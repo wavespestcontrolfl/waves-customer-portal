@@ -403,7 +403,10 @@ describe('grounded allowlist validation of LLM output', () => {
   test('extraction finds mixed-cap, cap-run, verb-object and for-target references', () => {
     const { extractOutputReferences } = PrevisitBrief._test;
     const refs = extractOutputReferences('Apply PhantomGuard X for emerald ash borer. Re-check the ants treated with Bifen IT.');
-    expect(refs.products).toEqual(expect.arrayContaining(['phantomguard', 'phantomguard x', 'bifen it']));
+    expect(refs.products).toEqual(expect.arrayContaining(['phantomguard', 'bifen it']));
+    // Application-verb objects surface separately — instruction fields
+    // validate them against the fixed visit list.
+    expect(refs.instructed).toEqual(expect.arrayContaining(['phantomguard x', 'bifen it']));
     expect(refs.targets).toEqual(expect.arrayContaining(['emerald ash borer']));
     // Date-shaped phrases are not product-shaped.
     expect(extractOutputReferences('Routine pest service on July 15.').products).toEqual([]);
@@ -506,6 +509,31 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
       grounding,
     );
     expect(verdict.reason).toMatch(/^ungrounded_novel_product:/);
+  });
+
+  test('an instruction naming a product outside the fixed visit list is rejected', () => {
+    // "Prodiamine 65 WDG" is grounded (last visit's product in llmFacts)
+    // but absent from the CURRENT window's fixed list — as an instruction
+    // it must reject; as last-visit description it is legitimate.
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: {
+        recentCalls: ['Asked about ants in garage'],
+        lastVisit: { products: ['Prodiamine 65 WDG'] },
+        productGuidance: { productNames: ['0-0-7 Fert'] },
+      },
+    };
+    const rejected = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: ['prodiamine 65 wdg'], priorities: ['Apply Prodiamine 65 WDG to the front turf'] },
+      grounding,
+    );
+    expect(rejected.reason).toMatch(/^ungrounded_novel_product:/);
+
+    const descriptive = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: ['prodiamine 65 wdg'], priorities: [], last_visit_summary: 'Applied Prodiamine 65 WDG across the lawn on July 15.' },
+      grounding,
+    );
+    expect(descriptive.reason).toBeUndefined();
   });
 
   test('a clean response yields the sanitized body', () => {
@@ -655,21 +683,39 @@ describe('input-hash cache', () => {
     expect(storedBrief(state2).brief.access.codes.propertyGate).toBe('1111');
   });
 
-  test('a populated section collapsing to zero is held as a suspected outage', async () => {
-    const state1 = useDb(baseResponses());
-    await PrevisitBrief.generateVisitBrief('svc-1');
-    const stored = storedBrief(state1).patch;
-    expect(JSON.parse(stored.pre_service_brief).coverage.calls).toBeGreaterThan(0);
-
-    // The aggregator swallows a recent-calls outage into [] — the hash
-    // changes, but the regression guard must keep the cached brief.
+  test('a recent-calls lookup OUTAGE aborts generation (sentinel)', async () => {
+    // sourceHealth 'unavailable' = the aggregator's calls query FAILED —
+    // hashing "no calls" would overwrite a valid cached brief.
     mockGetContext.mockResolvedValue({
       serviceHistory: [{ type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter.' }],
-      propertyProfile: { accessNotes: 'gate code [redacted]', pets: 'One dog, friendly' },
-      flags: [{ type: 'sensitivity', severity: 'medium', detail: 'Sensitive to pyrethroids' }],
+      propertyProfile: {},
+      flags: [],
       recentCalls: [],
       recentInteractions: [],
       pendingEstimate: null,
+      sourceHealth: { recentCalls: 'unavailable' },
+    });
+    const state = useDb(baseResponses());
+    await expect(PrevisitBrief.generateVisitBrief('svc-1'))
+      .rejects.toThrow(/recent-calls lookup unavailable/);
+    expect(state.updates.scheduled_services).toBeUndefined();
+  });
+
+  test('a legitimately emptied section regenerates (resolved flag)', async () => {
+    const state1 = useDb(baseResponses());
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const stored = storedBrief(state1).patch;
+
+    // The flag resolved during the day — a SUCCESSFUL empty read is
+    // truth and must refresh the cached brief, never read as an outage.
+    mockGetContext.mockResolvedValue({
+      serviceHistory: [{ type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter.' }],
+      propertyProfile: { accessNotes: 'gate code [redacted]', pets: 'One dog, friendly' },
+      flags: [],
+      recentCalls: [{ summary: 'Asked about ants in garage', direction: 'inbound', date: '2026-08-01' }],
+      recentInteractions: [],
+      pendingEstimate: null,
+      sourceHealth: { recentCalls: 'ok' },
     });
     const state2 = useDb(baseResponses({
       scheduled_services: [{
@@ -679,22 +725,8 @@ describe('input-hash cache', () => {
       }],
     }));
     const second = await PrevisitBrief.generateVisitBrief('svc-1');
-    expect(second.skipped).toBe(true);
-    expect(second.reason).toMatch(/^grounding_regression:.*calls/);
-    expect(state2.updates.scheduled_services).toBeUndefined();
-
-    // The manual regenerate route passes force — a genuine data removal
-    // is accepted then.
-    const state3 = useDb(baseResponses({
-      scheduled_services: [{
-        ...SVC,
-        pre_service_brief: stored.pre_service_brief,
-        pre_service_brief_type: stored.pre_service_brief_type,
-      }],
-    }));
-    const forced = await PrevisitBrief.generateVisitBrief('svc-1', { force: true });
-    expect(forced.generated).toBe(true);
-    expect(storedBrief(state3).brief.coverage.calls).toBe(0);
+    expect(second.generated).toBe(true);
+    expect(storedBrief(state2)).toBeTruthy();
   });
 });
 

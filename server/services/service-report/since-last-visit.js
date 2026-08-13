@@ -20,7 +20,7 @@ function readableActivityLine(currentFindings = []) {
   return String(current.title || '').trim();
 }
 
-async function buildSinceLastVisitContext({ record, currentPressureIndexOverride, knex = db } = {}) {
+async function buildSinceLastVisitContext({ record, currentPressureIndexOverride, knex = db, strict = false } = {}) {
   if (!record?.id || !record.customer_id) return undefined;
   const serviceLine = record.service_line || detectServiceLine(record.service_type);
   let priorQuery = knex('service_records')
@@ -49,16 +49,17 @@ async function buildSinceLastVisitContext({ record, currentPressureIndexOverride
       }
     });
   }
-  const prior = await priorQuery
+  // strict callers (pre-visit brief) must see an outage as an error, not
+  // as "no prior visit" — the default stays fail-soft for report renders.
+  const soft = (promise, fallback) => (strict ? promise : promise.catch(() => fallback));
+  const prior = await soft(priorQuery
     .orderBy('service_date', 'desc')
     .orderBy('started_at', 'desc')
-    .first('id', 'pressure_index')
-    .catch(() => null);
+    .first('id', 'pressure_index'), null);
 
-  const currentFindings = await knex('service_findings')
+  const currentFindings = await soft(knex('service_findings')
     .where({ service_record_id: record.id })
-    .select('id', 'service_record_id', 'title', 'detail', 'recommendation', 'severity')
-    .catch(() => []);
+    .select('id', 'service_record_id', 'title', 'detail', 'recommendation', 'severity'), []);
   const currentPressure = pressureValue(currentPressureIndexOverride !== undefined ? currentPressureIndexOverride : record.pressure_index);
   const priorPressure = pressureValue(prior?.pressure_index);
   const recommendation = firstRecommendation(currentFindings);

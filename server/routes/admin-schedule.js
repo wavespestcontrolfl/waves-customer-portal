@@ -10595,10 +10595,7 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
     // (prep email/SMS enrollment, assessment pre-draft) must survive the
     // generic-brief path.
     await AppointmentTagger.onServiceScheduled(req.params.id, { suppressWelcome: true });
-    // force: the operator explicitly asked — a genuine data removal may
-    // legitimately empty a section the regression guard would otherwise
-    // hold against a suspected outage.
-    const outcome = await PrevisitBrief.generateVisitBrief(req.params.id, { force: true });
+    const outcome = await PrevisitBrief.generateVisitBrief(req.params.id);
     // A skip is not a success: only 'unchanged' (the hash-cache no-op) is a
     // legitimate 200. The row vanishing mid-request reads as 404 (matching
     // the ownership probe's answer); everything else — terminal status, a

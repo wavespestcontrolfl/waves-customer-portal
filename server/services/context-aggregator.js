@@ -543,7 +543,7 @@ class ContextAggregator {
       db('estimates').where({ customer_id: customer.id }).whereIn('status', ['sent', 'viewed']).whereNull('archived_at').orderBy('created_at', 'desc').first(),
       db('sms_sequences').where({ customer_id: customer.id, sequence_type: 'cancellation_save', status: 'active' }).first(),
       this.getCompliance(customer.id),
-      this.getRecentCalls(customer.id),
+      this.getRecentCalls(customer.id, { sentinelOnError: true }),
       // Newest invoice a customer could actually be asked about: unpaid and
       // not voided. payer_id kept in the row — a third-party-billed invoice
       // is a FACT the drafter needs (the customer cannot pay it), never a
@@ -844,7 +844,11 @@ class ContextAggregator {
       } : null,
       flags, compliance,
       recentInteractions: interactions.slice(0, 5).map(i => ({ type: i.interaction_type, subject: i.subject, date: i.created_at })),
-      recentCalls: recentCalls.map(c => ({ summary: c.call_summary, direction: c.direction, outcome: c.call_outcome, date: c.created_at, transcript: c.transcript || null, nature: c.enriched_nature || null })),
+      recentCalls: (recentCalls || []).map(c => ({ summary: c.call_summary, direction: c.direction, outcome: c.call_outcome, date: c.created_at, transcript: c.transcript || null, nature: c.enriched_nature || null })),
+      // Source-health sentinels: 'unavailable' means the leg's query
+      // FAILED (not that it was empty) — hash-keyed consumers abort
+      // instead of persisting the emptied section as truth.
+      sourceHealth: { recentCalls: recentCalls === null ? 'unavailable' : 'ok' },
       summary,
     };
   }
@@ -855,7 +859,10 @@ class ContextAggregator {
   // is blind to the other channel and invents what was said. Summaries only:
   // raw transcripts are long and speaker-attribution on legacy rows is
   // unreliable, while summaries exist on ~half of recent calls in prod.
-  async getRecentCalls(customerId) {
+  // sentinelOnError: return null instead of [] on a lookup failure so the
+  // caller can tell an outage from a quiet phone (the pre-visit brief
+  // must not hash "no calls" over a cached brief during an outage).
+  async getRecentCalls(customerId, { sentinelOnError = false } = {}) {
     try {
       const rows = await db('call_log')
         .where({ customer_id: customerId })
@@ -911,7 +918,7 @@ class ContextAggregator {
       }));
     } catch (err) {
       logger.warn(`[context] recent-call lookup failed for customer ${customerId}: ${err.message}`);
-      return [];
+      return sentinelOnError ? null : [];
     }
   }
 

@@ -497,6 +497,12 @@ async function assembleGrounding(svc, dbh = db) {
   // brief survives.
   const ContextAggregator = require('./context-aggregator');
   const context = await ContextAggregator.getContextForCustomer(customer);
+  // Source-health sentinel: a recent-calls lookup FAILURE (not a quiet
+  // phone) must abort — hashed as "no calls" it would overwrite a valid
+  // cached brief.
+  if (context?.sourceHealth?.recentCalls === 'unavailable') {
+    throw new Error('recent-calls lookup unavailable — refusing to regenerate over the cached brief');
+  }
 
   // Access/pet/chemical guidance is copied DETERMINISTICALLY from this
   // row — a lookup outage must not collapse into "no preferences": the
@@ -529,15 +535,14 @@ async function assembleGrounding(svc, dbh = db) {
   // last same-line completed record.
   let sinceLastVisit = null;
   if (lastVisitRecord) {
-    try {
-      const { buildSinceLastVisitContext } = require('./service-report/since-last-visit');
-      sinceLastVisit = await buildSinceLastVisitContext({
-        record: { ...lastVisitRecord, service_date: calendarDay(lastVisitRecord.service_date) },
-        knex: dbh,
-      }) || null;
-    } catch (err) {
-      logger.warn(`[previsit-brief] since-last-visit failed for ${svc.id}: ${err.message}`);
-    }
+    // strict + no swallow: an outage here hashed as "nothing since last
+    // visit" would overwrite a valid cached brief.
+    const { buildSinceLastVisitContext } = require('./service-report/since-last-visit');
+    sinceLastVisit = await buildSinceLastVisitContext({
+      record: { ...lastVisitRecord, service_date: calendarDay(lastVisitRecord.service_date) },
+      knex: dbh,
+      strict: true,
+    }) || null;
   }
 
   // Product guidance — deterministic, per the owner constraint. Lawn
@@ -648,19 +653,6 @@ async function assembleGrounding(svc, dbh = db) {
     sinceLastVisit,
     openScope,
     catalogVocabulary,
-    // Per-section population counts for the FAIL-SOFT sources only (the
-    // context aggregator's legs and since-last-visit swallow their own DB
-    // errors into empty results) — a populated one collapsing to zero
-    // between runs is treated as a suspected outage by the regression
-    // guard in generateVisitBrief. Strict sources (history, products,
-    // prefs, estimate) propagate failures and abort generation, so an
-    // empty result there IS truth (e.g. a corrected recap removing its
-    // last product) and must never be held by the guard.
-    coverage: {
-      calls: (context?.recentCalls || []).length,
-      flags: (context?.flags || []).length,
-      sinceLastVisit: sinceLastVisit ? 1 : 0,
-    },
     // Every free-text slice is run through the shared access-code redactor
     // at this boundary (belt over the context-aggregator's own layer):
     // pet/sensitivity flag details and call summaries arrive as raw
@@ -788,7 +780,7 @@ const COMMON_PROSE_WORDS = new Set([
   'stone', 'stops', 'sweep', 'swept', 'technician', 'texts', 'thorough', 'through', 'times', 'today',
   'touch', 'toward', 'treat', 'treated', 'treatment', 'treatments', 'trees', 'update', 'updated', 'upcoming',
   'verify', 'visit', 'visits', 'walk', 'walkthrough', 'warrant', 'warrants', 'watch', 'water', 'weather',
-  'weeks', 'weekly', 'window', 'windows', 'within', 'worth', 'yesterday', 'trail', 'trails', 'chemical', 'chemicals',
+  'weeks', 'weekly', 'window', 'windows', 'within', 'worth', 'yesterday', 'trail', 'trails', 'chemical', 'chemicals', 'across', 'during', 'under', 'beside', 'beneath', 'against',
   'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november',
   'december', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
 ]);
@@ -832,6 +824,7 @@ function isGroundedReference(candidate, groundedText) {
 // how prose names what a product is applied against.
 function extractOutputReferences(text) {
   const products = new Set();
+  const instructed = new Set();
   const targets = new Set();
   const push = (set, value) => {
     const t = String(value || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
@@ -846,7 +839,7 @@ function extractOutputReferences(text) {
   // seen, not just "Apply Bifen SC"); the all-words-common skip in the
   // validator keeps ordinary prose objects ("use caution") from
   // over-rejecting.
-  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near)\b)[\w.-]+){0,3})/g)) push(products, m[1]);
+  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(instructed, m[1]);
   for (const m of text.matchAll(/\b(?:for|targeting|against)\s+((?:[a-z][a-z'-]*\s+){0,3}[a-z][a-z'-]*)/g)) push(targets, m[1]);
   // Organism references that never pass a preposition: "<X> activity/
   // damage/infestation" and "signs/evidence of <X>" ("Emerald ash borer
@@ -855,7 +848,7 @@ function extractOutputReferences(text) {
   // modifiers ("increased", "ongoing") the captures drag in.
   for (const m of text.matchAll(/\b((?:[A-Za-z][\w'-]*\s+){0,3}[A-Za-z][\w'-]*?)\s+(?:activity|infestation|damage|pressure|droppings|nesting|sightings?)\b/g)) push(targets, m[1]);
   for (const m of text.matchAll(/\b(?:signs?|evidence|presence|history)\s+of\s+((?:[A-Za-z][\w'-]*\s+){0,3}[A-Za-z][\w'-]*)/g)) push(targets, m[1]);
-  return { products: [...products], targets: [...targets] };
+  return { products: [...products], instructed: [...instructed], targets: [...targets] };
 }
 
 // Ungrounded-claim scan: the model may only mention product names and pest
@@ -909,11 +902,44 @@ function findUngroundedClaim(body, grounding) {
   const allWordsCommon = (term) => String(term).toLowerCase().split(/\s+/).every((w) => (
     w.length < 4 || REFERENCE_STOP_WORDS.has(w) || COMMON_PROSE_WORDS.has(w)
   ));
-  for (const field of outputFields) {
-    const refs = extractOutputReferences(String(field));
+  // Instruction fields (priorities, watch_items) direct the technician —
+  // an application-verb product reference there must name a product on
+  // the CURRENT visit's fixed list, not merely anything in the grounding:
+  // last visit's product rides in llmFacts as history and must never
+  // become an instruction when the current window excludes it
+  // (lawn-protocol authority rule). Descriptive fields (last-visit
+  // summary, context) may reference any grounded product.
+  const fixedNames = (grounding.llmFacts?.productGuidance?.productNames || [])
+    .map((n) => String(n).toLowerCase().replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const onFixedList = (term) => {
+    const phrase = String(term || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
+    return !phrase || fixedNames.some((n) => n === phrase || n.includes(phrase) || phrase.includes(n));
+  };
+  const labeledFields = [
+    ...(body.priorities || []).map((text) => ({ text, instructional: true })),
+    ...(body.watch_items || []).map((text) => ({ text, instructional: true })),
+    { text: body.last_visit_summary, instructional: false },
+    { text: body.open_scope, instructional: false },
+    { text: body.customer_context, instructional: false },
+  ].filter((f) => f.text);
+  for (const field of labeledFields) {
+    const refs = extractOutputReferences(String(field.text));
     for (const term of refs.products) {
       if (allWordsCommon(term)) continue;
-      if (!groundedExact(term)) return { kind: 'novel_product', term };
+      // A sentence-case application verb rides into the capitalized-run
+      // capture ("Applied Prodiamine") — the verb is not part of the
+      // product name; ground the remainder.
+      const bare = String(term).replace(/^(?:appl(?:y|ied|ying)|spray(?:ed|ing)?|us(?:e|ed|ing)|treat(?:ed|ing)?)\s+/i, '');
+      if (!groundedExact(bare)) return { kind: 'novel_product', term };
+    }
+    for (const term of refs.instructed) {
+      if (allWordsCommon(term)) continue;
+      if (field.instructional) {
+        if (!onFixedList(term)) return { kind: 'novel_product', term };
+      } else if (!groundedExact(term)) {
+        return { kind: 'novel_product', term };
+      }
     }
     for (const term of refs.targets) {
       if (!isGroundedReference(term, groundedText)) return { kind: 'novel_target', term };
@@ -1069,7 +1095,7 @@ async function generateBriefBody(grounding, deps = {}) {
  * { skipped: true, reason } otherwise. Never throws for a per-visit data
  * problem; the sweep and the route both surface `reason`.
  */
-async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {}, force = false } = {}) {
+async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = {}) {
   if (!briefGateEnabled()) return { skipped: true, reason: 'gate_off' };
 
   const svc = await dbh('scheduled_services')
@@ -1116,35 +1142,12 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {}, for
     return { skipped: true, reason: 'unchanged', brief: existing };
   }
 
-  // Grounding-regression guard (belt over the strict lookups): the
-  // FAIL-SOFT sources tracked in coverage swallow their own DB errors
-  // into empty results, so a transient outage can change the hash and
-  // read as "data gone". A tracked section that was populated in the
-  // stored brief but is empty now is a suspected outage — keep the prior
-  // brief. Strict sources are deliberately NOT tracked (their empties are
-  // truth). The admin regenerate route passes force to accept a genuine
-  // data removal in a fail-soft source too.
-  if (
-    !force
-    && String(svc.pre_service_brief_type || '') === VISIT_BRIEF_TYPE
-    && existing?.coverage
-  ) {
-    const regressed = Object.entries(existing.coverage)
-      .filter(([key, prior]) => Number(prior) > 0 && Number(grounding.coverage?.[key] ?? 0) === 0)
-      .map(([key]) => key);
-    if (regressed.length) {
-      logger.warn(`[previsit-brief] grounding regression for ${scheduledServiceId} (${regressed.join(', ')}) — keeping the cached brief`);
-      return { skipped: true, reason: `grounding_regression:${regressed.join(',')}` };
-    }
-  }
-
   const { via, body } = await generateBriefBody(grounding, deps);
 
   const brief = {
     version: VISIT_BRIEF_TYPE,
     grounding_hash: groundingHash,
     generated_via: via,
-    coverage: grounding.coverage,
     priorities: body.priorities,
     watch_items: body.watch_items,
     last_visit: {
