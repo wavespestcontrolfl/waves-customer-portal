@@ -9757,6 +9757,7 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
 
     let invoice = null;
     let voided = [];
+    let mintedTerm = null;
     try {
       await db.transaction(async (trx) => {
         // Advisory lock + overlap re-check: a concurrent Customer 360 mint,
@@ -9912,27 +9913,35 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
             .update({ prepay_invoice_id: invoice.id, updated_at: new Date() });
           term.prepay_invoice_id = invoice.id;
         }
+        mintedTerm = term;
 
-        await trx('activity_log').insert({
-          customer_id: liveVisit.customer_id,
-          action: 'annual_prepay_invoice_created',
-          description: `Annual prepay invoice ${invoice.invoice_number} created from the on-site switch for ${mintPayload.serviceType}: $${Number(mintPayload.amount).toFixed(2)} covering ${mintPayload.visitCount} visit(s)${voided.length ? `; supersedes ${voided.map((v) => v.invoiceNumber || v.id).join(', ')}` : ''}`,
-          metadata: JSON.stringify({
-            invoice_id: invoice.id,
-            invoice_number: invoice.invoice_number,
-            annual_prepay_term_id: term.id,
-            scheduled_service_id: target.visit.id,
-            superseded_invoice_ids: voided.map((v) => v.id),
-            charge_in_person: chargeInPerson,
-          }),
-          created_at: new Date(),
-        }).catch((err) => logger.warn(`[schedule:prepay-switch] activity_log insert failed: ${err.message}`));
       });
     } catch (err) {
       if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
       if (err && err.switchConflict) return res.status(409).json({ error: err.message });
       throw err;
     }
+
+    // Best-effort audit AFTER commit (Codex P0 r6, same lesson as the
+    // pre-slab SAVEPOINT bug): a failed INSERT inside the transaction aborts
+    // it at the PostgreSQL level, and swallowing that error lets the
+    // callback resolve — COMMIT silently becomes ROLLBACK while the route
+    // reports 201 for a switch that never happened. Outside the transaction
+    // a lost audit row is just a lost audit row.
+    await db('activity_log').insert({
+      customer_id: target.anchor.customer_id || target.visit.customer_id,
+      action: 'annual_prepay_invoice_created',
+      description: `Annual prepay invoice ${invoice.invoice_number} created from the on-site switch for ${mintPayload.serviceType}: $${Number(mintPayload.amount).toFixed(2)} covering ${mintPayload.visitCount} visit(s)${voided.length ? `; supersedes ${voided.map((v) => v.invoiceNumber || v.id).join(', ')}` : ''}`,
+      metadata: JSON.stringify({
+        invoice_id: invoice.id,
+        invoice_number: invoice.invoice_number,
+        annual_prepay_term_id: mintedTerm?.id || null,
+        scheduled_service_id: target.visit.id,
+        superseded_invoice_ids: voided.map((v) => v.id),
+        charge_in_person: chargeInPerson,
+      }),
+      created_at: new Date(),
+    }).catch((err) => logger.warn(`[schedule:prepay-switch] activity_log insert failed: ${err.message}`));
 
     // Delivery AFTER commit (send path only) — a failed send never rolls
     // back the switch; it reports delivery.ok=false and the client runs the
