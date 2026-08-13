@@ -491,17 +491,6 @@ const AgronomicWiki = {
 
       const month = new Date(treatmentDate).getMonth() + 1;
 
-      // 6b. Treatment-day weather. linkTreatmentOutcome runs at confirm /
-      // completion time (same day as the treatment), so a current FAWN
-      // snapshot approximates the application conditions. Null-safe: the
-      // canonical service returns null when the station is unavailable, and
-      // these columns stay null rather than blocking the link.
-      let fawn = null;
-      try {
-        fawn = await require('./fawn-weather').getCurrent();
-        if (fawn?.station === 'unavailable') fawn = null;
-      } catch { /* weather is enrichment, never a link blocker */ }
-
       // 7. Insert treatment_outcome
       const [outcome] = await db('treatment_outcomes').insert({
         customer_id: customerId,
@@ -537,13 +526,6 @@ const AgronomicWiki = {
         days_between_assessments: daysBetween,
         season: getSeason(month),
 
-        // Treatment-day FAWN snapshot (single reading, not a window average —
-        // the column names predate this writer). rainfall_in is the 7-day
-        // accumulation the station reports.
-        avg_temperature: fawn?.temp_f ?? null,
-        avg_humidity: fawn?.humidity_pct ?? null,
-        total_rainfall: fawn?.rainfall_in ?? null,
-
         grass_type: grassContext.grassType || null,
         property_sqft: grassContext.propertySqft || null,
         sun_exposure: grassContext.sunExposure || null,
@@ -559,8 +541,34 @@ const AgronomicWiki = {
         triggerId: serviceRecordId,
       });
 
-      // 8. Queue wiki page updates (fire-and-forget so we don't block the confirm)
+      // 8. Queue weather backfill + wiki page updates (fire-and-forget so we
+      // don't block the confirm — FAWN's external fetch has a 3.5s timeout
+      // and must never sit on the confirmation request path)
       setImmediate(async () => {
+        // Treatment-day weather onto the outcome row (single reading, not a
+        // window average — the column names predate this writer; rainfall is
+        // the station's 7-day accumulation). Prefer the post-assessment's
+        // persisted FAWN snapshot (no network); fall back to a current
+        // fetch, which approximates application conditions since the link
+        // runs on treatment day. Enrichment only — never blocks the link.
+        try {
+          let weather = post.fawn_temp_f != null || post.fawn_humidity_pct != null || post.fawn_rainfall_7d != null
+            ? { temp_f: post.fawn_temp_f, humidity_pct: post.fawn_humidity_pct, rainfall_in: post.fawn_rainfall_7d }
+            : null;
+          if (!weather) {
+            const fawn = await require('./fawn-weather').getCurrent();
+            if (fawn && fawn.station !== 'unavailable') weather = fawn;
+          }
+          if (weather) {
+            await db('treatment_outcomes').where({ id: outcome.id }).update({
+              avg_temperature: weather.temp_f ?? null,
+              avg_humidity: weather.humidity_pct ?? null,
+              total_rainfall: weather.rainfall_in ?? null,
+            });
+          }
+        } catch (err) {
+          logger.warn(`[agronomic-wiki] outcome ${outcome.id} weather backfill failed: ${err.message}`);
+        }
         try {
           // Update product pages
           for (const p of productsApplied) {
