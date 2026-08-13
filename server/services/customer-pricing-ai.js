@@ -309,6 +309,23 @@ async function loadCurrentServiceKeys(db, customer) {
   }
 }
 
+// EVERY price-bearing customer_turf_profiles writer goes through this fence
+// (#3391 GitHub round): FOR UPDATE on the turf row cannot serialize the
+// NO-ROW case, so a first-profile insert could land between the
+// click-to-estimate mint's null read and its estimate insert — publishing a
+// price that ignores the just-entered square footage or track. Taking the
+// customers row lock (customers → child table, the repo's order) makes the
+// write land wholly before or wholly after any in-flight mint, which holds
+// that same lock through the CTA writer. Works on a plain db handle (real
+// transaction) or an existing trx (savepoint; re-locking a row the outer
+// transaction already holds is a no-op).
+async function withTurfProfileFence(dbOrTrx, customerId, write) {
+  return dbOrTrx.transaction(async (trx) => {
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    return write(trx);
+  });
+}
+
 async function loadTurfProfile(db, customerId, { forUpdate = false } = {}) {
   // forUpdate (GitHub #3391 round): the click-to-estimate mint re-reads the
   // turf row under its transaction to compare against the composition's
@@ -1349,6 +1366,7 @@ module.exports = {
   // Same reasoning: the mint's price-input drift check re-reads the turf
   // profile through the composition's own loader.
   loadTurfProfile,
+  withTurfProfileFence,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.
   _private: { resolvePropertyContext, missingPropertyFor },
