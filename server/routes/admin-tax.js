@@ -1731,24 +1731,35 @@ router.post('/bank-import/upload', async (req, res, next) => {
         if (replay) { forceAlreadyPresent++; continue; }
         const startOrdinal = tupleCounts.get(r.tuple_key) + r.ordinal;
         let landed = false;
-        for (let ord = startOrdinal; ord < startOrdinal + 25 && !landed; ord++) {
-          const [ins] = await db('bank_transactions')
-            .insert({
-              account_label: accountLabel.trim(),
-              account_type: accountType,
-              txn_date: r.txn_date,
-              description: r.description,
-              amount: r.amount,
-              direction: r.direction,
-              source: 'csv',
-              source_file: String(filename || '').slice(0, 300) || null,
-              row_hash: bankImport.hashRow(accountLabel.trim(), r, ord),
-              suggestion: { forceToken, forcedFor: r.row_hash },
-            })
-            .onConflict('row_hash')
-            .ignore()
-            .returning(['id']);
-          if (ins) landed = true;
+        let lostIdentityRace = false;
+        for (let ord = startOrdinal; ord < startOrdinal + 25 && !landed && !lostIdentityRace; ord++) {
+          try {
+            const [ins] = await db('bank_transactions')
+              .insert({
+                account_label: accountLabel.trim(),
+                account_type: accountType,
+                txn_date: r.txn_date,
+                description: r.description,
+                amount: r.amount,
+                direction: r.direction,
+                source: 'csv',
+                source_file: String(filename || '').slice(0, 300) || null,
+                row_hash: bankImport.hashRow(accountLabel.trim(), r, ord),
+                suggestion: { forceToken, forcedFor: r.row_hash },
+              })
+              .onConflict('row_hash')
+              .ignore()
+              .returning(['id']);
+            if (ins) landed = true;
+          } catch (err) {
+            // onConflict only swallows row_hash conflicts; a 23505 that
+            // surfaces here is the partial unique index on
+            // (forceToken, forcedFor) — a concurrent retry of this SAME
+            // confirmation won the race, which IS replay safety. The
+            // SELECT above is just the fast path; this is the guarantee.
+            if (err.code !== '23505') throw err;
+            lostIdentityRace = true;
+          }
         }
         if (landed) forced++; else forceAlreadyPresent++;
       }

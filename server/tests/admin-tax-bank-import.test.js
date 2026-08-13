@@ -50,7 +50,9 @@ function bankBuilder() {
     ignore: jest.fn(() => b),
     returning: jest.fn(() => {
       if (Array.isArray(state.insertReturningQueue) && state.insertReturningQueue.length) {
-        return Promise.resolve(state.insertReturningQueue.shift());
+        const next = state.insertReturningQueue.shift();
+        if (next instanceof Error) return Promise.reject(next);
+        return Promise.resolve(next);
       }
       return Promise.resolve(state.insertedBank.map((r, i) => ({ id: `bt-${i}`, row_hash: r.row_hash })));
     }),
@@ -385,6 +387,20 @@ describe('force-duplicates upload (gate on)', () => {
     expect(state.insertedBank[1].row_hash).not.toBe(state.insertedBank[0].row_hash);
     expect(state.insertedBank[1].suggestion).toEqual({ forceToken: 'tok-first-99', forcedFor: hdSupplyHash });
     expect(state.insertedBank[1]).toMatchObject({ amount: 204.87, direction: 'debit', account_label: 'capone-checking' });
+  });
+
+  test('losing the DB force-identity race (concurrent retry of the same confirmation) resolves as already present', async () => {
+    const identityRace = Object.assign(new Error('duplicate key value violates unique constraint "bank_txn_force_identity_uniq"'), { code: '23505' });
+    state.insertReturningQueue = [
+      [], // bulk insert: everything conflicts
+      identityRace, // the force insert loses to the concurrent twin at the DB
+    ];
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true, forceRowHashes: [hdSupplyHash], forceToken: 'tok-raced-11' });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.forced).toBe(0);
+    expect(body.forceAlreadyPresent).toBe(1);
+    expect(state.insertedBank).toHaveLength(2); // walking stopped at the identity race
   });
 
   test('a NEW confirmation (new token) walks past prior forced copies — a third identical transaction stays importable', async () => {
