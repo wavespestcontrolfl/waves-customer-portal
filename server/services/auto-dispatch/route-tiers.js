@@ -115,34 +115,38 @@ async function loadAnchorMap(db, serviceIds) {
   const map = new Map();
   if (!serviceIds || serviceIds.length === 0) return map;
   try {
-    // Primary: reschedule_log rows the rebooker writes INSIDE the move
-    // transaction — strict auto-dispatch writer signature on both columns.
+    // Two durable sources, merged by TIMESTAMP: the anchor is the pre-move
+    // date of the chronologically EARLIEST record across BOTH — never
+    // source-priority, which could let a later reschedule_log row shadow an
+    // earlier audit record and quietly restore spent drift budget.
+    //   1. reschedule_log rows the rebooker writes INSIDE the move
+    //      transaction — strict auto-dispatch writer signature on both cols.
+    //   2. the append-only auto_dispatch_audit_logs 'changed' trail.
     const moveRows = await db('reschedule_log')
       .whereIn('scheduled_service_id', serviceIds)
       .where('reason_code', 'auto_dispatch')
       .where('initiated_by', 'auto_dispatch')
       .orderBy('created_at', 'asc')
       .select('scheduled_service_id', 'original_date', 'created_at');
-    for (const r of moveRows) {
-      if (!map.has(r.scheduled_service_id)) {
-        const d = toDateStr(r.original_date);
-        if (d) map.set(r.scheduled_service_id, d);
-      }
-    }
-    // Secondary (cumulative): the append-only auto-dispatch audit trail. Only
-    // fills services the transactional log somehow missed; where both exist
-    // the reschedule_log row is at least as early (same move, same run).
     const auditRows = await db('auto_dispatch_audit_logs')
       .whereIn('scheduled_service_id', serviceIds)
       .where('action', 'changed')
       .orderBy('created_at', 'asc')
       .select('scheduled_service_id', 'old_scheduled_date', 'created_at');
-    for (const r of auditRows) {
-      if (!map.has(r.scheduled_service_id)) {
-        const d = toDateStr(r.old_scheduled_date);
-        if (d) map.set(r.scheduled_service_id, d);
+
+    const earliestAt = new Map(); // sid -> timestamp of the record backing map's date
+    const consider = (sid, dateVal, createdAt) => {
+      const d = toDateStr(dateVal);
+      if (!sid || !d) return;
+      const at = new Date(createdAt || 0).getTime();
+      const prev = earliestAt.get(sid);
+      if (prev === undefined || at < prev) {
+        earliestAt.set(sid, at);
+        map.set(sid, d);
       }
-    }
+    };
+    for (const r of moveRows) consider(r.scheduled_service_id, r.original_date, r.created_at);
+    for (const r of auditRows) consider(r.scheduled_service_id, r.old_scheduled_date, r.created_at);
     return map;
   } catch (_) {
     return null; // fail closed upstream

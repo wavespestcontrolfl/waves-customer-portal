@@ -149,6 +149,17 @@ describe('anchor derivation', () => {
     expect(resolveAnchor(svc, map)).toBe('2026-09-01');
   });
 
+  test('the chronologically EARLIEST record wins across BOTH sources', async () => {
+    // An audit row records an earlier move than any reschedule_log row —
+    // source priority must not shadow it (that would restore spent budget).
+    const map = await loadAnchorMap(anchorDbStub({
+      moveRows: [{ scheduled_service_id: 's1', original_date: '2026-09-03', created_at: '2026-08-05T00:00:00Z' }],
+      auditRows: [{ scheduled_service_id: 's1', old_scheduled_date: '2026-09-01', created_at: '2026-08-01T00:00:00Z' }],
+    }), ['s1']);
+    const svc = { id: 's1', scheduled_date: '2026-09-05', auto_dispatch_change_count: 2 };
+    expect(resolveAnchor(svc, map)).toBe('2026-09-01');
+  });
+
   test('audit trail is a CUMULATIVE fallback when reschedule_log has no row', async () => {
     const map = await loadAnchorMap(anchorDbStub({
       auditRows: [{ scheduled_service_id: 's1', old_scheduled_date: '2026-09-02', created_at: '2026-08-02' }],

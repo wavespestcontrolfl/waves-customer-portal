@@ -93,7 +93,7 @@ beforeEach(() => {
           // Unchanged tech-day: mirror the loaded stops for this date+tech.
           return (stopsByDate[filters.scheduled_date] || [])
             .filter((s) => s.technician_id === filters.technician_id)
-            .map((s) => ({ id: s.id, window_start: s.window_start }));
+            .map((s) => ({ id: s.id, window_start: s.window_start, route_order: s.route_order }));
         },
         update: async (u) => { attempted.push({ id: filters.id, ...u }); return 1; },
       };
@@ -218,8 +218,8 @@ test('commit-time revalidation: a changed tech-day rolls back untouched (STALE_T
   stopsByDate['2026-08-18'] = backtrackDay();
   // Staff moved stop B off the day while the optimizer ran.
   liveRowsOverride = [
-    { id: 'A', window_start: '09:00' },
-    { id: 'C', window_start: '09:00' },
+    { id: 'A', window_start: '09:00', route_order: 2 },
+    { id: 'C', window_start: '09:00', route_order: 3 },
   ];
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);
@@ -232,9 +232,25 @@ test('commit-time revalidation: a changed tech-day rolls back untouched (STALE_T
 test('commit-time revalidation: a changed window_start rolls back untouched', async () => {
   stopsByDate['2026-08-18'] = backtrackDay();
   liveRowsOverride = [
-    { id: 'A', window_start: '09:00' },
-    { id: 'B', window_start: '14:00' }, // staff changed the window mid-run
-    { id: 'C', window_start: '09:00' },
+    { id: 'A', window_start: '09:00', route_order: 2 },
+    { id: 'B', window_start: '14:00', route_order: 1 }, // staff changed the window mid-run
+    { id: 'C', window_start: '09:00', route_order: 3 },
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
+test('commit-time revalidation: a MANUAL reorder mid-run wins — autonomous write rolls back', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  // Dispatcher hand-reordered while the optimizer ran: same stops, same
+  // windows, different route_order. The operator's newer order must survive.
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00', route_order: 1 },
+    { id: 'B', window_start: '09:00', route_order: 3 },
+    { id: 'C', window_start: '09:00', route_order: 2 },
   ];
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);

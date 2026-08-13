@@ -283,13 +283,22 @@ async function runRouteReorder(opts = {}) {
                 .where('technician_id', techId)
                 .whereNotIn('status', EXCLUDE_STATUSES)
                 .forUpdate()
-                .select('id', 'window_start');
-              const snapshot = new Map(techStops.map((s) => [s.id, s.window_start ? String(s.window_start).slice(0, 5) : null]));
+                .select('id', 'window_start', 'route_order');
+              const snapshot = new Map(techStops.map((s) => [s.id, {
+                window: s.window_start ? String(s.window_start).slice(0, 5) : null,
+                routeOrder: s.route_order == null ? null : Number(s.route_order),
+              }]));
               if (live.length !== techStops.length) throw stale('tech-day membership changed during the run');
               for (const row of live) {
-                if (!snapshot.has(row.id)) throw stale(`stop ${row.id} joined the tech-day during the run`);
+                const snap = snapshot.get(row.id);
+                if (!snap) throw stale(`stop ${row.id} joined the tech-day during the run`);
                 const win = row.window_start ? String(row.window_start).slice(0, 5) : null;
-                if (win !== snapshot.get(row.id)) throw stale(`stop ${row.id} window changed during the run`);
+                if (win !== snap.window) throw stale(`stop ${row.id} window changed during the run`);
+                // route_order too: a dispatcher's manual reorder landing while
+                // the optimizer ran must WIN — never overwrite the operator's
+                // newer order with the autonomous one (codex round-3 P1).
+                const ro = row.route_order == null ? null : Number(row.route_order);
+                if (ro !== snap.routeOrder) throw stale(`stop ${row.id} route_order changed during the run`);
               }
               // Freeze re-check at commit time (fail closed on unreadable).
               const commitFreeze = await loadReminderFreeze(trx, techStops.map((s) => s.id));
