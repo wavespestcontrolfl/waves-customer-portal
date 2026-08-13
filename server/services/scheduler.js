@@ -758,7 +758,8 @@ function initScheduledJobs() {
   // DAILY 3:40AM — Vision delta scoring sweep (before/after photo pairs on
   // treatment_outcomes → VISION-tier visual-change verdict). Bounded (25/run),
   // idempotent (vision_scored_at is terminal), and entirely inert unless
-  // GATE_VISION_DELTA === 'true' — the gate check lives inside the service
+  // GATE_VISION_DELTA is set (canonical gateEnvValue parse; registered as
+  // visionDelta in config/feature-gates.js) — the gate check lives inside the service
   // (single source of truth), so this leg is a no-op beyond the gated early
   // return. runExclusive: read-then-act — a deploy overlap must not
   // double-score (and double-bill) the same photo pairs.

@@ -21,14 +21,17 @@
  * conditioned on the photo-key pair read at load: a pair re-elected while the
  * vision call is in flight supersedes the result and nothing is written.
  *
- * Entirely inert unless GATE_VISION_DELTA === 'true' (checked inside
- * sweepUnscoredOutcomes — single source of truth; the cron leg adds no gate of
- * its own). Kill = unset GATE_VISION_DELTA.
+ * Entirely inert unless GATE_VISION_DELTA is set (checked inside
+ * sweepUnscoredOutcomes with the central registry's gateEnvValue parser —
+ * single source of truth; the cron leg adds no gate of its own; the
+ * visionDelta entry in config/feature-gates.js uses the SAME parser).
+ * Kill = unset GATE_VISION_DELTA.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { gateEnvValue } = require('../config/feature-gates');
 const { dispatchWithFallback } = require('./llm/call');
 const PhotoService = require('./photos');
 
@@ -291,8 +294,11 @@ const VisionDelta = {
   // ── Sweep unscored outcomes (bounded, oldest first) ─────────────────────
   async sweepUnscoredOutcomes({ limit = 25 } = {}) {
     // Gate lives HERE (single source of truth) — the cron leg and any manual
-    // caller are inert unless the gate is exactly 'true'.
-    if (process.env.GATE_VISION_DELTA !== 'true') return { skipped: 'gated' };
+    // caller are inert unless GATE_VISION_DELTA is set. Parsed at call time
+    // with the registry's canonical gateEnvValue so the visionDelta entry in
+    // config/feature-gates.js, logGateStatus, and this check can never
+    // disagree. Default (unset) = OFF.
+    if (!gateEnvValue('GATE_VISION_DELTA')) return { skipped: 'gated' };
 
     const rows = await db('treatment_outcomes')
       .whereNotNull('pre_best_photo_key')

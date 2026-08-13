@@ -1,6 +1,7 @@
 // Vision delta scoring lane (server/services/vision-delta.js):
-//  - sweep is entirely inert unless GATE_VISION_DELTA === 'true' (gate inside
-//    the service = single source of truth)
+//  - sweep is entirely inert unless GATE_VISION_DELTA is set (gate inside
+//    the service = single source of truth; parsed with the central registry's
+//    gateEnvValue, and registered there as visionDelta)
 //  - comparable + confident verdict persists jsonb + integer score + scored_at
 //  - non-comparable / low-confidence verdict stores the jsonb with a NULL
 //    score and still stamps scored_at (never re-scored in a loop)
@@ -146,12 +147,34 @@ describe('sweepUnscoredOutcomes gating', () => {
     expect(global.__visionDispatch).not.toHaveBeenCalled();
   });
 
-  test('gate must be exactly "true" — "1" stays gated', async () => {
-    process.env.GATE_VISION_DELTA = '1';
-    const state = useDb({ treatment_outcomes: [OUTCOME] });
-    const res = await VisionDelta.sweepUnscoredOutcomes();
-    expect(res).toEqual({ skipped: 'gated' });
-    expect(state.calls.treatment_outcomes).toBeUndefined();
+  test("canonical registry parser: 'false'/'0' stay gated; '1'/'on' enable", async () => {
+    // The sweep parses at call time with feature-gates' gateEnvValue — the
+    // one parser the registry itself uses, so the visionDelta entry,
+    // logGateStatus, and the sweep can never disagree.
+    for (const off of ['false', '0']) {
+      process.env.GATE_VISION_DELTA = off;
+      const state = useDb({ treatment_outcomes: [OUTCOME] });
+      expect(await VisionDelta.sweepUnscoredOutcomes()).toEqual({ skipped: 'gated' });
+      expect(state.calls.treatment_outcomes).toBeUndefined();
+    }
+    for (const on of ['1', 'on']) {
+      process.env.GATE_VISION_DELTA = on;
+      useDb({ treatment_outcomes: [] });
+      expect(await VisionDelta.sweepUnscoredOutcomes()).toEqual({ candidates: 0, scored: 0, failed: 0 });
+    }
+  });
+
+  test('GATE_VISION_DELTA is registered in the central gate registry (visionDelta)', () => {
+    // Real registry, not a mock — the baked entry must exist for
+    // logGateStatus()/isEnabled() and parse with the same gateEnvValue truth.
+    jest.isolateModules(() => {
+      process.env.GATE_VISION_DELTA = 'on';
+      expect(jest.requireActual('../config/feature-gates').gates.visionDelta).toBe(true);
+    });
+    jest.isolateModules(() => {
+      delete process.env.GATE_VISION_DELTA;
+      expect(jest.requireActual('../config/feature-gates').gates.visionDelta).toBe(false);
+    });
   });
 });
 
