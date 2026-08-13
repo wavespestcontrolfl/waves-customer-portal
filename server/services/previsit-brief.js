@@ -915,6 +915,18 @@ function findUngroundedClaim(body, grounding) {
   // EXACT normalized name only — either-side substring would let
   // "Apply Bifen" ride on fixed "Bifen IT", a renaming the prompt
   // forbids and the product authority rule rejects.
+  // A capitalized capture is a PRODUCT (vs a service/street/person name)
+  // when it matches the catalog vocabulary or any product list in the
+  // grounding (fixed or historical).
+  const knownProductNames = new Set([
+    ...(vocab?.names || []),
+    ...fixedNames,
+    ...((grounding.llmFacts?.lastVisit?.productNames || []).map((n) => String(n).toLowerCase().replace(/\s+/g, ' ').trim())),
+  ].filter(Boolean));
+  const isKnownProductName = (term) => {
+    const phrase = String(term || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
+    return !!phrase && knownProductNames.has(phrase);
+  };
   const onFixedList = (term) => {
     const phrase = String(term || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
     return !phrase || fixedNames.includes(phrase);
@@ -935,6 +947,14 @@ function findUngroundedClaim(body, grounding) {
       // product name; ground the remainder.
       const bare = String(term).replace(/^(?:appl(?:y|ied|ying)|spray(?:ed|ing)?|us(?:e|ed|ing)|treat(?:ed|ing)?)\s+/i, '');
       if (!groundedExact(bare)) return { kind: 'novel_product', term };
+      // In instruction fields even a BARE product mention directs the
+      // technician ("priorities: ['Bifen IT']") — when it names a known
+      // product that is off the current fixed list, reject; grounded
+      // non-product capitalized phrases (service names, streets) don't
+      // match the catalog and pass through.
+      if (field.instructional && isKnownProductName(bare) && !onFixedList(bare)) {
+        return { kind: 'novel_product', term };
+      }
     }
     for (const term of refs.instructed) {
       if (allWordsCommon(term)) continue;
