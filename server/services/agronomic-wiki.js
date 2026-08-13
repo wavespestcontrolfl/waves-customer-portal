@@ -1242,23 +1242,48 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       // margin; already-regenerated pages skip cheaply via the fingerprint
       // token and the skip branch clears the flag again.
       try {
-        // Keyset-paginate the whole window (oldest first) so a burst larger
-        // than one page can never silently age out of the 8-day window
-        // before the next weekly run. The gated sweep scores ≤25/day, so
-        // 20×100 is far past any legitimate volume; ties on vision_scored_at
-        // are sub-millisecond serial writes and practically unique.
-        let cursor = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+        // Select on the terminal stamp (vision_scored_at), NOT a non-null
+        // score: a cleared-then-replaced pair whose replacement scores null
+        // or fails terminally still stamps scored_at, and its pages may
+        // narrate the REMOVED score — this weekly pass is the durable retry
+        // behind the best-effort flagging at clear/score time. Over-flagging
+        // is cheap: an unchanged fingerprint takes the skip branch and
+        // clears the flag again.
+        //
+        // Keyset-paginate the whole 8-day window oldest-first on the
+        // composite (vision_scored_at, id) — a timestamp-only cursor would
+        // drop rows sharing the boundary timestamp, and a burst larger than
+        // one page must never silently age out before the next weekly run.
+        // The gated sweep stamps ≤25/day, so 20×100 is far past any
+        // legitimate volume.
+        const windowStart = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+        let cursorTs = windowStart;
+        let cursorId = null;
         for (let page = 0; page < 20; page++) {
-          const batch = await db('treatment_outcomes')
-            .whereNotNull('vision_delta_score')
-            .where('vision_scored_at', '>', cursor)
+          let query = db('treatment_outcomes').whereNotNull('vision_scored_at');
+          if (cursorId === null) {
+            query = query.where('vision_scored_at', '>', cursorTs);
+          } else {
+            const ts = cursorTs;
+            const id = cursorId;
+            query = query.where(function () {
+              this.where('vision_scored_at', '>', ts)
+                .orWhere(function () {
+                  this.where('vision_scored_at', ts).andWhere('id', '>', id);
+                });
+            });
+          }
+          const batch = await query
             .orderBy('vision_scored_at', 'asc')
+            .orderBy('id', 'asc')
             .limit(100);
           for (const outcome of batch) {
             await AgronomicWiki.markOutcomePagesStale(outcome);
           }
           if (batch.length < 100) break;
-          cursor = batch[batch.length - 1].vision_scored_at;
+          const last = batch[batch.length - 1];
+          cursorTs = last.vision_scored_at;
+          cursorId = last.id;
         }
       } catch (err) {
         logger.error(`[agronomic-wiki] Vision-score stale reconcile failed: ${err.message}`);

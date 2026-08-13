@@ -711,11 +711,11 @@ describe('weeklyRefreshIfDue', () => {
     }));
     const lastPage = [{ id: 'o-final', vision_delta_score: 7, vision_scored_at: new Date(t0 + 999000) }];
     let reconcileCalls = 0;
-    useDb({
+    const state = useDb({
       knowledge_entries: [],
       knowledge_update_log: [],
       treatment_outcomes: (rec) => {
-        if (rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_delta_score')) {
+        if (rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_scored_at')) {
           reconcileCalls += 1;
           return reconcileCalls === 1 ? fullPage : lastPage;
         }
@@ -731,6 +731,11 @@ describe('weeklyRefreshIfDue', () => {
     expect(reconcileCalls).toBe(2);
     expect(spy).toHaveBeenCalledTimes(101);
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'o-final' }));
+    // Page 2 uses the composite (vision_scored_at, id) cursor so rows tied on
+    // the boundary timestamp are never skipped.
+    const page2 = state.calls.treatment_outcomes.filter((rec) =>
+      rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_scored_at'))[1];
+    expect(page2.ops).toContainEqual(['andWhere', ['id', '>', 'o99']]);
     spy.mockRestore();
   });
 
