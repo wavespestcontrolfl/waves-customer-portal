@@ -10565,7 +10565,12 @@ router.post('/:id/card-request', requireAdmin, async (req, res, next) => {
 // convention as the edit-appt visit-count gate).
 router.post('/:id/regenerate-brief', async (req, res, next) => {
   try {
-    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+    // MUTATION-grade ownership (live visit only): this endpoint triggers
+    // tagger side effects, LLM spend, and a brief write — a tech token
+    // must hold a live assignment, not merely a recent one. The response
+    // read below is additionally ownership-scoped in the same query, so a
+    // mid-flight reassignment can neither leak the brief nor 200.
+    if (!(await technicianOwnsScheduledService(req, req.params.id, { forMutation: true }))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
     const AppointmentTagger = require('../services/appointment-tagger');
