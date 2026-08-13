@@ -496,6 +496,41 @@ describe('runDeterministicMatching', () => {
     expect(second.expensesLinked).toBe(1);
   });
 
+  test('an amount+date-only match WITHOUT provenance parks instead of auto-linking', async () => {
+    // same amount, right window — but nothing says this deposit IS the payout
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'CHECK DEPOSIT 1042', amount: 2418.66, direction: 'credit', account_type: 'bank', account_label: 'capone-checking', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: false, bank_last_four: '9876' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    expect(summary.ambiguous).toBe(1); // parks for the operator
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).payoutCandidates);
+    expect(parked).toBeDefined();
+  });
+
+  test('account-label last-4 provenance links when the description is not Stripe-shaped', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'ACH CREDIT SETTLEMENT', amount: 2418.66, direction: 'credit', account_type: 'bank', account_label: 'capone-checking-9876', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: false, bank_last_four: '9876' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(1);
+  });
+
+  test('a Banking-derived rejection lifts once a corrected CONFIRMED reconciliation lands', async () => {
+    // the payout was auto-reverted earlier (bankingRejectedPayoutIds), then a
+    // human corrected course and confirmed a matching reconciliation
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT ST-9', amount: 2400.0, direction: 'credit', account_type: 'bank', suggestion: { bankingRejectedPayoutIds: ['po-1'], autoRevert: { payoutId: 'po-1' } } }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: true, bank_last_four: null }];
+    state.reconRows = [{ status: 'confirmed', actual_amount: '2400.00' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(1); // eligible again — the rejection no longer stands
+
+    // …but while the payout stays unreconciled, the derived rejection holds
+    state.updates = [];
+    state.payouts = [{ id: 'po-1', amount: '2400.00', arrival_date: '2026-08-11', reconciled: false, bank_last_four: null }];
+    state.reconRows = [];
+    const second = await runDeterministicMatching();
+    expect(second.payoutsLinked).toBe(0);
+  });
+
   test('ambiguous payout credits PARK their candidates for the manual link path', async () => {
     state.bankRows = [
       { id: 'bt-1', txn_date: '2026-08-11', description: 'DEPOSIT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null },
@@ -556,7 +591,7 @@ describe('runDeterministicMatching', () => {
     expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
     expect(revert.patch.matched_payout_id).toBeNull();
     // the rejected payout joins the row's exclusion list and the revert is audited
-    expect(sugOf(revert).rejectedPayoutIds).toEqual(['po-1']);
+    expect(sugOf(revert).bankingRejectedPayoutIds).toEqual(['po-1']);
     expect(sugOf(revert).autoRevert.payoutId).toBe('po-1');
     expect(sugOf(revert).reconcilePending).toBeUndefined();
   });
@@ -570,7 +605,7 @@ describe('runDeterministicMatching', () => {
     expect(summary.linksReverted).toBe(1);
     const revert = state.updates.find(u => u.patch.status === 'unmatched');
     expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
-    expect(sugOf(revert).rejectedPayoutIds).toEqual(['po-1']);
+    expect(sugOf(revert).bankingRejectedPayoutIds).toEqual(['po-1']);
     expect(sugOf(revert).autoRevert.payoutId).toBe('po-1');
     // the decision was made under the payout row lock, state re-read inside
     const lockingBuilder = state.builders.find(x => x.table === 'stripe_payouts' && x.b.forUpdate.mock.calls.length > 0);
@@ -580,7 +615,7 @@ describe('runDeterministicMatching', () => {
   test('a payout reconciled DISCREPANTLY mid-echo reverts the fresh link instead of finalizing it', async () => {
     // validated as unreconciled/matching, then a human reconciles it with a
     // different banked amount DURING the echo → guard skip + revalidation
-    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'DEPOSIT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT ST-77', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
     state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: false }];
     reconcilePayout.mockImplementationOnce(async () => {
       state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: true }];
@@ -609,7 +644,7 @@ describe('runDeterministicMatching', () => {
     // a credit matching the ACTUAL banked amount links — the old SQL
     // expected-amount filter would have dropped this candidate entirely
     state.updates = [];
-    state.bankRows = [{ id: 'bt-2', txn_date: '2026-08-11', description: 'DEPOSIT', amount: 2400.0, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.bankRows = [{ id: 'bt-2', txn_date: '2026-08-11', description: 'STRIPE DEPOSIT', amount: 2400.0, direction: 'credit', account_type: 'bank', suggestion: null }];
     summary = await runDeterministicMatching();
     expect(summary.payoutsLinked).toBe(1);
     expect(state.updates.find(u => u.patch.status === 'matched_payout').patch.matched_payout_id).toBe('po-1');

@@ -311,7 +311,7 @@ async function healUnreconciledLinks() {
             match_method: null,
             matched_at: null,
             suggestion: suggestionMerge({
-              rejectedPayoutIds: [...new Set([...(rest.rejectedPayoutIds || []), row.matched_payout_id])],
+              bankingRejectedPayoutIds: [...new Set([...(rest.bankingRejectedPayoutIds || []), row.matched_payout_id])],
               autoRevert: { at: new Date().toISOString(), payoutId: row.matched_payout_id, reason: 'reconciliation rejected by a human on the Banking page' },
             }, ['reconcilePending']),
             updated_at: new Date(),
@@ -442,7 +442,7 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
             match_method: null,
             matched_at: null,
             suggestion: suggestionMerge({
-              rejectedPayoutIds: [...new Set([...(rest.rejectedPayoutIds || []), payoutId])],
+              bankingRejectedPayoutIds: [...new Set([...(rest.bankingRejectedPayoutIds || []), payoutId])],
               autoRevert: { at: new Date().toISOString(), payoutId, reason: 'reconciliation rejected by a human on the Banking page' },
             }, ['reconcilePending']),
             updated_at: new Date(),
@@ -497,14 +497,29 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
 
 // Rejected-target ruling for a row: every id the operator has ever unlinked
 // from it (cumulative arrays; the single lastUnlink id folds in for rows
-// written before the arrays existed).
+// written before the arrays existed). bankingPayoutIds are DERIVED
+// rejections (a human rejected the payout's reconciliation on the Banking
+// page, so the link was auto-reverted) — they exclude the payout only while
+// that rejection stands; a later corrected 'confirmed' reconciliation makes
+// the payout eligible again, unlike an explicit Tax unlink.
 function rejectedTargets(suggestion) {
   const last = suggestion?.lastUnlink || {};
   const expenseIds = new Set(suggestion?.rejectedExpenseIds || []);
   const payoutIds = new Set(suggestion?.rejectedPayoutIds || []);
   if (last.expenseId) expenseIds.add(last.expenseId);
   if (last.payoutId) payoutIds.add(last.payoutId);
-  return { expenseIds: [...expenseIds], payoutIds: [...payoutIds] };
+  return { expenseIds: [...expenseIds], payoutIds: [...payoutIds], bankingPayoutIds: [...new Set(suggestion?.bankingRejectedPayoutIds || [])] };
+}
+
+// Provenance for a payout auto-link: amount+date alone is not identity — a
+// same-amount unrelated deposit (owner transfer, check) could consume the
+// payout and hide the real deposit. Evidence = the statement description
+// looks like a Stripe deposit, or the imported account's label carries the
+// payout's destination last-4. Without it, the match PARKS for the operator.
+function payoutProvenance(row, payout) {
+  if (/stripe/i.test(String(row.description || ''))) return true;
+  const last4 = String(payout.bank_last_four || '').trim();
+  return !!(last4 && String(row.account_label || '').includes(last4));
 }
 
 // A card-statement debit cannot be an expense the books already know was
@@ -524,7 +539,7 @@ async function runDeterministicMatching({ limit } = {}) {
   const baseSelect = () => db('bank_transactions')
     .where({ status: 'unmatched' })
     .orderBy('txn_date', 'asc')
-    .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'suggestion');
+    .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion');
   // Rows the matcher already examined (transfer-flagged, parked candidates)
   // stay unmatched by design — a bounded oldest-first scan would let them
   // fill the window forever and starve newer imports. Bounded passes take
@@ -584,7 +599,7 @@ async function runDeterministicMatching({ limit } = {}) {
         .whereRaw(`suggestion is not null and ${EXAMINED_SQL}`)
         .orderBy('updated_at', 'asc')
         .limit(fill + 1)
-        .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'suggestion');
+        .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion');
       moreExamined = examined.length > fill;
       unmatched = unmatched.concat(examined.slice(0, fill));
     }
@@ -634,14 +649,20 @@ async function runDeterministicMatching({ limit } = {}) {
         .whereNotExists(function claimed() {
           this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_payout_id = stripe_payouts.id');
         })
-        .select('id', 'amount', 'arrival_date', 'reconciled')
+        .select('id', 'amount', 'arrival_date', 'reconciled', 'bank_last_four')
         .limit(50); // safety net far above any real 7-day payout count
       if (rejected.payoutIds.length) payoutQuery = payoutQuery.whereNotIn('id', rejected.payoutIds);
       const fetched = await payoutQuery;
       // reconciled candidates compare against their confirmed ACTUAL amount
       const withEffective = [];
       for (const c of fetched) withEffective.push({ ...c, effective_amount: await effectivePayoutAmount(c) });
-      const candidates = withEffective.filter(c => withinCandidateTolerance(c.effective_amount, row.amount));
+      const bankingRejected = new Set(rejected.bankingPayoutIds);
+      const candidates = withEffective
+        .filter(c => withinCandidateTolerance(c.effective_amount, row.amount))
+        // a Banking-derived rejection excludes the payout only while it
+        // stands: once a corrected 'confirmed' reconciliation flips the
+        // payout back to reconciled, it is eligible again
+        .filter(c => !(bankingRejected.has(c.id) && !c.reconciled));
       const exact = candidates.filter(c => centsEqual(c.effective_amount, row.amount));
       if (fetched.length === 50) {
         // cap hit = the window wasn't fully surveyed; uniqueness would be a
@@ -649,7 +670,7 @@ async function runDeterministicMatching({ limit } = {}) {
         summary.ambiguous++;
         continue;
       }
-      if (candidates.length === 1 && exact.length === 1) {
+      if (candidates.length === 1 && exact.length === 1 && payoutProvenance(row, exact[0])) {
         try {
           // Reconciliation intent is persisted ATOMICALLY with the claim —
           // ALWAYS, not conditioned on a pre-read of `reconciled` (that read
