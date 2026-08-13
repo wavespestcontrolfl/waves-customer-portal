@@ -229,10 +229,13 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
     FROM ai_follow_up_tasks t
     LEFT JOIN customers cu ON cu.id = t.customer_id
     LEFT JOIN csr_call_scores cs ON cs.id = t.call_score_id
-    -- A sent estimate fulfills a send_estimate task (codex r19).
+    -- A sent estimate fulfills a send_estimate task (codex r19). Report
+    -- click-to-estimate mints stamp sent_at without any delivery — they
+    -- must not fulfill a send obligation (in-hook audit r7b P1 on #3391).
     WHERE NOT (t.task_type = 'send_estimate' AND EXISTS (
         SELECT 1 FROM estimates fe
         WHERE fe.customer_id = t.customer_id AND fe.sent_at > t.created_at
+          AND COALESCE(fe.source, '') <> 'service_report_cta'
       ))
       -- Unlinked send_sms tasks fulfill through the source call's SID and
       -- recipient phone (codex r34): a human-typed/approved text to the

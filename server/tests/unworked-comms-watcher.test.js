@@ -41,6 +41,16 @@ const request = (over = {}) => ({
 });
 
 describe('composeUnworkedCommsDigest', () => {
+  test('a zero-delivery click-to-estimate mint never fulfills a send_estimate task (source contract, #3391)', () => {
+    // Those mints stamp sent_at without delivering anything — they must not
+    // clear a send obligation owed from a call.
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '../services/unworked-comms-watcher.js'), 'utf8',
+    );
+    const block = src.split('fe.sent_at > t.created_at')[1].slice(0, 300);
+    expect(block).toMatch(/COALESCE\(fe\.source, ''\) <> 'service_report_cta'/);
+  });
+
   test('fully-worked day composes nothing', () => {
     expect(composeUnworkedCommsDigest({ callbacks: [], followUps: [], unanswered: [] })).toBeNull();
     expect(composeUnworkedCommsDigest({})).toBeNull();

@@ -87,6 +87,11 @@ async function loadUnkeptPromises() {
         SELECT 1
         FROM estimates e
         WHERE e.sent_at IS NOT NULL
+          -- Report click-to-estimate mints stamp sent_at for the
+          -- publish-without-delivery shape but were never DELIVERED —
+          -- a report tap after a promised-quote call must not erase the
+          -- obligation (in-hook audit r7b P1 on #3391).
+          AND COALESCE(e.source, '') <> 'service_report_cta'
           -- End-of-call boundary (codex r23): bridged rows end at
           -- bridge-start + duration; late-created rows (recording/status
           -- callback) already carry post-call created_at — adding

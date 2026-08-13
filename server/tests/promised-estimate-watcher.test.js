@@ -87,6 +87,17 @@ describe('runPromisedEstimateWatcher', () => {
     expect(stamp).toHaveBeenCalledTimes(1);
   });
 
+  test('a zero-delivery click-to-estimate mint never counts as a kept promise (source contract, #3391)', () => {
+    // Those mints stamp sent_at for the publish-without-delivery shape but
+    // nothing was DELIVERED — a report tap after a promised-quote call must
+    // not erase the obligation.
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '../services/promised-estimate-watcher.js'), 'utf8',
+    );
+    const block = src.split('e.sent_at IS NOT NULL')[1].slice(0, 500);
+    expect(block).toMatch(/COALESCE\(e\.source, ''\) <> 'service_report_cta'/);
+  });
+
   test('quiet day skips without sending or stamping', async () => {
     const stamp = jest.fn(async () => {});
     const result = await runPromisedEstimateWatcher({
