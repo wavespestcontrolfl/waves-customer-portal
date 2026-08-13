@@ -3627,6 +3627,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // collects a card in person, so the office-only card-request funnel — and
       // the clearance stamp that arms the pre-visit sweep behind it — must not
       // fire. Same distinction admin-schedule and tech-track draw.
+      // Persist the field mode BEFORE activating — the sweep's retry has only
+      // the durable stamp to know a technician confirmed this row.
+      if (req.techRole === 'technician') {
+        await db('scheduled_services')
+          .where({ id: svc.id })
+          .whereNull('field_confirmed_at')
+          .update({ field_confirmed_at: new Date() })
+          .catch(() => {});
+      }
       await runOfficeConfirmActivation(db, svc, 'admin-dispatch', {
         skipCardRequest: req.techRole === 'technician',
       });

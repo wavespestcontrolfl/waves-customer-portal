@@ -8492,6 +8492,17 @@ router.put('/:id/status', async (req, res, next) => {
       // collects a card in person, so the office-only card-request funnel — and
       // the clearance stamp that arms the pre-visit sweep behind it — must not
       // fire from a field status tap. Office confirms keep the full funnel.
+      // The field mode is PERSISTED before the activation runs (same durable
+      // stamp tech-track writes in its transaction): a failed core leg hands
+      // this row to the hourly sweep, and only the stamp makes that retry keep
+      // skipping the funnel.
+      if (isTechnicianRequest(req)) {
+        await db('scheduled_services')
+          .where({ id: svc.id })
+          .whereNull('field_confirmed_at')
+          .update({ field_confirmed_at: new Date() })
+          .catch(() => {});
+      }
       await runOfficeConfirmActivation(db, svc, 'admin-schedule', {
         skipCardRequest: isTechnicianRequest(req),
       });

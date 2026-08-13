@@ -546,6 +546,15 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
 
   // ⭐ THE MIRROR CASE. Same words, different clauses, opposite meanings — an
   // explicit text withdrawal must survive whatever replacement channel follows.
+  test('"no calls, text me instead" negates the CALL channel only — no suppression', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Prefers texts.',
+      contact_preference: 'no calls, text me instead',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).not.toHaveBeenCalled();
+  });
+
   test('"stop texting me; call my husband instead" DOES suppress SMS', async () => {
     await executeTool('capture_lead', {
       call_summary: 'Asked us to stop texting and call the husband.',
@@ -636,6 +645,10 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
       'please opt out of your text messages',
       'I no longer want texts',
       'never text me again',
+      // Bare channel negation — no stop verb at all.
+      'no texts',
+      'no text messages please',
+      'no SMS to this number',
     ]) {
       jest.clearAllMocks();
       await executeTool('capture_lead', {

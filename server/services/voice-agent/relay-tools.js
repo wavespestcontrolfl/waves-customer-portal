@@ -906,7 +906,14 @@ async function executeTool(name, input = {}, ctx = {}) {
         return out;
       })();
       const TEXTY = /\b(?:text|texts|texting|sms|message|messages|messaging)\b/i;
-      const statedSmsStop = stopClauses.some((c) => TEXTY.test(c.stopped) && !TEXTY.test(c.kept));
+      // ⭐ "NO TEXTS" IS A STOP WITH NO STOP VERB. The bare channel negation —
+      // "no texts", "no SMS", "no text messages please" — carries no word from
+      // the STOP list, so it produced no clause and recorded nothing. It is its
+      // own pattern; "no calls, text me instead" stays untouched (it negates
+      // the CALL channel and keeps the texty one).
+      const BARE_NO_TEXTS_RE = /\bno\s+(?:more\s+)?(?:texts?|sms|text\s+messages?)\b/i;
+      const statedSmsStop = stopClauses.some((c) => TEXTY.test(c.stopped) && !TEXTY.test(c.kept))
+        || BARE_NO_TEXTS_RE.test(preferenceText);
       // A total stop is any "stop <reaching me at all>" phrasing — and the
       // common ones do not say "contact": "remove my number", "don't bother me
       // anymore", "take me off your list". It is NOT total when the same clause
