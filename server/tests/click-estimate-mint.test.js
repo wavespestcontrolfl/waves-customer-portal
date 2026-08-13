@@ -752,15 +752,18 @@ describe('mintReportClickEstimate', () => {
     expect(ops.updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
   });
 
-  test('a scheduled row with the UNCHANGED fingerprint reuses — the tap hands back the token staff planned to deliver', async () => {
+  test('a scheduled row NEVER reuses — even an unchanged fingerprint refuses as drift, because the public page 404s scheduled rows (GitHub round on bf357980f)', async () => {
+    // Handing back the scheduled row's token would redirect the customer
+    // straight to the invalid-link screen; blocking as drift keeps the
+    // planned delivery intact and the card honest.
     const scheduled = priorMint({ id: 'est-scheduled', status: 'scheduled' });
     const { trx, ops } = fakeTrx({ priorEstimateRows: [scheduled] });
-    const out = await mintReportClickEstimate(trx, baseArgs({
+    await expect(mintReportClickEstimate(trx, baseArgs({
       deduped: true,
       requestRow: { id: 'req-3', pricing_revision: JSON.stringify({ mintedEstimate: { id: 'est-scheduled', token: 'tok-old' } }) },
-    }));
-    expect(out.reused).toBe(true);
-    expect(ops.updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
+    }))).rejects.toThrow(ClickEstimateDriftError);
+    expect(ops.inserts).toHaveLength(0);
+    expect(ops.updates).toHaveLength(0);
   });
 
   test('an accepted mint whose service was since CANCELED is terminal history — the tap mints a fresh offer instead of the dead end (GitHub round P1)', async () => {

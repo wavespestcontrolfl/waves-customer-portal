@@ -163,11 +163,22 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     // is the merge set; customer_id stays the conflict key and is
     // never mutated.
     const insertRow = { customer_id: customerId, ...fields };
-    const [saved] = await db('customer_turf_profiles')
-      .insert(insertRow)
-      .onConflict('customer_id')
-      .merge({ ...fields, updated_at: new Date() })
-      .returning('*');
+    // Customer-lock fence (#3391 GitHub round): the click-to-estimate mint
+    // revalidates its pricing-source stamp under the CTA writer's customer
+    // row lock, and FOR UPDATE on the turf row cannot serialize the
+    // NO-ROW case — this upsert could insert the customer's first profile
+    // between the mint's null read and its estimate insert, publishing a
+    // price that ignores the just-entered square footage. Taking the same
+    // customer lock (customers → child table, the repo's order) makes the
+    // write land wholly before or wholly after any in-flight mint.
+    const [saved] = await db.transaction(async (trx) => {
+      await trx('customers').where({ id: customerId }).forUpdate().first('id');
+      return trx('customer_turf_profiles')
+        .insert(insertRow)
+        .onConflict('customer_id')
+        .merge({ ...fields, updated_at: new Date() })
+        .returning('*');
+    });
 
     logger.info?.(`[turf-profile] saved customer=${customerId} by tech=${req.technicianId}`);
     res.json({ profile: saved });

@@ -2147,12 +2147,25 @@ function preserveClickMintMarkersAcrossRevise(nextData, priorData) {
   // "unsent" for source-performance and both watcher predicates. A revise
   // never authors delivery state, so the prior row's is authoritative.
   // Scoped to click-mint rows (this function's contract) — other sources'
-  // revise behavior is unchanged.
+  // revise behavior is unchanged. MONOTONIC, not undefined-only (uncapped
+  // audit on bf357980f): this helper runs once pre-lock and again against
+  // the LOCKED re-read — if a real resend finished in between, the first
+  // pass already planted the older deliveryState in the pending payload,
+  // and an undefined-only guard would let the revision overwrite the
+  // locked row's newer witness. Whichever side carries the newer delivery
+  // evidence wins.
   if (mark && typeof mark === 'object'
-    && priorData.deliveryState && typeof priorData.deliveryState === 'object'
-    && nextData.deliveryState === undefined) {
-    nextData.deliveryState = priorData.deliveryState;
-    changed = true;
+    && priorData.deliveryState && typeof priorData.deliveryState === 'object') {
+    const witnessTs = (ds) => {
+      const value = ds?.lastDeliveredAt || ds?.firstDeliveredAt || null;
+      const ts = value ? new Date(value).getTime() : NaN;
+      return Number.isFinite(ts) ? ts : -Infinity;
+    };
+    const nextDs = nextData.deliveryState;
+    if (nextDs === undefined || witnessTs(priorData.deliveryState) > witnessTs(nextDs)) {
+      nextData.deliveryState = priorData.deliveryState;
+      changed = true;
+    }
   }
   return changed;
 }
@@ -2580,4 +2593,8 @@ module.exports = {
   resolveServerAuthoritativePricing,
   compareClientToServer,
   sanitizeClientIdentityFields,
+  // Exported for the monotonic delivery-witness contract test (#3391): the
+  // helper runs once pre-lock and again against the locked re-read, and
+  // the newer witness must always win.
+  preserveClickMintMarkersAcrossRevise,
 };

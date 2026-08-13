@@ -429,6 +429,25 @@ describe('reviseAdminEstimate', () => {
     expect(data.deliveryState.lastDeliveredAt).toBe('2026-08-13T02:00:00.000Z');
   });
 
+  test('the witness merge is MONOTONIC — the locked row\'s newer delivery state beats a stale pre-lock copy (audit on bf357980f P1)', async () => {
+    // preserveClickMintMarkersAcrossRevise runs once pre-lock and again
+    // against the locked re-read; a resend finishing in between means the
+    // pending payload already carries the OLDER witness, and undefined-only
+    // preservation would let the revision overwrite the new one.
+    const { preserveClickMintMarkersAcrossRevise } = require('../services/admin-estimate-persistence');
+    const mark = { serviceKey: 'pest_control' };
+    const stale = { firstDeliveredAt: '2026-08-13T01:00:00.000Z', lastDeliveredAt: '2026-08-13T02:00:00.000Z' };
+    const fresh = { firstDeliveredAt: '2026-08-13T01:00:00.000Z', lastDeliveredAt: '2026-08-13T06:00:00.000Z' };
+    // Locked row (prior) newer → wins over the stale pre-lock copy.
+    const next1 = { reportCtaMint: mark, deliveryState: { ...stale } };
+    preserveClickMintMarkersAcrossRevise(next1, { reportCtaMint: mark, deliveryState: fresh });
+    expect(next1.deliveryState.lastDeliveredAt).toBe('2026-08-13T06:00:00.000Z');
+    // Pending payload already newer (prior stale) → kept, never regressed.
+    const next2 = { reportCtaMint: mark, deliveryState: { ...fresh } };
+    preserveClickMintMarkersAcrossRevise(next2, { reportCtaMint: mark, deliveryState: stale });
+    expect(next2.deliveryState.lastDeliveredAt).toBe('2026-08-13T06:00:00.000Z');
+  });
+
   test('carries the lead_id mirror and schedule-stitch pointer across the rewrite', async () => {
     const withLinkage = {
       ...sentEstimate,

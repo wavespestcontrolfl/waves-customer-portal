@@ -284,6 +284,12 @@ async function mintReportClickEstimate(trx, {
   // live estimate the customer already holds would kill their token
   // mid-consideration.
   const fingerprintMatches = liveMints.filter((row) => {
+    // A SCHEDULED row is live for BLOCKING purposes but never for reuse
+    // (GitHub round on bf357980f): the public estimate page classifies
+    // scheduled as unpublished and 404s, so handing its token back sends
+    // the customer to the invalid-link screen. The scheduled drift
+    // blocker below refuses the tap instead.
+    if (String(row.status || '') === 'scheduled') return false;
     const mark = reportCtaMintOf(row);
     return mark?.fingerprint && crossSell?.fingerprint && mark.fingerprint === crossSell.fingerprint;
   });
