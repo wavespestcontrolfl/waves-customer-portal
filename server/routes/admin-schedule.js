@@ -9801,8 +9801,19 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           throw err;
         }
 
-        // Re-resolve the supersede set UNDER the lock, then retire it with a
-        // CAS that re-asserts the pristine-draft conditions in the UPDATE
+        // Lock EVERY invoice attached to the series before resolving (Codex
+        // P0 r5): the resolver's read and the CAS below must see the same
+        // rows no concurrent writer can mutate — an edit to line items,
+        // payer, or linkage between resolve and void would otherwise be
+        // erased by the void. With the rows locked, the resolve below IS the
+        // current state until commit; the CAS conditions stay as
+        // defense-in-depth.
+        await trx('invoices')
+          .whereIn('scheduled_service_id', target.visitIds)
+          .forUpdate()
+          .select('id');
+        // Re-resolve the supersede set UNDER the locks, then retire it with
+        // a CAS that re-asserts the pristine-draft conditions in the UPDATE
         // itself — if the invoice was sent, charged, or touched since the
         // resolver read it, the row count comes back 0 and everything rolls
         // back. This is the atomic void-with-mint.
@@ -9876,6 +9887,31 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           conn: trx,
         });
         if (!term) throw new Error('annual prepay term could not be created');
+        // A REUSED term keeps its old prepay_invoice_id (createTerm's merge
+        // is deliberately non-destructive), and after an aborted switch that
+        // id points at the invoice the abort voided — the payment sync keys
+        // on prepay_invoice_id, so paying THIS invoice would never activate
+        // coverage (Codex P0 r5). Rebind, but only a term this lane may own:
+        // undecided, and bound to nothing or to a dead invoice. Anything
+        // else is history this endpoint must not rewrite.
+        const boundId = term.prepay_invoice_id ? String(term.prepay_invoice_id) : null;
+        if (boundId !== String(invoice.id)) {
+          let rebindable = !term.renewal_decision;
+          if (rebindable && boundId) {
+            const bound = await trx('invoices').where({ id: boundId }).first('id', 'status');
+            rebindable = !bound
+              || ['void', 'cancelled', 'canceled', 'refunded'].includes(String(bound.status || '').toLowerCase());
+          }
+          if (!rebindable) {
+            const err = new Error('An existing annual prepay term is still bound to another invoice — resolve it from Customer 360');
+            err.switchConflict = true;
+            throw err;
+          }
+          await trx('annual_prepay_terms')
+            .where({ id: term.id })
+            .update({ prepay_invoice_id: invoice.id, updated_at: new Date() });
+          term.prepay_invoice_id = invoice.id;
+        }
 
         await trx('activity_log').insert({
           customer_id: liveVisit.customer_id,
@@ -9937,22 +9973,8 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
     if (ids.length === 0) return res.json({ restored: [] });
 
     const InvoiceService = require('../services/invoice');
-    // NEVER restore beside a live prepay (Codex P0 r4): a stale or replayed
-    // abort after the collection succeeded would otherwise recreate the
-    // per-application invoice next to the paid year. The abort path voids
-    // the prepay invoice FIRST — that void cancels its payment_pending term
-    // — so every legitimate undo arrives with no live term standing.
-    const today = etDateString();
-    const liveTerm = await db('annual_prepay_terms')
-      .where({ customer_id: target.anchor.customer_id || target.visit.customer_id })
-      .whereIn('status', ['payment_pending', 'active', 'renewal_pending'])
-      .where('term_end', '>=', today)
-      .first('id', 'status');
-    if (liveTerm) {
-      return res.status(409).json({
-        error: `This customer has a ${String(liveTerm.status).replace(/_/g, ' ')} annual prepay — restoring the per-application invoice would bill them twice. Void the prepay from Invoices first if the switch really is being unwound.`,
-      });
-    }
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    const undoCustomerId = target.anchor.customer_id || target.visit.customer_id;
     // Provenance-bound (Codex P0 r4): only the accept-minted invoice this
     // lane itself retired is restorable — a crafted id pointing at some
     // unrelated historical void invoice matches nothing and restores
@@ -9968,6 +9990,19 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
       // bill. A lost response is safe to retry.
       try {
         const outcome = await db.transaction(async (trx) => {
+          // NEVER restore beside a live prepay, checked INSIDE the restore
+          // transaction under the SAME per-customer advisory lock every
+          // prepay mint takes (Codex P0 r5): a concurrent Customer 360 or
+          // on-site mint serializes against this restore instead of slipping
+          // a live term in between the check and the re-mint. A stale or
+          // replayed abort after a successful collection therefore cannot
+          // park a per-application invoice beside the paid year — the
+          // assert throws (caught below as a 409) whenever a binding term
+          // covers today.
+          await lockAndAssertNoAnnualPrepayOverlap(
+            trx, undoCustomerId, etDateString(), false,
+            'This customer has a live annual prepay through',
+          );
           const row = await trx('invoices')
             .where({ id })
             .whereIn('scheduled_service_id', target.visitIds)
@@ -10015,6 +10050,13 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
         if (outcome.restored) restored.push(outcome.restored);
         else if (outcome.failed) failed.push(outcome.failed);
       } catch (err) {
+        // The live-prepay assert aborts the WHOLE request — restoring the
+        // other ids would be the same double-bill.
+        if (err && err.annualPrepayOverlap) {
+          return res.status(409).json({
+            error: 'This customer has a live annual prepay — restoring the per-application invoice would bill them twice. Void the prepay from Invoices first if the switch really is being unwound.',
+          });
+        }
         logger.error(`[schedule:prepay-switch] undo re-mint FAILED for voided ${id}: ${err.message}`);
         failed.push({ id, invoiceNumber: null, error: err.message });
       }

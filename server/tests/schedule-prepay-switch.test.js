@@ -113,6 +113,10 @@ function stubTables({
   estimate = { id: 'est-1', status: 'accepted', accepted_at: '2026-08-10T14:40:05.527Z' },
   visit = ACCEPTED_SERIES_VISIT,
   invoices = [ACCEPT_INVOICE],
+  // Rows reachable only by a direct id lookup (e.g. a prior prepay invoice
+  // on the customer) — NOT attached to this visit, so the resolver's
+  // series-scoped select must never see them.
+  invoicesById = {},
   replacementRow = undefined,
   term = undefined,
   addonCount = 0,
@@ -120,6 +124,7 @@ function stubTables({
   casResult = 1,
 } = {}) {
   stubTables.casCalls = [];
+  stubTables.updates = [];
   db.transaction = jest.fn(async (cb) => cb(db));
   db.mockImplementation((table) => {
     const q = {};
@@ -129,9 +134,13 @@ function stubTables({
     // notes LIKE, the idempotent-retry sweep filters status='void'.
     let notesLike = false;
     let voidOnly = false;
+    let whereId = null;
     q.where = jest.fn((...args) => {
       if (args[0] === 'notes') notesLike = true;
-      if (args[0] && typeof args[0] === 'object' && args[0].status === 'void') voidOnly = true;
+      if (args[0] && typeof args[0] === 'object') {
+        if (args[0].status === 'void') voidOnly = true;
+        if (args[0].id !== undefined) whereId = args[0].id;
+      }
       return q;
     });
     q.whereNull = jest.fn(() => q);
@@ -139,7 +148,8 @@ function stubTables({
     q.whereIn = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
-    q.update = jest.fn(async () => {
+    q.update = jest.fn(async (patch) => {
+      stubTables.updates.push({ table, patch });
       if (table === 'invoices') { stubTables.casCalls.push(true); return casResult; }
       return 1;
     });
@@ -159,7 +169,11 @@ function stubTables({
       // with the stubbed replacement row.
       if (table === 'invoices') {
         if (notesLike) return replacementRow;
-        return Array.isArray(invoices) ? invoices[0] : undefined;
+        const rows = Array.isArray(invoices) ? invoices : [];
+        if (whereId != null) {
+          return rows.find((r) => String(r.id) === String(whereId)) || invoicesById[String(whereId)];
+        }
+        return rows[0];
       }
       if (table === 'customers') return customer;
       if (table === 'estimates') {
@@ -534,6 +548,26 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
     expect(body.invoice.id).toBe('inv-prepay');
   });
 
+  test('a RETRIED switch rebinds a reused term to the NEW invoice so its payment activates coverage', async () => {
+    // The abort voided 'inv-old' but the cancelled term kept pointing at it;
+    // createTerm's non-destructive merge preserves that binding. Without the
+    // rebind, paying the retry's invoice never activates the year.
+    stubTables({ invoicesById: { 'inv-old': { id: 'inv-old', status: 'void' } } });
+    termSpy.mockResolvedValue({ id: 'term-1', prepay_invoice_id: 'inv-old', renewal_decision: null });
+    const { status } = await post('/svc-1/prepay-switch', { chargeInPerson: true });
+    expect(status).toBe(201);
+    const rebind = stubTables.updates.find((u) => u.table === 'annual_prepay_terms' && u.patch.prepay_invoice_id);
+    expect(rebind.patch.prepay_invoice_id).toBe('inv-prepay');
+  });
+
+  test('a reused term still bound to a LIVE invoice refuses instead of rewriting history', async () => {
+    stubTables({ invoicesById: { 'inv-old': { id: 'inv-old', status: 'paid' } } });
+    termSpy.mockResolvedValue({ id: 'term-1', prepay_invoice_id: 'inv-old', renewal_decision: null });
+    const { status, body } = await post('/svc-1/prepay-switch', { chargeInPerson: true });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/still bound to another invoice/i);
+  });
+
   test('an ineligible visit refuses with the preview blockReason and mints nothing', async () => {
     stubTables({ estimate: { id: 'est-1', status: 'sent', accepted_at: null } });
     const { status, body } = await post('/svc-1/prepay-switch', { chargeInPerson: true });
@@ -548,6 +582,7 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     jest.clearAllMocks();
     mockCreateInvoice.mockResolvedValue({ id: 'inv-new', invoice_number: 'WPC-2026-0401' });
     mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    mockLockOverlap.mockResolvedValue(undefined);
   });
 
   const VOIDED_ROW = {
@@ -588,12 +623,18 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 
-  test('REFUSES while a live prepay term stands — a stale abort must not double-bill', async () => {
-    stubTables({ invoices: [VOIDED_ROW], term: { id: 'term-1', status: 'payment_pending' } });
+  test('REFUSES while a live prepay term stands — the shared advisory lock + assert, inside the trx', async () => {
+    stubTables({ invoices: [VOIDED_ROW] });
+    const overlapErr = new Error('This customer has a live annual prepay through 2027-08-11.');
+    overlapErr.annualPrepayOverlap = { error: overlapErr.message };
+    mockLockOverlap.mockRejectedValue(overlapErr);
     const { status, body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
     expect(status).toBe(409);
     expect(body.error).toMatch(/would bill them twice/i);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
+    // Same serialization every prepay mint uses — a concurrent mint can't
+    // slip a term in between the check and the re-mint.
+    expect(mockLockOverlap).toHaveBeenCalled();
   });
 
   test("a void row WITHOUT this estimate's accept stamp restores nothing (crafted ids are inert)", async () => {
