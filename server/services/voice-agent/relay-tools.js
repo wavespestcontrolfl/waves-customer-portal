@@ -821,7 +821,13 @@ async function executeTool(name, input = {}, ctx = {}) {
       // extraction, so neither the outer nor the inner verb can seed a stop
       // clause. (Scoped to stop-verb pairs only: a lone "don't text me" is
       // still a real stop.)
-      const NEGATED_STOP_RE = /\b(?:don'?t|do not|never)\s+(?:ever\s+)?(?:stop|quit|cease|unsubscribe|remove|opt\s+(?:me|us)?\s*out)\b/gi;
+      // The negation can sit a few INTENT words away from the verb: "I don't
+      // WANT TO stop receiving texts" negates the stop just as surely as
+      // "don't stop texting me". The gap admits only a short whitelist of
+      // intent/filler words — never punctuation, never arbitrary text — so a
+      // real stop in a later clause ("do not call me. stop texting") can't be
+      // swallowed by a negator two clauses back.
+      const NEGATED_STOP_RE = /\b(?:don'?t|do not|never|not)\s+(?:(?:ever|really|actually|want(?:ed)?|wanna|wish(?:ed)?|liked?|intend(?:ed)?|plan(?:ned)?|meant?|need(?:ed)?|cared?|going|trying|tried|to)\s+){0,4}(?:stop|quit|cease|unsubscribe|remove|opt\s+(?:me|us)?\s*out)\b/gi;
       const preferenceText = String(input.contact_preference || '').replace(NEGATED_STOP_RE, 'KEEP');
       const mentionsEmail = /\bemail(s|ing)?\b/i.test(preferenceText)
         || String(input.preferred_contact_method || '') === 'email';

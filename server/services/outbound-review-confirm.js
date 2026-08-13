@@ -440,8 +440,27 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   try {
     const post = await db('scheduled_services').where({ id: svc.id }).first('status');
     if (post && ['cancelled', 'skipped', 'rescheduled'].includes(String(post.status))) {
-      const AppointmentReminders = require('./appointment-reminders');
-      await AppointmentReminders.handleCancellation(svc.id, { sendNotification: false }).catch(() => {});
+      // ⭐ ALL THREE TERMINAL PATHS CLOSE THE REMINDER, NOT JUST 'cancelled'.
+      // handleCancellation deliberately no-ops unless the visit is still
+      // exactly 'cancelled' at write time — so a skip or reschedule that
+      // committed during the legs (its own cleanup ran before this reminder
+      // existed) left the just-armed reminder active. Close it directly, with
+      // the same one-statement status guard handleCancellation uses so a
+      // restoration committing after the status read above is never re-closed.
+      // 'rescheduled' is a SUPERSEDED row in this lane (the rebook is a new
+      // row with its own reminder), so closing its reminder is final, not a
+      // pending-rebook hold.
+      await db('appointment_reminders')
+        .where({ scheduled_service_id: svc.id })
+        .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status IN ('cancelled','skipped','rescheduled'))")
+        .update({ cancelled: true, updated_at: new Date() })
+        .catch((e) => logger.warn(`[${routeTag}] terminal-race reminder close failed for ${svc.id}: ${e.message}`));
+      if (String(post.status) === 'cancelled') {
+        // The cancelled path also takes the cancellation-notice claim (a
+        // sendNotification:false caller claims to BLOCK a later auto-send).
+        const AppointmentReminders = require('./appointment-reminders');
+        await AppointmentReminders.handleCancellation(svc.id, { sendNotification: false }).catch(() => {});
+      }
       logger.info(`[${routeTag}] visit ${svc.id} went ${post.status} during the confirm hook — reminder closed, activation stood down`);
       return false;
     }

@@ -449,14 +449,14 @@ describe('existing-customer contact instructions still reach a human', () => {
     });
   });
 
-  test('the suppressed sentinel stamps the marker too — zero artifact either way', async () => {
+  test('the suppressed sentinel stamps NO marker — deliberate zero-artifact, not a failure', async () => {
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
-    NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true, reason: 'bell_policy' });
+    NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true, reason: 'internal_test' });
     await createLeadFromExtraction(
       { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
       { phone: CALLER, callSid: 'CA-dnc-stamp2' },
     );
-    expect(stampWrites()).toHaveLength(1);
+    expect(stampWrites()).toHaveLength(0);
   });
 
   test('a SUCCESSFUL feed write stamps nothing', async () => {
@@ -488,6 +488,47 @@ describe('existing-customer contact instructions still reach a human', () => {
       && String((w.payload && w.payload.metadata && w.payload.metadata.sql) || '').includes("- 'relay_contact_instruction_needed'"));
     expect(clears).toHaveLength(1);
     expect(stampWrites()).toHaveLength(0);
+  });
+
+  // ⭐ THE MARKER OUTLIVES ANY OUTAGE — no attempt cap ever clears it. A high
+  // attempt count keeps retrying; only success or a deliberate suppression
+  // (or a deleted customer) clears the obligation.
+  test('a marker with hundreds of failed attempts is retained and retried, never discarded', async () => {
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    NotificationService.notifyAdmin.mockRejectedValue(new Error('still down'));
+    const { sweepUnsurfacedContactInstructions } = require('../services/lead-from-extraction');
+    tables.call_log = makeBuilder('call_log', [{
+      id: 'cl-9', twilio_call_sid: 'CA-dnc-swept',
+      metadata: {
+        relay_contact_instruction_needed: 'true',
+        relay_contact_instruction: { customerId: 'c-777', do_not_contact_request: true },
+        relay_contact_instruction_attempts: 480,
+      },
+    }]);
+    const out = await sweepUnsurfacedContactInstructions();
+    expect(out).toMatchObject({ scanned: 1, recovered: 0 });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1); // still trying
+    const clears = writes.filter((w) => w.table === 'call_log' && w.verb === 'update'
+      && String((w.payload && w.payload.metadata && w.payload.metadata.sql) || '').includes("- 'relay_contact_instruction_needed'"));
+    expect(clears).toHaveLength(0); // never discarded
+  });
+
+  test('a sweep retry suppressed by policy clears the marker — deliberate, not a give-up', async () => {
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true, reason: 'internal_test' });
+    const { sweepUnsurfacedContactInstructions } = require('../services/lead-from-extraction');
+    tables.call_log = makeBuilder('call_log', [{
+      id: 'cl-9', twilio_call_sid: 'CA-dnc-swept',
+      metadata: {
+        relay_contact_instruction_needed: 'true',
+        relay_contact_instruction: { customerId: 'c-777', do_not_contact_request: true },
+      },
+    }]);
+    const out = await sweepUnsurfacedContactInstructions();
+    expect(out).toMatchObject({ scanned: 1, recovered: 0 });
+    const clears = writes.filter((w) => w.table === 'call_log' && w.verb === 'update'
+      && String((w.payload && w.payload.metadata && w.payload.metadata.sql) || '').includes("- 'relay_contact_instruction_needed'"));
+    expect(clears).toHaveLength(1);
   });
 
   test('a sweep retry that fails again bumps the attempt count instead of re-stamping', async () => {
@@ -786,6 +827,36 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
       }, CTX);
       expect(recordSuppression).not.toHaveBeenCalled();
     }
+  });
+
+  // ⭐ THE NEGATION CAN SIT INTENT WORDS AWAY FROM THE VERB. "I don't WANT TO
+  // stop receiving texts" negates the stop as surely as "don't stop texting
+  // me" — the un-neutralized inner "stop … texts" classified as a withdrawal
+  // of the channel the caller explicitly asked to keep.
+  test('a negated opt-in with intent words ("don\'t want to stop…") never suppresses', async () => {
+    for (const words of [
+      "I don't want to stop receiving texts",
+      'I do not wish to stop the reminders',
+      "we don't want to opt out of texts",
+      "I never intended to stop the text reminders",
+    ]) {
+      jest.clearAllMocks();
+      await executeTool('capture_lead', {
+        call_summary: 'Wants to KEEP the texts.',
+        contact_preference: words,
+        do_not_contact_request: false,
+      }, CTX);
+      expect(recordSuppression).not.toHaveBeenCalled();
+    }
+  });
+
+  test('…while an un-negated "I want to stop receiving texts" is still a real stop', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Asked us to stop texting.',
+      contact_preference: 'I want to stop receiving texts',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
   });
 
   test('…while a lone "don\'t text me" is still a real stop', async () => {

@@ -95,14 +95,18 @@ async function surfaceContactInstructionForCustomer(customer, extracted = {}, op
   const instruction = contactPreferenceFields(extracted);
   if (!customer || !customer.id || !instruction) return false;
   const dnc = instruction.do_not_contact_request === true;
-  const surfaced = await fileContactInstructionNotification(customer, instruction, opts, dnc);
+  const result = await fileContactInstructionNotification(customer, instruction, opts, dnc);
+  const surfaced = result.persisted;
   // ⭐ A FAILED COMPLIANCE ARTIFACT GETS A RETRY RAIL. This feed row is the
   // ONLY structured artifact for a lifecycle customer's stated instruction —
   // a notifyAdmin hiccup here silently lost a "stop texting me" with nothing
   // left to find it. Same rail as the hot-alert page: a durable obligation
   // marker on the call's own call_log row, recovered by the hourly sweep.
-  // The sweep's own retries never re-stamp (the marker is already there).
-  if (!surfaced && !opts.sweepRetry && opts.callSid) {
+  // The sweep's own retries never re-stamp (the marker is already there), and
+  // a SUPPRESSED result stamps nothing: suppression is the internal-test
+  // customer gate's deliberate zero-artifact decision, not a delivery failure
+  // — an obligation for it would just be cleared by the sweep's first pass.
+  if (!surfaced && !result.suppressed && !opts.sweepRetry && opts.callSid) {
     try {
       await db('call_log')
         .where({ twilio_call_sid: opts.callSid })
@@ -176,13 +180,13 @@ async function fileContactInstructionNotification(customer, instruction, opts, d
     // this function must never claim otherwise.
     if (!notif || notif.suppressed) {
       logger.error(`[voice-agent-lead] contact instruction for customer ${customer.id} did NOT persist to the admin feed (dnc=${dnc}${notif && notif.suppressed ? `, suppressed:${notif.reason || 'internal_test'}` : ''})`);
-      return false;
+      return { persisted: false, suppressed: !!(notif && notif.suppressed) };
     }
     logger.info(`[voice-agent-lead] contact instruction surfaced for existing customer ${customer.id} (dnc=${dnc})`);
-    return true;
+    return { persisted: true, suppressed: false };
   } catch (err) {
     logger.error(`[voice-agent-lead] contact instruction surfacing FAILED for customer ${customer.id}: ${err.message}`);
-    return false;
+    return { persisted: false, suppressed: false };
   }
 }
 
@@ -482,18 +486,20 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   return { leadId, customerId, created };
 }
 
-// How many hourly sweep attempts a stranded contact instruction gets before
-// the sweep stops retrying and demands a human (roughly one day). A row the
-// internal-test-customer gate suppresses on purpose would otherwise retry
-// forever; a real outage longer than this deserves eyes, not more retries.
-const CONTACT_INSTRUCTION_SWEEP_MAX_ATTEMPTS = 24;
-
 /**
  * Hourly recovery for contact instructions whose ONLY artifact (the admin feed
  * row) failed to persist on the live call. Mirrors sweepAbandonedHotAlerts:
  * keyed on the durable obligation marker capture time stamped, cleared only on
  * a proven re-file. Fail-open toward a duplicate feed row — a rare duplicate
  * beats a silently lost "stop texting me".
+ *
+ * ⭐ THE MARKER OUTLIVES ANY OUTAGE. There is no attempt cap: a compliance
+ * instruction with no other artifact is never discarded because delivery kept
+ * failing — the marker (and the stored instruction) stay until a re-file
+ * SUCCEEDS. The only clears besides success are deliberate ones: the
+ * internal-test suppression gate (zero-artifact by policy) and a customer row
+ * that no longer exists (a debt nobody can pay). Attempts are counted for
+ * observability only.
  */
 async function sweepUnsurfacedContactInstructions({ limit = 10 } = {}) {
   const rows = await db('call_log')
@@ -521,24 +527,29 @@ async function sweepUnsurfacedContactInstructions({ limit = 10 } = {}) {
       continue;
     }
     const attempts = Number(meta.relay_contact_instruction_attempts || 0);
-    if (attempts >= CONTACT_INSTRUCTION_SWEEP_MAX_ATTEMPTS) {
-      logger.error(`[voice-agent-lead] contact-instruction for customer ${customer.id} STILL unsurfaced after ${attempts} sweep attempts call_log=${row.id} — giving up, needs a human`);
-      await clearMarker();
-      continue;
-    }
-    const ok = await surfaceContactInstructionForCustomer(customer, {
-      contact_preference: payload.contact_preference,
-      preferred_contact_method: payload.preferred_contact_method,
+    const instruction = {
+      contact_preference: payload.contact_preference || null,
+      preferred_contact_method: CONTACT_METHODS.has(String(payload.preferred_contact_method || '')) ? payload.preferred_contact_method : null,
       do_not_contact_request: payload.do_not_contact_request === true,
-    }, {
+    };
+    const dnc = instruction.do_not_contact_request;
+    const result = await fileContactInstructionNotification(customer, instruction, {
       callSid: row.twilio_call_sid,
       smsSuppressionApplied: payload.smsSuppressionApplied === true,
       sweepRetry: true,
-    });
-    if (ok) {
+    }, dnc);
+    if (result.persisted) {
       await clearMarker();
       recovered += 1;
+    } else if (result.suppressed) {
+      // Deliberate zero-artifact (internal-test customer gate) — not a
+      // delivery failure. Clearing is the policy's decision, not a give-up.
+      logger.warn(`[voice-agent-lead] contact-instruction for customer ${customer.id} suppressed by policy on sweep retry call_log=${row.id} — clearing marker`);
+      await clearMarker();
     } else {
+      if (attempts > 0 && attempts % 24 === 0) {
+        logger.error(`[voice-agent-lead] contact-instruction for customer ${customer.id} STILL unsurfaced after ${attempts} sweep attempts call_log=${row.id} — marker retained, keeps retrying`);
+      }
       await db('call_log').where({ id: row.id }).update({
         metadata: db.raw(
           "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",

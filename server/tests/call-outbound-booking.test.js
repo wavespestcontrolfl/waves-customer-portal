@@ -298,7 +298,7 @@ describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () =>
     const state = { updates: [] };
     const fn = (table) => {
       const q = {};
-      ['where', 'whereNotIn', 'whereNull', 'whereIn', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
+      ['where', 'whereNotIn', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
       q.first = jest.fn(async () => {
         if (table === 'scheduled_services') return row;
         if (table === 'appointment_reminders') {
@@ -587,7 +587,7 @@ function confirmHookDb({ cardPayload = null, fallbackLeads = [], leadRow = null,
   const state = { triageResolved: false, updates: [] };
   const fn = (table) => {
     const q = {};
-    ['where', 'whereNotIn', 'whereNull', 'whereIn', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
+    ['where', 'whereNotIn', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
     q.select = jest.fn(async () => fallbackLeads);
     q.first = jest.fn(async () => {
       if (table === 'triage_items') return cardPayload ? { payload: JSON.stringify(cardPayload) } : null;
@@ -739,6 +739,37 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
     expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
     expect(convertCallLeadOnPhoneBooking).not.toHaveBeenCalled();
     expect(db._state.triageResolved).toBe(false);
+  });
+
+  // ⭐ A SKIP OR RESCHEDULE THAT COMMITS DURING THE LEGS CLOSES THE REMINDER
+  // TOO. handleCancellation no-ops unless the visit is still exactly
+  // 'cancelled' — so the post-legs cleanup for skipped/rescheduled rows must
+  // close the just-armed reminder directly, or it may text for a superseded
+  // visit (its own path's cleanup ran before this reminder existed).
+  test('a visit that went SKIPPED during the legs closes the just-armed reminder directly', async () => {
+    const base = confirmHookDb({ fallbackLeads: [] });
+    let svcReads = 0;
+    const wrapped = (table) => {
+      const q = base(table);
+      if (table === 'scheduled_services') {
+        const orig = q.first;
+        q.first = jest.fn(async (...a) => {
+          const row = await orig(...a);
+          svcReads += 1;
+          // Entry read sees the live row; everything after sees the skip.
+          return svcReads === 1 ? row : { ...row, status: 'skipped' };
+        });
+      }
+      return q;
+    };
+    Object.assign(wrapped, { fn: base.fn, transaction: base.transaction, raw: base.raw, _state: base._state });
+
+    const ok = await runOutboundReviewConfirmHook(wrapped, svc, 'test');
+    expect(ok).toBe(false); // unstamped — stood down
+    const reminderCloses = base._state.updates.filter(
+      (u) => u.table === 'appointment_reminders' && u.vals && u.vals.cancelled === true,
+    );
+    expect(reminderCloses.length).toBeGreaterThanOrEqual(1);
   });
 
   test('an unreadable current status refuses to activate (retryable), never guesses', async () => {
