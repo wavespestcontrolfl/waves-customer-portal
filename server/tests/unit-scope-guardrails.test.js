@@ -1243,7 +1243,7 @@ describe('a whole-building-classified tenant keeps their own stated area (r48)',
     warnings: [],
     ...overrides,
   });
-  // The Anita-adjacent shape: a suite tenant whose address carries no
+  // The suite-tenant regression shape: a suite tenant whose address carries no
   // Suite/Unit suffix and whose county record reads a generic 'Commercial'
   // has NO part-building evidence, so the lane classifies the job
   // entire_commercial_building / leased_whole_building to protect their
@@ -1431,6 +1431,26 @@ describe('association callers keep association scope on condo records (r51)', ()
     });
     expect(model.serviceScope).not.toBe('commercial_suite');
     // The building measurement survives for common-area pricing.
+    const facts = { home: { value: 24000, source: 'county_assessed', confidence: 'high' } };
+    applyUnitScopeToPropertyFacts(facts, model);
+    expect(facts.home.value).toBe(24000);
+  });
+
+  test('a manager whose contact address carries a Suite line is still not a suite (r52)', () => {
+    // The unitSignal door: the manager's own office address has a
+    // subpremise, which independently satisfied the suite branch even with
+    // the condo-record gate in place. The association signal must outrank
+    // every unit signal.
+    const model = resolveUnitScopeModel({
+      propertyRecord: { propertyType: 'Commercial Condo' },
+      extraction: { caller: { relationship_to_property: 'property manager' }, property: {} },
+      intent: { is_commercial: true, address: '3400 Cattlemen Rd Suite 100, Sarasota, FL 34232' },
+      propertyFacts: { tenant: false, home: { value: 24000, source: 'county_assessed' } },
+      address: '3400 Cattlemen Rd Suite 100, Sarasota, FL 34232',
+    });
+    expect(model.serviceScope).toBe('association_common_area');
+    expect(model.serviceScope).not.toBe('commercial_suite');
+    // The association's building measurement survives.
     const facts = { home: { value: 24000, source: 'county_assessed', confidence: 'high' } };
     applyUnitScopeToPropertyFacts(facts, model);
     expect(facts.home.value).toBe(24000);

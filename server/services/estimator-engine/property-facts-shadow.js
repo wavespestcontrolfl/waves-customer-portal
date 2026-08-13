@@ -168,29 +168,41 @@ function isCondoRecord({ aggregated, propertyType, landUseDescription }) {
     || CONDO_TYPES.test(String(landUseDescription || ''));
 }
 
-// …but the record only stands in for unit OCCUPANCY when the caller is
-// someone who occupies one unit. A condo-association manager or HOA board
-// member requesting COMMON-AREA service is not — treating their condo-typed
-// record as a suite cleared the association's building area and master
-// parcel as though they occupied one unit (codex r51 P1). The structured
-// hoa_common_area_service boolean and an hoa/common-area risk type carry
-// the same rule (they already outrank type text everywhere else — pre-push
-// r3). Owner/tenant/unknown keep the r49 behavior.
+// An ASSOCIATION caller: a manager/HOA/board relationship, the structured
+// hoa_common_area_service boolean, or an hoa/common-area risk type — the
+// signals that already outrank type text everywhere else (pre-push r3).
+// Such a caller is buying common-area service, never one unit's, no matter
+// what their record type or contact address says: a manager whose OFFICE
+// address carries "Suite 100" still tripped the suite branch through
+// `unitSignal` and the apply cleared the association's building area and
+// master parcel (codex r51 + r52 P1s — the condo-record gate alone left
+// the unitSignal door open).
+function associationCallerSignal({ extraction, intent }) {
+  const rel = String(extraction?.caller?.relationship_to_property || '').toLowerCase();
+  if (/property.?manager|manager|management|association|hoa|board/.test(rel)) return true;
+  if (extraction?.property?.hoa_common_area_service === true) return true;
+  return /hoa|common.?area|association/i.test(String(intent?.commercial_risk_type || ''));
+}
+
+// …and the condo record stands in for unit OCCUPANCY only for a caller who
+// occupies one unit — owner/tenant/unknown keep the r49 behavior.
 function condoRecordOccupancy({ condoRecord, extraction, intent }) {
   if (condoRecord !== true) return false;
-  const rel = String(extraction?.caller?.relationship_to_property || '').toLowerCase();
-  if (/property.?manager|manager|management|association|hoa|board/.test(rel)) return false;
-  if (extraction?.property?.hoa_common_area_service === true) return false;
-  if (/hoa|common.?area|association/i.test(String(intent?.commercial_risk_type || ''))) return false;
-  return true;
+  return !associationCallerSignal({ extraction, intent });
 }
 
 function inferServiceScope({
   propertyType, isCommercial, tenant, aggregated, unitSignal,
   unitScopeSuites = false, partBuilding = false, subpremise = false,
-  condoRecord = false,
+  condoRecord = false, association = false,
 }) {
   if (isCommercial) {
+    // An association CALLER outranks every unit signal (codex r52 P1): a
+    // manager's contact address may carry a Suite/Unit line, but the job
+    // is the complex's common areas, and the suite branch would clear the
+    // association's building area and master parcel. Lane-gated like every
+    // other unit-scope change.
+    if (unitScopeSuites && association) return 'association_common_area';
     // ASSOCIATION/aggregate first when nobody occupies one unit: an owner or
     // manager buying whole-complex service on a stacked aggregate parcel is
     // an association job, and `unitSignal` alone is true for any
@@ -237,7 +249,15 @@ function inferServiceScope({
 function inferOwnershipType({
   propertyType, isCommercial, tenant, aggregated, unitSignal,
   unitScopeSuites = false, partBuilding = false, condoRecord = false,
+  association = false,
 }) {
+  // Ownership follows the same association-caller rule (codex r52 P1) —
+  // without it, a manager whose contact address carried a Suite line was
+  // labelled a commercial condominium and lotApplicability read
+  // common-master-parcel for a job that prices the whole association.
+  if (isCommercial && association && unitScopeSuites && !tenant) {
+    return 'association_common_property';
+  }
   if (tenant) {
     // A commercial tenant is a leased SUITE only when they occupy part of a
     // building; a whole-building restaurant/warehouse lease sits on a real
@@ -537,13 +557,14 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
       }),
       extraction, intent,
     });
+    const association = associationCallerSignal({ extraction, intent });
     const serviceScope = inferServiceScope({
       propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites, partBuilding,
-      subpremise: subpremiseSignalForScope, condoRecord,
+      subpremise: subpremiseSignalForScope, condoRecord, association,
     });
     const ownershipType = inferOwnershipType({
       propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites, partBuilding,
-      condoRecord,
+      condoRecord, association,
     });
     const evidence = buildMeasurementEvidence({ propertyRecord, extraction, isCommercial, tenant, serviceScope });
     if (!evidence.length) return null;
@@ -712,5 +733,6 @@ module.exports = {
     hasPartBuildingEvidence,
     isCondoRecord,
     condoRecordOccupancy,
+    associationCallerSignal,
   },
 };

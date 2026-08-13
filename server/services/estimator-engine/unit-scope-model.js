@@ -313,10 +313,13 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
     }),
     extraction, intent,
   });
+  // An association caller outranks every unit signal — a manager's own
+  // contact address may carry a Suite/Unit line (codex r52 P1).
+  const association = shadowPrivate.associationCallerSignal({ extraction, intent });
   let serviceScope = shadowPrivate.inferServiceScope({
     propertyType, isCommercial, tenant, aggregated, unitSignal,
     unitScopeSuites: true, partBuilding: partBuildingEvidence, subpremise: subpremiseSignal,
-    condoRecord,
+    condoRecord, association,
   });
   // An explicit Unit/Apt/Suite subpremise on a residential job whose type
   // is missing or generic reads as a UNIT — a misclassified or
@@ -360,7 +363,7 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
   }
   const ownershipType = shadowPrivate.inferOwnershipType({
     propertyType, isCommercial, tenant, aggregated, unitSignal,
-    unitScopeSuites: true, partBuilding: partBuildingEvidence, condoRecord,
+    unitScopeSuites: true, partBuilding: partBuildingEvidence, condoRecord, association,
   });
 
   return {
