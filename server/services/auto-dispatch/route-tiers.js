@@ -192,6 +192,15 @@ async function loadReminderFreeze(db, serviceIds, now = new Date()) {
 
     // Inside the sender's claimable band ⇒ frozen regardless of flag (the row
     // may be mid-send). Unparseable appointment_time ⇒ frozen (fail closed).
+    //
+    // Timezone note (do not "fix" to AT TIME ZONE): appointment_time is
+    // timestamptz (knex `t.timestamp()` defaults useTz=true on pg — migration
+    // 20260401000078), so the driver hands back an absolute instant. More
+    // load-bearing still: this arithmetic deliberately MIRRORS the sender's
+    // own boundary math (appointment-reminders reminder72hStillReachable /
+    // reminderFlagsCoveredByNotice: `new Date(appointment_time).getTime() -
+    // now`), bit for bit — mutual exclusion with the sender only holds if
+    // both sides draw the band in the same frame.
     const inSendableBand = (apptTime) => {
       const t = new Date(apptTime).getTime();
       if (Number.isNaN(t)) return true;
