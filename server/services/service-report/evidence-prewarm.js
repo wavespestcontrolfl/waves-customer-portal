@@ -61,10 +61,12 @@ async function prewarmReportCrossSellEvidence(serviceRecord, database) {
 // card — a cold first view is exactly today's behavior, never wrong data).
 function prewarmReportCrossSellEvidenceBounded(serviceRecord, database, { maxWaitMs = 10000 } = {}) {
   const warm = prewarmReportCrossSellEvidence(serviceRecord, database);
-  return Promise.race([
-    warm,
-    new Promise((resolve) => setTimeout(() => resolve('timeout'), maxWaitMs)),
-  ]);
+  // The timer is cleared when the race settles (pre-push r2 P1): a fast
+  // warm otherwise leaves the 10s handle live — completions accumulate
+  // timers and graceful shutdown waits on them.
+  let timer;
+  const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), maxWaitMs); });
+  return Promise.race([warm, deadline]).finally(() => clearTimeout(timer));
 }
 
 module.exports = { prewarmReportCrossSellEvidence, prewarmReportCrossSellEvidenceBounded };

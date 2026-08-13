@@ -76,9 +76,14 @@ test('a record missing its ids is a no-op, never a throw', async () => {
 describe('bounded wait (pre-push r1 P1: the SMS races the warm)', () => {
   const { prewarmReportCrossSellEvidenceBounded } = require('../services/service-report/evidence-prewarm');
 
-  test('a fast warm resolves through with its result before the deadline', async () => {
+  test('a fast warm resolves through with its result before the deadline — and clears the timer (r2 P1)', async () => {
     buildReportCrossSell.mockResolvedValue({ mode: 'priced' });
+    const clearSpy = jest.spyOn(global, 'clearTimeout');
     await expect(prewarmReportCrossSellEvidenceBounded(RECORD, DB, { maxWaitMs: 500 })).resolves.toBe('priced');
+    // A fast warm must not leave the deadline handle live — completions
+    // otherwise accumulate timers and graceful shutdown waits on them.
+    expect(clearSpy).toHaveBeenCalled();
+    clearSpy.mockRestore();
   });
 
   test('a slow warm yields "timeout" at the deadline and keeps running in the background', async () => {
