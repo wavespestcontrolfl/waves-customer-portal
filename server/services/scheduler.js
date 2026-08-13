@@ -946,7 +946,13 @@ function initScheduledJobs() {
         // recording it would stamp a fresh 4:20 success under the 4:10 job's
         // name, clearing real failures and falsifying last_success_at.
         const inner = await runExclusive('auto-dispatch-recurring', async () => runRouteReorderIfEnabled(), { recordHealth: false });
-        if (inner && inner.skipped) {
+        // STRICT boolean — a completed run returns skipped as a NUMERIC
+        // count of skipped tech-days (frozen days are routine), and a
+        // truthy check would ledger a false skipped tick + fail job health
+        // on any normal night with one skip. Only runExclusive's
+        // lock-contention shape ({ skipped: true, reason }) means the tick
+        // itself never ran (uncapped audit r27 P1).
+        if (inner && inner.skipped === true) {
           // The 4:10 job still held the writer lock — the tick did NOT run.
           // Ledger it as skipped so job health / the dispatch card never show
           // a lock-starved night as a successful run with no output.

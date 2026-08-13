@@ -1,4 +1,11 @@
 jest.mock('../models/db', () => jest.fn());
+// The follow-up shift is a separate fenced+transactional unit with its own
+// suite (call-booking-catalog.test.js) — mocked so this suite's sequential
+// db-query queue models only the rebooker's own queries.
+jest.mock('../services/call-booking-catalog', () => ({
+  ...jest.requireActual('../services/call-booking-catalog'),
+  shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -69,7 +76,6 @@ describe('track token expiry on reschedule paths', () => {
     });
     const logInsert = chain();
     // Post-commit best-effort shift of a call-created follow-up child.
-    const followupShift = chain({ update: jest.fn().mockResolvedValue(0) });
     const logCount = chain({
       first: jest.fn().mockResolvedValue({ count: '1' }),
     });
@@ -83,7 +89,7 @@ describe('track token expiry on reschedule paths', () => {
     db.transaction = jest.fn(async (callback) => callback(trx));
     db.fn = { now: jest.fn(() => 'now()') };
 
-    const dbQueries = [serviceLookup, followupShift, logCount];
+    const dbQueries = [serviceLookup, logCount];
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return dbQueries.shift();

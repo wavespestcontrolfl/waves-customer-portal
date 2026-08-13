@@ -5999,6 +5999,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 scheduled_date: nextDateStr,
                 recurring_pattern: recurringPattern,
               };
+              // Fence-or-clear contract: a cadence rewrite that actually
+              // moves the child's date must not carry its route_order into
+              // the destination day (NULL appends after the ordered run).
+              if (childDateChanged) childUpdates.route_order = null;
               if (seriesCols.recurring_ongoing) childUpdates.recurring_ongoing = !!recurringOngoing;
               if (seriesCols.recurring_nth) childUpdates.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
               if (seriesCols.recurring_weekday) childUpdates.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
@@ -6086,6 +6090,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 if (!nextDateStr) continue;
                 const boosterDateChanged = normalizeDateOnly(booster.scheduled_date) !== nextDateStr;
                 const boosterUpdates = { scheduled_date: nextDateStr };
+                // Fence-or-clear contract — same as the child rewrite above.
+                if (boosterDateChanged) boosterUpdates.route_order = null;
                 if (seriesCols.skip_weekends) boosterUpdates.skip_weekends = skipChild;
                 if (seriesCols.weekend_shift && skipChild) boosterUpdates.weekend_shift = dirChild;
                 let boosterRewound = false;

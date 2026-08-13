@@ -1818,6 +1818,11 @@ async function rescheduleAppointment(input) {
       scheduled_date: dateStr,
       window_start: newStart,
       window_end: newWindowEnd,
+      // A DATE move carries the stop into another tech-day: clear its
+      // route_order (fence-or-clear contract — NULL appends after the
+      // destination day's ordered run; the CAS above already makes a
+      // stale-snapshot write miss). Same-day window changes keep it.
+      ...(dateStr !== observedDate ? { route_order: null } : {}),
       notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
       // Public track links live until the day after the visit — refresh onto
       // the new date, same as schedule-tools' movers.
