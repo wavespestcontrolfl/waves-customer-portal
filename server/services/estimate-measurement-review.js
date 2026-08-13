@@ -208,10 +208,18 @@ async function sendOfficeNotification({ subject, description, customerId, estima
     logger.error(`[estimate-measurement-review] admin notification threw for request ${requestId}: ${err.message}`);
     return null;
   });
-  const delivered = (await attempt())?.id || (await attempt())?.id;
-  if (!delivered) {
-    logger.error(`[estimate-measurement-review] admin notification FAILED TWICE for request ${requestId} — request row stands, office unnotified; surface via the requests panel sweep`);
+  const first = await attempt();
+  // suppressed:true is POLICY (internal/demo accounts must not ring the
+  // bell), not an outage — terminal success, no retry, no loud error
+  // (codex #3376 final head P3).
+  if (first?.suppressed) {
+    logger.info(`[estimate-measurement-review] admin notification suppressed by policy for request ${requestId}`);
+    return;
   }
+  if (first?.id) return;
+  const second = await attempt();
+  if (second?.suppressed || second?.id) return;
+  logger.error(`[estimate-measurement-review] admin notification FAILED TWICE for request ${requestId} — request row stands, office unnotified; surface via the requests panel sweep`);
 }
 
 async function createReviewRow({ database, estimate, reasonKeys, cleanNote, shownSqFt, shownSource, serialized = false }) {

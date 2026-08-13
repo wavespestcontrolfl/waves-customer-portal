@@ -203,11 +203,25 @@ describe('createEstimateMeasurementReview', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('retries a suppressed/failed admin notification once, then logs loudly (notifyAdmin never rejects)', async () => {
-    // notifyAdmin resolves a suppressed sentinel (no id) rather than
-    // rejecting — first call suppressed, retry succeeds.
+  test('policy suppression is terminal success — no retry, no loud error (codex final-head P3)', async () => {
+    // Internal/demo accounts: notifyAdmin resolves { suppressed: true } by
+    // DESIGN — retrying would double the deterministically suppressed call
+    // and page the log with a phantom outage.
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
+    const result = await createEstimateMeasurementReview({
+      estimateToken: 'tok-1',
+      reasons: ['bigger'],
+      database: mockDb(),
+      viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
+    });
+    expect(result).toEqual({ success: true, deduped: false });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('a real persistence failure retries once, then succeeds (notifyAdmin never rejects)', async () => {
     NotificationService.notifyAdmin
-      .mockResolvedValueOnce({ id: null, suppressed: true })
+      .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ id: 'notif-2' });
     const result = await createEstimateMeasurementReview({
       estimateToken: 'tok-1',

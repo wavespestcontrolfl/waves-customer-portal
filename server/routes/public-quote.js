@@ -842,6 +842,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
       engineInput.measuredTurfSf = num(ep.measuredTurfSf);
       engineInput.estimatedTurfSf = num(ep.estimatedTurfSf);
+      // Turf PROVENANCE rides with the figure (codex #3376 final head): a
+      // county-prior or parcel-capped lookup profile stripped of these
+      // fields would re-grade as a plain vision measurement downstream and
+      // lawn_area would claim 'ai_satellite' for a ratio guess or a capped
+      // number — the exact over-claim the source mapping exists to prevent.
+      if (ep.turfSource) engineInput.turfSource = ep.turfSource;
+      if (ep.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
       engineInput.imperviousSurfacePercent = num(ep.imperviousSurfacePercent ?? ep.imperviosSurfacePercent);
       engineInput.estimatedBedAreaSf = num(ep.estimatedBedAreaSf);
       engineInput.estimatedBedAreaPercent = num(ep.estimatedBedAreaPercent);

@@ -12225,11 +12225,27 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
       reasons: req.body?.reasons,
       note: req.body?.note,
       basisFor,
-      // The route's pre-check above is the fast path; the service re-checks
-      // this DURABLE verdict on the LOCKED row through the trx connection
-      // before any customer/request write (local audit P0 — call processing
-      // can invalidate the linkage after the pre-check).
-      callSideBlockedFor: (dbx, row) => callSideBlockForEstimateData(dbx, parseEstimateDataSafe(row)),
+      // The route's pre-check above is the fast path; inside the service's
+      // transaction this callback re-verifies the call linkage on the LOCKED
+      // row using the accept path's exact sequence (codex #3376 final-head
+      // P1): estimates (already locked by the service) → linked lead FOR
+      // UPDATE → staleCallLinkageReason with lockCallRow, so the lead and
+      // call locks are HELD through customer resolution and the insert —
+      // an ordinary read verdict would stop protecting the moment it
+      // returned (estimate-public.js accept path, codex P1 PR #3304).
+      callSideBlockedFor: async (trx, lockedRow) => {
+        const linkData = parseEstimateDataSafe(lockedRow);
+        const eng = linkData?.estimatorEngine;
+        if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
+        if (await callSideBlockForEstimateData(trx, linkData)) return true;
+        const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+        // Lead locked before call_log — repo-wide estimates → leads →
+        // call_log order against the processor's stamp writers.
+        if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
+          await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
+        }
+        return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true }));
+      },
     });
     res.status(result.deduped ? 200 : 201).json(result);
   } catch (err) {
@@ -21166,6 +21182,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         if (!featureGates.isEnabled('estimateMeasurementReview') || adminDraftPreview) return {};
         const { isMeasurementReviewEligible } = require('../services/estimate-measurement-review');
         if (!isMeasurementReviewEligible(estimate)) return {};
+        // Customer resolvability (codex #3376 final head): the service's
+        // attach-or-create resolver rejects a new profile without a phone,
+        // so an email-only estimate with no linked customer would render a
+        // sheet whose every submission 400s. Conservative gate — a
+        // phone-less estimate whose customer would resolve via the safe
+        // email/address match is hidden too; that slice challenges through
+        // a reply instead.
+        if (!estimate.customer_id && !estimate.customer_phone) return {};
         const mrEstResult = resolvePricingEstResult(estimateDataForIntelligence);
         return (measuredBasisForSection('lawn_care', mrEstResult) || measuredBasisForSection('commercial_lawn', mrEstResult))
           ? { measurementReviewEnabled: true }
