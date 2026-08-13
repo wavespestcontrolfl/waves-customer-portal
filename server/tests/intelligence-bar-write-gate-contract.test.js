@@ -34,6 +34,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 // keep it off the network.
 jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 27.4, lng: -82.5 },
+  haversine: jest.requireActual('../services/route-optimizer').haversine,
+  milesToDriveMinutes: jest.requireActual('../services/route-optimizer').milesToDriveMinutes,
   optimizeRoute: jest.fn(async (stops) => ({
     orderedStops: stops,
     totalDistanceMeters: 10000,

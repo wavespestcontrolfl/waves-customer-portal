@@ -8,7 +8,13 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/route-optimizer', () => ({ HQ: { lat: 27.39, lng: -82.39 }, haversine: () => 0.5 }));
+jest.mock('../services/route-optimizer', () => ({
+  HQ: { lat: 27.39, lng: -82.39 },
+  haversine: () => 0.5,
+  // Keep the REAL miles->minutes model so this suite stays honest about the
+  // estimator (and its gate) while still pinning geometry to 0.5 mi a leg.
+  milesToDriveMinutes: jest.requireActual('../services/route-optimizer').milesToDriveMinutes,
+}));
 
 const db = require('../models/db');
 const { findAvailableSlots } = require('../services/scheduling/find-time');

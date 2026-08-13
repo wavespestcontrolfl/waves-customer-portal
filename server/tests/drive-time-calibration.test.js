@@ -13,6 +13,8 @@
  *  - missing/garbage coordinates still return 0 rather than NaN.
  */
 const { driveMin, milesToDriveMinutes } = require('../services/auto-dispatch/geo');
+const routeOptimizer = require('../services/route-optimizer');
+const autoDispatchGeo = require('../services/auto-dispatch/geo');
 
 const GATE = 'GATE_DRIVE_TIME_CALIBRATION';
 const ORIGINAL = process.env[GATE];
@@ -116,6 +118,44 @@ describe('drive-time estimator', () => {
         prior = m;
       }
     });
+  });
+
+  /**
+   * Auto-dispatch ranks a visit's CURRENT placement (scored via
+   * auto-dispatch/geo) against CANDIDATE placements (scored inside
+   * scheduling/find-time). Both must run the SAME estimator or the comparison
+   * is between different scales and the driver can "improve" a route that did
+   * not improve. These pin the single shared model — they fail if anyone
+   * reintroduces a local copy of the constants in either module.
+   */
+  describe('one shared model across scheduling surfaces', () => {
+    test('auto-dispatch geo uses route-optimizer\'s model, not a local copy', () => {
+      expect(autoDispatchGeo.milesToDriveMinutes).toBe(routeOptimizer.milesToDriveMinutes);
+      expect(autoDispatchGeo.haversine).toBe(routeOptimizer.haversine);
+      expect(autoDispatchGeo.HQ).toBe(routeOptimizer.HQ);
+    });
+
+    // Each caller keeps a trivial coord→miles wrapper (so a suite can stub
+    // haversine), but the miles→minutes MODEL must come from one place. These
+    // pin that: the constants and the model function may not be re-declared.
+    test.each([
+      ['scheduling/find-time', '../services/scheduling/find-time'],
+      ['auto-dispatch/geo', '../services/auto-dispatch/geo'],
+    ])('%s declares no private drive-time model', (_label, mod) => {
+      const src = require('fs').readFileSync(require.resolve(mod), 'utf8');
+      expect(src).not.toMatch(/const\s+ROAD_FACTOR\s*=/);
+      expect(src).not.toMatch(/const\s+AVG_MPH\s*=/);
+      expect(src).not.toMatch(/function\s+milesToDriveMinutes/);
+      expect(src).toMatch(/milesToDriveMinutes.*require\('\.\.\/route-optimizer'\)|require\('\.\.\/route-optimizer'\)/);
+    });
+
+    test.each([['off', undefined], ['on', 'true']])(
+      'both surfaces produce identical minutes for the same leg (gate %s)', (_label, val) => {
+        if (val === undefined) delete process.env[GATE]; else process.env[GATE] = val;
+        expect(routeOptimizer.driveMin(VENICE, SARASOTA))
+          .toBe(autoDispatchGeo.driveMin(VENICE, SARASOTA));
+      },
+    );
   });
 
   test('gate is honoured at call time, with no module reload', () => {

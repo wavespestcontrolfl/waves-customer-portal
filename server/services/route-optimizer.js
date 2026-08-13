@@ -8,6 +8,7 @@
  */
 
 const logger = require('./logger');
+const { gateEnvValue } = require('../config/feature-gates');
 
 const HQ = { lat: 27.3946, lng: -82.3984 }; // Lakewood Ranch office
 
@@ -45,6 +46,79 @@ function haversine(lat1, lng1, lat2, lng2) {
     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
     Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/**
+ * Drive-time estimator — the ONE model every scheduling surface shares.
+ *
+ * This lived in three places (route-optimizer's own fallback, the find-time
+ * scorer, and auto-dispatch/geo) with the constants copy-pasted between them.
+ * They must agree: auto-dispatch ranks a visit's CURRENT placement against
+ * CANDIDATE placements produced by find-time, so two models means comparing
+ * numbers on different scales and "improving" a route that did not improve.
+ *
+ * Two models, selected by GATE_DRIVE_TIME_CALIBRATION:
+ *
+ *   legacy      haversine x 1.4 road factor @ 30 mph
+ *   calibrated  a fixed per-leg overhead + a per-mile rate
+ *
+ * The calibrated constants were fitted against 150 real trips reconstructed
+ * from Bouncie GPS (first/last fix per trip, with measured duration and
+ * odometer distance), fitted on half the sample and scored on the held-out
+ * half:
+ *
+ *   legacy      MAE 4.99 min   59% of legs within 5 min
+ *   calibrated  MAE 3.89 min   79% of legs within 5 min
+ *
+ * The legacy constants were measurably wrong in both terms — the same trips
+ * imply a road factor of 1.50 (not 1.40) and an average speed of 20.8 mph (not
+ * 30). The speed assumption is the larger error and is why legacy
+ * systematically under-estimates.
+ *
+ * The fixed term is measured, not a fudge factor: idle time averages 3.3 min on
+ * a 13.2 min trip, and under-estimate correlates with idle at 0.886. It is the
+ * park/unpark/idle overhead every leg carries regardless of length. One
+ * consequence is deliberate — detour is computed as
+ * d(prev,new) + d(new,next) - d(prev,next), so the fixed terms no longer cancel
+ * and inserting a stop costs its overhead even when it sits directly en route.
+ * A stop is never free; the legacy model priced it as if it were.
+ */
+const ROAD_FACTOR = 1.4;
+const AVG_MPH = 30;
+
+// Fitted per-leg overhead (minutes) and per-mile rate over STRAIGHT-LINE miles.
+// The per-mile rate already carries the road-detour factor — it is not applied
+// to road distance, so do not additionally multiply by ROAD_FACTOR.
+const CALIBRATED_FIXED_MINUTES = 4.25;
+const CALIBRATED_MINUTES_PER_MILE = 2.35;
+
+// Below this, two points are the same place (~260 ft) and the leg is not a
+// drive, so no overhead is charged. Guards the HQ bookends in candidate-slots,
+// where an anchor can coincide with the stop being scored.
+const SAME_PLACE_MILES = 0.05;
+
+/**
+ * Convert straight-line miles to estimated drive minutes.
+ */
+function milesToDriveMinutes(miles) {
+  if (!Number.isFinite(miles) || miles <= 0) return 0;
+  // Read at CALL time (not the baked gates map) so a flip needs no redeploy.
+  if (gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
+    if (miles < SAME_PLACE_MILES) return 0;
+    return Math.round(CALIBRATED_FIXED_MINUTES + (miles * CALIBRATED_MINUTES_PER_MILE));
+  }
+  return Math.round((miles * ROAD_FACTOR / AVG_MPH) * 60);
+}
+
+/**
+ * Drive minutes between two {lat,lng} points.
+ */
+function driveMin(a, b) {
+  if (!a || !b || a.lat == null || a.lng == null || b.lat == null || b.lng == null) return 0;
+  return milesToDriveMinutes(haversine(
+    parseFloat(a.lat), parseFloat(a.lng),
+    parseFloat(b.lat), parseFloat(b.lng),
+  ));
 }
 
 /**
@@ -345,4 +419,6 @@ module.exports = {
   calcUnoptimizedDistance,
   haversine,
   HQ,
+  milesToDriveMinutes,
+  driveMin,
 };

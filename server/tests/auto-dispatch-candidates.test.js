@@ -2,7 +2,13 @@
 // blackout windows and deactivated-capability techs are dropped, and the row
 // being moved is excluded from its own occupancy.
 jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
-jest.mock('../services/route-optimizer', () => ({ HQ: { lat: 27.39, lng: -82.39 }, haversine: () => 1 }));
+jest.mock('../services/route-optimizer', () => ({
+  HQ: { lat: 27.39, lng: -82.39 },
+  haversine: () => 1,
+  // Keep the REAL miles->minutes model so this suite stays honest about the
+  // estimator (and its gate) while still pinning geometry to 1 mile a leg.
+  milesToDriveMinutes: jest.requireActual('../services/route-optimizer').milesToDriveMinutes,
+}));
 
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const {
