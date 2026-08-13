@@ -343,17 +343,43 @@ async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
   const reconciliation = await retryPendingReconciliations();
   const bounded = Number.isFinite(limit) && limit > 0;
-  // limit+1 sentinel answers "is there more?" without a count query. A huge
-  // backfill would otherwise run thousands of serial per-row queries inside
-  // one request — callers pass a bound and surface moreRemaining instead.
-  let unmatchedQuery = db('bank_transactions')
+  const baseSelect = () => db('bank_transactions')
     .where({ status: 'unmatched' })
     .orderBy('txn_date', 'asc')
     .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'suggestion');
-  if (bounded) unmatchedQuery = unmatchedQuery.limit(limit + 1);
-  const fetched = await unmatchedQuery;
-  const moreRemaining = bounded && fetched.length > limit;
-  const unmatched = bounded ? fetched.slice(0, limit) : fetched;
+  // Rows the matcher already examined (transfer-flagged, parked candidates)
+  // stay unmatched by design — a bounded oldest-first scan would let them
+  // fill the window forever and starve newer imports. Bounded passes take
+  // NEVER-EXAMINED rows first, then spend any leftover budget re-scanning
+  // examined rows (oldest first) so a new expense can still resolve them.
+  // jsonb_exists_any = the function form of the ?| any-key operator —
+  // knex.raw treats bare ? (and ??) as binding placeholders and would eat
+  // the operator, silently binding the LIMIT value into it.
+  const EXAMINED_SQL = "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates'])";
+  let unmatched;
+  let moreRemaining = false;
+  if (!bounded) {
+    unmatched = await baseSelect();
+  } else {
+    // limit+1 sentinels answer "is there more?" without count queries. A
+    // huge backfill would otherwise run thousands of serial per-row queries
+    // inside one request — callers surface moreRemaining instead.
+    const fresh = await baseSelect()
+      .whereRaw(`(suggestion is null or not ${EXAMINED_SQL})`)
+      .limit(limit + 1);
+    const moreFresh = fresh.length > limit;
+    unmatched = fresh.slice(0, limit);
+    let moreExamined = false;
+    if (!moreFresh && unmatched.length < limit) {
+      const fill = limit - unmatched.length;
+      const examined = await baseSelect()
+        .whereRaw(`suggestion is not null and ${EXAMINED_SQL}`)
+        .limit(fill + 1);
+      moreExamined = examined.length > fill;
+      unmatched = unmatched.concat(examined.slice(0, fill));
+    }
+    moreRemaining = moreFresh || moreExamined;
+  }
   const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending };
 
   for (const row of unmatched) {

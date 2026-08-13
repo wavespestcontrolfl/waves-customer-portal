@@ -49,6 +49,11 @@ function makeBuilder(table) {
       if (b.whereRaw.mock.calls.some(c => String(c[0]).includes('reconcilePending'))) {
         rows = rows.filter(r => r.suggestion && r.suggestion.reconcilePending === true);
       }
+      // mirror the bounded pass's fresh-vs-examined split
+      const isExamined = (r) => !!(r.suggestion && (r.suggestion.ignore || r.suggestion.candidates || r.suggestion.payoutCandidates));
+      const raws = b.whereRaw.mock.calls.map(c => String(c[0]));
+      if (raws.some(s => s.includes('or not jsonb_exists_any'))) rows = rows.filter(r => !isExamined(r));
+      else if (raws.some(s => s.includes('suggestion is not null and'))) rows = rows.filter(isExamined);
     }
     return Promise.resolve(rows).then(resolve, reject);
   };
@@ -439,6 +444,21 @@ describe('runDeterministicMatching', () => {
     expect(parked.patch.suggestion.payoutCandidates).toHaveLength(2);
     expect(parked.patch.suggestion.payoutCandidatesTotal).toBe(2);
     expect(parked.patch.suggestion.payoutCandidates[0]).toEqual({ id: 'po-1', amount: 2418.66, arrival_date: '2026-08-10' });
+  });
+
+  test('parked/flagged rows cannot starve fresh imports out of a bounded pass', async () => {
+    state.bankRows = [
+      // two OLD examined rows that stay unmatched by design
+      { id: 'bt-old-1', txn_date: '2026-08-01', description: 'TRANSFERISH', amount: 9, direction: 'debit', suggestion: { ignore: true, reason: 'x' } },
+      { id: 'bt-old-2', txn_date: '2026-08-02', description: 'AMBIG', amount: 9, direction: 'debit', suggestion: { candidates: [{ id: 'e' }], candidatesTotal: 1 } },
+      // the FRESH row a naive oldest-first limit-2 scan would never reach
+      { id: 'bt-new', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', suggestion: null },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: null }];
+    const summary = await runDeterministicMatching({ limit: 2 });
+    // the fresh row was processed (and linked) despite the two older parked rows
+    expect(summary.expensesLinked).toBe(1);
+    expect(state.updates.find(u => u.patch.status === 'matched_expense')).toBeDefined();
   });
 
   test('a bounded pass reports moreRemaining instead of scanning everything', async () => {
