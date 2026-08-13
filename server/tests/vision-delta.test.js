@@ -10,6 +10,7 @@
 
 jest.mock('../models/db', () => {
   const fn = (table) => global.__visionDbMock(table);
+  fn.raw = (sql, bindings) => ({ __raw: sql, bindings });
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -73,7 +74,12 @@ function makeDb(responses = {}) {
     b.update = (patch) => {
       rec.ops.push(['update', [patch]]);
       (state.updates[table] = state.updates[table] || []).push(patch);
-      return { then: (res, rej) => Promise.resolve(1).then(res, rej) };
+      // Row count the UPDATE reports — overridable so tests can simulate a
+      // key-pair condition matching 0 rows (pair superseded mid-score).
+      const count = typeof state.updateResults?.[table] === 'function'
+        ? state.updateResults[table](patch, rec)
+        : 1;
+      return { then: (res, rej) => Promise.resolve(count).then(res, rej) };
     };
     b.then = (res, rej) => {
       let rows;
@@ -303,6 +309,49 @@ describe('scoreOutcome', () => {
     expect(AgronomicWiki.markOutcomePagesStale).not.toHaveBeenCalled();
   });
 
+  test('persistence writes are conditioned on the loaded photo-key pair + still-unscored', async () => {
+    const state = useDb({ treatment_outcomes: [OUTCOME] });
+    await VisionDelta.scoreOutcome('o1');
+
+    // calls[0] = the .first() load; calls[1] = the verdict UPDATE
+    const updateRec = state.calls.treatment_outcomes[1];
+    expect(updateRec.ops).toContainEqual(['where', [{
+      id: 'o1',
+      pre_best_photo_key: 'lawn/pre.jpg',
+      post_best_photo_key: 'lawn/post.jpg',
+    }]]);
+    expect(updateRec.ops).toContainEqual(['whereNull', ['vision_scored_at']]);
+  });
+
+  test('photo pair re-elected mid-score → verdict DISCARDED: no stamp, no stale-flag, reason superseded', async () => {
+    const state = useDb({ treatment_outcomes: [OUTCOME] });
+    state.updateResults = { treatment_outcomes: () => 0 }; // key-pair WHERE matches nothing
+
+    const res = await VisionDelta.scoreOutcome('o1');
+    expect(res).toEqual({ ok: false, reason: 'superseded' });
+    // Exactly one write was ATTEMPTED (the conditioned verdict update) and
+    // nothing else — no follow-up stamp, no attempt charge.
+    expect(state.updates.treatment_outcomes).toHaveLength(1);
+    expect(AgronomicWiki.markOutcomePagesStale).not.toHaveBeenCalled();
+  });
+
+  test('failed attempt against a superseded pair is not charged to the new pair', async () => {
+    const state = useDb({ treatment_outcomes: [{ ...OUTCOME, vision_score_attempts: 2 }] });
+    state.updateResults = { treatment_outcomes: () => 0 };
+    global.__visionDispatch = jest.fn(async () => { throw new Error('overloaded'); });
+
+    const res = await VisionDelta.scoreOutcome('o1');
+    // Would have been the terminal 3rd failure — but the row now belongs to a
+    // NEW pair with a fresh budget; the conditioned update wrote nothing.
+    expect(res).toEqual({ ok: false, reason: 'superseded' });
+    const failRec = state.calls.treatment_outcomes[1];
+    expect(failRec.ops).toContainEqual(['where', [{
+      id: 'o1',
+      pre_best_photo_key: 'lawn/pre.jpg',
+      post_best_photo_key: 'lawn/post.jpg',
+    }]]);
+  });
+
   test('null-score verdicts and failures never stale-flag wiki pages', async () => {
     useDb({ treatment_outcomes: [OUTCOME] });
     global.__visionDispatch = jest.fn(async () => verdictResponse({ ...GOOD_VERDICT, comparable: false }));
@@ -313,6 +362,33 @@ describe('scoreOutcome', () => {
     global.__visionDispatch = jest.fn(async () => { throw new Error('overloaded'); });
     await VisionDelta.scoreOutcome('o1');
     expect(AgronomicWiki.markOutcomePagesStale).not.toHaveBeenCalled();
+  });
+});
+
+// ── setOutcomeBestPhotoKey ─────────────────────────────────────────────────
+
+describe('setOutcomeBestPhotoKey', () => {
+  test('writes the key and guards every vision field behind an IS DISTINCT FROM case', async () => {
+    const state = useDb({ treatment_outcomes: [] });
+    await VisionDelta.setOutcomeBestPhotoKey('o1', 'post_best_photo_key', 'new.jpg');
+
+    const [patch] = state.updates.treatment_outcomes;
+    expect(patch.post_best_photo_key).toBe('new.jpg');
+    // Same-key writes must be a no-op on vision state; changed keys clear it —
+    // both live in the CASE so the compare + write are one atomic UPDATE.
+    for (const field of ['vision_delta', 'vision_delta_score', 'vision_scored_at']) {
+      expect(patch[field].__raw).toContain('post_best_photo_key IS DISTINCT FROM ?');
+      expect(patch[field].__raw).toContain('THEN NULL');
+      expect(patch[field].bindings).toEqual(['new.jpg']);
+    }
+    // attempts reset to 0 for the new pair (fresh 3, and the sweep re-selects)
+    expect(patch.vision_score_attempts.__raw).toContain('THEN 0');
+  });
+
+  test('rejects columns outside the photo-key allowlist', async () => {
+    useDb({ treatment_outcomes: [] });
+    await expect(VisionDelta.setOutcomeBestPhotoKey('o1', 'customer_id', 'x'))
+      .rejects.toThrow('invalid column');
   });
 });
 

@@ -17,6 +17,10 @@
  *                             3rd failed attempt, so the sweep never loops a row
  *   - vision_score_attempts — failure counter; rows give up permanently at 3
  *
+ * Every scoring write (verdict, attempt increment, terminal stamp) is
+ * conditioned on the photo-key pair read at load: a pair re-elected while the
+ * vision call is in flight supersedes the result and nothing is written.
+ *
  * Entirely inert unless GATE_VISION_DELTA === 'true' (checked inside
  * sweepUnscoredOutcomes — single source of truth; the cron leg adds no gate of
  * its own). Kill = unset GATE_VISION_DELTA.
@@ -125,7 +129,30 @@ async function callVisionModel(prePhoto, postPhoto) {
   return validateVerdict(parseVerdictText(result.text));
 }
 
+const PHOTO_KEY_COLUMNS = ['pre_best_photo_key', 'post_best_photo_key'];
+
 const VisionDelta = {
+
+  // ── Write a best-photo key, resetting vision state if the key CHANGED ───
+  // The attach paths can re-elect a best photo after an outcome was scored;
+  // a stored verdict would then describe the OLD pair while the row points
+  // at new photos. All SET expressions in one UPDATE see the pre-update row,
+  // so the CASE comparisons and the key write are atomic: a changed key
+  // clears the verdict/score/stamp and resets attempts (a new pair earns a
+  // fresh 3), which also re-selects the row for the sweep; an unchanged key
+  // leaves the scored state untouched.
+  async setOutcomeBestPhotoKey(outcomeId, column, s3Key) {
+    if (!PHOTO_KEY_COLUMNS.includes(column)) {
+      throw new Error(`setOutcomeBestPhotoKey: invalid column ${column}`);
+    }
+    return db('treatment_outcomes').where({ id: outcomeId }).update({
+      [column]: s3Key,
+      vision_delta: db.raw(`CASE WHEN ${column} IS DISTINCT FROM ? THEN NULL ELSE vision_delta END`, [s3Key]),
+      vision_delta_score: db.raw(`CASE WHEN ${column} IS DISTINCT FROM ? THEN NULL ELSE vision_delta_score END`, [s3Key]),
+      vision_scored_at: db.raw(`CASE WHEN ${column} IS DISTINCT FROM ? THEN NULL ELSE vision_scored_at END`, [s3Key]),
+      vision_score_attempts: db.raw(`CASE WHEN ${column} IS DISTINCT FROM ? THEN 0 ELSE vision_score_attempts END`, [s3Key]),
+    });
+  },
 
   // ── Score one outcome's before/after photo pair ─────────────────────────
   async scoreOutcome(outcomeId) {
@@ -137,6 +164,19 @@ const VisionDelta = {
     }
     const priorAttempts = Number(outcome.vision_score_attempts) || 0;
     if (priorAttempts >= MAX_ATTEMPTS) return { ok: false, reason: 'attempts_exhausted' };
+
+    // Every persistence write below is conditioned on this EXACT key pair:
+    // the attach paths can re-elect a best photo while the vision call is in
+    // flight (setOutcomeBestPhotoKey atomically resets the row for the new
+    // pair), and a verdict computed from the OLD photos must never stamp a
+    // row that now points at new ones. 0 rows updated = superseded — nothing
+    // is written; the reset row is already sweep-eligible for its new pair
+    // with a fresh attempt budget. (A change-and-change-back still matches:
+    // the row then points at the very pair this verdict describes.)
+    const scoredPair = {
+      pre_best_photo_key: outcome.pre_best_photo_key,
+      post_best_photo_key: outcome.post_best_photo_key,
+    };
 
     try {
       // Photo missing from S3 throws here → same attempt/terminal handling as
@@ -156,13 +196,25 @@ const VisionDelta = {
 
       // Always stamp vision_scored_at with the stored verdict — a
       // non-comparable / low-confidence pair keeps a null score but must
-      // never be re-scored in a loop.
-      await db('treatment_outcomes').where({ id: outcomeId }).update({
-        vision_delta: JSON.stringify(verdict),
-        vision_delta_score: score,
-        vision_scored_at: new Date(),
-        vision_score_attempts: priorAttempts + 1,
-      });
+      // never be re-scored in a loop. whereNull(vision_scored_at) is
+      // belt-and-braces against a concurrent scorer double-stamping.
+      const updated = await db('treatment_outcomes')
+        .where({ id: outcomeId, ...scoredPair })
+        .whereNull('vision_scored_at')
+        .update({
+          vision_delta: JSON.stringify(verdict),
+          vision_delta_score: score,
+          vision_scored_at: new Date(),
+          vision_score_attempts: priorAttempts + 1,
+        });
+      if (!updated) {
+        // Photo keys changed (or the row was stamped) while the vision call
+        // was in flight — the verdict describes photos the row no longer
+        // points at. Discard it; write NOTHING (no stamp, no attempt, no
+        // stale-flagging from a discarded score).
+        logger.info(`[vision-delta] Outcome ${outcomeId} superseded mid-score — verdict discarded`);
+        return { ok: false, reason: 'superseded' };
+      }
 
       logger.info(`[vision-delta] Scored outcome ${outcomeId}: score=${score === null ? 'null' : score} comparable=${verdict.comparable} confidence=${verdict.confidence}`);
 
@@ -193,7 +245,17 @@ const VisionDelta = {
         patch.vision_scored_at = new Date();
         patch.vision_delta = JSON.stringify({ error: String(err.message || 'unknown error').slice(0, 500) });
       }
-      await db('treatment_outcomes').where({ id: outcomeId }).update(patch);
+      // Same key-pair condition as the success write: if the pair was
+      // re-elected mid-flight, attempts were reset to 0 for the NEW pair —
+      // charging this failure (or a terminal {error} stamp) against it would
+      // poison a pair that was never tried.
+      const updated = await db('treatment_outcomes')
+        .where({ id: outcomeId, ...scoredPair })
+        .update(patch);
+      if (!updated) {
+        logger.info(`[vision-delta] Outcome ${outcomeId} superseded mid-score — failed attempt not charged`);
+        return { ok: false, reason: 'superseded' };
+      }
       logger.error(`[vision-delta] Scoring outcome ${outcomeId} failed (attempt ${attempts}${terminal ? ', terminal' : ''}): ${err.message}`);
       return { ok: false, reason: 'error', terminal, error: err.message };
     }
