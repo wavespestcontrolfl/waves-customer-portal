@@ -1234,7 +1234,7 @@ function cityServiceTargetKey(service, city) {
   return ownPageKey(canonicalizeServiceCategory(service) || service, city);
 }
 
-function arbitrateCityServiceTargets(opportunities = [], { frozenTargets = new Set() } = {}) {
+function arbitrateCityServiceTargets(opportunities = [], { frozenTargets = new Set(), frozenKeys = new Set() } = {}) {
   const CS = 'create_or_refresh_city_service_page';
   const byTarget = new Map();
   const out = [];
@@ -1262,14 +1262,23 @@ function arbitrateCityServiceTargets(opportunities = [], { frozenTargets = new S
     // OWN key via the upsert guard, unchanged.
     if (frozenTargets.has(targetKey)) continue;
     if (group.length === 1) { out.push(group[0]); continue; }
-    // PERSISTABLE candidates first — the standing yield rule: a candidate
-    // that will not clear its own floor must never displace one that will,
-    // or persistAll drops the winner after the eligible twin was already
-    // removed and the target ends the mine with NOTHING. When none clear,
-    // keep the full group so calibration still sees the best candidate
-    // (persistAll drops it either way).
-    const persistable = group.filter((o) => isPersistable(o));
-    const eligible = persistable.length ? persistable : group;
+    // Narrowing order (rounds 5-8, the complete shape):
+    // 1. UNFROZEN KEY — a candidate whose own dedupe key already has a
+    //    done/skipped row cannot land (the upsert guard is unconditional
+    //    and key-level), so electing it silences the target every mine
+    //    while the fence expires actionable twins on its behalf. Electing
+    //    the sibling instead bypasses no decision: skipped freezes only
+    //    its key, and an OLD done is not a veto (recent done already
+    //    fenced the whole target above).
+    // 2. PERSISTABLE — the standing yield rule: a candidate that will not
+    //    clear its own floor must never displace one that will.
+    // 3. QUERY-BEARING, then score.
+    // Each narrowing falls back a level when it empties, so calibration
+    // still sees the best candidate (persistAll drops or no-ops it).
+    const unfrozen = group.filter((o) => !frozenKeys.has(o.dedupe_key));
+    const landable = unfrozen.length ? unfrozen : group;
+    const persistable = landable.filter((o) => isPersistable(o));
+    const eligible = persistable.length ? persistable : landable;
     const queryBearing = eligible.filter((o) => o.query);
     const pool = queryBearing.length ? queryBearing : eligible;
     const winner = pool.reduce((best, o) => (o.score > best.score ? o : best), pool[0]);
@@ -1729,21 +1738,28 @@ class GscOpportunityMiner {
     // comment; mirroring _arbitratedRefreshPages' fail-soft posture, and
     // the in-txn fence re-checks under the lock).
     let cityServiceFrozenTargets = new Set();
+    let cityServiceFrozenKeys = new Set();
     try {
       const preArbitration = [...minedOpportunities, ...buckets.link_boost];
       if (preArbitration.some((o) => o.action_type === 'create_or_refresh_city_service_page')) {
-        // done only, TIME-BOUNDED to the mine window: the fence covers the
-        // GSC-lag gap between page creation and the own-page map observing
-        // it, and must expire once that gap has passed — an old done row is
-        // not a standing veto ("create or refresh" of a long-existing page
-        // is legitimate work if the pair somehow re-emits). skipped rows
-        // are runner outcomes, never target vetoes (round-7 P1).
+        // ONE read, two sets. TARGETS: done only, TIME-BOUNDED to the mine
+        // window — the fence covers the GSC-lag gap between page creation
+        // and the own-page map observing it, and expires once that gap has
+        // passed (an old done row is not a standing veto; skipped rows are
+        // runner outcomes, never target vetoes — round-7 P1). KEYS: every
+        // done/skipped row, unbounded — the upsert guard is unconditional,
+        // so a candidate aimed at such a key can never land and must not
+        // win the arbitration (round-8 P1, same rule as
+        // _arbitratedRefreshPages).
         const frozenRows = await db('opportunity_queue')
-          .where({ action_type: 'create_or_refresh_city_service_page', status: 'done' })
-          .where('updated_at', '>=', db.raw(`now() - interval '${GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS} days'`))
-          .select('service', 'city');
+          .where({ action_type: 'create_or_refresh_city_service_page' })
+          .whereIn('status', ['done', 'skipped'])
+          .select('dedupe_key', 'service', 'city', 'status', 'updated_at');
+        cityServiceFrozenKeys = new Set(frozenRows.map((r) => r.dedupe_key));
+        const lagCutoff = Date.now() - GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS * 86400_000;
         cityServiceFrozenTargets = new Set(frozenRows
-          .filter((r) => r.service && r.city)
+          .filter((r) => r.status === 'done' && r.service && r.city
+            && r.updated_at && new Date(r.updated_at).getTime() >= lagCutoff)
           .map((r) => cityServiceTargetKey(r.service, r.city)));
       }
     } catch (err) {
@@ -1751,7 +1767,7 @@ class GscOpportunityMiner {
     }
     const allOpportunities = arbitrateCityServiceTargets(
       [...minedOpportunities, ...buckets.link_boost],
-      { frozenTargets: cityServiceFrozenTargets }
+      { frozenTargets: cityServiceFrozenTargets, frozenKeys: cityServiceFrozenKeys }
     );
 
     const counts = Object.fromEntries(

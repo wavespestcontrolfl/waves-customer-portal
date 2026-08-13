@@ -2501,14 +2501,14 @@ describe('RECENT done rows fence the whole TARGET; skipped never does (rounds 5-
     // evidence — and an OLD done row is not a standing veto either.
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
-    expect(src).toMatch(/\{ action_type: 'create_or_refresh_city_service_page', status: 'done' \}[\s\S]{0,200}CANONICAL_MINE_PERIOD_DAYS/);
-    // Scoped to the city-service reads: _arbitratedRefreshPages' KEY-level
-    // done/skipped lookup is correct and stays. Neither city-service fence
-    // may consult skipped rows.
-    const frozenRead = src.slice(src.indexOf('cityServiceFrozenTargets'), src.indexOf('arbitrateCityServiceTargets(\n'));
-    expect(frozenRead).not.toMatch(/'skipped'/);
+    // TARGET derivation is done-only + lag-bounded (JS-side, from the
+    // combined read — see the round-8 test for the read itself)…
+    const read = src.slice(src.indexOf('let cityServiceFrozenTargets'), src.indexOf('const allOpportunities'));
+    expect(read).toMatch(/r\.status === 'done'[\s\S]{0,160}lagCutoff/);
+    // …and the in-lock fence never consults skipped rows at all.
     const fenceSrc = src.slice(src.indexOf('async _revalidateCityServiceBatch'), src.indexOf('async _sweepStaleFamilyRows'));
     expect(fenceSrc).not.toMatch(/'skipped'/);
+    expect(fenceSrc).toMatch(/CANONICAL_MINE_PERIOD_DAYS/);
   });
 
   test('a frozen target drops a SINGLE candidate too', () => {
@@ -2530,9 +2530,9 @@ describe('RECENT done rows fence the whole TARGET; skipped never does (rounds 5-
   test('mineAll reads frozen city-service TARGETS before arbitrating, fail-soft', () => {
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
-    expect(src).toMatch(/status: 'done' \}[\s\S]{0,300}cityServiceTargetKey\(r\.service, r\.city\)/);
+    expect(src).toMatch(/cityServiceTargetKey\(r\.service, r\.city\)/);
     expect(src).toMatch(/frozen-target lookup failed[\s\S]{0,60}arbitration proceeds frozen-blind/);
-    expect(src).toMatch(/arbitrateCityServiceTargets\(\n?\s*\[\.\.\.minedOpportunities, \.\.\.buckets\.link_boost\],\n?\s*\{ frozenTargets: cityServiceFrozenTargets \}/);
+    expect(src).toMatch(/arbitrateCityServiceTargets\(\n?\s*\[\.\.\.minedOpportunities, \.\.\.buckets\.link_boost\],\n?\s*\{ frozenTargets: cityServiceFrozenTargets, frozenKeys: cityServiceFrozenKeys \}/);
   });
 
   test('a SKIPPED occupant does not block the target in the fence', async () => {
@@ -2564,5 +2564,49 @@ describe('RECENT done rows fence the whole TARGET; skipped never does (rounds 5-
       { bucket: 'no_content_yet', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'no_content_yet::termite::sarasota::old', service: 'termite', city: 'sarasota', score: 70, query: 'old', signal_metadata: {} },
     ]);
     expect(out).toHaveLength(0);
+  });
+});
+
+describe('key-level frozen exclusion INSIDE the winner pool (round-8 P1)', () => {
+  const row = (bucket, { query = null, score = 60, dedupe_key } = {}) => ({
+    bucket,
+    action_type: 'create_or_refresh_city_service_page',
+    query,
+    dedupe_key,
+    page_url: null,
+    service: 'termite',
+    city: 'sarasota',
+    score,
+    signal_metadata: { impressions: 120 },
+  });
+
+  test('a winner aimed at a skipped/old-done KEY yields to an actionable sibling', () => {
+    // The upsert guard is unconditional and key-level: electing the frozen
+    // key lands nothing every mine while the fence expires actionable
+    // twins on its behalf. The sibling landing bypasses no decision —
+    // skipped freezes only its key, and recent done already fences the
+    // whole target separately.
+    const frozenNcy = row('no_content_yet', { query: 'termite inspection sarasota', score: 70, dedupe_key: 'kf' });
+    const lg = row('local_gap', { score: 56, dedupe_key: 'kl' });
+    const out = arbitrateCityServiceTargets([frozenNcy, lg], { frozenKeys: new Set(['kf']) });
+    expect(out).toHaveLength(1);
+    expect(out[0].dedupe_key).toBe('kl');
+  });
+
+  test('an all-frozen-key group keeps its best for calibration', () => {
+    const a = row('no_content_yet', { query: 'q', score: 70, dedupe_key: 'ka' });
+    const b = row('local_gap', { score: 56, dedupe_key: 'kb' });
+    const out = arbitrateCityServiceTargets([a, b], { frozenKeys: new Set(['ka', 'kb']) });
+    expect(out).toHaveLength(1);
+    expect(out[0].dedupe_key).toBe('ka');
+  });
+
+  test('mineAll derives BOTH sets from one read: unbounded keys, lag-bounded done targets', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    const read = src.slice(src.indexOf('let cityServiceFrozenTargets'), src.indexOf('const allOpportunities'));
+    expect(read).toMatch(/whereIn\('status', \['done', 'skipped'\]\)/);
+    expect(read).toMatch(/cityServiceFrozenKeys = new Set\(frozenRows\.map\(\(r\) => r\.dedupe_key\)\)/);
+    expect(read).toMatch(/r\.status === 'done'[\s\S]{0,160}lagCutoff/);
   });
 });
