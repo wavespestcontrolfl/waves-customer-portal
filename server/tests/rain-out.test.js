@@ -2406,17 +2406,19 @@ describe('rain-out service', () => {
       expect(result.routeConflicts).toEqual([]);
     });
 
-    test('route scope: a null-end DAY-move sibling is not warned — commit runs no gate for it', async () => {
-      // Deliberate boundary, not an oversight. On a day move this row lands
-      // with a null end, and rebooker.reschedule computes
-      // `windowEnd = win.end || service.window_end` (both null) with both
-      // occupancy checks behind `if (updates.window_start && windowEnd)` —
-      // so commit cannot SLOT_TAKEN on it and "the schedule will block this
-      // move" would be a false positive. The gate skip itself is a real
-      // latent double-book, but it is pre-existing on main and reaches every
-      // reschedule caller. Contrast the same-day case above, where commit's
-      // windowless-mover fallback gives the row a real span.
-      listOccupiedWindows.mockResolvedValue(occ('2026-06-20', []));
+    test('route scope: a null-end DAY-move sibling projects its duration-derived span (gate now enforces)', async () => {
+      // rebooker.reschedule now derives the occupancy span for a
+      // start-but-no-end row (occupancyProbeEnd: duration-or-60, the read
+      // predicate's own COALESCE) and gates on it — so the advisory
+      // projects the same span. The 90-minute duration is the
+      // discriminator: a flat-60 projection (13:00-14:00) abuts the booked
+      // 14:00 row and would NOT warn (half-open), while the duration span
+      // (13:00-14:30) overlaps it.
+      listOccupiedWindows.mockResolvedValue(occ('2026-06-20', [{
+        id: 'svc-booked', customer_id: 'cust-b', technician_id: 'tech-1', status: 'confirmed',
+        service_type: 'Lawn Treatment', window_start: '14:00:00', window_end: '15:00:00',
+        estimated_duration_minutes: 60, reservation_expires_at: null,
+      }]));
       wireDb({
         scheduled_services: [
           chain({
@@ -2427,11 +2429,12 @@ describe('rain-out service', () => {
           }),
           chain({
             rows: [{
-              id: 'svc-2', window_start: '09:00:00', window_end: null,
-              estimated_duration_minutes: 60, route_order: 2,
+              id: 'svc-2', window_start: '13:00:00', window_end: null,
+              estimated_duration_minutes: 90, route_order: 2,
             }],
           }),
         ],
+        customers: [chain({ rows: [{ id: 'cust-b', first_name: 'cust-b', last_name: null }] })],
       });
 
       const result = await RainOut.checkTarget({
@@ -2440,9 +2443,50 @@ describe('rain-out service', () => {
         target: { date: '2026-06-20', window: { start: '09:00', end: '10:00' } },
       });
 
-      expect(result.routeConflicts).toEqual([]);
-      // One snapshot for the request — no per-window fanout.
-      expect(listOccupiedWindows).toHaveBeenCalledTimes(1);
+      expect(result.conflicts).toEqual([]);
+      expect(result.routeConflicts).toEqual([
+        expect.objectContaining({ id: 'svc-booked', customerName: 'cust-b', windowStart: '14:00' }),
+      ]);
+    });
+
+    test('route scope: REBOOKER_NULL_END_OCCUPANCY=off restores the no-warning boundary', async () => {
+      // With the kill switch off, commit skips the null-end gate again —
+      // warning here would claim a block commit will not enforce. The
+      // advisory keys on the SAME env so the two can never disagree.
+      process.env.REBOOKER_NULL_END_OCCUPANCY = 'off';
+      try {
+        listOccupiedWindows.mockResolvedValue(occ('2026-06-20', [{
+          id: 'svc-booked', customer_id: 'cust-b', technician_id: 'tech-1', status: 'confirmed',
+          service_type: 'Lawn Treatment', window_start: '14:00:00', window_end: '15:00:00',
+          estimated_duration_minutes: 60, reservation_expires_at: null,
+        }]));
+        wireDb({
+          scheduled_services: [
+            chain({
+              first: jest.fn().mockResolvedValue({
+                id: 'svc-1', technician_id: 'tech-1', scheduled_date: '2026-06-11',
+                window_start: '09:00', window_end: '10:00', route_order: 1,
+              }),
+            }),
+            chain({
+              rows: [{
+                id: 'svc-2', window_start: '13:00:00', window_end: null,
+                estimated_duration_minutes: 90, route_order: 2,
+              }],
+            }),
+          ],
+        });
+
+        const result = await RainOut.checkTarget({
+          serviceId: 'svc-1',
+          caller: { isAdmin: true, technicianId: 'tech-1' },
+          target: { date: '2026-06-20', window: { start: '09:00', end: '10:00' } },
+        });
+
+        expect(result.routeConflicts).toEqual([]);
+      } finally {
+        delete process.env.REBOOKER_NULL_END_OCCUPANCY;
+      }
     });
 
     test('route scope: a day move keeps each sibling\'s own window on the target date', async () => {

@@ -203,6 +203,30 @@ function emitCustomerJobRefresh(service, toStatus) {
   });
 }
 
+// Occupancy-probe end for a row landing at `windowStart` with no stored
+// end. window_end is nullable (schema-legal — admin edits leave open-ended
+// windows), but the row still OCCUPIES a span once booked: the shared SQL
+// predicate (scheduling/occupancy.js) COALESCEs a null end to
+// window_start + NULLIF(estimated_duration_minutes, 0)-or-60. A write gate
+// that skips (or probes a flat 60) for such a row is asymmetric with the
+// read side — the booked row will block OTHERS across its derived span,
+// while its own booking checked nothing (or less). Derive the same span
+// here so write-side gates probe exactly what the row will occupy.
+// Capped at 23:59: `time` can't carry past midnight, and the suggestion
+// probe (findRescheduleOptions) applies the same cap.
+// Kill switch: REBOOKER_NULL_END_OCCUPANCY=off restores the legacy
+// behavior at every call site (single path skips its gate again, series
+// fallbacks return to flat 60) — callers key on the env, not this helper.
+function occupancyProbeEnd(windowStart, storedEnd, estimatedDurationMinutes) {
+  if (storedEnd) return storedEnd;
+  if (!windowStart) return null;
+  const [h, m] = String(windowStart).split(':').map(Number);
+  if (!Number.isFinite(h)) return null;
+  const dur = Number(estimatedDurationMinutes) > 0 ? Number(estimatedDurationMinutes) : 60;
+  const total = Math.min(h * 60 + (m || 0) + dur, 23 * 60 + 59);
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
 // Convert "08:00-09:00" → { start: '08:00', end: '09:00' }. Tolerates objects.
 function parseWindow(w) {
   if (!w) return { start: null, end: null };
@@ -432,6 +456,18 @@ class SmartRebooker {
         code: 'SLOT_TAKEN',
       });
     }
+    // Gate span ≠ persisted span: window_end stays null when the caller
+    // left it open-ended, but the occupancy checks below probe the span
+    // the row will actually occupy per the read predicate. Previously a
+    // null windowEnd skipped all three guarded blocks entirely — a
+    // start-but-no-end row could be moved onto an occupied slot with NO
+    // check, a latent double-booking reachable from every reschedule
+    // caller (customer links, dispatch board, rain-out on legacy rows).
+    const occupancyGateEnd = windowEnd || (
+      process.env.REBOOKER_NULL_END_OCCUPANCY === 'off'
+        ? null
+        : occupancyProbeEnd(win.start || service.window_start, null, service.estimated_duration_minutes)
+    );
     const updates = {
       scheduled_date: newDate,
       window_start: win.start || service.window_start,
@@ -450,7 +486,7 @@ class SmartRebooker {
       const keptTechId = Object.prototype.hasOwnProperty.call(options, 'technicianId')
         ? options.technicianId
         : service.technician_id;
-      if (updates.window_start && windowEnd) {
+      if (updates.window_start && occupancyGateEnd) {
         // COARSEST scheduling lock FIRST: the date-wide occupancy lock guards
         // the tech-blind findConflictingVisits check below. Without a
         // date-scoped key, two writers with DIFFERENT techs (or one assigned +
@@ -470,7 +506,7 @@ class SmartRebooker {
           ['slot-reserve', `${keptTechId || 'unassigned'}:${newDateStr}`],
         );
       }
-      if (keptTechId && updates.window_start && windowEnd) {
+      if (keptTechId && updates.window_start && occupancyGateEnd) {
         const overlap = await trx('scheduled_services')
           .where('scheduled_date', newDateStr)
           .where('technician_id', keptTechId)
@@ -489,7 +525,7 @@ class SmartRebooker {
           // never register as conflicts.
           .whereRaw(
             "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
-            [windowEnd, updates.window_start],
+            [occupancyGateEnd, updates.window_start],
           )
           .first('id');
         if (overlap) {
@@ -511,12 +547,12 @@ class SmartRebooker {
       // (rain-out route pushes) pass options.excludeServiceIds so the
       // visits moving in the same sweep don't collide with their own
       // pre-move positions.
-      if (updates.window_start && windowEnd) {
+      if (updates.window_start && occupancyGateEnd) {
         const occupancyClash = await findConflictingVisits({
           db: trx,
           date: newDateStr,
           windowStart: updates.window_start,
-          windowEnd,
+          windowEnd: occupancyGateEnd,
           excludeServiceIds: [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))],
           excludeStatuses: ['cancelled', 'completed'],
         });
@@ -827,6 +863,8 @@ class SmartRebooker {
         .orderBy('scheduled_date', 'asc')
         .select(
           'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id',
+          // Feeds the duration-aware occupancy fallbacks below.
+          'estimated_duration_minutes',
           // Rewind evidence for needsLifecycleRewind below — a pending
           // sibling can still carry stale tracker stamps (or SMS guards)
           // from an aborted attempt that a partial reset left behind.
@@ -1053,11 +1091,14 @@ class SmartRebooker {
         // for techless anchors. Same throw/handling as the single-visit
         // path; sweptIds excludes every row this sweep is moving.
         if (isAnchor && updateData.window_start) {
-          const anchorOccEnd = updateData.window_end || (() => {
-            const [h, m] = String(updateData.window_start).split(':').map(Number);
-            const total = h * 60 + (m || 0) + 60;
-            return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
-          })();
+          // Duration-aware fallback (was flat 60): a 90-minute anchor
+          // occupies 90 minutes per the read predicate, so a flat-60 probe
+          // under-checked the tail. Kill switch restores flat 60.
+          const anchorOccEnd = occupancyProbeEnd(
+            updateData.window_start,
+            updateData.window_end,
+            process.env.REBOOKER_NULL_END_OCCUPANCY === 'off' ? null : sib.estimated_duration_minutes,
+          );
           const anchorOccClash = await findConflictingVisits({
             db: trx,
             date: String(date).split('T')[0],
@@ -1109,12 +1150,13 @@ class SmartRebooker {
             );
           }
           // Null window_end (schema-legal) must not collapse the probe to a
-          // zero-length window — mirror the SQL predicate's 60-minute fallback.
-          const occEnd = updateData.window_end || (() => {
-            const [h, m] = String(updateData.window_start).split(':').map(Number);
-            const total = h * 60 + (m || 0) + 60;
-            return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
-          })();
+          // zero-length window — mirror the SQL predicate's duration-or-60
+          // fallback (was flat 60, which under-probed >60-min services).
+          const occEnd = occupancyProbeEnd(
+            updateData.window_start,
+            updateData.window_end,
+            process.env.REBOOKER_NULL_END_OCCUPANCY === 'off' ? null : sib.estimated_duration_minutes,
+          );
           // Tech-blind occupancy (shared module) — a strict superset of the
           // old tech-scoped probe (it also catches technician-NULL rows and
           // ran even for techless siblings). sweptIds excludes exactly the

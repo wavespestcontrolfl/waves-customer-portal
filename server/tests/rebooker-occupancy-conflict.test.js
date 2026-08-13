@@ -168,6 +168,92 @@ describe('reschedule — shared occupancy conflict gate', () => {
     expect(dateLockOrder).toBeLessThan(findConflictingVisits.mock.invocationCallOrder[0]);
   });
 
+  describe('null window_end — derived occupancy span (was: gate skipped entirely)', () => {
+    afterEach(() => { delete process.env.REBOOKER_NULL_END_OCCUPANCY; });
+
+    test('a start-but-no-end move now probes its duration-derived span and 409s on a clash', async () => {
+      // Neither the target window nor the row carries an end, so the old
+      // guard (`updates.window_start && windowEnd`) skipped locks AND both
+      // probes — the move landed on an occupied slot with NO check. The
+      // gate now derives the span the row will occupy per the read
+      // predicate (start + duration) and probes that.
+      wireRescheduleMocks(service({ window_end: null, estimated_duration_minutes: 90 }));
+      findConflictingVisits.mockResolvedValue([{ id: 'svc-other', technician_id: null }]);
+
+      await expect(
+        SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: null }, 'customer_request', 'customer_sms'),
+      ).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+
+      // 90-minute duration → 10:30, NOT the flat-60 10:00 — the same
+      // COALESCE(NULLIF(estimated_duration_minutes,0),60) the SQL predicate
+      // applies once the row is booked.
+      expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+        windowStart: '09:00',
+        windowEnd: '10:30',
+        excludeStatuses: ['cancelled', 'completed'],
+      }));
+    });
+
+    test('clean derived-span move commits, holds the locks, and persists window_end as NULL', async () => {
+      const { trx, trxScheduled } = wireRescheduleMocks(service({ window_end: null, estimated_duration_minutes: null }));
+
+      const result = await SmartRebooker.reschedule(
+        'svc-1', TARGET, { start: '09:00', end: null }, 'customer_request', 'customer_sms',
+      );
+      expect(result.success).toBe(true);
+
+      // Null/0 duration falls back to 60 — identical to the SQL fallback.
+      expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+        windowStart: '09:00',
+        windowEnd: '10:00',
+      }));
+      // The derived span is the GATE only — the persisted row keeps its
+      // open-ended window (admin edits leave these deliberately).
+      expect(trxScheduled.update).toHaveBeenCalledWith(expect.objectContaining({ window_end: null }));
+      // Locks now guard this path too (they were skipped along with the
+      // probe): date-occupancy first, then the tech-scoped key.
+      expect(slotReserveKeys(trx)).toEqual([`occupancy:${TARGET}`, `unassigned:${TARGET}`]);
+    });
+
+    test('REBOOKER_NULL_END_OCCUPANCY=off restores the legacy skip', async () => {
+      process.env.REBOOKER_NULL_END_OCCUPANCY = 'off';
+      const { trx, trxScheduled } = wireRescheduleMocks(service({ window_end: null, estimated_duration_minutes: 90 }));
+      findConflictingVisits.mockResolvedValue([{ id: 'svc-other', technician_id: null }]);
+
+      // Clash present, but with the kill switch off the gate never runs —
+      // exact pre-fix behavior, the one-click revoke if enforcement starts
+      // rejecting moves the business wants through.
+      const result = await SmartRebooker.reschedule(
+        'svc-1', TARGET, { start: '09:00', end: null }, 'customer_request', 'customer_sms',
+      );
+      expect(result.success).toBe(true);
+      expect(findConflictingVisits).not.toHaveBeenCalled();
+      expect(slotReserveKeys(trx)).toEqual([]);
+      expect(trxScheduled.update).toHaveBeenCalledWith(expect.objectContaining({ window_end: null }));
+    });
+
+    test('a windowless move (no start either) still skips the gate — inert to the predicate', async () => {
+      wireRescheduleMocks(service({ window_start: null, window_end: null }));
+
+      const result = await SmartRebooker.reschedule(
+        'svc-1', TARGET, null, 'customer_request', 'customer_sms',
+      );
+      expect(result.success).toBe(true);
+      expect(findConflictingVisits).not.toHaveBeenCalled();
+    });
+
+    test('a stored end still wins over the derivation (unchanged fast path)', async () => {
+      wireRescheduleMocks(service({ estimated_duration_minutes: 90 }));
+
+      await SmartRebooker.reschedule(
+        'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_sms',
+      );
+      expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+        windowEnd: '11:00',
+      }));
+    });
+  });
+
   test('batch moves (rain-out) exclude every visit in the sweep, deduped', async () => {
     wireRescheduleMocks(service());
 
