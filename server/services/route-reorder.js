@@ -277,6 +277,14 @@ async function runRouteReorder(opts = {}) {
           // Any drift rolls the whole tech-day back untouched.
           const stale = (msg) => Object.assign(new Error(msg), { code: 'STALE_TECH_DAY' });
           try {
+            // SERIALIZABLE: FOR UPDATE locks existing rows but cannot stop a
+            // phantom — a stop INSERTED/reassigned into this tech-day after
+            // the membership SELECT. Serializable isolation predicate-locks
+            // the read; a concurrent membership change aborts THIS transaction
+            // with a serialization failure (40001), which is handled below as
+            // a stale tech-day skip. Especially relevant while the 4:10
+            // auto-dispatch run may still be applying moves under its own
+            // advisory lock.
             await db.transaction(async (trx) => {
               const live = await trx('scheduled_services')
                 .where('scheduled_date', dateStr)
@@ -317,8 +325,16 @@ async function runRouteReorder(opts = {}) {
                   .update({ route_order: i + 1 });
                 if (updated !== 1) throw stale(`stop ${result.orderedStops[i].id} changed during the run`);
               }
-            });
+            }, { isolationLevel: 'serializable' });
           } catch (writeErr) {
+            // 40001 = serialization_failure: a concurrent transaction touched
+            // (or inserted into) this tech-day — same treatment as any other
+            // superseded day: roll back, skip, never retry blindly.
+            if (writeErr.code === '40001') {
+              summary.skipped.push({ ...entryBase, reason: 'STALE_TECH_DAY', detail: 'serialization conflict — tech-day changed concurrently' });
+              logger.warn(`[route-reorder] ${dateStr} tech ${techId}: serialization conflict — rolled back`);
+              continue;
+            }
             if (writeErr.code === 'STALE_TECH_DAY') {
               summary.skipped.push({ ...entryBase, reason: 'STALE_TECH_DAY', detail: writeErr.message });
               logger.warn(`[route-reorder] ${dateStr} tech ${techId}: superseded during the run — rolled back (${writeErr.message})`);

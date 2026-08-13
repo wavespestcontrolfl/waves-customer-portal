@@ -182,6 +182,9 @@ test('savings above the floor rewrite route_order transactionally in optimized o
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(1);
   expect(db.transaction).toHaveBeenCalledTimes(1);
+  // Phantom-proofing: the write transaction must run SERIALIZABLE so a stop
+  // inserted/reassigned into the tech-day mid-run aborts it (40001).
+  expect(db.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'serializable' });
   expect(trxUpdates).toEqual([
     { id: 'A', route_order: 1 },
     { id: 'C', route_order: 2 },
@@ -238,6 +241,19 @@ test('commit-time revalidation: a changed window_start rolls back untouched', as
   ];
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
+test('a serialization conflict (40001 — phantom membership change) is a skip, not a failure', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  db.transaction.mockImplementationOnce(async () => {
+    throw Object.assign(new Error('could not serialize access due to concurrent update'), { code: '40001' });
+  });
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(res.failed).toBe(0);
   expect(trxUpdates).toEqual([]);
   const ledger = JSON.parse(ledgerInserts[0].result);
   expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));

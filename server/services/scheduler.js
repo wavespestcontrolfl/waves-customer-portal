@@ -9,7 +9,7 @@ const logger = require('./logger');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive } = require('../utils/cron-lock');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
@@ -919,7 +919,10 @@ function initScheduledJobs() {
   // GATE_ROUTE_TIERS is on). Zero customer comms by construction.
   // =========================================================================
   cron.schedule('20 4 * * *', async () => {
-    if (!isEnabled('routeReorder')) return;
+    // Call-time read (NOT the baked isEnabled snapshot) so a Railway var flip
+    // takes effect on the next tick without a redeploy — matching the
+    // documented gate contract and the service's own internal check.
+    if (!gateEnvValue('GATE_ROUTE_REORDER')) return;
     logger.info('Running: Route-Tiers nightly reorder');
     try {
       // runExclusive: read-then-act — a deploy overlap must not double-run and
