@@ -410,34 +410,44 @@ async function reserve({ customerId, purchaseId, slotId }) {
     throw httpError(409, OFFER_CHANGED);
   }
   try {
-    // Re-reserving the same estimate deletes the prior hold in-txn
-    // (slot-reservation's own semantics) — re-picks need no explicit release.
-    const { scheduledServiceId, expiresAt } = await slotReservation.reserveSlot({
-      estimateId: estimate.id,
-      slotId,
-    });
-    // CAS on the still-open states (P1): a concurrent re-init can void this
-    // purchase between the unlocked read above and here — a blind id-keyed
-    // update would revive the voided row as reserved/confirmable. When the
-    // CAS loses, release the hold we just created and bounce the client.
-    const reserved = await db('one_tap_purchases')
-      .where({ id: purchase.id })
-      .whereIn('status', ['initiated', 'reserved'])
-      .update({
-        scheduled_service_id: scheduledServiceId,
-        slot_id: String(slotId),
-        status: 'reserved',
-        updated_at: db.fn.now(),
+    // The whole hold-replace + ledger-pointer write is serialized per
+    // purchase by an advisory lock (P1): two concurrent reserves otherwise
+    // interleave — B replaces A's hold inside reserveSlot's own txn, then
+    // A's later pointer write lands a DELETED hold id and orphans B's hold.
+    // reserveSlot keeps its own internal transaction; the outer lock just
+    // guarantees one reserve fully finishes (pointer committed) before the
+    // next starts.
+    return await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`one_tap_reserve:${purchase.id}`]);
+      // Re-reserving the same estimate deletes the prior hold in-txn
+      // (slot-reservation's own semantics) — re-picks need no explicit release.
+      const { scheduledServiceId, expiresAt } = await slotReservation.reserveSlot({
+        estimateId: estimate.id,
+        slotId,
       });
-    if (!reserved) {
-      try {
-        await slotReservation.releaseReservation({ scheduledServiceId, estimateId: estimate.id });
-      } catch (releaseErr) {
-        logger.warn(`[one-tap-purchase] lost-CAS hold release failed (code=${releaseErr?.code || 'none'})`);
+      // CAS on the still-open states (P1): a concurrent re-init can void
+      // this purchase — a blind id-keyed update would revive the voided row
+      // as reserved/confirmable. When the CAS loses, release the hold we
+      // just created and bounce the client.
+      const reserved = await trx('one_tap_purchases')
+        .where({ id: purchase.id })
+        .whereIn('status', ['initiated', 'reserved'])
+        .update({
+          scheduled_service_id: scheduledServiceId,
+          slot_id: String(slotId),
+          status: 'reserved',
+          updated_at: trx.fn.now(),
+        });
+      if (!reserved) {
+        try {
+          await slotReservation.releaseReservation({ scheduledServiceId, estimateId: estimate.id });
+        } catch (releaseErr) {
+          logger.warn(`[one-tap-purchase] lost-CAS hold release failed (code=${releaseErr?.code || 'none'})`);
+        }
+        throw httpError(409, OFFER_CHANGED);
       }
-      throw httpError(409, OFFER_CHANGED);
-    }
-    return { scheduledServiceId, expiresAt, holdMinutes: HOLD_MINUTES };
+      return { scheduledServiceId, expiresAt, holdMinutes: HOLD_MINUTES };
+    });
   } catch (err) {
     if (err.code === 'INVALID_SLOT_ID') throw httpError(400, 'invalid slotId format');
     if (err.code === 'SLOT_UNAVAILABLE') {
@@ -776,7 +786,11 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
           trx,
         });
       } catch (commitErr) {
-        if (commitErr.code === 'RESERVATION_EXPIRED') {
+        // RESERVATION_NOT_FOUND joins the expiry lane (P1): the cleanup
+        // sweep or a release can DELETE the hold between our pre-txn read
+        // and commitReservation's own — same recovery (re-pick), never a
+        // 500 that leaves the purchase pointing at a missing hold.
+        if (commitErr.code === 'RESERVATION_EXPIRED' || commitErr.code === 'RESERVATION_NOT_FOUND') {
           throw httpError(409, 'Your held time expired — pick a slot again.', { code: 'RESERVATION_EXPIRED' });
         }
         if (commitErr.code === 'SLOT_UNAVAILABLE') {
