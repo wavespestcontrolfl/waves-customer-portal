@@ -330,13 +330,13 @@ async function loadLawnWindowGuidance(dbh, svc) {
           .catch(() => null);
         if (protocolRow?.id) {
           query.protocolId = protocolRow.id;
-        } else if (!grass.trackKey) {
-          // Assigned protocol unresolvable AND no known track to fall back
-          // to — fail closed rather than resolving the key against an
-          // arbitrary active protocol.
-          return { ...NO_LAWN_GUIDANCE, reason: 'assigned_protocol_unresolved' };
         } else {
-          query.grassTrack = grass.trackKey;
+          // Assigned protocol unresolvable — fail closed even when the
+          // grass track is known: resolving the assigned window key
+          // against the currently ACTIVE protocol can yield different
+          // products/rates than the version this visit was assigned from
+          // (lawn-protocol authority rule).
+          return { ...NO_LAWN_GUIDANCE, reason: 'assigned_protocol_unresolved' };
         }
       } else if (grass.trackKey) {
         query.grassTrack = grass.trackKey;
@@ -468,10 +468,15 @@ async function assembleGrounding(svc, dbh = db) {
     logger.warn(`[previsit-brief] context aggregation failed for ${svc.id}: ${err.message}`);
   }
 
+  // Access/pet/chemical guidance is copied DETERMINISTICALLY from this
+  // row — a lookup outage must not collapse into "no preferences": the
+  // emptied access block changes the grounding hash and the sweep would
+  // overwrite a valid cached brief without gate codes or pet warnings.
+  // Propagate instead; runSweep counts the visit failed and the prior
+  // brief survives untouched.
   const prefs = await dbh('property_preferences')
     .where({ customer_id: svc.customer_id })
-    .first()
-    .catch(() => null);
+    .first();
 
   const history = await loadRecentServiceRecords(dbh, svc.customer_id, svc.service_type);
   const visitLine = history.visitLine ?? visitLineOf(svc.service_type);
