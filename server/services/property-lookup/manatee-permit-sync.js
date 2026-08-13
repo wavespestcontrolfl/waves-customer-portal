@@ -352,11 +352,21 @@ async function findSyncedPoolPermit({ parcelPin, addrKey, looseKey } = {}) {
   ].filter(Boolean);
   let row = null;
   for (const [col, val] of tiers) {
-    row = await db('pool_permit_records')
+    const query = db('pool_permit_records')
       .whereNot('record_status', 'Canceled')
       .where(col, val)
       .orderBy('issued_date', 'desc')
       .first();
+    // Address-tier guard: the loose key drops the street SUFFIX ("101 Main
+    // St" and "101 Main Ave" collide), so when the caller KNOWS the parcel,
+    // an address-tier row asserting a DIFFERENT clean parcel is another
+    // property — only pin-less/odd-format rows may rescue a pin miss.
+    if (col !== 'parcel_pin' && parcelPin) {
+      query.where((b) => b.whereNull('parcel_pin')
+        .orWhere('parcel_pin', String(parcelPin))
+        .orWhereRaw("parcel_pin !~ '^[0-9]{10}$'"));
+    }
+    row = await query;
     if (row) break;
   }
   if (!row) return null;
@@ -551,20 +561,31 @@ async function findConstructionActivity({ parcelPin, looseKey } = {}) {
   const coFloor = monthsAgoIso(NEW_BUILD_CO_MONTHS);
   const seenAfter = new Date(Date.now() - ACTIVE_SEEN_WITHIN_DAYS * 24 * 60 * 60 * 1000);
   for (const [col, val] of tiers) {
-    const ucRow = await db('construction_permit_records')
+    // Same address-tier parcel guard as findSyncedPoolPermit: with a known
+    // parcel, a loose-key row asserting a DIFFERENT clean pin is another
+    // property (the loose key drops street suffixes).
+    const parcelGuard = (query) => {
+      if (col !== 'parcel_pin' && parcelPin) {
+        query.where((b) => b.whereNull('parcel_pin')
+          .orWhere('parcel_pin', String(parcelPin))
+          .orWhereRaw("parcel_pin !~ '^[0-9]{10}$'"));
+      }
+      return query;
+    };
+    const ucRow = await parcelGuard(db('construction_permit_records')
       .where(col, val)
       .whereNull('co_date')
       .where('issued_date', '>=', activeFloor)
       .where('last_seen_at', '>=', seenAfter)
       .whereRaw("LOWER(COALESCE(status, '')) NOT IN ('closed', 'canceled', 'withdrawn')")
-      .orderBy('issued_date', 'desc')
+      .orderBy('issued_date', 'desc'))
       .first();
-    const nbRow = await db('construction_permit_records')
+    const nbRow = await parcelGuard(db('construction_permit_records')
       .where(col, val)
       .whereNotNull('co_date')
       .where('co_date', '>=', coFloor)
       .whereRaw("type_of_work ILIKE 'new%'")
-      .orderBy('co_date', 'desc')
+      .orderBy('co_date', 'desc'))
       .first();
     if (ucRow || nbRow) {
       // Per-signal permit detail — one flat permitNo next to two flags let

@@ -100,12 +100,23 @@ function keepNewest(current, candidate) {
 }
 
 async function lookupManateePermits(pin, timeoutMs, address) {
-  const rows = await queryArcgis(
-    process.env.MANATEE_PERMITS_URL || DEFAULT_MANATEE_PERMITS_URL,
-    `SELECTPIN='${pin}' AND PERMIT_TYPE IN ('Pool_Spa','Aluminum Structure')`,
-    ['PERMIT_NO', 'PERMIT_TYPE', 'PERMIT_ISSUE'],
-    timeoutMs,
-  );
+  // GIS outage must not take the synced-table backstop down with it — the
+  // sync exists precisely for what the live layer can't see. A GIS failure
+  // is only rethrown at the END when the backstop found nothing, so the
+  // caller's null-means-retry contract still holds for truly-unchecked
+  // parcels; positive synced evidence wins over retry semantics.
+  let gisError = null;
+  let rows = [];
+  try {
+    rows = await queryArcgis(
+      process.env.MANATEE_PERMITS_URL || DEFAULT_MANATEE_PERMITS_URL,
+      `SELECTPIN='${pin}' AND PERMIT_TYPE IN ('Pool_Spa','Aluminum Structure')`,
+      ['PERMIT_NO', 'PERMIT_TYPE', 'PERMIT_ISSUE'],
+      timeoutMs,
+    );
+  } catch (err) {
+    gisError = err;
+  }
   let poolPermit = null;
   let enclosurePermit = null;
   for (const row of rows) {
@@ -137,6 +148,7 @@ async function lookupManateePermits(pin, timeoutMs, address) {
       error: err?.message || String(err),
     });
   }
+  if (gisError && !poolPermit) throw gisError;
   return { poolPermit, enclosurePermit };
 }
 
