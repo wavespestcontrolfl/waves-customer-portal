@@ -643,7 +643,7 @@ const AgronomicWiki = {
   // ────────────────────────────────────────────────────────────
   // updateProductPage — aggregate outcomes for a product, generate wiki page
   // ────────────────────────────────────────────────────────────
-  async updateProductPage(productName, { rethrow = false } = {}) {
+  async updateProductPage(productName, { rethrow = false, withState = false } = {}) {
     try {
       // One page per catalog product: resolve the applied-product string to
       // its canonical catalog name and aggregate outcomes across every known
@@ -661,7 +661,7 @@ const AgronomicWiki = {
 
       if (!outcomes.length) {
         logger.info(`[agronomic-wiki] No outcomes found for product ${productName}`);
-        return null;
+        return withState ? { entry: null, writeState: 'no_data' } : null;
       }
 
       // Aggregate stats
@@ -724,6 +724,7 @@ const AgronomicWiki = {
         await syncKbCopyTrust(entry.id, TRUSTED_STATUSES.includes(entry.review_status));
       }
 
+      if (withState) return { entry, writeState: result?.writeState || 'failed' };
       return entry;
     } catch (err) {
       logger.error(`[agronomic-wiki] updateProductPage failed for ${productName}: ${err.message}`);
@@ -735,7 +736,7 @@ const AgronomicWiki = {
   // ────────────────────────────────────────────────────────────
   // updateConditionPage — aggregate outcomes for a pest/disease/weed condition
   // ────────────────────────────────────────────────────────────
-  async updateConditionPage(conditionName, { rethrow = false } = {}) {
+  async updateConditionPage(conditionName, { rethrow = false, withState = false } = {}) {
     try {
       const slug = `condition/${slugify(conditionName)}`;
 
@@ -769,6 +770,7 @@ const AgronomicWiki = {
       };
 
       const result = await AgronomicWiki.generatePage(slug, 'condition', data, `Condition: ${conditionName}`);
+      if (withState) return { entry: result?.entry || null, writeState: result?.writeState || 'failed' };
       return result?.entry || null;
     } catch (err) {
       logger.error(`[agronomic-wiki] updateConditionPage failed for ${conditionName}: ${err.message}`);
@@ -780,7 +782,7 @@ const AgronomicWiki = {
   // ────────────────────────────────────────────────────────────
   // updateTrackPage — aggregate performance across all customers on a track
   // ────────────────────────────────────────────────────────────
-  async updateTrackPage(trackId, { rethrow = false } = {}) {
+  async updateTrackPage(trackId, { rethrow = false, withState = false } = {}) {
     try {
       const slug = `track/${slugify(trackId)}`;
 
@@ -791,7 +793,7 @@ const AgronomicWiki = {
 
       if (!outcomes.length) {
         logger.info(`[agronomic-wiki] No outcomes found for track ${trackId}`);
-        return null;
+        return withState ? { entry: null, writeState: 'no_data' } : null;
       }
 
       const stats = aggregateOutcomes(outcomes);
@@ -806,6 +808,7 @@ const AgronomicWiki = {
       };
 
       const result = await AgronomicWiki.generatePage(slug, 'track', data, `Track ${trackId} Performance`);
+      if (withState) return { entry: result?.entry || null, writeState: result?.writeState || 'failed' };
       return result?.entry || null;
     } catch (err) {
       logger.error(`[agronomic-wiki] updateTrackPage failed for ${trackId}: ${err.message}`);
@@ -817,7 +820,7 @@ const AgronomicWiki = {
   // ────────────────────────────────────────────────────────────
   // updateSeasonalPage — aggregate what happened this month
   // ────────────────────────────────────────────────────────────
-  async updateSeasonalPage(month) {
+  async updateSeasonalPage(month, { rethrow = false, withState = false } = {}) {
     try {
       const monthNames = [
         'January', 'February', 'March', 'April', 'May', 'June',
@@ -849,7 +852,7 @@ const AgronomicWiki = {
           logger.error(`[agronomic-wiki] Failed to prune empty seasonal page ${slug}: ${err.message}`);
         }
         logger.info(`[agronomic-wiki] No outcomes found for month ${month} — skipping seasonal page`);
-        return null;
+        return withState ? { entry: null, writeState: 'no_data' } : null;
       }
 
       const stats = aggregateOutcomes(outcomes);
@@ -863,9 +866,11 @@ const AgronomicWiki = {
       };
 
       const result = await AgronomicWiki.generatePage(slug, 'seasonal', data, `${monthName} — Seasonal Intelligence`);
+      if (withState) return { entry: result?.entry || null, writeState: result?.writeState || 'failed' };
       return result?.entry || null;
     } catch (err) {
       logger.error(`[agronomic-wiki] updateSeasonalPage failed for month ${month}: ${err.message}`);
+      if (rethrow) throw err;
       return null;
     }
   },
@@ -1219,37 +1224,42 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         .orderBy('last_data_update', 'asc')
         .limit(10);
 
-      // rethrow distinguishes updater ERRORS (throw → failed++, marker
-      // withheld, daily retry, job_health failure) from legitimate no-data
-      // returns (null → an orphan page with no source outcomes; counted
-      // separately so it can't stall the chain forever). Any real failure
-      // withholds the weekly success marker; already-refreshed pages skip
-      // cheaply via the unchanged-fingerprint guard on retry.
+      // Failure accounting by writeState, not by return truthiness:
+      // generatePage converts its own failures into { writeState: 'failed' }
+      // (LLM error, gate-write error) or 'stub' (empty generation), which
+      // the plain updater return would count as refreshed. Classification:
+      //   generated/skipped → refreshed; no_data → orphan page with no
+      //   source outcomes (left stale, never blocks the chain);
+      //   failed/stub/thrown → failed, which withholds the weekly success
+      //   marker (daily retry; refreshed pages skip via the fingerprint
+      //   guard) and surfaces to job_health via the returned { error }.
       let refreshed = 0;
       let failed = 0;
       let noData = 0;
+      const classify = (res) => {
+        if (['generated', 'skipped'].includes(res?.writeState)) refreshed++;
+        else if (res?.writeState === 'no_data') noData++;
+        else failed++;
+      };
+      const REFRESH_OPTS = { rethrow: true, withState: true };
       for (const page of stalePages) {
         try {
           if (page.category === 'product') {
             const productName = page.title.replace(/^Product:\s*/i, '');
-            const entry = await AgronomicWiki.updateProductPage(productName, { rethrow: true });
-            if (entry) refreshed++; else noData++;
+            classify(await AgronomicWiki.updateProductPage(productName, REFRESH_OPTS));
           } else if (page.category === 'track') {
             const trackId = page.slug.replace('track/', '');
-            const entry = await AgronomicWiki.updateTrackPage(trackId, { rethrow: true });
-            if (entry) refreshed++; else noData++;
+            classify(await AgronomicWiki.updateTrackPage(trackId, REFRESH_OPTS));
           } else if (page.category === 'seasonal') {
             const monthSlug = page.slug.replace('seasonal/', '');
             const monthNames = ['january','february','march','april','may','june','july','august','september','october','november','december'];
             const monthIdx = monthNames.indexOf(monthSlug);
             if (monthIdx >= 0) {
-              await AgronomicWiki.updateSeasonalPage(monthIdx + 1);
-              refreshed++;
+              classify(await AgronomicWiki.updateSeasonalPage(monthIdx + 1, REFRESH_OPTS));
             }
           } else if (page.category === 'condition') {
             const conditionName = page.title.replace(/^Condition:\s*/i, '');
-            const entry = await AgronomicWiki.updateConditionPage(conditionName, { rethrow: true });
-            if (entry) refreshed++; else noData++;
+            classify(await AgronomicWiki.updateConditionPage(conditionName, REFRESH_OPTS));
           }
         } catch (err) {
           failed++;
@@ -1260,9 +1270,17 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         logger.warn(`[agronomic-wiki] Weekly refresh: ${noData} stale page(s) have no source data (orphans) — left stale, not counted as failures`);
       }
 
-      // 3. Generate seasonal page for current month
+      // 3. Generate seasonal page for current month — a failed/stub
+      // generation here withholds the marker like any stale-loop failure
+      // (no_data is normal early in a month with no outcomes yet).
       const currentMonth = new Date().getMonth() + 1;
-      await AgronomicWiki.updateSeasonalPage(currentMonth);
+      try {
+        const seasonalRes = await AgronomicWiki.updateSeasonalPage(currentMonth, REFRESH_OPTS);
+        if (!['generated', 'skipped', 'no_data'].includes(seasonalRes?.writeState)) failed++;
+      } catch (err) {
+        failed++;
+        logger.error(`[agronomic-wiki] Current-month seasonal refresh failed: ${err.message}`);
+      }
 
       if (failed > 0) {
         // Partial failure: no weekly_cron success marker — weeklyRefreshIfDue
