@@ -8110,6 +8110,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    // Warm the cross-sell card's property-evidence cache (owner lane
+    // 2026-08-13). Post-commit + fire-and-forget, same posture as the T&S
+    // auto-score above: it never blocks completion latency or success, and
+    // the module is double-gated (dark by default) and never rejects. The
+    // report SMS goes out well after this, so a cold-cache county/vision
+    // lookup has hours of headroom — by the time the customer opens the
+    // report, the composer's cache-only read finds the evidence and the
+    // card prices instead of falling back to the quote CTA. Backfills are
+    // excluded: their customers already received (or never had) the report
+    // moment this exists to serve. Replays are cache-first no-ops.
+    if (useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record?.id) {
+      setImmediate(() => {
+        const { prewarmReportCrossSellEvidence } = require('../services/service-report/evidence-prewarm');
+        void prewarmReportCrossSellEvidence(record, db);
+      });
+    }
+
     // Live-override completions correct the linked technician timer too
     // (codex P1, pre-push audit round 20c): the correction is authoritative
     // for costing via the durable stamp, but without this sync timesheets
