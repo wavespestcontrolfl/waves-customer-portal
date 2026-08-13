@@ -875,9 +875,12 @@ function labelize(value) {
 function buildAgents(tasks, sources) {
   return AGENTS.map((agent) => {
     const agentTasks = tasks.filter((item) => item.agentId === agent.id);
-    const critical = agentTasks.filter((item) => item.priority === 'critical').length;
-    const high = agentTasks.filter((item) => item.priority === 'high').length;
-    const needsApproval = agentTasks.filter((item) => ['needs_review', 'approval'].includes(item.status)).length;
+    // status 'info' = non-actionable activity (autonomous run ledgers) — it
+    // renders in the feed but must never count as open/approval workload.
+    const actionable = agentTasks.filter((item) => item.status !== 'info');
+    const critical = actionable.filter((item) => item.priority === 'critical').length;
+    const high = actionable.filter((item) => item.priority === 'high').length;
+    const needsApproval = actionable.filter((item) => ['needs_review', 'approval'].includes(item.status)).length;
     const erroredSource = sources.find((source) => source.status === 'error' && sourceAgentHint(source.id) === agent.id);
     const status = erroredSource
       ? 'blocked'
@@ -890,11 +893,11 @@ function buildAgents(tasks, sources) {
     return {
       ...agent,
       status,
-      openTasks: agentTasks.length,
+      openTasks: actionable.length,
       needsApproval,
       highPriority: critical + high,
       lastActivityAt: latestDate(agentTasks),
-      headline: headlineForAgent(agent, agentTasks, status),
+      headline: headlineForAgent(agent, actionable, status),
     };
   });
 }
@@ -987,10 +990,12 @@ router.get('/overview', async (_req, res) => {
       agents: agents.length,
       activeAgents: agents.filter((agent) => agent.status !== 'idle').length,
       blockedAgents: agents.filter((agent) => agent.status === 'blocked').length,
-      openTasks: tasks.length,
+      // 'info' items are activity, not workload — excluded from open/approval
+      // counts (they still render in the task feed itself).
+      openTasks: tasks.filter((item) => item.status !== 'info').length,
       hiddenTasks: stateApplied.hiddenCount,
       needsApproval: tasks.filter((item) => ['needs_review', 'approval'].includes(item.status)).length,
-      highPriority: tasks.filter((item) => item.priority === 'critical' || item.priority === 'high').length,
+      highPriority: tasks.filter((item) => item.status !== 'info' && (item.priority === 'critical' || item.priority === 'high')).length,
     },
     agents,
     tasks,
