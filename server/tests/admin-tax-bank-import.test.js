@@ -35,6 +35,7 @@ function bankBuilder() {
   const b = {
     where: jest.fn((c) => { wheres.push(c); return b; }),
     whereIn: jest.fn((c, v) => { wheres.push([c, v]); return b; }),
+    whereRaw: jest.fn((sql, binds) => { wheres.push([sql, binds]); return b; }),
     first: jest.fn(() => Promise.resolve(state.bankRow)),
     update: jest.fn((patch) => {
       if (state.bankUpdateError) return Promise.reject(state.bankUpdateError);
@@ -349,40 +350,53 @@ describe('force-duplicates upload (gate on)', () => {
     expect(state.insertedBank).toHaveLength(1); // only the bulk attempt
   });
 
-  test('forceDuplicates without the hash scope is rejected BEFORE any insert — 400 means nothing changed', async () => {
+  test('forceDuplicates without the hash scope or token is rejected BEFORE any insert — 400 means nothing changed', async () => {
     state.insertReturningQueue = [[]];
-    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true });
+    let res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true });
     expect(res.status).toBe(400);
+    res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true, forceRowHashes: [hdSupplyHash] });
+    expect(res.status).toBe(400); // token missing
     expect(state.insertedBank).toHaveLength(0); // validated before the bulk insert
   });
 
-  test('a replayed force confirmation is idempotent — the single target ordinal conflicts instead of minting more copies', async () => {
-    state.insertReturningQueue = [
-      [], // bulk insert: everything conflicts (replay)
-      [], // the ONE force attempt at ordinal+1 also conflicts (already forced earlier)
-    ];
-    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true, forceRowHashes: [hdSupplyHash] });
+  test('a replayed force confirmation (same token) is caught by the stored record — nothing re-inserted', async () => {
+    state.bankRow = { id: 'forced-earlier' }; // the forceToken+forcedFor lookup finds the prior forced row
+    state.insertReturningQueue = [[]]; // bulk insert: everything conflicts (replay)
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true, forceRowHashes: [hdSupplyHash], forceToken: 'tok-replayed-1' });
     const body = await res.json();
     expect(body.forced).toBe(0);
     expect(body.forceAlreadyPresent).toBe(1);
-    // exactly one force attempt was made — no ordinal walk to +2, +3, …
-    expect(state.insertedBank).toHaveLength(2); // 1 bulk attempt + 1 force attempt
+    expect(state.insertedBank).toHaveLength(1); // bulk attempt only — no force insert at all
   });
 
-  test('with forceDuplicates + its hash, the skipped row re-inserts under the NEXT ordinal hash', async () => {
+  test('with forceDuplicates + hash + token, the skipped row re-inserts under the next free ordinal, recording the token', async () => {
     state.insertReturningQueue = [
       [], // bulk insert: everything conflicts
-      [{ id: 'bt-forced' }], // first force attempt (ordinal+1) lands
+      [{ id: 'bt-forced' }], // first force attempt lands
     ];
-    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true, forceRowHashes: [hdSupplyHash] });
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true, forceRowHashes: [hdSupplyHash], forceToken: 'tok-first-99' });
     const body = await res.json();
     expect(body.forced).toBe(1);
     expect(body.imported).toBe(1);
     expect(body.duplicates).toBe(1);
     expect(state.insertedBank).toHaveLength(2);
-    // the forced copy has a DIFFERENT identity than the original attempt
+    // the forced copy has a DIFFERENT identity than the original attempt,
+    // and carries the confirmation identity for replay detection
     expect(state.insertedBank[1].row_hash).not.toBe(state.insertedBank[0].row_hash);
+    expect(state.insertedBank[1].suggestion).toEqual({ forceToken: 'tok-first-99', forcedFor: hdSupplyHash });
     expect(state.insertedBank[1]).toMatchObject({ amount: 204.87, direction: 'debit', account_label: 'capone-checking' });
+  });
+
+  test('a NEW confirmation (new token) walks past prior forced copies — a third identical transaction stays importable', async () => {
+    state.insertReturningQueue = [
+      [], // bulk: ordinal 0 conflicts
+      [], // walk: ordinal 1 conflicts (the earlier forced copy)
+      [{ id: 'bt-third' }], // ordinal 2 lands
+    ];
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true, forceRowHashes: [hdSupplyHash], forceToken: 'tok-second-42' });
+    const body = await res.json();
+    expect(body.forced).toBe(1);
+    expect(state.insertedBank).toHaveLength(3); // 1 bulk + 2 walk attempts
   });
 
   test('a forced copy cannot collide with a row the SAME upload imported (two new identical rows, one conflicted)', async () => {
@@ -394,7 +408,7 @@ describe('force-duplicates upload (gate on)', () => {
       [{ id: 'bt-new', row_hash: ordinal1Hash }], // bulk: ordinal 0 conflicts (DB copy), ordinal 1 lands
       [{ id: 'bt-forced' }], // the force attempt lands
     ];
-    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv: twoIdenticalCsv, forceDuplicates: true, forceRowHashes: [hdSupplyHash] });
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv: twoIdenticalCsv, forceDuplicates: true, forceRowHashes: [hdSupplyHash], forceToken: 'tok-collide-7' });
     const body = await res.json();
     expect(body.forced).toBe(1);
     // target ordinal = tuple occurrences (2) + row ordinal (0) = 2 — past
@@ -409,7 +423,7 @@ describe('force-duplicates upload (gate on)', () => {
       [], // bulk insert: EVERY row conflicts on the confirming re-post
       [{ id: 'bt-forced' }], // the single scoped force attempt lands
     ];
-    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv: twoRowCsv, forceDuplicates: true, forceRowHashes: [hdSupplyHash] });
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv: twoRowCsv, forceDuplicates: true, forceRowHashes: [hdSupplyHash], forceToken: 'tok-scoped-3' });
     const body = await res.json();
     expect(body.duplicates).toBe(2); // both conflicted…
     expect(body.forced).toBe(1); // …but only the scoped one was forced

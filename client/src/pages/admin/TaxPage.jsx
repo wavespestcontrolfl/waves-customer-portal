@@ -4085,9 +4085,14 @@ function BankImportTab() {
       };
       act("upload", "/admin/tax/bank-import/upload", payload).then((r) => {
         if (!r) return;
-        // hashes scope a later force-import to EXACTLY these skipped rows —
-        // on a re-post every previously imported row conflicts too
-        setDupUpload(r.duplicates > 0 ? { ...payload, forceRowHashes: r.duplicateHashes || [] } : null);
+        // hashes scope a later force-import to EXACTLY these skipped rows
+        // (on a re-post every previously imported row conflicts too), and
+        // the server-issued token makes that confirmation replay-safe
+        setDupUpload(
+          r.duplicates > 0
+            ? { ...payload, forceRowHashes: r.duplicateHashes || [], forceToken: r.forceToken }
+            : null,
+        );
         setNotice({
           text:
             `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skipped.length} skipped)` +

@@ -312,7 +312,9 @@ async function runDeterministicMatching() {
     const transfer = transferSuggestion(row.description);
     if (transfer) {
       if (!row.suggestion || !row.suggestion.ignore) {
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({ suggestion: transfer, updated_at: new Date() });
+        // merged, not replaced — suggestion also carries durable identity
+        // records (forceToken/forcedFor, lastUnlink) that must survive
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({ suggestion: { ...(row.suggestion || {}), ...transfer }, updated_at: new Date() });
         summary.transferFlagged++;
       }
       continue; // transfer-looking rows never auto-match anything

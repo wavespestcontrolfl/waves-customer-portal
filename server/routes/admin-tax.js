@@ -1619,6 +1619,7 @@ router.get('/export/tax-package', async (req, res, next) => {
 // manual POST /expenses applies (server-owned partial deduction, AI-verify
 // flag). See services/bank-import.js for the matching policy.
 
+const nodeCrypto = require('crypto');
 const bankImport = require('../services/bank-import');
 const { gateEnvValue } = require('../config/feature-gates');
 
@@ -1644,7 +1645,7 @@ router.use('/bank-import', (req, res, next) => {
 
 router.post('/bank-import/upload', async (req, res, next) => {
   try {
-    const { accountLabel, accountType, filename, csv, forceDuplicates, forceRowHashes } = req.body || {};
+    const { accountLabel, accountType, filename, csv, forceDuplicates, forceRowHashes, forceToken } = req.body || {};
     if (!accountLabel || typeof accountLabel !== 'string' || accountLabel.length > 100) {
       return res.status(400).json({ error: 'accountLabel is required (max 100 chars)' });
     }
@@ -1661,8 +1662,9 @@ router.post('/bank-import/upload', async (req, res, next) => {
     // "nothing changed", never "your rows imported but the force was ignored".
     if (forceDuplicates === true
       && (!Array.isArray(forceRowHashes) || forceRowHashes.length === 0 || forceRowHashes.length > 10000
-        || !forceRowHashes.every(h => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h)))) {
-      return res.status(400).json({ error: 'forceDuplicates requires forceRowHashes: the duplicateHashes array from the original upload response' });
+        || !forceRowHashes.every(h => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h))
+        || typeof forceToken !== 'string' || forceToken.length < 8 || forceToken.length > 64)) {
+      return res.status(400).json({ error: 'forceDuplicates requires forceRowHashes + forceToken from the original upload response' });
     }
     const { rows, skipped } = bankImport.parseStatementCsv(csv);
     if (rows.length === 0) {
@@ -1700,16 +1702,17 @@ router.post('/bank-import/upload', async (req, res, next) => {
     const duplicateRows = hashed.filter(r => !insertedHashes.has(r.row_hash));
     // Force path for the split-across-uploads case: a genuinely distinct
     // identical transaction in a SEPARATE file hashes like a re-upload and
-    // is skipped above. When the operator confirms these are real, each
-    // confirmed row targets ONE deterministic ordinal:
-    //   (occurrences of its tuple in THIS file) + (its own ordinal)
-    // Targets start past every ordinal this file occupies, so a forced copy
-    // can never collide with a row the same upload imported normally (two
-    // new identical rows where only one conflicted); a replayed
-    // confirmation computes the same target, conflicts, and reports
-    // alreadyPresent instead of minting more copies; and because the copy
-    // stays IN the ordinal space, a later fuller export that carries all
-    // occurrences dedupes against it instead of importing extras.
+    // is skipped above. When the operator confirms these are real:
+    // - Replay safety comes from the SERVER-ISSUED forceToken: a forced row
+    //   records {forceToken, forcedFor} in suggestion, and a re-post of the
+    //   same confirmation (double-click, network retry) finds that record
+    //   and reports alreadyPresent instead of minting another copy.
+    // - A LATER genuine confirmation carries a NEW token, so it walks to the
+    //   next free ordinal — a third/fourth identical transaction stays
+    //   importable. The walk starts past every ordinal this file occupies
+    //   (tuple occurrences + row ordinal), so it can never collide with a
+    //   row the same upload imported normally, and forced copies stay IN
+    //   the ordinal space so a later fuller export dedupes against them.
     // ⛔ Force is scoped to EXPLICIT row hashes from the FIRST response's
     // duplicate set: on the confirming re-post every previously inserted row
     // conflicts too, so an unscoped force would duplicate the whole
@@ -1721,23 +1724,33 @@ router.post('/bank-import/upload', async (req, res, next) => {
       for (const h of hashed) tupleCounts.set(h.tuple_key, (tupleCounts.get(h.tuple_key) || 0) + 1);
       const forceSet = new Set(forceRowHashes);
       for (const r of duplicateRows.filter(d => forceSet.has(d.row_hash))) {
-        const targetOrdinal = tupleCounts.get(r.tuple_key) + r.ordinal;
-        const [ins] = await db('bank_transactions')
-          .insert({
-            account_label: accountLabel.trim(),
-            account_type: accountType,
-            txn_date: r.txn_date,
-            description: r.description,
-            amount: r.amount,
-            direction: r.direction,
-            source: 'csv',
-            source_file: String(filename || '').slice(0, 300) || null,
-            row_hash: bankImport.hashRow(accountLabel.trim(), r, targetOrdinal),
-          })
-          .onConflict('row_hash')
-          .ignore()
-          .returning(['id']);
-        if (ins) forced++; else forceAlreadyPresent++;
+        const replay = await db('bank_transactions')
+          .whereRaw("suggestion->>'forceToken' = ?", [forceToken])
+          .whereRaw("suggestion->>'forcedFor' = ?", [r.row_hash])
+          .first('id');
+        if (replay) { forceAlreadyPresent++; continue; }
+        const startOrdinal = tupleCounts.get(r.tuple_key) + r.ordinal;
+        let landed = false;
+        for (let ord = startOrdinal; ord < startOrdinal + 25 && !landed; ord++) {
+          const [ins] = await db('bank_transactions')
+            .insert({
+              account_label: accountLabel.trim(),
+              account_type: accountType,
+              txn_date: r.txn_date,
+              description: r.description,
+              amount: r.amount,
+              direction: r.direction,
+              source: 'csv',
+              source_file: String(filename || '').slice(0, 300) || null,
+              row_hash: bankImport.hashRow(accountLabel.trim(), r, ord),
+              suggestion: { forceToken, forcedFor: r.row_hash },
+            })
+            .onConflict('row_hash')
+            .ignore()
+            .returning(['id']);
+          if (ins) landed = true;
+        }
+        if (landed) forced++; else forceAlreadyPresent++;
       }
     }
     // The inserts above are already committed — a matching failure must NOT
@@ -1760,6 +1773,8 @@ router.post('/bank-import/upload', async (req, res, next) => {
       forceAlreadyPresent,
       duplicates: duplicateRows.length,
       duplicateHashes: duplicateRows.map(r => r.row_hash),
+      // one-time confirmation identity for a force re-post (replay-safe)
+      forceToken: duplicateRows.length > 0 ? nodeCrypto.randomUUID() : null,
       duplicateSamples: duplicateRows.slice(0, 10).map(r => ({ txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
       skipped,
       matching,

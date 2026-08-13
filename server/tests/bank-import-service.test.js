@@ -409,6 +409,13 @@ describe('runDeterministicMatching', () => {
     expect(expenseBuilder.b.whereNot).toHaveBeenCalledWith('id', 'exp-1');
   });
 
+  test('the transfer flag MERGES into suggestion — durable identity records survive', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', suggestion: { forceToken: 'tok-1', forcedFor: 'abc' } }];
+    await runDeterministicMatching();
+    const flagged = state.updates.find(u => u.patch.suggestion && u.patch.suggestion.ignore);
+    expect(flagged.patch.suggestion).toMatchObject({ ignore: true, forceToken: 'tok-1', forcedFor: 'abc' });
+  });
+
   test('an already-flagged transfer row is not re-flagged (idempotent)', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-08', description: 'TRANSFER TO SAVINGS', amount: 1000, direction: 'debit', suggestion: { ignore: true, reason: 'x' } }];
     const summary = await runDeterministicMatching();
