@@ -11223,22 +11223,68 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 });
 
 // PUT /api/admin/dispatch/:serviceId/reorder
+// Fenced + stale-guarded (uncapped audit r22 P1): every route_order writer
+// holds the tech-day 'slot-reserve' advisory lock or it can interleave with
+// the nightly reorder's fenced rewrite and leave a mixed sequence. The write
+// is keyed to the tech-day read before the lock — a row that moved while we
+// waited misses the predicate and the request 409s instead of stamping a
+// stale sequence onto the row's new day.
 router.put('/:serviceId/reorder', async (req, res, next) => {
   try {
-    await db('scheduled_services').where({ id: req.params.serviceId }).update({ route_order: req.body.routeOrder });
-    res.json({ success: true });
-  } catch (err) { next(err); }
+    const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    let found = true;
+    await db.transaction(async (trx) => {
+      const prov = await trx('scheduled_services')
+        .where({ id: req.params.serviceId })
+        .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+      if (!prov) { found = false; return; } // pre-fence behavior: unknown id was a silent no-op
+      await lockTechDays(trx, [{ techId: prov.technician_id, date: prov.day }]);
+      const updated = await trx('scheduled_services')
+        .where({ id: req.params.serviceId })
+        .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [prov.day])
+        .modify((q) => (prov.technician_id ? q.where('technician_id', prov.technician_id) : q.whereNull('technician_id')))
+        .update({ route_order: req.body.routeOrder });
+      if (updated !== 1) throw Object.assign(new Error('schedule changed while reordering'), { code: 'STALE_OPTIMIZE' });
+    });
+    res.json({ success: true, ...(found ? {} : { updated: 0 }) });
+  } catch (err) {
+    if (err.code === 'STALE_OPTIMIZE') return res.status(409).json({ error: 'Schedule changed while reordering — reload and retry' });
+    next(err);
+  }
 });
 
 // PUT /api/admin/dispatch/reorder-bulk
+// One transaction, complete tech-day lock union acquired ONCE sorted, every
+// write keyed to its pre-lock tech-day — same contract as the single-row
+// endpoint above. The pre-fence version wrote row-by-row unfenced and
+// non-transactional: racing the nightly reorder could land half the manual
+// order before its rewrite and half after (uncapped audit r22 P1).
 router.put('/reorder/bulk', async (req, res, next) => {
   try {
     const { order } = req.body;
-    for (const item of order) {
-      await db('scheduled_services').where({ id: item.serviceId }).update({ route_order: item.routeOrder });
-    }
+    const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    await db.transaction(async (trx) => {
+      const rows = await trx('scheduled_services')
+        .whereIn('id', (order || []).map((i) => i.serviceId))
+        .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+      const byId = new Map(rows.map((r) => [String(r.id), r]));
+      await lockTechDays(trx, rows.map((r) => ({ techId: r.technician_id, date: r.day })));
+      for (const item of order || []) {
+        const prov = byId.get(String(item.serviceId));
+        if (!prov) continue; // pre-fence behavior: unknown id was a silent no-op
+        const updated = await trx('scheduled_services')
+          .where({ id: item.serviceId })
+          .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [prov.day])
+          .modify((q) => (prov.technician_id ? q.where('technician_id', prov.technician_id) : q.whereNull('technician_id')))
+          .update({ route_order: item.routeOrder });
+        if (updated !== 1) throw Object.assign(new Error('schedule changed while reordering'), { code: 'STALE_OPTIMIZE' });
+      }
+    });
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'STALE_OPTIMIZE') return res.status(409).json({ error: 'Schedule changed while reordering — reload and retry' });
+    next(err);
+  }
 });
 
 // GET /api/admin/dispatch/products/catalog
