@@ -8348,10 +8348,17 @@ router.put('/:id/status', async (req, res, next) => {
     // 'confirmed' tap is not the only field path: pending → en_route/on_site/
     // completed day-of skips 'confirmed' entirely, and without the durable
     // stamp the lazy activation ran the office-side card funnel on a visit
-    // the technician was standing at. Same stamp, same trx.
+    // the technician was standing at. Same stamp, same trx. The state test is
+    // "activation still owed" (customer_confirmed unset — the stamp IS the
+    // activation receipt on office-review rows), not "status pending": an
+    // office confirm whose activation failed leaves the row confirmed-but-
+    // unstamped, and the tech advancing THAT row day-of is a field confirm
+    // too. Ownership is enforced by technicianCurrentVisitFilter on the
+    // pre-select plus the in-trx row-locked re-check below.
     const isFieldLifecycleTakeover = isTechnicianRequest(req)
       && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
-      && fromStatus === 'pending'
+      && svc.customer_confirmed !== true
+      && ['pending', 'confirmed'].includes(fromStatus)
       && DAY_OF_LIFECYCLE_STATUSES.has(toStatus);
 
     try {

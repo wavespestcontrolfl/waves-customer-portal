@@ -3543,13 +3543,21 @@ router.put('/:serviceId/status', async (req, res, next) => {
     const isOfficeReviewConfirm = toStatus === 'confirmed'
       && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action);
     // ⭐ A TECHNICIAN RUNNING THE VISIT IS A FIELD CONFIRMATION — the same
-    // day-of takeover semantics as the admin-schedule status route: a pending
-    // office-review row moved straight to en_route/on_site/completed by its
-    // technician must carry the durable field stamp, or the lazy activation
-    // runs the office-side card funnel on a visit the tech is standing at.
+    // day-of takeover semantics as the admin-schedule status route: an
+    // office-review row still owing activation (customer_confirmed unset —
+    // covers pending AND the confirmed-but-unstamped activation-retry state)
+    // moved straight to en_route/on_site/completed by ITS OWN technician must
+    // carry the durable field stamp, or the lazy activation runs the
+    // office-side card funnel on a visit the tech is standing at. This route
+    // is not tech-ownership-scoped like admin-schedule, so the predicate
+    // enforces assignment itself: only the visit's current technician can
+    // field-stamp it.
     const isFieldLifecycleTakeover = req.techRole === 'technician'
+      && req.technicianId
+      && String(svc.technician_id || '') === String(req.technicianId)
       && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
-      && fromStatus === 'pending'
+      && svc.customer_confirmed !== true
+      && ['pending', 'confirmed'].includes(fromStatus)
       && ['en_route', 'on_site', 'completed'].includes(toStatus);
     try {
       await db.transaction(async (trx) => {

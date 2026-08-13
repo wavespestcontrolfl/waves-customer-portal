@@ -1131,14 +1131,30 @@ describe('field-confirm semantics cover day-of takeovers on BOTH status routes',
   const fs = require('fs');
   const path = require('path');
   for (const file of ['admin-schedule.js', 'admin-dispatch.js']) {
-    test(`${file}: pending office-review row moved day-of by its technician stamps field_confirmed_at`, () => {
+    test(`${file}: unactivated office-review row moved day-of by its technician stamps field_confirmed_at`, () => {
       const src = fs.readFileSync(path.join(__dirname, '../routes', file), 'utf8');
       const idx = src.indexOf('const isFieldLifecycleTakeover');
       expect(idx).toBeGreaterThan(-1);
       const predicate = src.slice(idx, idx + 700);
       expect(predicate).toContain('OFFICE_REVIEW_PENDING_SOURCE_ACTIONS');
-      expect(predicate).toContain("fromStatus === 'pending'");
+      // The state test is "activation still owed", NOT "status pending" — a
+      // confirmed-but-unstamped activation-retry row is a field confirm too.
+      expect(predicate).toContain('svc.customer_confirmed !== true');
+      expect(predicate).toContain("['pending', 'confirmed'].includes(fromStatus)");
       expect(src).toMatch(/if \(isFieldLifecycleTakeover\) \{\s*\n\s*lifecycleUpdates\.field_confirmed_at = svc\.field_confirmed_at \|\| /);
     });
   }
+
+  // ⭐ ONLY THE VISIT'S OWN TECHNICIAN CAN FIELD-STAMP IT. admin-schedule
+  // scopes technician requests via technicianCurrentVisitFilter + an in-trx
+  // row-locked re-check; admin-dispatch is not ownership-scoped, so its
+  // predicate must enforce assignment itself.
+  test('admin-dispatch.js: the takeover predicate enforces technician ownership', () => {
+    const fs2 = require('fs');
+    const src = fs2.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const idx = src.indexOf('const isFieldLifecycleTakeover');
+    const predicate = src.slice(idx, idx + 700);
+    expect(predicate).toContain('String(svc.technician_id || \'\') === String(req.technicianId)');
+    expect(predicate).toContain('req.technicianId');
+  });
 });
