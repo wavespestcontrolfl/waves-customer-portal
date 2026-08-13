@@ -99,6 +99,30 @@ describe('diffServiceContacts', () => {
     ]);
   });
 
+  test('a shared household phone does not misattribute a removal', () => {
+    // Jane and Bob share a phone; Jane is deleted and Bob compacts 2→1.
+    // A phone-first match would pair Bob with Jane ("updated Bob" + false
+    // "removed Bob"); the unique-match preference must record Jane's removal.
+    const before = {
+      ...jane,
+      service_contact2_name: 'Bob Smith',
+      service_contact2_phone: '+15551231234',
+      service_contact2_email: 'bob@example.com',
+    };
+    const after = {
+      service_contact_name: 'Bob Smith',
+      service_contact_phone: '+15551231234',
+      service_contact_email: 'bob@example.com',
+    };
+    const events = diffServiceContacts(before, after);
+    expect(events).toEqual([
+      expect.objectContaining({
+        action: 'service_contact_removed',
+        person: expect.objectContaining({ name: 'Jane Smith' }),
+      }),
+    ]);
+  });
+
   test('a role-only change is an update flagged on role', () => {
     const events = diffServiceContacts(jane, {
       ...jane,
@@ -147,12 +171,15 @@ describe('recordServiceContactChanges', () => {
     expect(rows[0].description).not.toContain('5551231234');
     expect(rows[0].description).not.toContain('Smith');
     expect(rows[0].description).not.toContain('jane@example.com');
-    // …but metadata carries the complete contact for the People panel.
-    expect(JSON.parse(rows[0].metadata)).toEqual(expect.objectContaining({
+    // …and metadata is masked the same way — no reader needs full values
+    // today, so no full third-party PII is retained anywhere in the row.
+    const metadata = JSON.parse(rows[0].metadata);
+    expect(JSON.stringify(metadata)).not.toMatch(/Smith|5551231234|jane@example\.com/);
+    expect(metadata).toEqual(expect.objectContaining({
       slot: 1,
-      name: 'Jane Smith',
-      phone: '+15551231234',
-      email: 'jane@example.com',
+      name: 'Jane S.',
+      phone: '…1234',
+      email: 'j…@example.com',
       role: 'spouse',
       source: 'portal',
       actor_customer_id: 'cust-primary',

@@ -1681,6 +1681,18 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       .where({ id: customerId })
       .where((q) => q.whereNull(matched.roleCol).orWhere(matched.roleCol, ''))
       .update({ [matched.roleCol]: roleToRecord.slice(0, 30) });
+    if (wrote) {
+      // 360 timeline event — post-write, best-effort (never fails the call
+      // pipeline; the recorder catches its own failures).
+      require('./service-contact-events').recordServiceContactChanges({
+        customerId,
+        before: customer,
+        after: { ...customer, [matched.roleCol]: roleToRecord.slice(0, 30) },
+        source: 'call',
+      }).catch((err) => {
+        logger.warn(`[call-processor] service-contact event recording failed for customer ${customerId}: ${err.message}`);
+      });
+    }
     return !!wrote;
   };
   if (contact.phone && knownPhones.includes(last10(contact.phone))) {
@@ -1765,7 +1777,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     write = write.where((q) => q.whereNull(col).orWhere(col, ''));
   }
   const contactRole = String(contact.role || '').trim().toLowerCase();
-  const updated = await write.update({
+  const slotWrite = {
     [emptySlot.name]: fullName ? capitalizeName(fullName) : null,
     [emptySlot.phone]: contact.phone || null,
     [emptySlot.email]: slotEmail,
@@ -1792,8 +1804,20 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       service_contacts_consent_source: null,
       service_contacts_consent_text_version: null,
     } : {}),
-  });
+  };
+  const updated = await write.update(slotWrite);
   if (!updated) return 'skipped_slot_race';
+  // 360 timeline event — post-write, best-effort. The conditional WHERE
+  // proved the slot was still empty at write time, so merging slotWrite over
+  // the read snapshot diffs to exactly this one addition.
+  require('./service-contact-events').recordServiceContactChanges({
+    customerId,
+    before: customer,
+    after: { ...customer, ...slotWrite },
+    source: 'call',
+  }).catch((err) => {
+    logger.warn(`[call-processor] service-contact event recording failed for customer ${customerId}: ${err.message}`);
+  });
   return 'written';
 }
 

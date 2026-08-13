@@ -748,10 +748,13 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
   if (!winnerId || !loserId || winnerId === loserId) {
     throw new Error('executeMerge: winnerId and loserId must be distinct');
   }
-  return db.transaction(async (trx) => {
+  // Locked winner snapshot, hoisted for the post-commit contact audit event.
+  let winnerBeforeMerge = null;
+  const result = await db.transaction(async (trx) => {
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loser = locked.find((r) => r.id === loserId);
+    winnerBeforeMerge = winner;
     if (!winner || !loser) throw new Error('executeMerge: customer not found');
     if (winner.deleted_at || loser.deleted_at) throw new Error('executeMerge: refusing to merge a deleted customer');
     // The surviving row must be live: retiring an active customer into an
@@ -1494,6 +1497,20 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     // link-as-property route preserves the loser's address on the winner).
     return { journalId: journal?.id || journal, repointed, backfills, loserSnapshot: loser };
   });
+  // 360 timeline events for loser contacts appended onto the winner —
+  // post-commit, best-effort (a failed event must never fail the merge).
+  // No-op when the backfills touched no contact slot.
+  if (winnerBeforeMerge) {
+    require('./service-contact-events').recordServiceContactChanges({
+      customerId: winnerId,
+      before: winnerBeforeMerge,
+      after: { ...winnerBeforeMerge, ...result.backfills },
+      source: 'dedupe',
+    }).catch((err) => {
+      logger.warn(`[customer-dedupe] service-contact event recording failed for customer ${winnerId}: ${err.message}`);
+    });
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -2082,6 +2099,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     err.statusCode = 409;
     throw err;
   };
+  // Locked winner snapshot + applied patch, hoisted for the post-commit
+  // contact audit event (backfilled loser contacts leaving the winner).
+  let winnerBeforeUndo = null;
+  let winnerPatchApplied = null;
   const result = await db.transaction(async (trx) => {
     const journal = await trx('customer_merge_journal').where({ id: journalId }).forUpdate().first();
     if (!journal) refuse('Merge journal entry not found');
@@ -3547,6 +3568,8 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     }
     if (Object.keys(winnerPatch).length) {
       await trx('customers').where({ id: winnerId }).update({ ...winnerPatch, updated_at: trx.fn.now() });
+      winnerBeforeUndo = winner;
+      winnerPatchApplied = winnerPatch;
     }
     if (!ledgerMovedBack && creditsMovedBack) {
       await trx('customers').where({ id: winnerId }).decrement('account_credits', creditsMovedBack);
@@ -3720,6 +3743,19 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       winnerName: [winner.first_name, winner.last_name].filter(Boolean).join(' ') || 'Unknown',
     };
   });
+
+  // Post-commit on purpose: a failed event must never roll back the revert.
+  // No-op when the reverted patch touched no contact slot.
+  if (winnerBeforeUndo && winnerPatchApplied) {
+    require('./service-contact-events').recordServiceContactChanges({
+      customerId: result.winnerId,
+      before: winnerBeforeUndo,
+      after: { ...winnerBeforeUndo, ...winnerPatchApplied },
+      source: 'dedupe_undo',
+    }).catch((err) => {
+      logger.warn(`[customer-dedupe] service-contact event recording failed for customer ${result.winnerId}: ${err.message}`);
+    });
+  }
 
   // Post-commit on purpose: a failed bell must never roll back the revert.
   try {

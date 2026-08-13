@@ -19,15 +19,14 @@
  * any failure only warns — a logging failure must never fail the customer's
  * save (same posture as the account.updated email dispatch).
  *
- * Descriptions carry only masked identifiers (first name + last initial,
- * first-letter-masked email, last-4 phone) because they ride global
- * surfaces — the dashboard recentActivity feed and the IB briefing. The
- * full contact detail lives in metadata — the People panel (Phase 2) needs
- * it for removed-contact history, which no other table retains. Both the
- * timeline endpoint and the raw table are admin-only, and the dashboard
- * feed strips metadata from service_contact_* rows
- * (routes/admin-dashboard.js) so full detail stays scoped to the
- * customer's own timeline.
+ * Descriptions AND metadata carry only masked identifiers (first name +
+ * last initial, first-letter-masked email, last-4 phone): descriptions ride
+ * global surfaces (the dashboard recentActivity feed, the IB briefing), and
+ * no current reader needs the full values — the timeline selects only
+ * action/description/created_at. The Phase 2 People panel can move to full
+ * detail forward-only when its consumer ships. The dashboard feed
+ * additionally strips metadata from service_contact_* rows
+ * (routes/admin-dashboard.js) as defense in depth.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -59,6 +58,8 @@ const SOURCE_LABELS = {
   portal: 'customer portal',
   admin: 'admin',
   dedupe: 'account merge',
+  dedupe_undo: 'account merge undo',
+  call: 'call pipeline',
 };
 
 // Populated slots as people: {slot, name, phone, email, role}.
@@ -75,9 +76,15 @@ function slotPeople(customerRow) {
 }
 
 function matchPerson(person, candidates) {
-  return candidates.find((c) => phoneKey(person.phone) && phoneKey(person.phone) === phoneKey(c.phone))
-    || candidates.find((c) => norm(person.email) && norm(person.email) === norm(c.email))
+  // A shared household phone can match several people — only a UNIQUE phone
+  // match is identity on its own. On an ambiguous phone, fall through to
+  // email/name to pick the right person; the ambiguous pool is the fallback
+  // only when nothing else disambiguates.
+  const phoneMatches = candidates.filter((c) => phoneKey(person.phone) && phoneKey(person.phone) === phoneKey(c.phone));
+  if (phoneMatches.length === 1) return phoneMatches[0];
+  return candidates.find((c) => norm(person.email) && norm(person.email) === norm(c.email))
     || candidates.find((c) => norm(person.name) && norm(person.name) === norm(c.name))
+    || phoneMatches[0]
     || null;
 }
 
@@ -168,9 +175,14 @@ async function recordServiceContactChanges({
       description: describeEvent(event, sourceLabel),
       metadata: JSON.stringify({
         slot: event.person.slot,
-        name: event.person.name || null,
-        phone: event.person.phone || null,
-        email: event.person.email || null,
+        // Masked like the description: no reader needs the full values today
+        // (the timeline selects action/description/created_at), so retaining
+        // full third-party PII would serve only the unbuilt Phase 2 People
+        // panel — which can switch to full detail forward-only when its
+        // consumer actually ships and is reviewed.
+        name: maskName(event.person.name) || null,
+        phone: maskPhone(event.person.phone) || null,
+        email: maskEmail(event.person.email) || null,
         role: event.person.role || null,
         source,
         actor_customer_id: actorCustomerId,
