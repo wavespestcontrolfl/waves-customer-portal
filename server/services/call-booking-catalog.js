@@ -605,14 +605,25 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
       { techId: k.technician_id, date: k.day },
       { techId: k.technician_id, date: k.new_day },
     ]));
-    return trx('scheduled_services')
-      .whereIn('id', kids.map((k) => k.id))
-      .where(filter)
-      .update({
-        scheduled_date: trx.raw('scheduled_date + (?::date - ?::date)', [toStr, fromStr]),
-        route_order: null,
-        updated_at: trx.fn.now(),
-      });
+    // Each write is keyed to the day OBSERVED before the lock (uncapped
+    // audit r28 P1): a reschedule that committed while we waited for the
+    // fence has already moved the child — shifting the NEWER date would
+    // double-move it into tech-days this transaction never locked. A day
+    // mismatch skips that child (best-effort contract: it stays where the
+    // newer writer put it).
+    let shifted = 0;
+    for (const k of kids) {
+      shifted += await trx('scheduled_services')
+        .where({ id: k.id })
+        .where(filter)
+        .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [k.day])
+        .update({
+          scheduled_date: trx.raw('scheduled_date + (?::date - ?::date)', [toStr, fromStr]),
+          route_order: null,
+          updated_at: trx.fn.now(),
+        });
+    }
+    return shifted;
   };
   return conn.isTransaction ? run(conn) : conn.transaction(run);
 }

@@ -1188,12 +1188,12 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
   // Mirrors the real surface the fenced implementation uses (mock ≠ prod
   // export rule): conn.transaction(cb) hands cb a trx.
   function fakeConn({ updatedCount = 1, kids = [{ id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19' }] } = {}) {
-    const log = { table: null, where: null, whereIn: null, update: null, raws: [], lockKeys: [] };
+    const log = { table: null, where: null, wheres: [], update: null, raws: [], lockKeys: [] };
     const trx = (table) => {
       log.table = table;
       const chain = {
-        where: (arg) => { if (!log.where) log.where = arg; return chain; },
-        whereIn: (_col, ids) => { log.whereIn = ids; return chain; },
+        where: (arg) => { log.wheres.push(arg); if (!log.where) log.where = arg; return chain; },
+        whereRaw: (sql, bindings) => { log.wheres.push({ sql, bindings }); return chain; },
         select: () => Promise.resolve(kids),
         update: (arg) => { log.update = arg; return Promise.resolve(updatedCount); },
       };
@@ -1239,7 +1239,10 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     // BEFORE the write, and the day change clears the stale route_order.
     expect(log.lockKeys).toEqual(expect.arrayContaining(['t1:2026-07-16', 't1:2026-07-19']));
     expect(log.update).toMatchObject({ route_order: null });
-    expect(log.whereIn).toEqual(['kid-1']);
+    // Per-row write keyed to the pre-lock observed id + day — a child moved
+    // by a concurrent writer misses instead of being double-shifted.
+    expect(log.wheres).toContainEqual({ id: 'kid-1' });
+    expect(log.wheres).toContainEqual(expect.objectContaining({ bindings: ['2026-07-16'] }));
   });
 
   test('pg date hydration (JS Date at LOCAL midnight) recovers the calendar date', async () => {
