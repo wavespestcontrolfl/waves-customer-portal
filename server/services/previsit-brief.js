@@ -799,8 +799,13 @@ const COMMON_PROSE_WORDS = new Set([
   'told', 'used', 'want', 'well', 'your', 'their', 'after', 'need', 'needs', 'ask',
   'asks', 'same', 'soon', 'once', 'twice', 'edge', 'best', 'back', 'full', 'half',
   'away', 'near', 'upon', 'very', 'much', 'many', 'wear', 'shoe', 'shoes', 'rain',
-  'wind', 'heat', 'cold', 'warm', 'soil', 'seed', 'grub', 'grubs', 'weed', 'weeds', 'file', 'card', 'paid', 'owed', 'owes', 'due', 'dues', 'crew', 'team', 'unit', 'step', 'path', 'walk', 'tarp', 'hose', 'pump', 'tank', 'mask', 'kit',
+  'wind', 'heat', 'cold', 'warm', 'soil', 'seed', 'file', 'down', 'knock', 'card', 'paid', 'owed', 'owes', 'due', 'dues', 'crew', 'team', 'unit', 'step', 'path', 'walk', 'tarp', 'hose', 'pump', 'tank', 'mask', 'kit',
 ]);
+
+// Short/common organism names — too short (or too domain-loaded) for the
+// rare-word scan and unsound to substring-ground ('rat' matches inside
+// 'operator'). Every occurrence must be WORD-BOUNDARY grounded.
+const SHORT_ORGANISM_RE = /\b(rats?|mouse|mice|ants?|bees?|fly|flies|wasps?|ticks?|fleas?|moths?|slugs?|grubs?|mites?|voles?|moles?|gnats?|weeds?|aphids?)\b/g;
 
 // Light stemming for the rare-word pass — plurals/participles of known or
 // grounded words must not read as novel.
@@ -993,6 +998,19 @@ function findUngroundedClaim(body, grounding) {
   const selfReported = new Set(
     (body.mentioned_terms || []).flatMap((t) => String(t).toLowerCase().split(/\s+/)),
   );
+  // Organism boundary pass: short pest names checked with word-boundary
+  // grounding (substring would false-ground 'rat' inside 'operator');
+  // singular grounds on plural and vice versa.
+  for (const field of outputFields) {
+    for (const m of String(field).toLowerCase().matchAll(SHORT_ORGANISM_RE)) {
+      const organism = m[1];
+      const stems = [...new Set([organism, organism.replace(/s$/, ''), `${organism}s`,
+        organism === 'mice' ? 'mouse' : organism, organism === 'flies' ? 'fly' : organism])];
+      const escapeStem = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const grounded = stems.some((stem) => new RegExp(`\\b${escapeStem(stem)}s?\\b`).test(groundedText));
+      if (!grounded) return { kind: 'novel_target', term: organism };
+    }
+  }
   const wordKnown = (word) => wordVariants(word).some((v) => (
     REFERENCE_STOP_WORDS.has(v)
     || COMMON_PROSE_WORDS.has(v)

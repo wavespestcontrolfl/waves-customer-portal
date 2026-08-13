@@ -566,7 +566,23 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
       { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Inspect mice near the garage'] },
       GROUNDING,
     );
-    expect(verdict.reason).toMatch(/^ungrounded_novel_term:mice/);
+    expect(verdict.reason).toMatch(/^ungrounded_novel_(term|target):mice/);
+  });
+
+  test('short ungrounded organisms are caught with word-boundary grounding', () => {
+    for (const prose of ['Rat activity warrants inspection', 'Inspect grubs near the lawn']) {
+      const verdict = validateBriefJson(
+        { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [prose] },
+        GROUNDING,
+      );
+      expect(verdict.reason).toMatch(/^ungrounded_novel_target:/);
+    }
+    // Grounded short organisms still pass ('ants' is in the call summary).
+    const ok = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: ['ants'], priorities: ['Knock down ant trails at the garage'] },
+      GROUNDING,
+    );
+    expect(ok.reason).toBeUndefined();
   });
 
   test('a clean response yields the sanitized body', () => {
