@@ -79,14 +79,20 @@ function parseExtractedAddress(raw) {
 // the first reply/signature marker. Conservative — an unrecognized
 // signature style just means extra text reaches the scan, which the
 // commercial patterns already require strong premises wording to match.
-// A `From:` line OPENING the body is usually an automated form
-// notification's own payload ("From: Jane Doe" / "Phone: …" / "Message: our
-// warehouse needs quarterly service"), not a reply header — breaking there
-// discarded the entire request and left a residential-priced draft eligible
-// for auto-send (codex r48 P1). A leading `From:` ends the sender's text
-// only inside a recognizable quoted block: after a forwarded/original-
-// message separator, or when the following lines form an RFC header block
-// (`To:` plus `Sent:`/`Date:`), which a form payload does not carry.
+// A `From:` line is a reply header in a reply and a PAYLOAD FIELD in an
+// automated form notification ("From: Jane Doe" / "Phone: …" / "Message: our
+// warehouse needs quarterly service"). Breaking at every `From:` discarded
+// the entire request and left a residential-priced draft eligible for
+// auto-send (codex r48 P1). Preceding content does NOT settle it either — a
+// form notification routinely opens with a preamble line ("New website
+// inquiry") before its fields, and gating on that still dropped the request
+// (codex r50 P1). So `From:` ends the sender's text only inside a
+// recognizable QUOTED BLOCK: after a forwarded/original-message separator,
+// or when the following lines form an RFC header block (`To:` plus
+// `Sent:`/`Date:`/`Subject:`), which a form payload does not carry.
+// Leaking a same-thread quoted original into the scan is the benign
+// direction — r43/r47 deliberately feed prior-thread prose to it — while a
+// forward of a DIFFERENT property is caught by the separator above.
 const FORWARD_SEPARATOR_RE = /^\s*(?:[-_]{2,}\s*)?(?:begin\s+)?(?:forwarded message|original message)/i;
 function looksLikeQuotedHeaderBlock(lines, index) {
   const window = lines.slice(index + 1, index + 6);
@@ -109,7 +115,7 @@ function emailProseForScan(body) {
     // wherever it appears (its `From:`/`To:` header block follows).
     if (FORWARD_SEPARATOR_RE.test(line)) break;
     if (/^\s*From:\s/i.test(line)) {
-      if (hasContent() || looksLikeQuotedHeaderBlock(lines, i)) break;
+      if (looksLikeQuotedHeaderBlock(lines, i)) break;
       // Form-payload field: keep scanning for the request text below it, but
       // never scan the FIELD itself — a sender line carrying an employer
       // ("Sarasota Warehouse Supply") is not a statement about the premises

@@ -201,6 +201,26 @@ describe('maybeDraftEstimateFromEmailLead', () => {
       expect(scannedMessage()).toContain('warehouse');
     });
 
+    test('a preamble line above the From: field does not make it a reply header', async () => {
+      // Form notifications routinely open with a banner line before their
+      // fields; gating on "content precedes it" still dropped the request.
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'New inquiry',
+          body_text: [
+            'New website inquiry',
+            'From: Jane Doe',
+            'Phone: 941-555-0184',
+            'Message: service our warehouse on 48th Ave E.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toContain('warehouse');
+    });
+
     test('the sender field itself is never scanned as premises wording', async () => {
       await maybeDraftEstimateFromEmailLead({
         email: {
