@@ -740,6 +740,57 @@ const REFERENCE_STOP_WORDS = new Set([
   'overall', 'seasonal', 'pest', 'insect',
 ]);
 
+// Ordinary field-prose vocabulary (verbs/nouns/adjectives a brief uses,
+// plus calendar words). The rare-word pass below rejects any output word
+// outside this set, the stopwords, the grounding, and the self-reported
+// terms — prose validation cannot prove a free sentence names no novel
+// organism, so an unrecognized rare word fails the leg to the template
+// (safe degradation; the brief must never carry invented guidance).
+const COMMON_PROSE_WORDS = new Set([
+  'about', 'above', 'access', 'account', 'action', 'address', 'after', 'again', 'ahead', 'alert',
+  'along', 'amount', 'annual', 'apply', 'applied', 'applying', 'appointment', 'approach', 'arrival', 'arrive',
+  'arriving', 'asked', 'attention', 'avoid', 'balance', 'baseboard', 'baseboards', 'basement', 'bathroom', 'bedroom',
+  'before', 'begin', 'behind', 'below', 'between', 'billing', 'booked', 'booking', 'bring', 'building',
+  'cabinet', 'cabinets', 'called', 'calling', 'cancel', 'cancelled', 'carefully', 'caution', 'check', 'checked',
+  'checking', 'clear', 'close', 'closet', 'complete', 'completed', 'concern', 'concerns', 'condition', 'conditions',
+  'confirm', 'confirmed', 'contact', 'continue', 'continued', 'corner', 'corners', 'coverage', 'covered', 'crawl',
+  'credit', 'current', 'customer', 'cycle', 'damage', 'daytime', 'detail', 'details', 'discussed', 'dispatch',
+  'document', 'driveway', 'during', 'earlier', 'early', 'entry', 'estimate', 'evening', 'every', 'expect',
+  'expects', 'extra', 'family', 'fence', 'fencing', 'first', 'flag', 'flagged', 'focus', 'follow',
+  'following', 'front', 'garage', 'garden', 'gate', 'gates', 'gutter', 'gutters', 'heavy', 'hedge',
+  'hedges', 'history', 'home', 'hours', 'inspect', 'inspected', 'inspection', 'inside', 'invoice', 'issue',
+  'issues', 'items', 'kitchen', 'knock', 'landscape', 'lanai', 'later', 'lawn', 'leave', 'light',
+  'listed', 'locked', 'maintain', 'maintenance', 'member', 'membership', 'message', 'meter', 'monitor', 'monitoring',
+  'month', 'monthly', 'morning', 'mulch', 'needs', 'nothing', 'note', 'noted', 'notes', 'notice',
+  'notify', 'number', 'office', 'onsite', 'orders', 'other', 'outdoor', 'owner', 'panel', 'parking',
+  'patio', 'payment', 'pending', 'perimeter', 'phone', 'photo', 'photos', 'place', 'placed', 'planned',
+  'plans', 'plants', 'please', 'pool', 'porch', 'prefer', 'preference', 'preferences', 'prefers', 'pressure',
+  'previous', 'prior', 'program', 'progress', 'quote', 'rate', 'ready', 'recap', 'recent', 'recently',
+  'recheck', 'record', 'records', 'reminder', 'renewal', 'repair', 'report', 'reported', 'request', 'requested',
+  'reschedule', 'rescheduled', 'resolve', 'resolved', 'response', 'return', 'review', 'reviewed', 'right', 'roof',
+  'route', 'routine', 'schedule', 'scheduled', 'scope', 'screen', 'screened', 'season', 'secure', 'secured',
+  'sensitive', 'sensitivity', 'setup', 'sheet', 'shrubs', 'siding', 'since', 'skip', 'slab', 'small',
+  'soffit', 'spray', 'sprayed', 'spraying', 'spot', 'staff', 'start', 'started', 'status', 'still',
+  'stone', 'stops', 'sweep', 'swept', 'technician', 'texts', 'thorough', 'through', 'times', 'today',
+  'touch', 'toward', 'treat', 'treated', 'treatment', 'treatments', 'trees', 'update', 'updated', 'upcoming',
+  'verify', 'visit', 'visits', 'walk', 'walkthrough', 'warrant', 'warrants', 'watch', 'water', 'weather',
+  'weeks', 'weekly', 'window', 'windows', 'within', 'worth', 'yesterday', 'trail', 'trails', 'chemical', 'chemicals',
+  'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november',
+  'december', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+]);
+
+// Light stemming for the rare-word pass — plurals/participles of known or
+// grounded words must not read as novel.
+function wordVariants(word) {
+  const out = [word];
+  if (word.endsWith('es')) out.push(word.slice(0, -2));
+  if (word.endsWith('s')) out.push(word.slice(0, -1));
+  if (word.endsWith('ing')) out.push(word.slice(0, -3), `${word.slice(0, -3)}e`);
+  if (word.endsWith('ed')) out.push(word.slice(0, -2), word.slice(0, -1));
+  if (word.endsWith('ly')) out.push(word.slice(0, -2));
+  return out;
+}
+
 // A reference is grounded when the whole normalized phrase appears in the
 // grounding payload, or (fuzzy tier — word order/articles vary in prose)
 // when every significant word of it does. A phrase left with no
@@ -832,6 +883,32 @@ function findUngroundedClaim(body, grounding) {
     }
     for (const term of refs.targets) {
       if (!isGroundedReference(term, groundedText)) return { kind: 'novel_target', term };
+    }
+  }
+  // Rare-word pass — the shape regexes above cannot see every sentence
+  // form ("Inspect unicorn beetles near the garage" passes them). Any
+  // output word that is not stopword/common-prose, not in the grounding,
+  // and not a (grounded-verified) self-reported term is treated as a
+  // novel reference.
+  const selfReported = new Set(
+    (body.mentioned_terms || []).flatMap((t) => String(t).toLowerCase().split(/\s+/)),
+  );
+  const wordKnown = (word) => wordVariants(word).some((v) => (
+    REFERENCE_STOP_WORDS.has(v)
+    || COMMON_PROSE_WORDS.has(v)
+    || selfReported.has(v)
+    || groundedText.includes(v)
+  ));
+  for (const field of outputFields) {
+    for (const m of String(field).toLowerCase().matchAll(/[a-z][a-z'-]{4,}/g)) {
+      const word = m[0];
+      // Hyphenated prose ("re-check", "walk-through"): known when every
+      // part is known; short parts are below the rare-word threshold.
+      const parts = word.split('-').filter(Boolean);
+      const known = parts.length > 1
+        ? parts.every((part) => part.length < 5 || wordKnown(part))
+        : wordKnown(word);
+      if (!known) return { kind: 'novel_term', term: word };
     }
   }
   return null;

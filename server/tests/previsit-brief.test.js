@@ -483,6 +483,16 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
     expect(verdict.reason).toMatch(/^ungrounded_(novel_target:|term:)/);
   });
 
+  test('a novel organism in an unrecognized sentence shape is still caught (rare-word pass)', () => {
+    // No preposition, no activity-noun, not self-reported — the rare-word
+    // pass is the layer that must reject it.
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Inspect unicorn beetles near the garage'] },
+      GROUNDING,
+    );
+    expect(verdict.reason).toMatch(/^ungrounded_novel_term:/);
+  });
+
   test('a clean response yields the sanitized body', () => {
     const verdict = validateBriefJson({ ...CLEAN_LLM_JSON }, GROUNDING);
     expect(verdict.reason).toBeUndefined();

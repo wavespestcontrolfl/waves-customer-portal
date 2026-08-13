@@ -248,7 +248,7 @@ describe('POST /:id/regenerate-brief', () => {
       expect(body.success).toBe(true);
       expect(body.unchanged).toBe(false);
       expect(body.brief.version).toBe('visit_brief_v1');
-      expect(mockGenerateVisitBrief).toHaveBeenCalledWith('svc-1');
+      expect(mockGenerateVisitBrief).toHaveBeenCalledWith('svc-1', { force: true });
       expect(mockOnServiceScheduled).not.toHaveBeenCalled();
     });
   });
