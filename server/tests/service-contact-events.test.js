@@ -144,6 +144,29 @@ describe('diffServiceContacts', () => {
     expect(events).toHaveLength(2);
   });
 
+  test('a phone newly shared with another listed contact does not swap identities', () => {
+    // Jane changes her phone to Bob's existing household number. Her email
+    // and name are unchanged — she must match herself (one phone update),
+    // not pair with Bob and spray spurious add/remove events.
+    const before = {
+      ...jane,
+      service_contact2_name: 'Bob Neighbor',
+      service_contact2_phone: '+15557775555',
+      service_contact2_email: 'bob@example.com',
+    };
+    const after = {
+      ...before,
+      service_contact_phone: '+15557775555',
+    };
+    expect(diffServiceContacts(before, after)).toEqual([
+      expect.objectContaining({
+        action: 'service_contact_updated',
+        person: expect.objectContaining({ name: 'Jane Smith' }),
+        changed: ['phone'],
+      }),
+    ]);
+  });
+
   test('a role-only change is an update flagged on role', () => {
     const events = diffServiceContacts(jane, {
       ...jane,

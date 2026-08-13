@@ -76,14 +76,17 @@ function slotPeople(customerRow) {
 }
 
 function matchPerson(person, candidates) {
-  // A shared household phone can match several people — only a UNIQUE phone
-  // match is identity on its own. On an ambiguous phone, fall through to
-  // email/name to pick the right person; the ambiguous pool is the fallback
-  // only when nothing else disambiguates.
+  // Identity preference: an exact email match is the strongest evidence — a
+  // phone can be a shared household line or newly transferred between
+  // people (Jane switching to Bob's existing number must not pair Jane with
+  // Bob). A phone match identifies on its own only when it is UNIQUE and no
+  // email evidence claimed the person first; name is the last resort before
+  // the ambiguous-phone fallback.
+  const emailMatch = candidates.find((c) => norm(person.email) && norm(person.email) === norm(c.email));
+  if (emailMatch) return emailMatch;
   const phoneMatches = candidates.filter((c) => phoneKey(person.phone) && phoneKey(person.phone) === phoneKey(c.phone));
   if (phoneMatches.length === 1) return phoneMatches[0];
-  return candidates.find((c) => norm(person.email) && norm(person.email) === norm(c.email))
-    || candidates.find((c) => norm(person.name) && norm(person.name) === norm(c.name))
+  return candidates.find((c) => norm(person.name) && norm(person.name) === norm(c.name))
     || phoneMatches[0]
     || null;
 }
