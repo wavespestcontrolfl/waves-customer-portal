@@ -181,6 +181,10 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
       const chain = {
         leftJoin: () => chain,
         where: () => chain,
+        // The shared CTA writer spans sources with whereIn + picks the
+        // newest open row with orderBy.
+        whereIn: () => chain,
+        orderBy: () => chain,
         whereNotIn: () => chain,
         forUpdate: () => chain,
         select: () => chain,

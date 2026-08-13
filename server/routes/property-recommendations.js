@@ -28,8 +28,8 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { buildPropertyRecommendations, mosquitoNoteCard } = require('../services/property-recommendations');
 const { buildPortalOffer } = require('../services/service-report/cross-sell');
-const { normalizeRequestedServiceKey, OPEN_REQUEST_TERMINAL_STATUSES } = require('../services/estimate-add-service-request');
-const { storedRevisionMatches } = require('./reports-public');
+const { normalizeRequestedServiceKey } = require('../services/estimate-add-service-request');
+const { writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
 router.use(authenticate);
 
@@ -74,9 +74,10 @@ router.post('/request', requestLimiter, async (req, res, next) => {
         return res.status(409).json({ error: 'This suggestion is no longer available — please refresh the page' });
       }
       const requestedService = normalizeRequestedServiceKey('mosquito') || 'mosquito';
-      const outcome = await writeOrRefreshRequest({
+      const outcome = await writeOrRefreshCtaRequest(db, {
         customerId: req.customerId,
         requestedService,
+        source: 'portal_home',
         subject: 'Add Mosquito Protection — requested from portal home',
         description: 'Customer asked about mosquito coverage from the portal home recommendations (quote requested — no price was shown). Review and follow up — no customer message has been sent.',
         revisionSnapshot: { source: 'portal_home', card: 'mosquito_note' },
@@ -119,9 +120,10 @@ router.post('/request', requestLimiter, async (req, res, next) => {
     const priceText = Number.isFinite(perApplication) && perApplication > 0
       ? `(shown $${perApplication.toFixed(2)} per application on portal home)`
       : '(quote requested from portal home)';
-    const outcome = await writeOrRefreshRequest({
+    const outcome = await writeOrRefreshCtaRequest(db, {
       customerId: req.customerId,
       requestedService,
+      source: 'portal_home',
       subject: `Add ${offer.label} — requested from portal home`,
       description: `Customer tapped "${offer.label}" on the portal home recommendations ${priceText}. Review and follow up — no customer message has been sent.`,
       // The server-computed offer snapshot — the shown price is the honored
@@ -134,44 +136,6 @@ router.post('/request', requestLimiter, async (req, res, next) => {
     next(err);
   }
 });
-
-// One transaction, serialized per customer, idempotent against an open row —
-// the same shape as the report cross-sell click write (source differs so the
-// two surfaces dedupe independently of each other's open requests).
-async function writeOrRefreshRequest({ customerId, requestedService, subject, description, revisionSnapshot }) {
-  return db.transaction(async (trx) => {
-    await trx('customers').where({ id: customerId }).forUpdate().first('id');
-    const existing = await trx('service_requests')
-      .where({ customer_id: customerId, requested_service: requestedService, source: 'portal_home' })
-      .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
-      .first();
-    if (existing) {
-      if (storedRevisionMatches(existing.pricing_revision, revisionSnapshot)
-        && existing.subject === subject) {
-        return { deduped: true };
-      }
-      await trx('service_requests').where({ id: existing.id }).update({
-        subject,
-        description,
-        pricing_revision: JSON.stringify(revisionSnapshot),
-        updated_at: new Date(),
-      });
-      return { request: existing, refreshed: true };
-    }
-    const [request] = await trx('service_requests').insert({
-      customer_id: customerId,
-      requested_service: requestedService,
-      source: 'portal_home',
-      category: 'add_service',
-      subject,
-      description,
-      urgency: 'routine',
-      status: 'new',
-      pricing_revision: JSON.stringify(revisionSnapshot),
-    }).returning('*');
-    return { request };
-  });
-}
 
 // Bell AFTER the durable row exists; a bell failure leaves the row
 // actionable in the Customer 360 requests panel either way.

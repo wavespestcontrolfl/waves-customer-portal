@@ -31,22 +31,10 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // Canonical (sorted-key) serializer — the repo's existing one, already shared
 // across service-report modules. Used to compare a JSONB round-trip against a
 // freshly built object without tripping over PostgreSQL's key ordering.
-const { stableStringify } = require('../services/service-report/ai-summary');
-const parseJsonOrNull = (value) => { try { return JSON.parse(value); } catch { return null; } };
+// Moved to the shared CTA writer (one mechanism for report + portal CTAs);
+// re-exported below so existing consumers/tests keep their import path.
+const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-// Does a stored service_requests.pricing_revision already hold exactly this
-// offer snapshot? Compared STRUCTURALLY (codex #3367 PR r11 P2):
-// pricing_revision is JSONB, so PostgreSQL stores it decomposed and returns
-// its own canonical key order — and its own numeric form (114.00 → 114.00,
-// not 114). A raw string compare against a freshly serialized object
-// therefore misses on ordering alone, so an identical repeat tap would churn
-// the row and mint another event row instead of being the intended no-op.
-// Both sides are parsed to JS values and canonically serialized; an
-// unparsable stored value simply fails to match and takes the refresh path.
-function storedRevisionMatches(stored, snapshot) {
-  const prior = typeof stored === 'string' ? parseJsonOrNull(stored) : (stored ?? null);
-  return stableStringify(prior) === stableStringify(snapshot);
-}
 const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -1185,7 +1173,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
           return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
         }
         {
-          const { normalizeRequestedServiceKey, OPEN_REQUEST_TERMINAL_STATUSES } = require('../services/estimate-add-service-request');
+          const { normalizeRequestedServiceKey } = require('../services/estimate-add-service-request');
           const requestedService = normalizeRequestedServiceKey(crossSell.serviceKey) || crossSell.serviceKey;
           const perApplication = Number(crossSell.option?.perVisit);
           const priceText = Number.isFinite(perApplication) && perApplication > 0
@@ -1199,68 +1187,24 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
           // One server-computed snapshot for insert, dedupe compare, AND the
           // refresh update — the three must never drift apart.
           const revisionSnapshot = { source: 'service_report', serviceRecordId: service.id, crossSell };
-          const outcome = await db.transaction(async (trx) => {
-            // Serialize per customer: the row lock makes check-then-insert
-            // idempotent (the estimate flow's partial-unique index only
-            // covers estimate-linked rows; this path has estimate_id NULL).
-            await trx('customers').where({ id: joined.customer_id }).forUpdate().first('id');
-            // The event row commits WITH the request row (or with the
-            // dedupe resolution to the existing open row) — one
-            // transaction, so analytics can never claim a request that has
-            // no actionable record.
-            const recordEvent = async () => {
+          // Shared CTA writer (one mechanism with the portal home CTA — the
+          // open-row lookup spans both sources so the same service tapped on
+          // two surfaces refreshes one row instead of minting two). The
+          // event row commits WITH the request row via onWrite — one
+          // transaction, so analytics can never claim a request that has no
+          // actionable record; the identical-resubmission no-op records no
+          // extra event (local codex r15 P1).
+          const outcome = await writeOrRefreshCtaRequest(db, {
+            customerId: joined.customer_id,
+            requestedService,
+            source: 'service_report',
+            subject: requestSubject,
+            description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
+            revisionSnapshot,
+            onWrite: async (trx) => {
               const recorded = await recordServiceReportEvent(service, eventName, channel, req, metadata, trx);
               if (!recorded) throw new Error('event insert failed');
-            };
-            const existing = await trx('service_requests')
-              .where({ customer_id: joined.customer_id, requested_service: requestedService, source: 'service_report' })
-              .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
-              .first();
-            if (existing) {
-              // An IDENTICAL resubmission (same validated snapshot and
-              // subject) is a pure no-op (local codex r15 P1): no row
-              // churn, no extra event row — the card simply re-confirms.
-              // The snapshot compare is structural (see storedRevisionMatches).
-              if (storedRevisionMatches(existing.pricing_revision, revisionSnapshot)
-                && existing.subject === requestSubject) {
-                return { deduped: true };
-              }
-              // Refresh the stored snapshot to THIS click's validated offer
-              // (codex #3367 PR r1): the shown-price lock must reflect what
-              // the customer just saw — an older revision (or a quote-mode
-              // row that has since become priced) must not stand as the
-              // recorded quote while the card confirms the new one.
-              // A refresh is a MATERIAL change, not a no-op (codex #3367 PR
-              // r12): the customer just price-locked a different offer —
-              // another report, another price, quote→priced, start→add. The
-              // no-notification path is reserved for the identical-snapshot
-              // branch above; here the bell fires so staff who already saw
-              // the old request learn the terms moved, and updated_at is
-              // stamped so the row does not sit frozen at its created_at.
-              await trx('service_requests').where({ id: existing.id }).update({
-                subject: requestSubject,
-                description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
-                pricing_revision: JSON.stringify(revisionSnapshot),
-                updated_at: new Date(),
-              });
-              await recordEvent();
-              return { request: existing, refreshed: true };
-            }
-            const [request] = await trx('service_requests').insert({
-              customer_id: joined.customer_id,
-              requested_service: requestedService,
-              source: 'service_report',
-              category: 'add_service',
-              subject: requestSubject,
-              description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
-              urgency: 'routine',
-              status: 'new',
-              // The server-computed offer snapshot — the shown price is the
-              // honored price (sent-quote price-lock doctrine).
-              pricing_revision: JSON.stringify(revisionSnapshot),
-            }).returning('*');
-            await recordEvent();
-            return { request };
+            },
           });
           if (!outcome.deduped) {
             // Bell AFTER the durable row exists; a bell failure leaves the
