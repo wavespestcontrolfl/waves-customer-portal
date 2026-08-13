@@ -1159,7 +1159,13 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const pestPricingVersion = (Array.isArray(v1?.lineItems)
       ? v1.lineItems.find((li) => li?.service === 'pest_control')?.pricingVersion
       : null) || null;
-    return { recomputed: true, source, serverResult, serverTotals, pestPricingVersion };
+    // rawEngineResult: the unmapped generateEstimate output. The click-to-
+    // estimate mint reads its per-line discounted annual/visit cadence for
+    // the cent-exact cross-check against the card's shown price — the same
+    // raw shape the card's own quote derivation consumed, so the check can
+    // never diverge on mapping differences. Additive; existing callers read
+    // only serverResult/serverTotals.
+    return { recomputed: true, source, serverResult, serverTotals, pestPricingVersion, rawEngineResult: v1 };
   } catch (error) {
     // failClosed policy rejections (gated/invalid add-on inside the replayed
     // inputs) propagate — wrapping them as ENGINE_ERROR would hand them to

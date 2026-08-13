@@ -3185,3 +3185,8 @@ router._internals = {
 };
 
 module.exports = router;
+// Publish-without-delivery consumers (report click-to-estimate mint) freeze
+// the SAME send snapshot the send/sibling-publication paths do — one bundle
+// builder, so a minted estimate's locked price replays exactly like a sent
+// one. Lazy-required by services to avoid load-order cycles.
+module.exports.buildEstimateSendSnapshot = buildEstimateSendSnapshot;

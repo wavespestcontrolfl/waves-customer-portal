@@ -1129,7 +1129,15 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
           )
           .first();
         const { buildReportCrossSell } = require('../services/service-report/cross-sell');
-        const crossSell = joined?.customer_id ? await buildReportCrossSell(joined, db) : null;
+        // Click-to-estimate (GATE_REPORT_CLICK_TO_ESTIMATE, inert without the
+        // parent card gate that already guarded this event): a priced tap
+        // mints a viewable estimate at the shown price inside the SAME
+        // transaction as the request row. Gate off → includeEngineContext is
+        // false and this block behaves byte-for-byte as today.
+        const clickToEstimate = require('../config/feature-gates').isEnabled('reportClickToEstimate');
+        const crossSell = joined?.customer_id
+          ? await buildReportCrossSell(joined, db, { includeEngineContext: clickToEstimate })
+          : null;
         // The recomputed offer must MATCH what the customer clicked (codex
         // #3367 r6 P1): a vanished offer, a different target family, or a
         // shown per-application price that no longer holds (>1% drift) all
@@ -1186,7 +1194,14 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
           const requestSubject = `${crossSell.relationship === 'start' ? 'Start' : 'Add'} ${crossSell.label} — requested from service report`;
           // One server-computed snapshot for insert, dedupe compare, AND the
           // refresh update — the three must never drift apart.
-          const revisionSnapshot = { source: 'service_report', serviceRecordId: service.id, crossSell };
+          // engineContext is STRIPPED first (click-to-estimate lane): it is
+          // server-internal mint material carrying raw engine inputs and the
+          // live customer row, whose incidental fields (updated_at) move
+          // between taps — embedding it would turn every identical tap into
+          // a "material refresh" (bell churn + a superseded estimate per
+          // tap), and its presence would also flip on the gate state.
+          const { engineContext: _mintContext, ...publicCrossSell } = crossSell;
+          const revisionSnapshot = { source: 'service_report', serviceRecordId: service.id, crossSell: publicCrossSell };
           // Shared CTA writer (one mechanism with the portal home CTA — the
           // open-row lookup spans both sources so the same service tapped on
           // two surfaces refreshes one row instead of minting two). The
@@ -1194,6 +1209,14 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
           // transaction, so analytics can never claim a request that has no
           // actionable record; the identical-resubmission no-op records no
           // extra event (local codex r15 P1).
+          // Mint hook (click-to-estimate): runs on EVERY writer outcome —
+          // dedupe included, because a repeat tap must hand back the same
+          // live estimate URL — inside the writer's transaction, so the
+          // estimate, the request row, and the event commit or roll back
+          // together. A missing engineContext on a priced offer (composer
+          // degradation) simply keeps today's request-only flow.
+          let mintedEstimate = null;
+          const mintEligible = clickToEstimate && crossSell.mode === 'priced' && !!crossSell.engineContext;
           const outcome = await writeOrRefreshCtaRequest(db, {
             customerId: joined.customer_id,
             requestedService,
@@ -1205,6 +1228,20 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
               const recorded = await recordServiceReportEvent(service, eventName, channel, req, metadata, trx);
               if (!recorded) throw new Error('event insert failed');
             },
+            ...(mintEligible ? {
+              withRow: async (trx, { row, deduped, priorPricingRevision }) => {
+                const { mintReportClickEstimate } = require('../services/service-report/click-estimate-mint');
+                mintedEstimate = await mintReportClickEstimate(trx, {
+                  customer: crossSell.engineContext.customer,
+                  service,
+                  crossSell,
+                  requestRow: row,
+                  priorPricingRevision,
+                  deduped,
+                  revisionSnapshot,
+                });
+              },
+            } : {}),
           });
           if (!outcome.deduped) {
             // Bell AFTER the durable row exists; a bell failure leaves the
@@ -1225,9 +1262,24 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
               logger.warn(`[reports-public] cross-sell bell failed (request ${outcome.request?.id} stands): ${err.message}`);
             });
           }
+          // The estimate URL rides the confirmation response so the card can
+          // redirect straight into the estimate page. Only present when the
+          // mint (or reuse) actually committed — everything durable happened
+          // in the transaction above, so this response can never promise a
+          // link that doesn't exist.
+          return res.json({ ok: true, ...(mintedEstimate ? { estimateUrl: mintedEstimate.url } : {}) });
         }
       } catch (err) {
-        logger.warn(`[reports-public] cross-sell request creation failed: ${err.message}`);
+        // A mint whose recomputed price no longer matches the card is the
+        // same situation as the offer-fingerprint drift above: nothing was
+        // persisted (the transaction rolled back), the card refreshes.
+        if (err && err.clickEstimateDrift === true) {
+          return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
+        }
+        // err.code preferred over message near constraint-bearing inserts
+        // (PG quotes conflicting values — the estimates row carries customer
+        // identity); non-PG errors have no code and keep their message.
+        logger.warn(`[reports-public] cross-sell request creation failed: ${err.code || err.message}`);
         return res.status(503).json({ error: 'Could not record the request — please try again' });
       }
     }

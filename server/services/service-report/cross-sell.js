@@ -477,7 +477,15 @@ async function cacheOnlyPropertyLookup(address) {
 // `service` is the reports-public joined row (service_records + customers
 // COALESCE address). Best-effort by contract: every failure path returns
 // null — the report itself must never notice this feature exists.
-async function buildReportCrossSell(service, database, { propertyLookup = cacheOnlyPropertyLookup } = {}) {
+async function buildReportCrossSell(service, database, {
+  propertyLookup = cacheOnlyPropertyLookup,
+  // Opt-in ONLY (click-to-estimate mint path): ride the picked option's raw
+  // engine context out on a server-internal `engineContext` key. The READ
+  // path never passes this, so the public report payload — which spreads
+  // this return wholesale — can never carry engine inputs, and the
+  // fingerprint is computed over the public payload alone either way.
+  includeEngineContext = false,
+} = {}) {
   try {
     const customerId = service?.customer_id;
     if (!customerId || !database) return null;
@@ -831,6 +839,7 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       db: database,
       propertyLookup: trackedPropertyLookup,
       propertySeed,
+      includeEngineContext,
     });
 
     // No lookup result — a miss, a rejected lookup, or the lookup switched
@@ -923,7 +932,19 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // stable option id + price can no longer persist a snapshot the
     // customer never saw. Recomputed identically on the click path; any
     // drift 409s and the card prompts a refresh.
-    return { ...payload, fingerprint: offerFingerprint(payload) };
+    // engineContext rides OUTSIDE the fingerprinted payload — it is
+    // server-internal mint material, never customer-visible, and including
+    // it would change the fingerprint between the read path (no context)
+    // and the click path (context requested), 409ing every valid tap.
+    const fingerprinted = { ...payload, fingerprint: offerFingerprint(payload) };
+    if (includeEngineContext && priced && option?.engineContext) {
+      // The customer row rides along so the mint persists identity/address
+      // from the SAME row every pricing frame above was anchored to — the
+      // click path never re-reads it and cannot race a concurrent edit into
+      // a different premises than the one that was priced.
+      fingerprinted.engineContext = { ...option.engineContext, customer };
+    }
+    return fingerprinted;
   } catch (err) {
     // err.code only (codex #3381-lane pre-push r4): the composer's errors
     // can be PG errors quoting bound values (addresses, payload fields) —

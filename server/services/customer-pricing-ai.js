@@ -1064,7 +1064,15 @@ function ownedAndNotRepeatable(serviceKey, currentSet) {
   return currentSet.has(serviceKey) && !REPEATABLE_ONE_TIME_KEYS.includes(serviceKey);
 }
 
-async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, propertyLookup, propertySeed = null }) {
+async function buildCustomerPricingResponse({
+  customer, prompt, targetTier, db, propertyLookup, propertySeed = null,
+  // Opt-in ONLY (report click-to-estimate lane): attach the exact engine
+  // context each priced option was computed from, so a mint can persist the
+  // same combined-tier baseline instead of re-deriving property facts. The
+  // context carries raw engine inputs, so no default caller — and no public
+  // payload — may ever receive it.
+  includeEngineContext = false,
+}) {
   const text = String(prompt || '').trim();
   const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer);
   // Two sets on purpose (codex #3253 r2): currentServiceKeys (WaveGuard
@@ -1224,6 +1232,20 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
       // future path ever routes an owned service here, no price for it can
       // still reach the customer.
       if (ownedAndNotRepeatable(option.serviceKey, ownedSet)) continue;
+      if (includeEngineContext) {
+        // The exact inputs this option's price came from. targetOnlyServices
+        // is the option WITHOUT the modeled current services: an estimate
+        // minted from it prices just the new service, with the combined
+        // WaveGuard tier restored through priorQualifyingServices — the
+        // engine unions those into tierServiceKeys, so the target line's
+        // tier discount matches this combined run (the mint cross-checks
+        // that equality to the cent before anything persists).
+        quoted.engineContext = {
+          propertyInput: propertyContext.propertyInput,
+          targetOnlyServices: optionServices(option, context),
+          currentServiceKeys: [...currentServiceKeys],
+        };
+      }
       if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) options.push(quoted);
     }
   }
@@ -1285,6 +1307,12 @@ module.exports = {
   variantsForService,
   currentServiceObjectsFor,
   optionServices,
+  // Shared per-visit derivation (report click-to-estimate lane): the mint's
+  // cent-exact cross-check must read a per-application price off an engine
+  // result EXACTLY the way the card's quote did — one function, no second
+  // derivation to drift.
+  quotedPerVisitForServiceKey: (estimate, serviceKey) =>
+    quoteAmountFromLine(findLineItem(estimate, serviceKey)).perVisit || null,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.
   _private: { resolvePropertyContext, missingPropertyFor },

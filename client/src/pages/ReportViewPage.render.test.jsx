@@ -554,6 +554,67 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
     expect(screen.getByText('Rate today’s visit')).toBeInTheDocument();
   });
 
+  it('a priced tap whose response carries estimateUrl redirects into the estimate page (click-to-estimate)', async () => {
+    const assignSpy = vi.fn();
+    const originalLocation = window.location;
+    Reflect.deleteProperty(window, 'location');
+    window.location = { ...originalLocation, assign: assignSpy, reload: vi.fn() };
+    try {
+      mountWithFetch(vi.fn(async (url, init) => {
+        if (init && init.method === 'POST') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, estimateUrl: 'https://portal.wavespestcontrol.com/estimate/tok-abc' }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => payload };
+      }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Keep My Home Protected' }));
+      await waitFor(() => expect(assignSpy).toHaveBeenCalledWith('https://portal.wavespestcontrol.com/estimate/tok-abc'));
+      // The recorded-request confirmation renders BEHIND the navigation, so
+      // a blocked redirect still shows durable-state copy, never a dead card.
+      expect(screen.getByText(/Request received/)).toBeInTheDocument();
+    } finally {
+      window.location = originalLocation;
+    }
+  });
+
+  it('a confirmation with NO estimateUrl (gate off / quote tap) never navigates', async () => {
+    const assignSpy = vi.fn();
+    const originalLocation = window.location;
+    Reflect.deleteProperty(window, 'location');
+    window.location = { ...originalLocation, assign: assignSpy, reload: vi.fn() };
+    try {
+      mountWithFetch(dataOnlyFetch());
+      fireEvent.click(await screen.findByRole('button', { name: 'Keep My Home Protected' }));
+      expect(await screen.findByText(/Request received/)).toBeInTheDocument();
+      expect(assignSpy).not.toHaveBeenCalled();
+    } finally {
+      window.location = originalLocation;
+    }
+  });
+
+  it('a non-portal estimateUrl never navigates (same-origin guard on a server-composed value)', async () => {
+    const assignSpy = vi.fn();
+    const originalLocation = window.location;
+    Reflect.deleteProperty(window, 'location');
+    window.location = { ...originalLocation, assign: assignSpy, reload: vi.fn() };
+    try {
+      mountWithFetch(vi.fn(async (url, init) => {
+        if (init && init.method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({ ok: true, estimateUrl: 'https://evil.example.com/estimate/x' }) };
+        }
+        return { ok: true, status: 200, json: async () => payload };
+      }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Keep My Home Protected' }));
+      expect(await screen.findByText(/Request received/)).toBeInTheDocument();
+      expect(assignSpy).not.toHaveBeenCalled();
+    } finally {
+      window.location = originalLocation;
+    }
+  });
+
   it('referral tap fetches the link on the TAP and reveals code + prefilled Text/Email', async () => {
     const calls = [];
     mountWithFetch(vi.fn(async (url, init) => {
