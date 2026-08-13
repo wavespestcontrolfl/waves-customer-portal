@@ -1018,7 +1018,16 @@ async function executeTool(name, input = {}, ctx = {}) {
       // so back-fill the card that was already written for this call.
       if (capturedLeadId && typeof ctx.bookingRequested === 'function' && ctx.bookingRequested()) {
         const { attachLeadToVoiceBookingCard } = require('./relay-booking');
-        await attachLeadToVoiceBookingCard(ctx.callSid, capturedLeadId);
+        const attached = await attachLeadToVoiceBookingCard(ctx.callSid, capturedLeadId);
+        // A failure here is not fatal and must not be silent: the confirm side
+        // recovers the lead from this call's own CallSid, which is why the
+        // backfill is allowed to be best-effort at all.
+        if (!attached) {
+          logger.warn(
+            `[voice-relay] lead ${capturedLeadId} was NOT attached to the booking review card `
+            + `callSid=${ctx.callSid || 'n/a'} — office confirm will recover it by CallSid`
+          );
+        }
       }
       // ⭐ NO LEAD IS A REAL OUTCOME, NOT A FAILURE — AND NOT A SUCCESS EITHER.
       // createLeadFromExtraction deliberately creates NOTHING for a matched

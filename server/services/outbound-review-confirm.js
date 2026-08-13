@@ -259,6 +259,28 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
         leadId = payload.lead_id;
         keepOpenForQuote = payload.keep_open_for_quote === true;
       } else if (payload && payload.origin === 'voice_agent') {
+        // ⭐ …BUT FIRST, ASK THE CALL ITSELF. The lead id lands on this card by
+        // a BACKFILL after capture_lead runs, and that backfill is best-effort:
+        // one transient failure and a lead that really exists is invisible here
+        // forever, because the branch below then treats the null as the call's
+        // answer and permanently skips conversion. Leads stamp their own
+        // `twilio_call_sid`, so the call can be asked directly — an EXACT
+        // recovery keyed to this call, never the single-active-lead guess the
+        // comment below rules out.
+        const callRow = await db('call_log')
+          .where({ id: svc.source_call_log_id })
+          .first('twilio_call_sid');
+        const recovered = callRow && callRow.twilio_call_sid
+          ? await db('leads')
+            .where({ twilio_call_sid: callRow.twilio_call_sid })
+            .whereNull('deleted_at')
+            .orderBy('created_at', 'desc')
+            .first('id', 'status')
+          : null;
+        if (recovered) {
+          leadId = recovered.id;
+          logger.info(`[${routeTag}] voice card for ${svc.id} carried no lead_id — recovered lead ${leadId} by CallSid`);
+        }
         // ⭐ NO LEAD ON A VOICE CARD MEANS NO LEAD — DO NOT GUESS ONE.
         // The single-active-lead fallback below exists for PRE-PAYLOAD
         // outbound-review rows, where a missing lead_id only meant the card
@@ -266,8 +288,10 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
         // is the call's own answer: capture_lead either never ran or matched
         // an existing customer and created no lead. Falling back would mark
         // whatever unrelated quote that customer happens to have open as WON —
-        // a booked ants visit closing an open termite estimate.
-        noLeadIdentifiedOnCall = true;
+        // a booked ants visit closing an open termite estimate. (Only once the
+        // CallSid recovery above has come up empty too: then there genuinely is
+        // no lead from this call.)
+        noLeadIdentifiedOnCall = !recovered;
       }
     }
     if (noLeadIdentifiedOnCall) {

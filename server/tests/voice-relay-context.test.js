@@ -393,6 +393,35 @@ describe('GATE ON — caller recognition', () => {
       expect(seen).toEqual([true]);
     });
 
+    // ⭐ VERIFICATION IS NOT CONTEXT, SO IT DOES NOT SHARE CONTEXT'S FATE. The
+    // flag used to publish only if the WHOLE resolution won its 4s race, so a
+    // slow SERVICE-NAMES read could un-verify a caller who had already proved
+    // themselves — and `callerVerified` is what makes an explicit "stop texting
+    // me" actually suppress rather than merely be noted. A hung optional loader
+    // must cost the KNOWN CALLER block, never the proven identity.
+    test('a hung optional loader still reports VERIFIED (only the context is lost)', async () => {
+      delete process.env.VOICE_RELAY_REQUIRE_ATTESTATION; // not what this pins
+      jest.useFakeTimers();
+      try {
+        primeDb({ customers: [CUSTOMER] });
+        // One optional loader never settles. Verification itself is fine.
+        loadOwnedRecurringServiceKeys.mockImplementation(() => new Promise(() => {}));
+        const seen = [];
+        const pending = relayContext.resolveCallerContext(FROM, {
+          callSid: CALL_SID,
+          onVerified: (ok) => seen.push(ok),
+        });
+        // Async advance so verification's own microtask chain settles BEFORE
+        // the deadlines fire — the real ordering, where the call_log read
+        // returns quickly and the optional loader is the slow one.
+        await jest.advanceTimersByTimeAsync(5000); // past BOTH bounds
+        expect(await pending).toBeNull(); // no context — that part is expected
+        expect(seen).toEqual([true]); // …but the caller stayed verified
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     test('only a PASSED-A counts — a passed B or C does not', () => {
       expect(relayContext.isFullAttestation('TN-Validation-Passed-A')).toBe(true);
       expect(relayContext.isFullAttestation('A')).toBe(true);
@@ -508,6 +537,21 @@ describe('GATE ON — account tools', () => {
     expect(out).toContain('Pest Control'); // …and so is everything else
     expect(out).toContain('Tuesday August 18');
     assertNoWrites();
+  });
+
+  // ⭐ AND THE FIGURE IS NEVER FETCHED FOR SOMEONE WHO MAY NOT HEAR IT. Redacting
+  // an amount that has already been loaded into the session leaves it one
+  // careless template away from being spoken; the loader is told which caller it
+  // is answering, and hands back existence only. (It is still the CANONICAL
+  // loader — a hand-rolled "is there an open invoice" query would fork the
+  // definition of an open balance away from every other money surface.)
+  test('the unattested read carries no amount at all — existence only, canonical loader', async () => {
+    openBalanceSummary.mockResolvedValue({ total: 49.5, count: 1, moreCount: 0, invoices: [] });
+    const balance = await relayContext.loadOpenBalance('c-1111', { amounts: false });
+    expect(balance).toEqual({ hasOpen: true });
+    expect(balance.total).toBeUndefined();
+    expect(balance.count).toBeUndefined();
+    expect(openBalanceSummary).toHaveBeenCalled(); // the money truth still decides
   });
 
   // FAIL CLOSED: every tier default is 'redacted'. A session ctx with no tier

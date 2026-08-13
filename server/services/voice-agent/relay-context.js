@@ -59,6 +59,10 @@ function isFullAttestation(value) {
 // Bound the whole context resolution so a slow pool can never add dead air to
 // a live call: on timeout the caller is simply treated as unknown.
 const CONTEXT_RESOLVE_TIMEOUT_MS = 4000;
+// Verification's own bound (one call_log read + the atomic claim). Separate
+// from the context bound on purpose — see resolveCallerContext: a slow optional
+// loader must not be able to un-verify a caller who already proved themselves.
+const VERIFY_RESOLVE_TIMEOUT_MS = 4000;
 
 // How recent the signature-verified /voice call_log row must be for its
 // CallSid to identify a LIVE relay session (replay bound — see
@@ -636,11 +640,29 @@ async function loadCompletedVisits(customerId, limit = 5) {
   });
 }
 
-async function loadOpenBalance(customerId) {
+/**
+ * Open balance for a caller. `amounts:false` returns EXISTENCE ONLY — no total,
+ * no count — for the tiers allowed a yes/no and nothing more.
+ *
+ * ⭐ THE FIGURE STOPS HERE, NOT AT THE RENDERER. Redacting a total that has
+ * already been loaded into a context object leaves it one careless template away
+ * from being spoken; when the caller may not have it, it does not leave this
+ * function.
+ *
+ * ⭐ AND IT IS STILL THE SAME LOADER. The obvious "cheaper" version of this is a
+ * hand-rolled `select 1 from invoices where …open…` — which forks the definition
+ * of what an open balance IS away from `openBalanceSummary`, the money-truth
+ * mechanism every other surface answers from (voids, drafts, payer-billed rows,
+ * credits). A yes/no that disagrees with the invoice list is worse than a
+ * withheld figure, so the canonical loader still decides; only the boolean
+ * crosses the boundary.
+ */
+async function loadOpenBalance(customerId, { amounts = true } = {}) {
   const { openBalanceSummary } = require('../open-balance');
   const summary = await openBalanceSummary(customerId).catch(() => null);
   if (!summary) return null;
-  return { total: summary.total, count: summary.count };
+  if (!amounts) return { hasOpen: Number(summary.total) > 0 };
+  return { total: summary.total, count: summary.count, hasOpen: Number(summary.total) > 0 };
 }
 
 async function loadPriorCallSummary(phone) {
@@ -704,11 +726,12 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
     const svc = systemBlockSafe(lastVisit.service, 60);
     lines.push(`Last completed visit: ${lastVisit.date}${svc ? ` — ${svc}` : ''}`);
   }
-  if (balance && Number(balance.total) > 0) {
+  if (balance && balance.hasOpen) {
     // ⭐ THE AMOUNT IS THE ATTESTED PART. A matched caller is told they have a
     // balance either way — that much they can see on their own portal — but the
     // FIGURE follows the same rule as the invoice tool it comes from: a call the
     // carrier vouches for. Redacted (contact-slot) callers never get either.
+    // (When they may not have it, `balance` carries no total to begin with.)
     lines.push(redacted || !attested
       ? 'Open balance: yes — there is an open balance. Do NOT state or estimate the amount.'
       : `Open balance: yes — ${fmtMoney(balance.total)} across ${balance.count} invoice${balance.count === 1 ? '' : 's'}`);
@@ -743,30 +766,33 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null } 
   // WS client that declared an ANI may not), and it is decided only after
   // EVERY rule below has had its say — including the attestation requirement.
   //
-  // ⭐ AND IT IS LATCHED, NOT PUBLISHED, until the work WINS ITS RACE. Firing
-  // the callback from inside the work let a verified-but-slow resolution set
-  // the session's flag and then time out: the caller came back UNKNOWN while
-  // `callerVerified` stayed true, which is precisely the fail-closed promise
-  // the timeout exists to make. The loser of the race — timeout or a late
-  // straggler — publishes nothing, so the flag stays false.
-  let verifiedLatch = false;
-  const reportVerified = (ok) => { verifiedLatch = ok === true; };
+  // ⭐ AND IT IS PUBLISHED ON ITS OWN RACE, NOT THE HYDRATION'S. It was latched
+  // and published only if the WHOLE context resolution won the 4s bound — so a
+  // slow SERVICE-NAMES read, or a slow message thread, could time out a call
+  // that had already proved itself and demote it to unverified. That is not a
+  // conservative failure: `callerVerified` is what lets a caller use
+  // lookup_customer AND what makes an explicit "stop texting me" actually
+  // suppress instead of merely being noted, so an unrelated slow query silently
+  // dropped a consent instruction. Verification is not context; it gets its own
+  // bounded race and publishes the moment IT settles — after every rule
+  // (including the attestation requirement) has had its say, and never from a
+  // loser: exactly one of {result, timeout} resolves the race, and only that
+  // one publishes.
   const publishVerified = (ok) => {
     if (typeof onVerified === 'function') {
       try { onVerified(ok === true); } catch { /* the flag is the caller's */ }
     }
   };
   if (!isContextEnabled()) return null;
-  const work = (async () => {
+  const verifyWork = (async () => {
     // The WS setup frame is unverified input — cross-check it against the
     // signature-verified /voice webhook's call_log row BEFORE any account read.
-    // Verification happens HERE, inside the bounded work: a stalled call_log
-    // read or claim must degrade to "unknown caller", never hang the first turn.
+    // Bounded on its own below: a stalled call_log read or claim degrades to
+    // "unknown caller", never hangs the first turn.
     const verification = await verifyInboundCaller({ callSid, from });
     if (!verification.verified) {
-      reportVerified(false);
       logger.info(`[voice-relay-context] caller ${maskPhone(from)} NOT verified against call_log (${verification.reason}) — treating as unknown, no account access`);
-      return null;
+      return { verified: false };
     }
     logger.info(`[voice-relay-context] caller ${maskPhone(from)} verified against call_log callSid=${callSid} attestation=${verification.attestation || 'none'}`);
     // ⭐ THE SPOOFING LEVER, DARK BY DEFAULT.
@@ -794,10 +820,8 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null } 
       // NOT verified for the session either: "no recognition and no account
       // reads" has to include lookup_customer, which is the one tool that does
       // not need a matched customer id.
-      reportVerified(false);
-      return null;
+      return { verified: false };
     }
-    reportVerified(true);
     // ⭐ THE SPLIT TIER (owner ruling 2026-08-12). Recognition still rests on the
     // ANI, which is the ruling's "discuss freely with a matched caller" — but
     // caller ID is spoofable, so the reads where a spoof pays best are held back
@@ -807,14 +831,43 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null } 
     // their appointments, today's ETA, their estimates, what service they're on —
     // stays on the ANI match, so an ordinary caller on a carrier that signs
     // nothing still gets a receptionist who knows them.
-    const attested = isFullAttestation(verification.attestation);
+    return { verified: true, attested: isFullAttestation(verification.attestation) };
+  })();
+
+  // Verification's OWN bound. Whichever of {verification, timeout} resolves
+  // first is the session's answer, and it is published immediately — a later
+  // hydration timeout can no longer take it back.
+  let verifyTimer;
+  const verifyDeadline = new Promise((resolve) => {
+    verifyTimer = setTimeout(() => {
+      logger.warn(`[voice-relay-context] caller verification timed out for ${maskPhone(from)} — treating as unverified`);
+      resolve({ verified: false });
+    }, VERIFY_RESOLVE_TIMEOUT_MS);
+    verifyTimer.unref?.();
+  });
+  const verified = Promise.race([verifyWork, verifyDeadline])
+    .catch(() => ({ verified: false }))
+    .then((v) => {
+      clearTimeout(verifyTimer);
+      publishVerified(v.verified === true);
+      return v;
+    });
+  verifyWork.catch(() => {}); // a late loser must never surface as unhandled
+
+  const work = (async () => {
+    const v = await verified;
+    if (!v.verified) return null;
+    const { attested } = v;
     const customer = await findUniqueCustomerByAni(from);
     if (!customer) return null;
     const [services, nextAppointment, visits, balance, priorCall, recentTexts] = await Promise.all([
       loadRecurringServiceNames(customer.id).catch(() => []),
       loadNextAppointment(customer.id).catch(() => null),
       loadCompletedVisits(customer.id, 1).catch(() => []),
-      loadOpenBalance(customer.id).catch(() => null),
+      // The figure is only LOADED for a caller who may hear it (full tier +
+      // attestation A); everyone else gets existence only, so there is no total
+      // in the session for a template to leak.
+      loadOpenBalance(customer.id, { amounts: customer.tier === 'full' && attested }).catch(() => null),
       // The gist of the caller's LAST call is call content, so it rides the
       // same attestation line as get_call_history — not fetched at all without
       // it, rather than fetched and dropped.
@@ -855,14 +908,13 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null } 
     }, CONTEXT_RESOLVE_TIMEOUT_MS);
     timer.unref?.();
   });
-  let won = false;
   try {
-    const result = await Promise.race([work.then((r) => { won = true; return r; }), timeout]);
-    publishVerified(won && verifiedLatch);
-    return result;
+    // Only the CONTEXT is at stake here now. Verification published its own
+    // verdict above, so a slow optional loader costs the caller their KNOWN
+    // CALLER block — not their proven identity.
+    return await Promise.race([work, timeout]);
   } catch (err) {
     logger.warn(`[voice-relay-context] context resolve failed for ${maskPhone(from)} — treating as unknown: ${err.message}`);
-    publishVerified(false);
     return null;
   } finally {
     clearTimeout(timer);
@@ -901,7 +953,9 @@ async function accountOverviewText(customerId, { tier = 'redacted', attested = f
     loadRecurringServiceNames(customerId).catch(() => []),
     loadNextAppointment(customerId).catch(() => null),
     loadCompletedVisits(customerId, 1).catch(() => []),
-    loadOpenBalance(customerId).catch(() => null),
+    // Existence only unless this caller may actually hear the figure — the
+    // amount must not be fetched for a tier that is forbidden to speak it.
+    loadOpenBalance(customerId, { amounts: !redacted && attested }).catch(() => null),
   ]);
   const lastVisit = visits[0] || null;
   const parts = [
@@ -926,7 +980,7 @@ async function accountOverviewText(customerId, { tier = 'redacted', attested = f
   ];
   if (redacted) {
     // Yes/no ONLY — the amount belongs to the account holder's own matched line.
-    if (balance && Number(balance.total) > 0) {
+    if (balance && balance.hasOpen) {
       parts.push('Open balance: yes — there is an open balance on this account. Do NOT state or estimate the amount; the account holder can see it in the portal, or the office can go over it with them directly.');
     } else if (balance) {
       parts.push('Open balance: none.');
@@ -936,13 +990,13 @@ async function accountOverviewText(customerId, { tier = 'redacted', attested = f
     parts.push('This is a LOOKED-UP account (the caller\'s phone did not match it): confirm details the caller states themselves, don\'t recite account details to them.');
     return parts.join(' ');
   }
-  if (balance && Number(balance.total) > 0 && !attested) {
+  if (balance && balance.hasOpen && !attested) {
     // Matched, but the carrier will not vouch for the number: they are told
     // there IS a balance — which they can see in their own portal anyway — and
     // the figure waits for a human or an attested call.
     parts.push('Open balance: yes — there is an open balance on this account. Do NOT state or estimate the amount; '
       + 'the caller can see it in their portal, or a team member can go over it with them.');
-  } else if (balance && Number(balance.total) > 0) {
+  } else if (balance && balance.hasOpen) {
     parts.push(`Open balance: ${fmtMoney(balance.total)} across ${balance.count} open invoice${balance.count === 1 ? '' : 's'}. You may state this amount to the caller; never read card or bank details (we do not have them to read).`);
   } else if (balance) {
     parts.push('Open balance: none — the account is paid up.');
@@ -1373,4 +1427,6 @@ module.exports = {
   LOOKUP_SESSION_BUDGET,
   PRICEABLE_PROPERTY_TYPES,
   CONTEXT_RESOLVE_TIMEOUT_MS,
+  VERIFY_RESOLVE_TIMEOUT_MS,
+  loadOpenBalance,
 };

@@ -583,7 +583,7 @@ describe('voice-agent bookings share the office-review activation path', () => {
 // A hand-built knex-ish db mock for the confirm hook: table-aware first()/
 // select()/update() so the triage-payload path and the fallback lead lookup
 // can be exercised independently.
-function confirmHookDb({ cardPayload = null, fallbackLeads = [], leadRow = null } = {}) {
+function confirmHookDb({ cardPayload = null, fallbackLeads = [], leadRow = null, callRow = null } = {}) {
   const state = { triageResolved: false, updates: [] };
   const fn = (table) => {
     const q = {};
@@ -591,6 +591,7 @@ function confirmHookDb({ cardPayload = null, fallbackLeads = [], leadRow = null 
     q.select = jest.fn(async () => fallbackLeads);
     q.first = jest.fn(async () => {
       if (table === 'triage_items') return cardPayload ? { payload: JSON.stringify(cardPayload) } : null;
+      if (table === 'call_log') return callRow;
       if (table === 'leads') return leadRow;
       return null;
     });
@@ -678,6 +679,24 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
     // The rest of the confirm still runs — this is a lead decision, not a halt.
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
     expect(db._state.triageResolved).toBe(true);
+  });
+
+  // ⭐ …BUT A BACKFILL THAT FAILED IS NOT AN ANSWER. The lead id reaches the
+  // card by a best-effort update after capture_lead; one transient failure and
+  // a lead that really exists would be skipped forever. The call stamps its own
+  // CallSid on the lead, so the confirm asks the call directly — exact, not the
+  // single-active-lead guess the case above rules out.
+  test('a null lead_id is RECOVERED by CallSid before it is believed', async () => {
+    const db = confirmHookDb({
+      cardPayload: { origin: 'voice_agent', lead_id: null },
+      callRow: { twilio_call_sid: 'CA-voice-1' },
+      leadRow: { id: 'lead-recovered', status: 'new' },
+      fallbackLeads: [{ id: 'lead-unrelated', status: 'estimate_sent' }],
+    });
+    await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(convertCallLeadOnPhoneBooking).toHaveBeenCalledWith(db, expect.objectContaining({
+      leadId: 'lead-recovered',
+    }));
   });
 
   test('a voice card that DOES carry a lead still converts exactly that lead', async () => {
