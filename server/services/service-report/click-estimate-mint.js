@@ -276,7 +276,15 @@ async function mintReportClickEstimate(trx, {
         return rev?.mintedEstimate || null;
       } catch { return null; }
     })();
-    if (deduped || String(requestMark?.id || '') === String(match.id)) return null;
+    // Skip ONLY when the row already points at the reused estimate —
+    // NEVER on the writer's dedupe verdict alone (out-of-band audit on
+    // e60d94729, P1): deduped does not guarantee linkage. A gate-off tap
+    // can create an identical request WITHOUT minting; when the gate
+    // returns, the writer dedupes that row while the reuse hands back the
+    // earlier live estimate — skipping here would leave the row
+    // unlinked, so acceptance could never match and resolve it, and
+    // staff would be paged to follow up on work that was booked.
+    if (String(requestMark?.id || '') === String(match.id)) return null;
     const mark = reportCtaMintOf(match);
     return {
       pricing_revision: JSON.stringify({

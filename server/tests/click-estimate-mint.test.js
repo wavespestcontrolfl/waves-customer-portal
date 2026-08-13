@@ -205,11 +205,34 @@ describe('mintReportClickEstimate', () => {
 
   test('repeat tap on an unchanged offer REUSES the live estimate (found by lineage, not the request row) and writes nothing', async () => {
     const { trx, ops } = fakeTrx({ priorEstimateRows: [priorMint()] });
-    const out = await mintReportClickEstimate(trx, baseArgs({ deduped: true }));
+    const out = await mintReportClickEstimate(trx, baseArgs({
+      deduped: true,
+      // The normal deduped shape: the refreshed row still carries the mint
+      // pointer — an unlinked deduped row relinks instead (audit on
+      // e60d94729; test below).
+      requestRow: { id: 'req-3', pricing_revision: JSON.stringify({ mintedEstimate: { id: 'est-old', token: 'tok-old' } }) },
+    }));
     expect(out.reused).toBe(true);
     expect(out.url).toBe('/estimate/tok-old');
     expect(ops.inserts).toHaveLength(0);
     expect(ops.updates).toHaveLength(0);
+  });
+
+  test('a DEDUPED tap whose row lacks the mint pointer RELINKS it — dedupe is not proof of linkage (out-of-band audit on e60d94729 P1)', async () => {
+    // A gate-off tap can create an identical request without minting; when
+    // the gate returns, the writer dedupes that row while the reuse hands
+    // back the earlier live estimate. Without the relink, acceptance can
+    // never match and resolve the open row — staff get paged for booked
+    // work.
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [priorMint()] });
+    const out = await mintReportClickEstimate(trx, baseArgs({
+      deduped: true,
+      requestRow: { id: 'req-3', pricing_revision: JSON.stringify({ source: 'service_report' }) },
+    }));
+    expect(out.reused).toBe(true);
+    const relink = ops.updates.find((u) => u.table === 'service_requests');
+    expect(relink.criteria).toEqual({ id: 'req-3' });
+    expect(JSON.parse(relink.patch.pricing_revision).mintedEstimate.id).toBe('est-old');
   });
 
   test('a dead prior link (expired) re-mints even on a dedupe tap', async () => {
