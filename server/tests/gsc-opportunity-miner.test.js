@@ -2273,8 +2273,10 @@ describe('_revalidateCityServiceBatch — in-flight target fence under the persi
       const chain = {
         where: jest.fn().mockReturnThis(),
         whereIn: jest.fn((col, vals) => { chain._inKeys = vals; return chain; }),
-        forUpdate: jest.fn().mockReturnThis(),
-        select: jest.fn().mockResolvedValue(inflightRows),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        // The in-flight read is the FOR UPDATE one; the in-lock frozen
+        // re-read (no forUpdate) sees no done/skipped rows by default.
+        select: jest.fn(() => Promise.resolve(chain._locked ? inflightRows : [])),
         update: jest.fn((patch) => { updates.push({ keys: chain._inKeys, patch }); return Promise.resolve(chain._inKeys?.length || 0); }),
       };
       return chain;
@@ -2455,12 +2457,15 @@ describe('cross-bucket keys canonicalize service ALIASES (round-4 P1)', () => {
     const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
     const miner = new GscOpportunityMiner();
     const inflight = [{ dedupe_key: 'striking_distance::tree_shrub::sarasota::q', service: 'tree_shrub', city: 'sarasota', status: 'claimed', bucket: 'striking_distance', query: 'q' }];
-    const trx = jest.fn(() => ({
-      where: jest.fn().mockReturnThis(),
-      whereIn: jest.fn().mockReturnThis(),
-      forUpdate: jest.fn().mockReturnThis(),
-      select: jest.fn().mockResolvedValue(inflight),
-    }));
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        select: jest.fn(() => Promise.resolve(chain._locked ? inflight : [])),
+      };
+      return chain;
+    });
     const out = await miner._revalidateCityServiceBatch(trx, [{
       bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::tree-shrub::sarasota::_',
       service: 'tree-shrub', city: 'sarasota', score: 56, signal_metadata: {},
@@ -2557,12 +2562,15 @@ describe('RECENT done rows fence the whole TARGET; skipped never does (rounds 5-
     const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
     const miner = new GscOpportunityMiner();
     const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::old', service: 'termite', city: 'sarasota', status: 'skipped', skip_reason: 'manual_dismiss:no page for this pair', bucket: 'no_content_yet', query: 'old' }];
-    const trx = jest.fn(() => ({
-      where: jest.fn().mockReturnThis(),
-      whereIn: jest.fn().mockReturnThis(),
-      forUpdate: jest.fn().mockReturnThis(),
-      select: jest.fn().mockResolvedValue(inflight),
-    }));
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        select: jest.fn(() => Promise.resolve(chain._locked ? inflight : [])),
+      };
+      return chain;
+    });
     const out = await miner._revalidateCityServiceBatch(trx, [
       { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::termite::sarasota::_', service: 'termite', city: 'sarasota', score: 56, signal_metadata: {} },
     ]);
@@ -2573,12 +2581,15 @@ describe('RECENT done rows fence the whole TARGET; skipped never does (rounds 5-
     const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
     const miner = new GscOpportunityMiner();
     const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::old', service: 'termite', city: 'sarasota', status: 'done', bucket: 'no_content_yet', query: 'old' }];
-    const trx = jest.fn(() => ({
-      where: jest.fn().mockReturnThis(),
-      whereIn: jest.fn().mockReturnThis(),
-      forUpdate: jest.fn().mockReturnThis(),
-      select: jest.fn().mockResolvedValue(inflight),
-    }));
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        select: jest.fn(() => Promise.resolve(chain._locked ? inflight : [])),
+      };
+      return chain;
+    });
     // Even the frozen row's OWN key is blocked — a skipped target admits
     // nothing, upsert-refresh path included.
     const out = await miner._revalidateCityServiceBatch(trx, [
@@ -2743,7 +2754,7 @@ describe('local_gap lifecycle guards (round-4 cloud P1s)', () => {
     expect(updates[0].patch.status).toBe('expired');
     expect(updates[0].patch.skip_reason).toBe('local_gap_signal_gone');
     // Wired in mineAll under the canonical-window + no-error guards.
-    expect(src).toMatch(/if \(!errors\.local_gap\) \{[\s\S]{0,120}_sweepStaleLocalGapRows\(/);
+    expect(src).toMatch(/if \(!errors\.local_gap && !runState\.cityServiceFrozenLookupFailed\) \{[\s\S]{0,120}_sweepStaleLocalGapRows\(/);
   });
 
   test('an UNLANDABLE candidate cannot supersede a pending local_gap twin', async () => {
@@ -2753,8 +2764,8 @@ describe('local_gap lifecycle guards (round-4 cloud P1s)', () => {
       const chain = {
         where: jest.fn().mockReturnThis(),
         whereIn: jest.fn().mockReturnThis(),
-        forUpdate: jest.fn().mockReturnThis(),
-        select: jest.fn().mockResolvedValue(inflight),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        select: jest.fn(() => Promise.resolve(chain._locked ? inflight : [])),
         update: jest.fn((patch) => { updates.push(patch); return Promise.resolve(1); }),
       };
       return chain;
@@ -2776,5 +2787,39 @@ describe('local_gap lifecycle guards (round-4 cloud P1s)', () => {
     expect(out3).toHaveLength(1);
     expect(updates).toHaveLength(1);
     expect(updates[0].skip_reason).toBe('city_service_superseded');
+  });
+});
+
+describe('in-lock frozen re-read + untrusted-snapshot sweep guard (round-5 cloud P1)', () => {
+  const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+
+  test('a candidate whose key froze AFTER arbitration is dropped under the lock', async () => {
+    // A runner flipped the elected row pending→skipped between the
+    // unlocked frozen read and the fence: the in-flight select excludes
+    // runner skips, but the in-lock re-read catches the key — the
+    // candidate cannot land and must not pass to a no-op upsert.
+    const frozenNow = [{ dedupe_key: 'k1' }];
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        select: jest.fn(() => Promise.resolve(chain._locked ? [] : frozenNow)),
+      };
+      return chain;
+    });
+    const miner = new GscOpportunityMiner();
+    const out = await miner._revalidateCityServiceBatch(trx, [{
+      bucket: 'no_content_yet', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'k1',
+      query: 'q', service: 'termite', city: 'sarasota', score: 60, signal_metadata: {},
+    }]);
+    expect(out).toHaveLength(0);
+  });
+
+  test('a failed frozen lookup suppresses the local_gap sweep, not just arbitration', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    expect(src).toMatch(/runState\.cityServiceFrozenLookupFailed = true;/);
+    expect(src).toMatch(/!errors\.local_gap && !runState\.cityServiceFrozenLookupFailed/);
   });
 });

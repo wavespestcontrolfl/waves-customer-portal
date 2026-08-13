@@ -1781,8 +1781,14 @@ class GscOpportunityMiner {
             || isHumanTerminalSkip(r.status, r.skip_reason)))
           .map((r) => cityServiceTargetKey(r.service, r.city)));
       }
+      runState.cityServiceFrozenLookupFailed = false;
     } catch (err) {
-      logger.warn(`[gsc-opp-miner] city-service frozen-target lookup failed (${err.message}) — arbitration proceeds frozen-blind`);
+      // Frozen-blind arbitration risks only a no-op upsert — but the
+      // local_gap SWEEP must not run off an untrusted snapshot: it could
+      // expire the very pending row whose elected replacement then fails
+      // the upsert guard (cloud P1).
+      runState.cityServiceFrozenLookupFailed = true;
+      logger.warn(`[gsc-opp-miner] city-service frozen-target lookup failed (${err.message}) — arbitration proceeds frozen-blind, local_gap sweep suppressed`);
     }
     const allOpportunities = arbitrateCityServiceTargets(
       [...minedOpportunities, ...buckets.link_boost],
@@ -1872,7 +1878,7 @@ class GscOpportunityMiner {
           // because the keys are target-stable. Same guards: canonical
           // window + no bucket error (the fail-closed map guard throws
           // into errors.local_gap, which suppresses this).
-          if (!errors.local_gap) {
+          if (!errors.local_gap && !runState.cityServiceFrozenLookupFailed) {
             await this._sweepStaleLocalGapRows(
               revalidated.filter((o) => o.bucket === 'local_gap'),
               trx
@@ -3755,7 +3761,27 @@ class GscOpportunityMiner {
             .orWhere('skip_reason', 'like', 'manual_dismiss:%'))))
       .forUpdate()
       .select('dedupe_key', 'service', 'city', 'status', 'skip_reason', 'bucket', 'query');
-    if (!inflight.length) return opportunities;
+    // Re-read candidate keys' frozen state UNDER the lock (cloud P1): the
+    // arbitration's frozenKeys came from an unlocked read, and a runner can
+    // flip an elected row pending→skipped in between — the in-flight select
+    // above excludes runner-skipped rows, so the candidate would pass here
+    // and then no-op at the upsert, after arbitration already discarded its
+    // sibling. Any candidate whose own key is frozen NOW is dropped: it
+    // cannot land, and the pair self-heals next mine. (A claimed→skipped
+    // flip mid-fence is impossible to miss: a claimed row already defers
+    // the candidate.)
+    const csKeys = opportunities
+      .filter((o) => o.action_type === CS && o.dedupe_key)
+      .map((o) => o.dedupe_key);
+    let lockedFrozen = new Set(frozenKeys);
+    if (csKeys.length) {
+      const frozenNow = await trx('opportunity_queue')
+        .whereIn('dedupe_key', csKeys)
+        .whereIn('status', ['done', 'skipped'])
+        .select('dedupe_key');
+      for (const r of frozenNow) lockedFrozen.add(r.dedupe_key);
+    }
+    if (!inflight.length && !lockedFrozen.size) return opportunities;
     const isFrozenRow = (r) => r.status === 'done' || isHumanTerminalSkip(r.status, r.skip_reason);
     const occupied = new Map();
     for (const r of inflight) {
@@ -3768,6 +3794,10 @@ class GscOpportunityMiner {
     const supersede = [];
     const out = opportunities.filter((o) => {
       if (o.action_type !== CS || !o.service || !o.city) return true;
+      // Key frozen NOW (in-lock re-read) ⇒ the upsert guard will no-op
+      // this candidate regardless of target occupancy — drop it before
+      // any occupancy/supersession reasoning.
+      if (lockedFrozen.has(o.dedupe_key)) { deferred += 1; return false; }
       const allRows = occupied.get(cityServiceTargetKey(o.service, o.city)) || [];
       if (allRows.some(isFrozenRow)) { deferred += 1; return false; }
       const rows = allRows.filter((r) => r.dedupe_key !== o.dedupe_key);
@@ -3782,7 +3812,7 @@ class GscOpportunityMiner {
       // twin claimable. The rows are FOR UPDATE-locked, so claimNext
       // cannot grab one mid-supersession; 'expired' is revivable per the
       // retirement doctrine.
-      const canSupersede = o.query && isPersistable(o) && !frozenKeys.has(o.dedupe_key);
+      const canSupersede = o.query && isPersistable(o) && !lockedFrozen.has(o.dedupe_key);
       const blocking = rows.filter((r) => !(
         r.status === 'pending' && r.bucket === 'local_gap' && !r.query && canSupersede
       ));
