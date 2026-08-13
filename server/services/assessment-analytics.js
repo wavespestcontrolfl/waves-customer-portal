@@ -16,7 +16,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { loadCustomerGrassContext, normalizeGrassType } = require('./lawn-grass-context');
-const { recomputeEntryReviewGate, escapeLike } = require('./agronomic-wiki');
+const { recomputeEntryReviewGate } = require('./agronomic-wiki');
 
 function slugify(t) {
   return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
@@ -747,10 +747,13 @@ async function detectContradictions() {
             contradiction.wiki_entry_id = await resolveWikiEntryId();
 
             // Check if already flagged
+            // Exact equality on the deterministic claim string — substring
+            // predicates are not product-exact ("Bifen" matches an existing
+            // "Bifen XTS" claim) and the backfill below would reattribute
+            // another product's row to the wrong wiki page.
             const existing = await db('knowledge_contradictions')
               .where({ kb_entry_id: kbEntry.id, contradiction_type: 'claim_vs_data' })
-              // Same LIKE-metacharacter hazard as the seasonal dedupe below.
-              .whereRaw("kb_claim ILIKE ? ESCAPE '\\'", [`%${escapeLike(eff.product_name)}%`])
+              .where({ kb_claim: contradiction.kb_claim })
               .where({ status: 'open' })
               .first();
 
@@ -802,15 +805,14 @@ async function detectContradictions() {
                 severity: 0.6,
               };
 
-              // Dedupe scoped to THIS product — a broad KB entry can match
-              // several efficacy products, and a product-blind predicate
-              // would collapse them all onto the first inserted row.
-              // escapeLike: catalog names carry LIKE metacharacters
-              // ("Prodiamine 65%") that would otherwise match other
-              // products' rows and suppress/misattribute this one.
+              // Exact equality on the deterministic description — product-
+              // scoped (a broad KB entry can match several products) and
+              // immune to LIKE metacharacters in catalog names
+              // ("Prodiamine 65%") and to substring collisions
+              // ("Bifen" vs "Bifen XTS").
               const existing = await db('knowledge_contradictions')
                 .where({ kb_entry_id: kbEntry.id, contradiction_type: 'claim_vs_data' })
-                .whereRaw("description ILIKE ? ESCAPE '\\'", [`%${escapeLike(eff.product_name)}%peak season%shoulder%`])
+                .where({ description: contradiction.description })
                 .where({ status: 'open' })
                 .first();
 

@@ -238,8 +238,9 @@ test('seasonal dedupe is scoped per product — two products under one KB entry 
     ],
     knowledge_entries: [],
     knowledge_contradictions: (rec) => {
-      const raw = rec.ops.find(([m]) => m === 'whereRaw');
-      if (raw) dedupeQueries.push(raw[1][1]);
+      for (const [m, args] of rec.ops) {
+        if (m === 'where' && args[0]?.description) dedupeQueries.push(args[0].description);
+      }
       return []; // nothing pre-existing — both should insert
     },
   });
@@ -250,8 +251,10 @@ test('seasonal dedupe is scoped per product — two products under one KB entry 
   expect(result.contradictions).toBe(2);
   const ids = dbMock.state.inserts.knowledge_contradictions.map((c) => c.wiki_entry_id);
   expect(ids).toEqual(['wiki-bifen-it', 'wiki-bifen-xts']);
-  // The dedupe predicate must carry the product name, not just the phrase
-  expect(dedupeQueries.some((q) => String(q).includes('Bifen I/T'))).toBe(true);
+  // The dedupe predicate is the exact deterministic description — product-
+  // scoped, no LIKE patterns (substring collisions and % in catalog names)
+  expect(dedupeQueries.some((q) => String(q).startsWith('Bifen I/T performs worse'))).toBe(true);
+  expect(dedupeQueries.some((q) => String(q).startsWith('Bifen XTS performs worse'))).toBe(true);
 });
 
 test('an existing open row with null attribution is backfilled and gated when the bridge resolves', async () => {
