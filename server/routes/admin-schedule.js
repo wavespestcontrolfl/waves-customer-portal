@@ -9961,10 +9961,25 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           throw err;
         }
         for (const inv of resolved.supersedes) {
+          // Mirror voidInvoice's money guards under the lock (Codex P0 r20):
+          // a manually recorded payment rides payment_recorded_at or a
+          // paid/processing payments-ledger row (metadata linkage), neither
+          // of which the resolver's column guards see. Recorded money means
+          // this is a refund decision — never a switch.
+          const recordedPayment = await trx('payments')
+            .whereIn('status', ['paid', 'processing'])
+            .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(inv.id)])
+            .first('id');
+          if (recordedPayment) {
+            const err = new Error(`${inv.invoiceNumber || 'The per-application invoice'} has a recorded payment — resolve it from Invoices, never a switch`);
+            err.switchConflict = true;
+            throw err;
+          }
           const retired = await trx('invoices')
             .where({ id: inv.id, status: 'draft' })
             .whereNull('sent_at')
             .whereNull('paid_at')
+            .whereNull('payment_recorded_at')
             .whereNull('stripe_payment_intent_id')
             .update({ status: 'void', updated_at: new Date() });
           if (retired !== 1) {
@@ -10110,6 +10125,62 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
 // never trust client-sent amounts) — the client supplies only ids, and each is
 // verified to be a void invoice belonging to this visit's series. Idempotent:
 // a row already replaced is skipped rather than duplicated.
+// GET /api/admin/schedule/:id/prepay-switch/status — is the switch's prepay
+// actually ACTIVATED? Paid is not activated (Codex P0 r20): the payment
+// routes deliberately swallow a failed syncTermForInvoicePayment, so an
+// invoice can sit paid while the term is payment_pending and the visits
+// unstamped — completing then would bill per application again. The client
+// claims success ONLY on this answer; a paid-but-pending state is repaired
+// synchronously here (the sync is idempotent) before answering. Ungated like
+// the undo: it is read-and-repair for switches already in flight.
+router.get('/:id/prepay-switch/status', requireAdmin, async (req, res, next) => {
+  try {
+    const invoiceId = String(req.query.invoiceId || '').trim();
+    if (!invoiceId) return res.status(400).json({ error: 'invoiceId is required' });
+    const visit = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'prepaid_method', 'annual_prepay_term_id');
+    if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
+    const invoice = await db('invoices')
+      .where({ id: invoiceId, customer_id: visit.customer_id })
+      .first('id', 'status', 'paid_at', 'annual_prepay_term_id');
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found for this customer' });
+
+    const invoiceStatus = String(invoice.status || '').toLowerCase();
+    const settled = ['paid', 'prepaid'].includes(invoiceStatus) || !!invoice.paid_at;
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    const readTerm = async () => (invoice.annual_prepay_term_id
+      ? db('annual_prepay_terms').where({ id: invoice.annual_prepay_term_id }).first('id', 'status')
+      : db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id', 'status'));
+    let term = await readTerm();
+    const termActiveStatuses = ['active', 'renewal_pending'];
+    if (settled && (!term || !termActiveStatuses.includes(String(term.status || '')))) {
+      // Paid but not activated — the exact swallowed-sync gap. Repair now.
+      try {
+        await AnnualPrepayRenewals.syncTermForInvoicePayment(invoice.id);
+      } catch (err) {
+        logger.warn(`[schedule:prepay-switch] status repair sync failed for invoice ${invoice.id}: ${err.message}`);
+      }
+      term = await readTerm();
+    }
+    const freshVisit = await db('scheduled_services')
+      .where({ id: visit.id })
+      .first('prepaid_method', 'annual_prepay_term_id');
+    const termActive = !!term && termActiveStatuses.includes(String(term.status || ''));
+    const visitCovered = !!freshVisit
+      && String(freshVisit.prepaid_method || '') === 'annual_prepay_invoice'
+      && !!freshVisit.annual_prepay_term_id;
+    res.json({
+      invoiceStatus,
+      settled,
+      termStatus: term ? term.status : null,
+      termActive,
+      visitCovered,
+      activated: settled && termActive && visitCovered,
+    });
+  } catch (err) { next(err); }
+});
+
 // DELIBERATELY NOT GATED (Codex P1 r7): this is the compensation leg. A
 // client that started a switch just before the kill switch flipped can still
 // void its uncollected prepay through the ordinary invoice route — refusing

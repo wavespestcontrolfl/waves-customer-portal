@@ -58,7 +58,7 @@ let calls;
 // switch committed?", "was the old invoice restored?") instead of indexes.
 function stubFetch({
   preview = PREVIEW, switchFails = false, switchNetworkFails = false,
-  undoFails = false, freshStatus = 'paid',
+  undoFails = false, freshStatus = 'paid', statusActivated = true,
 } = {}) {
   calls = [];
   global.fetch = vi.fn(async (url, options = {}) => {
@@ -66,6 +66,11 @@ function stubFetch({
     calls.push({ path, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
     const ok = (json, status = 200) => ({ ok: true, status, json: async () => json });
     if (path.includes('annual-prepay-preview')) return ok(preview);
+    if (path.includes('/prepay-switch/status')) {
+      return ok(statusActivated
+        ? { activated: true, termStatus: 'active', visitCovered: true }
+        : { activated: false, termStatus: 'payment_pending', visitCovered: false });
+    }
     if (path.includes('/prepay-switch/undo')) {
       if (undoFails) return ok({ restored: [], failed: [{ id: 'inv-1', invoiceNumber: 'WPC-2026-0345', error: 'insert failed' }] });
       return ok({ restored: [{ replacedInvoiceId: 'inv-1', invoiceId: 'inv-new', invoiceNumber: 'WPC-2026-0401' }], failed: [] });
@@ -132,6 +137,28 @@ describe('PrepaySwitchSheet', () => {
     expect(screen.getByText(/Complete the visit next/)).toBeInTheDocument();
     expect(onSaved).toHaveBeenCalled();
     expect(didUndo()).toBe(false);
+  });
+
+  it('PAID but not ACTIVATED parks with Check again — paid is not coverage (Codex P0 r20)', async () => {
+    stubFetch({ statusActivated: false });
+    render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
+    await screen.findByText('tender 512');
+    fireEvent.click(screen.getByRole('button', { name: 'tender-success' }));
+
+    expect(await screen.findByText(/coverage still activating/)).toBeInTheDocument();
+    expect(screen.getByText(/Do NOT complete the visit/)).toBeInTheDocument();
+    expect(screen.queryByText('Annual prepay collected')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Check again/ })).toBeInTheDocument();
+  });
+
+  it('success requires the ACTIVATION check, not just the paid invoice', async () => {
+    render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
+    await screen.findByText('tender 512');
+    fireEvent.click(screen.getByRole('button', { name: 'tender-success' }));
+    expect(await screen.findByText('Annual prepay collected')).toBeInTheDocument();
+    expect(calls.some((c) => c.path.includes('/prepay-switch/status'))).toBe(true);
   });
 
   it('a tender that reports success while PROCESSING parks — never a success claim', async () => {

@@ -279,13 +279,36 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
     const collected = async () => {
       setBusy('confirm');
       const fresh = await adminFetch(`/admin/invoices/${invoice.id}`).catch(() => null);
-      setBusy('');
-      setCollecting(null);
       const status = String(fresh?.status || '').toLowerCase();
       if (fresh && PREPAY_SETTLED_STATUSES.includes(status)) {
-        finish(invoice);
+        // Paid is not ACTIVATED (Codex P0 r20): the payment routes swallow a
+        // failed term sync, so the term can sit payment_pending with the
+        // visits unstamped — completing then would bill per application
+        // again. The status endpoint repairs-and-reports; success is claimed
+        // only on activated:true.
+        const act = await adminFetch(`/admin/schedule/${visitId}/prepay-switch/status?invoiceId=${encodeURIComponent(invoice.id)}`).catch(() => null);
+        setBusy('');
+        setCollecting(null);
+        if (act?.activated) {
+          finish(invoice);
+          return;
+        }
+        const checkAgain = async () => {
+          const again = await adminFetch(`/admin/schedule/${visitId}/prepay-switch/status?invoiceId=${encodeURIComponent(invoice.id)}`).catch(() => null);
+          if (again?.activated) { setRecovery(null); finish(invoice); return true; }
+          return false;
+        };
+        setRecovery({
+          title: 'Payment settled — coverage still activating',
+          message: 'The payment is in, but the prepaid year hasn\u2019t stamped onto the visits yet. Tap Check again in a moment. Do NOT complete the visit until this confirms — completing now would bill per application on top of the prepay.',
+          detail: act ? `term: ${act.termStatus || 'none'} \u00b7 visit covered: ${act.visitCovered ? 'yes' : 'no'}` : 'Could not read the activation status.',
+          voided: [],
+          checkAgain,
+        });
         return;
       }
+      setBusy('');
+      setCollecting(null);
       setRecovery({
         title: 'Payment still processing',
         message: `The ${money(Number(invoice.total) || 0)} charge went in but hasn\u2019t settled yet \u2014 do not charge again. If it settles, the prepaid year activates on its own. If it fails, void ${invoice.invoice_number || 'the prepay invoice'} from Invoices, then tap Restore to put the per-application invoice back.`,
@@ -324,6 +347,22 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
           </div>
         )}
         <div className="flex gap-2">
+          {recovery.checkAgain && (
+            <button
+              type="button"
+              disabled={busy === 'checking'}
+              onClick={async () => {
+                setBusy('checking');
+                const ok = await recovery.checkAgain();
+                setBusy('');
+                if (!ok) setRecovery((r) => (r ? { ...r, detail: `${r.detail || ''} \u2014 still not active, check again shortly`.trim() } : r));
+              }}
+              className="flex-1 rounded-full bg-zinc-900 text-white font-medium u-focus-ring disabled:opacity-60"
+              style={{ padding: '12px 16px', fontSize: 14 }}
+            >
+              {busy === 'checking' ? 'Checking\u2026' : 'Check again'}
+            </button>
+          )}
           {recovery.voided?.length > 0 && (
             <button
               type="button"

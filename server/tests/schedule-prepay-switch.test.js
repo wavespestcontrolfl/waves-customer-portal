@@ -134,6 +134,7 @@ function stubTables({
   seriesCount = 4,
   rootsCount = 1,
   casResult = 1,
+  recordedPayment = undefined,
 } = {}) {
   stubTables.casCalls = [];
   stubTables.updates = [];
@@ -159,6 +160,7 @@ function stubTables({
     });
     q.whereNot = jest.fn(() => q);
     let rootsProbe = false;
+    q.whereRaw = jest.fn(() => q);
     q.whereNull = jest.fn((col) => {
       if (col === 'recurring_parent_id') rootsProbe = true;
       return q;
@@ -203,6 +205,7 @@ function stubTables({
         }
         return rows[0];
       }
+      if (table === 'payments') return recordedPayment;
       if (table === 'customers') return customer;
       if (table === 'estimates') {
         if (estimate === 'throw') throw new Error('estimate read failed');
@@ -576,6 +579,14 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
     expect(String(stamp.patch.notes.bindings[1])).toContain('[prepay-switch-superseded-by:inv-prepay]');
   });
 
+  test('a recorded payment on the draft refuses the switch — canonical money guard mirrored (Codex P0 r20)', async () => {
+    stubTables({ recordedPayment: { id: 'pay-1' } });
+    const { status, body } = await post('/svc-1/prepay-switch');
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/recorded payment/i);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
+
   test('a CAS conflict (invoice changed under the lock) aborts before anything is minted', async () => {
     stubTables({ casResult: 0 });
     const { status, body } = await post('/svc-1/prepay-switch');
@@ -775,5 +786,54 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     const { body } = await post('/svc-1/prepay-switch/undo', {});
     expect(body.restored).toEqual([]);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
+});
+
+describe('on-site prepay switch — activation status (paid ≠ activated)', () => {
+  let syncSpy;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    syncSpy = jest.spyOn(AnnualPrepayRenewals, 'syncTermForInvoicePayment').mockResolvedValue(undefined);
+  });
+  afterEach(() => syncSpy.mockRestore());
+
+  async function getStatus() {
+    const app = express();
+    app.use('/admin/schedule', router);
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+    const server = app.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/schedule/svc-1/prepay-switch/status?invoiceId=inv-prepay`);
+      return { status: res.status, body: await res.json() };
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+
+  test('activated only when paid AND the term is active AND the visit carries the coverage stamp', async () => {
+    stubTables({
+      visit: { ...ACCEPTED_SERIES_VISIT, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'term-1' },
+      invoicesById: { 'inv-prepay': { id: 'inv-prepay', status: 'paid', paid_at: '2026-08-13T00:00:00Z', annual_prepay_term_id: 'term-1' } },
+      term: { id: 'term-1', status: 'active' },
+    });
+    const { status, body } = await getStatus();
+    expect(status).toBe(200);
+    expect(body.activated).toBe(true);
+    // Already active — no repair needed.
+    expect(syncSpy).not.toHaveBeenCalled();
+  });
+
+  test('paid but PENDING repairs synchronously and answers honestly if still not active', async () => {
+    stubTables({
+      invoicesById: { 'inv-prepay': { id: 'inv-prepay', status: 'paid', paid_at: '2026-08-13T00:00:00Z', annual_prepay_term_id: 'term-1' } },
+      term: { id: 'term-1', status: 'payment_pending' },
+    });
+    const { body } = await getStatus();
+    // The swallowed-sync gap: the endpoint re-runs the idempotent sync…
+    expect(syncSpy).toHaveBeenCalledWith('inv-prepay');
+    // …and with the term still pending (stub static), never claims success.
+    expect(body.activated).toBe(false);
+    expect(body.termStatus).toBe('payment_pending');
   });
 });
