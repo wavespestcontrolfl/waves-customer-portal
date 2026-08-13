@@ -398,7 +398,18 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
       logger.warn(`[voice-relay-visit] finding text withheld — banned customer copy (${hits.length} match(es)) on record ${record.id}`);
       return null;
     }
-    return text;
+    // ⭐ ACCESS CODES ARE REDACTED ON EVERY FREE-TEXT REPORT FIELD. The
+    // provenance filter only suppresses TITLE-ONLY raw-note findings; a
+    // structured finding's detail/recommendation or a product's application
+    // area is technician free text too, and "lockbox 4417 at the side gate"
+    // in a recommendation would be spoken verbatim. Same canonical redactor
+    // the transcript and history paths use.
+    try {
+      const { redactAccessCodes } = require('../context-aggregator');
+      return typeof redactAccessCodes === 'function' ? redactAccessCodes(text) : text;
+    } catch {
+      return text;
+    }
   };
   // ⭐ PROVENANCE, NOT CATEGORY — the customer report's own rule
   // (ServiceReportDocument.jsx): findings synthesized from RAW technician

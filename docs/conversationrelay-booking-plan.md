@@ -60,7 +60,7 @@ Socket.io registers its own `upgrade` handler and only acts on `/socket.io/`. We
 ## Owner steps to test Phase 0 on the sandbox
 
 1. Deploy this branch (or run locally) with `VOICE_RELAY_ENABLED=true`, `ANTHROPIC_API_KEY`, and **`VOICE_RELAY_WS_SECRET`** (a long random string) set. Without the secret the ws endpoint **refuses to attach** (fail-closed) — it is otherwise public and can spend tokens / write leads.
-2. Point +19412691697 at something that can MINT A PER-CALL TOKEN — a static TwiML Bin can no longer do this, which is why the sandbox runs on a Twilio Function (`voice-relay-sandbox` / `/relay-sandbox`). The URL must carry `callSid` + `t`, never the secret:
+2. Point +19412691697 at something that can MINT A PER-CALL TOKEN — a static TwiML Bin can no longer do this, which is why the sandbox runs on a Twilio Function (`voice-relay-sandbox` / `/relay-sandbox`). ⚠️ **The Function MUST be deployed with `protected` visibility** (Twilio then enforces a valid `X-Twilio-Signature` on every request — the deployed sandbox Function is, verified by an unsigned GET returning 403). A public token-minter is a minting ORACLE: it holds the secret and mints for caller-controlled `event.CallSid`, so anyone could mint tokens for arbitrary CallSids and open synthetic relay sessions. If Protected visibility is ever unavailable, validate `X-Twilio-Signature` in the Function body before minting — never mint unauthenticated. The URL must carry `callSid` + `t`, never the secret:
 
    ```xml
    <?xml version="1.0" encoding="UTF-8"?>

@@ -454,6 +454,22 @@ describe('get_service_report', () => {
   // ⭐ PROVENANCE, NOT CATEGORY (the customer report's own rule): a raw-note
   // synthesized finding is title-only, and a raw-note title can carry a gate
   // code. Structured findings still speak; bare titles never do.
+  // ⭐ ACCESS CODES ARE REDACTED IN STRUCTURED FIELDS TOO — the provenance
+  // filter only kills title-only rows; a structured recommendation is free
+  // text and can carry a lockbox code.
+  test('a gate code inside a structured finding detail is redacted, not spoken', async () => {
+    primeDb({
+      scheduled_services: [],
+      service_records: [{ id: 'sr-9', service_date: '2026-08-01', service_type: 'Pest Control', technician_notes: null, structured_notes: null, status: 'completed' }],
+      service_findings: [
+        { category: 'other', severity: 'info', title: 'Side gate access', detail: 'used gate code 4417 to enter', recommendation: 'Monitor at next visit' },
+      ],
+    });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).not.toContain('4417');
+    expect(out).toContain('Monitor at next visit'); // the rest still speaks
+  });
+
   test('title-only raw-note findings are never spoken; structured ones still are', async () => {
     primeDb({
       scheduled_services: [],
