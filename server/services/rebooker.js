@@ -1080,10 +1080,22 @@ class SmartRebooker {
         // advisory-lock + overlap guard as the single-visit path, scoped
         // to the anchor; siblings keep their existing techs. Callers that
         // omit the option (admin series shifts) are unaffected.
+        // Anchor gate span, derived BEFORE the tech-scoped guard (codex
+        // #3377 P1 r2): keying that guard on the raw window_end let a
+        // null-end anchor skip the slot-reserve tech lock AND the tech
+        // overlap query — slot-reservation writers take the tech lock but
+        // not the date lock, so the later tech-blind probe alone cannot
+        // serialize against them and both could commit an overlap under
+        // READ COMMITTED. Stored end wins; else the duration-derived span.
+        // Null under the kill switch so the guard keeps its legacy skip.
+        const anchorGateEnd = !isAnchor ? null : (updateData.window_end || (
+          process.env.REBOOKER_NULL_END_OCCUPANCY === 'off'
+            ? null
+            : occupancyProbeEnd(updateData.window_start, null, sib.estimated_duration_minutes)
+        ));
         if (isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
           updateData.technician_id = options.technicianId || null;
-          const anchorEnd = updateData.window_end;
-          if (options.technicianId && updateData.window_start && anchorEnd) {
+          if (options.technicianId && updateData.window_start && anchorGateEnd) {
             await trx.raw(
               'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
               ['slot-reserve', `${options.technicianId}:${String(date).split('T')[0]}`],
@@ -1099,7 +1111,7 @@ class SmartRebooker {
               })
               .whereRaw(
                 "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
-                [anchorEnd, updateData.window_start],
+                [anchorGateEnd, updateData.window_start],
               )
               .first('id');
             if (overlap) {
@@ -1116,14 +1128,12 @@ class SmartRebooker {
         // for techless anchors. Same throw/handling as the single-visit
         // path; sweptIds excludes every row this sweep is moving.
         if (isAnchor && updateData.window_start) {
-          // Duration-aware fallback (was flat 60): a 90-minute anchor
-          // occupies 90 minutes per the read predicate, so a flat-60 probe
-          // under-checked the tail. Kill switch restores flat 60.
-          const anchorOccEnd = occupancyProbeEnd(
-            updateData.window_start,
-            updateData.window_end,
-            process.env.REBOOKER_NULL_END_OCCUPANCY === 'off' ? null : sib.estimated_duration_minutes,
-          );
+          // Duration-aware span shared with the tech guard above (was flat
+          // 60, which under-checked a >60-min anchor's tail). Under the
+          // kill switch anchorGateEnd is null and this falls back to the
+          // legacy flat-60 — this probe always ran, unlike the guard.
+          const anchorOccEnd = anchorGateEnd
+            || occupancyProbeEnd(updateData.window_start, updateData.window_end, null);
           const anchorOccClash = await findConflictingVisits({
             db: trx,
             date: String(date).split('T')[0],
