@@ -248,9 +248,17 @@ async function optimizeAllRoutes(input) {
   }
 
   if (result.orderedStops) {
-    for (let i = 0; i < result.orderedStops.length; i++) {
-      await db('scheduled_services').where('id', result.orderedStops[i].id).update({ route_order: i + 1, updated_at: new Date() });
-    }
+    // Fenced + transactional rewrite — same 'slot-reserve' tech-day lock as
+    // every other route_order writer (scheduling/tech-day-lock.js); an
+    // unfenced per-row loop racing the nightly reorder leaves a mixed
+    // sequence. Locks every tech-day this board-wide rewrite touches.
+    const { lockTechDays } = require('../scheduling/tech-day-lock');
+    await db.transaction(async (trx) => {
+      await lockTechDays(trx, services.map((s) => ({ techId: s.technician_id, date })));
+      for (let i = 0; i < result.orderedStops.length; i++) {
+        await trx('scheduled_services').where('id', result.orderedStops[i].id).update({ route_order: i + 1, updated_at: new Date() });
+      }
+    });
   }
 
   logger.info(`[intelligence-bar:schedule] Optimized routes for ${date}: saved ${savedMiles} miles (${savedPct}%)`);
@@ -321,9 +329,15 @@ async function optimizeTechRoute(input) {
   }
 
   if (result.orderedStops) {
-    for (let i = 0; i < result.orderedStops.length; i++) {
-      await db('scheduled_services').where('id', result.orderedStops[i].id).update({ route_order: i + 1, updated_at: new Date() });
-    }
+    // Fenced + transactional — single tech-day; same contract as
+    // optimize_all_routes above.
+    const { lockTechDays } = require('../scheduling/tech-day-lock');
+    await db.transaction(async (trx) => {
+      await lockTechDays(trx, [{ techId: tech.id, date }]);
+      for (let i = 0; i < result.orderedStops.length; i++) {
+        await trx('scheduled_services').where('id', result.orderedStops[i].id).update({ route_order: i + 1, updated_at: new Date() });
+      }
+    });
   }
 
   logger.info(`[intelligence-bar:schedule] Optimized ${tech.name}'s route for ${date}: saved ${savedMiles} miles`);
