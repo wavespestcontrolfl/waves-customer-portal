@@ -318,7 +318,11 @@ async function loadLawnWindowGuidance(dbh, svc) {
     const serviceDate = scheduledDay ? parseETDateTime(`${scheduledDay}T12:00`) : new Date();
 
     const assignedWindowKey = svc.lawn_protocol_window_key || null;
-    const query = { serviceDate };
+    // strict: a transient protocol/product query failure must throw, not
+    // read as "no guidance" — an emptied lawn block changes the grounding
+    // hash and would overwrite a valid cached brief (runSweep counts the
+    // visit failed and the prior brief survives).
+    const query = { serviceDate, strict: true };
     if (assignedWindowKey) {
       query.windowKey = assignedWindowKey;
       // Resolve the assigned protocol row (key + version, newest match —
@@ -327,11 +331,13 @@ async function loadLawnWindowGuidance(dbh, svc) {
       if (svc.lawn_protocol_key) {
         const protocolQuery = dbh('lawn_protocols').where({ protocol_key: svc.lawn_protocol_key });
         if (svc.lawn_protocol_version) protocolQuery.where({ version: svc.lawn_protocol_version });
+        // No .catch: a lookup OUTAGE must propagate — collapsing it into
+        // "unresolved" would store assigned_protocol_unresolved guidance
+        // over a valid cached brief.
         const protocolRow = await protocolQuery
           .orderBy('effective_from', 'desc')
           .orderBy('created_at', 'desc')
-          .first('id')
-          .catch(() => null);
+          .first('id');
         if (protocolRow?.id) {
           query.protocolId = protocolRow.id;
         } else {
@@ -824,6 +830,16 @@ function validateBriefJson(json, grounding) {
     open_scope: cleanText(json.open_scope, 400),
     customer_context: cleanText(json.customer_context, 500),
   };
+  // Semantically empty output is a MISS, not a brief: cached as
+  // generated_via 'llm' it would block regeneration (unchanged grounding
+  // hash) while showing the tech nothing. Reject so the deterministic
+  // template serves instead.
+  const hasContent = body.priorities.length > 0
+    || body.watch_items.length > 0
+    || body.last_visit_summary
+    || body.open_scope
+    || body.customer_context;
+  if (!hasContent) return { reason: 'empty_output' };
   const ungrounded = findUngroundedClaim(body, grounding);
   if (ungrounded) {
     const kindLabel = {
