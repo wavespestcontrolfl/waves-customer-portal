@@ -11,16 +11,21 @@
 //
 // ORDER IS THE SAFETY PROPERTY. The accept already minted a per-application
 // invoice for this series (setup fee + first application); the owner's
-// 2026-08-12 ruling waives that fee, so the prepaid year SUPERSEDES it. That
-// void happens LAST — only after the prepay is collected or the pay link is
-// deliberately sent:
-//   • tender fails / operator backs out → the just-minted prepay invoice is
-//     voided (cancelling its payment_pending term) and the superseded
-//     invoice is untouched: the visit bills exactly as it did before.
-//   • prepay settles → the superseded invoice is voided. If that void fails
-//     the operator sees a loud, retryable error, because completion REUSES
-//     any non-void invoice attached to the visit — leaving it alive would
-//     bill the customer for a visit they just prepaid.
+// 2026-08-12 ruling waives that fee, so the prepaid year SUPERSEDES it.
+//
+// That retirement happens FIRST, server-side, before any prepay invoice
+// exists (Codex P0: voiding after the tender leaves a minutes-long window
+// where BOTH invoices are payable and the customer could pay each):
+//   1. POST …/prepay-switch/supersede — re-derives the set server-side and
+//      voids it. A refusal here has changed nothing and charged nothing.
+//   2. mint the prepay invoice, then collect it (or send the pay link).
+//   3. If the mint fails, or the operator backs out of the tender, POST
+//      …/prepay-switch/undo re-mints an equivalent draft from the voided
+//      row's own line items — the visit bills what it billed before, under a
+//      new invoice number — and the uncollected prepay invoice is voided so
+//      its payment_pending term can't suppress billing.
+// A failed undo is loud: the operator must know this visit currently has no
+// invoice behind it.
 
 import { useEffect, useState } from 'react';
 import MobilePaymentSheet from './MobilePaymentSheet';
@@ -98,9 +103,10 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
   const [actionError, setActionError] = useState('');
   // Minted prepay invoice awaiting in-person tender.
   const [collecting, setCollecting] = useState(null);
-  // Set once the prepay is settled: the superseded invoices still need
-  // voiding, and a failure here is louder than a normal error.
-  const [cleanupFailed, setCleanupFailed] = useState(null);
+  // Set when an aborted switch could NOT put the per-application invoice
+  // back — the visit is left with nothing to bill, which the operator must
+  // know before completing it.
+  const [restoreFailed, setRestoreFailed] = useState(null);
   const [done, setDone] = useState(null);
 
   const visitId = service?.id;
@@ -118,31 +124,36 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
 
   const supersedes = preview?.supersedes || [];
 
-  // Void every superseded invoice. Returns the list that FAILED so the caller
-  // can surface exactly which ones still need a hand — a partial success must
-  // never read as done.
-  const voidSuperseded = async () => {
-    const failures = [];
-    for (const inv of supersedes) {
-      try {
-        await adminFetch(`/admin/invoices/${inv.id}/void`, { method: 'POST' });
-      } catch (e) {
-        failures.push({ ...inv, error: e.message || 'void failed' });
-      }
-    }
-    return failures;
+  // Step 1 — retire the per-application invoice SERVER-side. The server
+  // re-derives the set itself (the client's list is display only) and refuses
+  // as a whole if anything changed since the preview. Returns the voided rows
+  // so the undo can restore them; throws with the server's reason otherwise.
+  const supersedeFirst = async () => {
+    if (supersedes.length === 0) return [];
+    const result = await adminFetch(`/admin/schedule/${visitId}/prepay-switch/supersede`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    return Array.isArray(result?.voided) ? result.voided : [];
   };
 
-  // `collected` rides INTO the cleanup state and back out of a retry: a
-  // send-path switch whose void failed and later succeeded must not report
-  // "collected" and tell the operator to complete a visit whose term is still
-  // payment_pending.
-  const finish = async (invoice, { collected }) => {
-    const failures = await voidSuperseded();
-    if (failures.length > 0) {
-      setCleanupFailed({ failures, invoice, collected });
-      return;
+  // Step 3 — the switch didn't complete: put the per-application invoice back
+  // (re-minted server-side from the voided row's own amounts, new number).
+  const undoSupersede = async (voided) => {
+    if (!voided || voided.length === 0) return { ok: true, failed: [] };
+    try {
+      const result = await adminFetch(`/admin/schedule/${visitId}/prepay-switch/undo`, {
+        method: 'POST',
+        body: JSON.stringify({ voidedInvoiceIds: voided.map((v) => v.id) }),
+      });
+      const failed = Array.isArray(result?.failed) ? result.failed : [];
+      return { ok: failed.length === 0, failed };
+    } catch (e) {
+      return { ok: false, failed: voided.map((v) => ({ ...v, error: e.message || 'restore failed' })) };
     }
+  };
+
+  const finish = (invoice, { collected }) => {
     onSaved?.();
     setDone({ invoice, collected });
   };
@@ -151,6 +162,16 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
     if (!preview?.eligible || !customerId) return;
     setBusy(chargeInPerson ? 'charge' : 'send');
     setActionError('');
+    let voided = [];
+    try {
+      voided = await supersedeFirst();
+    } catch (e) {
+      // Nothing was minted and nothing charged — the visit still bills as it
+      // did. Surface the server's reason and stop.
+      setActionError(e.message || 'Could not retire the per-application invoice');
+      setBusy('');
+      return;
+    }
     try {
       const result = await adminFetch(`/admin/customers/${customerId}/annual-prepay-invoice`, {
         method: 'POST',
@@ -159,24 +180,34 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
       const invoice = result?.invoice;
       if (!invoice?.id) throw new Error('The prepay invoice did not come back — check Invoices before retrying');
       if (chargeInPerson) {
-        setCollecting(invoice);
+        setCollecting({ invoice, voided });
         return;
       }
-      // The mint returns 201 even when the SMS/email leg failed. Voiding the
-      // per-application invoice on the strength of a prepay invoice the
-      // customer never received would leave them with no bill at all and
-      // nothing to pay — keep the existing invoice and say what happened.
+      // The mint returns 201 even when the SMS/email leg failed. A prepay
+      // invoice the customer never received, with their per-application one
+      // already retired, would leave them with no bill at all — put it back.
       if (result?.delivery && result.delivery.ok === false) {
+        const undo = await undoSupersede(voided);
         setActionError(
           `The ${money(preview.prepayTotal)} prepay invoice was created (${invoice.invoice_number || 'see Invoices'}) but could NOT be delivered`
           + `${result.delivery.error ? `: ${result.delivery.error}` : '.'} `
-          + 'The per-application invoice was left in place. Resend the prepay invoice from Invoices, then void the old one.',
+          + (undo.ok
+            ? 'The per-application invoice was restored. Resend the prepay invoice from Invoices when you\u2019re ready.'
+            : 'The per-application invoice could NOT be restored either — this visit has no invoice behind it. Rebuild it from Invoices.'),
         );
         return;
       }
-      await finish(invoice, { collected: false });
+      finish(invoice, { collected: false });
     } catch (e) {
-      setActionError(e.message || 'Could not create the prepay invoice');
+      const undo = await undoSupersede(voided);
+      setActionError(
+        `${e.message || 'Could not create the prepay invoice'}.`
+        + (voided.length === 0
+          ? ''
+          : undo.ok
+            ? ' The per-application invoice was restored — nothing changed.'
+            : ' The per-application invoice could NOT be restored — this visit has no invoice behind it. Rebuild it from Invoices.'),
+      );
     } finally {
       setBusy('');
     }
@@ -184,44 +215,52 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
 
   // ── In-person tender ────────────────────────────────────────────────────
   if (collecting) {
-    // Abort: void the just-minted prepay invoice so its payment_pending term
-    // is cancelled and the customer isn't left with coverage nobody paid for.
-    // The superseded invoice is deliberately untouched on this path.
+    const { invoice, voided } = collecting;
+    // Abort: void the uncollected prepay invoice (cancelling its
+    // payment_pending term) AND put the per-application invoice back, so the
+    // visit bills exactly what it billed before the operator tapped in.
     const abortAndClose = async () => {
       setBusy('abort');
       try {
-        const fresh = await adminFetch(`/admin/invoices/${collecting.id}`).catch(() => null);
+        const fresh = await adminFetch(`/admin/invoices/${invoice.id}`).catch(() => null);
         const status = String(fresh?.status || '').toLowerCase();
         // Settled in the gap (webhook lag, captured PaymentIntent, credit
         // auto-applied) — that's a successful collection, not an abort.
         if (fresh && !['draft', 'sent', 'overdue'].includes(status)) {
           setCollecting(null);
-          await finish(collecting, { collected: true });
+          finish(invoice, { collected: true });
           return;
         }
-        await adminFetch(`/admin/invoices/${collecting.id}/void`, { method: 'POST' });
-        setCollecting(null);
-        onClose?.();
+        await adminFetch(`/admin/invoices/${invoice.id}/void`, { method: 'POST' });
       } catch (e) {
         setCollecting(null);
-        setActionError(`The prepay invoice was created but not collected, and cancelling it failed: ${e.message}. Void ${collecting.invoice_number || 'it'} from Invoices — until then this customer's visits are held against an uncollected prepay.`);
-      } finally {
+        setActionError(`The prepay invoice was created but not collected, and cancelling it failed: ${e.message}. Void ${invoice.invoice_number || 'it'} from Invoices — until then this customer's visits are held against an uncollected prepay.`);
         setBusy('');
+        return;
       }
-    };
-    const collected = async () => {
-      const invoice = collecting;
+      const undo = await undoSupersede(voided);
+      setBusy('');
       setCollecting(null);
-      await finish(invoice, { collected: true });
+      if (!undo.ok) {
+        // The loud one: the visit now has NO invoice behind it.
+        setRestoreFailed(undo.failed);
+        return;
+      }
+      onSaved?.();
+      onClose?.();
+    };
+    const collected = () => {
+      setCollecting(null);
+      finish(invoice, { collected: true });
     };
     return (
       <MobilePaymentSheet
         desktopVisible
         hideInvoiceTender
         service={{ customerId, customerName }}
-        invoiceId={collecting.id}
-        invoiceToken={collecting.token}
-        amount={Number(collecting.total) || 0}
+        invoiceId={invoice.id}
+        invoiceToken={invoice.token}
+        amount={Number(invoice.total) || 0}
         onClose={abortAndClose}
         onChargeSuccess={collected}
         onPrepaidRecorded={collected}
@@ -229,46 +268,36 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
     );
   }
 
-  // ── Superseded-invoice cleanup failed — the loud one ────────────────────
-  if (cleanupFailed) {
+  // ── Undo failed: the visit is left with nothing to bill ─────────────────
+  if (restoreFailed) {
     return (
       <Shell>
         <div className="text-alert-fg font-medium" style={{ fontSize: 15, marginBottom: 8 }}>
-          {cleanupFailed.collected
-            ? 'Prepay collected — but the old invoice is still open'
-            : 'Prepay invoice sent — but the old invoice is still open'}
+          This visit has no invoice behind it
         </div>
         <div className="text-zinc-900" style={{ fontSize: 13, marginBottom: 10 }}>
-          {cleanupFailed.failures.map((inv) => `${inv.invoiceNumber || 'Invoice'} (${money(inv.total)})`).join(', ')}{' '}
-          could not be voided. Completing this visit will reuse it and bill {customerName}
-          {cleanupFailed.collected ? ' for a visit they just prepaid' : ' on top of the prepay invoice they were just sent'}.
-          Void it from Invoices now.
+          The prepay was cancelled, but {restoreFailed.map((inv) => inv.invoiceNumber || 'the per-application invoice').join(', ')}{' '}
+          could not be put back. Completing this visit will bill {customerName} the per-visit price only — the
+          setup fee is gone. Rebuild the invoice from Invoices before completing.
         </div>
         <div className="text-ink-secondary" style={{ fontSize: 12, marginBottom: 14 }}>
-          {cleanupFailed.failures[0]?.error}
+          {restoreFailed[0]?.error}
         </div>
         <div className="flex gap-2">
           <button
             type="button"
-            disabled={busy === 'cleanup'}
+            disabled={busy === 'restore'}
             onClick={async () => {
-              setBusy('cleanup');
-              const failures = await voidSuperseded();
+              setBusy('restore');
+              const undo = await undoSupersede(restoreFailed);
               setBusy('');
-              if (failures.length === 0) {
-                onSaved?.();
-                // Report what actually happened, not what the retry did: a
-                // send-path switch is still uncollected.
-                setDone({ invoice: cleanupFailed.invoice, collected: cleanupFailed.collected });
-                setCleanupFailed(null);
-              } else {
-                setCleanupFailed({ ...cleanupFailed, failures });
-              }
+              if (undo.ok) { setRestoreFailed(null); onSaved?.(); onClose?.(); }
+              else setRestoreFailed(undo.failed);
             }}
             className="flex-1 rounded-full bg-zinc-900 text-white font-medium u-focus-ring disabled:opacity-60"
             style={{ padding: '12px 16px', fontSize: 14 }}
           >
-            {busy === 'cleanup' ? 'Retrying…' : 'Retry void'}
+            {busy === 'restore' ? 'Retrying…' : 'Retry restore'}
           </button>
           <button
             type="button"
@@ -393,8 +422,8 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
             </div>
           ))}
           <div className="text-ink-secondary" style={{ fontSize: 12, marginTop: 6 }}>
-            Voided once the prepay is collected — or once you send the prepay invoice. Never on cancel, so backing
-            out leaves this visit billing exactly as it does now.
+            Voided the moment you tap below, so it can’t be paid while you collect. Back out and an identical
+            invoice is put straight back (new number) — this visit keeps billing exactly as it does now.
           </div>
         </div>
       )}

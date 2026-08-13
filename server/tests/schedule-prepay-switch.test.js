@@ -31,6 +31,12 @@ jest.mock('../middleware/admin-auth', () => ({
   requireAdmin: (_req, _res, next) => next(),
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
+const mockVoidInvoice = jest.fn(async () => ({ status: 'void' }));
+const mockCreateInvoice = jest.fn(async () => ({ id: 'inv-new', invoice_number: 'WPC-2026-0401' }));
+jest.mock('../services/invoice', () => ({
+  voidInvoice: (...args) => mockVoidInvoice(...args),
+  create: (...args) => mockCreateInvoice(...args),
+}));
 const mockResolveForInvoice = jest.fn(async () => ({ payerId: null }));
 jest.mock('../services/payer', () => ({
   resolveForInvoice: (...args) => mockResolveForInvoice(...args),
@@ -120,6 +126,9 @@ function stubTables({
       return [];
     });
     q.first = jest.fn(async () => {
+      // The undo endpoint reads ONE invoice row by id; the preview/supersede
+      // path reads the set via .select() above.
+      if (table === 'invoices') return Array.isArray(invoices) ? invoices[0] : undefined;
       if (table === 'customers') return customer;
       if (table === 'estimates') {
         if (estimate === 'throw') throw new Error('estimate read failed');
@@ -386,4 +395,127 @@ describe('on-site prepay switch — gate surface', () => {
   // feature-gates snapshots env at require time, so proving the dark surface
   // needs its own module registry, not a resetModules mid-suite (which drops
   // the db mock this file's router is holding).
+});
+
+// ── The write endpoints ───────────────────────────────────────────────────
+// The preview only DISPLAYS the supersede set; these are what actually retire
+// and restore the per-application invoice, and they must enforce the same
+// rules against the live DB (the client's list is never trusted).
+async function post(path, body = {}) {
+  const app = express();
+  app.use(express.json());
+  app.use('/admin/schedule', router);
+  app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+  const server = app.listen(0);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/schedule${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json() };
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+describe('on-site prepay switch — supersede (retire before the tender)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockVoidInvoice.mockResolvedValue({ status: 'void' });
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    stubTables();
+  });
+
+  test('voids the accept-minted invoice through the canonical void path', async () => {
+    const { status, body } = await post('/svc-1/prepay-switch/supersede');
+    expect(status).toBe(200);
+    expect(body.voided).toEqual([{ id: 'inv-1', invoiceNumber: 'WPC-2026-0345', total: 227 }]);
+    expect(mockVoidInvoice).toHaveBeenCalledWith('inv-1');
+  });
+
+  test('re-derives the set server-side — a client-supplied id is ignored', async () => {
+    const { body } = await post('/svc-1/prepay-switch/supersede', { invoiceIds: ['inv-someone-elses'] });
+    expect(body.voided.map((v) => v.id)).toEqual(['inv-1']);
+    expect(mockVoidInvoice).toHaveBeenCalledTimes(1);
+    expect(mockVoidInvoice).toHaveBeenCalledWith('inv-1');
+  });
+
+  test('refuses a delivered invoice and voids NOTHING', async () => {
+    stubTables({ invoices: [{ ...ACCEPT_INVOICE, sent_at: '2026-08-11T12:00:00Z' }] });
+    const { status, body } = await post('/svc-1/prepay-switch/supersede');
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/already gone out to the customer/i);
+    expect(mockVoidInvoice).not.toHaveBeenCalled();
+  });
+
+  test('refuses when the estimate is not accepted', async () => {
+    stubTables({ estimate: { id: 'est-1', status: 'sent', accepted_at: null } });
+    const { status } = await post('/svc-1/prepay-switch/supersede');
+    expect(status).toBe(409);
+    expect(mockVoidInvoice).not.toHaveBeenCalled();
+  });
+
+  test('a void that fails reports what did retire so the caller stops', async () => {
+    mockVoidInvoice.mockRejectedValueOnce(new Error('ACH in flight'));
+    const { status, body } = await post('/svc-1/prepay-switch/supersede');
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/Nothing was charged/i);
+    expect(body.voided).toEqual([]);
+  });
+});
+
+describe('on-site prepay switch — undo (put the invoice back)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCreateInvoice.mockResolvedValue({ id: 'inv-new', invoice_number: 'WPC-2026-0401' });
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+  });
+
+  const VOIDED_ROW = {
+    ...ACCEPT_INVOICE,
+    status: 'void',
+    customer_id: 'cust-1',
+    scheduled_service_id: 'svc-1',
+    title: 'WaveGuard Membership Setup + First Application',
+  };
+
+  test('re-mints from the VOIDED ROW\'s own amounts, never the request body', async () => {
+    stubTables({ invoices: [VOIDED_ROW] });
+    const { status, body } = await post('/svc-1/prepay-switch/undo', {
+      voidedInvoiceIds: ['inv-1'],
+      // A hostile/stale client amount must have no effect.
+      lineItems: [{ description: 'free', unit_price: 0 }],
+    });
+    expect(status).toBe(200);
+    expect(body.restored).toEqual([{ replacedInvoiceId: 'inv-1', invoiceId: 'inv-new', invoiceNumber: 'WPC-2026-0401' }]);
+    const created = mockCreateInvoice.mock.calls[0][0];
+    expect(created.lineItems).toEqual([
+      { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 },
+      { description: 'First service application', quantity: 1, unit_price: 128 },
+    ]);
+    expect(created.scheduledServiceId).toBe('svc-1');
+  });
+
+  test('skips a row that is not void — no duplicate bill on a repeated undo', async () => {
+    stubTables({ invoices: [{ ...VOIDED_ROW, status: 'draft' }] });
+    const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(body.restored).toEqual([]);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
+
+  test('reports a failed re-mint instead of claiming the invoice is back', async () => {
+    stubTables({ invoices: [VOIDED_ROW] });
+    mockCreateInvoice.mockRejectedValueOnce(new Error('insert failed'));
+    const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(body.restored).toEqual([]);
+    expect(body.failed[0]).toMatchObject({ id: 'inv-1', invoiceNumber: 'WPC-2026-0345' });
+  });
+
+  test('no ids ⇒ nothing restored', async () => {
+    stubTables({ invoices: [VOIDED_ROW] });
+    const { body } = await post('/svc-1/prepay-switch/undo', {});
+    expect(body.restored).toEqual([]);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
 });

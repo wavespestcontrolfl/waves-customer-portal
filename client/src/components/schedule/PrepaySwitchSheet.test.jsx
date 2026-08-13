@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 //
-// The on-site annual-prepay switch sheet. What's actually load-bearing here
-// is the ORDER of the money moves, so that's what these cover: the superseded
-// per-application invoice is voided only AFTER the prepay is collected or
-// sent, and never when the operator backs out.
+// The on-site annual-prepay switch sheet. What's load-bearing is the ORDER of
+// the money moves, so that's what these cover: the per-application invoice is
+// retired BEFORE the prepay is minted (so the two are never payable at once),
+// and any path that doesn't complete puts it back.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -53,13 +53,23 @@ let calls;
 
 // Routes each fetch by path so assertions can talk about intent ("was the old
 // invoice voided?") instead of call indexes.
-function stubFetch({ preview = PREVIEW, voidFails = false, mintFails = false, deliveryFails = false } = {}) {
+function stubFetch({
+  preview = PREVIEW, supersedeFails = false, mintFails = false, deliveryFails = false, undoFails = false,
+} = {}) {
   calls = [];
   global.fetch = vi.fn(async (url, options = {}) => {
     const path = String(url);
     calls.push({ path, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
     const ok = (json) => ({ ok: true, json: async () => json });
     if (path.includes('annual-prepay-preview')) return ok(preview);
+    if (path.includes('/prepay-switch/supersede')) {
+      if (supersedeFails) return { ok: false, status: 409, json: async () => ({ error: 'WPC-2026-0345 has already gone out to the customer' }) };
+      return ok({ voided: [{ id: 'inv-1', invoiceNumber: 'WPC-2026-0345', total: 227 }] });
+    }
+    if (path.includes('/prepay-switch/undo')) {
+      if (undoFails) return ok({ restored: [], failed: [{ id: 'inv-1', invoiceNumber: 'WPC-2026-0345', error: 'insert failed' }] });
+      return ok({ restored: [{ replacedInvoiceId: 'inv-1', invoiceId: 'inv-new', invoiceNumber: 'WPC-2026-0401' }], failed: [] });
+    }
     if (path.includes('/annual-prepay-invoice')) {
       if (mintFails) return { ok: false, status: 409, json: async () => ({ error: 'already has a term' }) };
       // The mint returns 201 even when the send leg failed — `delivery.ok`
@@ -69,16 +79,17 @@ function stubFetch({ preview = PREVIEW, voidFails = false, mintFails = false, de
         ...(deliveryFails ? { delivery: { ok: false, error: 'SMS gateway rejected' } } : {}),
       });
     }
-    if (path.endsWith('/void')) {
-      if (voidFails) return { ok: false, status: 400, json: async () => ({ error: 'invoice is not voidable' }) };
-      return ok({ status: 'void' });
-    }
+    if (path.endsWith('/void')) return ok({ status: 'void' });
     if (path.includes('/admin/invoices/')) return ok({ id: 'inv-prepay', status: 'draft' });
     return ok({});
   });
 }
 
-const voidedIds = () => calls.filter((c) => c.path.endsWith('/void')).map((c) => c.path.match(/invoices\/([^/]+)\/void/)[1]);
+const pathsHit = () => calls.map((c) => c.path.replace(/^.*\/api/, ''));
+const didSupersede = () => calls.some((c) => c.path.includes('/prepay-switch/supersede'));
+const didUndo = () => calls.some((c) => c.path.includes('/prepay-switch/undo'));
+const didMint = () => calls.some((c) => c.path.includes('/annual-prepay-invoice'));
+const voidedPrepay = () => calls.some((c) => c.path === '/api/admin/invoices/inv-prepay/void');
 
 beforeEach(() => {
   localStorage.setItem('waves_admin_token', 'test-token');
@@ -103,22 +114,36 @@ describe('PrepaySwitchSheet', () => {
     expect(screen.getByText(/WPC-2026-0345/)).toBeInTheDocument();
   });
 
-  it('voids the superseded invoice only AFTER the prepay is collected', async () => {
+  it('retires the per-application invoice BEFORE minting the prepay', async () => {
     const onSaved = vi.fn();
     render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={onSaved} />);
     fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
-
-    // Minted and handed to the tender sheet — nothing voided yet.
     await screen.findByText('tender 512');
-    expect(voidedIds()).toEqual([]);
+
+    // The two are never simultaneously payable: supersede strictly precedes
+    // the mint.
+    const order = pathsHit();
+    const supersedeAt = order.findIndex((p) => p.includes('/prepay-switch/supersede'));
+    const mintAt = order.findIndex((p) => p.includes('/annual-prepay-invoice'));
+    expect(supersedeAt).toBeGreaterThanOrEqual(0);
+    expect(mintAt).toBeGreaterThan(supersedeAt);
 
     fireEvent.click(screen.getByRole('button', { name: 'tender-success' }));
-    await waitFor(() => expect(voidedIds()).toEqual(['inv-1']));
-    expect(onSaved).toHaveBeenCalled();
     expect(await screen.findByText('Annual prepay collected')).toBeInTheDocument();
+    expect(onSaved).toHaveBeenCalled();
+    // Nothing to clean up afterwards — the old invoice was already gone.
+    expect(didUndo()).toBe(false);
   });
 
-  it('backing out of the tender voids the PREPAY invoice and leaves the old one alone', async () => {
+  it('a refused supersede stops before anything is minted or charged', async () => {
+    stubFetch({ supersedeFails: true });
+    render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
+    expect(await screen.findByText(/already gone out to the customer/)).toBeInTheDocument();
+    expect(didMint()).toBe(false);
+  });
+
+  it('backing out voids the PREPAY invoice and puts the per-application one back', async () => {
     const onClose = vi.fn();
     render(<PrepaySwitchSheet service={SERVICE} onClose={onClose} onSaved={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
@@ -126,73 +151,40 @@ describe('PrepaySwitchSheet', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'tender-abort' }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
-    // The visit must bill exactly as it did before the operator tapped in.
-    expect(voidedIds()).toEqual(['inv-prepay']);
+    // The visit bills exactly as it did before the operator tapped in.
+    expect(voidedPrepay()).toBe(true);
+    expect(didUndo()).toBe(true);
   });
 
-  it('sending the invoice instead still supersedes the per-application one', async () => {
-    render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: /Send the invoice instead/ }));
-    await waitFor(() => expect(voidedIds()).toEqual(['inv-1']));
-    const mint = calls.find((c) => c.path.includes('/annual-prepay-invoice'));
-    expect(mint.body).toMatchObject({ amount: 512, visitCount: 4, chargeInPerson: false });
-    expect(await screen.findByText('Annual prepay invoice sent')).toBeInTheDocument();
-  });
-
-  it('a failed supersede void is loud — completion would reuse that invoice', async () => {
-    stubFetch({ voidFails: true });
-    render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+  it('a failed restore is loud — the visit would complete with nothing to bill', async () => {
+    stubFetch({ undoFails: true });
+    const onClose = vi.fn();
+    render(<PrepaySwitchSheet service={SERVICE} onClose={onClose} onSaved={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
     await screen.findByText('tender 512');
-    fireEvent.click(screen.getByRole('button', { name: 'tender-success' }));
 
-    expect(await screen.findByText(/the old invoice is still open/i)).toBeInTheDocument();
-    expect(screen.getByText(/bill Trang Nguyen for a visit they just prepaid/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Retry void/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'tender-abort' }));
+    expect(await screen.findByText(/no invoice behind it/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Retry restore/ })).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('a failed DELIVERY keeps the old invoice — the customer never got the prepay link', async () => {
-    stubFetch({ deliveryFails: true });
+  it('sending the invoice instead also supersedes first, and relays server-derived money', async () => {
     render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /Send the invoice instead/ }));
-    expect(await screen.findByText(/could NOT be delivered/)).toBeInTheDocument();
-    expect(screen.getByText(/per-application invoice was left in place/)).toBeInTheDocument();
-    expect(voidedIds()).toEqual([]);
-  });
-
-  it('a cleanup retry on the SEND path does not claim the money was collected', async () => {
-    // Void fails once, then succeeds — the retry must still report "sent",
-    // not "collected": the term is payment_pending until the customer pays.
-    let voidAttempts = 0;
-    stubFetch();
-    const base = global.fetch;
-    global.fetch = vi.fn(async (url, options = {}) => {
-      if (String(url).endsWith('/void')) {
-        voidAttempts += 1;
-        calls.push({ path: String(url), method: 'POST', body: null });
-        if (voidAttempts === 1) return { ok: false, status: 400, json: async () => ({ error: 'temporary' }) };
-        return { ok: true, json: async () => ({ status: 'void' }) };
-      }
-      return base(url, options);
-    });
-
-    render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: /Send the invoice instead/ }));
-    expect(await screen.findByText(/Prepay invoice sent — but the old invoice is still open/)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /Retry void/ }));
     expect(await screen.findByText('Annual prepay invoice sent')).toBeInTheDocument();
-    expect(screen.queryByText('Annual prepay collected')).not.toBeInTheDocument();
-    // …and it must not tell the operator to complete a visit nothing covers.
-    expect(screen.queryByText(/Complete the visit next/)).not.toBeInTheDocument();
+    expect(didSupersede()).toBe(true);
+    const mint = calls.find((c) => c.path.includes('/annual-prepay-invoice'));
+    expect(mint.body).toMatchObject({ amount: 512, visitCount: 4, chargeInPerson: false });
   });
 
-  it('a mint failure surfaces the server reason and voids nothing', async () => {
+  it('a mint failure restores the per-application invoice and says so', async () => {
     stubFetch({ mintFails: true });
     render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
     expect(await screen.findByText(/already has a term/)).toBeInTheDocument();
-    expect(voidedIds()).toEqual([]);
+    expect(screen.getByText(/restored — nothing changed/)).toBeInTheDocument();
+    expect(didUndo()).toBe(true);
   });
 
   it('renders the server blockReason instead of an offer when the switch is refused', async () => {
