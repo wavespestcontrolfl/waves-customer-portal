@@ -872,7 +872,15 @@ class RelayConversation {
       this._maybeEndAfterTurn(); // lead captured + agent done → end the call
       return; // end_turn
     }
+    // ⭐ EXHAUSTION IS NOT SILENCE. If the model spent every round on tool
+    // calls, nothing above ever spoke — the caller would sit in dead air on an
+    // open line until they prompt again or a timeout fires. Say so and hand
+    // the turn back; the session stays open (the caller may well have a
+    // simpler next question), and the lead/booking writes that did land are
+    // already durable.
     logger.warn(`[voice-relay] hit MAX_TOOL_ROUNDS callSid=${this.callSid}`);
+    this.say("Sorry — that's taking me longer than it should. I've made a note for the team to follow up. Is there anything else I can help with?");
+    this._maybeEndAfterTurn();
   }
 
   /**

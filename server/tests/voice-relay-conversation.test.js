@@ -394,6 +394,39 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(ctx.resolveSlotRef(ref1)).toMatchObject({ timeOfDay: 'afternoon', expandOpenDays: false });
   });
 
+  // ⭐ EXHAUSTION IS NOT SILENCE. A model that spends every round on tool
+  // calls never emits text — without a fallback the caller sits in dead air
+  // on an open line after MAX_TOOL_ROUNDS.
+  test('tool-round exhaustion speaks a fallback instead of leaving the caller in silence', async () => {
+    let IsolatedConvo;
+    jest.isolateModules(() => {
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() {
+        return {
+          messages: {
+            stream: () => ({
+              finalMessage: async () => ({
+                content: [{ type: 'tool_use', id: 't1', name: 'get_availability', input: {} }],
+                stop_reason: 'tool_use',
+              }),
+            }),
+          },
+        };
+      });
+      jest.doMock('../services/voice-agent/relay-tools', () => ({
+        TOOLS: [],
+        CONTEXT_TOOLS: [],
+        activeTools: () => [],
+        executeTool: jest.fn(async () => 'ok'),
+      }));
+      IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
+    });
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-exhaust', from: '+19415551234', send });
+    await convo._runLoop('book me something').catch(() => {});
+    const spoken = send.mock.calls.map(([t]) => String(t)).join(' ');
+    expect(spoken).toMatch(/anything else I can help/i);
+  });
+
   // Contact-slot recognition must never reach the ctx as 'full'.
   test('customerTier on the tool ctx mirrors the ANI match column, failing closed', () => {
     const convo = new RelayConversation({ callSid: 'CA7', from: '+19415551234', send: jest.fn() });
