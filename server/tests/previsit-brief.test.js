@@ -585,6 +585,22 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
     expect(ok.reason).toBeUndefined();
   });
 
+  test('a LOWERCASE bare known product off the fixed list is rejected in priorities', () => {
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: {
+        recentCalls: ['Asked about ants in garage'],
+        lastVisit: { productNames: ['Bifen IT'] },
+        productGuidance: { productNames: [] },
+      },
+    };
+    const rejected = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: ['bifen it'], priorities: ['bifen it along the fence'] },
+      grounding,
+    );
+    expect(rejected.reason).toMatch(/^ungrounded_novel_product:/);
+  });
+
   test('a clean response yields the sanitized body', () => {
     const verdict = validateBriefJson({ ...CLEAN_LLM_JSON }, GROUNDING);
     expect(verdict.reason).toBeUndefined();

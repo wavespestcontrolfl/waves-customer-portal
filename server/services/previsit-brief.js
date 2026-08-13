@@ -960,7 +960,20 @@ function findUngroundedClaim(body, grounding) {
     { text: body.open_scope, instructional: false },
     { text: body.customer_context, instructional: false },
   ].filter((f) => f.text);
+  const escapeReTerm = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const field of labeledFields) {
+    // Instruction fields: scan for EVERY known product name regardless of
+    // casing — the capitalized extractors miss "priorities: ['bifen it']",
+    // and a known-but-off-fixed-list name is an instruction toward a
+    // product the current visit excludes.
+    if (field.instructional) {
+      const fieldText = String(field.text).toLowerCase();
+      for (const name of knownProductNames) {
+        if (new RegExp(`\\b${escapeReTerm(name)}\\b`).test(fieldText) && !fixedNames.includes(name)) {
+          return { kind: 'novel_product', term: name };
+        }
+      }
+    }
     const refs = extractOutputReferences(String(field.text));
     for (const term of refs.products) {
       if (allWordsCommon(term)) continue;
@@ -1197,9 +1210,14 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
   const groundingHash = hashOf(grounding);
 
   const existing = parseStoredBrief(svc.pre_service_brief);
+  // Template-generated briefs are NOT a permanent cache hit: they exist
+  // because a provider was down or a response was rejected, and an
+  // unchanged grounding would otherwise pin the reduced template forever.
+  // Each sweep retries the LLM; a repeat miss just re-stores the template.
   if (
     String(svc.pre_service_brief_type || '') === VISIT_BRIEF_TYPE
     && existing?.grounding_hash === groundingHash
+    && existing.generated_via !== 'template'
   ) {
     return { skipped: true, reason: 'unchanged', brief: existing };
   }
