@@ -4016,6 +4016,8 @@ function BankImportTab() {
   const [accountType, setAccountType] = useState("bank");
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState(null);
+  // per-row candidate pick for the manual link path (row id → expense id)
+  const [linkPick, setLinkPick] = useState({});
 
   const load = useCallback(() => {
     adminFetch("/admin/tax/bank-import/status")
@@ -4248,14 +4250,50 @@ function BankImportTab() {
                     {BANK_STATUS_LABELS[r.status] || r.status}
                   </Badge>
                 </td>
-                <td style={{ padding: "8px 12px", color: D.muted, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {r.suggestion?.ignore
-                    ? "internal transfer?"
-                    : r.suggestion?.categoryName ||
-                      (r.suggestion?.candidates ? `${r.suggestion.candidates.length} possible matches` : "")}
+                <td style={{ padding: "8px 12px", color: D.muted, maxWidth: 260, overflow: "hidden", whiteSpace: "nowrap" }}>
+                  {r.suggestion?.ignore ? (
+                    "internal transfer?"
+                  ) : r.status === "unmatched" && r.suggestion?.candidates?.length ? (
+                    <select
+                      style={{ ...inputStyle, maxWidth: 240 }}
+                      value={linkPick[r.id] || ""}
+                      onChange={(e) => setLinkPick((p) => ({ ...p, [r.id]: e.target.value }))}
+                      title="Existing ledger expenses with a matching amount — link instead of creating a duplicate"
+                    >
+                      <option value="">
+                        {r.suggestion.candidates.length} possible existing match{r.suggestion.candidates.length > 1 ? "es" : ""}…
+                      </option>
+                      {r.suggestion.candidates.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {(c.vendor_name || c.description || "expense").slice(0, 40)} · {fmtD(c.expense_date)}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    r.suggestion?.categoryName || ""
+                  )}
                 </td>
                 <td style={{ padding: "8px 12px", whiteSpace: "nowrap" }}>
-                  {r.status === "unmatched" && r.direction === "debit" && !r.suggestion?.ignore && (
+                  {r.status === "unmatched" && r.direction === "debit" && linkPick[r.id] && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
+                      onClick={() =>
+                        act("link", `/admin/tax/bank-import/${r.id}/link-expense`, { expenseId: linkPick[r.id] }).then((res) => {
+                          if (res)
+                            setLinkPick((p) => {
+                              const next = { ...p };
+                              delete next[r.id];
+                              return next;
+                            });
+                        })
+                      }
+                    >
+                      Link
+                    </button>
+                  )}
+                  {r.status === "unmatched" && r.direction === "debit" && !r.suggestion?.ignore && !linkPick[r.id] && (
                     <button
                       type="button"
                       disabled={!!busy}

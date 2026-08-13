@@ -16,6 +16,8 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 const state = {
   bankRow: null,
+  expenseRow: null,
+  bankUpdateError: null,
   bankUpdateResult: 1,
   insertedBank: [],
   insertedExpenses: [],
@@ -31,6 +33,7 @@ function bankBuilder() {
     whereIn: jest.fn((c, v) => { wheres.push([c, v]); return b; }),
     first: jest.fn(() => Promise.resolve(state.bankRow)),
     update: jest.fn((patch) => {
+      if (state.bankUpdateError) return Promise.reject(state.bankUpdateError);
       state.bankUpdates.push({ wheres: wheres.slice(), patch });
       return Promise.resolve(state.bankUpdateResult);
     }),
@@ -55,6 +58,7 @@ function expensesBuilder() {
     insert: jest.fn((row) => { state.insertedExpenses.push(row); return b; }),
     returning: jest.fn(() => Promise.resolve([{ id: 'exp-new', ...state.insertedExpenses[state.insertedExpenses.length - 1] }])),
     where: jest.fn(() => b),
+    first: jest.fn(() => Promise.resolve(state.expenseRow)),
     del: jest.fn(() => { state.deletedExpenseIds.push('exp-new'); return Promise.resolve(1); }),
   };
   return b;
@@ -125,6 +129,8 @@ const post = (path, body) => fetch(`${baseUrl}${path}`, {
 
 beforeEach(() => {
   state.bankRow = null;
+  state.expenseRow = null;
+  state.bankUpdateError = null;
   state.bankUpdateResult = 1;
   state.insertedBank = [];
   state.insertedExpenses = [];
@@ -243,5 +249,45 @@ describe('create-expense (gate on)', () => {
     state.category = null;
     expect((await post('/admin/tax/bank-import/bt-1/create-expense', { categoryId: 'nope' })).status).toBe(400);
     expect(state.insertedExpenses).toHaveLength(0);
+  });
+});
+
+describe('link-expense (gate on)', () => {
+  beforeEach(() => {
+    process.env.GATE_BANK_IMPORT = 'true';
+    state.bankRow = { id: 'bt-1', direction: 'debit', status: 'unmatched' };
+    state.expenseRow = { id: 'exp-9' };
+  });
+
+  test('links via CAS with match_method=manual', async () => {
+    const res = await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'exp-9' });
+    expect(res.status).toBe(200);
+    expect(state.bankUpdates[0].wheres).toContainEqual({ id: 'bt-1', status: 'unmatched' });
+    expect(state.bankUpdates[0].patch).toMatchObject({ status: 'matched_expense', matched_expense_id: 'exp-9', match_method: 'manual' });
+  });
+
+  test('validates inputs: missing expenseId, unknown expense, credit row, non-unmatched row', async () => {
+    expect((await post('/admin/tax/bank-import/bt-1/link-expense', {})).status).toBe(400);
+    state.expenseRow = null;
+    expect((await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'nope' })).status).toBe(404);
+    state.expenseRow = { id: 'exp-9' };
+    state.bankRow.direction = 'credit';
+    expect((await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'exp-9' })).status).toBe(400);
+    state.bankRow.direction = 'debit';
+    state.bankRow.status = 'ignored';
+    expect((await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'exp-9' })).status).toBe(409);
+  });
+
+  test('a unique-index violation (expense already linked elsewhere) answers 409', async () => {
+    const dup = new Error('duplicate key value violates unique constraint');
+    dup.code = '23505';
+    state.bankUpdateError = dup;
+    const res = await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'exp-9' });
+    expect(res.status).toBe(409);
+  });
+
+  test('losing the CAS race answers 409', async () => {
+    state.bankUpdateResult = 0;
+    expect((await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'exp-9' })).status).toBe(409);
   });
 });

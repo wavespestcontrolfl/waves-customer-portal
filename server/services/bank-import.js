@@ -252,8 +252,11 @@ async function runDeterministicMatching() {
       .whereNotExists(function claimed() {
         this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = expenses.id');
       })
-      .select('id', 'amount', 'description', 'vendor_name', 'expense_date')
-      .limit(6);
+      // UNBOUNDED on purpose: uniqueness must be judged over the COMPLETE
+      // candidate set — a cap could hide a second strong candidate and fake
+      // "exactly one". The ±5-day amount-filtered window keeps this small;
+      // only the operator-facing suggestion list below is bounded.
+      .select('id', 'amount', 'description', 'vendor_name', 'expense_date');
     // Auto-link needs exact cents + vendor evidence + a single such candidate.
     const strong = candidates.filter(c => centsEqual(c.amount, row.amount) && vendorEvidence(row.description, c));
     if (strong.length === 1) {
@@ -268,7 +271,7 @@ async function runDeterministicMatching() {
     } else if (candidates.length > 0) {
       summary.ambiguous++;
       await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-        suggestion: { ...(row.suggestion || {}), candidates: candidates.map(c => ({ id: c.id, description: c.description, vendor_name: c.vendor_name, expense_date: c.expense_date })) },
+        suggestion: { ...(row.suggestion || {}), candidates: candidates.slice(0, 6).map(c => ({ id: c.id, description: c.description, vendor_name: c.vendor_name, expense_date: c.expense_date })) },
         updated_at: new Date(),
       });
     }

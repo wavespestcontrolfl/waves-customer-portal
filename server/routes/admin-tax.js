@@ -1805,6 +1805,34 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Manually link a staged debit to an EXISTING expense (the ambiguous-
+// candidates path — creating would duplicate the ledger row, ignoring would
+// drop it from coverage). Atomic: CAS on status='unmatched' plus the partial
+// unique index on matched_expense_id; losing either race answers 409.
+router.post('/bank-import/:id/link-expense', async (req, res, next) => {
+  try {
+    const { expenseId } = req.body || {};
+    if (!expenseId) return res.status(400).json({ error: 'expenseId is required' });
+    const row = await db('bank_transactions').where({ id: req.params.id }).first('id', 'direction', 'status');
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits link to expenses' });
+    if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    const expense = await db('expenses').where({ id: expenseId }).first('id');
+    if (!expense) return res.status(404).json({ error: 'expense not found' });
+    let claimed;
+    try {
+      claimed = await db('bank_transactions')
+        .where({ id: row.id, status: 'unmatched' })
+        .update({ status: 'matched_expense', matched_expense_id: expenseId, match_method: 'manual', matched_at: new Date(), updated_at: new Date() });
+    } catch (err) {
+      if (err.code === '23505') return res.status(409).json({ error: 'that expense is already linked to another bank row' });
+      throw err;
+    }
+    if (!claimed) return res.status(409).json({ error: 'row was matched by someone else mid-flight' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 router.post('/bank-import/:id/ignore', async (req, res, next) => {
   try {
     const changed = await db('bank_transactions')

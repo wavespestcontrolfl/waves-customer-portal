@@ -236,6 +236,22 @@ describe('runDeterministicMatching', () => {
     expect(state.updates.find(u => u.patch.suggestion).patch.suggestion.candidates).toHaveLength(1);
   });
 
+  test('a second strong candidate anywhere in the set blocks auto-link (no cap can hide it)', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', suggestion: null },
+    ];
+    // Two candidates BOTH exact-cent + vendor-evidence strong → must park.
+    state.expenses = Array.from({ length: 8 }, (_, i) => (
+      { id: `exp-${i}`, amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10' }
+    ));
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(0);
+    expect(summary.ambiguous).toBe(1);
+    expect(state.updates.find(u => u.patch.status)).toBeUndefined();
+    // operator-facing suggestion list stays bounded even when the set is larger
+    expect(state.updates.find(u => u.patch.suggestion).patch.suggestion.candidates).toHaveLength(6);
+  });
+
   test('near-miss amount (within candidate tolerance) never auto-links', async () => {
     state.bankRows = [
       { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.41, direction: 'debit', suggestion: null },
