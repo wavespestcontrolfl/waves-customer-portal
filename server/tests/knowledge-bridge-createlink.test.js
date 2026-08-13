@@ -6,6 +6,7 @@
 
 jest.mock('../models/db', () => {
   const fn = (table) => global.__bridgeDbMock(table);
+  fn.transaction = (cb) => global.__bridgeDbMock.transaction(cb);
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -25,7 +26,7 @@ function makeDb(responses = {}) {
       return [];
     };
     const b = {};
-    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'whereIn', 'whereNotNull', 'whereNull', 'orderBy', 'orderByRaw', 'limit', 'select', 'groupBy']) {
+    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'whereIn', 'whereNotNull', 'whereNull', 'orderBy', 'orderByRaw', 'limit', 'select', 'groupBy', 'forUpdate']) {
       b[m] = (...args) => {
         rec.ops.push([m, args]);
         if (typeof args[0] === 'function') args[0].call(b);
@@ -48,6 +49,9 @@ function makeDb(responses = {}) {
     b.then = (res, rej) => Promise.resolve(resolveRows()).then(res, rej);
     return b;
   };
+  // createLink runs inside db.transaction(trx => …) with row locks; the
+  // mock hands the same builder back as the trx so every op stays visible.
+  dbFn.transaction = async (cb) => cb(dbFn);
   dbFn.state = state;
   return dbFn;
 }
@@ -137,6 +141,7 @@ test('a failed link write returns a distinguishable failure, never a bare null',
     }
     return b;
   };
+  global.__bridgeDbMock.transaction = async (cb) => cb(global.__bridgeDbMock);
 
   const link = await KnowledgeBridge.createLink(LINK_ARGS);
 
@@ -158,6 +163,7 @@ test('autoLink counts per-link failures in stats.errors', async () => {
     }
     return b;
   };
+  global.__bridgeDbMock.transaction = async (cb) => cb(global.__bridgeDbMock);
 
   const stats = await KnowledgeBridge.autoLink();
 

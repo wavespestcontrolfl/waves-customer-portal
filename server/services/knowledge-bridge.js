@@ -552,11 +552,15 @@ const KnowledgeBridge = {
   // ────────────────────────────────────────────────────────────
   async createLink({ kbEntryId, wikiEntryId, linkType, relevanceScore, linkReason, createdBy }) {
     try {
-      // Look up slugs
-      const kb = kbEntryId ? await db('knowledge_base').where({ id: kbEntryId }).select('slug', 'source').first() : null;
-      const wiki = wikiEntryId ? await db('knowledge_entries').where({ id: wikiEntryId }).select('slug').first() : null;
+      return await db.transaction(async (trx) => {
+      // Row-locked lookups serialize concurrent createLink calls per entry
+      // (manual /link racing autoLink): unserialised, one call's stale
+      // target scan could overwrite another call's later ambiguity-clearing
+      // pointer update. Consistent kb→wiki lock order avoids deadlocks.
+      const kb = kbEntryId ? await trx('knowledge_base').where({ id: kbEntryId }).forUpdate().select('slug', 'source').first() : null;
+      const wiki = wikiEntryId ? await trx('knowledge_entries').where({ id: wikiEntryId }).forUpdate().select('slug').first() : null;
 
-      const [link] = await db('knowledge_bridge').insert({
+      const [link] = await trx('knowledge_bridge').insert({
         kb_entry_id: kbEntryId || null,
         kb_slug: kb?.slug || null,
         wiki_entry_id: wikiEntryId || null,
@@ -572,9 +576,9 @@ const KnowledgeBridge = {
       // wiki pages; a singular pointer is only meaningful while the link set
       // is unambiguous. Exactly one distinct target → point at it; several →
       // CLEAR the pointer (a stale arbitrary association is worse than null
-      // for direct-pointer consumers). Not transactional with the insert —
-      // the writers are a weekly locked cron and a manual admin route, and a
-      // lost race self-heals on the next autoLink pass.
+      // for direct-pointer consumers). Atomic with the insert via the
+      // enclosing transaction + row locks (codex P1: a manual /link racing
+      // autoLink could otherwise persist a stale scan).
       if (kbEntryId && wikiEntryId) {
         // EXCEPT on wiki-sync mirror rows: there `wiki_entry_id` is the
         // mirror's PROVENANCE pointer, written authoritatively by
@@ -584,22 +588,23 @@ const KnowledgeBridge = {
         // stale mirror active and agent-visible forever, so autoLink's
         // shortcut maintenance never touches mirror rows (codex P1 r4).
         if (kb?.source !== 'wiki-sync') {
-          const kbSide = await db('knowledge_bridge')
+          const kbSide = await trx('knowledge_bridge')
             .where({ kb_entry_id: kbEntryId }).whereNotNull('wiki_entry_id')
             .select('wiki_entry_id');
           const kbTargets = [...new Set(kbSide.map((r) => r.wiki_entry_id))];
-          await db('knowledge_base').where({ id: kbEntryId })
+          await trx('knowledge_base').where({ id: kbEntryId })
             .update({ wiki_entry_id: kbTargets.length === 1 ? kbTargets[0] : (kbSide.length === 0 ? wikiEntryId : null) });
         }
-        const wikiSide = await db('knowledge_bridge')
+        const wikiSide = await trx('knowledge_bridge')
           .where({ wiki_entry_id: wikiEntryId }).whereNotNull('kb_entry_id')
           .select('kb_entry_id');
         const wikiTargets = [...new Set(wikiSide.map((r) => r.kb_entry_id))];
-        await db('knowledge_entries').where({ id: wikiEntryId })
+        await trx('knowledge_entries').where({ id: wikiEntryId })
           .update({ kb_entry_id: wikiTargets.length === 1 ? wikiTargets[0] : (wikiSide.length === 0 ? kbEntryId : null) });
       }
 
       return link || null;
+      });
     } catch (err) {
       logger.error(`[knowledge-bridge] createLink failed: ${err.message}`);
       // Distinguishable failure: an onConflict-ignored upsert legitimately

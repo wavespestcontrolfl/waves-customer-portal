@@ -401,6 +401,13 @@ async function backfillOutcomeWeather(outcome, post, treatmentDate) {
       const ms = parsed?.getTime?.();
       return Number.isFinite(ms) ? parsed : null;
     };
+    // Age must be NON-NEGATIVE as well as under the window — a future
+    // observation_time (clock-skewed or malformed station data) would
+    // otherwise pass every "recent" check forever.
+    const withinFreshWindow = (parsed) => {
+      const age = Date.now() - parsed.getTime();
+      return age >= 0 && age < FRESH_MS;
+    };
     const postIsTreatmentDay = etCalendarDayOf(post.service_date) === etCalendarDayOf(treatmentDate);
     let snapshotUsable = false;
     if (postIsTreatmentDay && post.fawn_snapshot) {
@@ -409,7 +416,7 @@ async function backfillOutcomeWeather(outcome, post, treatmentDate) {
         const parsed = parseMoment(snap?.observation_time ?? snap?.timestamp);
         snapshotUsable = parsed !== null
           && etDateString(parsed) === etCalendarDayOf(treatmentDate)
-          && Date.now() - parsed.getTime() < FRESH_MS;
+          && withinFreshWindow(parsed);
       } catch { /* unparseable snapshot fails closed */ }
     }
     let weather = snapshotUsable
@@ -433,7 +440,7 @@ async function backfillOutcomeWeather(outcome, post, treatmentDate) {
       const freshMoment = (value) => {
         if (value == null) return null;
         const parsed = parseMoment(value);
-        return parsed !== null ? Date.now() - parsed.getTime() < FRESH_MS : false;
+        return parsed !== null ? withinFreshWindow(parsed) : false;
       };
       const obsFresh = freshMoment(fawn?.observation_time);
       const fresh = obsFresh !== null ? obsFresh : freshMoment(fawn?.timestamp) === true;

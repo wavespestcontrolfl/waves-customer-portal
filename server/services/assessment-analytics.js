@@ -761,10 +761,25 @@ async function detectContradictions() {
           if (bridged) {
             resolvedWikiEntryId = bridged.wiki_entry_id;
           } else {
-            const wikiEntry = await db('knowledge_entries')
-              .where('slug', 'ilike', `%${slugify(eff.product_name)}%`)
-              .first();
-            resolvedWikiEntryId = wikiEntry?.id ?? null;
+            // Exact slug first — the fuzzy fallback's unordered .first()
+            // could attach a broad name ("Bifen") to an arbitrary variant
+            // page and permanently gate the wrong page. Fuzzy is accepted
+            // only when the candidate set is uniquely identifiable;
+            // ambiguity leaves attribution null.
+            const productSlug = slugify(eff.product_name);
+            const exact = await db('knowledge_entries')
+              .where({ slug: `product/${productSlug}` })
+              .first('id');
+            if (exact) {
+              resolvedWikiEntryId = exact.id;
+            } else {
+              const { escapeLike } = require('./agronomic-wiki');
+              const candidates = await db('knowledge_entries')
+                .whereRaw("slug ILIKE ? ESCAPE '\\'", [`%${escapeLike(productSlug)}%`])
+                .select('id')
+                .limit(2);
+              resolvedWikiEntryId = candidates.length === 1 ? candidates[0].id : null;
+            }
           }
           return resolvedWikiEntryId;
         };
