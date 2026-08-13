@@ -1,0 +1,741 @@
+'use strict';
+
+// =========================================================================
+// One-Tap Purchase (portal roadmap bet 3, owner rulings 2026-08-13, final)
+//
+// The portal-home PRICED offer card (offer-matrix target from
+// buildPortalOffer — never a fixed service) gains a purchase flow:
+// TERMS → TIME PICKER (ride-along/nearby slots first) → CONFIRM. Everything
+// is pay-per-application; nothing is charged at confirm (card capture is a
+// SetupIntent through the existing billing endpoints, save-only). The
+// confirmation is EMAIL + APP NOTIFICATION — NO SMS anywhere in this flow
+// (skipWelcomeSms on the converter; no SMS sender is ever called here).
+//
+// Money doctrine (each rule has burned a past lane):
+//   - Never trust client amounts: the clicked perApplication is only ever
+//     COMPARED against the server-recomputed offer (drift ⇒ 409); the price
+//     that persists is recomputed server-side from the same machinery that
+//     rendered the card (buildPortalPurchaseBasis shares buildPortalOffer's
+//     core, so the two can never disagree).
+//   - PARITY ASSERT (P0): the synthesized estimate's annual/visits must
+//     equal the offer's per-application within $0.005 or nothing persists.
+//   - Fail closed everywhere: drift, unpriceable, missing card, snapshot
+//     load failure, expired reservation, owned-in-the-meantime, gate off.
+//   - The confirm transaction copies the estimate-accept lock ordering
+//     EXACTLY (rung-1 date occupancy lock pre-acquired, then the comms
+//     lock, then row locks — estimate-public.js documents the real
+//     deadlock the ordering prevents).
+// =========================================================================
+
+const crypto = require('crypto');
+const db = require('../models/db');
+const logger = require('./logger');
+const slotReservation = require('./slot-reservation');
+const { getAvailableSlots } = require('./estimate-slot-availability');
+const { buildPortalPurchaseBasis, cacheOnlyPropertyLookup } = require('./service-report/cross-sell');
+const { acquireOccupancyLock } = require('./scheduling/occupancy');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
+
+// Single source of the terms the customer agrees to. The exact snapshot is
+// stored on the purchase row at init and rendered verbatim by the client —
+// the version string bumps whenever this copy changes.
+const TERMS_VERSION = 'v1';
+const TERMS_TEXT = [
+  'You are adding a recurring service to your Waves Pest Control plan, billed per application at the price shown.',
+  'Nothing is charged today. After each completed visit, the per-application amount is billed to your account like your existing services.',
+  'A payment method on file is required to confirm. Saving a card does not charge it.',
+  'Visits recur on the cadence shown. You can reschedule any visit, or cancel this service, by contacting Waves Pest Control at any time.',
+  'The price shown reflects your current WaveGuard member pricing for this property.',
+].join('\n');
+
+// Mirrors slot-reservation.js DEFAULT_HOLD_MINUTES — the client renders the
+// hold countdown copy from this; the authoritative expiry rides the reserve
+// response's expiresAt.
+const HOLD_MINUTES = 15;
+
+const OFFER_CHANGED = 'This offer is no longer available — please refresh the page';
+
+// Ownership vocabulary (waveguard-existing-services) spells the termite
+// family 'termite_bait'; the offer vocabulary spells it 'termite' — same
+// mapping cross-sell.js applies.
+const OWNED_KEY_TO_OFFER_KEY = { termite_bait: 'termite' };
+
+function httpError(status, message, extra = {}) {
+  const err = new Error(message);
+  err.status = status;
+  Object.assign(err, extra);
+  return err;
+}
+
+function dateOnly(value) {
+  if (!value) return '';
+  if (value instanceof Date) return value.toISOString().split('T')[0];
+  return String(value).split('T')[0];
+}
+
+function hhmm(value) {
+  return value ? String(value).slice(0, 5) : '';
+}
+
+// Same STRICT drift rules as routes/property-recommendations.js's request
+// path: fingerprint, service key, option id, and the priced amount must all
+// match what the server would render RIGHT NOW; Number() coercion traps
+// ('', null, false ⇒ 0) are closed by the typeof check. mode==='priced' is
+// guaranteed by buildPortalPurchaseBasis, asserted again for belt-and-braces.
+function assertNoDrift(offer, clicked = {}) {
+  const clickedPrint = String(clicked.fingerprint || '').trim();
+  const clickedKey = String(clicked.serviceKey || '').trim();
+  const clickedOption = String(clicked.optionId || '').trim();
+  const rawPer = clicked.perApplication;
+  const clickedPer = typeof rawPer === 'number' && Number.isFinite(rawPer) ? rawPer : null;
+  const serverPer = Number(offer?.option?.perVisit);
+  const mismatch = !offer
+    || offer.mode !== 'priced'
+    || !clickedPrint || clickedPrint !== offer.fingerprint
+    || !clickedKey || clickedKey !== offer.serviceKey
+    || !(clickedPer !== null && clickedPer > 0
+      && Number.isFinite(serverPer) && Math.abs(clickedPer - serverPer) < 0.005)
+    || !clickedOption || clickedOption !== String(offer.option?.id || '');
+  if (mismatch) throw httpError(409, OFFER_CHANGED);
+}
+
+// Customer-facing slot serialization: nearbyJob.detourMinutes is a routing
+// internal and is deliberately dropped (never rendered — SlotPicker rule).
+function serializeSlot(slot) {
+  return {
+    slotId: slot.slotId,
+    date: slot.date,
+    windowStart: slot.windowStart,
+    windowEnd: slot.windowEnd,
+    techFirstName: slot.techFirstName || null,
+    routeOptimal: !!slot.routeOptimal,
+  };
+}
+
+async function loadSlots(estimateId) {
+  const result = await getAvailableSlots(estimateId, {});
+  return {
+    primary: (result.primary || []).map(serializeSlot),
+    expander: (result.expander || []).map(serializeSlot),
+    nearby: !!result.nearby,
+  };
+}
+
+async function loadPurchaseForCustomer(customerId, purchaseId) {
+  const row = await db('one_tap_purchases').where({ id: purchaseId }).first();
+  // 404 on ownership mismatch, never 403 — a foreign purchase id must be
+  // indistinguishable from a nonexistent one.
+  if (!row || String(row.customer_id) !== String(customerId)) {
+    throw httpError(404, 'Not found');
+  }
+  return row;
+}
+
+function estimateExpired(estimate) {
+  return !!(estimate?.expires_at && new Date(estimate.expires_at) < new Date());
+}
+
+// ── initPurchase ─────────────────────────────────────────────────────────
+// Recompute the offer server-side, reject on any drift from what the card
+// rendered, synthesize the NEW-SERVICE-ONLY draft estimate, ledger the
+// purchase, and return terms + slots.
+async function initPurchase({ customerId, clicked, ip, userAgent }) {
+  const basis = await buildPortalPurchaseBasis(customerId, db);
+  if (!basis) throw httpError(409, OFFER_CHANGED);
+  const offer = basis.payload;
+  assertNoDrift(offer, clicked);
+
+  const pricingAi = require('./customer-pricing-ai');
+  const pricingEngine = require('./pricing-engine');
+
+  // The engine-facing variant (tier/frequency/program knobs) behind the
+  // quoted option id — same variant ladder the pricer offered from.
+  const variant = pricingAi.variantsForService(offer.serviceKey, '', false)
+    .find((v) => v.id === offer.option.id);
+  if (!variant) throw httpError(409, OFFER_CHANGED);
+
+  // Same property context the offer priced with: same customer row, same
+  // turf profile, same CACHE-ONLY lookup discipline, same estimate seed.
+  // Any residual divergence is caught by the parity assert below.
+  const turfProfile = await pricingAi.loadTurfProfile(db, customerId);
+  const propertyContext = await pricingAi.resolvePropertyContext({
+    customer: basis.customer,
+    turfProfile,
+    propertyLookup: cacheOnlyPropertyLookup,
+    propertySeed: basis.propertySeed || null,
+  });
+
+  if (pricingEngine.needsSync && pricingEngine.needsSync()) {
+    await pricingEngine.syncConstantsFromDB(db);
+  }
+
+  // NEW-SERVICE-ONLY estimate: services = ONLY the purchased option, with
+  // the owned qualifying families as priorQualifyingServices so the engine
+  // prices at the COMBINED WaveGuard tier (without them it unions nothing
+  // and prices standalone Bronze — estimate-engine tierServiceKeys).
+  const ownedFamilyKeys = [...new Set(basis.result?.currentServiceKeys || [])];
+  const context = { grassType: propertyContext.grassType, palmCount: propertyContext.palmCount };
+  const engineInputs = {
+    ...propertyContext.propertyInput,
+    recurringCustomer: true,
+    priorQualifyingServices: ownedFamilyKeys,
+    services: pricingAi.optionServices(variant, context),
+  };
+  const engineResult = pricingEngine.generateEstimate(engineInputs);
+  const line = pricingAi.findLineItem(engineResult, offer.serviceKey);
+  const amount = pricingAi.quoteAmountFromLine(line);
+  const visits = [line?.visitsPerYear, line?.visits, line?.frequency]
+    .map(Number).find((n) => Number.isFinite(n) && n > 0) || null;
+  const annualAfter = Number(amount.annual);
+  if (!(annualAfter > 0) || !visits) throw httpError(409, OFFER_CHANGED);
+  const perVisit = Math.round((annualAfter / visits) * 100) / 100;
+
+  // PARITY ASSERT (P0): the synthesized price must equal the offer the
+  // customer saw. A mismatch means the two computations diverged — no
+  // purchase persists, and the divergence is logged for investigation
+  // (amounts only; no customer identifiers beyond the id).
+  if (!(Math.abs(perVisit - Number(offer.option.perVisit)) <= 0.005)) {
+    logger.error(`[one-tap-purchase] per-application parity failed for customer ${customerId}: synthesized $${perVisit} vs offer $${offer.option.perVisit} (${offer.serviceKey}/${offer.option.id})`);
+    throw httpError(409, OFFER_CHANGED);
+  }
+
+  // Membership snapshot — the frozen account context acceptance/conversion
+  // replays (waived setup, combined tier). Mirrors the IB draft lane: the
+  // offer only renders on recurring ownership, so this customer is a proven
+  // member — a missing snapshot must refuse, never fall through to
+  // new-customer terms. Deliberately NO frozen existingServices extension
+  // plan (freezeExtensionPlan stays false): freezing one would reprice the
+  // customer's EXISTING visits on accept.
+  const { computeMembershipContext } = require('./estimate-membership-context');
+  let membershipSnapshot = null;
+  try {
+    membershipSnapshot = await computeMembershipContext(db, {
+      customerId,
+      estData: {
+        lineItems: engineResult.lineItems || [],
+        recurring: {
+          annualBeforeDiscount: Number(engineResult.summary?.recurringAnnualBeforeDiscount || 0),
+          annualAfterDiscount: Number(engineResult.summary?.recurringAnnualAfterDiscount || 0),
+        },
+      },
+    });
+  } catch {
+    membershipSnapshot = null;
+  }
+  if (!membershipSnapshot) {
+    throw httpError(503, 'Your account context could not be loaded just now — please try again shortly.');
+  }
+
+  // monthly_total derives from the discounted annual so the converter's
+  // billing-cadence correspondence guard (|annual − monthly×12| ≤ $0.50)
+  // holds by construction and per-application stays cent-exact.
+  const monthlyTotal = Math.round((annualAfter / 12) * 100) / 100;
+
+  // The ONE recurring line, from the RAW engine line (the exact shape the
+  // converter's recurringLinesFromEngineResult reads in production), with
+  // the selection flags acceptance requires. No customerSelection.frequency
+  // is ever set — the converter would treat it as the accepted plan cadence.
+  const storedLine = {
+    ...line,
+    name: line.name || offer.option.label || variant.label,
+    selected: true,
+    isSelected: true,
+  };
+  const estimateData = {
+    result: { ...engineResult, recurring: { services: [storedLine] } },
+    engineInputs,
+    priorQualifyingServices: ownedFamilyKeys,
+    membershipSnapshot,
+    oneTapPurchase: {
+      fingerprint: offer.fingerprint,
+      optionId: offer.option.id,
+      perVisit,
+      initiatedAt: new Date().toISOString(),
+    },
+  };
+
+  // Supersede any prior open one-tap attempt: release its live hold, void
+  // its ledger row, archive its draft (never bulk beyond this customer's
+  // own open one-tap drafts).
+  const priorOpen = await db('one_tap_purchases')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['initiated', 'reserved']);
+  for (const prior of priorOpen) {
+    if (prior.scheduled_service_id) {
+      try {
+        await slotReservation.releaseReservation({
+          scheduledServiceId: prior.scheduled_service_id,
+          estimateId: prior.estimate_id,
+        });
+      } catch (err) {
+        // The 15-min reservation sweeper is the backstop.
+        logger.warn(`[one-tap-purchase] prior hold release failed (code=${err?.code || 'none'})`);
+      }
+    }
+  }
+  if (priorOpen.length) {
+    await db('one_tap_purchases')
+      .whereIn('id', priorOpen.map((p) => p.id))
+      .update({ status: 'voided', updated_at: db.fn.now() });
+  }
+  await db('estimates')
+    .where({ customer_id: customerId, source: 'one_tap_purchase', status: 'draft' })
+    .whereNull('archived_at')
+    .update({ archived_at: db.fn.now() });
+
+  // The draft rides the customer's on-file address so resolveEstimateCoords
+  // adopts the customer coords (ride-along slot ranking needs them).
+  const token = crypto.randomBytes(16).toString('hex');
+  const [estimate] = await db('estimates').insert({
+    customer_id: customerId,
+    status: 'draft',
+    source: 'one_tap_purchase',
+    address: pricingAi.addressForCustomer(basis.customer) || null,
+    monthly_total: monthlyTotal,
+    annual_total: annualAfter,
+    onetime_total: 0,
+    waveguard_tier: membershipSnapshot.tierLabel || null,
+    token,
+    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    notes: null,
+    estimate_data: JSON.stringify(estimateData),
+  }).returning('*');
+
+  const [purchase] = await db('one_tap_purchases').insert({
+    customer_id: customerId,
+    estimate_id: estimate.id,
+    service_key: offer.serviceKey,
+    option_id: offer.option.id,
+    fingerprint: offer.fingerprint,
+    per_visit: perVisit,
+    status: 'initiated',
+    terms_version: TERMS_VERSION,
+    terms_snapshot: TERMS_TEXT,
+    consent_ip: ip || null,
+    consent_user_agent: userAgent || null,
+  }).returning('*');
+
+  // Card presence decides whether CONFIRM shows inline card capture. Lookup
+  // errors bubble inside the helper by design; here they degrade to "ask
+  // for the card" (the confirm-time check is the authority either way).
+  const { findConsentedChargeableCard } = require('./payment-method-consents');
+  let hasCardOnFile = false;
+  try {
+    hasCardOnFile = !!(await findConsentedChargeableCard(customerId));
+  } catch {
+    hasCardOnFile = false;
+  }
+
+  const slots = await loadSlots(estimate.id);
+
+  return {
+    purchaseId: purchase.id,
+    estimateId: estimate.id,
+    serviceKey: offer.serviceKey,
+    label: offer.label,
+    perVisit,
+    cadenceLabel: offer.option.cadence || '',
+    visitsPerYear: visits,
+    terms: { version: TERMS_VERSION, text: TERMS_TEXT },
+    hasCardOnFile,
+    slots,
+    holdMinutes: HOLD_MINUTES,
+  };
+}
+
+// ── reserve ──────────────────────────────────────────────────────────────
+async function reserve({ customerId, purchaseId, slotId }) {
+  const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
+  if (!['initiated', 'reserved'].includes(purchase.status)) throw httpError(409, OFFER_CHANGED);
+  const estimate = await db('estimates')
+    .where({ id: purchase.estimate_id })
+    .first('id', 'status', 'expires_at');
+  if (!estimate || estimate.status !== 'draft' || estimateExpired(estimate)) {
+    throw httpError(409, OFFER_CHANGED);
+  }
+  try {
+    // Re-reserving the same estimate deletes the prior hold in-txn
+    // (slot-reservation's own semantics) — re-picks need no explicit release.
+    const { scheduledServiceId, expiresAt } = await slotReservation.reserveSlot({
+      estimateId: estimate.id,
+      slotId,
+    });
+    await db('one_tap_purchases').where({ id: purchase.id }).update({
+      scheduled_service_id: scheduledServiceId,
+      slot_id: String(slotId),
+      status: 'reserved',
+      updated_at: db.fn.now(),
+    });
+    return { scheduledServiceId, expiresAt, holdMinutes: HOLD_MINUTES };
+  } catch (err) {
+    if (err.code === 'INVALID_SLOT_ID') throw httpError(400, 'invalid slotId format');
+    if (err.code === 'SLOT_UNAVAILABLE') {
+      throw httpError(409, 'That time was just taken — pick another slot.', { code: 'SLOT_UNAVAILABLE' });
+    }
+    if (['ESTIMATE_NOT_FOUND', 'ESTIMATE_EXPIRED', 'ESTIMATE_TERMINAL'].includes(err.code)) {
+      throw httpError(409, OFFER_CHANGED);
+    }
+    throw err;
+  }
+}
+
+// ── release ──────────────────────────────────────────────────────────────
+// Client calls on overlay close/back; the 15-min reservation sweeper is the
+// backstop for abandoned holds.
+async function release({ customerId, purchaseId }) {
+  const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
+  if (purchase.status === 'completed') throw httpError(409, 'This purchase is already confirmed.');
+  if (purchase.scheduled_service_id) {
+    await slotReservation.releaseReservation({
+      scheduledServiceId: purchase.scheduled_service_id,
+      estimateId: purchase.estimate_id,
+    });
+  }
+  if (purchase.status === 'reserved') {
+    await db('one_tap_purchases').where({ id: purchase.id }).update({
+      status: 'initiated',
+      scheduled_service_id: null,
+      slot_id: null,
+      updated_at: db.fn.now(),
+    });
+  }
+  return { released: true };
+}
+
+// ── slots (re-fetch) ─────────────────────────────────────────────────────
+async function slots({ customerId, purchaseId }) {
+  const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
+  if (!['initiated', 'reserved'].includes(purchase.status)) throw httpError(409, OFFER_CHANGED);
+  try {
+    return await loadSlots(purchase.estimate_id);
+  } catch (err) {
+    if (['ESTIMATE_NOT_FOUND', 'ESTIMATE_EXPIRED', 'ESTIMATE_TERMINAL'].includes(err.code)) {
+      throw httpError(409, OFFER_CHANGED);
+    }
+    throw err;
+  }
+}
+
+async function voidPurchase(purchase) {
+  if (purchase.scheduled_service_id) {
+    try {
+      await slotReservation.releaseReservation({
+        scheduledServiceId: purchase.scheduled_service_id,
+        estimateId: purchase.estimate_id,
+      });
+    } catch (err) {
+      logger.warn(`[one-tap-purchase] void-time hold release failed (code=${err?.code || 'none'})`);
+    }
+  }
+  await db('one_tap_purchases').where({ id: purchase.id }).update({
+    status: 'voided',
+    scheduled_service_id: null,
+    updated_at: db.fn.now(),
+  }).catch(() => {});
+}
+
+function formatVisitWhen(firstVisit) {
+  if (!firstVisit?.date) return '';
+  const [y, m, d] = firstVisit.date.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, (m || 1) - 1, d || 1, 12));
+  const dateText = Number.isNaN(dt.getTime())
+    ? firstVisit.date
+    : dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const window = firstVisit.windowStart && firstVisit.windowEnd
+    ? `, ${to12h(firstVisit.windowStart)}–${to12h(firstVisit.windowEnd)}`
+    : '';
+  return `${dateText}${window}`;
+}
+
+function to12h(value) {
+  const [h, m] = String(value || '').split(':').map(Number);
+  if (!Number.isFinite(h)) return String(value || '');
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  const hour = ((h + 11) % 12) + 1;
+  return `${hour}:${String(m || 0).padStart(2, '0')} ${suffix}`;
+}
+
+// ── confirm ──────────────────────────────────────────────────────────────
+async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent }) {
+  if (termsAccepted !== true) throw httpError(400, 'You must agree to the terms to confirm.');
+  const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
+  if (purchase.status !== 'reserved' || !purchase.scheduled_service_id) {
+    throw httpError(409, 'Pick a time before confirming.');
+  }
+  const preEstimate = await db('estimates').where({ id: purchase.estimate_id }).first('id', 'status', 'expires_at', 'price_locked_at');
+  if (!preEstimate || preEstimate.status !== 'draft' || preEstimate.price_locked_at || estimateExpired(preEstimate)) {
+    throw httpError(409, OFFER_CHANGED);
+  }
+
+  const customer = await db('customers').where({ id: customerId }).first();
+  if (!customer || customer.active === false || customer.deleted_at) throw httpError(409, OFFER_CHANGED);
+
+  // Owned-in-the-meantime re-check (fail closed → release + void): the same
+  // street-scoped ownership authority the offer used. An unknowable picture
+  // voids too — we may not sell a family we cannot prove is un-owned.
+  const linkage = require('./estimate-property-linkage');
+  const { loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
+  let ownedKeys = null;
+  try {
+    const primaryStreet = linkage.normalizedStampedStreet(
+      customer.address_line1, customer.address_line2, customer.city, customer.zip
+    );
+    if (!primaryStreet || linkage.scopeKeyLacksLocality(primaryStreet)) {
+      throw new Error('unprovable primary premises');
+    }
+    ownedKeys = await loadOwnedRecurringServiceKeys(db, customerId, {
+      streetScope: {
+        estimateStreet: primaryStreet,
+        customerPrimaryStreet: primaryStreet,
+        requireSharedLocality: true,
+      },
+    });
+  } catch (err) {
+    logger.warn(`[one-tap-purchase] confirm ownership re-check failed, voiding (code=${err?.code || 'none'})`);
+    await voidPurchase(purchase);
+    throw httpError(409, OFFER_CHANGED);
+  }
+  const ownedVocab = new Set(ownedKeys.map((k) => OWNED_KEY_TO_OFFER_KEY[k] || k));
+  if (ownedVocab.has(purchase.service_key)) {
+    await voidPurchase(purchase);
+    throw httpError(409, 'This service is already on your account — nothing was purchased.');
+  }
+
+  // Consented chargeable card — REQUIRED, no fallback, never proceed
+  // cardless. The client collects via the existing setup-intent + save-card
+  // pair, then retries confirm.
+  const { findConsentedChargeableCard } = require('./payment-method-consents');
+  let card = null;
+  try {
+    card = await findConsentedChargeableCard(customerId);
+  } catch (err) {
+    logger.warn(`[one-tap-purchase] card lookup failed, asking for card (code=${err?.code || 'none'})`);
+    card = null;
+  }
+  if (!card) throw httpError(402, 'A saved payment method is required to confirm.', { needsCard: true });
+
+  const EstimateConverter = require('./estimate-converter');
+  let txOut;
+  try {
+    txOut = await db.transaction(async (trx) => {
+      // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
+      // copied from the estimate-accept txn, which documents the real
+      // deadlock): the hold's date occupancy key is taken BEFORE any row
+      // lock; commitReservation re-checks its own pre-read against the key
+      // we pass down (preLockedDate) and a moved hold fails into the
+      // RESERVATION_EXPIRED re-pick recovery.
+      const holdDateRow = await trx('scheduled_services')
+        .where({ id: purchase.scheduled_service_id })
+        .first('scheduled_date');
+      if (!holdDateRow) {
+        throw httpError(409, 'Your held time expired — pick a slot again.', { code: 'RESERVATION_EXPIRED' });
+      }
+      const preLockedDate = dateOnly(holdDateRow.scheduled_date) || null;
+      if (preLockedDate) await acquireOccupancyLock(trx, preLockedDate);
+      // Rung 6 — comms lock before this txn's first row lock (the converter
+      // inserts scheduled_services rows on this trx).
+      await lockCustomerComms(trx, customerId);
+
+      const est = await trx('estimates')
+        .where({ id: purchase.estimate_id })
+        .forUpdate()
+        .first();
+      if (!est || est.status !== 'draft' || estimateExpired(est)) throw httpError(409, OFFER_CHANGED);
+
+      // CAS double-confirm guard: acceptance is where money commits.
+      const locked = await trx('estimates')
+        .where({ id: est.id, status: 'draft' })
+        .whereNull('price_locked_at')
+        .update({
+          status: 'accepted',
+          accepted_at: trx.fn.now(),
+          price_locked_at: trx.fn.now(),
+          price_locked_by: 'customer_accept',
+          pricing_authority: 'LOCKED',
+          server_computed_price: est.annual_total,
+        });
+      if (!locked) throw httpError(409, OFFER_CHANGED);
+
+      let committed;
+      try {
+        committed = await slotReservation.commitReservation({
+          scheduledServiceId: purchase.scheduled_service_id,
+          customerId,
+          estimatedPrice: Number(purchase.per_visit),
+          estimate: { ...est, status: 'accepted' },
+          serviceMode: 'recurring',
+          preLockedDate,
+          trx,
+        });
+      } catch (commitErr) {
+        if (commitErr.code === 'RESERVATION_EXPIRED') {
+          throw httpError(409, 'Your held time expired — pick a slot again.', { code: 'RESERVATION_EXPIRED' });
+        }
+        if (commitErr.code === 'SLOT_UNAVAILABLE') {
+          throw httpError(409, 'That time is no longer available — pick a slot again.', { code: 'SLOT_UNAVAILABLE' });
+        }
+        throw commitErr;
+      }
+
+      // The converter detects the committed reservation on this trx and
+      // anchors the series to it. NO SMS (skipWelcomeSms), no setup invoice
+      // (later per-visit charges ride the existing invoice-on-complete
+      // rail), no auto-send; the deferred email/notification payloads fire
+      // post-commit below so a rollback can't page anyone.
+      const conversion = await EstimateConverter.convertEstimate(est.id, {
+        database: trx,
+        billingTerm: 'standard',
+        skipSetupInvoice: true,
+        autoSendInvoice: false,
+        skipWelcomeSms: true,
+        skipMembershipEmail: true,
+        deferFollowUpReminderRegistration: true,
+        deferCommercialScheduleNotification: true,
+      });
+
+      await trx('one_tap_purchases').where({ id: purchase.id }).update({
+        status: 'completed',
+        accepted_at: trx.fn.now(),
+        consent_ip: ip || null,
+        consent_user_agent: userAgent || null,
+        updated_at: trx.fn.now(),
+      });
+
+      return { conversion, committed };
+    });
+  } catch (err) {
+    // Re-pick recovery: the hold died mid-confirm — everything rolled back;
+    // put the purchase back in pick-a-time state (best-effort).
+    if (err && (err.code === 'RESERVATION_EXPIRED' || err.code === 'SLOT_UNAVAILABLE')) {
+      await db('one_tap_purchases')
+        .where({ id: purchase.id, status: 'reserved' })
+        .update({ status: 'initiated', scheduled_service_id: null, slot_id: null, updated_at: db.fn.now() })
+        .catch(() => {});
+    }
+    throw err;
+  }
+
+  // ── Post-commit (best-effort — never roll back the purchase) ──────────
+  const { conversion, committed } = txOut;
+  const serviceLabel = committed?.service_type
+    || String(purchase.service_key || 'service').replace(/_/g, ' ');
+  const firstVisit = committed ? {
+    date: dateOnly(committed.scheduled_date),
+    windowStart: hhmm(committed.window_start),
+    windowEnd: hhmm(committed.window_end),
+  } : null;
+
+  // Standard accept-path emails, nothing else: the booked-onboarding email
+  // (idempotent per estimate) + the membership email the converter deferred.
+  try {
+    const { sendEstimateAcceptedOnboarding } = require('./estimate-accepted-email');
+    void sendEstimateAcceptedOnboarding({
+      customerId,
+      estimateId: purchase.estimate_id,
+      serviceLabel,
+      appointment: committed || null,
+    });
+  } catch (e) {
+    logger.error(`[one-tap-purchase] onboarding email failed for customer ${customerId}: ${e.message}`);
+  }
+  if (conversion?.membershipEmail && conversion?.recurringConversionSkipped !== true) {
+    try {
+      const AccountMembershipEmail = require('./account-membership-email');
+      void AccountMembershipEmail.sendMembershipStarted(conversion.membershipEmail)
+        .catch((e) => logger.error(`[one-tap-purchase] membership email failed for customer ${customerId}: ${e.message}`));
+    } catch (e) {
+      logger.error(`[one-tap-purchase] membership email setup failed: ${e.message}`);
+    }
+  }
+
+  // Deferred follow-up reminder registration (same post-commit contract as
+  // the estimate-accept route; sendConfirmation false — no comms fire here).
+  const deferredRows = Array.isArray(conversion?.deferredFollowUpReminderRows)
+    ? conversion.deferredFollowUpReminderRows
+    : [];
+  for (const appointment of deferredRows) {
+    try {
+      const AppointmentReminders = require('./appointment-reminders');
+      await AppointmentReminders.registerAppointment(
+        appointment.id,
+        customerId,
+        `${dateOnly(appointment.scheduled_date)}T${hhmm(appointment.window_start) || '08:00'}`,
+        appointment.service_type || serviceLabel,
+        'estimate_accept_slot',
+        { sendConfirmation: false },
+      );
+    } catch (e) {
+      logger.error(`[one-tap-purchase] reminder registration failed for ${appointment.id}: ${e.message}`);
+    }
+  }
+
+  // Deferred admin notifications the converter returned (tier upgrade,
+  // plan-rate review, commercial schedule) — dispatched post-commit exactly
+  // like the accept route does.
+  const NotificationService = require('./notification-service');
+  for (const key of ['commercialScheduleNotification', 'tierUpgradeNotification', 'planRateReviewNotification']) {
+    const n = conversion?.[key];
+    if (!n) continue;
+    try {
+      void NotificationService.notifyAdmin(n.type, n.title, n.body, n.options)
+        .catch((e) => logger.error(`[one-tap-purchase] deferred admin notify (${key}) failed: ${e.message}`));
+    } catch (e) {
+      logger.error(`[one-tap-purchase] deferred admin notify (${key}) setup failed: ${e.message}`);
+    }
+  }
+
+  // App notification (bell + native push). Transactional confirmation of
+  // the customer's own purchase — deliberately NO preferenceKey, so a
+  // marketing pref can never suppress it; deduped per purchase.
+  const perVisitText = `$${Number(purchase.per_visit).toFixed(2)}`;
+  const visitLine = firstVisit?.date ? ` First visit: ${formatVisitWhen(firstVisit)}.` : '';
+  try {
+    void Promise.resolve(NotificationService.notifyCustomer(
+      customerId,
+      'service',
+      `${serviceLabel} is confirmed`,
+      `${serviceLabel} was added to your plan at ${perVisitText} per application.${visitLine} A confirmation email is on the way.`,
+      {
+        link: '/',
+        dedupeKey: `one_tap_purchase:${purchase.id}`,
+        metadata: { purchaseId: purchase.id, estimateId: purchase.estimate_id },
+      },
+    )).catch((e) => logger.error(`[one-tap-purchase] customer notification failed: ${e.message}`));
+  } catch (e) {
+    logger.error(`[one-tap-purchase] customer notification setup failed: ${e.message}`);
+  }
+
+  // Staff bell — staff-only visibility of the self-served purchase.
+  try {
+    const { triggerNotification } = require('./notification-triggers');
+    void triggerNotification('one_tap_purchase_completed', {
+      customerId,
+      customerName: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || null,
+      serviceLabel,
+      perVisit: Number(purchase.per_visit),
+      firstVisitDate: firstVisit?.date || null,
+      estimateId: purchase.estimate_id,
+    }).catch((e) => logger.error(`[one-tap-purchase] staff bell failed: ${e.message}`));
+  } catch (e) {
+    logger.error(`[one-tap-purchase] staff bell setup failed: ${e.message}`);
+  }
+
+  return {
+    success: true,
+    firstVisit,
+    perVisit: Number(purchase.per_visit),
+    label: serviceLabel,
+  };
+}
+
+module.exports = {
+  initPurchase,
+  reserve,
+  release,
+  slots,
+  confirm,
+  TERMS_VERSION,
+  TERMS_TEXT,
+  HOLD_MINUTES,
+  _private: { assertNoDrift, serializeSlot, formatVisitWhen, to12h },
+};

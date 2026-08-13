@@ -1285,6 +1285,16 @@ module.exports = {
   variantsForService,
   currentServiceObjectsFor,
   optionServices,
+  // First-class exports for the one-tap purchase lane (2026-08-13): the
+  // purchase must re-run the pricing engine over the SAME property context
+  // and line-amount arithmetic this module priced the offer with — importing
+  // these (rather than re-implementing them) is what keeps the synthesized
+  // estimate's per-application price equal to the offer's by construction
+  // (the purchase path still asserts the parity and fails closed on drift).
+  resolvePropertyContext,
+  loadTurfProfile,
+  findLineItem,
+  quoteAmountFromLine,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.
   _private: { resolvePropertyContext, missingPropertyFor },
