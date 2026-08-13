@@ -290,37 +290,19 @@ describe('access codes', () => {
   });
 });
 
-describe('history outage — no manufactured first-visit claim', () => {
-  test('a service_records failure never becomes "new customer"', async () => {
+describe('history outage — generation aborts, cached brief survives', () => {
+  test('a service_records failure aborts the write instead of erasing guidance', async () => {
     const state = useDb(baseResponses({
       service_records: () => { throw new Error('history db down'); },
     }));
-    const out = await PrevisitBrief.generateVisitBrief('svc-1');
-    expect(out.generated).toBe(true);
-
-    // The LLM payload carries an explicit unavailable sentinel and NO
-    // first-visit claim.
-    const text = global.__dispatch.mock.calls[0][1].text;
-    const facts = JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
-    expect(facts.history).toEqual({ available: false });
-    expect(facts.visit).not.toHaveProperty('newCustomer');
-    expect(facts.lastVisit).toBeNull();
-
-    // The stored access block carries no new-customer alert either.
-    const { brief } = storedBrief(state);
-    expect(brief.access.alerts.map((a) => a.type)).not.toContain('new_customer');
-    expect(brief.last_visit.date).toBeNull();
-  });
-
-  test('the deterministic template does not assert first-visit on an outage', async () => {
-    global.__dispatch = jest.fn(async () => ({ ok: false, reason: 'down' }));
-    const state = useDb(baseResponses({
-      service_records: () => { throw new Error('history db down'); },
-    }));
-    const out = await PrevisitBrief.generateVisitBrief('svc-1');
-    expect(out.via).toBe('template');
-    const { brief } = storedBrief(state);
-    expect(JSON.stringify(brief.priorities)).not.toMatch(/first visit/i);
+    // Unreadable history must NOT hash into a brief with last-visit and
+    // product guidance erased (and can never manufacture a first-visit
+    // claim) — the visit throws, runSweep counts it failed, and the
+    // previously stored brief stays untouched.
+    await expect(PrevisitBrief.generateVisitBrief('svc-1'))
+      .rejects.toThrow(/service history unreadable/);
+    expect(global.__dispatch).not.toHaveBeenCalled();
+    expect(state.updates.scheduled_services || []).toEqual([]);
   });
 
   test('genuinely-empty history (readable) still claims new customer', async () => {

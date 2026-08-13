@@ -403,8 +403,12 @@ async function loadLawnWindowGuidance(dbh, svc) {
         })),
     };
   } catch (err) {
+    // Propagate — the lookups run strict for exactly this reason: a
+    // transient failure converted to empty guidance would be hashed and
+    // stored over a valid cached brief. runSweep counts the visit failed
+    // and the prior brief survives.
     logger.warn(`[previsit-brief] lawn protocol window lookup failed: ${err.message}`);
-    return { ...NO_LAWN_GUIDANCE, reason: 'lookup_failed' };
+    throw err;
   }
 }
 
@@ -489,6 +493,13 @@ async function assembleGrounding(svc, dbh = db) {
     .first();
 
   const history = await loadRecentServiceRecords(dbh, svc.customer_id, svc.service_type);
+  // available:false = history UNREADABLE, not empty. Continuing would hash
+  // and persist a brief with last-visit and product guidance erased over a
+  // valid cached one — abort this visit's generation instead (runSweep
+  // counts it failed; the prior brief survives).
+  if (!history.available) {
+    throw new Error('service history unreadable — refusing to regenerate over the cached brief');
+  }
   const visitLine = history.visitLine ?? visitLineOf(svc.service_type);
   // Same-line ONLY — no any-line fallback: a cross-line "last visit" would
   // drag another line's products and notes into this visit's brief.
