@@ -23,7 +23,7 @@ let mockState;
 jest.mock('../models/db', () => {
   const builderFor = (table) => {
     const chain = {
-      where: () => chain,
+      where: (...args) => { mockState.wheres.push({ table, args }); return chain; },
       whereNot: () => chain,
       whereNotNull: () => chain,
       orderBy: () => chain,
@@ -93,7 +93,7 @@ const EXTRACTED = {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { inserts: [], updates: [], threadEmails: [] };
+  mockState = { inserts: [], updates: [], threadEmails: [], wheres: [] };
   mockReadiness.mockReturnValue({ ready: true, serviceInterest: 'Pest Control', missing: [] });
   mockBuilder.mockReturnValue({
     monthly: 62, annual: 744, oneTimeTotal: 0,
@@ -339,6 +339,30 @@ describe('maybeDraftEstimateFromEmailLead', () => {
         lead: LEAD,
       });
       expect(scannedMessage()).not.toContain('warehouse');
+    });
+  });
+
+  // PRIOR means received BEFORE this email — a retry of an older message
+  // must not read the thread's later mail as its history (codex r53 P1).
+  describe('prior-thread read is bounded to earlier mail', () => {
+    const emailsWheres = () => mockState.wheres
+      .filter((w) => w.table === 'emails')
+      .map((w) => w.args);
+
+    test('the query bounds on received_at when this email carries one', async () => {
+      await maybeDraftEstimateFromEmailLead({ email: EMAIL, extracted: EXTRACTED, lead: LEAD });
+      expect(emailsWheres()).toEqual(expect.arrayContaining([
+        ['received_at', '<', EMAIL.received_at],
+      ]));
+    });
+
+    test('an email without received_at keeps the whole-thread read', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: { ...EMAIL, received_at: null },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(emailsWheres().some((args) => args[0] === 'received_at')).toBe(false);
     });
   });
 

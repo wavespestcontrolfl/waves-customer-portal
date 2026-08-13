@@ -173,11 +173,19 @@ async function priorThreadProseForScan(email) {
   const threadId = String(email?.gmail_thread_id || '').trim();
   if (!threadId) return '';
   try {
-    const priors = await db('emails')
+    let query = db('emails')
       .where('gmail_thread_id', threadId)
       .whereNot('id', email.id)
       .whereNotNull('classification')
-      .whereNot('classification', 'spam')
+      .whereNot('classification', 'spam');
+    // PRIOR means received BEFORE this email — a reclassify/retry of an
+    // older message must not scan the thread's LATER mail as its history:
+    // a later commercial request would contaminate an earlier residential
+    // inquiry's readiness scan (codex r53 P1). An email with no
+    // received_at keeps the whole-thread read — losing genuine earlier
+    // evidence is the costlier direction.
+    if (email?.received_at) query = query.where('received_at', '<', email.received_at);
+    const priors = await query
       .orderBy('received_at', 'asc')
       .limit(PRIOR_THREAD_SCAN_MESSAGES)
       .select('subject', 'body_text', 'snippet');
