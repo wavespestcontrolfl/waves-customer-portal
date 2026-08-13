@@ -35,6 +35,12 @@ function knexWithSnapshot(snapshot) {
 const JULY = 6; // month index — mosquito baseline 8 (elevated)
 const JANUARY = 0; // baseline 2 (not elevated)
 
+// Snapshot dates computed relative to now so the freshness cutoff never
+// ages the suite out.
+const daysAgo = (n) => new Date(Date.now() - n * 24 * 3600 * 1000).toISOString().slice(0, 10);
+const FRESH_DATE = daysAgo(3);
+const STALE_DATE = daysAgo(120);
+
 beforeEach(() => {
   buildPortalOffer.mockReset();
   buildPortalOffer.mockImplementation(async () => null);
@@ -117,7 +123,7 @@ describe('mosquito seasonal note', () => {
 describe('irrigation advice card', () => {
   test.each(Object.keys(IRRIGATION_ADVICE))('interpretation %s → advice card', async (interpretation) => {
     const result = await buildPropertyRecommendations('cust-1', {
-      knex: knexWithSnapshot({ status: 'high', interpretation, service_date: '2026-08-10' }),
+      knex: knexWithSnapshot({ status: 'high', interpretation, service_date: FRESH_DATE }),
       monthIndex: JANUARY,
     });
     const card = result.cards.find((c) => c.id === 'irrigation_advice');
@@ -128,7 +134,15 @@ describe('irrigation advice card', () => {
 
   test('balanced water picture → no advice card', async () => {
     const result = await buildPropertyRecommendations('cust-1', {
-      knex: knexWithSnapshot({ status: 'balanced', interpretation: 'water_balance_ok', service_date: '2026-08-10' }),
+      knex: knexWithSnapshot({ status: 'balanced', interpretation: 'water_balance_ok', service_date: FRESH_DATE }),
+      monthIndex: JANUARY,
+    });
+    expect(result.cards.find((c) => c.id === 'irrigation_advice')).toBeUndefined();
+  });
+
+  test('a stale snapshot never drives current advice (freshness cutoff)', async () => {
+    const result = await buildPropertyRecommendations('cust-1', {
+      knex: knexWithSnapshot({ status: 'high', interpretation: 'wet_condition_watch', service_date: STALE_DATE }),
       monthIndex: JANUARY,
     });
     expect(result.cards.find((c) => c.id === 'irrigation_advice')).toBeUndefined();
@@ -151,7 +165,7 @@ describe('composition', () => {
     }));
     loadOwnedRecurringServiceKeys.mockImplementation(async () => ['pest_control', 'lawn_care']);
     const result = await buildPropertyRecommendations('cust-1', {
-      knex: knexWithSnapshot({ status: 'high', interpretation: 'wet_condition_watch', service_date: '2026-08-10' }),
+      knex: knexWithSnapshot({ status: 'high', interpretation: 'wet_condition_watch', service_date: FRESH_DATE }),
       monthIndex: JULY,
     });
     expect(result.cards.map((c) => c.id)).toEqual(['irrigation_advice', 'plan_offer', 'mosquito_note']);
@@ -163,7 +177,7 @@ describe('composition', () => {
     // must not depend on that contract to keep the stack alive.
     buildPortalOffer.mockImplementation(async () => { throw new Error('unexpected'); });
     const result = await buildPropertyRecommendations('cust-1', {
-      knex: knexWithSnapshot({ status: 'high', interpretation: 'wet_condition_watch', service_date: '2026-08-10' }),
+      knex: knexWithSnapshot({ status: 'high', interpretation: 'wet_condition_watch', service_date: FRESH_DATE }),
       monthIndex: JANUARY,
     });
     expect(result.cards.map((c) => c.id)).toEqual(['irrigation_advice']);
@@ -186,9 +200,16 @@ describe('route contracts (gate + drift)', () => {
 
   jest.resetModules();
 
+  // Controls the route's mosquito revalidation without touching a DB.
+  const mosquitoNote = jest.fn(async () => null);
+
   function appWithGate(gateOn) {
     jest.doMock('../middleware/auth', () => ({
       authenticate: (req, _res, nextFn) => { req.customerId = 'cust-1'; nextFn(); },
+    }));
+    jest.doMock('../services/property-recommendations', () => ({
+      buildPropertyRecommendations: async () => ({ cards: [] }),
+      mosquitoNoteCard: mosquitoNote,
     }));
     // reports-public is a very heavy route module — the route only borrows
     // its structural snapshot compare, so a stub keeps this suite light.
@@ -217,6 +238,9 @@ describe('route contracts (gate + drift)', () => {
     delete process.env.GATE_PROPERTY_RECOMMENDATIONS;
     jest.dontMock('../middleware/auth');
     jest.dontMock('../routes/reports-public');
+    jest.dontMock('../services/property-recommendations');
+    mosquitoNote.mockReset();
+    mosquitoNote.mockImplementation(async () => null);
     if (server) { await new Promise((resolve) => server.close(resolve)); server = null; }
   });
 
@@ -239,5 +263,14 @@ describe('route contracts (gate + drift)', () => {
       cardId: 'plan_offer', serviceKey: 'tree_shrub', offerMode: 'priced', perApplication: 84, optionId: 'x', fingerprint: 'fp',
     });
     expect(stale.status).toBe(409);
+  });
+
+  test('gate on: mosquito note revalidates before writing — ineligible taps 409', async () => {
+    const base = await listen(appWithGate(true));
+    // mosquitoNote answers null (season over / ownership changed / unknowable)
+    // — the write path must reject, never file the request.
+    const gone = await post(base, { cardId: 'mosquito_note' });
+    expect(gone.status).toBe(409);
+    expect(mosquitoNote).toHaveBeenCalled();
   });
 });

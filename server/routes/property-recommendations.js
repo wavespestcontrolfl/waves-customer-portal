@@ -26,7 +26,7 @@ const { authenticate } = require('../middleware/auth');
 const { gateEnvValue } = require('../config/feature-gates');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { buildPropertyRecommendations } = require('../services/property-recommendations');
+const { buildPropertyRecommendations, mosquitoNoteCard } = require('../services/property-recommendations');
 const { buildPortalOffer } = require('../services/service-report/cross-sell');
 const { normalizeRequestedServiceKey, OPEN_REQUEST_TERMINAL_STATUSES } = require('../services/estimate-add-service-request');
 const { storedRevisionMatches } = require('./reports-public');
@@ -65,6 +65,14 @@ router.post('/request', requestLimiter, async (req, res, next) => {
 
     // ── Mosquito seasonal note: a plain quote request, no price snapshot ──
     if (cardId === 'mosquito_note') {
+      // Revalidate before writing (same drift doctrine as the offer): a
+      // stale page — or a direct authenticated POST — must not file a
+      // request the card would no longer render (season over, ownership
+      // changed, or ownership unknowable).
+      const note = await mosquitoNoteCard(req.customerId, db);
+      if (!note) {
+        return res.status(409).json({ error: 'This suggestion is no longer available — please refresh the page' });
+      }
       const requestedService = normalizeRequestedServiceKey('mosquito') || 'mosquito';
       const outcome = await writeOrRefreshRequest({
         customerId: req.customerId,

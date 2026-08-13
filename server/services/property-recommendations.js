@@ -25,6 +25,21 @@ const logger = require('./logger');
 const { buildPortalOffer } = require('./service-report/cross-sell');
 const { loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
 const { dateOnlyString } = require('../utils/date-only');
+const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
+
+// Seasonal decisions read the EASTERN calendar month (codex pre-push P1):
+// Railway runs in UTC, so getMonth() flips seasons hours early at month
+// boundaries — exactly where the mosquito threshold changes sit.
+function currentEtMonthIndex() {
+  return etParts(new Date()).month - 1;
+}
+
+// An irrigation snapshot older than this many ET calendar days may not
+// drive "this week" advice (codex pre-push P1): the copy says "recent",
+// and a months-old wet/dry reading would tell a customer to change
+// watering off data that no longer describes their lawn. Lawn programs
+// visit at most ~monthly, so 45 days covers a visit plus slack.
+const IRRIGATION_ADVICE_MAX_AGE_DAYS = 45;
 
 // Advice copy per lawn-water interpretation (the snapshot engine's judgment;
 // this is display copy only — same interpretation vocabulary property-score
@@ -74,6 +89,10 @@ async function irrigationAdviceCard(customerId, knex) {
     .catch(() => null);
   const advice = snap && IRRIGATION_ADVICE[snap.interpretation];
   if (!advice) return null;
+  // Freshness cutoff on the ET calendar — a stale snapshot renders nothing.
+  const snapDay = dateOnlyString(snap.service_date);
+  const cutoffDay = etDateString(addETDays(new Date(), -IRRIGATION_ADVICE_MAX_AGE_DAYS));
+  if (!snapDay || snapDay < cutoffDay) return null;
   return {
     id: 'irrigation_advice',
     kind: 'advice',
@@ -89,7 +108,7 @@ async function irrigationAdviceCard(customerId, knex) {
 // only when BOTH facts hold: the season is elevated AND the account provably
 // has no mosquito program. An unreadable ownership picture skips the note
 // (we may not claim a coverage gap we cannot prove).
-async function mosquitoNoteCard(customerId, knex, monthIndex) {
+async function mosquitoNoteCard(customerId, knex, monthIndex = currentEtMonthIndex()) {
   if (!mosquitoSeasonElevated(monthIndex)) return null;
   let ownedKeys;
   try {
@@ -128,12 +147,10 @@ function offerCard(offer) {
   };
 }
 
-// monthIndex is injectable for tests; defaults to the current month. Month
-// granularity makes the ET/UTC boundary question immaterial (both agree
-// except a few hours at month edges, and the note is seasonal copy).
+// monthIndex is injectable for tests; defaults to the current ET month.
 async function buildPropertyRecommendations(customerId, {
   knex = db,
-  monthIndex = new Date().getMonth(),
+  monthIndex = currentEtMonthIndex(),
 } = {}) {
   const cards = [];
 
@@ -164,5 +181,9 @@ async function buildPropertyRecommendations(customerId, {
 
 module.exports = {
   buildPropertyRecommendations,
-  _test: { irrigationAdviceCard, mosquitoNoteCard, offerCard, mosquitoSeasonElevated, IRRIGATION_ADVICE },
+  // Production export: the request route revalidates the mosquito note
+  // before writing (a stale page or direct POST must not file a request
+  // the card would no longer render).
+  mosquitoNoteCard,
+  _test: { irrigationAdviceCard, offerCard, mosquitoSeasonElevated, currentEtMonthIndex, IRRIGATION_ADVICE },
 };
