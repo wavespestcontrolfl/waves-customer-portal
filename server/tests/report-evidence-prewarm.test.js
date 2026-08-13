@@ -104,19 +104,26 @@ describe('completion wiring (source contracts — both handlers are too heavy to
   const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
   const recapSrc = fs.readFileSync(path.join(__dirname, '../services/pest-recap.js'), 'utf8');
 
-  test('dispatch: one BOUNDED-await call site, guarded on v1 + complete + non-backfill', () => {
-    const calls = dispatchSrc.match(/prewarmReportCrossSellEvidenceBounded/g) || [];
-    expect(calls.length).toBe(2); // require + invocation
-    expect(dispatchSrc).toMatch(/useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record\?\.id/);
+  test('dispatch: bounded call site guarded on v1 + complete + non-backfill + customer-deliverable posture (r2 P1)', () => {
+    expect(dispatchSrc).toMatch(/useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record\?\.id\s*\n\s*&& !\['disabled', 'internal_only'\]\.includes\(typedDeliveryMode\)/);
     expect(dispatchSrc).toMatch(/await prewarmReportCrossSellEvidenceBounded\(record, db, \{ maxWaitMs: 10000 \}\)/);
   });
 
-  test('pest-recap: the slim completion path warms BEFORE its SMS send (r1 P1)', () => {
-    const calls = recapSrc.match(/prewarmReportCrossSellEvidenceBounded/g) || [];
+  test('dispatch: a second fire-and-forget warm runs AFTER series maintenance for the consumed-last-visit case (r2 P2)', () => {
+    const maintenanceAt = dispatchSrc.indexOf('runPostCompletionSeriesMaintenance({ db, svc');
+    const rewarmAt = dispatchSrc.indexOf('void prewarmReportCrossSellEvidence(record, db)');
+    expect(maintenanceAt).toBeGreaterThan(0);
+    expect(rewarmAt).toBeGreaterThan(maintenanceAt);
+  });
+
+  test('pest-recap: the warm runs AFTER the SMS send — nothing sits between the durable claim and the send (r2 P1)', () => {
+    const calls = recapSrc.match(/prewarmReportCrossSellEvidence/g) || [];
     expect(calls.length).toBe(2); // require + invocation
-    // Ordering: the warm call must appear before the recap SMS dispatch.
-    expect(recapSrc.indexOf('prewarmReportCrossSellEvidenceBounded'))
-      .toBeLessThan(recapSrc.indexOf('body: smsRecap(recapText)'));
+    // Fire-and-forget, never the bounded wait, and strictly after the send.
+    expect(recapSrc).toMatch(/void prewarmReportCrossSellEvidence\(freshRecord, db\)/);
+    expect(recapSrc).not.toMatch(/prewarmReportCrossSellEvidenceBounded/);
+    expect(recapSrc.indexOf('body: smsRecap(recapText)'))
+      .toBeLessThan(recapSrc.indexOf('void prewarmReportCrossSellEvidence(freshRecord, db)'));
   });
 
   test('pest-recap: only the completion-transition WINNER warms — retries never duplicate the paid pipeline (r5 P1)', () => {
@@ -125,8 +132,6 @@ describe('completion wiring (source contracts — both handlers are too heavy to
   });
 
   test('pest-recap: only v1-template records warm — the card renders for no other template (r3 P1)', () => {
-    // Spend guard: a recap record without service_report_v1 renders a
-    // report the composer never decorates, so warming it buys nothing.
     expect(recapSrc).toMatch(/freshRecord && freshRecord\.report_template_version === 'service_report_v1'/);
   });
 });

@@ -8122,7 +8122,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // any completion. Backfills are excluded: their customers already
     // received (or never had) the report moment this exists to serve.
     // Replays are cache-first no-ops.
-    if (useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record?.id) {
+    // Delivery posture joins the guard (codex #3382 r2 P1): 'disabled'
+    // (typed kill switch — no public token is ever minted) and
+    // 'internal_only' (Phase-1b shadow — staff-review only) reports can't
+    // reach a customer, so warming their evidence spends county/vision
+    // calls and up to 10s of completion latency on a card no customer can
+    // see.
+    if (useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record?.id
+      && !['disabled', 'internal_only'].includes(typedDeliveryMode)) {
       const { prewarmReportCrossSellEvidenceBounded } = require('../services/service-report/evidence-prewarm');
       await prewarmReportCrossSellEvidenceBounded(record, db, { maxWaitMs: 10000 });
     }
@@ -11144,6 +11151,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     try {
       const { runPostCompletionSeriesMaintenance } = require('../services/recurring-series-extend');
       await runPostCompletionSeriesMaintenance({ db, svc, source: 'dispatch_complete' });
+      // Re-warm AFTER the refill (codex #3382 r2 P2): when this completion
+      // consumed a series' last scheduled visit, the earlier bounded warm
+      // ran against an ownership view with no upcoming row — the composer
+      // suppresses that (recent uncorroborated identity) and spends
+      // nothing. The refill just created the next visit, so the report IS
+      // card-eligible now; this pass does the real warm. Cache-first, so
+      // in the common case (first warm succeeded) it's a no-op read.
+      // Fire-and-forget: everything customer-facing already went out.
+      if (useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record?.id
+        && !['disabled', 'internal_only'].includes(typedDeliveryMode)) {
+        const { prewarmReportCrossSellEvidence } = require('../services/service-report/evidence-prewarm');
+        void prewarmReportCrossSellEvidence(record, db);
+      }
     } catch (seriesErr) {
       logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
     }

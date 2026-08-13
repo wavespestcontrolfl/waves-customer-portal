@@ -579,30 +579,6 @@ async function submitRecap({
     }
   }
 
-  // 4c. Warm the cross-sell card's property-evidence cache before the recap
-  // SMS goes out (pre-push r1 P1: this slim path completes visits and texts
-  // the report link without ever passing through /complete, so its reports
-  // — a major one-time-pest lane — would otherwise always render the CTA
-  // fallback). Same bounded-wait posture as the dispatch handler: on
-  // timeout the warm finishes in the background and the next view
-  // self-heals; the module is double-gated and never rejects, so it can't
-  // block or fail the recap.
-  if (recordId && completedThisSubmit) {
-    try {
-      const freshRecord = await db('service_records').where({ id: recordId }).first();
-      // v1-template records ONLY (pre-push r3 P1): reports-public composes
-      // the cross-sell card solely for service_report_v1, and recap-written
-      // records aren't all stamped with it — warming a report that can
-      // never render the card would spend county/vision calls for nothing.
-      if (freshRecord && freshRecord.report_template_version === 'service_report_v1') {
-        const { prewarmReportCrossSellEvidenceBounded } = require('./service-report/evidence-prewarm');
-        await prewarmReportCrossSellEvidenceBounded(freshRecord, db, { maxWaitMs: 10000 });
-      }
-    } catch (prewarmErr) {
-      logger.warn(`[pest-recap] evidence pre-warm skipped (code=${prewarmErr?.code || 'none'}) for record ${recordId}`);
-    }
-  }
-
   // 5. Optional customer recap SMS. Only the submit that won the
   //    recap_sms_sent_at claim under the lock reaches the send — a
   //    concurrent/retried submit has willSendSms=false and is skipped.
@@ -647,6 +623,28 @@ async function submitRecap({
     // Wanted to text but the claim was already taken (concurrent double-
     // submit, or a recap that already texted this customer): no-op.
     smsError = 'duplicate_suppressed';
+  }
+
+  // 5b. Warm the cross-sell card's property-evidence cache — AFTER the SMS
+  // (codex #3382 r2 P1): the transaction durably claims recap_sms_sent_at,
+  // and any wait placed between that claim and the send widens the crash
+  // window in which a retry sees the claim and permanently suppresses an
+  // unsent message. Post-send, fire-and-forget: the customer opening the
+  // link within seconds may get one cold (CTA) view — today's behavior —
+  // and the next view self-heals to a priced card. v1-template records
+  // only (r1: no other template renders the card) and only the completion
+  // winner (r1: retries must not duplicate the paid pipeline); the module
+  // is double-gated and never rejects.
+  if (recordId && completedThisSubmit) {
+    try {
+      const freshRecord = await db('service_records').where({ id: recordId }).first();
+      if (freshRecord && freshRecord.report_template_version === 'service_report_v1') {
+        const { prewarmReportCrossSellEvidence } = require('./service-report/evidence-prewarm');
+        void prewarmReportCrossSellEvidence(freshRecord, db);
+      }
+    } catch (prewarmErr) {
+      logger.warn(`[pest-recap] evidence pre-warm skipped (code=${prewarmErr?.code || 'none'}) for record ${recordId}`);
+    }
   }
 
   // Digital business card: a recap completion is a real performed visit —
