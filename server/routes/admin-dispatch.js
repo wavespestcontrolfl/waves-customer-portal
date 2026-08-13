@@ -3551,6 +3551,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // columns (no constraint conflict).
         const lifecycleUpdates = {};
         const lifecycleAt = new Date();
+        // ⭐ THE FIELD-CONFIRM MODE RIDES THE STATUS TRANSACTION. A technician
+        // confirming an office-review row must leave the durable stamp even if
+        // everything after the commit dies — the hourly retry has ONLY this
+        // marker to know the card funnel is skipped. Same-trx, never
+        // swallowed: a stamp failure rolls the confirmation back with it.
+        if (isOfficeReviewConfirm && req.techRole === 'technician') {
+          lifecycleUpdates.field_confirmed_at = svc.field_confirmed_at || lifecycleAt;
+        }
         if (toStatus === 'confirmed' && !isOfficeReviewConfirm) {
           // Same lifecycle semantics as the admin-schedule status route. For a
           // pending outbound-review booking this is the flag the shared-writer
@@ -3627,15 +3635,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // collects a card in person, so the office-only card-request funnel — and
       // the clearance stamp that arms the pre-visit sweep behind it — must not
       // fire. Same distinction admin-schedule and tech-track draw.
-      // Persist the field mode BEFORE activating — the sweep's retry has only
-      // the durable stamp to know a technician confirmed this row.
-      if (req.techRole === 'technician') {
-        await db('scheduled_services')
-          .where({ id: svc.id })
-          .whereNull('field_confirmed_at')
-          .update({ field_confirmed_at: new Date() })
-          .catch(() => {});
-      }
+      // (field_confirmed_at was stamped INSIDE the status transaction above —
+      // atomic with the confirmation, never swallowed.)
       await runOfficeConfirmActivation(db, svc, 'admin-dispatch', {
         skipCardRequest: req.techRole === 'technician',
       });

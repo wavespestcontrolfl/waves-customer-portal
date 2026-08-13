@@ -8373,6 +8373,13 @@ router.put('/:id/status', async (req, res, next) => {
           // the activation receipt, stamped post-commit only once the shared
           // confirm hook's core legs succeed.
           if (!isOfficeReviewConfirm) lifecycleUpdates.customer_confirmed = true;
+          // ⭐ THE FIELD-CONFIRM MODE RIDES THE STATUS TRANSACTION. The hourly
+          // retry has ONLY this durable stamp to know a technician confirmed
+          // the row (card collected in person — no funnel). Same-trx, never
+          // swallowed: a stamp failure rolls the confirmation back with it.
+          if (isOfficeReviewConfirm && isTechnicianRequest(req)) {
+            lifecycleUpdates.field_confirmed_at = svc.field_confirmed_at || new Date();
+          }
         } else if (toStatus === 'on_site') {
           Object.assign(lifecycleUpdates, buildOnSiteLifecycleUpdates(svc, new Date()));
         } else if (toStatus === 'completed') {
@@ -8492,17 +8499,8 @@ router.put('/:id/status', async (req, res, next) => {
       // collects a card in person, so the office-only card-request funnel — and
       // the clearance stamp that arms the pre-visit sweep behind it — must not
       // fire from a field status tap. Office confirms keep the full funnel.
-      // The field mode is PERSISTED before the activation runs (same durable
-      // stamp tech-track writes in its transaction): a failed core leg hands
-      // this row to the hourly sweep, and only the stamp makes that retry keep
-      // skipping the funnel.
-      if (isTechnicianRequest(req)) {
-        await db('scheduled_services')
-          .where({ id: svc.id })
-          .whereNull('field_confirmed_at')
-          .update({ field_confirmed_at: new Date() })
-          .catch(() => {});
-      }
+      // (field_confirmed_at was stamped INSIDE the status transaction above —
+      // atomic with the confirmation, never swallowed.)
       await runOfficeConfirmActivation(db, svc, 'admin-schedule', {
         skipCardRequest: isTechnicianRequest(req),
       });
