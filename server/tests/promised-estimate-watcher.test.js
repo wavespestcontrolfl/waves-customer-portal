@@ -97,12 +97,13 @@ describe('runPromisedEstimateWatcher', () => {
     const block = src.split('e.sent_at IS NOT NULL')[1].slice(0, 1200);
     expect(block).toMatch(/COALESCE\(e\.source, ''\) <> 'service_report_cta'/);
     // …but a mint an operator LATER actually delivered keeps the promise
-    // (GitHub #3391 round P2): the exclusion re-includes rows whose
-    // deliveryState.sentChannels records a real send. The typeof guard
-    // keeps jsonb_array_length off non-array/absent values.
-    expect(block).toMatch(/deliveryState,sentChannels/);
-    expect(block).toMatch(/jsonb_typeof\(e\.estimate_data #> '\{deliveryState,sentChannels\}'\) = 'array'/);
-    expect(block).toMatch(/jsonb_array_length/);
+    // (GitHub #3391 round P2). REAL delivery only — sentChannels also
+    // carries SMS suppression sentinels (uncapped audit on 528b1aad7 P1),
+    // so the predicate keys on channels.email.ok / channels.sms.real, the
+    // same line stampChannels draws, never on sentChannels length.
+    expect(block).toMatch(/e\.estimate_data #>> '\{deliveryState,channels,email,ok\}' = 'true'/);
+    expect(block).toMatch(/e\.estimate_data #>> '\{deliveryState,channels,sms,real\}' = 'true'/);
+    expect(block).not.toMatch(/sentChannels\}'\) = 'array'/);
   });
 
   test('quiet day skips without sending or stamping', async () => {

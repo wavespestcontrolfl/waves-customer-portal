@@ -233,15 +233,16 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
     -- click-to-estimate mints stamp sent_at without any delivery — they
     -- must not fulfill a send obligation (in-hook audit r7b P1 on #3391).
     -- Unless an operator LATER actually sent the mint (GitHub round P2):
-    -- sendEstimateNow stamps deliveryState.sentChannels, and a delivered
-    -- estimate fulfills the task regardless of its source.
+    -- sendEstimateNow stamps deliveryState. REAL delivery only —
+    -- sentChannels also carries SMS suppression sentinels (uncapped audit
+    -- on 528b1aad7 P1), so the truth is channels.email.ok or
+    -- channels.sms.real, the same line stampChannels draws.
     WHERE NOT (t.task_type = 'send_estimate' AND EXISTS (
         SELECT 1 FROM estimates fe
         WHERE fe.customer_id = t.customer_id AND fe.sent_at > t.created_at
           AND (COALESCE(fe.source, '') <> 'service_report_cta'
-               OR (CASE WHEN jsonb_typeof(fe.estimate_data #> '{deliveryState,sentChannels}') = 'array'
-                        THEN jsonb_array_length(fe.estimate_data #> '{deliveryState,sentChannels}')
-                        ELSE 0 END) > 0)
+               OR fe.estimate_data #>> '{deliveryState,channels,email,ok}' = 'true'
+               OR fe.estimate_data #>> '{deliveryState,channels,sms,real}' = 'true')
       ))
       -- Unlinked send_sms tasks fulfill through the source call's SID and
       -- recipient phone (codex r34): a human-typed/approved text to the

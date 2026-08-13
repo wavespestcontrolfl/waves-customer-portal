@@ -44,7 +44,14 @@ class ClickEstimateDriftError extends Error {
 function priorMintStillLive(row, now) {
   if (!row || row.archived_at) return false;
   if (row.status === 'accepted') return true;
-  if (!['sent', 'viewed'].includes(String(row.status || ''))) return false;
+  // 'sending' is an operator send IN FLIGHT (GitHub #3391 round P0): the
+  // admin workflow commits the claim BEFORE the provider calls, and
+  // finalization does not reject an archived row — so a mid-send row is a
+  // live customer link, not a dead one. A STALE claim (expiry window
+  // already lapsed) is a crashed send and falls to the expiry check below,
+  // dead like any lapsed row — the same live/stale line extendEstimate
+  // draws.
+  if (!['sent', 'viewed', 'sending'].includes(String(row.status || ''))) return false;
   const expiresAt = row.expires_at ? new Date(row.expires_at) : null;
   if (expiresAt && !Number.isNaN(expiresAt.getTime()) && expiresAt <= now) return false;
   return true;
@@ -373,6 +380,22 @@ async function mintReportClickEstimate(trx, {
       url: estimatePathFor(fingerprintMatch.token),
       reused: true,
     };
+  }
+
+  // ── Mid-send lineage refuses the mint, retryable (GitHub round P0) ──────
+  // Reaching here means a fresh mint will supersede (archive) every
+  // supersedable lineage row — but a row whose operator send is IN FLIGHT
+  // ('sending' claim, window not lapsed) is a live customer link that
+  // finalization would happily deliver after we archived it: the customer
+  // gets a dead token with a second estimate minted beside it. Nothing to
+  // reuse (the offer changed or the mark lost its fingerprint) and nothing
+  // safe to archive — refuse as the route's retryable 503; sends finish in
+  // seconds and the next tap proceeds normally.
+  const midSendMint = supersedableMints.find((row) => (
+    String(row.status || '') === 'sending' && priorMintStillLive(row, nowDate)
+  ));
+  if (midSendMint) {
+    throw new Error('a click-mint estimate send is in flight — retry after delivery completes');
   }
 
   // ── Mint ────────────────────────────────────────────────────────────────

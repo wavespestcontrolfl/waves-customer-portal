@@ -705,6 +705,49 @@ describe('mintReportClickEstimate', () => {
     expect(ops.inserts).toHaveLength(0);
   });
 
+  test('a MID-SEND lineage row refuses a superseding mint as retryable — never archived under an in-flight delivery (GitHub round P0)', async () => {
+    // The admin send workflow commits status='sending' before the provider
+    // calls, and finalization does not reject an archived row: archiving
+    // here would deliver a dead token and mint a second estimate beside it.
+    const midSend = priorMint({
+      id: 'est-midsend', status: 'sending',
+      estimate_data: { reportCtaMint: { serviceKey: 'pest_control', fingerprint: 'fp-DIFFERENT' } },
+    });
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [midSend] });
+    const err = await mintReportClickEstimate(trx, baseArgs({ deduped: false })).catch((e) => e);
+    // Retryable (route 503), NOT drift — the send finishes in seconds and
+    // the next tap proceeds.
+    expect(err).toBeInstanceOf(Error);
+    expect(err.clickEstimateDrift).toBeUndefined();
+    expect(err.message).toMatch(/in flight/);
+    expect(ops.inserts).toHaveLength(0);
+    expect(ops.updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
+  });
+
+  test('a mid-send row with the UNCHANGED fingerprint reuses — the tap hands back the very token being delivered', async () => {
+    const midSend = priorMint({ id: 'est-midsend', status: 'sending' });
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [midSend] });
+    const out = await mintReportClickEstimate(trx, baseArgs({
+      deduped: true,
+      requestRow: { id: 'req-3', pricing_revision: JSON.stringify({ mintedEstimate: { id: 'est-midsend', token: 'tok-old' } }) },
+    }));
+    expect(out.reused).toBe(true);
+    expect(out.estimateId).toBe('est-midsend');
+    expect(ops.updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
+  });
+
+  test('a CRASHED send (sending, window lapsed) supersedes like any dead lineage row', async () => {
+    const crashed = priorMint({
+      id: 'est-crashed', status: 'sending', expires_at: new Date('2026-08-01T00:00:00Z'),
+      estimate_data: { reportCtaMint: { serviceKey: 'pest_control', fingerprint: 'fp-DIFFERENT' } },
+    });
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [crashed] });
+    const out = await mintReportClickEstimate(trx, baseArgs({ deduped: false }));
+    expect(out.reused).toBe(false);
+    const archive = ops.updates.find((u) => u.table === 'estimates' && u.patch.archived_at);
+    expect(archive.criteria).toEqual({ id: 'est-crashed' });
+  });
+
   test('the minted row stamps the engine version that actually priced it', async () => {
     const { trx, ops } = fakeTrx();
     await mintReportClickEstimate(trx, baseArgs());
@@ -724,5 +767,9 @@ describe('priorMintStillLive', () => {
     expect(priorMintStillLive({ status: 'declined' }, now)).toBe(false);
     expect(priorMintStillLive({ status: 'draft' }, now)).toBe(false);
     expect(priorMintStillLive(null, now)).toBe(false);
+  });
+  test('an in-flight operator send (sending, window not lapsed) is LIVE; a stale claim (lapsed) is a crashed send and dead (GitHub round P0)', () => {
+    expect(priorMintStillLive({ status: 'sending', expires_at: '2026-08-20' }, now)).toBe(true);
+    expect(priorMintStillLive({ status: 'sending', expires_at: '2026-08-01' }, now)).toBe(false);
   });
 });
