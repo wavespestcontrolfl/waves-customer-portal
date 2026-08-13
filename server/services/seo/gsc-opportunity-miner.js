@@ -1290,8 +1290,15 @@ function arbitrateCityServiceTargets(opportunities = [], { frozenTargets = new S
     // still sees the best candidate (persistAll drops or no-ops it).
     const unfrozen = group.filter((o) => !frozenKeys.has(o.dedupe_key));
     const landable = unfrozen.length ? unfrozen : group;
-    const persistable = landable.filter((o) => isPersistable(o));
-    const eligible = persistable.length ? persistable : landable;
+    // MAPPABLE next (cloud P1): a raw-service candidate ('tree_shrub',
+    // 'specialty') groups into the canonical target but parks downstream
+    // as facts_unmappable — electing it discards the viable canonical
+    // twin on every mine. Its own key and lifecycle stay untouched; it
+    // just loses the arbitration to a sibling the runner can execute.
+    const mappable = landable.filter((o) => canonicalizeServiceCategory(o.service) === o.service);
+    const runnable = mappable.length ? mappable : landable;
+    const persistable = runnable.filter((o) => isPersistable(o));
+    const eligible = persistable.length ? persistable : runnable;
     const queryBearing = eligible.filter((o) => o.query);
     const pool = queryBearing.length ? queryBearing : eligible;
     const winner = pool.reduce((best, o) => (o.score > best.score ? o : best), pool[0]);
@@ -2560,6 +2567,29 @@ class GscOpportunityMiner {
     // degraded-bucket doctrine from #3372.
     if (!ownPagesByServiceCity || !ownPagesByServiceCity.size) {
       throw new Error('own-pages map unavailable or empty — refusing to treat every city-service pair as uncovered');
+    }
+    // …and FRESH, not merely nonempty (cloud P1): syncQueries and
+    // syncPages fail independently, so historical gsc_pages rows keep the
+    // map nonempty while a recently created or reclassified hub page is
+    // absent from the stale snapshot — which this bucket would then treat
+    // as missing and draft again. Same two-sided check as
+    // _queryPageMapCoveredDomains: the hub pages leg must track the hub
+    // queries leg (relative, with the same grace) AND carry an absolute
+    // recency bound so a whole-sync outage cannot vacuously pass.
+    const freshness = await db.raw(`
+      SELECT
+        (SELECT max(date) FROM gsc_pages   WHERE page_url LIKE '%wavespestcontrol.com/%') AS pages_max,
+        (SELECT max(date) FROM gsc_queries WHERE domain = ?) AS queries_max
+    `, [HUB_DOMAIN]);
+    const fr = freshness?.rows?.[0] || {};
+    const graceMs = GscOpportunityMiner.QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS * 86400_000;
+    const absMs = GscOpportunityMiner.MAP_ABSOLUTE_STALENESS_DAYS * 86400_000;
+    const pagesMax = fr.pages_max ? new Date(fr.pages_max).getTime() : 0;
+    const queriesMax = fr.queries_max ? new Date(fr.queries_max).getTime() : 0;
+    if (!pagesMax
+      || (queriesMax && pagesMax < queriesMax - graceMs)
+      || pagesMax < Date.now() - absMs) {
+      throw new Error('gsc_pages hub coverage is stale relative to gsc_queries — refusing to judge city-service coverage from an old snapshot');
     }
 
     // PER-QUERY rows, not pre-aggregated pairs: the classifier label must

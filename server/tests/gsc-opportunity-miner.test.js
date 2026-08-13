@@ -2437,7 +2437,10 @@ describe('cross-bucket keys canonicalize service ALIASES (round-4 P1)', () => {
     expect(cityServiceTargetKey('mystery', 'venice')).not.toBe(cityServiceTargetKey('pest', 'venice'));
   });
 
-  test('a raw-service striking_distance row collapses with a canonical local_gap twin', () => {
+  test('a raw-service striking_distance row still GROUPS with a canonical local_gap twin', () => {
+    // One row out — the grouping is the point of the canonical key. Since
+    // the mappable narrowing (round-6 cloud P1), the RUNNABLE canonical
+    // twin wins: the raw-service row would park as facts_unmappable.
     const lg = {
       bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', query: null,
       page_url: null, service: 'tree-shrub', city: 'sarasota', score: 56, signal_metadata: { impressions: 200 },
@@ -2449,8 +2452,7 @@ describe('cross-bucket keys canonicalize service ALIASES (round-4 P1)', () => {
     };
     const out = arbitrateCityServiceTargets([lg, sd]);
     expect(out).toHaveLength(1);
-    expect(out[0].bucket).toBe('striking_distance');
-    expect(out[0].signal_metadata.segment_impressions).toBe(200);
+    expect(out[0].bucket).toBe('local_gap');
   });
 
   test('the in-flight fence sees a raw-service pending row as occupying the canonical target', async () => {
@@ -2821,5 +2823,57 @@ describe('in-lock frozen re-read + untrusted-snapshot sweep guard (round-5 cloud
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
     expect(src).toMatch(/runState\.cityServiceFrozenLookupFailed = true;/);
     expect(src).toMatch(/!errors\.local_gap && !runState\.cityServiceFrozenLookupFailed/);
+  });
+});
+
+describe('pages-leg freshness + mappable winners (round-6 cloud P1s)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+  const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+
+  test('a nonempty-but-STALE own-page map throws before mining', () => {
+    // syncQueries and syncPages fail independently — historical rows keep
+    // the map nonempty while a new hub page is missing from the snapshot.
+    expect(lg).toMatch(/pagesMax < queriesMax - graceMs/);
+    expect(lg).toMatch(/pagesMax < Date\.now\(\) - absMs/);
+    expect(lg).toMatch(/gsc_pages hub coverage is stale relative to gsc_queries/);
+    // Same knobs as the query-page-map freshness mechanism — no new ones.
+    expect(lg).toMatch(/QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS/);
+    expect(lg).toMatch(/MAP_ABSOLUTE_STALENESS_DAYS/);
+  });
+
+  test('a raw-service candidate loses the arbitration to a runnable canonical twin', () => {
+    // 'tree_shrub' groups into the canonical target but parks downstream
+    // as facts_unmappable — electing it would discard the viable twin on
+    // every mine. Keys and lifecycles untouched; it just loses.
+    const rawSd = {
+      bucket: 'striking_distance', action_type: 'create_or_refresh_city_service_page',
+      query: 'tree trimming sarasota', dedupe_key: 'sd-raw', page_url: null,
+      service: 'tree_shrub', city: 'sarasota', score: 80, signal_metadata: { impressions: 120 },
+    };
+    const lgRow = {
+      bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page',
+      query: null, dedupe_key: 'lg-canon', page_url: null,
+      service: 'tree-shrub', city: 'sarasota', score: 56, signal_metadata: { impressions: 200 },
+    };
+    const out = arbitrateCityServiceTargets([rawSd, lgRow]);
+    expect(out).toHaveLength(1);
+    expect(out[0].dedupe_key).toBe('lg-canon');
+  });
+
+  test('an all-raw group still keeps its best for calibration', () => {
+    const rawSd = {
+      bucket: 'striking_distance', action_type: 'create_or_refresh_city_service_page',
+      query: 'q', dedupe_key: 'sd-raw', page_url: null,
+      service: 'tree_shrub', city: 'sarasota', score: 80, signal_metadata: {},
+    };
+    const rawAeo = {
+      bucket: 'aeo_gap', action_type: 'create_or_refresh_city_service_page',
+      query: 'q2', dedupe_key: 'aeo-raw', page_url: null,
+      service: 'tree_shrub', city: 'sarasota', score: 60, signal_metadata: {},
+    };
+    const out = arbitrateCityServiceTargets([rawSd, rawAeo]);
+    expect(out).toHaveLength(1);
+    expect(out[0].dedupe_key).toBe('sd-raw');
   });
 });
