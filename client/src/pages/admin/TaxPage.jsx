@@ -4018,6 +4018,10 @@ function BankImportTab() {
   const [notice, setNotice] = useState(null);
   // per-row candidate pick for the manual link path (row id → expense id)
   const [linkPick, setLinkPick] = useState({});
+  // per-row category override for Create (row id → category id) — the AI
+  // suggestion is a default, never the only option
+  const [catPick, setCatPick] = useState({});
+  const [categories, setCategories] = useState([]);
   const [hasMore, setHasMore] = useState(false);
   const [covYear, setCovYear] = useState(String(new Date().getFullYear()));
   // last upload payload, kept only while its result reported duplicates —
@@ -4051,6 +4055,11 @@ function BankImportTab() {
       .catch(() => setCoverage([]));
   }, [loadRows, covYear]);
   useEffect(load, [load]);
+  useEffect(() => {
+    adminFetch("/admin/tax/expense-categories")
+      .then((d) => setCategories(d.categories || []))
+      .catch(() => {});
+  }, []);
 
   const act = (label, path, body) => {
     setBusy(label);
@@ -4392,6 +4401,22 @@ function BankImportTab() {
                         </option>
                       ))}
                     </select>
+                  ) : r.status === "unmatched" && r.direction === "debit" ? (
+                    <select
+                      style={{ ...inputStyle, maxWidth: 240 }}
+                      value={catPick[r.id] || ""}
+                      onChange={(e) => setCatPick((p) => ({ ...p, [r.id]: e.target.value }))}
+                      title="Category for Create — the AI suggestion is only a default; pick to override"
+                    >
+                      <option value="">
+                        {r.suggestion?.categoryName ? `AI: ${r.suggestion.categoryName}` : "Category…"}
+                      </option>
+                      {categories.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
                   ) : (
                     r.suggestion?.categoryName || ""
                   )}
@@ -4442,7 +4467,18 @@ function BankImportTab() {
                       type="button"
                       disabled={!!busy}
                       style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginRight: 6 }}
-                      onClick={() => act("create", `/admin/tax/bank-import/${r.id}/create-expense`)}
+                      onClick={() =>
+                        // an operator-picked category overrides the AI
+                        // suggestion (and skips the AI-verify note)
+                        act("create", `/admin/tax/bank-import/${r.id}/create-expense`, catPick[r.id] ? { categoryId: catPick[r.id] } : {}).then((res) => {
+                          if (res)
+                            setCatPick((p) => {
+                              const next = { ...p };
+                              delete next[r.id];
+                              return next;
+                            });
+                        })
+                      }
                     >
                       Create expense
                     </button>

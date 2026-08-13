@@ -1883,8 +1883,12 @@ router.post('/bank-import/suggest', async (req, res, next) => {
       try {
         const ai = await autoCategorizeExpense(null, row.description, row.amount);
         if (ai?.categoryId) {
+          // atomic jsonb merge: the matching pass can write transfer flags
+          // or candidates into suggestion DURING the model call — a rebuild
+          // from the pre-call snapshot would erase them (same guard the
+          // expenses auto-categorize path applies to its post-model write)
           await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-            suggestion: { ...(row.suggestion || {}), categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning },
+            suggestion: db.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning })]),
             updated_at: new Date(),
           });
           results.push({ id: row.id, category: ai.categoryName, applied: true });
@@ -2040,6 +2044,15 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
     let reconciliation;
     try {
       const result = await bankImport.echoPayoutReconciliation(row.id, payoutId, Number(row.amount), `Manually linked to bank import row ${row.id}`);
+      if (result && result.skipped && result.reason === 'human_rejected') {
+        // the helper REVERTED the link (a human rejected this payout's
+        // reconciliation on the Banking page) — success:true would have the
+        // UI silently clear the selection while the link no longer exists
+        return res.status(409).json({ error: "a human rejected this payout's reconciliation on the Banking page — the link was not kept, and this payout is now excluded for this row" });
+      }
+      if (result && result.skipped && result.reason === 'precondition') {
+        return res.status(409).json({ error: 'row changed mid-flight — reload' });
+      }
       reconciliation = result && result.skipped ? 'already_reconciled' : 'confirmed';
     } catch (err) {
       // pending flag persisted with the claim — the matching sweep retries

@@ -85,6 +85,8 @@ function expensesBuilder() {
   return b;
 }
 
+// raw with bindings returns both so tests can assert bound payloads;
+// binding-less raw stays a plain string (the jsonb key-subtraction asserts)
 const mockDb = jest.fn((table) => {
   if (table === 'bank_transactions') return bankBuilder();
   if (table === 'expenses') return expensesBuilder();
@@ -100,7 +102,7 @@ const mockDb = jest.fn((table) => {
   }
   return bankBuilder();
 });
-mockDb.raw = jest.fn((sql) => sql);
+mockDb.raw = jest.fn((sql, bindings) => (bindings ? { sql, bindings } : sql));
 mockDb.fn = { now: jest.fn(() => new Date()) };
 // Transaction stub: the callback gets the same table router. A thrown error
 // propagates like a rollback would (the mock can't undo recorded inserts —
@@ -534,6 +536,20 @@ describe('link-payout (gate on)', () => {
     expect(state.bankUpdates[1].patch.suggestion).toContain("- 'reconcilePending'");
   });
 
+  test('a human-rejected reconciliation answers 409 — the helper reverted the link, never a silent success', async () => {
+    reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-9', skipped: true, reason: 'human_rejected' });
+    const res = await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toContain('rejected');
+  });
+
+  test('a precondition skip (row changed mid-flight) answers 409', async () => {
+    reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-9', skipped: true, reason: 'precondition' });
+    const res = await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' });
+    expect(res.status).toBe(409);
+  });
+
   test('a non-paid payout is refused server-side — pending/failed money cannot explain a bank credit', async () => {
     state.payoutRow = { id: 'po-9', status: 'in_transit' };
     const res = await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' });
@@ -586,7 +602,11 @@ describe('suggest scoped to visible rows (gate on)', () => {
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.processed).toBe(1);
-    expect(state.bankUpdates[0].patch.suggestion).toMatchObject({ categoryId: 'cat-1', categoryName: 'Supplies' });
+    // atomic jsonb merge — never a rebuild that could erase keys the
+    // matcher wrote during the model call
+    const sug = state.bankUpdates[0].patch.suggestion;
+    expect(sug.sql).toContain("coalesce(suggestion, '{}'::jsonb) ||");
+    expect(JSON.parse(sug.bindings[0])).toMatchObject({ categoryId: 'cat-1', categoryName: 'Supplies' });
   });
 });
 
