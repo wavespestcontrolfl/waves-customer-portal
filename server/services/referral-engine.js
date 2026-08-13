@@ -214,16 +214,29 @@ async function enrollPromoter(customerId) {
     if (!customer) throw new Error('Customer not found');
 
     // Check if already enrolled — by profile id first, then by the shared
-    // phone (codex #3379 r2 P2): multi-property accounts keep one phone
-    // across sibling customer_ids (20260504000008 dropped the customers
-    // phone-uniqueness), but referral_promoters.customer_phone REMAINS
-    // unique — one promoter identity per household by design. Without the
-    // phone fallback, a sibling profile's report tap tried to insert the
-    // shared phone, lost to the constraint, and answered 503 forever
-    // instead of the household's existing link.
-    let existing = await trx('referral_promoters').where({ customer_id: customerId }).first();
-    if (!existing && customer.phone) {
-      existing = await trx('referral_promoters').where({ customer_phone: customer.phone }).first();
+    // phone SCOPED TO THE SAME ACCOUNT (codex #3379 r2 P2 + pre-push r4 P0):
+    // multi-property accounts keep one phone across sibling customer_ids
+    // (20260504000008 dropped the customers phone-uniqueness) while
+    // referral_promoters.customer_phone remains unique — one promoter
+    // identity per household. But phone alone is NOT identity: recycled and
+    // shared numbers cross genuinely unrelated customers, and reusing a
+    // foreign promoter would expose their code and credit their rewards to
+    // the wrong account. account_id is the canonical boundary — the
+    // fallback joins through customers and requires it. A cross-ACCOUNT
+    // phone collision therefore still fails the insert (surfaced as 503 =
+    // manual conflict resolution), which is the correct money posture.
+    // Both lookups take FOR UPDATE on the promoter row (pre-push r4 P1):
+    // sibling profiles lock DIFFERENT customer rows, so the customer lock
+    // alone lets two siblings concurrently repair the same promoter's
+    // legacy code/link and diverge — the row lock serializes the repair.
+    let existing = await trx('referral_promoters').where({ customer_id: customerId }).forUpdate().first();
+    if (!existing && customer.phone && customer.account_id) {
+      existing = await trx('referral_promoters as rp')
+        .join('customers as c', 'rp.customer_id', 'c.id')
+        .where('rp.customer_phone', customer.phone)
+        .where('c.account_id', customer.account_id)
+        .forUpdate('rp')
+        .first('rp.*');
     }
     if (existing) {
       let code = String(existing.referral_code || customer.referral_code || referralCodeFromLink(existing.referral_link) || '').trim();

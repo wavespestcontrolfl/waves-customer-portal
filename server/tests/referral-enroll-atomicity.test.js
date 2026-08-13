@@ -26,12 +26,17 @@ function makeTrx(state) {
       table,
       _forUpdate: false,
       _excludesId: false,
+      _phoneScope: null,
+      _accountScope: null,
+      join: jest.fn().mockReturnThis(),
       _where: null,
       where: jest.fn(function where(...args) {
         // The already-enrolled conflict probe excludes the promoter's own
         // id — the fake must honor that or it reports the row as its own
         // "conflict" and the engine regenerates a code that isn't there.
         if (args[0] === 'id' && args[1] === '!=') chain._excludesId = true;
+        else if (args[0] === 'rp.customer_phone') chain._phoneScope = args[1];
+        else if (args[0] === 'c.account_id') chain._accountScope = args[1];
         else if (args.length === 1 && args[0] && typeof args[0] === 'object') chain._where = args[0];
         return chain;
       }),
@@ -41,16 +46,27 @@ function makeTrx(state) {
           state.customerReadLocked = chain._forUpdate;
           return state.customer;
         }
-        if (table === 'referral_promoters') {
+        if (table === 'referral_promoters' || table === 'referral_promoters as rp') {
           if (chain._excludesId) return null;
           // Honor whichever key the engine queried by: profile id first,
-          // then the shared household phone (multi-property fallback).
+          // then the account-scoped shared-phone join (multi-property
+          // fallback). The fake enforces the account boundary: a phone
+          // match WITHOUT the matching account resolves nothing.
+          if (chain._phoneScope) {
+            state.phoneFallbacks.push({ phone: chain._phoneScope, account: chain._accountScope, locked: chain._forUpdate });
+            const p = state.promoter;
+            if (!p || p.customer_phone !== chain._phoneScope) return null;
+            return (state.promoterAccountId && state.promoterAccountId === chain._accountScope) ? p : null;
+          }
           const wanted = chain._where || {};
           if (wanted.customer_id) {
-            return state.promoter && state.promoter.customer_id === wanted.customer_id ? state.promoter : null;
-          }
-          if (wanted.customer_phone) {
-            return state.promoter && state.promoter.customer_phone === wanted.customer_phone ? state.promoter : null;
+            // Record the lock on every by-id lookup, hit or miss — the
+            // engine must take it BEFORE knowing whether the row exists.
+            state.ownLookupLocked = chain._forUpdate;
+            if (state.promoter && state.promoter.customer_id === wanted.customer_id) {
+              return state.promoter;
+            }
+            return null;
           }
           return state.promoter || null;
         }
@@ -92,12 +108,15 @@ function primeDb(state) {
 
 function freshState(overrides = {}) {
   return {
-    customer: { id: 'cust-1', phone: '+15555550100', email: 'x@example.com', first_name: 'Casey', last_name: 'Placeholder', referral_code: null },
+    customer: { id: 'cust-1', account_id: 'acct-1', phone: '+15555550100', email: 'x@example.com', first_name: 'Casey', last_name: 'Placeholder', referral_code: null },
     promoter: null,
     updates: [],
     inserts: [],
     trxTables: [],
     customerReadLocked: false,
+    ownLookupLocked: false,
+    phoneFallbacks: [],
+    promoterAccountId: null,
     ...overrides,
   };
 }
@@ -157,7 +176,8 @@ test('a sibling profile sharing the phone reuses the household promoter — no i
   primeDb(state);
   const first = await engine.enrollPromoter('cust-1');
   // Second property profile: different customer_id, same phone.
-  state.customer = { id: 'cust-2', phone: '+15555550100', email: 'x@example.com', first_name: 'Casey', last_name: 'Placeholder', referral_code: null };
+  state.promoterAccountId = 'acct-1';
+  state.customer = { id: 'cust-2', account_id: 'acct-1', phone: '+15555550100', email: 'x@example.com', first_name: 'Casey', last_name: 'Placeholder', referral_code: null };
   const sibling = await engine.enrollPromoter('cust-2');
   expect(sibling.alreadyEnrolled).toBe(true);
   expect(sibling.promoter.referral_code).toBe(first.promoter.referral_code);
@@ -182,6 +202,7 @@ test('a sibling losing the insert race retries once and lands on the winner (235
       raced = true;
       // Simulate the winner's committed row appearing only AFTER this
       // attempt's lookups: hide it during the callback, then fail the insert.
+      state.promoterAccountId = 'acct-1';
       const winner = { id: 'promo-w', customer_id: 'cust-0', customer_phone: '+15555550100', referral_code: 'WAVES-WINNER01', referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-WINNER01' };
       const hidden = { ...state, promoter: null };
       const trx = makeTrx(hidden);
@@ -208,4 +229,40 @@ test('a sibling losing the insert race retries once and lands on the winner (235
   const { promoter, alreadyEnrolled } = await engine.enrollPromoter('cust-1');
   expect(alreadyEnrolled).toBe(true);
   expect(promoter.referral_code).toBe('WAVES-WINNER01');
+});
+
+test('P0 guard: a phone match in a DIFFERENT account is never reused — foreign codes stay foreign', async () => {
+  const state = freshState();
+  primeDb(state);
+  await engine.enrollPromoter('cust-1');
+  // Unrelated customer, same (recycled) phone, different account.
+  state.promoterAccountId = 'acct-1';
+  state.customer = { id: 'cust-9', account_id: 'acct-OTHER', phone: '+15555550100', email: 'y@example.com', first_name: 'Riley', last_name: 'Fixture', referral_code: null };
+  // The fallback finds nothing (account mismatch) → first-enroll path →
+  // insert (the real DB would 23505 on the shared phone → 503 = manual
+  // resolution, the correct money posture; the fake just records the path).
+  const second = await engine.enrollPromoter('cust-9');
+  expect(second.alreadyEnrolled).toBe(false);
+  expect(state.phoneFallbacks.some((f) => f.account === 'acct-OTHER')).toBe(true);
+  expect(second.promoter.referral_code).not.toBe('');
+});
+
+test('no account_id → no phone fallback at all (legacy single-profile rows)', async () => {
+  const state = freshState();
+  primeDb(state);
+  state.customer = { ...state.customer, account_id: null };
+  await engine.enrollPromoter('cust-1');
+  expect(state.phoneFallbacks).toHaveLength(0);
+});
+
+test('both promoter lookups take FOR UPDATE — the repair path is serialized on the row (r4 P1)', async () => {
+  const state = freshState();
+  primeDb(state);
+  const first = await engine.enrollPromoter('cust-1');
+  expect(state.ownLookupLocked).toBe(true);
+  state.promoterAccountId = 'acct-1';
+  state.customer = { id: 'cust-2', account_id: 'acct-1', phone: '+15555550100', email: 'x@example.com', first_name: 'Casey', last_name: 'Placeholder', referral_code: null };
+  const sibling = await engine.enrollPromoter('cust-2');
+  expect(sibling.promoter.referral_code).toBe(first.promoter.referral_code);
+  expect(state.phoneFallbacks.every((f) => f.locked)).toBe(true);
 });
