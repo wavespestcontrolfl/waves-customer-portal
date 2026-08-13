@@ -361,6 +361,42 @@ describe('reviseAdminEstimate', () => {
     expect(updates).toHaveLength(0);
   });
 
+  test('a click-mint revise keeps the zero-comms marker and lineage but INVALIDATES the offer fingerprint (#3391 audit P0)', async () => {
+    const clickMint = {
+      ...sentEstimate,
+      estimate_data: JSON.stringify({
+        ...JSON.parse(sentEstimate.estimate_data),
+        noEngagementAutomation: true,
+        reportCtaMint: {
+          serviceKey: 'pest_control',
+          serviceRecordId: 'sr-1',
+          requestId: 'req-1',
+          fingerprint: 'fp-card-1',
+          mintedAt: '2026-08-13T00:00:00.000Z',
+        },
+      }),
+    };
+    const { database, updates } = makeReviseDatabase({ estimate: clickMint });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: reviseBody,
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    const data = JSON.parse(updates[0].estimate_data);
+    // The zero-comms contract survives — a revise must never re-enable
+    // automated outreach on the lane that promises none.
+    expect(data.noEngagementAutomation).toBe(true);
+    // Lineage survives (reuse/supersession resolves through it) …
+    expect(data.reportCtaMint.serviceKey).toBe('pest_control');
+    expect(data.reportCtaMint.mintedAt).toBe('2026-08-13T00:00:00.000Z');
+    // … but the fingerprint does NOT: staff changed the terms, so a later
+    // identical card tap must supersede this row, never reuse it.
+    expect(data.reportCtaMint.fingerprint).toBeUndefined();
+    expect(data.reportCtaMint.fingerprintInvalidatedAt).toBeTruthy();
+  });
+
   test('carries the lead_id mirror and schedule-stitch pointer across the rewrite', async () => {
     const withLinkage = {
       ...sentEstimate,

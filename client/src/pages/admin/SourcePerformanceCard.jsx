@@ -22,6 +22,7 @@ const SOURCE_LABELS = {
   sms_intake: "SMS intake",
   lead_agent: "Lead agent",
   booking_assessment: "Assessment booking",
+  service_report_cta: "Report card tap",
   other: "Other",
 };
 

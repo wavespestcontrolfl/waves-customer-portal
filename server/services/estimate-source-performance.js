@@ -34,6 +34,9 @@ const KNOWN_SOURCES = [
   'sms_intake',
   'lead_agent',
   'booking_assessment',
+  // Report click-to-estimate mints (#3391) — the conversion lane this card
+  // exists to measure must not fold into 'other'.
+  'service_report_cta',
 ];
 const SOURCE_ORDER = [...KNOWN_SOURCES, 'other'];
 

@@ -1249,6 +1249,19 @@ async function buildCustomerPricingResponse({
           propertyInput: propertyContext.propertyInput,
           targetOnlyServices: optionServices(option, context),
           currentServiceKeys: [...currentServiceKeys],
+          // The RAW staff-writable price-bearing sources this pricing read
+          // (GitHub #3391 round: address/property_type equality alone
+          // misses these) — the mint re-reads both rows under its lock and
+          // treats any change as offer drift.
+          pricingSourceStamp: {
+            lot_sqft: customer.lot_sqft ?? null,
+            property_sqft: customer.property_sqft ?? null,
+            bed_sqft: customer.bed_sqft ?? null,
+            palm_count: customer.palm_count ?? null,
+            lawn_type: customer.lawn_type ?? null,
+            turf_lawn_sqft: turfProfile?.lawn_sqft ?? null,
+            turf_track_key: turfProfile?.track_key ?? turfProfile?.grass_type ?? null,
+          },
         };
       }
       if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) options.push(quoted);
@@ -1323,6 +1336,9 @@ module.exports = {
   // current services EXACTLY the way the card's composition did — one
   // loader, one street-scope resolution, no second derivation to drift.
   loadCurrentServiceKeys,
+  // Same reasoning: the mint's price-input drift check re-reads the turf
+  // profile through the composition's own loader.
+  loadTurfProfile,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.
   _private: { resolvePropertyContext, missingPropertyFor },

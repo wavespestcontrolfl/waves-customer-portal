@@ -2116,6 +2116,33 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // a later stamp-clear skip invalidation and leave the former lead's draft
 // sendable to the wrong recipient.
 const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id'];
+// Click-to-estimate mints (#3391 audit P0): both markers are
+// lifecycle-critical and PRIOR-WINS across a revise — the zero-comms
+// opt-out is the lane's owner-approved contract (a revise must never
+// re-enable automated outreach), and reportCtaMint is the durable lineage
+// the mint resolves reuse/supersession through (dropping it permits a
+// second live estimate at a second honorable price). The offer FINGERPRINT
+// inside the lineage does NOT survive: staff just changed the terms, so a
+// later identical card tap must supersede this row, never reuse it as the
+// card's unchanged offer.
+function preserveClickMintMarkersAcrossRevise(nextData, priorData) {
+  if (!nextData || typeof nextData !== 'object' || !priorData || typeof priorData !== 'object') return false;
+  let changed = false;
+  if (priorData.noEngagementAutomation === true && nextData.noEngagementAutomation !== true) {
+    nextData.noEngagementAutomation = true;
+    changed = true;
+  }
+  const mark = priorData.reportCtaMint;
+  if (mark && typeof mark === 'object') {
+    const { fingerprint: _droppedFingerprint, ...lineage } = mark;
+    nextData.reportCtaMint = {
+      ...lineage,
+      ...(mark.fingerprint ? { fingerprintInvalidatedAt: new Date().toISOString() } : {}),
+    };
+    changed = true;
+  }
+  return changed;
+}
 // Nested estimatorEngine keys preserved across a revise — the call
 // provenance every linkage consumer resolves through, plus the
 // invalidation markers a revise must never clear.
@@ -2256,6 +2283,7 @@ async function reviseAdminEstimate({
           preserved = true;
         }
       }
+      if (preserveClickMintMarkersAcrossRevise(nextData, existingData)) preserved = true;
       // Durable CALL PROVENANCE survives a revise even though the rest of
       // the estimator metadata is deliberately replaced (codex P1, PR
       // #3304 GH r8): the V2 client sends a fresh blob carrying only
@@ -2455,6 +2483,7 @@ async function reviseAdminEstimate({
           for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
           }
+          preserveClickMintMarkersAcrossRevise(pendingData, lockedData);
           for (const key of REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS) {
             const lockedValue = lockedData?.estimatorEngine?.[key];
             if (lockedValue === undefined) continue;

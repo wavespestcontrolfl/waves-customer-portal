@@ -114,7 +114,7 @@ async function mintReportClickEstimate(trx, {
   } = deps.persistence || require('../admin-estimate-persistence');
   const recompute = deps.recompute || serverRecomputeFromEstimateData;
   const {
-    quotedPerVisitForServiceKey, addressForCustomer, loadCurrentServiceKeys,
+    quotedPerVisitForServiceKey, addressForCustomer, loadCurrentServiceKeys, loadTurfProfile,
   } = deps.pricingAi || require('../customer-pricing-ai');
   const computeMembershipContext = deps.computeMembershipContext
     || require('../estimate-membership-context').computeMembershipContext;
@@ -141,47 +141,36 @@ async function mintReportClickEstimate(trx, {
     serviceKey: crossSell?.serviceKey,
   });
   const liveMints = (priorMintRows || []).filter((row) => priorMintStillLive(row, nowDate));
-  if (deduped) {
-    const match = liveMints.find((row) => {
-      const mark = reportCtaMintOf(row);
-      return mark?.fingerprint && crossSell?.fingerprint && mark.fingerprint === crossSell.fingerprint;
-    });
-    if (match) {
-      return {
-        estimateId: match.id,
-        token: match.token,
-        url: estimatePathFor(match.token),
-        reused: true,
-      };
-    }
-  }
+  // Every lineage row a fresh mint must permanently retire — live OR dead
+  // (expired/declined), because an unarchived expired row can be REVIVED by
+  // the public extension flow (in-hook audit r8 P0). Accepted/locked rows
+  // stay untouched.
+  const supersedableMints = (priorMintRows || []).filter((row) => (
+    !row.archived_at && row.status !== 'accepted' && !row.price_locked_at
+  ));
 
-  // ── Mint ────────────────────────────────────────────────────────────────
   const context = crossSell?.engineContext;
   const option = crossSell?.option;
   if (!context?.propertyInput || !context?.targetOnlyServices || !option?.perVisit
-    || !context?.primaryStreet) {
+    || !context?.primaryStreet || !context?.pricingSourceStamp) {
     throw new Error('click-to-estimate mint called without engine context');
   }
-  const priorQualifyingServices = Array.isArray(context.currentServiceKeys)
+  // The engine's tier logic speaks CANONICAL keys — the pricing-panel
+  // loader maps termite_bait → termite for display parity, and replaying
+  // that panel key would drop a termite customer's tier contribution and
+  // 409 every tap as a phantom tier drift (GitHub #3391 round). Map back
+  // before anything persists or replays.
+  const canonicalQualifyingKey = (key) => (key === 'termite' ? 'termite_bait' : key);
+  const priorQualifyingServices = (Array.isArray(context.currentServiceKeys)
     ? context.currentServiceKeys.filter(Boolean)
-    : [];
+    : []).map(canonicalQualifyingKey);
 
-  // The persisted replay input: the card's exact property facts + the target
-  // service ALONE. Identity (priorQualifyingServices / recurringCustomer) is
-  // deliberately NOT baked in — serverRecomputeFromEstimateData strips
-  // client-claimable identity and re-applies it from the server-derived deps,
-  // and the public page re-injects estimate_data.priorQualifyingServices on
-  // every replay (extractEngineInputs), so display and accept keep pricing at
-  // the combined tier without a forgeable input field.
+  // ── Customer revalidation, BEFORE the reuse fast path ───────────────────
   // The composed customer row was read BEFORE this transaction's lock
-  // (#3391 audit r2 P1): a profile edit committing in between would have
-  // its fanout run before this estimate exists, then the mint would write
-  // the stale email/address into a new live row. Re-read under the lock
-  // writeOrRefreshCtaRequest already holds on this customer row; identity
-  // fields persist from the FRESH row, and a change to the fields the
-  // pricing frames were anchored on (primary address, property type) is
-  // offer drift — refuse, the card refreshes.
+  // (#3391 audit r2 P1); reuse must not return an estimate whose pricing
+  // anchored to premises that have since changed (GitHub round: the
+  // address-fanout rewrites the live estimate's address while its priced
+  // snapshot stays stale — refuse and let the card refresh).
   const freshCustomer = await trx('customers').where({ id: customer.id }).first();
   if (!freshCustomer || freshCustomer.active === false || freshCustomer.deleted_at) {
     throw new Error('customer row vanished before click-to-estimate mint');
@@ -190,14 +179,94 @@ async function mintReportClickEstimate(trx, {
     || String(freshCustomer.property_type || '') !== String(customer.property_type || '')) {
     throw new ClickEstimateDriftError('customer premises changed between pricing and mint');
   }
+  // EVERY staff-writable price-bearing source, not just the premises pair
+  // (GitHub #3391 round): the composition stamped the raw values it priced
+  // from; re-read both rows under the lock and treat any change as offer
+  // drift — the recompute replays captured facts, so it would only confirm
+  // stale inputs.
+  const freshTurf = await loadTurfProfile(trx, customer.id);
+  const stamp = context.pricingSourceStamp;
+  const numOrNull = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
+  const strOrNull = (v) => (v === null || v === undefined ? null : String(v));
+  const priceInputDrifted = [
+    [numOrNull(stamp.lot_sqft), numOrNull(freshCustomer.lot_sqft)],
+    [numOrNull(stamp.property_sqft), numOrNull(freshCustomer.property_sqft)],
+    [numOrNull(stamp.bed_sqft), numOrNull(freshCustomer.bed_sqft)],
+    [numOrNull(stamp.palm_count), numOrNull(freshCustomer.palm_count)],
+    [strOrNull(stamp.lawn_type), strOrNull(freshCustomer.lawn_type)],
+    [numOrNull(stamp.turf_lawn_sqft), numOrNull(freshTurf?.lawn_sqft)],
+    [strOrNull(stamp.turf_track_key), strOrNull(freshTurf?.track_key ?? freshTurf?.grass_type ?? null)],
+  ].some(([composed, fresh]) => composed !== fresh);
+  if (priceInputDrifted) {
+    throw new ClickEstimateDriftError('price-bearing property inputs changed between pricing and mint');
+  }
 
-  // Ownership revalidation INSIDE the transaction (in-hook audit r7 P0):
-  // context.currentServiceKeys was loaded at composition, before this
-  // customer lock — an acceptance or staff add landing in between would
-  // let the mint publish an acceptable estimate for a service the customer
-  // now OWNS (duplicate billing on accept), and the lineage lock only sees
-  // prior CTA mints. Same loader + street-scope resolution the composition
-  // used; premises equality above guarantees the same scope.
+  // ── Reuse: identical offer, estimate already minted and still live ──────
+  // Matched by FINGERPRINT against the locked lineage, NOT by the request
+  // writer's dedupe verdict (GitHub round P0): staff terminalizing the
+  // request — or a portal-home refresh of the shared row — makes the next
+  // tap arrive deduped=false with the offer unchanged, and archiving the
+  // live estimate the customer already holds would kill their token
+  // mid-consideration.
+  const fingerprintMatch = liveMints.find((row) => {
+    const mark = reportCtaMintOf(row);
+    return mark?.fingerprint && crossSell?.fingerprint && mark.fingerprint === crossSell.fingerprint;
+  });
+  const relinkRequestRow = async (match) => {
+    // Relink the CURRENT request row when its snapshot lost (or never
+    // had) the mint pointer — the durable lineage lives on the estimate,
+    // but the advisory display linkage should follow the reuse.
+    // mintedEstimate is excluded from the writer's dedupe compare, so
+    // this cannot turn the next identical tap into a refresh.
+    const requestMark = (() => {
+      try {
+        const rev = typeof requestRow.pricing_revision === 'string'
+          ? JSON.parse(requestRow.pricing_revision)
+          : requestRow.pricing_revision;
+        return rev?.mintedEstimate || null;
+      } catch { return null; }
+    })();
+    if (deduped || String(requestMark?.id || '') === String(match.id)) return null;
+    const mark = reportCtaMintOf(match);
+    return {
+      pricing_revision: JSON.stringify({
+        ...revisionSnapshot,
+        mintedEstimate: {
+          id: match.id,
+          token: match.token,
+          mintedAt: mark?.mintedAt || nowDate.toISOString(),
+        },
+      }),
+      updated_at: nowDate,
+    };
+  };
+
+  // ── Reuse fast path 1: the customer already ACCEPTED this offer ─────────
+  // Their tap gets the accepted estimate back — and the fresh request row
+  // resolves immediately (mirrors the accept path's own resolution): the
+  // work is booked, staff must not be paged to follow up on it.
+  if (fingerprintMatch && fingerprintMatch.status === 'accepted') {
+    const relinkPatch = await relinkRequestRow(fingerprintMatch);
+    await trx('service_requests').where({ id: requestRow.id }).update({
+      ...(relinkPatch || { updated_at: nowDate }),
+      status: 'resolved',
+    });
+    return {
+      estimateId: fingerprintMatch.id,
+      token: fingerprintMatch.token,
+      url: estimatePathFor(fingerprintMatch.token),
+      reused: true,
+    };
+  }
+
+  // Ownership revalidation INSIDE the transaction, BEFORE any unaccepted
+  // reuse (in-hook audits r7+r8 P0): context.currentServiceKeys was loaded
+  // at composition, before this customer lock — an acceptance or staff add
+  // landing in between must neither mint NOR hand back a still-acceptable
+  // estimate for a service the customer now owns (duplicate billing on
+  // accept). The lineage lock only sees prior CTA mints. Same loader +
+  // street-scope resolution the composition used; premises equality above
+  // guarantees the same scope.
   const freshServices = await loadCurrentServiceKeys(trx, freshCustomer);
   if (freshServices.ownershipLookupFailed) {
     // FAIL CLOSED, retryable — unknown ownership must not publish a price
@@ -221,6 +290,37 @@ async function mintReportClickEstimate(trx, {
     throw new ClickEstimateDriftError('qualifying services changed between pricing and mint');
   }
 
+  // ── Reuse fast path 2: identical UNACCEPTED offer, still live ───────────
+  // Matched by FINGERPRINT against the locked lineage, NOT by the request
+  // writer's dedupe verdict (GitHub round P0): staff terminalizing the
+  // request — or a portal-home refresh of the shared row — makes the next
+  // tap arrive deduped=false with the offer unchanged, and archiving the
+  // live estimate the customer already holds would kill their token
+  // mid-consideration. Runs AFTER every revalidation above: a stale offer
+  // never reuses any more than it mints.
+  if (fingerprintMatch) {
+    const relinkPatch = await relinkRequestRow(fingerprintMatch);
+    if (relinkPatch) {
+      await trx('service_requests').where({ id: requestRow.id }).update(relinkPatch);
+    }
+    return {
+      estimateId: fingerprintMatch.id,
+      token: fingerprintMatch.token,
+      url: estimatePathFor(fingerprintMatch.token),
+      reused: true,
+    };
+  }
+
+  // ── Mint ────────────────────────────────────────────────────────────────
+
+  // The persisted replay input: the card's exact property facts + the target
+  // service ALONE. Identity (priorQualifyingServices / recurringCustomer) is
+  // deliberately NOT baked in — serverRecomputeFromEstimateData strips
+  // client-claimable identity and re-applies it from the server-derived deps,
+  // and the public page re-injects estimate_data.priorQualifyingServices on
+  // every replay (extractEngineInputs), so display and accept keep pricing at
+  // the combined tier without a forgeable input field. Identity fields
+  // persist from freshCustomer — re-read and drift-checked above.
   const estimateData = {
     engineInputs: {
       ...context.propertyInput,
@@ -242,7 +342,7 @@ async function mintReportClickEstimate(trx, {
       fingerprint: crossSell.fingerprint || null,
       shownPerApplication: option.perVisit,
       mintedAt: nowDate.toISOString(),
-      ...(liveMints.length ? { supersededEstimateIds: liveMints.map((r) => r.id) } : {}),
+      ...(supersedableMints.length ? { supersededEstimateIds: supersedableMints.map((r) => r.id) } : {}),
     },
   };
 
@@ -404,12 +504,15 @@ async function mintReportClickEstimate(trx, {
     updated_at: nowDate,
   });
 
-  // Supersede EVERY live prior mint for this offer (locked above): two live
-  // links at two honorable prices is the exact ambiguity the price-lock
-  // ruling exists to prevent. Accepted/locked rows are never touched
-  // (acceptance already spun up downstream records).
-  for (const row of liveMints) {
-    if (row.status === 'accepted' || row.price_locked_at) continue;
+  // Supersede EVERY prior lineage row for this offer (locked above) — live
+  // AND dead (in-hook audit r8 P0): two live links at two honorable prices
+  // is the exact ambiguity the price-lock ruling exists to prevent, and an
+  // EXPIRED prior is not safe to skip — the public extension-request flow
+  // can revive an unarchived sent_at row for seven more days, resurrecting
+  // the old price beside this replacement. Archival is the one durable
+  // no-revive state. Accepted/locked rows are never touched (acceptance
+  // already spun up downstream records).
+  for (const row of supersedableMints) {
     await trx('estimates')
       .where({ id: row.id })
       .whereNull('archived_at')

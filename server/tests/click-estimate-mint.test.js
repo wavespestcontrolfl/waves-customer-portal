@@ -19,6 +19,15 @@ const CUSTOMER = {
   id: 'cust-9', first_name: 'Testa', last_name: 'Fixture',
   phone: '+15550100200', email: 'testa@example.com',
   address_line1: '12 Invented Way', city: 'Parrish', zip: '34219',
+  lot_sqft: 9000, property_sqft: 2100, bed_sqft: null, palm_count: null, lawn_type: null,
+};
+
+// The raw staff-writable price sources the composition stamped — the mint
+// re-reads customers + customer_turf_profiles under its lock and refuses
+// any change as drift.
+const PRICING_SOURCE_STAMP = {
+  lot_sqft: 9000, property_sqft: 2100, bed_sqft: null, palm_count: null,
+  lawn_type: null, turf_lawn_sqft: null, turf_track_key: null,
 };
 
 function fakeTrx({ priorEstimateRows = [], customerRow = CUSTOMER } = {}) {
@@ -83,6 +92,9 @@ function baseArgs(overrides = {}) {
       loadCurrentServiceKeys: jest.fn(async () => ({
         currentServiceKeys: ['lawn'], ownedServiceKeys: ['lawn'], ownershipLookupFailed: false,
       })),
+      // Price-input drift re-read (GitHub round): default turf profile is
+      // absent, matching the stamp's null turf fields.
+      loadTurfProfile: jest.fn(async () => null),
     },
     computeMembershipContext: jest.fn(async () => ({ member: true })),
     bundleUtils: { pricingBundleMatchesEstimateTotals: () => true },
@@ -106,6 +118,7 @@ function baseArgs(overrides = {}) {
         targetOnlyServices: { pest: { frequency: 'quarterly' } },
         currentServiceKeys: ['lawn'],
         primaryStreet: '12 invented way|parrish|34219',
+        pricingSourceStamp: { ...PRICING_SOURCE_STAMP },
       },
     },
     requestRow: { id: 'req-3' },
@@ -214,8 +227,17 @@ describe('mintReportClickEstimate', () => {
   });
 
   test('a changed offer supersedes (archives) EVERY live unaccepted prior mint', async () => {
+    // Priors carry STALE fingerprints — an identical fingerprint would now
+    // reuse regardless of the writer's dedupe verdict (GitHub round P0).
     const { trx, ops } = fakeTrx({
-      priorEstimateRows: [priorMint(), priorMint({ id: 'est-old-2', token: 'tok-old-2' })],
+      priorEstimateRows: [
+        priorMint({ estimate_data: { reportCtaMint: { serviceKey: 'pest_control', fingerprint: 'fp-stale-1' } } }),
+        priorMint({
+          id: 'est-old-2',
+          token: 'tok-old-2',
+          estimate_data: { reportCtaMint: { serviceKey: 'pest_control', fingerprint: 'fp-stale-2' } },
+        }),
+      ],
     });
     await mintReportClickEstimate(trx, baseArgs({ deduped: false }));
     const archived = ops.updates.filter((u) => u.table === 'estimates' && u.patch.archived_at).map((u) => u.criteria?.id);
@@ -247,6 +269,120 @@ describe('mintReportClickEstimate', () => {
     const args = baseArgs();
     args.crossSell.option.waveguardTier = 'Gold';
     await expect(mintReportClickEstimate(trx, args)).rejects.toThrow(ClickEstimateDriftError);
+  });
+
+  test('an unchanged offer REUSES even when the writer says deduped=false — a terminalized request must not kill the live token (GitHub P0)', async () => {
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [priorMint()] });
+    const out = await mintReportClickEstimate(trx, baseArgs({ deduped: false }));
+    expect(out.reused).toBe(true);
+    expect(out.estimateId).toBe('est-old');
+    // Nothing archived, nothing inserted — the customer's token stays live.
+    expect(ops.inserts).toHaveLength(0);
+    expect(ops.updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
+    // The fresh request row is RELINKED to the reused estimate.
+    const relink = ops.updates.find((u) => u.table === 'service_requests');
+    expect(relink.criteria).toEqual({ id: 'req-3' });
+    const stored = JSON.parse(relink.patch.pricing_revision);
+    expect(stored.mintedEstimate.id).toBe('est-old');
+    expect(stored.mintedEstimate.token).toBe('tok-old');
+  });
+
+  test('a deduped repeat tap whose row already carries the linkage writes NOTHING', async () => {
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [priorMint()] });
+    const args = baseArgs({
+      deduped: true,
+      requestRow: { id: 'req-3', pricing_revision: JSON.stringify({ mintedEstimate: { id: 'est-old', token: 'tok-old' } }) },
+    });
+    const out = await mintReportClickEstimate(trx, args);
+    expect(out.reused).toBe(true);
+    expect(ops.inserts).toHaveLength(0);
+    expect(ops.updates).toHaveLength(0);
+  });
+
+  test('premises drift refuses BEFORE the reuse fast path — a moved customer never gets the stale estimate back (GitHub P1)', async () => {
+    const { trx, ops } = fakeTrx({
+      priorEstimateRows: [priorMint()],
+      customerRow: { ...CUSTOMER, address_line1: '99 Somewhere Else' },
+    });
+    await expect(mintReportClickEstimate(trx, baseArgs({ deduped: true })))
+      .rejects.toThrow(/premises changed/);
+    expect(ops.inserts).toHaveLength(0);
+    expect(ops.updates).toHaveLength(0);
+  });
+
+  test('a changed price-bearing input (lot_sqft, turf profile, …) refuses as drift under the lock (GitHub P1)', async () => {
+    const { trx, ops } = fakeTrx({ customerRow: { ...CUSTOMER, lot_sqft: 12000 } });
+    await expect(mintReportClickEstimate(trx, baseArgs()))
+      .rejects.toThrow(/price-bearing property inputs changed/);
+    expect(ops.inserts).toHaveLength(0);
+
+    // A turf-profile edit (independently writable) drifts the same way.
+    const second = fakeTrx();
+    const args = baseArgs();
+    args.deps.pricingAi.loadTurfProfile = jest.fn(async () => ({ lawn_sqft: 4200, track_key: 'A' }));
+    await expect(mintReportClickEstimate(second.trx, args))
+      .rejects.toThrow(/price-bearing property inputs changed/);
+  });
+
+  test('a termite panel key replays as canonical termite_bait — no phantom tier drift for termite customers (GitHub P1)', async () => {
+    const { trx, ops } = fakeTrx();
+    const args = baseArgs();
+    args.crossSell.engineContext.currentServiceKeys = ['termite'];
+    args.deps.pricingAi.loadCurrentServiceKeys = jest.fn(async () => ({
+      currentServiceKeys: ['termite'], ownedServiceKeys: ['termite'], ownershipLookupFailed: false,
+    }));
+    await mintReportClickEstimate(trx, args);
+    const data = JSON.parse(ops.inserts[0].row.estimate_data);
+    expect(data.priorQualifyingServices).toEqual(['termite_bait']);
+  });
+
+  test('a fresh mint archives EXPIRED prior lineage rows too — the extension flow must have nothing to revive (audit r8 P0)', async () => {
+    const expired = priorMint({
+      id: 'est-expired',
+      token: 'tok-expired',
+      expires_at: '2026-08-01T00:00:00Z',
+      estimate_data: { reportCtaMint: { serviceKey: 'pest_control', fingerprint: 'fp-stale' } },
+    });
+    const accepted = priorMint({
+      id: 'est-accepted-old',
+      status: 'accepted',
+      estimate_data: { reportCtaMint: { serviceKey: 'pest_control', fingerprint: 'fp-older' } },
+    });
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [expired, accepted] });
+    await mintReportClickEstimate(trx, baseArgs());
+    const archived = ops.updates.filter((u) => u.table === 'estimates' && u.patch.archived_at).map((u) => u.criteria?.id);
+    expect(archived).toEqual(['est-expired']);
+    const data = JSON.parse(ops.inserts[0].row.estimate_data);
+    expect(data.reportCtaMint.supersededEstimateIds).toEqual(['est-expired']);
+  });
+
+  test('an ACCEPTED identical mint reuses AND resolves the fresh request row — even when the customer now owns the service (audit r8 P0)', async () => {
+    const { trx, ops } = fakeTrx({
+      priorEstimateRows: [priorMint({ status: 'accepted' })],
+    });
+    const args = baseArgs({ deduped: false });
+    // Ownership reflects the acceptance — the accepted-reuse path must not
+    // consult it (the tap just gets the accepted estimate back).
+    args.deps.pricingAi.loadCurrentServiceKeys = jest.fn(async () => ({
+      currentServiceKeys: ['lawn', 'pest_control'], ownedServiceKeys: ['lawn', 'pest_control'], ownershipLookupFailed: false,
+    }));
+    const out = await mintReportClickEstimate(trx, args);
+    expect(out.reused).toBe(true);
+    expect(out.estimateId).toBe('est-old');
+    expect(ops.inserts).toHaveLength(0);
+    const rowUpdate = ops.updates.find((u) => u.table === 'service_requests');
+    expect(rowUpdate.patch.status).toBe('resolved');
+  });
+
+  test('an UNACCEPTED identical mint does NOT reuse when the customer now owns the service — revalidation precedes reuse (audit r8 P0)', async () => {
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [priorMint()] });
+    const args = baseArgs({ deduped: false });
+    args.deps.pricingAi.loadCurrentServiceKeys = jest.fn(async () => ({
+      currentServiceKeys: ['lawn'], ownedServiceKeys: ['lawn', 'pest_control'], ownershipLookupFailed: false,
+    }));
+    await expect(mintReportClickEstimate(trx, args)).rejects.toThrow(/now owned/);
+    expect(ops.inserts).toHaveLength(0);
+    expect(ops.updates).toHaveLength(0);
   });
 
   test('a target service the customer NOW owns refuses the mint as drift (audit r7 P0)', async () => {
