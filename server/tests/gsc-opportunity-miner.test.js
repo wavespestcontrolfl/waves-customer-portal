@@ -2703,15 +2703,15 @@ describe('local_gap is HUB-scoped on both legs (round-3 cloud P1)', () => {
     expect(lg).toMatch(/\.where\('domain', HUB_DOMAIN\)/);
   });
 
-  test('coverage is satisfied only by a HUB page, via the hub:: namespace', () => {
-    // A spoke page serving — or OUTRANKING — the pair must not suppress a
-    // genuinely missing hub page: the plain map keys are first-wins across
-    // domains, so a host check on the winning URL is not enough; the hub::
-    // namespace is first-wins among hub pages alone.
+  test('coverage is satisfied only by a HUB page on the EXACT canonical route', () => {
+    // Two rules at once: a spoke page must not vouch for the hub, and a
+    // blog URL carrying service+city tokens must not vouch for the
+    // city-service page — hub:: keys are granted only for exact routes.
     expect(lg).toMatch(/ownPagesByServiceCity\.get\(`hub::\$\{ownPageKey\(service, city\)\}`\)/);
     const loader = src.slice(src.indexOf('async _loadOwnPagesByServiceCity'), src.indexOf('QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS'));
     expect(loader).toMatch(/host === HUB_DOMAIN/);
-    expect(loader).toMatch(/`hub::\$\{ownPageKey\(svc, city\)\}`/);
+    expect(loader).toMatch(/exactCityServiceRoutePair\(r\.page_url\)/);
+    expect(loader).toMatch(/`hub::\$\{ownPageKey\(routePair\.service, routePair\.city\)\}`/);
   });
 
   test('the serp-profiler no-data log carries a digest, never the raw query', () => {
@@ -2937,6 +2937,19 @@ describe('inventory truth + money-family exclusion + full twin merge (round-9 cl
     expect(lg).toMatch(/getSitemapManager\(\)\.listUrls\(\)/);
     expect(lg).toMatch(/live sitemap parsed to zero URLs/);
     expect(lg).toMatch(/livePairs\.has\(ownPageKey\(pair\.service, pair\.city\)\)/);
+    // EXACT routes only — token classification let a blog URL cover the pair.
+    expect(lg).toMatch(/exactCityServiceRoutePair\(u\)/);
+  });
+
+  test('exactCityServiceRoutePair accepts only the canonical route shape', () => {
+    const { exactCityServiceRoutePair } = require('../services/seo/gsc-opportunity-miner')._internals;
+    expect(exactCityServiceRoutePair('https://wavespestcontrol.com/termite-control-sarasota-fl/'))
+      .toEqual({ service: 'termite', city: 'Sarasota' });
+    expect(exactCityServiceRoutePair('/tree-and-shrub-care-north-port-fl/'))
+      .toEqual({ service: 'tree-shrub', city: 'North Port' });
+    // A blog carrying the tokens is NOT the page.
+    expect(exactCityServiceRoutePair('https://wavespestcontrol.com/termite/termite-damage-sarasota-fl/')).toBeNull();
+    expect(exactCityServiceRoutePair('/blog/pest-control-sarasota-fl-tips/')).toBeNull();
   });
 
   test('a missing money-family page is EXCLUDED at mine time, single-source slug map', () => {

@@ -1242,6 +1242,28 @@ function isHumanTerminalSkip(status, skipReason) {
   return r === 'manual_dismiss' || r.startsWith('manual_dismiss:');
 }
 
+// Parse a hub path as an EXACT canonical city-service route — the only
+// URL shape that counts as coverage for the local_gap bucket (cloud P1:
+// token classification is too broad; a blog like
+// /termite/termite-damage-sarasota-fl/ carries service and city tokens
+// but is NOT the city-service page, and counting it suppresses the
+// genuinely missing /termite-control-sarasota-fl/). Uses the
+// brief-builder's SERVICE_CITY_SLUG — the one slug map — lazily.
+function exactCityServiceRoutePair(path) {
+  try {
+    const { SERVICE_CITY_SLUG } = require('../content/content-brief-builder')._internals;  
+    const clean = String(path || '').replace(/^https?:\/\/[^/]+/i, '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '').toLowerCase();
+    for (const [service, slug] of Object.entries(SERVICE_CITY_SLUG || {})) {
+      const m = clean.match(new RegExp(`^${slug}-([a-z0-9-]+)-fl$`));
+      if (m) {
+        const city = normalizeCity(m[1].replace(/-/g, ' '));
+        if (city) return { service, city };
+      }
+    }
+  } catch (_) { /* fail-open to "not a route" — coverage just not granted */ }
+  return null;
+}
+
 // Does the (service, city) pair derive a money-family path the runner's
 // protected-page guard would block unconditionally? Uses the
 // brief-builder's SERVICE_CITY_SLUG (the ONE slug map) and protected-pages'
@@ -2078,11 +2100,15 @@ class GscOpportunityMiner {
       // outranks the hub page hides the hub page's existence — a consumer
       // asking "does a HUB page exist for this pair" (local_gap coverage)
       // would read the pair as uncovered and queue a duplicate hub draft
-      // (cloud P1). Additive like the canonical keys: nothing else changes.
+      // (cloud P1). Keys are granted ONLY for EXACT canonical city-service
+      // routes — classification-based tokens would let a blog URL vouch
+      // for the page (cloud P1, next round). Additive: nothing else
+      // changes.
       const host = String(routeIdentity(r.page_url) || '').split('::')[0];
       if (host === HUB_DOMAIN) {
-        for (const svc of new Set([service, canon].filter(Boolean))) {
-          const hubKey = `hub::${ownPageKey(svc, city)}`;
+        const routePair = exactCityServiceRoutePair(r.page_url);
+        if (routePair) {
+          const hubKey = `hub::${ownPageKey(routePair.service, routePair.city)}`;
           if (!map.has(hubKey)) map.set(hubKey, r.page_url);
         }
       }
@@ -2678,12 +2704,10 @@ class GscOpportunityMiner {
     }
     const livePairs = new Set();
     for (const u of sitemapUrls) {
-      const svc = inferServiceFromUrl(u);
-      const cty = inferCityFromUrl(u);
-      if (svc && cty) {
-        const c = canonicalizeServiceCategory(svc) || svc;
-        livePairs.add(ownPageKey(c, cty));
-      }
+      // EXACT canonical routes only — a blog URL carrying service+city
+      // tokens must not vouch for the city-service page (cloud P1).
+      const pair = exactCityServiceRoutePair(u);
+      if (pair) livePairs.add(ownPageKey(pair.service, pair.city));
     }
 
     // PER-QUERY rows, not pre-aggregated pairs: the classifier label must
@@ -4736,6 +4760,7 @@ module.exports.GscOpportunityMiner = GscOpportunityMiner;
 module.exports._internals = {
   arbitrateCityServiceTargets,
   cityServiceTargetKey,
+  exactCityServiceRoutePair,
   isHumanTerminalSkip,
   persistFloorFor,
   isPersistable,
