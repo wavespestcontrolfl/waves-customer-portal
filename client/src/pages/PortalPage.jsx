@@ -4264,6 +4264,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 // retired 2026-08-06 — offering Email/Both here would show a
                 // choice the server no longer honors.
                 { key: 'techArrived', label: 'Tech Arrived Alert', desc: 'A text the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
+                // Weather & property advisories (portal roadmap bet 6, owner
+                // ruling 2026-08-13: push + bell). A NEW alert type must ship
+                // with its self-service opt-out on the live settings surface
+                // (codex #3390 P1) — this is a deliberate, single-item
+                // extension of the 2026-07-09 "stops at appointment alerts"
+                // ruling, which predates this lane. No channelKey: these are
+                // app/bell advisories only — never SMS or email.
+                { key: 'weatherAlerts', label: 'Weather & Property Alerts', desc: 'Rain and lawn advisories for your property in the app', icon: 'checkCircle', locked: false, defaultOn: true },
                 // Owner ruling 2026-07-09: the list stops at the appointment
                 // alerts. Auto En Route from GPS (internal detail of the
                 // en-route alert above), Service Complete Report (locked

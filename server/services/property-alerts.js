@@ -67,7 +67,13 @@ const NOTIFICATION_CATEGORY = 'lawn_health';
 async function triggeredRainAreas({ now = new Date(), knex = db } = {}) {
   const start = etDateString(addETDays(now, -RAIN_WINDOW_DAYS));
   const end = etDateString(addETDays(now, -1));
-  const areas = await knex('lawn_water_areas').select('id', 'rain_adjustment_factor');
+  // Active areas only (codex #3390): a deactivated area's calibration is
+  // deliberately retired — the weather sync stops refreshing it, but up to
+  // three retained daily rows could still satisfy the window right after
+  // deactivation. Same filter the sync and area resolver apply.
+  const areas = await knex('lawn_water_areas')
+    .where('active', true)
+    .select('id', 'rain_adjustment_factor');
   const triggered = new Map();
   for (const area of areas) {
     const raw = await getAreaRainfall(area.id, start, end, knex);
@@ -171,7 +177,12 @@ async function reassuranceRuleCandidates({ now = new Date(), knex = db } = {}) {
       // One reassurance per visit — the key carries the record id.
       dedupeKey: `lawn_inspection_reassurance:${visit.service_record_id}`,
       title: 'Chinch bug conditions: elevated',
-      body: `Summer heat favors chinch bug activity in Southwest Florida lawns. Your lawn was inspected ${daysAgo} day${daysAgo === 1 ? '' : 's'} ago — no chinch bug activity was found.`,
+      // The claim matches the evidence EXACTLY (codex #3390 P1): the
+      // no_activity finding is generic ("No lawn issues observed this
+      // visit") and records nothing chinch-specific, so the body says "no
+      // lawn issues" — never "no chinch bug activity", which the visit
+      // never asserted.
+      body: `Summer heat favors chinch bug activity in Southwest Florida lawns. Your lawn was inspected ${daysAgo} day${daysAgo === 1 ? '' : 's'} ago — no lawn issues were found.`,
       payload: { serviceRecordId: visit.service_record_id, visitDay, daysAgo },
       cooldownDays: REASSURE_COOLDOWN_DAYS,
     });
@@ -185,18 +196,24 @@ const RULES = [rainRuleCandidates, reassuranceRuleCandidates];
 // Caps + delivery
 // ---------------------------------------------------------------------------
 
-// A candidate survives when: no alert for this customer (ANY rule) within
-// CROSS_RULE_CAP_DAYS, no alert for this rule within its own cooldown, and
-// this exact dedupe key never fired.
+// A candidate survives when: this exact dedupe key NEVER fired (checked
+// unbounded — codex #3390: the windowed read below cannot implement "never";
+// a reassurance visit stays eligible past its 21-day cooldown and would
+// re-consume the run budget every morning), no alert for this customer (ANY
+// rule) within CROSS_RULE_CAP_DAYS, and no alert for this rule within its
+// own cooldown.
 async function candidatePassesCaps(candidate, { now = new Date(), knex = db } = {}) {
+  const everFired = await knex('customer_alerts')
+    .where({ customer_id: candidate.customerId, dedupe_key: candidate.dedupeKey })
+    .first('id');
+  if (everFired) return false;
   const recent = await knex('customer_alerts')
     .where({ customer_id: candidate.customerId })
     .where('fired_at', '>=', addETDays(now, -Math.max(CROSS_RULE_CAP_DAYS, candidate.cooldownDays)))
-    .select('rule_key', 'dedupe_key', 'fired_at');
+    .select('rule_key', 'fired_at');
   const capMs = CROSS_RULE_CAP_DAYS * 24 * 3600 * 1000;
   const cooldownMs = candidate.cooldownDays * 24 * 3600 * 1000;
   for (const row of recent) {
-    if (row.dedupe_key === candidate.dedupeKey) return false;
     const age = now.getTime() - new Date(row.fired_at).getTime();
     if (age < capMs) return false;
     if (row.rule_key === candidate.ruleKey && age < cooldownMs) return false;
@@ -204,7 +221,26 @@ async function candidatePassesCaps(candidate, { now = new Date(), knex = db } = 
   return true;
 }
 
-async function deliverAlert(candidate, { knex = db } = {}) {
+async function deliverAlert(candidate, { knex = db, now = new Date() } = {}) {
+  // Customer quiet hours (codex #3390 P1): the mid-morning cron satisfies
+  // the GLOBAL 8–8 window, but a customer's own configured window can cover
+  // 10:05 too, and the preferences surface promises it is honored. Same
+  // helper the notification dispatcher enforces. Advisories are perishable
+  // — a quiet-hours customer is skipped (no ledger row, no consumed cap),
+  // not deferred. Fail closed on an unreadable prefs row.
+  try {
+    const { inCustomerQuietHours } = require('./notification-dispatcher');
+    const prefs = await knex('notification_prefs')
+      .where({ customer_id: candidate.customerId })
+      .first('quiet_hours_start', 'quiet_hours_end');
+    if (prefs && inCustomerQuietHours(prefs, now)) {
+      return { delivered: false, reason: 'quiet_hours' };
+    }
+  } catch (err) {
+    logger.warn(`[property-alerts] quiet-hours check failed, skipping (${candidate.ruleKey}): ${err.message}`);
+    return { delivered: false, reason: 'quiet_hours_unknown' };
+  }
+
   // NOTIFY FIRST, ledger after (codex pre-push P1): the ledger row feeds the
   // portal card and consumes the frequency cap, so it may only exist for an
   // alert the customer actually received. notifyCustomer checks the

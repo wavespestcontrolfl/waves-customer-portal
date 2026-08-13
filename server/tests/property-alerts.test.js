@@ -26,12 +26,21 @@ const daysAgoDate = (n) => new Date(Date.now() - n * 24 * 3600 * 1000);
 const daysAgoDay = (n) => daysAgoDate(n).toISOString().slice(0, 10);
 
 // Table-keyed knex fake: rows resolve from `tables`, inserts are captured.
+// Object-form where criteria ARE honored (the caps exact-key probe depends
+// on it); 2-arg/range wheres are no-ops like the other suites' fakes.
 function knexFor(tables = {}) {
   const inserts = [];
   const fn = (table) => {
     const rows = tables[table] || [];
+    const filters = [];
+    const matches = (row) => filters.every((f) => Object.entries(f).every(
+      ([key, value]) => !(key in row) || row[key] === value
+    ));
     const q = {
-      where() { return q; },
+      where(criteria) {
+        if (criteria && typeof criteria === 'object') filters.push(criteria);
+        return q;
+      },
       whereIn() { return q; },
       whereNull() { return q; },
       whereNotNull() { return q; },
@@ -39,8 +48,8 @@ function knexFor(tables = {}) {
       groupBy() { return q; },
       orderBy() { return q; },
       limit() { return q; },
-      select: async () => rows,
-      first: async () => rows[0] || null,
+      select: async () => rows.filter(matches),
+      first: async () => rows.filter(matches)[0] || null,
       insert(row) {
         inserts.push({ table, row });
         return {
@@ -127,6 +136,10 @@ describe('reassurance rule', () => {
     const candidates = await reassuranceRuleCandidates({ now: JULY_NOW, knex });
     expect(candidates).toHaveLength(1);
     expect(candidates[0].body).toContain('9 days ago');
+    // The claim matches the generic no_activity evidence — never a
+    // chinch-specific assertion the visit did not record (codex #3390 P1).
+    expect(candidates[0].body).toContain('no lawn issues were found');
+    expect(candidates[0].body).not.toContain('no chinch bug activity');
     expect(candidates[0].dedupeKey).toBe('lawn_inspection_reassurance:sr-1');
   });
 
@@ -176,21 +189,23 @@ describe('frequency caps', () => {
 
   test('ANY alert within the cross-rule window blocks a new one', async () => {
     const knex = knexFor({
-      customer_alerts: [{ rule_key: 'lawn_inspection_reassurance', dedupe_key: 'other', fired_at: daysAgoDate(2) }],
+      customer_alerts: [{ customer_id: 'cust-1', rule_key: 'lawn_inspection_reassurance', dedupe_key: 'other', fired_at: daysAgoDate(2) }],
     });
     expect(await candidatePassesCaps(CANDIDATE, { knex })).toBe(false);
   });
 
   test('an old alert outside every window passes', async () => {
     const knex = knexFor({
-      customer_alerts: [{ rule_key: 'rain_skip_irrigation', dedupe_key: 'old', fired_at: daysAgoDate(30) }],
+      customer_alerts: [{ customer_id: 'cust-1', rule_key: 'rain_skip_irrigation', dedupe_key: 'old', fired_at: daysAgoDate(30) }],
     });
     expect(await candidatePassesCaps(CANDIDATE, { knex })).toBe(true);
   });
 
-  test('the exact dedupe key never refires regardless of age', async () => {
+  test('the exact dedupe key never refires regardless of age (unbounded probe)', async () => {
+    // 30 days old — far outside every cooldown window; only the dedicated
+    // unbounded exact-key probe can catch it (codex #3390 P2).
     const knex = knexFor({
-      customer_alerts: [{ rule_key: 'rain_skip_irrigation', dedupe_key: CANDIDATE.dedupeKey, fired_at: daysAgoDate(30) }],
+      customer_alerts: [{ customer_id: 'cust-1', rule_key: 'rain_skip_irrigation', dedupe_key: CANDIDATE.dedupeKey, fired_at: daysAgoDate(30) }],
     });
     expect(await candidatePassesCaps(CANDIDATE, { knex })).toBe(false);
   });
@@ -237,6 +252,24 @@ describe('delivery', () => {
     const outcome = await deliverAlert(CANDIDATE, { knex });
     expect(outcome).toEqual({ delivered: true, deduped: true });
     expect(knex.__inserts).toHaveLength(1);
+  });
+
+  test("a customer's own quiet hours skip delivery entirely — no bell, no ledger, no consumed cap", async () => {
+    const knex = knexFor({
+      notification_prefs: [{ customer_id: 'cust-1', quiet_hours_start: '00:00', quiet_hours_end: '23:59' }],
+    });
+    const outcome = await deliverAlert(CANDIDATE, { knex });
+    expect(outcome).toEqual({ delivered: false, reason: 'quiet_hours' });
+    expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+    expect(knex.__inserts).toHaveLength(0);
+  });
+
+  test('no quiet-hours window configured → delivery proceeds', async () => {
+    const knex = knexFor({
+      notification_prefs: [{ customer_id: 'cust-1', quiet_hours_start: null, quiet_hours_end: null }],
+    });
+    const outcome = await deliverAlert(CANDIDATE, { knex });
+    expect(outcome.delivered).toBe(true);
   });
 });
 
