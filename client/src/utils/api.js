@@ -576,6 +576,37 @@ export class ApiClient {
     });
   }
 
+  // ---- One-tap purchase (GATE_ONE_TAP_PURCHASE; the CTA renders only when
+  // the recommendations payload says oneTap:true) ----
+  oneTapInit(payload) {
+    return this.request('/one-tap/init', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  oneTapReserve(purchaseId, slotId) {
+    return this.request(`/one-tap/${purchaseId}/reserve`, {
+      method: 'POST',
+      body: JSON.stringify({ slotId }),
+    });
+  }
+
+  oneTapRelease(purchaseId) {
+    return this.request(`/one-tap/${purchaseId}/reserve`, { method: 'DELETE' });
+  }
+
+  oneTapSlots(purchaseId) {
+    return this.request(`/one-tap/${purchaseId}/slots`);
+  }
+
+  oneTapConfirm(purchaseId, payload) {
+    return this.request(`/one-tap/${purchaseId}/confirm`, {
+      method: 'POST',
+      body: JSON.stringify(payload || { termsAccepted: true }),
+    });
+  }
+
   // ---- Property alerts (GATE_PROPERTY_ALERTS; gate-off answers
   // available:false) ----
   getPropertyAlerts() {
