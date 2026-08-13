@@ -9,6 +9,7 @@ const ADMIN_EVENT = 'dispatch:job_update';
 const TERMINAL_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 const BOARD_HIDDEN_STATUSES = ['cancelled', 'rescheduled'];
 const TERMINAL_RACE = 'TERMINAL_STATUS_RACE';
+const ASSIGNMENT_RACE = 'ASSIGNMENT_RACE';
 
 function httpError(status, message) {
   const err = new Error(message);
@@ -165,13 +166,27 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
         { techId: newTechId, date: dayRow.day },
       ]);
     }
+    // CAS on the PRE-LOCK tech + day (uncapped audit r29 P1): job and
+    // fromTechId were read before the advisory locks, so a writer that
+    // committed while we waited may have already assigned this job (its
+    // fresh route_order must NOT be cleared by our stale no-op) or moved it
+    // to a third tech/day whose fence we never took. A miss below is a
+    // conflict, never a silent apply.
     const rows = await assignmentTrx('scheduled_services')
       .where({ id: jobId })
       .whereNotIn('status', TERMINAL_STATUSES)
+      .whereRaw('technician_id IS NOT DISTINCT FROM ?', [fromTechId])
+      .modify((q) => { if (dayRow?.day) q.whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [dayRow.day]); })
       .update({ technician_id: newTechId, route_order: null, updated_at: assignmentTrx.fn.now() })
       .returning('*');
     if (rows.length === 0) {
-      throw Object.assign(new Error('terminal status race'), { code: TERMINAL_RACE });
+      const live = await assignmentTrx('scheduled_services')
+        .where({ id: jobId })
+        .first('status');
+      if (!live || TERMINAL_STATUSES.includes(live.status)) {
+        throw Object.assign(new Error('terminal status race'), { code: TERMINAL_RACE });
+      }
+      throw Object.assign(new Error('assignment race'), { code: ASSIGNMENT_RACE });
     }
     updatedRow = rows[0];
 
@@ -193,6 +208,9 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   } catch (err) {
     if (err && err.code === TERMINAL_RACE) {
       throw httpError(409, 'Cannot reassign - job transitioned to a terminal state concurrently');
+    }
+    if (err && err.code === ASSIGNMENT_RACE) {
+      throw httpError(409, 'Job was reassigned or rescheduled concurrently - reload and retry');
     }
     throw err;
   }
