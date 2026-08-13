@@ -9,14 +9,43 @@
  *
  * Buckets:
  *   striking_distance   query at pos 4–15 with ≥minImpressions
- *   ctr_rewrite         pos 1–8, high impressions, ctr < 2%
+ *   ctr_rewrite         pos 1–8, high impressions, ctr < 2%. NOTE: its
+ *                       rewrite_title_meta rows persist at the env-tunable
+ *                       AUTONOMOUS_REWRITE_MIN_SCORE floor (default = the
+ *                       global 75, which the bucket's scores structurally
+ *                       cannot reach — the lane is dark until the operator
+ *                       sets the env; see scoring-config.minScoreToActFor).
  *   decay_refresh       page clicks down ≥25% vs prior period
- *   cannibalization     2+ own URLs ranking for same query (low-confidence)
- *   page_type_mismatch  URL type doesn't match query intent (heuristic only
- *                       until SERP profiler ships in Step 2)
  *   local_gap           {city, service} has impressions but no own page
  *   seasonal_rising     query impressions up 50%+ vs prior 14d window
- *   no_content_yet      query has impressions but no own page anywhere
+ *   no_content_yet      query has impressions but NO owned page usefully
+ *                       ranking for it — served-ness judged on TRUE
+ *                       query→page rows (gsc_query_page_map). Emits ONLY
+ *                       on mapped-and-weak evidence: a materially-mapped
+ *                       page at ≤ answerGapPositionMax is refresh/answer-
+ *                       gap territory and excludes the query, while a
+ *                       materially-mapped page ranking beyond it is the
+ *                       gap this bucket mints content for. An UNMAPPED
+ *                       query (or one mapped only immaterially) is
+ *                       skipped, not emitted — absence of a mapping is
+ *                       missing evidence, not proof no page ranks.
+ *
+ * RETIRED buckets (removed 2026-08-12 — never emitted a row; each
+ * duplicated a live first-class mechanism, and the "find the existing
+ * mechanism" rule wins over resurrecting the copy):
+ *   cannibalization     → seo/cannibalization.js (CannibalizationDetector,
+ *                       true query→page evidence into
+ *                       seo_cannibalization_flags + seo-action-generator's
+ *                       differentiate_spoke approval flow). The miner copy
+ *                       was also structurally unpersistable: do_not_publish
+ *                       floor 75 vs a max score of ~18 after the −35
+ *                       cannibalizationRisk penalty.
+ *   page_type_mismatch  → seo/url-intelligence.js intent routing
+ *                       (seo_intent_routes: expected_page_type vs
+ *                       actual_winner_page_type with misroute severity).
+ *                       Miner copy: floor 75 vs max ~16 after −40
+ *                       serpMismatch, plus a NULL-vs-'' predicate that
+ *                       matched nothing.
  *   aeo_gap             city×service absent from LLM answers across N+ days
  *                       AND has GSC demand (gated behind GATE_AEO_GAP_MINING)
  *   answer_gap          queries a page ranks 9–30 for (true query→page rows
@@ -286,8 +315,6 @@ function gscOpportunityScore(bucket, position, impressionsBoost) {
   }
   if (bucket === 'ctr_rewrite') return Math.round(W * 0.85 * impressionsBoost);
   if (bucket === 'decay_refresh') return Math.round(W * 0.75 * impressionsBoost);
-  if (bucket === 'cannibalization') return Math.round(W * 0.5 * impressionsBoost);
-  if (bucket === 'page_type_mismatch') return Math.round(W * 0.6 * impressionsBoost);
   if (bucket === 'local_gap') return Math.round(W * 0.8 * impressionsBoost);
   if (bucket === 'seasonal_rising') return Math.round(W * 0.7 * impressionsBoost);
   if (bucket === 'no_content_yet') return Math.round(W * 0.65 * impressionsBoost);
@@ -348,9 +375,6 @@ function actionForOpportunity(opp) {
 }
 
 function baseActionForOpportunity({ bucket, query, page_url, city, service }) {
-  if (bucket === 'cannibalization' || bucket === 'page_type_mismatch') {
-    return 'do_not_publish'; // always human review for these
-  }
   if (bucket === 'ctr_rewrite' && page_url) return 'rewrite_title_meta';
   if (bucket === 'decay_refresh' && page_url) return 'refresh_existing_page';
   if (bucket === 'link_boost' && page_url) return 'add_internal_links';
@@ -677,12 +701,13 @@ function buildListicleFamilyRefreshOpp(entries) {
 // Can a query-level bucket ACTUALLY emit this representative? Service
 // resolution alone is not enough (Codex r12): striking_distance takes any
 // ≥50-imp query ranking 4-15 regardless of the own-page map, while
-// no_content_yet takes >15 ONLY when no own page exists for the
-// service+city — a rep at position 20 whose service+city has any own page
-// is emitted by NEITHER, so excluding its family would lose the demand to
+// no_content_yet takes >15 ONLY when no owned page usefully ranks for the
+// query (noContentYetMapEmittable over gsc_query_page_map) — a rep at
+// position 20 that a mapped page serves at ≤ answerGapPositionMax is
+// emitted by NEITHER, so excluding its family would lose the demand to
 // no bucket at all. Top-3 reps are irrelevant here: family admission drops
 // them as won intent regardless.
-function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thresholds = THRESHOLDS, { seasonalEmittable = false } = {}) {
+function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thresholds = THRESHOLDS, { seasonalEmittable = false, mappedPositions = null, mapCoveredDomains = null } = {}) {
   if (!rep) return false;
   // mineSeasonalRising emits the rep independently of position and the
   // own-page map — a seasonal-emittable rep must count as reachable or the
@@ -700,6 +725,7 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
     plainPosition: rep.position || 0,
     service_category: rep.service_category || null,
     city_target: rep.city_target || null,
+    domains: Array.isArray(rep.domains) ? rep.domains : [],
   }];
   for (const t of tuples) {
     if ((t.impressions || 0) < thresholds.minImpressionsToScore) continue;
@@ -722,29 +748,76 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
       };
       cand.action_type = actionForOpportunity(cand);
       const { total } = scoreOpportunity(cand, { position: pos, impressions: t.impressions });
-      if (total >= minScoreToActFor(cand.action_type)) return true;
+      if (total >= persistFloorFor(cand)) return true;
       continue;
     }
     if (pos <= thresholds.strikingDistancePositionMax) continue;
-    // no_content_yet mirror, including its RAW-classifier-first service
-    // lookup: the own-page map keys raw classifier values (tree_shrub), so
-    // canonicalizing here made the lookup miss and BOTH buckets dropped
-    // the demand (Codex r13).
-    if (!service) continue;
-    if (ownPagesByServiceCity.get(ownPageKey(service, city))) continue;
+    // no_content_yet mirror — MUST match mineNoContentYet's admission
+    // exactly (the reachability contract). Its served-ness test is
+    // noContentYetMapEmittable over true query→page rows, gated on map
+    // coverage judged PER TUPLE from that tuple's own contributing
+    // domains — the miner checks each (query, service, city, intent)
+    // candidate's domains individually, so a union across tuples would
+    // read a mixed-coverage query as wholly uncheckable while the miner
+    // emits its covered tuple: both sides would enqueue for one intent.
+    // Uncovered tuples (and tuples without domain provenance — fallback
+    // reps, older callers) fail closed exactly like the miner's uncovered
+    // candidates: unreachable here, demand stays with the family.
+    // Canonicalized exactly as mineNoContentYet resolves it: a raw
+    // classifier value that canonicalizes to null makes the MINER skip,
+    // so the mirror must skip too, or it calls the rep reachable through
+    // a bucket that will never emit it.
+    const ncyCanon = canonicalizeServiceCategory(t.service_category);
+    const ncyService = (ncyCanon && classifierQuerySupported(t.service_category, ncyCanon, rep.query) ? ncyCanon : null)
+      || inferServiceFromQuery(rep.query);
+    if (!ncyService) continue;
+    // mineNoContentYet is HUB-ONLY, so the mirror must clear the floor on
+    // HUB impressions — cross-domain totals would declare a spoke-carried
+    // variant reachable through a bucket that will never emit it, and the
+    // family would be excluded for nothing (audit P2). Tuples without hub
+    // provenance fall back to the aggregate (older callers / fabricated
+    // test tuples), which only ever errs toward keeping the family.
+    // EVERY dimension mirrors mineNoContentYet, which is hub-only: hub
+    // impressions, HUB coverage, HUB mapped position. Judging the spoke
+    // domains too would let an uncovered or strongly-ranked spoke mark
+    // the rep unreachable while the miner happily emits the hub
+    // candidate — both buckets then queue for one intent (audit P1).
+    // Tuples without hub provenance fall back to the aggregate (older
+    // callers / fabricated test tuples), which only errs toward keeping
+    // the family.
+    const hubImpressions = t.hubImpressions != null ? t.hubImpressions : (t.impressions || 0);
+    if (hubImpressions < thresholds.minImpressionsToScore) continue;
+    // HUB position, for the same reason as hub impressions: the bucket
+    // ranks hub rows only, so a cross-domain average could put the rep
+    // outside the >15 window the miner actually applies (audit P2).
+    const hubPos = t.hubPosition != null ? t.hubPosition : pos;
+    if (hubPos <= thresholds.strikingDistancePositionMax) continue;
+    if (!queryDomainsCovered([HUB_DOMAIN], mapCoveredDomains || new Set())) continue;
+    const hubMappedPosition = mappedPositions instanceof Map
+      ? mappedPositions.get(mappedPositionKey(rep.query, HUB_DOMAIN)) ?? null
+      : null;
+    if (!noContentYetEmittable([hubMappedPosition], thresholds)) continue;
     const cand = {
       bucket: 'no_content_yet',
       query: rep.query,
       page_url: null,
-      service,
+      service: ncyService,
       city,
     };
     cand.action_type = actionForOpportunity(cand);
-    const { total } = scoreOpportunity(cand, { position: pos, impressions: t.impressions });
-    if (total >= minScoreToActFor(cand.action_type)) return true;
+    const { total } = scoreOpportunity(cand, { position: hubPos, impressions: hubImpressions });
+    // persistFloorFor, not minScoreToActFor: no_content_yet city-service
+    // rows ride the blog floor, so the mirror must use the SAME shared
+    // gate or it calls a persistable candidate unreachable (audit P1).
+    if (total >= persistFloorFor(cand)) return true;
   }
   return false;
 }
+
+// Blog and city-service publishes are HUB-ONLY (hubOnlyBlogDomains in the
+// publisher), so every bucket that MINTS content mines hub demand only —
+// and every mirror of those buckets must scope to the same domain.
+const HUB_DOMAIN = 'wavespestcontrol.com';
 
 // Canonical ROUTE IDENTITY of a page URL — registrable domain (www
 // stripped) + query/hash-free path with the trailing slash trimmed,
@@ -758,6 +831,14 @@ function routeIdentity(url) {
   const host = str.replace(/^[a-z]+:\/\//i, '').split('/')[0].split(':')[0].replace(/^www\./i, '').toLowerCase();
   const path = str.split('#')[0].split('?')[0].replace(/^[a-z]+:\/\/[^/]+/i, '').replace(/\/+$/, '');
   return `${host}::${path}`;
+}
+
+// seo_actions stores URLs scheme-less ("wavespestcontrol.com/path"), so
+// they need a scheme before routeIdentity can split host from path.
+function seoActionRouteIdentity(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return null;
+  return routeIdentity(/^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`);
 }
 
 // SQL twin of routeIdentity() for matching STORED page_url values by route
@@ -813,6 +894,174 @@ function ownPageKey(service, city) {
   return `${service || ''}::${city || ''}`;
 }
 
+// no_content_yet admission, judged on TRUE query→page evidence: emit only
+// when the query IS mapped and its best owned page ranks beyond
+// answerGapPositionMax. Both failure directions close:
+//  - mapped at ≤ answerGapPositionMax → refresh/answer-gap territory
+//    (mineAnswerGap's own window); new content beside it would compete.
+//    Mere map-row existence is deliberately NOT the served test (same
+//    doctrine as the listicle_family served check) — existence alone kept
+//    the bucket inert, like the retired service+city coverage check did
+//    (zero rows ever persisted, verified against prod 2026-08-11).
+//  - UNMAPPED → missing evidence, not proof of absence (audit P1 #4):
+//    every gsc_queries impression originated from SOME owned URL, and the
+//    query+page breakdown omits low-volume rows — emitting on absence
+//    could mint content beside an unseen ranking page. At current prod
+//    data this costs nothing: every real candidate carries a mapping.
+//
+// SHARED by mineNoContentYet admission and listicleFamilyRepReachable's
+// no_content_yet mirror — the two must stay in lockstep or family demand
+// double-emits / strands (the reachability contract).
+function noContentYetMapEmittable(bestMappedPosition, thresholds = THRESHOLDS) {
+  return bestMappedPosition != null
+    && Number.isFinite(bestMappedPosition)
+    && bestMappedPosition > thresholds.answerGapPositionMax;
+}
+
+// A candidate aggregates impressions across domains, so the evidence must
+// hold for EVERY contributing domain: positions are resolved per
+// (query, domain) and each one must be mapped AND weak. A query-wide
+// lookup would let one domain's weak mapping vouch for another domain
+// where the query is unmapped (missing evidence) or strongly served —
+// both directions mint competing content (audit P1 #5). Empty list =
+// no provenance = fail closed.
+function noContentYetEmittable(domainPositions, thresholds = THRESHOLDS) {
+  const list = Array.isArray(domainPositions) ? domainPositions : [];
+  if (!list.length) return false;
+  return list.every((p) => noContentYetMapEmittable(p, thresholds));
+}
+
+// The page a low-CTR query ACTUALLY ranks with, from true query→page rows:
+// the most-impressed page is the one Google showed and users didn't click,
+// which is what a title/meta rewrite must target. The service+city
+// own-page heuristic picks the segment's biggest page instead, which on a
+// multi-page segment aims the rewrite PR at an unrelated URL (audit P1
+// #6). Ties break on the better (lower) position. No rows → null →
+// actionForOpportunity falls through to do_not_publish (fail closed).
+// Positions arrive as pg numerics (strings), nulls, or absent. Number()
+// maps null AND '' to 0 — a perfect position-0 ranking — so every
+// position read goes through this guard: missing data must never read as
+// "ranks first" (that fails OPEN in both consumers: it would suppress a
+// no_content_yet gap and make a deep page look in-window).
+function finitePosition(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function pickCtrRewriteTargetPage(rows = []) {
+  let best = null;
+  for (const r of rows) {
+    const impressions = parseInt(r.impressions, 10) || 0;
+    const position = finitePosition(r.page_position);
+    if (!r.page_url) continue;
+    if (!best
+      || impressions > best.impressions
+      || (impressions === best.impressions && position != null
+        && (best.position == null || position < best.position))) {
+      best = { page_url: r.page_url, impressions, position };
+    }
+  }
+  return best ? best.page_url : null;
+}
+
+// The selected page must ITSELF be underperforming. The bucket's gate is a
+// query-level CTR aggregate across every page and domain, so a weak
+// secondary page can drag the aggregate under the threshold while the
+// most-impressed page is perfectly healthy — rewriting that page's title
+// would damage a working snippet (audit P1 #9). Fail closed: no rows, no
+// pick, or a healthy pick → null → do_not_publish.
+// Minimum share of a query's mapped demand the rewrite target must carry.
+// The bucket's impression floor and position gate are both QUERY-level, so
+// demand sitting on deep ineligible URLs can qualify the query while a
+// bystander page that happens to rank shallow gets selected — and with a
+// handful of impressions its CTR is noise, not evidence (audit P2). A page
+// carrying under a quarter of the query's mapped demand is not what the
+// query is really landing on.
+const CTR_REWRITE_TARGET_MIN_SHARE = 0.25;
+
+// Restrict mapped pages to the ones a candidate's OWN domains produced.
+// rankingPages is keyed by query alone while candidates are grouped by
+// (query, service, city), so under mixed-domain or drifted classification
+// one tuple could otherwise be handed a URL that belongs to another
+// tuple's domain (audit P1). Pages without domain provenance are dropped:
+// unattributable evidence must not pick a rewrite target.
+function pagesForCandidateDomains(pageRows = [], domains = []) {
+  const own = new Set((Array.isArray(domains) ? domains : [])
+    .filter(Boolean).map((d) => String(d).toLowerCase()));
+  if (!own.size) return [];
+  return pageRows.filter((r) => (Array.isArray(r.domains) ? r.domains : [])
+    .some((d) => d && own.has(String(d).toLowerCase())));
+}
+
+function ctrRewriteTargetFor(pageRows = [], thresholds = THRESHOLDS) {
+  // Only pages inside the bucket's own ranking window are eligible. The
+  // gate is a query-level avg_position, which a deep secondary URL can
+  // ride: a page sitting at 30 or 50 naturally shows a terrible CTR and
+  // would collect an automated metadata rewrite it never qualified for
+  // (audit P2). A title/meta rewrite is the right lever only when the
+  // page already ranks well and still isn't earning the click.
+  const inWindow = pageRows.filter((r) => {
+    const pos = finitePosition(r.page_position);
+    return pos != null && pos <= thresholds.ctrRewritePositionMax;
+  });
+  const url = pickCtrRewriteTargetPage(inWindow);
+  if (!url) return null;
+  const row = inWindow.find((r) => r.page_url === url);
+  if (!row) return null;
+  // Materiality, both absolute and relative to the query's own demand.
+  // The absolute floor is the same answerGapMinQueryImpressions that
+  // materialServingPosition uses — one notion of "enough impressions for
+  // this page+query pair to be actionable" across the module.
+  const targetImpressions = parseInt(row.impressions, 10) || 0;
+  if (targetImpressions < thresholds.answerGapMinQueryImpressions) return null;
+  const mappedTotal = pageRows.reduce((sum, r) => sum + (parseInt(r.impressions, 10) || 0), 0);
+  if (!mappedTotal) return null;
+  if (targetImpressions / mappedTotal < CTR_REWRITE_TARGET_MIN_SHARE) return null;
+  return recomputeCtr(row.clicks, row.impressions) < thresholds.ctrRewriteMaxCtr ? url : null;
+}
+
+// How well an owned page serves a query, counting only MATERIAL mappings.
+// An unweighted min across URLs lets a single stray impression at
+// position 2 declare the query served and suppress no_content_yet, while
+// the real demand sits on another URL at position 50. A page below
+// answerGapMinQueryImpressions is not actionable by the refresh side
+// either — mineAnswerGap ignores it — so calling it "serving" suppresses
+// a real gap on evidence no mechanism would act on (audit P2). All
+// mappings immaterial → null → fails closed, same as unmapped.
+function materialServingPosition(pages = [], thresholds = THRESHOLDS) {
+  let best = null;
+  for (const p of pages) {
+    const impressions = parseInt(p.impressions, 10) || 0;
+    if (impressions < thresholds.answerGapMinQueryImpressions) continue;
+    const pos = finitePosition(p.page_position);
+    if (pos == null) continue;
+    if (best == null || pos < best) best = pos;
+  }
+  return best;
+}
+
+// Is a candidate's absent/weak query→page mapping trustworthy EVIDENCE, or
+// possibly a sync hole? Map syncs run and fail independently per domain
+// (and stale rows linger), while candidates aggregate gsc_queries across
+// every domain — so a global "the map has rows" sentinel would read one
+// domain's failed sync as a genuine content gap whenever any other domain
+// synced. A candidate is checkable only when EVERY domain contributing its
+// impressions has in-window map rows; unknown/empty domain lists fail
+// closed (pre-push audit P1, 2026-08-12).
+// Key for per-(query, domain) mapped positions — domains compare
+// case-insensitively, matching queryDomainsCovered.
+function mappedPositionKey(query, domain) {
+  return `${String(query || '')}\x00${String(domain || '').toLowerCase()}`;
+}
+
+function queryDomainsCovered(domains, coveredDomains) {
+  const list = Array.isArray(domains) ? domains : [];
+  if (!list.length) return false;
+  return list.every((d) => d && coveredDomains.has(String(d).toLowerCase()));
+}
+
+
 function dedupeKey({ bucket, service, city, query, page_url }) {
   const parts = [
     bucket,
@@ -854,11 +1103,11 @@ function scoreOpportunity(opportunity, extraSignals = {}) {
       ? Math.round(WEIGHTS.aeoGap * (extraSignals.gapStrength ?? 1))
       : 0,
   };
-  // Penalties surface in later steps (cannibalizationRisk needs SERP, etc.).
-  // Cannibalization bucket pre-applies its own risk inline:
-  let penalty = 0;
-  if (opportunity.bucket === 'cannibalization') penalty += WEIGHTS.cannibalizationRisk;
-  if (opportunity.bucket === 'page_type_mismatch') penalty += WEIGHTS.serpMismatch;
+  // Penalties surface in later steps (the decision router applies
+  // serpMismatch against live SERP profiles); no bucket pre-applies one
+  // here since the review-only buckets retired. _penalty stays in the
+  // breakdown for shape stability with historical rows.
+  const penalty = 0;
 
   const total = Object.values(breakdown).reduce((a, b) => a + b, 0) - penalty;
   return { total, breakdown: { ...breakdown, _penalty: penalty } };
@@ -896,6 +1145,78 @@ function linkBoostCap() {
   return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_LINK_BOOST_MAX_PER_RUN;
 }
 
+// THE persistence floor for an opportunity — single source of truth for
+// persistAll's admission gate and for every "is this candidate live?"
+// question asked elsewhere (parent-row protection, companion protection).
+// Two exceptions ride a lower floor than their action_type implies:
+// listicle_family blog/refresh rows keep the BLOG floor (aggregated
+// sub-50-impression demand admitted as a blog must not be discarded for
+// taking the safer refresh route), and a link_boost companion DERIVED from
+// a ctr_rewrite inherits the rewrite floor because it inherits that
+// parent's score by construction.
+// Log-safe identifier for a GSC query. Search terms are arbitrary
+// external text — names, addresses, phone numbers all show up in real GSC
+// exports — so they must never reach the logs (AGENTS.md non-card PII
+// rule). The digest is stable across runs, so repeat failures still
+// correlate.
+function queryDigest(query) {
+  return crypto.createHash('sha256').update(String(query || '')).digest('hex').slice(0, 12);
+}
+
+function persistFloorFor(o) {
+  const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
+  if (o.bucket === 'listicle_family' && familyFloorActions.includes(o.action_type)) {
+    return minScoreToActFor('new_supporting_blog');
+  }
+  // no_content_yet caps out at 73 (gscOpportunity 23 + localRevenue 20 +
+  // conversionIntent 15 + contentGap 15) and the facts boost is scoped to
+  // refresh actions — so a candidate that resolves BOTH city and service,
+  // and is therefore routed to create_or_refresh_city_service_page at the
+  // 75 floor, could never persist (audit P1). Same exception, same
+  // reasoning as listicle_family above: identical demand must not be
+  // discarded for taking the SAFER page route instead of a blog post.
+  if (o.bucket === 'no_content_yet' && o.action_type === 'create_or_refresh_city_service_page') {
+    return minScoreToActFor('new_supporting_blog');
+  }
+  if (o.bucket === 'link_boost' && o.signal_metadata?.source_bucket === 'ctr_rewrite') {
+    return minScoreToActFor('rewrite_title_meta');
+  }
+  return minScoreToActFor(o.action_type);
+}
+
+function isPersistable(o) {
+  return (o?.score ?? 0) >= persistFloorFor(o || {});
+}
+
+// Companion dedupe keys the CURRENT batch still stands behind. A link_boost
+// key is (bucket, service, city, page) with NO query in it, so companions
+// are shared across queries and across source buckets — retiring one on a
+// stale ctr_rewrite row's account would delete work another live parent
+// still needs. Protection is synthesized from EVERY live link-boost-eligible
+// parent (rewrite_title_meta AND refresh_existing_page), not just the
+// emitted link_boost rows: LINK_BOOST_MAX_PER_RUN can drop a companion whose
+// page is still actively targeted, and a decay_refresh parent sharing a page
+// with a stale rewrite row must not lose its companion (audit P1 ×2).
+function companionProtectionKeys(opportunities = []) {
+  const keys = new Set();
+  for (const o of opportunities) {
+    // Only candidates that will ACTUALLY PERSIST defend anything. A
+    // below-floor parent is dropped by persistAll, so protecting the
+    // companion it can no longer justify would leave that companion
+    // claimable at its stale higher score while the parent row itself is
+    // being retired (audit P1) — the same rule the reconciliation applies
+    // to parent rows, via the same shared floor.
+    if (!isPersistable(o)) continue;
+    if (o.bucket === 'link_boost' && o.dedupe_key) keys.add(o.dedupe_key);
+    if (o.page_url && LINK_BOOST_SOURCE_ACTIONS.has(o.action_type)) {
+      keys.add(dedupeKey({
+        bucket: 'link_boost', service: o.service, city: o.city, page_url: o.page_url,
+      }));
+    }
+  }
+  return keys;
+}
+
 function deriveLinkBoost(parents = [], { cap = linkBoostCap(), excludeKeys = new Set() } = {}) {
   if (!cap) return [];
   const byKey = new Map();
@@ -922,9 +1243,37 @@ function deriveLinkBoost(parents = [], { cap = linkBoostCap(), excludeKeys = new
     // the same page) collapse to one companion per dedupe key; keep the
     // strongest signal.
     const existing = byKey.get(opp.dedupe_key);
-    if (!existing || opp.score > existing.score) byKey.set(opp.dedupe_key, opp);
+    const winner = (!existing || opp.score > existing.score) ? opp : existing;
+    // …but the FLOOR follows the most permissive JUSTIFIED parent, not the
+    // score winner. Collapsing by raw score alone could tag a companion
+    // 'decay_refresh' (global floor 75) when a persistable ctr_rewrite
+    // parent on the same page justified it at the lower rewrite floor —
+    // dropping work that parent should admit (audit P1). Provenance is
+    // additive: any qualifying rewrite parent grants the rewrite floor.
+    const contributors = new Set([
+      ...(existing?.signal_metadata?.source_buckets || [existing?.signal_metadata?.source_bucket]),
+      ...(opp.signal_metadata?.source_buckets || [opp.signal_metadata?.source_bucket]),
+    ].filter(Boolean));
+    // Only override when the rewrite floor is genuinely LOWER than the
+    // one the winner would otherwise ride — with the env unset the two are
+    // equal and the recorded provenance stays the score winner's.
+    const rewriteJustified = minScoreToActFor('rewrite_title_meta') < persistFloorFor(winner)
+      && ((existing?.signal_metadata?.source_bucket === 'ctr_rewrite' && isPersistable(existing))
+        || (opp.signal_metadata?.source_bucket === 'ctr_rewrite' && isPersistable(opp)));
+    winner.signal_metadata = {
+      ...winner.signal_metadata,
+      source_buckets: Array.from(contributors),
+      source_bucket: rewriteJustified ? 'ctr_rewrite' : winner.signal_metadata.source_bucket,
+    };
+    byKey.set(opp.dedupe_key, winner);
   }
+  // Drop companions that cannot clear their own persistence floor BEFORE
+  // the cap: persistAll checks floors afterwards, so ten 60–74-point decay
+  // companions would consume every slot, be discarded at the global floor,
+  // and starve lower-scoring but valid rewrite companions riding the lower
+  // rewrite floor (audit P2). Same floor the persist gate uses.
   return Array.from(byKey.values())
+    .filter(isPersistable)
     .sort((a, b) => b.score - a.score)
     .slice(0, cap);
 }
@@ -1078,6 +1427,16 @@ class GscOpportunityMiner {
     // One facts-readiness verdict per city::service per run — shared by
     // family subgroup selection AND the boost (Codex r32).
     const factsReadyCache = new Map();
+    // Queries whose EVIDENCE was unavailable this run (map coverage
+    // missing for a contributing domain). Their pending rows must survive
+    // the canonical sweep: absent evidence is not a recovered signal, and
+    // expiring them would let a sync outage drain the lane one domain at
+    // a time. Same shape and purpose as familyExemptions above.
+    const sweepExemptQueries = { ctr_rewrite: new Set(), no_content_yet: new Set() };
+    // Pages the older seo_actions queue owns for internal-link work.
+    // Captured here so the persist transaction can retire companions that
+    // were queued BEFORE that queue claimed the page.
+    let legacyOwnedLinkPages = null;
     const since = sinceDate(periodDays);
     const priorSince = sinceDate(periodDays * 2);
 
@@ -1103,13 +1462,13 @@ class GscOpportunityMiner {
 
     const runs = [
       ['striking_distance', () => this.mineStrikingDistance(since, ownPagesByServiceCity)],
-      ['ctr_rewrite', () => this.mineCtrRewrite(since, ownPagesByServiceCity)],
+      ['ctr_rewrite', () => this.mineCtrRewrite(since, { exemptQueries: sweepExemptQueries.ctr_rewrite })],
       ['decay_refresh', () => this.mineDecayRefresh(since, priorSince)],
-      ['cannibalization', () => this.mineCannibalization(since)],
-      ['page_type_mismatch', () => this.minePageTypeMismatch(since)],
+      // cannibalization + page_type_mismatch retired 2026-08-12 — see the
+      // header's RETIRED note for the canonical mechanisms.
       ['local_gap', () => this.mineLocalGap(since, ownPagesByServiceCity)],
       ['seasonal_rising', () => this.mineSeasonalRising(periodDays)],
-      ['no_content_yet', () => this.mineNoContentYet(since, ownPagesByServiceCity)],
+      ['no_content_yet', () => this.mineNoContentYet(since, { periodDays, exemptQueries: sweepExemptQueries.no_content_yet })],
       ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
       ['answer_gap', () => this.mineAnswerGap(since)],
       // Runs AFTER answer_gap by list order: its persistable refresh pages
@@ -1239,10 +1598,28 @@ class GscOpportunityMiner {
         logger.warn(`[gsc-opp-miner] occupied link_boost keys load failed: ${err.message}`);
         return new Set();
       });
-      buckets.link_boost = deriveLinkBoost(
-        [...(buckets.ctr_rewrite || []), ...(buckets.decay_refresh || [])],
-        { excludeKeys: occupied }
-      );
+      // seo-action-generator also emits add_internal_links (issue_type
+      // internal_linking) into seo_actions, so companions need the same
+      // cross-queue fence the rewrite targets got — otherwise a page can
+      // collect duplicate internal-link work under two unrelated dedupe
+      // schemes (audit P1). Fails CLOSED: an unavailable lookup derives
+      // no companions this run rather than risking duplicates.
+      const linkOwned = await this._pagesOwnedByOpenSeoActions(['add_internal_links']);
+      legacyOwnedLinkPages = linkOwned;
+      if (linkOwned === null) {
+        logger.warn('[gsc-opp-miner] link_boost: seo_actions fence unavailable — no companions derived this run');
+        buckets.link_boost = [];
+      } else {
+        // Legacy-owned pages are dropped BEFORE the cap, not after: a
+        // post-cap filter lets them consume LINK_BOOST_MAX_PER_RUN slots
+        // and then vanish, starving eligible lower-scoring pages (audit
+        // P2 — same class as the persistability filter below).
+        buckets.link_boost = deriveLinkBoost(
+          [...(buckets.ctr_rewrite || []), ...(buckets.decay_refresh || [])]
+            .filter((o) => !linkOwned.has(routeIdentity(o.page_url))),
+          { excludeKeys: occupied }
+        );
+      }
     } catch (err) {
       logger.warn(`[gsc-opp-miner] link_boost failed: ${err.message}`);
       errors.link_boost = err.message;
@@ -1285,6 +1662,43 @@ class GscOpportunityMiner {
             trx,
             familyExemptions
           );
+        }
+        // ctr_rewrite lane sweep, same doctrine as the family one: a query
+        // that RECOVERS (CTR back above threshold, impressions or position
+        // out of range) simply vanishes from the bucket, so per-query
+        // reconciliation inside persistAll never sees it and its pending
+        // rewrite would stay claimable for the full 14 days — optimizing a
+        // page that is now performing fine. Guarded on a successful bucket
+        // run: with an error, an empty/short bucket means "didn't run", not
+        // "no signal", and sweeping would retire valid queued work.
+        // Filtering newly-derived companions stops FUTURE duplicates, but a
+        // companion queued before seo_actions claimed the page stays
+        // independently claimable until expiry — two mechanisms doing the
+        // same internal-link work (AGENTS.md single-mechanism rule).
+        // Ownership is window-independent, so this runs on every mine.
+        await this._retireLegacyOwnedCompanions(trx, legacyOwnedLinkPages);
+        // periodDays gate mirrors the family sweep: a manual 7-day mine
+        // sees far fewer qualifying queries, and treating everything
+        // absent from that shorter window as "recovered" would expire
+        // valid rows produced by the authoritative 28-day run.
+        // Both newly-revived buckets share one disappearing-signal
+        // lifecycle, so they share ONE sweep (AGENTS.md: extend the
+        // existing mechanism, never add a sibling). no_content_yet needs
+        // it most: its stale rows CREATE pages, so acting on a query an
+        // owned page has since started serving publishes duplicate
+        // content — a worse outcome than a stale rewrite.
+        if (periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS) {
+          for (const bucket of ['ctr_rewrite', 'no_content_yet']) {
+            if (errors[bucket]) continue;
+            await this._sweepRecoveredQueries(
+              bucket,
+              revalidated.filter((o) => o.bucket === bucket),
+              trx,
+              revalidated,
+              sweepExemptQueries[bucket],
+              since
+            );
+          }
         }
       });
     }
@@ -1391,6 +1805,161 @@ class GscOpportunityMiner {
     return map;
   }
 
+  // A failed map leg can hide behind a healthy queries leg for WEEKS:
+  // syncQueryPageMap swallows its own errors (catch → warn, no rethrow),
+  // so syncDailyData reports success while gsc_query_page_map goes stale —
+  // and any historical row inside the window would still "prove" coverage.
+  // The domain's own gsc_queries freshness is the authoritative yardstick:
+  // both legs sync the same window in the same call, so when queries have
+  // advanced but the map hasn't, the gap is a sync hole. The grace absorbs
+  // benign skew (GSC omits low-volume rows from the query+page breakdown,
+  // so a thin domain's map can legitimately trail by a day or two).
+  static QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS = 4;
+
+  // ABSOLUTE staleness bound. The relative check compares the map against
+  // that domain's own gsc_queries high-water mark — but if the WHOLE sync
+  // for a domain fails, both tables keep the same old maximum and the
+  // relative test reports "covered" forever. The 6am sync failing does not
+  // stop the 7:30am miner, so stale evidence would drive live retirements.
+  // GSC itself reports ~3 days behind (hub measured at exactly 3 on
+  // 2026-08-12), so 7 days is comfortable margin over normal lag while
+  // still catching a multi-day outage.
+  static MAP_ABSOLUTE_STALENESS_DAYS = 7;
+
+  // Domains whose query→page map is present AND fresh for the window — the
+  // coverage evidence behind queryDomainsCovered (no_content_yet and its
+  // reachability mirror). An empty set means the map sync isn't keeping up
+  // anywhere; a partial set means the missing domains' absent mappings are
+  // sync holes, not content gaps (pre-push audit P1 ×2, 2026-08-12).
+  async _queryPageMapCoveredDomains(since) {
+    const result = await db.raw(
+      `SELECT m.domain
+         FROM (SELECT domain, max(date_from) AS map_max
+                 FROM gsc_query_page_map
+                WHERE date_from >= ?
+                GROUP BY domain) m
+         JOIN (SELECT domain, max(date) AS queries_max
+                 FROM gsc_queries
+                WHERE date >= ?
+                GROUP BY domain) q
+           ON q.domain = m.domain
+        WHERE m.map_max >= q.queries_max - make_interval(days => ?)
+          AND m.map_max >= current_date - make_interval(days => ?)`,
+      [since, since,
+        GscOpportunityMiner.QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS,
+        GscOpportunityMiner.MAP_ABSOLUTE_STALENESS_DAYS]
+    );
+    const covered = new Set();
+    for (const r of (result.rows || [])) {
+      if (r.domain) covered.add(String(r.domain).toLowerCase());
+    }
+    return covered;
+  }
+
+  // Best (lowest) owned-page position per (query, DOMAIN) from TRUE
+  // query→page rows. Keyed per domain, not per query: a candidate's
+  // evidence must hold for every domain contributing its impressions
+  // (noContentYetEmittable), and a query-wide best would let one domain
+  // vouch for another. Per-page position is impression-weighted like
+  // mineAnswerGap's aggregation (each stored position is already an
+  // impression-level average, so a plain avg() lets a one-impression day
+  // at position 1 mask a 100-impression day at 50).
+  async _bestMappedPositionByQueryDomain(queries, since) {
+    if (!queries.length) return new Map();
+    const rows = await db('gsc_query_page_map')
+      .where('date_from', '>=', since)
+      .whereIn('query', queries)
+      .select('query', 'domain')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      // Per-page impressions ride along so immaterial mappings can be
+      // discarded before judging served-ness (materialServingPosition).
+      .sum('impressions as impressions')
+      .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as page_position'))
+      .groupBy('query', 'domain')
+      .groupByRaw(CANON_URL_SQL);
+    const pagesByKey = new Map();
+    for (const r of rows) {
+      if (!r.domain) continue;
+      const key = mappedPositionKey(r.query, r.domain);
+      if (!pagesByKey.has(key)) pagesByKey.set(key, []);
+      pagesByKey.get(key).push(r);
+    }
+    const map = new Map();
+    for (const [key, pages] of pagesByKey) {
+      const pos = materialServingPosition(pages);
+      if (pos != null) map.set(key, pos);
+    }
+    return map;
+  }
+
+  // Route identities of pages with an OPEN rewrite_title_meta action in
+  // seo_actions — the older mechanism's claim on a page. null on failure
+  // so the caller can fail CLOSED: without this evidence we cannot rule
+  // out duplicate rewrite work.
+  async _pagesOwnedByOpenSeoActions(actionTypes = ['rewrite_title_meta']) {
+    try {
+      // status stays 'open' after execution — completion is recorded in
+      // execution_status — so filtering on status alone would exclude a
+      // page FOREVER once it had ever been actioned, even after its CTR
+      // regressed (audit P1). Only 'done' is finished: admin-seo-actions
+      // still permits /execute for every open approved action whose
+      // execution_status is not 'done', so 'failed' and 'manual_required'
+      // remain independently executable and therefore still OWN the page
+      // (audit P1).
+      const rows = await db('seo_actions')
+        .whereIn('action_type', actionTypes)
+        .where({ status: 'open' })
+        .whereNot('execution_status', 'done')
+        .select('url');
+      const out = new Set();
+      for (const r of rows) {
+        const id = seoActionRouteIdentity(r.url);
+        if (id) out.add(id);
+      }
+      return out;
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] seo_actions ownership lookup failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  // The mapped page a low-CTR query actually ranks with, per query — see
+  // pickCtrRewriteTargetPage for the selection rule. Rows from domains
+  // without FRESH map coverage are excluded: syncQueryPageMap swallows
+  // per-domain failures, so a stale row could otherwise nominate an
+  // obsolete page and aim an automated rewrite at the wrong URL (audit
+  // P1 #7). No covered domains → empty map → every candidate fails closed
+  // to do_not_publish.
+  async _rankingPageByQuery(queries, since, coveredDomains = new Set()) {
+    if (!queries.length || !coveredDomains.size) return new Map();
+    const rows = await db('gsc_query_page_map')
+      .where('date_from', '>=', since)
+      .whereIn('query', queries)
+      .whereRaw('lower(domain) = ANY(?)', [Array.from(coveredDomains)])
+      .select('query')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      // Per-page clicks ride along so the selected target can be held to
+      // the CTR threshold on its OWN performance (ctrRewriteTargetFor),
+      // and the mapped-domain set so the caller can require evidence from
+      // every contributing domain.
+      .select(db.raw('array_agg(DISTINCT lower(domain)) as domains'))
+      .sum('clicks as clicks')
+      .sum('impressions as impressions')
+      .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as page_position'))
+      .groupBy('query')
+      .groupByRaw(CANON_URL_SQL);
+    const out = new Map();
+    for (const r of rows) {
+      if (!out.has(r.query)) out.set(r.query, { pages: [], domains: new Set() });
+      const entry = out.get(r.query);
+      entry.pages.push(r);
+      for (const d of (Array.isArray(r.domains) ? r.domains : [])) {
+        if (d) entry.domains.add(String(d).toLowerCase());
+      }
+    }
+    return out;
+  }
+
   // Cross-domain tuple aggregation for representative reachability. The
   // family rows are deliberately HUB-ONLY (blog publishes are hub-only),
   // but mineStrikingDistance / mineNoContentYet / mineSeasonalRising
@@ -1403,7 +1972,22 @@ class GscOpportunityMiner {
       .where('is_branded', false)
       .whereIn('query', queries)
       .select('query', 'service_category', 'city_target', 'intent_type')
+      // Contributing domains per tuple — the no_content_yet mirror needs
+      // them to judge map coverage the way mineNoContentYet does
+      // (queryDomainsCovered).
+      .select(db.raw('array_agg(DISTINCT domain) as domains'))
       .sum('impressions as impressions')
+      // HUB-ONLY impressions alongside the cross-domain total: the
+      // no_content_yet mirror must judge the rep by what THAT bucket
+      // sees, and it is hub-scoped (blog publishes are hub-only). A
+      // variant with sub-threshold hub demand plus enough spoke traffic
+      // to clear the floor would otherwise read as reachable and exclude
+      // its family from BOTH buckets (audit P2).
+      .select(db.raw('sum(impressions) FILTER (WHERE domain = ?) as hub_impressions', [HUB_DOMAIN]))
+      // Hub-only position too: mineNoContentYet judges hub rankings, and a
+      // strong hub position averaged with weak spokes (or the reverse)
+      // would make the mirror disagree with the bucket it mirrors.
+      .select(db.raw('avg(position) FILTER (WHERE domain = ?) as hub_avg_position', [HUB_DOMAIN]))
       .avg('position as plain_avg_position')
       .groupBy('query', 'service_category', 'city_target', 'intent_type');
     const map = new Map();
@@ -1411,9 +1995,12 @@ class GscOpportunityMiner {
       const list = map.get(r.query) || [];
       list.push({
         impressions: parseInt(r.impressions, 10) || 0,
+        hubImpressions: parseInt(r.hub_impressions, 10) || 0,
         plainPosition: Number(r.plain_avg_position) || 0,
+        hubPosition: finitePosition(r.hub_avg_position),
         service_category: r.service_category || null,
         city_target: r.city_target || null,
+        domains: Array.isArray(r.domains) ? r.domains : [],
       });
       map.set(r.query, list);
     }
@@ -1525,11 +2112,15 @@ class GscOpportunityMiner {
     });
   }
 
-  async mineCtrRewrite(since, ownPagesByServiceCity = new Map()) {
+  async mineCtrRewrite(since, { exemptQueries = new Set() } = {}) {
     const rows = await db('gsc_queries')
       .where('date', '>=', since)
       .where('is_branded', false)
       .select('query', 'service_category', 'city_target')
+      // Contributing domains — the rewrite target is trustworthy only if
+      // EVERY one of them has fresh map coverage (same rule as
+      // no_content_yet).
+      .select(db.raw('array_agg(DISTINCT domain) as domains'))
       .sum('clicks as clicks')
       .sum('impressions as impressions')
       .avg('position as avg_position')
@@ -1540,16 +2131,107 @@ class GscOpportunityMiner {
     const filtered = rows.filter(
       (r) => recomputeCtr(r.clicks, r.impressions) < THRESHOLDS.ctrRewriteMaxCtr
     );
+    // Freshness is validated BEFORE the empty early-return. If the sync
+    // has failed long enough that nothing remains in the window, an early
+    // `return []` would bypass the guard entirely: mineAll records no
+    // error and the sweep expires every pending rewrite (audit P1). An
+    // empty mine is only trustworthy when the SOURCE is fresh.
+    const covered = await this._queryPageMapCoveredDomains(since);
+    if (!covered.size) {
+      throw new Error('gsc_query_page_map has no fresh coverage for the window');
+    }
+    if (!filtered.length) return [];
+
+    // Target the page the query ACTUALLY ranks with (true query→page
+    // rows), not the service+city segment's biggest page: a rewrite PR
+    // must edit the URL whose snippet is losing the clicks. Three
+    // independent fail-closed conditions, any of which yields no page →
+    // do_not_publish: a contributing domain without FRESH map coverage
+    // (stale rows could nominate an obsolete page); a contributing domain
+    // that never mapped this query (partial evidence — another domain's
+    // page must not stand in for it); or a selected page whose own CTR is
+    // healthy (the query-level aggregate can be dragged under the
+    // threshold by a weak sibling page).
+    const rankingPages = await this._rankingPageByQuery(
+      filtered.map((r) => r.query), since, covered
+    );
+    // CROSS-QUEUE FENCE. url-intelligence diagnoses ctr_problem and
+    // seo-action-generator queues rewrite_title_meta into seo_actions —
+    // a second, older mechanism for this exact job. Activating this
+    // bucket without arbitration would let one page collect concurrent
+    // duplicate rewrite work (AGENTS.md: extend the existing mechanism,
+    // never run a parallel one). The existing queue is the AUTHORITY: any
+    // page with an open action there is off-limits here. Verified live,
+    // not theoretical — that pipeline is dormant (last run 2026-05-24)
+    // but still holds 42 open unapproved rewrites, one of which matches a
+    // current target.
+    const ownedBySeoActions = await this._pagesOwnedByOpenSeoActions();
+    if (ownedBySeoActions === null) {
+      // THROW, never return []: mineAll records the bucket as errored,
+      // which suppresses its sweep. Returning an empty array would read as
+      // "ran fine, no signal" and the sweep would expire every pending
+      // rewrite on a transient dependency failure (audit P1).
+      throw new Error('seo_actions ownership fence unavailable — cannot rule out duplicate rewrite work');
+    }
+
+    // One page, one rewrite. A query classified under two service/city
+    // values during the window yields two qualifying candidates that can
+    // resolve to the SAME page, and dedupeKey keeps service+city — so both
+    // persist and two rewrite rows target one URL (audit P2). Keep the
+    // highest-impression candidate per resolved page.
+    const claimedPages = new Map();
+    for (const r of [...filtered].sort((a, b) => parseInt(b.impressions, 10) - parseInt(a.impressions, 10))) {
+      const mapped = rankingPages.get(r.query);
+      if (!(queryDomainsCovered(r.domains, covered) && mapped
+        && queryDomainsCovered(r.domains, mapped.domains))) continue;
+      const target = ctrRewriteTargetFor(pagesForCandidateDomains(mapped.pages, r.domains));
+      if (!target) continue;
+      // The claimant must be able to PERSIST. A high-volume but
+      // low-revenue/informational classification could otherwise claim the
+      // page while sitting under the rewrite floor, blocking a
+      // lower-impression sibling that would have qualified — leaving the
+      // page with no rewrite at all (audit P2).
+      const probe = {
+        bucket: 'ctr_rewrite',
+        query: r.query,
+        page_url: target,
+        service: r.service_category || inferServiceFromQuery(r.query),
+        city: normalizeCity(r.city_target) || inferCityFromQuery(r.query),
+      };
+      probe.action_type = actionForOpportunity(probe);
+      const { total } = scoreOpportunity(probe, {
+        position: parseFloat(r.avg_position),
+        impressions: parseInt(r.impressions, 10),
+      });
+      if (total < persistFloorFor(probe)) continue;
+      const id = routeIdentity(target);
+      if (!claimedPages.has(id)) claimedPages.set(id, r);
+    }
 
     return filtered.map((r) => {
       const city = normalizeCity(r.city_target) || inferCityFromQuery(r.query);
       const service = r.service_category || inferServiceFromQuery(r.query);
-      // ctr_rewrite REQUIRES a target page (we're rewriting its title/meta).
-      // If no matching own page exists, actionForOpportunity falls through
-      // to do_not_publish for that opportunity — which is the right outcome
-      // when there's nothing to rewrite. Use normalized values to match
-      // the map keys built in _loadOwnPagesByServiceCity.
-      const pageUrl = ownPagesByServiceCity.get(ownPageKey(service, city)) || null;
+      const mapped = rankingPages.get(r.query);
+      const resolved = (queryDomainsCovered(r.domains, covered)
+        && mapped
+        && queryDomainsCovered(r.domains, mapped.domains))
+        ? ctrRewriteTargetFor(pagesForCandidateDomains(mapped.pages, r.domains))
+        : null;
+      const targetId = resolved ? routeIdentity(resolved) : null;
+      // Coverage/mapping unavailable for a contributing domain means we
+      // could not JUDGE this query — its pending row must survive the
+      // sweep rather than read as a recovered signal (audit P1).
+      if (!queryDomainsCovered(r.domains, covered)
+        || !mapped
+        || !queryDomainsCovered(r.domains, mapped.domains)) {
+        exemptQueries.add(r.query);
+      }
+      const pageUrl = (
+        // The older seo_actions queue owns this page — yield to it.
+        (resolved && ownedBySeoActions.has(targetId))
+        // A higher-impression sibling candidate already claimed the page.
+        || (resolved && claimedPages.get(targetId) !== r)
+      ) ? null : resolved;
       const opp = {
         bucket: 'ctr_rewrite',
         query: r.query,
@@ -1634,130 +2316,6 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineCannibalization(since) {
-    // Heuristic: queries with significant impressions where the site
-    // owns 2+ URLs both ranking in the same period at similar service+city.
-    // True query→page mapping isn't in GSC's BigQuery export schema we
-    // have locally; this is an upper-bound flag for human review.
-    const queries = await db('gsc_queries')
-      .where('date', '>=', since)
-      .where('is_branded', false)
-      .select('query', 'service_category', 'city_target')
-      .sum('impressions as impressions')
-      .groupBy('query', 'service_category', 'city_target')
-      .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore * 4]);
-
-    const out = [];
-    for (const q of queries) {
-      // Find own URLs that match service+city and carry material
-      // impressions. The per-page HAVING filters out URLs that only
-      // surface for the query incidentally; the JS-side length check
-      // then enforces the ≥ cannibalizationMinUrls floor.
-      //
-      // Earlier iteration had `havingRaw('count(distinct page_url) >= 2')`
-      // here after `groupBy('page_url')` — but that always evaluates to 1
-      // per group, so the bucket silently produced zero results. The
-      // correct per-page filter is on impressions; URL count is a
-      // post-query JS check.
-      const ownPages = await db('gsc_pages')
-        .where('date', '>=', since)
-        .where('service_category', q.service_category || '')
-        .where('city_target', q.city_target || '')
-        .select(db.raw(`${CANON_URL_SQL} as page_url`))
-        .sum('impressions as impressions')
-        .groupByRaw(CANON_URL_SQL)
-        .havingRaw('sum(impressions) > ?', [10]);
-      if (ownPages.length < THRESHOLDS.cannibalizationMinUrls) continue;
-
-      const city = normalizeCity(q.city_target);
-      const service = q.service_category;
-      const opp = {
-        bucket: 'cannibalization',
-        query: q.query,
-        page_url: null,
-        service,
-        city,
-        signal_metadata: {
-          competing_urls: ownPages.slice(0, 8).map((p) => ({
-            page_url: p.page_url,
-            impressions: parseInt(p.impressions, 10),
-          })),
-          impressions: parseInt(q.impressions, 10),
-        },
-      };
-      const { total, breakdown } = scoreOpportunity(opp, {
-        position: 5,
-        impressions: opp.signal_metadata.impressions,
-      });
-      opp.score = total;
-      opp.score_breakdown = breakdown;
-      opp.action_type = actionForOpportunity(opp);
-      opp.dedupe_key = dedupeKey(opp);
-      out.push(opp);
-    }
-    return out;
-  }
-
-  async minePageTypeMismatch(since) {
-    // Heuristic until SERP profiler ships:
-    //   a blog URL is ranking for a query that has explicit city + service
-    //   intent (transactional-local SERP wants a city-service page).
-    const pages = await db('gsc_pages')
-      .where('date', '>=', since)
-      .select(db.raw(`${CANON_URL_SQL} as page_url`))
-      .max('page_type as page_type')
-      .max('service_category as service_category')
-      .max('city_target as city_target')
-      .sum('impressions as impressions')
-      .avg('position as avg_position')
-      .groupByRaw(CANON_URL_SQL)
-      .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore]);
-
-    const out = [];
-    for (const p of pages) {
-      const pageType = inferPageType(p.page_url, p.page_type);
-      if (pageType !== 'blog') continue;
-      const city = normalizeCity(p.city_target) || inferCityFromUrl(p.page_url);
-      const service = p.service_category || inferServiceFromUrl(p.page_url);
-      if (!city || !service) continue;
-
-      // Has it surfaced in queries with transactional-local intent?
-      const localQueries = await db('gsc_queries')
-        .where('date', '>=', since)
-        .where('city_target', p.city_target || '')
-        .where('service_category', p.service_category || '')
-        .where('intent_type', 'service')
-        .sum('impressions as impressions')
-        .first();
-
-      if (!localQueries || parseInt(localQueries.impressions || 0, 10) < THRESHOLDS.minImpressionsToScore) continue;
-
-      const opp = {
-        bucket: 'page_type_mismatch',
-        query: null,
-        page_url: p.page_url,
-        service,
-        city,
-        signal_metadata: {
-          page_type: pageType,
-          impressions: parseInt(p.impressions, 10),
-          avg_position: parseFloat(p.avg_position),
-          local_query_impressions: parseInt(localQueries.impressions, 10),
-        },
-      };
-      const { total, breakdown } = scoreOpportunity(opp, {
-        position: opp.signal_metadata.avg_position,
-        impressions: opp.signal_metadata.impressions,
-      });
-      opp.score = total;
-      opp.score_breakdown = breakdown;
-      opp.action_type = actionForOpportunity(opp);
-      opp.dedupe_key = dedupeKey(opp);
-      out.push(opp);
-    }
-    return out;
-  }
-
   async mineLocalGap(since, ownPagesByServiceCity = new Map()) {
     // {city, service} pairs with impression demand but no own page in
     // gsc_pages matching that pair.
@@ -1778,10 +2336,13 @@ class GscOpportunityMiner {
       const service = q.service_category;
       if (!city || !service) continue;
 
-      // Use the normalized own-page map (same fix as mineNoContentYet).
-      // Earlier iteration queried gsc_pages with raw classifier values,
-      // missing pages where the classification was empty in gsc_pages
-      // but resolvable via inferServiceFromUrl/inferCityFromUrl.
+      // Use the normalized own-page map. Earlier iteration queried
+      // gsc_pages with raw classifier values, missing pages where the
+      // classification was empty in gsc_pages but resolvable via
+      // inferServiceFromUrl/inferCityFromUrl. Segment-level coverage is
+      // the RIGHT granularity here (unlike per-query no_content_yet): the
+      // bucket asks "does a page exist for this city+service pair", so
+      // any page classified to the pair genuinely answers it.
       if (ownPagesByServiceCity.get(ownPageKey(service, city))) continue;
 
       const opp = {
@@ -2192,7 +2753,7 @@ class GscOpportunityMiner {
       // Blog publishes are HUB-ONLY (hubOnlyBlogDomains in the publisher);
       // gsc_queries also holds every spoke property, and spoke-observed
       // demand must never mint a hub post it doesn't have.
-      .where('domain', 'wavespestcontrol.com')
+      .where('domain', HUB_DOMAIN)
       .select('query', 'service_category', 'city_target', 'intent_type')
       .sum('impressions as impressions')
       // Impressions-weighted, matching mineAnswerGap: each stored position is
@@ -2220,18 +2781,29 @@ class GscOpportunityMiner {
     // competing-rows bug from the representative's angle (Codex r17).
     const reachQueries = Array.from(new Set(allFams
       .flatMap((f) => f.variants.map((v) => v.query))));
-    const [crossTuples, seasonalEmittable] = reachQueries.length
+    const [crossTuples, seasonalEmittable, reachCoveredDomains] = reachQueries.length
       ? await Promise.all([
         this._crossDomainRepTuples(reachQueries, since),
         this._seasonalEmittableQueries(reachQueries, periodDays),
+        this._queryPageMapCoveredDomains(since),
       ])
-      : [new Map(), new Set()];
+      : [new Map(), new Set(), new Set()];
+    // Served-ness inputs for the no_content_yet mirror inside reachability
+    // — same map, same aggregation, same per-domain coverage rule
+    // mineNoContentYet uses.
+    const reachBestMapped = reachCoveredDomains.size && reachQueries.length
+      ? await this._bestMappedPositionByQueryDomain(reachQueries, since)
+      : new Map();
     const fams = allFams.filter((f) => {
       const anyVariantReachable = f.variants.some((v) => listicleFamilyRepReachable(
         { ...v, tuples: crossTuples.get(v.query) || v.tuples },
         ownPagesByServiceCity,
         THRESHOLDS,
-        { seasonalEmittable: seasonalEmittable.has(v.query) }
+        {
+          seasonalEmittable: seasonalEmittable.has(v.query),
+          mappedPositions: reachBestMapped,
+          mapCoveredDomains: reachCoveredDomains,
+        }
       ));
       return listicleFamilyEligible(f, THRESHOLDS, { repQualifiesQueryBucket: anyVariantReachable });
     });
@@ -2878,32 +3450,135 @@ class GscOpportunityMiner {
     }
   }
 
-  async mineNoContentYet(since, ownPagesByServiceCity = new Map()) {
-    // Queries with impressions on the property but no own page even
-    // appearing in gsc_pages for the matching service+city.
+  async mineNoContentYet(since, { periodDays = GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS, exemptQueries = new Set() } = {}) {
+    // Queries with impressions but no owned page USEFULLY ranking for them
+    // — served-ness on TRUE query→page rows, not classification overlap.
+    // Two earlier iterations both broke in opposite directions: raw
+    // service_category = '' predicates matched nothing (over-emitting for
+    // covered topics), then the service+city own-page map check marked a
+    // whole segment covered when ANY page shared the classification —
+    // with 28d of cross-property data every segment has some page, so the
+    // bucket emitted ZERO rows all-time (verified prod 2026-08-11).
+    // noContentYetMapEmittable is the corrected test; the reachability mirror
+    // in listicleFamilyRepReachable applies the same one.
     const queries = await db('gsc_queries')
       .where('date', '>=', since)
       .where('is_branded', false)
+      // HUB-ONLY, exactly as mineListicleFamily is and for the same
+      // reason: this bucket's output is a blog or city-service page, blog
+      // publishes are hub-only (hubOnlyBlogDomains in the publisher), and
+      // the emitted brief carries no target_sites — so spoke-observed
+      // demand would mint a hub post the hub does not have the demand
+      // for (audit P1). Cross-domain aggregation is right for judging
+      // whether a page RANKS (see _bestMappedPositionByQueryDomain); it
+      // is wrong for deciding where to PUBLISH.
+      .where('domain', 'wavespestcontrol.com')
       .select('query', 'service_category', 'city_target', 'intent_type')
+      // Contributing domains ride along so the served-check can require
+      // map coverage from each of them (queryDomainsCovered).
+      .select(db.raw('array_agg(DISTINCT domain) as domains'))
       .sum('impressions as impressions')
       .avg('position as avg_position')
       .groupBy('query', 'service_category', 'city_target', 'intent_type')
       .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore])
       .havingRaw('avg(position) > ?', [THRESHOLDS.strikingDistancePositionMax]);
 
-    const out = [];
+    // ONE candidate per query. A classifier change mid-window returns
+    // separate rows per (service_category, city_target), every one of them
+    // consults the SAME query-level evidence, and dedupeKey embeds service
+    // and city — so two splits would both persist and the runner would
+    // draft two posts for one search intent (audit P1). The
+    // highest-impression classification wins, mirroring how
+    // clusterListicleFamilies breaks the same tie.
+    const byQuery = new Map();
     for (const q of queries) {
       const city = normalizeCity(q.city_target) || inferCityFromQuery(q.query);
-      const service = q.service_category || inferServiceFromQuery(q.query);
+      // CANONICALIZE, don't store the raw classifier value. The sync
+      // writes snake_case ('tree_shrub') and a 'specialty' bucket with no
+      // facts identity of its own; facts-sufficiency maps only the
+      // hyphenated coarse ids, so a raw value reaches the runner as
+      // facts_unmappable and parks instead of drafting (audit P2). Same
+      // helper the listicle lane uses for the same reason.
+      // The sync's SERVICE_PATTERNS are UNBOUNDED substring tests, so
+      // "types of important documents florida" arrives stored as 'pest'
+      // ('ant' inside 'important'). Trusting that would enqueue pest
+      // content for an unrelated query now that this bucket actually
+      // emits. classifierQuerySupported is the boundary-aware validator
+      // the listicle lane already built for this exact failure; a stored
+      // category counts only with real query evidence, otherwise fall
+      // through to contextual inference.
+      const canon = canonicalizeServiceCategory(q.service_category);
+      const service = (canon && classifierQuerySupported(q.service_category, canon, q.query) ? canon : null)
+        || inferServiceFromQuery(q.query);
       if (!service) continue;
+      const impressions = parseInt(q.impressions, 10) || 0;
+      // PERSISTABLE first, then impressions. A slightly larger
+      // low-revenue classification could otherwise win the collapse, fall
+      // under its floor, and be dropped — while the family lane yielded
+      // because reachability saw the smaller PERSISTABLE tuple, leaving
+      // the demand with neither bucket (audit P1). Reachability admits a
+      // rep when ANY tuple clears the floor, so the collapse must prefer
+      // a clearing tuple for the two to agree.
+      const probe = {
+        bucket: 'no_content_yet', query: q.query, page_url: null, service, city,
+      };
+      probe.action_type = actionForOpportunity(probe);
+      const { total } = scoreOpportunity(probe, {
+        position: parseFloat(q.avg_position), impressions,
+      });
+      const persistable = total >= persistFloorFor(probe);
+      const existing = byQuery.get(q.query);
+      const better = !existing
+        || (persistable && !existing.persistable)
+        || (persistable === existing.persistable && impressions > existing.impressions);
+      if (better) {
+        byQuery.set(q.query, { q, service, city, impressions, persistable });
+      }
+    }
+    const candidates = Array.from(byQuery.values());
+    // Same ordering rule as ctr_rewrite: prove the source is fresh before
+    // an empty result is allowed to mean "no signal" (audit P1).
+    const covered = await this._queryPageMapCoveredDomains(since);
+    if (!covered.has(HUB_DOMAIN)) {
+      throw new Error(`gsc_query_page_map has no fresh coverage for ${HUB_DOMAIN}`);
+    }
+    if (!candidates.length) return [];
 
-      // Use the normalized own-page map (built once in mineAll) so the
-      // ownership check matches our normalized service+city values.
-      // Earlier iteration queried gsc_pages with raw service_category =
-      // '' when only inferServiceFromQuery resolved a service, missing
-      // every page that needed URL inference — incorrectly enqueued
-      // no_content_yet rows for topics we already cover.
-      if (ownPagesByServiceCity.get(ownPageKey(service, city))) continue;
+    // Fail CLOSED on missing map coverage: "empty means the check didn't
+    // run, not that nothing is served" — emitting unchecked candidates
+    // would flood the queue with rows for already-served topics. Coverage
+    // is judged PER CONTRIBUTING DOMAIN (queryDomainsCovered): map syncs
+    // fail independently per domain, so one domain's rows must not vouch
+    // for another domain's absences.
+    const bestMapped = await this._bestMappedPositionByQueryDomain(
+      candidates.map((c) => c.q.query), since
+    );
+    // ARBITRATION vs seasonal_rising. A service query can be both rising
+    // ≥50% and weakly mapped, and for a cityless query both buckets emit
+    // new_supporting_blog — under different dedupe keys (bucket is the
+    // first key segment), so persistAll keeps both and the runner drafts
+    // TWO posts for one intent (audit P1). _seasonalEmittableQueries is
+    // the same admission mirror the listicle lane already uses for this
+    // exact purpose; seasonal_rising runs earlier in mineAll's list, so
+    // yielding to it here is the stable direction.
+    const seasonalEmittable = await this._seasonalEmittableQueries(
+      candidates.map((c) => c.q.query), periodDays
+    );
+
+    let uncovered = 0;
+    const out = [];
+    for (const { q, service, city } of candidates) {
+      if (!queryDomainsCovered(q.domains, covered)) {
+        uncovered += 1;
+        exemptQueries.add(q.query); // evidence missing, not signal recovered
+        continue;
+      }
+      // Evidence per CONTRIBUTING DOMAIN — every one must map this query
+      // to a weakly-ranking page (see noContentYetEmittable).
+      const domainPositions = (Array.isArray(q.domains) ? q.domains : [])
+        .map((d) => bestMapped.get(mappedPositionKey(q.query, d)) ?? null);
+      if (!noContentYetEmittable(domainPositions)) continue;
+      if (seasonalEmittable.has(q.query)) continue; // seasonal_rising owns it
 
       const opp = {
         bucket: 'no_content_yet',
@@ -2915,6 +3590,17 @@ class GscOpportunityMiner {
           impressions: parseInt(q.impressions, 10),
           avg_position: parseFloat(q.avg_position),
           intent_type: q.intent_type,
+          // The specific topic behind specialty→broad canonicalization.
+          // 'wasp' and 'bed bug' canonicalize to 'pest', 'aeration' to
+          // 'lawn' — and those narrow topics are individually FAQ-blocked
+          // while the broad service is not. Without this the brief keeps
+          // its default FAQ mandate (isFaqBlockedService reads this field)
+          // and guardrail-options passes only the broad service to the
+          // publish guard, so the draft earns an FAQ the repo treats as
+          // policy-blocked and parks on FAQ_BLOCKED_SERVICE. The listicle
+          // lane already solved this; the newly-emitting bucket has to
+          // call the same helper (Codex P1).
+          specialty_topic: extractSpecialtyTopic([q.query]),
         },
       };
       const { total, breakdown } = scoreOpportunity(opp, {
@@ -2927,11 +3613,75 @@ class GscOpportunityMiner {
       opp.dedupe_key = dedupeKey(opp);
       out.push(opp);
     }
-    return out;
+    if (uncovered) {
+      // Per-candidate evidence decisions, NOT an infrastructure failure —
+      // the bucket ran. A skipped candidate's pending row is retired by
+      // the sweep, which is acceptable because retirement is 'expired'
+      // (revivable): the next mine with restored coverage re-emits it and
+      // the upsert revives the row.
+      logger.warn(`[gsc-opp-miner] no_content_yet: ${uncovered} candidate(s) skipped — a contributing domain has no in-window query→page map rows`);
+    }
+
+    // ONE row per city-service TARGET. Several distinct weak queries can
+    // resolve to the same (service, city), and every one of them
+    // create-or-refreshes the SAME page — persisted separately, the runner
+    // drafts that one page once per query. This is the per-query collapse
+    // above one level up: that one dedupes the classifier splits OF a
+    // query, this one dedupes the queries OF a target (uncapped pre-push
+    // audit P1).
+    //
+    // The winner keeps its OWN query-derived dedupe key. A target-keyed row
+    // (query dropped from the key) would dedupe just as well but be stable
+    // forever, and the upsert's frozen-row guard skips 'done'/'skipped'
+    // rows ENTIRELY — so once a segment's page completed once, no later
+    // query could ever enqueue that target again and the bucket would go
+    // permanently silent for it, which is the exact failure this PR exists
+    // to fix (cloud P2). Every contributing query rides along in
+    // signal_metadata instead, so the brief still sees the full demand
+    // rather than only the winner's intent.
+    const targets = new Map();
+    const collapsed = [];
+    for (const opp of out) {
+      if (opp.action_type !== 'create_or_refresh_city_service_page') {
+        collapsed.push(opp);
+        continue;
+      }
+      const key = ownPageKey(opp.service, opp.city);
+      if (!targets.has(key)) targets.set(key, []);
+      targets.get(key).push(opp);
+    }
+    for (const group of targets.values()) {
+      // Same bucket and action across the group, so persistFloorFor is
+      // identical for every member and the top score IS the persistable-
+      // first pick the per-query collapse above makes explicitly.
+      const winner = group.reduce((best, o) => (o.score > best.score ? o : best), group[0]);
+      if (group.length > 1) {
+        winner.signal_metadata.contributing_queries = group
+          .map((o) => o.query)
+          .sort();
+        winner.signal_metadata.contributing_impressions = group
+          .reduce((sum, o) => sum + (o.signal_metadata.impressions || 0), 0);
+        // A blocked topic on a LOSING query still binds the page, because
+        // the brief's coverage section makes the draft address every
+        // collapsed phrasing — so a generic winner beside a 'wasp' or
+        // 'bed bug' sibling would otherwise keep its FAQ mandate and park
+        // on FAQ_BLOCKED_SERVICE. Winner first: the helper returns the
+        // first match, so its own topic still wins when it has one.
+        winner.signal_metadata.specialty_topic = extractSpecialtyTopic([
+          winner.query,
+          ...group.filter((o) => o !== winner).map((o) => o.query),
+        ]);
+      }
+      collapsed.push(winner);
+    }
+    return collapsed;
   }
 
   // ── persistence ────────────────────────────────────────────────────
 
+  // persistAll is purely ADDITIVE. Every retirement lives in the
+  // canonical-mine sweeps (_sweepRecoveredQueries / _sweepStaleFamilyRows)
+  // so a manual short-window run can never destroy queued work.
   async persistAll(opportunities, trx = null) {
     const runner = trx || db;
     if (!opportunities.length) return 0;
@@ -2966,10 +3716,7 @@ class GscOpportunityMiner {
       // Bounded to the lane's two intended actions: a demoted family row
       // (do_not_publish, or a rerouted city-service action) must NOT ride
       // the blog floor into the queue.
-      const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
-      const scoreFloor = o.bucket === 'listicle_family' && familyFloorActions.includes(o.action_type)
-        ? minScoreToActFor('new_supporting_blog')
-        : minScoreToActFor(o.action_type);
+      const scoreFloor = persistFloorFor(o);
       if (o.score < scoreFloor) {
         // Rollout hygiene for the near-me demotion: a previously persisted
         // new_supporting_blog row shares this candidate's dedupe_key, but a
@@ -3091,6 +3838,251 @@ class GscOpportunityMiner {
     return count;
   }
 
+  /**
+   * Companion keys that must survive a retirement pass: the ones the
+   * current batch stands behind, UNION the ones live queue rows do.
+   *
+   * The batch alone is not enough. A link_boost key carries no query and
+   * no source bucket, so it is shared across parents — and a parent can be
+   * absent from this batch for reasons unrelated to its validity: its
+   * bucket errored this run, or its signal dipped for a window. Reading
+   * live page-editing rows straight from the queue covers both without
+   * needing to know which bucket failed.
+   *
+   * retiringKeys are excluded: those rows are still 'pending' right now,
+   * so each would otherwise contribute its OWN companion key and shield
+   * it — retiring the parent while its companion stayed claimable, the
+   * exact leak this protection exists to prevent.
+   *
+   * Fails CLOSED on a query error by returning null: callers skip
+   * companion retirement entirely rather than expiring everything.
+   */
+  async _companionProtection(runner, opportunities = [], retiringKeys = new Set()) {
+    const keys = companionProtectionKeys(opportunities);
+    try {
+      let liveQ = runner('opportunity_queue')
+        .whereIn('status', ['pending', 'claimed', 'pending_review'])
+        .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
+        .whereNotNull('page_url');
+      if (retiringKeys.size) liveQ = liveQ.whereNotIn('dedupe_key', Array.from(retiringKeys));
+      const live = await liveQ.select('page_url', 'service', 'city');
+      for (const r of live) {
+        keys.add(dedupeKey({
+          bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
+        }));
+      }
+      return keys;
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] companion protection lookup failed (${err.message}) — companion retirement suppressed this run`);
+      return null;
+    }
+  }
+
+  /**
+   * Expire pending link_boost rows whose page the older seo_actions queue
+   * has since claimed for internal-link work. The derivation-time fence
+   * only covers companions minted THIS run; a page can acquire an open
+   * legacy action after ours was queued, and then both are independently
+   * claimable. Pending only — claimed/in-review work is in flight —
+   * locked before update, and revivable ('expired') if the legacy action
+   * completes and the page becomes ours again.
+   */
+  async _retireLegacyOwnedCompanions(trx, ownedPages) {
+    if (!(ownedPages instanceof Set) || !ownedPages.size) return;
+    const runner = trx || db;
+    try {
+      const locked = await runner('opportunity_queue')
+        .where({ bucket: 'link_boost', status: 'pending' })
+        .whereNotNull('page_url')
+        .select('dedupe_key', 'page_url')
+        .forUpdate();
+      const stale = locked.filter((r) => ownedPages.has(routeIdentity(r.page_url)));
+      if (!stale.length) return;
+      await runner('opportunity_queue')
+        .whereIn('dedupe_key', stale.map((r) => r.dedupe_key))
+        .update({
+          status: 'expired', skip_reason: 'seo_actions_owns_page', updated_at: new Date(),
+        });
+      logger.info(`[gsc-opp-miner] link_boost: ${stale.length} companion(s) yielded to seo_actions`);
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] legacy companion retirement failed: ${err.message}`);
+      throw err;
+    }
+  }
+
+  /**
+   * THE retirement mechanism for the query buckets this PR revives — one
+   * sweep, no siblings (AGENTS.md). Any pending row whose dedupe key the
+   * current mine did not re-emit as persistable is stale evidence: the
+   * signal recovered (CTR climbed back, impressions or position left the
+   * gates), the query became served, the map evidence stopped being
+   * trustworthy, or the target page MOVED (a ctr_rewrite key embeds
+   * page_url, so a moved target retires the old key by construction).
+   * Left alone, those rows stay claimable for the full 14 days and act on
+   * evidence the mine has already withdrawn — optimizing a page that now
+   * performs fine, or worse, publishing a page for a query an owned page
+   * has since started serving.
+   *
+   * Mirrors the family sweep's contract: the CALLER guards on a successful
+   * bucket run (an errored bucket's empty output means "didn't run", not
+   * "no signal"), only PENDING rows are touched, and retirement is
+   * 'expired' — revivable the moment the signal returns. Companions follow
+   * their parent, minus anything the current batch still stands behind.
+   */
+  async _sweepRecoveredQueries(bucket, bucketOpportunities = [], trx = null, fullBatch = null, exemptQueries = new Set(), since = null) {
+    const runner = trx || db;
+    // Keyed on persistable DEDUPE KEYS, not query strings: one query can
+    // produce several (query, service, city, intent) candidates, so a
+    // surviving tuple would otherwise shelter a sibling tuple whose
+    // evidence disappeared (audit P1). Below-floor candidates are not
+    // live — persistAll drops them, so the stored row keeps a stale
+    // higher score.
+    const liveKeys = new Set(
+      bucketOpportunities.filter(isPersistable).map((o) => o.dedupe_key).filter(Boolean)
+    );
+    try {
+      // FOR UPDATE: claimNext can otherwise claim a row between the select
+      // and the update — the guarded parent update then skips it while its
+      // companion is still expired from the stale snapshot. Locking also
+      // lets the update key on the LOCKED rows themselves rather than
+      // re-running the predicate against a moved target (audit P1).
+      let staleQ = runner('opportunity_queue')
+        .where({ bucket, status: 'pending' });
+      if (liveKeys.size) staleQ = staleQ.whereNotIn('dedupe_key', Array.from(liveKeys));
+      // Rows for queries we could not judge this run are preserved: the
+      // sweep retires RECOVERED signals, never unavailable evidence.
+      if (exemptQueries.size) staleQ = staleQ.whereNotIn('query', Array.from(exemptQueries));
+      // Read WITHOUT a lock first, purely to derive companion keys — the
+      // authoritative lock below covers parents and companions in ONE
+      // statement. Locking parents, running more queries, then locking
+      // companions leaves a gap in which claimNext (FOR UPDATE SKIP
+      // LOCKED) can claim a companion: the later select would omit it as
+      // no-longer-pending and the transaction would expire only its
+      // parent, leaving a claimed orphan doing obsolete link work
+      // (audit P1).
+      const probe = await staleQ.select('dedupe_key', 'page_url', 'service', 'city');
+      if (!probe.length) return;
+
+      // DOMAIN-SCOPED. ctr_rewrite mines across every property, so a
+      // single stale spoke sync makes that property's queries vanish from
+      // the candidate set entirely — they never even reach exemptQueries —
+      // and their pending rows would read as recovered (audit P1). A row
+      // is only judged when the domain of the page it targets has fresh
+      // coverage. Rows without a page (hub-only buckets) ride HUB
+      // coverage. Coverage unavailable → judge nothing.
+      const sweepCovered = since ? await this._queryPageMapCoveredDomains(since) : null;
+      const probeStale = probe.filter((r) => {
+        if (!sweepCovered) return false;
+        const host = r.page_url
+          ? String(routeIdentity(r.page_url) || '').split('::')[0]
+          : HUB_DOMAIN;
+        return !!host && sweepCovered.has(host);
+      });
+      if (!probeStale.length) return;
+
+      // Protection must see the COMPLETE batch — a live decay_refresh
+      // parent targeting a stale rewrite's page shares its companion key,
+      // and the single-bucket list cannot see it.
+      const protectedKeys = await this._companionProtection(
+        runner, fullBatch || bucketOpportunities, new Set(probeStale.map((r) => r.dedupe_key))
+      );
+      // FAIL CLOSED, as documented on _companionProtection: without the
+      // protection set we cannot tell which companions are still needed,
+      // and expiring parents anyway would orphan a still-claimable
+      // companion from its retired parent (audit P1). Suppress the whole
+      // retirement for this run — the next mine retries.
+      if (protectedKeys === null) {
+        logger.warn(`[gsc-opp-miner] ${bucket} sweep: companion protection unavailable — retirement suppressed this run`);
+        return;
+      }
+      const companionKeys = probeStale
+        .filter((r) => r.page_url)
+        .map((r) => dedupeKey({
+          bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
+        }))
+        .filter((k) => !protectedKeys.has(k));
+
+      // ONE locking statement over parents AND companions. Everything
+      // above ran unlocked and is only used to derive keys; this select is
+      // the authoritative snapshot, so nothing can be claimed between
+      // locking a parent and locking its companion. Rows claimed before it
+      // are simply absent (the status filter re-evaluates under the lock).
+      // Which companion rows actually EXIST as pending work. A
+      // synthesized key with no row behind it — the cap excluded it, link
+      // boosts are disabled, or another queue owns the page — must not
+      // block its parent forever: the lock can never return a row that
+      // does not exist (audit P2).
+      const existingCompanions = companionKeys.length
+        ? new Set((await runner('opportunity_queue')
+          .where({ bucket: 'link_boost', status: 'pending' })
+          .whereIn('dedupe_key', companionKeys)
+          .select('dedupe_key')).map((r) => r.dedupe_key))
+        : new Set();
+      const targetKeys = probeStale.map((r) => r.dedupe_key).concat(Array.from(existingCompanions));
+      const locked = await runner('opportunity_queue')
+        .whereIn('dedupe_key', targetKeys)
+        .where('status', 'pending')
+        .select('dedupe_key')
+        .forUpdate();
+      if (!locked.length) return;
+
+      // ATOMIC PAIRS: retire a parent and the companion it owns together,
+      // or neither. claimNext can claim a companion between the unlocked
+      // probe and this lock; the status predicate then omits it while its
+      // parent still locks and expires, and the worker executes obsolete
+      // link work against a retired parent (audit P1). A parent whose
+      // intended companion could not be locked is left alone — the next
+      // canonical mine retries the pair once that work finishes.
+      const lockedKeys = new Set(locked.map((r) => r.dedupe_key));
+      const targetedCompanions = new Set(companionKeys);
+      const parentsByCompanion = new Map();
+      const blockedParents = new Set();
+      for (const r of probeStale) {
+        if (!r.page_url) continue;
+        const ck = dedupeKey({
+          bucket: 'link_boost', service: r.service, city: r.city, page_url: r.page_url,
+        });
+        if (!targetedCompanions.has(ck) || !existingCompanions.has(ck)) continue;
+        // Only companions we INTENDED to retire block their parent; a
+        // protected companion means another live parent still needs it,
+        // which is no reason to keep ours.
+        if (!lockedKeys.has(ck)) blockedParents.add(r.dedupe_key);
+        if (!parentsByCompanion.has(ck)) parentsByCompanion.set(ck, []);
+        parentsByCompanion.get(ck).push(r.dedupe_key);
+      }
+      const expiringParents = new Set(locked
+        .map((r) => r.dedupe_key)
+        .filter((k) => !targetedCompanions.has(k) && !blockedParents.has(k)));
+      // BOTH directions of the pair invariant. The previous pass only
+      // deferred a parent whose companion was claimed; the mirror case —
+      // the PARENT claimed while the companion stayed pending — would
+      // expire an orphaned companion whose parent is still live work
+      // (audit P1). A companion expires only when every parent that
+      // targeted it is being expired too.
+      const expireKeys = locked.map((r) => r.dedupe_key).filter((k) => {
+        if (!targetedCompanions.has(k)) return expiringParents.has(k);
+        const parents = parentsByCompanion.get(k) || [];
+        return parents.length > 0 && parents.every((pk) => expiringParents.has(pk));
+      });
+      if (blockedParents.size) {
+        logger.info(`[gsc-opp-miner] ${bucket} sweep: ${blockedParents.size} pair(s) deferred — companion claimed mid-sweep`);
+      }
+      if (!expireKeys.length) return;
+
+      await runner('opportunity_queue')
+        .whereIn('dedupe_key', expireKeys)
+        .update({
+          status: 'expired', skip_reason: `${bucket}_signal_recovered`, updated_at: new Date(),
+        });
+      logger.info(`[gsc-opp-miner] ${bucket} sweep: ${expireKeys.length} row(s) expired (parents + companions)`);
+    } catch (err) {
+      // Inside the persist transaction the caller owns rollback semantics;
+      // rethrow so a failed sweep cannot leave half-reconciled state.
+      logger.warn(`[gsc-opp-miner] ${bucket} recovered-query sweep failed: ${err.message}`);
+      throw err;
+    }
+  }
+
   async expireStale() {
     const result = await db('opportunity_queue')
       .where('status', 'pending')
@@ -3139,6 +4131,15 @@ module.exports._internals = {
   extractSpecialtyTopic,
   listicleFamilyRefreshDedupeKey,
   listicleFamilyRepReachable,
+  noContentYetMapEmittable,
+  noContentYetEmittable,
+  pickCtrRewriteTargetPage,
+  ctrRewriteTargetFor,
+  pagesForCandidateDomains,
+  seoActionRouteIdentity,
+  routeIdentity,
+  materialServingPosition,
+  queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
   // The page-edit conflict action set — shared with refresh-audit so every
   // producer's in-flight check covers the same actions (r34 follow-up).

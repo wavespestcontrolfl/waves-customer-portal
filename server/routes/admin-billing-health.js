@@ -211,6 +211,10 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
           customerId,
           purpose: 'payment_receipt',
           identityTrustLevel: 'admin_operator',
+          // Staff explicitly charged and receipted this customer — operator
+          // provenance keeps the receipt on SMS (push routing stays out of
+          // operator-triggered sends).
+          operatorInitiated: true,
           body,
           metadata: { source: 'admin_manual_charge', paymentId: payment?.id || null },
         });

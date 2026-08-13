@@ -81,6 +81,19 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(combos[0].service.frequency).toBe('bimonthly');
   });
 
+  test('Enhanced lawn + 9x T&S with NUMERIC nine cadences combine at every_6_weeks (codex r26 P1)', () => {
+    // Engine-backed lines carry frequency: 9 — the generic bucket read
+    // both as bimonthly and the seeding gate then rejected the combined
+    // row's cadence/visits mismatch.
+    const { combos } = combineRecurringServicesForScheduling([
+      { name: 'Lawn Care', service: 'lawn_care', frequency: 9, visitsPerYear: 9 },
+      { name: 'Tree & Shrub Care Program', frequency: 9, visitsPerYear: 9 },
+    ]);
+    expect(combos).toHaveLength(1);
+    expect(combos[0].service.frequency).toBe('every_6_weeks');
+    expect(combos[0].service.visitsPerYear).toBe(9);
+  });
+
   test('9-app lawn never combines with a 6-visit T&S program (same bimonthly pattern bucket)', () => {
     // patternFromVisitsPerYear buckets 6–11 visits as "bimonthly" — explicit
     // visit counts are the cadence truth (Codex P1).
@@ -90,6 +103,117 @@ describe('combineRecurringServicesForScheduling', () => {
     ]);
     expect(combos).toEqual([]);
     expect(remaining).toHaveLength(2);
+  });
+
+  test('a lawn line with CONFLICTING visit-count aliases never combines (Codex r12 P1)', () => {
+    // { visitsPerYear: 6, visits: 9 } is unresolvable, not stale debris —
+    // first-alias reading would combine a 6-visit combo and discard the
+    // contradiction the per-line conflict declines key on. The row must
+    // stay standalone so those gates route it to office scheduling.
+    const { remaining, combos } = combineRecurringServicesForScheduling([
+      { name: 'Lawn Fertilization & Weed Control', visitsPerYear: 6, visits: 9 },
+      { name: 'Tree & Shrub Care Program', visitsPerYear: 6 },
+    ]);
+    expect(combos).toEqual([]);
+    expect(remaining).toHaveLength(2);
+  });
+
+  test('a T&S companion with CONFLICTING visit-count aliases never combines (Codex r12 P1)', () => {
+    const { remaining, combos } = combineRecurringServicesForScheduling([
+      { name: 'Lawn Fertilization & Weed Control', appsPerYear: 6 },
+      { name: 'Tree & Shrub Care Program', visitsPerYear: 6, visits: 9 },
+    ]);
+    expect(combos).toEqual([]);
+    expect(remaining).toHaveLength(2);
+  });
+
+  test('cadence sentinels never satisfy route matching — BOTH sides conflicted stays separate (Codex r14 P1)', () => {
+    // Each side resolves the same truthy conflict sentinel; equality must
+    // not read as "cadences agree" and combine a row whose cadence is
+    // unresolvable on both sides.
+    const conflicted = combineRecurringServicesForScheduling([
+      { name: 'Pest Control', service: 'pest_control', frequency: 'quarterly', cadence: 'monthly' },
+      { name: 'Termite Bait Station System', frequency: 'monthly', cadence: 'quarterly' },
+    ]);
+    expect(conflicted.combos).toEqual([]);
+    expect(conflicted.remaining).toHaveLength(2);
+    // Same for two unrecognized-field sentinels.
+    const unrecognized = combineRecurringServicesForScheduling([
+      { name: 'Pest Control', service: 'pest_control', frequency: 'every_4_months' },
+      { name: 'Termite Bait Station System', frequency: 'every_4_months' },
+    ]);
+    expect(unrecognized.combos).toEqual([]);
+    expect(unrecognized.remaining).toHaveLength(2);
+    // A conflicted companion must not fall back to the route's program
+    // default either (bait default = quarterly).
+    const companionConflicted = combineRecurringServicesForScheduling(
+      [
+        { name: 'Pest Control', service: 'pest_control' },
+        { name: 'Termite Bait Station System', frequency: 'monthly', cadence: 'quarterly' },
+      ],
+      { acceptFrequency: 'quarterly' },
+    );
+    expect(companionConflicted.combos).toEqual([]);
+  });
+
+  test('a conflicted termite-bait count declines the bait+bond combine — no count-less synthetic row (Codex r15 P1)', () => {
+    // The bait+bond route combines on cadence alone; with the conflicted
+    // count nulled (r12) the synthetic row would carry NO count and the
+    // termite seeding gate (exactly 4) would degrade the sold quarterly
+    // series to a parent-only appointment. Declined, both rows keep their
+    // pre-existing standalone semantics.
+    const { remaining, combos } = combineRecurringServicesForScheduling([
+      { name: 'Termite Bait Station System', frequency: 'quarterly', visitsPerYear: 4, visits: 2 },
+      { name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5yr' },
+    ]);
+    expect(combos).toEqual([]);
+    expect(remaining).toHaveLength(2);
+    // A conflicted BOND companion declines the same way.
+    const bondConflicted = combineRecurringServicesForScheduling([
+      { name: 'Termite Bait Station System', frequency: 'quarterly', visitsPerYear: 4 },
+      { name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5yr', visitsPerYear: 4, visits: 2 },
+    ]);
+    expect(bondConflicted.combos).toEqual([]);
+    expect(bondConflicted.remaining).toHaveLength(2);
+    // Clean counts still combine (control).
+    const clean = combineRecurringServicesForScheduling([
+      { name: 'Termite Bait Station System', frequency: 'quarterly', visitsPerYear: 4 },
+      { name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5yr' },
+    ]);
+    expect(clean.combos).toHaveLength(1);
+    // The COMPANION validates independently even on accept-resolved
+    // routes (codex r18 pre-push P1): a conflicted bait companion beside
+    // an accepted quarterly pest plan declines the combine.
+    const acceptCompanionConflict = combineRecurringServicesForScheduling(
+      [
+        { name: 'Pest Control', service: 'pest_control' },
+        { name: 'Termite Bait', service: 'termite_bait', visitsPerYear: 4, visits: 2 },
+      ],
+      { acceptFrequency: 'quarterly' },
+    );
+    expect(acceptCompanionConflict.combos).toEqual([]);
+    // Populated-but-invalid aliases decline line-resolved combines too.
+    const invalidAlias = combineRecurringServicesForScheduling([
+      { name: 'Termite Bait Station System', frequency: 'quarterly', visitsPerYear: 4, visits: 0 },
+      { name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5yr' },
+    ]);
+    expect(invalidAlias.combos).toEqual([]);
+  });
+
+  test('conflicting pest counts on an accepted-frequency combo: combine stands, count never rides (Codex r12 P1)', () => {
+    // Pest primaries ride the ACCEPTED plan cadence (stale-debris doctrine),
+    // so a contested count set doesn't block the combo — but it must not be
+    // first-alias-read into the synthetic row either.
+    const { combos } = combineRecurringServicesForScheduling(
+      [
+        { name: 'Pest Control', service: 'pest_control', visitsPerYear: 4, visits: 12 },
+        { name: 'Termite Bait', service: 'termite_bait' },
+      ],
+      { acceptFrequency: 'quarterly' },
+    );
+    expect(combos).toHaveLength(1);
+    expect(combos[0].service.frequency).toBe('quarterly');
+    expect(combos[0].service.visitsPerYear).toBeUndefined();
   });
 
   test('lawn + T&S without explicit visit counts stay separate (visits required for this route)', () => {

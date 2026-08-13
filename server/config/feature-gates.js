@@ -38,6 +38,7 @@
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
+ *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -136,6 +137,17 @@ const gates = {
   // today). Money surface — fail-closed ==='true' in EVERY environment.
   // Kill switch: unset or any non-'true' value.
   completionBalanceSweep: process.env.GATE_COMPLETION_BALANCE_SWEEP === 'true',
+
+  // Service-report cross-sell (owner-approved 2026-08-11): the LIVE web
+  // report offers the next service family the customer lacks (pest ↔ lawn,
+  // then tree & shrub, then termite) with estimator-backed pricing, falling
+  // back to an unpriced request-a-quote CTA when property data can't support
+  // a real number. Customer-facing pricing surface — fail-closed ==='true'
+  // in EVERY environment. Gate off: report payloads carry no crossSell key
+  // and every report renders byte-identical to today. PDF/static/sms_preview
+  // renders never carry it at ANY setting (the PDF is a pricing-free
+  // permanent record and its S3 cache key does not vary on this gate).
+  reportCrossSell: process.env.GATE_REPORT_CROSS_SELL === 'true',
 
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is
@@ -763,14 +775,15 @@ const gates = {
   // payer's AP inbox. Reuses the existing (live) payer subsystem; only fires
   // alongside GATE_CALL_SECONDARY_CONTACT (the payer IS a secondary party).
   callPayerLinking: process.env.GATE_CALL_PAYER_LINKING === 'true',
-  // Review-gated OUTBOUND-callback bookings: a confirmed booking taken on an
-  // outbound call (a return call to an inbound lead) creates the appointment
-  // PENDING/needs-review — customer_confirmed=false, NO auto-SMS, a distinct
-  // source_action so the customer can't self-confirm it, and an
-  // outbound_booking_review triage item — instead of being skipped as
-  // 'outbound_call'. The office confirms it in dispatch (which arms reminders).
-  // Requires a real catalog service (no generic-placeholder fallback for
-  // outbound). Off → outbound bookings stay manual (current behavior).
+  // OUTBOUND-callback auto-booking: a confirmed booking taken on an outbound
+  // call (a return call to an inbound lead) creates the appointment LIVE, the
+  // same as an inbound one — status confirmed, reminders armed, lead
+  // converted, confirmation + card-request through the normal TCPA-gated legs
+  // — instead of being skipped as 'outbound_call'. (The pending-office-review
+  // hold this gate originally shipped with was removed 2026-08-11 by owner
+  // directive, PR #3361 — enabling this is a fully customer-facing lane, not
+  // a staged rollout.) Requires a real catalog service (no generic-placeholder
+  // fallback for outbound). Off → outbound bookings stay manual.
   callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
   // Call-ingest completeness watchdog: a 30-min cron that diffs Twilio's own
   // call ledger against call_log and rings an admin bell for any answered

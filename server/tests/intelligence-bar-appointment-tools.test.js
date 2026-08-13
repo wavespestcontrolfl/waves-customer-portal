@@ -55,6 +55,8 @@ function chain(overrides = {}) {
   Object.assign(builder, {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
     whereILike: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),

@@ -28,6 +28,25 @@ const {
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
+// Canonical (sorted-key) serializer — the repo's existing one, already shared
+// across service-report modules. Used to compare a JSONB round-trip against a
+// freshly built object without tripping over PostgreSQL's key ordering.
+const { stableStringify } = require('../services/service-report/ai-summary');
+const parseJsonOrNull = (value) => { try { return JSON.parse(value); } catch { return null; } };
+
+// Does a stored service_requests.pricing_revision already hold exactly this
+// offer snapshot? Compared STRUCTURALLY (codex #3367 PR r11 P2):
+// pricing_revision is JSONB, so PostgreSQL stores it decomposed and returns
+// its own canonical key order — and its own numeric form (114.00 → 114.00,
+// not 114). A raw string compare against a freshly serialized object
+// therefore misses on ordering alone, so an identical repeat tap would churn
+// the row and mint another event row instead of being the intended no-op.
+// Both sides are parsed to JS values and canonically serialized; an
+// unparsable stored value simply fails to match and takes the refresh path.
+function storedRevisionMatches(stored, snapshot) {
+  const prior = typeof stored === 'string' ? parseJsonOrNull(stored) : (stored ?? null);
+  return stableStringify(prior) === stableStringify(snapshot);
+}
 const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -205,6 +224,34 @@ const reportEventLimiter = rateLimit({
   message: { error: 'Too many report events. Please try again in a minute.' },
 });
 
+// cross_sell_requested is not analytics: it recomputes the full offer
+// (pricing engine + many reads) and writes durable rows, so it gets its own
+// LOW per-token limiter ahead of any recomputation (local codex r15 P1) —
+// a long-lived report token must not be able to drive expensive pricing
+// work at the 120/min analytics rate. Keyed per token: the token is the
+// capability under abuse, and per-token capping bounds each leaked link
+// regardless of the caller's IP pool.
+// Mounted as REAL route middleware, never awaited inside the handler: the
+// default 429 responder ends the response without calling next(), so a
+// promise-wrapped limiter would leave the async handler suspended forever
+// (pre-push P1). skip() keeps every other event on the analytics limiter
+// alone — the body is already parsed when this runs.
+// skip() must read the event name EXACTLY as the handler does (codex
+// #3367 PR r11 P1): the handler trims before matching, so comparing the
+// raw body value here let `' cross_sell_requested '` skip this limiter and
+// drive the full recomputation + durable writes at the 120/min analytics
+// rate. One normalizer, both call sites.
+const normalizedEventName = (req) => String(req?.body?.eventName || '').trim();
+const crossSellActionLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `xsell:${req.params.token || 'anon'}`,
+  skip: (req) => normalizedEventName(req) !== 'cross_sell_requested',
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+
 const ALLOWED_REPORT_EVENTS = new Set([
   'service_report_viewed',
   'ai_summary_viewed',
@@ -235,6 +282,8 @@ const ALLOWED_REPORT_EVENTS = new Set([
   'photo_opened',
   'followup_requested',
   'review_request_clicked',
+  'cross_sell_requested',
+  'referral_cta_clicked',
 ]);
 const ALLOWED_REPORT_EVENT_CHANNELS = new Set(['public_report', 'portal', 'email', 'sms', 'wallet']);
 
@@ -258,19 +307,27 @@ function hashPublicIp(value) {
   return crypto.createHmac('sha256', secret).update(ip).digest('hex');
 }
 
-async function recordServiceReportEvent(service, eventName, channel, req, metadata = {}) {
-  if (!service?.id || !ALLOWED_REPORT_EVENTS.has(eventName) || !ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) return;
-  await db('service_report_events').insert({
-    service_record_id: service.id,
-    customer_id: service.customer_id || null,
-    event_name: eventName,
-    channel,
-    metadata: JSON.stringify(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
-    user_agent: String(req.get('user-agent') || '').slice(0, 1000) || null,
-    ip_hash: hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress),
-  }).catch((err) => {
+// Returns true only when the event row durably persisted. Analytics callers
+// ignore the return (fire-and-forget as ever); the cross-sell request path
+// MUST check it — its UI contract is "confirmed means recorded" (codex
+// #3367 r5).
+async function recordServiceReportEvent(service, eventName, channel, req, metadata = {}, dbConn = db) {
+  if (!service?.id || !ALLOWED_REPORT_EVENTS.has(eventName) || !ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) return false;
+  try {
+    await dbConn('service_report_events').insert({
+      service_record_id: service.id,
+      customer_id: service.customer_id || null,
+      event_name: eventName,
+      channel,
+      metadata: JSON.stringify(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+      user_agent: String(req.get('user-agent') || '').slice(0, 1000) || null,
+      ip_hash: hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress),
+    });
+    return true;
+  } catch (err) {
     logger.warn(`[reports-public] service_report_event insert failed: ${err.message}`);
-  });
+    return false;
+  }
 }
 
 async function buildServiceReportV1ResponseData(service, token, {
@@ -278,6 +335,14 @@ async function buildServiceReportV1ResponseData(service, token, {
   pestPressureConfig,
   staffViewer = false,
   pinnedLawnAssessmentId = null,
+  // OPT-IN, and only the /data render path opts in (codex #3367 PR r15).
+  // Composing the offer runs the whole ownership → property → estimate →
+  // pricing pipeline plus a referral-settings read. The Q&A endpoint calls
+  // this builder purely for report CONTEXT and consumes neither key, so
+  // every customer question was paying for pricing work nobody reads —
+  // under the general report limiter, repeatedly. Defaulting to off means a
+  // future caller cannot inherit that cost by accident either.
+  composeOffers = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -498,7 +563,57 @@ async function buildServiceReportV1ResponseData(service, token, {
   if (suppressedTypedReport(service)) {
     return { ...data, dynamicContext, pdfUrl: null, internalOnly: true, ...(staffViewer ? { staffViewer: true } : {}) };
   }
-  return { ...data, dynamicContext, ...(staffViewer ? { staffViewer: true } : {}) };
+
+  // Cross-sell offer card (owner-approved 2026-08-11, GATE_REPORT_CROSS_SELL)
+  // — LIVE VIEWS ONLY by ruling: the PDF is a pricing-free permanent record
+  // (ServiceReportDocument header rule) and the S3 PDF cache key does not
+  // vary on this gate, so a non-live render must never carry it in either
+  // gate direction. Best-effort by contract: the builder returns null on any
+  // failure/suppression and the report renders exactly as today.
+  let crossSell = null;
+  let referral = null;
+  if (mode === 'live' && composeOffers) {
+    const { isEnabled } = require('../config/feature-gates');
+    if (isEnabled('reportCrossSell')) {
+      const { buildReportCrossSell } = require('../services/service-report/cross-sell');
+      crossSell = await buildReportCrossSell(service, db);
+      // The referral card rides the SAME gate + payload (codex #3367 r5),
+      // and its copy is composed from the LIVE referral program settings
+      // (codex PR r1): a disabled program suppresses the card entirely, and
+      // the reward promise softens to match what the settings actually
+      // grant — template copy must never advertise a benefit the referee
+      // won't receive. Best-effort: unreadable settings suppress the card.
+      // STRICT read (codex #3367 PR r2): getSettings() falls back to
+      // program-active $25/$25 defaults on a failed or absent row, which
+      // would advertise rewards a broken or unconfigured environment
+      // cannot honor — no live row, no card.
+      try {
+        const referralEngine = require('../services/referral-engine');
+        const settings = await referralEngine.getLiveSettings();
+        if (settings?.program_active) {
+          const referrerCents = Number(settings.referrer_reward_cents || 0);
+          const refereeCents = Number(settings.referee_discount_cents || 0);
+          referral = {
+            line: referrerCents > 0 && refereeCents > 0
+              ? 'Refer a friend — you both get rewarded when they start service.'
+              : referrerCents > 0
+                ? 'Refer a friend — you get rewarded when they start service.'
+                : 'Refer a friend — we’ll take just as good care of them.',
+          };
+        }
+      } catch (err) {
+        logger.warn(`[reports-public] referral card suppressed: ${err.message}`);
+      }
+    }
+  }
+
+  return {
+    ...data,
+    dynamicContext,
+    ...(crossSell ? { crossSell } : {}),
+    ...(referral ? { referral } : {}),
+    ...(staffViewer ? { staffViewer: true } : {}),
+  };
 }
 
 async function findProjectByReportSegment(segment) {
@@ -910,7 +1025,7 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
 });
 
 // POST /api/reports/:token/events — token-scoped report interaction events.
-router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
+router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Report not found' });
   }
@@ -928,9 +1043,16 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    const eventName = String(req.body?.eventName || '').trim();
+    const eventName = normalizedEventName(req);
     const channel = String(req.body?.channel || 'public_report').trim();
     if (!ALLOWED_REPORT_EVENTS.has(eventName)) {
+      return res.status(400).json({ error: 'Unknown report event' });
+    }
+    // Cross-sell events exist only while the feature does (codex #3367 r4:
+    // a token holder must not mint events/notifications for a dark gate).
+    // Same copy as an unknown event — the gate state is not probeable.
+    if ((eventName === 'cross_sell_requested' || eventName === 'referral_cta_clicked')
+      && !require('../config/feature-gates').isEnabled('reportCrossSell')) {
       return res.status(400).json({ error: 'Unknown report event' });
     }
     if (!ALLOWED_REPORT_EVENT_CHANNELS.has(channel)) {
@@ -945,7 +1067,214 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
       return res.status(400).json({ error: 'Event metadata too large' });
     }
 
-    await recordServiceReportEvent(service, eventName, channel, req, metadata);
+    // Every event except the cross-sell request keeps its fire-and-forget
+    // analytics contract. cross_sell_requested is handled below with
+    // validate-first + a single transaction, so an event row can never
+    // exist without its actionable service_requests row (codex #3367 r7).
+    if (eventName !== 'cross_sell_requested') {
+      // Write mirrors read (AGENTS.md report-token rule; local codex r11):
+      // the referral card only renders when LIVE settings exist and the
+      // program is active, so a crafted referral click against a dark or
+      // unconfigured program must not pollute referral analytics. Same
+      // strict read as the card composer; an unreadable settings row
+      // rejects rather than records.
+      if (eventName === 'referral_cta_clicked') {
+        try {
+          const settings = await require('../services/referral-engine').getLiveSettings();
+          if (!settings?.program_active) {
+            return res.status(409).json({ error: 'Referral program is not active' });
+          }
+        } catch {
+          return res.status(503).json({ error: 'Could not record the event — please try again' });
+        }
+      }
+      await recordServiceReportEvent(service, eventName, channel, req, metadata);
+      return res.json({ ok: true });
+    }
+
+    // Cross-sell CTA → durable service_requests row + office bell (codex
+    // #3367 r6: the bell's Customer-360 deep link points at the requests
+    // panel, so the actionable row must exist there — an analytics event
+    // alone is not a workflow). Same shape/vocabulary as the estimate
+    // add-service flow, WITHOUT its customer confirmations (owner sends all
+    // customer comms; the card's own confirmation copy is the only customer
+    // feedback). Abuse posture: the offer is RECOMPUTED server-side (client
+    // metadata never reaches the row or bell; no offer → no row), and the
+    // customer-row lock + open-row check make the request idempotent — a
+    // repeat tap resolves to the existing open request. Creation failure is
+    // a 503 so the card can only confirm a durably recorded request.
+    if (eventName === 'cross_sell_requested') {
+      // The dedicated 5/min per-token limiter already ran as route
+      // middleware — ahead of this handler and therefore ahead of any
+      // recompute or DB work.
+      try {
+        const joined = await db('service_records as sr')
+          .leftJoin('customers as c', 'sr.customer_id', 'c.id')
+          .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+          .where('sr.id', service.id)
+          .select(
+            // scheduled_service_id rides along so the click-path recompute
+            // classifies the report by its catalog identity exactly like
+            // the read path (codex #3367 PR r4) — omitting it made every
+            // valid click 409 whenever the catalog reclassified stale text.
+            'sr.id', 'sr.customer_id', 'sr.service_type', 'sr.scheduled_service_id', 'sr.is_callback',
+            // service_date/created_at feed the historical-report recency
+            // gate (PR r9) — the click path must classify identically.
+            'sr.service_date', 'sr.created_at',
+            db.raw('COALESCE(ss.service_address_line1, c.address_line1) as address_line1'),
+            db.raw(`${stampedLine2Sql('ss', 'c')} as address_line2`),
+            db.raw('COALESCE(ss.service_address_city, c.city) as city'),
+            db.raw('COALESCE(ss.service_address_zip, c.zip) as zip'),
+            'c.first_name', 'c.last_name',
+          )
+          .first();
+        const { buildReportCrossSell } = require('../services/service-report/cross-sell');
+        const crossSell = joined?.customer_id ? await buildReportCrossSell(joined, db) : null;
+        // The recomputed offer must MATCH what the customer clicked (codex
+        // #3367 r6 P1): a vanished offer, a different target family, or a
+        // shown per-application price that no longer holds (>1% drift) all
+        // reject — the card fails visibly instead of confirming a request
+        // for something the customer never saw. Client metadata is only
+        // COMPARED against server truth here, never persisted as the offer.
+        const clickedKey = String(metadata.serviceKey || '').trim();
+        const clickedMode = String(metadata.offerMode || '').trim();
+        // STRICT type check before any numeric handling (AGENTS.md
+        // report-token rule; local codex r11): Number() coerces '', null,
+        // false, and [] to 0, which slipped malformed bodies through the
+        // quote-mode branch. A priced click must carry an actual finite
+        // positive number; a quote click must carry null/absent — the
+        // exact shapes the card emits.
+        const rawPer = metadata.perApplication;
+        const clickedPer = typeof rawPer === 'number' && Number.isFinite(rawPer) ? rawPer : null;
+        const serverPer = Number(crossSell?.option?.perVisit);
+        // Key AND mode must match, and a priced offer must match to the
+        // cent (codex #3367 r8: a quote-only card that became priced before
+        // the click must not record "shown $X" the customer never saw; a
+        // priced card whose price moved must re-render first).
+        // The server-issued fingerprint covers every RENDERED field
+        // (relationship, label, cadence, tier included — pre-push P1), so
+        // any drift between what the customer saw and what the server now
+        // computes rejects, not just key/mode/price/option drift.
+        const clickedPrint = String(metadata.fingerprint || '').trim();
+        const offerMismatch = !crossSell
+          || !clickedPrint || clickedPrint !== crossSell.fingerprint
+          || !clickedKey || clickedKey !== crossSell.serviceKey
+          || !clickedMode || clickedMode !== crossSell.mode
+          || (crossSell.mode === 'priced'
+            ? !(clickedPer !== null && clickedPer > 0
+              && Number.isFinite(serverPer) && Math.abs(clickedPer - serverPer) < 0.005
+              // The clicked OPTION must be the recomputed option too
+              // (pre-push codex r11 P1): a preferred-variant change that
+              // happens to keep the same per-application price must not
+              // snapshot a different cadence/tier than the customer saw.
+              && String(metadata.optionId || '') === String(crossSell.option?.id || ''))
+            : !(rawPer === null || rawPer === undefined));
+        if (offerMismatch) {
+          return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
+        }
+        {
+          const { normalizeRequestedServiceKey, OPEN_REQUEST_TERMINAL_STATUSES } = require('../services/estimate-add-service-request');
+          const requestedService = normalizeRequestedServiceKey(crossSell.serviceKey) || crossSell.serviceKey;
+          const perApplication = Number(crossSell.option?.perVisit);
+          const priceText = Number.isFinite(perApplication) && perApplication > 0
+            ? `(shown $${perApplication.toFixed(2)} per application on report)`
+            : '(quote requested from report)';
+          // One server-computed subject for insert AND dedupe refresh
+          // (codex #3367 PR r3): if ownership changed since the original
+          // request (start → add) while the ladder target held, the reused
+          // row's subject must match the newly validated snapshot too.
+          const requestSubject = `${crossSell.relationship === 'start' ? 'Start' : 'Add'} ${crossSell.label} — requested from service report`;
+          // One server-computed snapshot for insert, dedupe compare, AND the
+          // refresh update — the three must never drift apart.
+          const revisionSnapshot = { source: 'service_report', serviceRecordId: service.id, crossSell };
+          const outcome = await db.transaction(async (trx) => {
+            // Serialize per customer: the row lock makes check-then-insert
+            // idempotent (the estimate flow's partial-unique index only
+            // covers estimate-linked rows; this path has estimate_id NULL).
+            await trx('customers').where({ id: joined.customer_id }).forUpdate().first('id');
+            // The event row commits WITH the request row (or with the
+            // dedupe resolution to the existing open row) — one
+            // transaction, so analytics can never claim a request that has
+            // no actionable record.
+            const recordEvent = async () => {
+              const recorded = await recordServiceReportEvent(service, eventName, channel, req, metadata, trx);
+              if (!recorded) throw new Error('event insert failed');
+            };
+            const existing = await trx('service_requests')
+              .where({ customer_id: joined.customer_id, requested_service: requestedService, source: 'service_report' })
+              .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
+              .first();
+            if (existing) {
+              // An IDENTICAL resubmission (same validated snapshot and
+              // subject) is a pure no-op (local codex r15 P1): no row
+              // churn, no extra event row — the card simply re-confirms.
+              // The snapshot compare is structural (see storedRevisionMatches).
+              if (storedRevisionMatches(existing.pricing_revision, revisionSnapshot)
+                && existing.subject === requestSubject) {
+                return { deduped: true };
+              }
+              // Refresh the stored snapshot to THIS click's validated offer
+              // (codex #3367 PR r1): the shown-price lock must reflect what
+              // the customer just saw — an older revision (or a quote-mode
+              // row that has since become priced) must not stand as the
+              // recorded quote while the card confirms the new one.
+              // A refresh is a MATERIAL change, not a no-op (codex #3367 PR
+              // r12): the customer just price-locked a different offer —
+              // another report, another price, quote→priced, start→add. The
+              // no-notification path is reserved for the identical-snapshot
+              // branch above; here the bell fires so staff who already saw
+              // the old request learn the terms moved, and updated_at is
+              // stamped so the row does not sit frozen at its created_at.
+              await trx('service_requests').where({ id: existing.id }).update({
+                subject: requestSubject,
+                description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
+                pricing_revision: JSON.stringify(revisionSnapshot),
+                updated_at: new Date(),
+              });
+              await recordEvent();
+              return { request: existing, refreshed: true };
+            }
+            const [request] = await trx('service_requests').insert({
+              customer_id: joined.customer_id,
+              requested_service: requestedService,
+              source: 'service_report',
+              category: 'add_service',
+              subject: requestSubject,
+              description: `Customer tapped "${crossSell.label}" on their service report ${priceText}. Review and follow up — no customer message has been sent.`,
+              urgency: 'routine',
+              status: 'new',
+              // The server-computed offer snapshot — the shown price is the
+              // honored price (sent-quote price-lock doctrine).
+              pricing_revision: JSON.stringify(revisionSnapshot),
+            }).returning('*');
+            await recordEvent();
+            return { request };
+          });
+          if (!outcome.deduped) {
+            // Bell AFTER the durable row exists; a bell failure leaves the
+            // row actionable in the Customer 360 requests panel either way.
+            const { triggerNotification } = require('../services/notification-triggers');
+            await triggerNotification('bundle_quote_requested', {
+              bundled: false,
+              customerId: joined.customer_id,
+              customerName: `${joined.first_name || ''} ${joined.last_name || ''}`.trim() || null,
+              suggestedService: [crossSell.label, priceText].join(' '),
+              // Start-vs-add rides to the bell too (codex #3367 PR r3): the
+              // builder's add-to-plan copy contradicts a start-plan request.
+              relationship: crossSell.relationship,
+              // Distinguishes "the terms on an open request just changed"
+              // from a first-time inquiry (codex #3367 PR r12).
+              refreshed: !!outcome.refreshed,
+            }).catch((err) => {
+              logger.warn(`[reports-public] cross-sell bell failed (request ${outcome.request?.id} stands): ${err.message}`);
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn(`[reports-public] cross-sell request creation failed: ${err.message}`);
+        return res.status(503).json({ error: 'Could not record the request — please try again' });
+      }
+    }
 
     return res.json({ ok: true });
   } catch (err) { next(err); }
@@ -1688,7 +2017,9 @@ router.get('/:token/data', async (req, res, next) => {
       }
       const pinnedLawnAssessmentId = requestedAssessment;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
-        mode, staffViewer, pinnedLawnAssessmentId,
+        // The render path is the only consumer of the cross-sell/referral
+        // keys, so it is the only caller that pays to compose them.
+        mode, staffViewer, pinnedLawnAssessmentId, composeOffers: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
@@ -1898,3 +2229,4 @@ async function ensureReportToken(serviceRecordId) {
 module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
 module.exports.reportLimiter = reportLimiter;
+module.exports.storedRevisionMatches = storedRevisionMatches;

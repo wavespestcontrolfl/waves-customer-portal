@@ -393,10 +393,20 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: p.bundled
         ? `Bundle self-applied: ${p.customerName || 'Customer'}`
-        : `Bundle inquiry: ${p.customerName || 'Customer'}`,
+        // A refresh replaced the terms on an OPEN request (codex #3367 PR
+        // r12): staff who already triaged the old one need to see that the
+        // customer price-locked something different, not a repeat of the
+        // inquiry they've already read.
+        : p.refreshed
+          ? `Bundle inquiry updated: ${p.customerName || 'Customer'}`
+          : `Bundle inquiry: ${p.customerName || 'Customer'}`,
       body: p.bundled
         ? `Added ${p.suggestedService || 'service'} → ${p.newTier || p.tier || 'new tier'} @ $${Number(p.newMonthly || 0).toFixed(2)}/mo`
-        : `Interested in adding ${p.suggestedService || 'a service'} to ${p.previousTier || p.tier || 'current'} plan`,
+        // start-vs-add mirrors the request row (codex #3367 PR r3): a
+        // no-plan customer's bell must not claim a "current plan".
+        : p.relationship === 'start'
+          ? `Interested in starting ${p.suggestedService || 'a service'} — no current plan`
+          : `Interested in adding ${p.suggestedService || 'a service'} to ${p.previousTier || p.tier || 'current'} plan`,
       // Add-on inquiries create a service_requests row; the only place staff can
       // mark it handled (releasing uniq_service_requests_open_estimate_requested_service)
       // is the requests panel on the Customer 360 overview, so deep-link there when

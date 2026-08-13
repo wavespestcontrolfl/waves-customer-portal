@@ -43,6 +43,7 @@ const {
   toQualifyingKeys,
   qualifyingKeysForRow,
   loadActiveRecurringServiceRows,
+  loadCatalogFieldsByRowId,
   loadExistingRecurringQualifyingRows,
   filterRowsToStreet,
 } = require('./waveguard-existing-services');
@@ -148,6 +149,57 @@ function accountServiceKeys(raw) {
   if (palmService) add('palm_injection');
   if (!keys.size) keys.add(accountServiceKey(raw));
   return [...keys].filter(Boolean);
+}
+
+// CATALOG-AUTHORITATIVE identity for a scheduled row (codex #3353 r3).
+// A row's service_type text can drift from what its service_id actually
+// points at — the repo's documented case is a stale "Pest Control" label on
+// a row linked to lawn_care_monthly — and the qualifying/tier path already
+// treats the joined catalog identity as the truth. Without this the same
+// response counts Lawn Care toward the tier while telling staff the customer
+// buys Pest Control.
+//
+// INFORMATIVE catalog text wins; anything else defers to service_type. A
+// catalog name that names no service family at all ("Premium Home Plan")
+// tells us nothing, so the row's own text still speaks. Mirrors the rule
+// ownershipKeysForRow applies in waveguard-existing-services.
+// The catalog KEY alone, never key+name concatenated (codex #3359). Feeding
+// "termite_liquid Termite Liquid Treatment" through the free-text classifier
+// yields termite_liquid_termite_liquid_treatment — a noncanonical key that
+// matches nothing and renders as a duplicated label. The service_key IS the
+// canonical identity; the name is for display only.
+function catalogIdentityText(meta) {
+  return String(meta?.serviceKey || '').replace(/[_-]+/g, ' ');
+}
+
+function catalogNamesAFamily(text) {
+  const s = String(text || '').toLowerCase();
+  return /\b(pest|lawn|turf|tree|shrub|ornamental|mosquito|termite|palms?|rodent|rats?|mouse|mice)\b/.test(s);
+}
+
+// The text the account key/label should be derived from for this row.
+//
+// GATED on autoWaveguardTierEnroll, deliberately: that is the same flag
+// loadExistingRecurringQualifyingRows uses to decide whether the tier path
+// classifies by catalog identity or by service_type text. Reading the
+// catalog here unconditionally would fix the gate-ON divergence Codex
+// reported (tier counts Lawn Care, panel says Pest Control) while CREATING
+// the mirror-image one with the gate off. Display follows whatever rule
+// qualification is using, so the two can never disagree in either state.
+function authoritativeServiceText(row = {}, meta = null) {
+  if (!isEnabled('autoWaveguardTierEnroll')) return row.service_type;
+  const catalogText = catalogIdentityText(meta);
+  return catalogNamesAFamily(catalogText) ? catalogText : row.service_type;
+}
+
+// Display name for a row: the catalog's own name when its identity is what we
+// keyed on, so the label reads "Termite Liquid Treatment" rather than a
+// de-slugged key. Falls back to the row text on the same terms as the key.
+function authoritativeServiceLabelText(row = {}, meta = null) {
+  if (!isEnabled('autoWaveguardTierEnroll')) return row.service_type;
+  return catalogNamesAFamily(catalogIdentityText(meta))
+    ? (meta?.serviceName || catalogIdentityText(meta))
+    : row.service_type;
 }
 
 function accountServiceLabel(key, raw) {
@@ -314,22 +366,150 @@ function lineItemAmount(line = {}) {
   return Number.isFinite(unit) ? unit * qty : 0;
 }
 
-// What the invoice charged for the SERVICE itself: the sum of its
-// non-setup lines, falling back to the invoice total when there are no
-// parseable line items.
+// Line classification, keyed on the shapes buildScheduledServiceInvoiceLines
+// actually emits (server/services/invoice.js): the primary service line and
+// each add-on carry a client_id of scheduled_<id>_primary / _addon_<addonId>,
+// and every discount is a negative line tagged _kind:'discount' whose
+// discount_for names the line it reduces (null = appointment-wide).
+
+// A deposit credit is the APPLICATION OF A PAYMENT, not a price reduction:
+// the customer paid that money earlier on the estimate. Treating it as a
+// discount reports a $117 application with a $49 deposit as $68 — the
+// customer paid the full $117, just across two moments.
+function isDepositCreditLine(line = {}) {
+  return String(line.category || '') === 'deposit_credit';
+}
+
+// The covered base visit line. invoice.js's own invoiceHasNonBaseCharges
+// keys on this same tag: add-ons carry `_addon_`, but a pre-minted
+// mobile-checkout invoice adds positive extraLineItems with NO such id, so
+// "is it an add-on" is the wrong question — "is it the primary line" is the
+// right one. Anything else positive is an extra, however it got there.
+function isPrimaryLine(line = {}) {
+  return String(line.client_id || '').includes('_primary');
+}
+
+function isAddonLine(line = {}) {
+  return String(line.client_id || '').includes('_addon_');
+}
+
+// A tag-aware invoice declares which line is the service; an invoice with no
+// tags at all is legacy and gets the single-positive heuristic instead.
+function invoiceIsTagAware(lines) {
+  return lines.some((line) => isPrimaryLine(line) || isAddonLine(line));
+}
+
+function isPositiveLine(line = {}) {
+  return lineItemAmount(line) > 0;
+}
+
+function isDiscountLine(line = {}) {
+  return line._kind === 'discount' || Number(lineItemAmount(line)) < 0;
+}
+
+// A discount attached to a specific line, which leaves with that line.
+function discountTargets(line = {}, clientIds) {
+  return isDiscountLine(line) && clientIds.has(String(line.discount_for || ''));
+}
+
+// Appointment-wide discount: a discount line naming no parent.
+function isAppointmentWideDiscount(line = {}) {
+  return isDiscountLine(line) && !line.discount_for;
+}
+
+// What the invoice charged for THE SERVICE ITSELF, per application.
+//
+// Add-ons are separate line items on the same appointment invoice while
+// service_type still names only the primary service, so summing every line
+// reports a $100 pest visit with a $75 one-time add-on as "Pest Control ·
+// $175 per application" (codex #3353 r11). Add-ons and their own discounts
+// are excluded; the primary line and its discount are what the recurring
+// service costs.
+// Does this invoice bill for a SERVICE at all? A standalone setup/membership
+// or deposit-only invoice does not, so it is not the invoice that decides what
+// the customer pays per application — it is skipped entirely, and an older
+// service invoice may still answer. Distinct from a service invoice whose
+// basis is unattributable, which DOES decide the key (as withheld).
+function invoiceCarriesServiceCharge(row = {}) {
+  const lines = invoiceLineItems(row);
+  if (!lines.length) return Number(row.total) > 0;
+  const billable = lines.filter((line) => !isSetupLineItem(line) && !isDepositCreditLine(line));
+  // A tag-aware invoice bills for the SERVICE only when its primary line is
+  // itself a positive charge. An add-on-only invoice — the concrete case is a
+  // prepay-covered visit whose base is $0 while a one-time add-on bills — says
+  // nothing about what the recurring service costs per application, so like a
+  // setup-only invoice it is skipped and an older service invoice may answer
+  // (codex #3359 r2).
+  if (invoiceIsTagAware(billable)) {
+    return billable.some((line) => isPrimaryLine(line) && isPositiveLine(line));
+  }
+  return billable.some(isPositiveLine);
+}
+
 function invoiceServiceAmount(row = {}) {
   const lines = invoiceLineItems(row);
-  if (lines.length) {
-    const serviceTotal = lines
-      .filter((line) => !isSetupLineItem(line))
-      .reduce((sum, line) => sum + lineItemAmount(line), 0);
-    if (serviceTotal > 0) return round2(serviceTotal);
-    // All lines were setup/membership (or discounts netted to zero) — not a
-    // usable per-visit price.
-    return null;
+  if (!lines.length) {
+    // No parseable lines: the invoice total is already net of any discount.
+    const total = Number(row.total);
+    return Number.isFinite(total) && total > 0 ? round2(total) : null;
   }
-  const total = Number(row.total);
-  return Number.isFinite(total) && total > 0 ? round2(total) : null;
+  const hadSetupLines = lines.some(isSetupLineItem);
+  const billable = lines.filter((line) => !isSetupLineItem(line) && !isDepositCreditLine(line));
+  const positives = billable.filter(isPositiveLine);
+  const primaries = positives.filter(isPrimaryLine);
+
+  let serviceLines;
+  let extras;
+  if (primaries.length) {
+    extras = positives.filter((line) => !isPrimaryLine(line));
+    const primaryIds = new Set(primaries.map((line) => String(line.client_id)));
+    const primaryDiscounts = billable.filter((line) => discountTargets(line, primaryIds));
+    const appointmentWide = billable.filter(isAppointmentWideDiscount);
+    // An appointment-WIDE discount spans the primary line and every extra
+    // together, and nothing records how it was apportioned. With extras
+    // present there is no honest attribution, so the basis is withheld —
+    // the same rule this module applies to every other unattributable
+    // figure.
+    if (extras.length && appointmentWide.length) return null;
+    serviceLines = [...primaries, ...primaryDiscounts, ...(extras.length ? [] : appointmentWide)];
+  } else {
+    // Legacy / fallback invoices carry no client_id at all. One positive line
+    // is unambiguously the service; several cannot be told apart, so they
+    // withhold rather than summing unrelated charges into a per-application
+    // price. A TAG-AWARE invoice never reaches this heuristic (codex #3359
+    // r2): its tags already said which line is the service, and with no
+    // positive primary the remaining positives are add-ons or checkout
+    // extras — treating one as the service records an add-on's price as the
+    // recurring per-application figure.
+    if (invoiceIsTagAware(billable)) return null;
+    if (positives.length !== 1) return null;
+    extras = [];
+    serviceLines = [...positives, ...billable.filter(isDiscountLine)];
+  }
+
+  let serviceTotal = serviceLines.reduce((sum, line) => sum + lineItemAmount(line), 0);
+
+  // invoices.discount_amount holds the SUM of every discount on the invoice —
+  // line-specific ones AND a manual discountIds selection (InvoiceService
+  // .create). The line-represented part is already in serviceTotal above, so
+  // only the REMAINDER is the manual portion still missing. Ignoring the
+  // field whenever any discount line exists drops that remainder; subtracting
+  // it whole would double-count the line part.
+  const lineDiscountTotal = billable
+    .filter(isDiscountLine)
+    .reduce((sum, line) => sum + Math.abs(lineItemAmount(line)), 0);
+  const manualPortion = round2((Number(row.discount_amount) || 0) - lineDiscountTotal);
+  if (manualPortion > 0) {
+    // A manual discount is computed against the whole subtotal, so with any
+    // extra or setup line on the invoice it is not the service's alone.
+    if (extras.length || hadSetupLines) return null;
+    serviceTotal -= manualPortion;
+  }
+
+  if (serviceTotal > 0) return round2(serviceTotal);
+  // Everything was setup/membership/deposit, or discounts netted it to zero —
+  // not a usable per-visit price.
+  return null;
 }
 
 // What the customer actually LAST PAID per visit, by qualifying key — most
@@ -341,7 +521,7 @@ function invoiceServiceAmount(row = {}) {
 // amount reflects only ONE contract. When a key spans multiple per-property
 // contracts, loadCurrentServiceSpendContext must not stamp it across all of
 // them — it aggregates the per-contract scheduled prices instead.
-async function loadLastPaidSpendByKey(database, customerId) {
+async function loadLastPaidSpendByKey(database, customerId, catalogIdentityByRowId = new Map()) {
   const spend = {};
   try {
     const rows = await database('invoices')
@@ -350,13 +530,51 @@ async function loadLastPaidSpendByKey(database, customerId) {
       .whereNotNull('service_type')
       .orderBy('paid_at', 'desc')
       .limit(100)
-      .select('service_type', 'total', 'line_items', 'paid_at');
+      // discount_amount carries a manual invoice-level discount that never
+      // appears as a negative line (codex #3353 r11). scheduled_service_id
+      // links the invoice to the visit it was minted for, which is what
+      // resolves its catalog identity below.
+      .select('service_type', 'total', 'line_items', 'paid_at', 'discount_amount',
+        'scheduled_service_id');
+    // The NEWEST invoice for a key decides that key, even when it decides
+    // "withheld" (codex #3359): letting an older invoice fill in behind an
+    // intentionally-unattributable newest one presents a superseded price as
+    // what the customer currently pays.
+    const decided = new Set();
     for (const row of rows) {
-      const key = accountServiceKey(row.service_type);
-      if (!key || spend[key] != null) continue;
+      // The SAME gated catalog-vs-text rule the scheduled rows are keyed with
+      // (codex #3359 r2): an invoice minted from a visit whose service_type
+      // text has drifted must file under the family the panel groups that
+      // visit's contract into, or the authoritative last-paid amount lands
+      // under a key nothing reads and the panel falls back to the scheduled
+      // estimate. Invoices minted without a visit link keep their own text,
+      // exactly as before.
+      const identityText = authoritativeServiceText(
+        row,
+        row.scheduled_service_id ? catalogIdentityByRowId.get(row.scheduled_service_id) : null,
+      );
+      // A COMBINED invoice ("Quarterly Pest + Termite Bait Station") is one
+      // charge covering several families — so using it as any component's
+      // per-application basis presents the whole bundle as that component's
+      // price (codex #3353 r3). This is the invoice-path twin of the
+      // component-count guard on the customer-level stamps below, and it
+      // matters more because last-paid takes precedence over every other
+      // basis. Withhold rather than mis-attribute — and decide EVERY
+      // component (codex #3359 r2): the customer's latest charge for each of
+      // them is part of the unattributable bundle, so an older standalone
+      // invoice for any component is superseded and must not fill in.
+      const keys = accountServiceKeys(identityText).filter(Boolean);
+      const undecidedKeys = keys.filter((key) => !decided.has(key));
+      if (!undecidedKeys.length) continue;
+      // Not a service invoice (setup/membership, deposit, or add-on only): it
+      // says nothing about the per-application price, so an older service
+      // invoice may still answer.
+      if (!invoiceCarriesServiceCharge(row)) continue;
+      undecidedKeys.forEach((key) => decided.add(key));
+      if (keys.length > 1) continue;
       const amount = invoiceServiceAmount(row);
       if (amount != null) {
-        spend[key] = {
+        spend[undecidedKeys[0]] = {
           amount,
           paidAt: row.paid_at || null,
         };
@@ -366,6 +584,245 @@ async function loadLastPaidSpendByKey(database, customerId) {
     logger.warn(`[membership-context] last-paid lookup skipped for customer ${customerId}: ${err.message}`);
   }
   return spend;
+}
+
+// Visit cadence (frequency + visits/year) per scheduled row, from the service
+// catalog. DISPLAY ONLY — the staff spend panel reads "$95 per application ·
+// Quarterly (4/yr)" so the office can compare a new quote against what the
+// customer actually pays today, and the monthly-rate basis below divides by
+// this visit count. Degrades to an EMPTY Map on any error (CLAUDE.md r6): a
+// missing cadence hides the label and skips the derived basis, it never
+// breaks the panel or the membership snapshot that embeds it.
+async function loadCadenceByRowId(database, customerId) {
+  try {
+    const rows = await database('scheduled_services as s')
+      .leftJoin('services as svc', 's.service_id', 'svc.id')
+      .where({ 's.customer_id': customerId })
+      // recurring_interval_days is REQUIRED here, not optional detail: it is
+      // what resolves a 'custom' series (codex #3353 r5 — the projection
+      // missed it, so the r4 interval-days resolution silently never fired
+      // against a real database and every custom series fell back to the
+      // catalog cadence).
+      // The catalog IDENTITY rides along with the cadence: one join already
+      // resolves both, and the identity is what makes the displayed service
+      // name trustworthy when service_type text has drifted.
+      .select('s.id', 's.recurring_pattern', 's.recurring_interval_days',
+        'svc.frequency', 'svc.visits_per_year', 'svc.service_key', 'svc.name as service_name');
+    // The LIVE series wins over the catalog default (codex #3353 r3): a
+    // series whose scheduled_services.recurring_pattern overrides its
+    // catalog frequency really runs at the overridden cadence, and reading
+    // the catalog alone would both mislabel it and divide the monthly rate
+    // by the wrong visit count (a $100/mo monthly series read as quarterly
+    // becomes "$300 per application"). Resolution reuses the coverage-cadence
+    // helpers in annual-prepay-renewals — the repo's existing mechanism
+    // (AGENTS.md: extend it, never build a parallel one) — which is also what
+    // admin-invoices' coverage suggestion resolves with.
+    //
+    // Required at CALL time: this module sits in a require cycle with the
+    // converter/prepay web, and a module-scope destructure of ._private can
+    // land while that export is still undefined.
+    const {
+      normalizeCoverageCadence,
+      cadenceFromIntervalDays,
+    } = require('./annual-prepay-renewals')._private;
+    // Visits per year comes from the SHARED helper (codex #3353 r9):
+    // prepay-cadence exists for exactly this mapping, and it knows cadences a
+    // coverage-vocabulary round-trip drops — seasonal_feb_oct resolves to 9
+    // there and to nothing through normalizeCoverageCadence. Maintaining a
+    // second mapping is the parallel-mechanism mistake AGENTS.md names, which
+    // I made while citing that very rule.
+    const { visitsPerYearForCadence } = require('./prepay-cadence');
+    return new Map(rows.map((row) => {
+      // Same three-step resolution admin-invoices' coverage suggestion uses,
+      // in the same order (codex #3353 r4): the scheduler's
+      // 'monthly_nth_weekday' IS monthly; named cadences go through
+      // normalizeCoverageCadence; and everything it can't name — notably
+      // 'custom' carrying recurring_interval_days = 42 — resolves from the
+      // interval days.
+      // The shared helper resolves the live pattern DIRECTLY when it knows it
+      // (monthly_nth_weekday, seasonal_feb_oct, every_6_weeks…); the coverage
+      // normalizer and interval-days mapping are the fallbacks for patterns it
+      // doesn't name. Whichever produces the cadence, the visit count always
+      // comes from the one shared mapping.
+      const rawPattern = String(row.recurring_pattern || '').trim().toLowerCase();
+      const liveCadence = (visitsPerYearForCadence(rawPattern) ? rawPattern : null)
+        || normalizeCoverageCadence(row.recurring_pattern)
+        || cadenceFromIntervalDays(row.recurring_interval_days);
+      const liveVisitsPerYear = visitsPerYearForCadence(liveCadence);
+      const identity = { serviceKey: row.service_key || null, serviceName: row.service_name || null };
+      if (liveCadence && liveVisitsPerYear) {
+        return [row.id, { ...identity, frequency: liveCadence, visitsPerYear: liveVisitsPerYear }];
+      }
+      // A series that DECLARES a live recurrence we cannot name yields NO
+      // cadence — never the catalog default (codex #3353 r6). weekly and
+      // biweekly are the concrete cases: the scheduler supports both,
+      // normalizeCoverageCadence doesn't name them and cadenceFromIntervalDays
+      // deliberately rejects their 7/14-day intervals as non-coverage
+      // cadences, so the catalog fallback would show a weekly series as its
+      // catalog quarterly (4/yr) and divide a monthly rate by 4.
+      //
+      // The RULE, not just those two patterns: an unresolvable live override
+      // is known-different, not unknown, so inheriting the catalog asserts
+      // something we have positive evidence against. Showing nothing is the
+      // honest failure — a null cadence omits the label and suppresses the
+      // monthly-rate division rather than quoting a wrong per-application
+      // figure. The catalog only speaks for a series that declares no
+      // recurrence of its own.
+      if (rawPattern || Number(row.recurring_interval_days) > 0) {
+        return [row.id, { ...identity, frequency: null, visitsPerYear: null }];
+      }
+      return [row.id, {
+        ...identity,
+        frequency: row.frequency || null,
+        visitsPerYear: Number(row.visits_per_year) > 0 ? Number(row.visits_per_year) : null,
+      }];
+    }));
+  } catch {
+    return new Map();
+  }
+}
+
+// Which of these rows carry add-ons. Returns NULL on failure — the caller
+// then treats every row as possibly-composite and requires an explicit
+// primary-line price, because assuming "no add-ons" would quote appointment
+// totals as service prices.
+async function loadAddonRowIds(database, rows) {
+  const rowIds = rows.map((row) => row.id).filter(Boolean);
+  if (!rowIds.length) return new Set();
+  try {
+    const addonRows = await database('scheduled_service_addons')
+      .whereIn('scheduled_service_id', rowIds)
+      .select('scheduled_service_id');
+    return new Set(addonRows.map((row) => String(row.scheduled_service_id)));
+  } catch {
+    return null;
+  }
+}
+
+// What the RECURRING SERVICE costs on this visit, as opposed to what the
+// appointment totals (codex #3359). scheduled_services.estimated_price is the
+// whole visit net — calculateVisitFinancialsForAddons sums the primary line
+// and every add-on, then applies the appointment discount — so on a visit with
+// add-ons it is not a per-application price for the plan. The same $100 + $75
+// appointment the invoice path now separates would otherwise come back as $175
+// through this fallback whenever invoice evidence is missing or withheld.
+//
+// A composite visit therefore decomposes: primary_line_price minus its own
+// line discount. Without that column there is nothing to decompose from, so
+// the row yields no basis rather than a padded one.
+//
+// An APPOINTMENT-level discount on a composite row withholds outright (codex
+// #3359 r2): it spans the primary and every add-on with no recorded
+// apportionment — the exact shape invoiceServiceAmount withholds on — so
+// subtracting only the primary's own line discount would report the
+// undiscounted primary as what the customer pays. A row with no add-ons keeps
+// its estimated_price, which is already net of that discount and wholly the
+// primary's. Any of the three discount columns counts as the signal: rows
+// written before discount_dollars existed carry only discount_type/_id, and
+// an unresolvable discount must withhold, not be assumed zero.
+function rowServicePrice(row = {}, addonRowIds) {
+  const composite = addonRowIds ? addonRowIds.has(String(row.id)) : true;
+  if (!composite) {
+    return Number(row.estimated_price) > 0 ? round2(row.estimated_price) : null;
+  }
+  if (Number(row.discount_dollars) > 0 || row.discount_type || row.discount_id) return null;
+  const primary = Number(row.primary_line_price);
+  if (!(primary > 0)) return null;
+  const net = round2(primary - (Number(row.line_discount_dollars) || 0));
+  return net > 0 ? net : null;
+}
+
+// Catalog identity per scheduled row, loaded INDEPENDENTLY of cadence (codex
+// #3359). loadCadenceByRowId is deliberately fail-soft and carries a wider
+// projection; if it degrades (schema lag on a cadence column, say) while the
+// narrower identity query still works, folding identity into it would silently
+// revert the panel to stale service_type — recreating, with the tier gate on,
+// exactly the tier-vs-label divergence this is meant to remove.
+//
+// The RESULT is waveguard-existing-services' loadCatalogFieldsByRowId — the
+// same mechanism tier qualification classifies enriched rows with, loaded
+// ONCE per snapshot and passed to qualification too (codex #3359 r3/r4: an
+// independent copy, and then an independent second call, each meant one
+// lookup could transiently fail while the other succeeded, splitting the
+// tier and spend paths onto different identities — the divergence this
+// module exists to remove). This adapter only reshapes that one result for
+// DISPLAY: null (join failed) degrades to an empty Map — "no catalog
+// identity", defer to service_type — per this panel's never-break-the-
+// snapshot rule, and qualification saw the same null.
+function catalogIdentityMapFrom(catalogFields) {
+  if (!catalogFields) return new Map();
+  return new Map([...catalogFields].map(([id, row]) => [id, {
+    serviceKey: row.service_key || null,
+    serviceName: row.service_name || null,
+  }]));
+}
+
+// The annual-prepay terms backing a customer's active rows, by id. The TERM
+// is the authoritative source of a prepaid per-application figure —
+// prepay_amount / coverage_visit_count is exactly what splitCoverageAmount
+// divides — so reading it removes any need to infer the figure from the
+// allocations still on the schedule (codex #3353 r9: completed visits are
+// filtered out of the active rows, so those allocations are a partial view
+// whose count and spread say nothing reliable about the term).
+// Degrades to an EMPTY Map on error; a prepaid contract with no term then
+// withholds rather than guessing.
+async function loadPrepaidTermsById(database, rows) {
+  const termIds = [...new Set(rows.map((row) => row.annual_prepay_term_id).filter(Boolean))];
+  if (!termIds.length) return new Map();
+  try {
+    // Through coveredTermsAsOf, NOT a raw term read (codex #3353 r10/r11):
+    // that query is the repo's definition of coverage whose money is still
+    // live — it excludes cancelled terms and revokes coverage whose prepay
+    // invoice went void, refunded, or disputed. A raw read returns the
+    // original amount for a term the customer no longer holds. No date window
+    // (null), matching annualPrepayCoversVisit: the stamp allocates specific
+    // prepaid dollars to the visit regardless of where it sits on the
+    // calendar.
+    const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+    // customer_id and coverage_service_type come along so the caller can apply
+    // annualPrepayCoversVisit's remaining two guards in memory (codex #3353
+    // r12) — a batched equivalent of the canonical predicate rather than a
+    // per-row async call, since this loader also runs on the estimate-save
+    // path where N extra queries would be a real cost.
+    const terms = await coveredTermsAsOf(database, null)
+      .whereIn('t.id', termIds)
+      .select('t.id', 't.prepay_amount', 't.coverage_visit_count', 't.customer_id', 't.coverage_service_type');
+    return new Map(terms.map((term) => [String(term.id), term]));
+  } catch {
+    // NULL, not an empty Map: "this term is not in the covered set" and "the
+    // coverage query failed" mean opposite things now. The first says
+    // coverage lapsed, so the visit bills its scheduled price; the second
+    // says we don't know, and a customer who may be prepaid must not be
+    // quoted the undiscounted price on a guess.
+    return null;
+  }
+}
+
+// Customer-facing cadence wording. "Every other month" beats the catalog's
+// "bimonthly", which reads as twice-a-month to half the people who see it.
+// 'bi_monthly' is billing-cadence's normalized key; 'bimonthly' is the
+// catalog's spelling of the same cadence — both land on the same wording.
+const CADENCE_LABEL = {
+  monthly: 'Monthly',
+  monthly_nth_weekday: 'Monthly',
+  bi_monthly: 'Every other month',
+  bimonthly: 'Every other month',
+  every_6_weeks: 'Every 6 weeks',
+  quarterly: 'Quarterly',
+  triannual: 'Every 4 months',
+  every_4_months: 'Every 4 months',
+  semiannual: 'Twice a year',
+  biannual: 'Twice a year',
+  annual: 'Annual',
+  yearly: 'Annual',
+  seasonal: 'Seasonal',
+  seasonal_feb_oct: 'Seasonal (Feb–Oct)',
+};
+
+function cadenceLabelFor(frequency) {
+  const key = String(frequency || '').trim().toLowerCase();
+  if (!key) return null;
+  return CADENCE_LABEL[key] || key.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 // Explicit unit identity of a stamped address (null when none), extracted
@@ -390,29 +847,57 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     currentDiscountPct: 0,
   };
 
+  // ONE catalog lookup for the whole snapshot — qualification, row/label
+  // display, and linked-invoice classification all read this same result
+  // (codex #3359 r4), so a transient failure degrades every path together
+  // instead of splitting them onto different identities.
+  const catalogFieldsByRowId = await loadCatalogFieldsByRowId(database, customerId);
   const rows = Array.isArray(existingRows)
     ? existingRows
     : await loadActiveRecurringServiceRows(database, customerId);
   const qualifyingRows = Array.isArray(existingRows)
     ? existingRows
-    : await loadExistingRecurringQualifyingRows(database, customerId);
+    : await loadExistingRecurringQualifyingRows(database, customerId, { catalogFieldsByRowId });
+  // qualifyingKeysForRow, not a re-derivation from service_type text: it is
+  // the SAME catalog-authoritative reducer loadExistingRecurringQualifyingRows
+  // qualified these rows with, so the tier families here match the ones that
+  // path selected. Re-reading service_type reported the stale family — the
+  // display half of the drift Codex flagged. Gate-off rows carry no catalog
+  // fields, so it falls back to service_type exactly as before.
   const existingServiceKeys = [...new Set(qualifyingRows
-    .flatMap((row) => accountServiceKeys(row.service_type))
-    .map((key) => toQualifyingKey(key))
+    .flatMap((row) => qualifyingKeysForRow(row))
     .filter(Boolean))];
   const currentTier = existingServiceKeys.length ? determineWaveGuardTier(existingServiceKeys) : null;
-  const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId);
+  const cadenceByRowId = await loadCadenceByRowId(database, customerId);
+  const catalogIdentityByRowId = catalogIdentityMapFrom(catalogFieldsByRowId);
+  // Paid invoices resolve their family through the visit they were minted
+  // for, from the same shared identity result, under the same gated rule as
+  // the rows.
+  const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId, catalogIdentityByRowId);
+  const addonRowIds = await loadAddonRowIds(database, rows);
+  // ET calendar day — scheduled_date is a pg DATE column, read as the stored
+  // day (repo convention), so the cutoff must be the ET day too.
+  const { etDateString } = require('../utils/datetime-et');
+  const todayEt = etDateString();
+  const prepaidTermsById = await loadPrepaidTermsById(database, rows);
+  // Best-effort: the customer row backs the stamped per-application /
+  // monthly-rate basis of last resort below. A failed load simply leaves
+  // those fallbacks unavailable, exactly as before they existed.
+  const customer = await database('customers').where({ id: customerId }).first().catch(() => null);
   const byKey = new Map();
   const componentKeysByKey = new Map();
   const componentRowsByKey = new Map();
   for (const row of rows) {
-    const key = accountServiceKey(row.service_type);
+    // Catalog identity decides what this row IS, not its (possibly stale)
+    // service_type text — see authoritativeServiceText.
+    const identityText = authoritativeServiceText(row, catalogIdentityByRowId.get(row.id));
+    const key = accountServiceKey(identityText);
     if (!key) continue;
     if (!byKey.has(key)) byKey.set(key, []);
     byKey.get(key).push(row);
     const components = componentKeysByKey.get(key) || new Set();
     const componentRows = componentRowsByKey.get(key) || new Map();
-    accountServiceKeys(row.service_type).forEach((component) => {
+    accountServiceKeys(identityText).forEach((component) => {
       components.add(component);
       if (!componentRows.has(component)) componentRows.set(component, []);
       componentRows.get(component).push(row);
@@ -483,10 +968,164 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       contractGroups = [{ address: null, rows: serviceRows }];
     }
     const contracts = contractGroups.map(({ address, rows: contractRows }) => {
-      const scheduled = contractRows.find((row) => Number(row.estimated_price) > 0);
+      // The NEXT upcoming appointment, not whichever row the unordered
+      // query happened to return first (codex #3353 r11). Mixed-price
+      // contracts are a supported shape — a newly repriced future visit sits
+      // beside older ones — so "first positive row" could present either
+      // price across reloads of identical data. Earliest scheduled day with a
+      // row-id tiebreak, exactly how the extension path in this file picks
+      // its basis: the figure the customer actually pays next.
+      // PAST rows are excluded first (codex #3359): loadActiveRecurringServiceRows
+      // filters status but not date, so a stale past pending visit sorts ahead
+      // of every future appointment and an ascending sort would deterministically
+      // quote its old price. A visit still en_route/on_site across ET midnight
+      // is today's work and stays eligible — same live-in-progress exception the
+      // ownership path makes.
+      const LIVE_IN_PROGRESS = new Set(['en_route', 'on_site', 'in_progress']);
+      // The next visit is selected by DATE, then its price is read — never
+      // "the next visit that happens to have a usable price" (codex #3359
+      // r3). Skipping an unattributable next visit to quote a later one
+      // reports a scheduled basis the customer's actual next application
+      // does not pay; a null basis on the true next visit withholds the
+      // contract instead. Callback visits are excluded EXPLICITLY (the same
+      // exclusion the frozen appointment list applies): a free callback is
+      // not an application, and before this reordering the price filter only
+      // dropped it by accident.
+      const scheduled = [...contractRows]
+        .filter((row) => !isCallbackServiceRow(row))
+        .filter((row) => {
+          if (LIVE_IN_PROGRESS.has(String(row.status || '').toLowerCase())) return true;
+          const day = visitDateKey(row.scheduled_date);
+          return !!day && day >= todayEt;
+        })
+        .sort((a, b) => {
+          const dayA = visitDateKey(a.scheduled_date) || '';
+          const dayB = visitDateKey(b.scheduled_date) || '';
+          if (dayA !== dayB) return dayA.localeCompare(dayB);
+          return String(a.id).localeCompare(String(b.id));
+        })[0];
+      const scheduledPerVisit = scheduled ? rowServicePrice(scheduled, addonRowIds) : null;
+      // Annual-prepay coverage: prepaid_amount is the DISCOUNTED amount the
+      // customer ACTUALLY PAID for the visit, while estimated_price stays the
+      // undiscounted list price. A panel captioned "currently pays per
+      // application" must not quote the list figure ($120 shown for a visit
+      // prepaid at $114). Same basis rule the extension logic in this file
+      // already applies: honest only when the contract is UNIFORMLY prepaid
+      // at one allocation — a mixed or uneven contract keeps the scheduled
+      // price rather than picking one row's allocation to stand for all.
+      // A prepaid contract's per-application figure comes from the TERM, not
+      // from the allocations left on the schedule (codex #3353 r9).
+      // prepay_amount / coverage_visit_count is exactly the number
+      // splitCoverageAmount divides, so it is right regardless of how the
+      // cent remainder landed or how many visits have already completed —
+      // and completed visits ARE filtered out of these rows, which is what
+      // made every previous attempt to infer it from them wrong (r7's
+      // exact-cents check, r8's spread bound).
+      //
+      // ONE term only: two terms collapsed into one address contract have no
+      // single honest per-application figure. No term, no usable amount, or
+      // no visit count withholds too — a paid term disproves the scheduled
+      // price, so there is nothing safe to fall back to.
+      const prepaidTermIds = [...new Set(contractRows.map((row) => row.annual_prepay_term_id).filter(Boolean))];
+      // LIVE coverage is the per-visit prepaid_amount stamp, not the term link
+      // (codex #3353 r10). When a prepay payment is voided, refunded, or
+      // disputed, clearPrepaidStampsForTerm nulls the stamps on the remaining
+      // visits so they bill normally again but DELIBERATELY keeps
+      // annual_prepay_term_id for audit — its own comment says "billing-skip
+      // keys on prepaid_amount, which is now null". Keying on the audit link
+      // alone (my r9 refactor dropped this check) reports cancelled coverage
+      // as still prepaid, overriding the price those visits will now bill.
+      // Reading the same signal billing reads is the point.
+      // The METHOD is what makes a stamp the annual term's (codex #3353 r11).
+      // applyPrepaidCoverageForTerm deliberately preserves an independent
+      // cash/Zelle stamp while attachScheduledServices may still link that row
+      // to the term, so a positive amount + term link is NOT proof the annual
+      // term paid for it — that repeats r10's audit-link mistake with a
+      // positive but unrelated stamp. These are the same three conditions
+      // annualPrepayCoversVisit checks before consulting the term.
+      const { ANNUAL_PREPAY_PREPAID_METHOD } = require('./annual-prepay-renewals');
+      const { serviceMatchesCoverage, normalizeCoverageServiceType } = require('./annual-prepay-renewals')._private;
+      // The remaining two guards from annualPrepayCoversVisit (codex #3353
+      // r12), applied in memory against the batched terms:
+      //  - the term must belong to THIS customer, so a stale stamp pointing at
+      //    another customer's live term can't claim coverage;
+      //  - and when the term declares a coverage service, the stamped visit
+      //    must still BE that service. Coverage-selection cleanup is
+      //    best-effort, so an appointment retyped out of the term's coverage
+      //    keeps its stamp — completion billing rejects that coverage, and
+      //    this panel must not divide the term amount under the new service.
+      // Legacy terms with no coverage_service_type never had a service to
+      // match, exactly as the canonical predicate treats them.
+      const rowCoveredByTerm = (row) => {
+        if (!row.annual_prepay_term_id) return false;
+        if (!(Number(row.prepaid_amount) > 0)) return false;
+        if (row.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) return false;
+        const term = prepaidTermsById?.get(String(row.annual_prepay_term_id));
+        if (!term) return false;
+        if (term.customer_id != null && String(term.customer_id) !== String(customerId)) return false;
+        if (term.coverage_service_type && row.service_type
+          && !serviceMatchesCoverage(row, normalizeCoverageServiceType(term.coverage_service_type))) {
+          return false;
+        }
+        return true;
+      };
+      const fullyPrepaid = contractRows.length > 0 && contractRows.every(rowCoveredByTerm);
+      // Rows carrying a term link that did NOT qualify above: coverage was
+      // cancelled (stamps cleared, link kept for audit) or the term's money is
+      // no longer live. Those visits bill their scheduled price now, so any
+      // invoice predating the prepay is superseded.
+      const lapsedPrepaidLink = !fullyPrepaid
+        && prepaidTermsById !== null
+        && contractRows.some((row) => !!row.annual_prepay_term_id);
+      // Coverage lookup failed outright: any row carrying a term link is of
+      // UNKNOWN status, so no basis is trustworthy for this contract.
+      const prepaidStatusUnknown = prepaidTermsById === null
+        && contractRows.some((row) => !!row.annual_prepay_term_id);
+      const prepaidTerm = (fullyPrepaid && prepaidTermIds.length === 1)
+        ? prepaidTermsById.get(String(prepaidTermIds[0]))
+        : null;
+      const termAmount = Number(prepaidTerm?.prepay_amount);
+      const termVisits = Number(prepaidTerm?.coverage_visit_count);
+      const prepaidPerVisit = (termAmount > 0 && Number.isInteger(termVisits) && termVisits > 0)
+        ? round2(termAmount / termVisits)
+        : null;
+      const uniformlyPrepaid = prepaidPerVisit != null;
+      // Cadence belongs to the CONTRACT, not the family (codex #3353 r4):
+      // monthly pest at one property and quarterly at another are different
+      // schedules, and picking the first resolvable row for both would be an
+      // arbitrary choice out of an unordered query.
+      const contractCadence = contractRows
+        .map((row) => cadenceByRowId.get(row.id))
+        .find((entry) => entry && (entry.frequency || entry.visitsPerYear)) || null;
       return {
         serviceAddress: address,
-        scheduledPerVisit: scheduled ? round2(scheduled.estimated_price) : null,
+        scheduledPerVisit,
+        // The figure this contract actually bills at — the paid allocation
+        // when prepaid, else the scheduled price. A FULLY prepaid contract
+        // whose allocations are too spread to average shows NOTHING rather
+        // than the list price: the active term is positive evidence against
+        // that price, so substituting it would be the same mistake as
+        // inheriting a catalog cadence over a live one. A PARTLY prepaid
+        // contract keeps the scheduled price, which is genuine for the
+        // visits that aren't prepaid.
+        perVisit: prepaidPerVisit ?? ((fullyPrepaid || prepaidStatusUnknown) ? null : scheduledPerVisit),
+        prepaid: uniformlyPrepaid,
+        // A prepaid contract whose allocations could not be averaged: no
+        // figure of ANY provenance is trustworthy for it, so the family-level
+        // precedence must suppress the historical-invoice fallback too, not
+        // just the scheduled price (codex #3353 r8 — r7 suppressed only the
+        // latter, so a superseded per-visit invoice still surfaced).
+        prepaidWithoutBasis: (fullyPrepaid && prepaidPerVisit == null) || prepaidStatusUnknown,
+        // Per-contract provenance: one prepaid property alongside one billing
+        // at its scheduled price must not describe BOTH as a paid allocation.
+        spendSource: prepaidPerVisit != null
+          ? 'prepaid_allocation'
+          : ((!fullyPrepaid && !prepaidStatusUnknown && scheduledPerVisit != null)
+            ? 'scheduled_estimate'
+            : 'unavailable'),
+        cadenceLabel: cadenceLabelFor(contractCadence?.frequency),
+        visitsPerYear: contractCadence?.visitsPerYear ?? null,
+        lapsedPrepaidLink,
         activeScheduledVisits: contractRows.length,
       };
     });
@@ -498,7 +1137,85 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     const scheduledPerVisit = contracts.some((contract) => contract.scheduledPerVisit != null)
       ? round2(contracts.reduce((sum, contract) => sum + (Number(contract.scheduledPerVisit) || 0), 0))
       : null;
-    const currentPerVisit = usableLastPaid?.amount ?? scheduledPerVisit;
+    // The billed basis across this key's contracts, prepaid allocations
+    // included. NOTE this is a SUM over per-property contracts — it is the
+    // account's recurring spend for the family, NOT one visit's charge, so a
+    // multi-contract key must never be rendered as a single per-application
+    // price (each contract carries its own figure above).
+    const effectivePerVisit = contracts.some((contract) => contract.perVisit != null)
+      ? round2(contracts.reduce((sum, contract) => sum + (Number(contract.perVisit) || 0), 0))
+      : null;
+    // Family-level cadence speaks ONLY when every contract agrees (codex
+    // #3353 r4). Contracts on different schedules each carry their own above,
+    // and the family stays silent rather than displaying one property's
+    // cadence over both. Single-contract keys — the overwhelming majority,
+    // and the only shape the monthly-rate division below can apply to —
+    // are unaffected.
+    const distinctCadences = new Set(contracts.map(
+      (contract) => `${contract.cadenceLabel || ''}|${contract.visitsPerYear ?? ''}`,
+    ));
+    const agreedCadence = distinctCadences.size === 1 ? contracts[0] : null;
+    const cadenceLabel = agreedCadence?.cadenceLabel ?? null;
+    const visitsPerYear = agreedCadence?.visitsPerYear ?? null;
+    // Customer-level billing stamps are a WHOLE-PLAN figure: the converter
+    // only writes customers.per_application_fee for a single-recurring-unit
+    // accept, and monthly_rate covers everything the customer buys.
+    // Attributing either to one service on a multi-service account would
+    // overstate that service, so both are gated to an account carrying
+    // exactly ONE recurring service with ONE contract — the same shape the
+    // converter's own stamp gate requires. Last resort, below both real
+    // evidence sources: legacy and multi-unit plans previously read
+    // "unavailable" here, which told the office nothing at all.
+    //
+    // COMPONENT count, not just key count (codex #3353 r1): accountServiceKey
+    // groups a COMBINED row ("Quarterly Pest + Termite Bait Station") under
+    // its FIRST component alone, so byKey.size is 1 while the account really
+    // carries two recurring families. Without this the whole plan total gets
+    // attributed to Pest Control's per-application line — the exact
+    // overstatement this gate exists to prevent, just arriving through a
+    // combined row instead of two rows.
+    const componentCount = (componentKeysByKey.get(key) || new Set([key])).size;
+    const singleUnitAccount = byKey.size === 1 && contracts.length === 1 && componentCount === 1;
+    const stampedPerApplication = (singleUnitAccount
+      && customer?.billing_mode === 'per_application'
+      && Number(customer.per_application_fee) > 0)
+      ? round2(customer.per_application_fee)
+      : null;
+    // Monthly members never pay a per-application figure — this is the
+    // arithmetic equivalent for comparison against a quote, and the panel
+    // labels its source so staff never reads it as a charged amount.
+    const monthlyDerivedPerApplication = (singleUnitAccount
+      && stampedPerApplication == null
+      && Number(customer?.monthly_rate) > 0
+      && visitsPerYear > 0)
+      ? round2((Number(customer.monthly_rate) * 12) / visitsPerYear)
+      : null;
+    // An ACTIVE uniformly-prepaid contract outranks paid-invoice history
+    // (codex #3353 r3): the annual-prepay invoice itself carries no
+    // service_type, so a customer who paid per-visit invoices BEFORE moving
+    // to prepay still has those older rows in lastPaidByKey — and they
+    // describe a superseded billing arrangement. The allocation describes
+    // the term the customer is on now, so it wins.
+    const activePrepaidBasis = contracts.some((contract) => contract.prepaid)
+      ? effectivePerVisit
+      : null;
+    // A prepaid contract with no averageable basis poisons EVERY fallback
+    // below it: the paid term disproves the scheduled price, the customer-level
+    // stamps, and any older per-visit invoice alike (codex #3353 r8).
+    const prepaidWithoutBasis = contracts.some((contract) => contract.prepaidWithoutBasis);
+    // After a prepay lapses, the SCHEDULED price outranks invoice history
+    // (codex #3353 r11): those visits bill their scheduled price now, and any
+    // per-visit invoice from before the prepay describes an arrangement two
+    // changes ago. My r10 test missed this by supplying no invoice.
+    const lapsedPrepaid = contracts.some((contract) => contract.lapsedPrepaidLink);
+    const currentPerVisit = prepaidWithoutBasis
+      ? null
+      : (activePrepaidBasis
+        ?? (lapsedPrepaid ? effectivePerVisit : null)
+        ?? usableLastPaid?.amount
+        ?? effectivePerVisit
+        ?? stampedPerApplication
+        ?? monthlyDerivedPerApplication);
     const scheduledDates = serviceRows.map((row) => row.scheduled_date).filter(Boolean).sort();
     const componentServiceAddresses = {};
     const componentServiceAddressesComplete = {};
@@ -512,7 +1229,13 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     return {
       key,
       keys: [...(componentKeysByKey.get(key) || new Set([key]))],
-      label: accountServiceLabel(key, serviceRows[0]?.service_type),
+      // Labelled from the same authoritative text the key was derived from,
+      // so the name staff reads can never disagree with the family the tier
+      // counted.
+      label: accountServiceLabel(
+        key,
+        authoritativeServiceLabelText(serviceRows[0] || {}, catalogIdentityByRowId.get(serviceRows[0]?.id)),
+      ),
       qualifiesForWaveGuard: existingServiceKeys.includes(key),
       // Every property this service is active at — lets duplicate checks
       // scope to the quoted property instead of blocking account-wide.
@@ -529,8 +1252,34 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       componentServiceAddresses,
       componentServiceAddressesComplete,
       currentPerVisit: currentPerVisit ?? null,
-      spendSource: usableLastPaid ? 'last_paid_invoice' : (scheduledPerVisit != null ? 'scheduled_estimate' : 'unavailable'),
-      lastPaidAt: usableLastPaid?.paidAt || null,
+      // Visit cadence for display — "Quarterly (4/yr)". Null on either half
+      // simply omits that half; the panel never invents a cadence, and a
+      // family whose contracts run different schedules stays null here.
+      cadenceLabel,
+      visitsPerYear,
+      // Family-level provenance. With several contracts on DIFFERENT bases
+      // (one prepaid, one billing its scheduled price) no single source is
+      // true of all of them, so it reports mixed_basis and the per-contract
+      // sources above carry the detail (codex #3353 r4).
+      spendSource: (() => {
+        if (prepaidWithoutBasis) return 'unavailable';
+        const contractSources = new Set(contracts.map((contract) => contract.spendSource));
+        if (contracts.length > 1 && contractSources.size > 1) return 'mixed_basis';
+        if (activePrepaidBasis != null) return 'prepaid_allocation';
+        if (lapsedPrepaid && effectivePerVisit != null) return 'scheduled_estimate';
+        if (usableLastPaid) return 'last_paid_invoice';
+        if (effectivePerVisit != null) return 'scheduled_estimate';
+        if (stampedPerApplication != null) return 'per_application_fee';
+        if (monthlyDerivedPerApplication != null) return 'monthly_rate_derived';
+        return 'unavailable';
+      })(),
+      // Only when the invoice is what the figure came FROM (codex #3353 r6).
+      // When an active prepaid allocation outranks a superseded per-visit
+      // invoice, carrying that invoice's date renders as "prepaid allocation
+      // · 2026-01-10" and dates the current allocation to the old payment.
+      lastPaidAt: (activePrepaidBasis != null || (lapsedPrepaid && effectivePerVisit != null))
+        ? null
+        : (usableLastPaid?.paidAt || null),
       scheduledPerVisit,
       // One entry per active per-property contract (a single entry when the
       // rows aren't property-split) so multi-property spend stays itemized.

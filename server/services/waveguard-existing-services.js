@@ -132,13 +132,34 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   // (splitCoverageAmount slice) — the tier-extension credit derives from
   // what was PAID, never the undiscounted estimated_price.
   if (cols.prepaid_amount) selectCols.push('prepaid_amount');
+  // Which mechanism paid for the visit. A cash/Zelle prepayment keeps its own
+  // method even when attachScheduledServices links the row to an annual term,
+  // so the method is what distinguishes annual-prepay coverage from an
+  // unrelated out-of-band payment (annual-prepay-renewals' own
+  // annualPrepayCoversVisit keys on it first).
+  if (cols.prepaid_method) selectCols.push('prepaid_method');
+  // Appointment decomposition: estimated_price is the whole visit NET
+  // (primary + add-ons − appointment discount), so the primary line's own
+  // price and discount are what a per-application figure for the recurring
+  // service must be built from.
+  if (cols.primary_line_price) selectCols.push('primary_line_price');
+  if (cols.line_discount_dollars) selectCols.push('line_discount_dollars');
+  // Appointment-LEVEL discount signal (distinct from the primary line's own
+  // discount above): it spans the primary and every add-on with no recorded
+  // apportionment, so a composite row carrying one cannot honestly quote its
+  // primary line as a per-application price and must withhold instead.
+  if (cols.discount_id) selectCols.push('discount_id');
+  if (cols.discount_type) selectCols.push('discount_type');
+  if (cols.discount_dollars) selectCols.push('discount_dollars');
   // Carried for the gated qualifying-row filter below — additive for every
   // other consumer of these rows.
   if (cols.is_callback) selectCols.push('is_callback');
   if (cols.source) selectCols.push('source');
   // For per-property tier scoping: an unstamped row resolves its property via
-  // the estimate that created it (codex #3244 r6).
+  // the estimate that created it (codex #3244 r6) — or directly via its
+  // customer_properties link (codex #3367 PR r8).
   if (cols.source_estimate_id) selectCols.push('source_estimate_id');
+  if (cols.property_id) selectCols.push('property_id');
   const hasStampedAddress = !!cols.service_address_line1;
   if (hasStampedAddress) {
     selectCols.push('service_address_line1');
@@ -225,7 +246,14 @@ async function loadCatalogFieldsByRowId(database, customerId) {
 // Load the customer's active, recurring, WaveGuard-qualifying rows. The plan
 // gate prevents a lead/one-time buyer with a stray recurring visit from
 // receiving membership pricing.
-async function loadExistingRecurringQualifyingRows(database, customerId) {
+// opts.catalogFieldsByRowId: a caller that ALSO classifies rows by catalog
+// identity (the spend panel) passes its already-loaded map — including a
+// null from a failed load — so qualification and that caller's own
+// classification are guaranteed to see the SAME catalog snapshot (codex
+// #3359 r4: two sequential loads meant one could transiently fail while the
+// other succeeded, splitting tier and spend onto different identities).
+// Omitted (every other caller), the loader fetches its own.
+async function loadExistingRecurringQualifyingRows(database, customerId, { catalogFieldsByRowId } = {}) {
   if (!(await isActivePlanCustomer(database, customerId))) return [];
   const rows = await loadActiveRecurringServiceRows(database, customerId);
   const { isEnabled } = require('../config/feature-gates');
@@ -242,7 +270,9 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
   const { isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
   // Legacy degrade: a failed join classifies on service_type alone here,
   // exactly the pre-null-return behavior (ownership fails closed instead).
-  const catalogById = (await loadCatalogFieldsByRowId(database, customerId)) || new Map();
+  const catalogById = (catalogFieldsByRowId !== undefined
+    ? catalogFieldsByRowId
+    : await loadCatalogFieldsByRowId(database, customerId)) || new Map();
   const today = etDateString();
   // The kept rows are returned ENRICHED with their catalog identity (Codex
   // #3011 r11 P1): downstream reducers (qualifyingKeysFromRows and the
@@ -318,18 +348,75 @@ async function loadExistingQualifyingServiceKeys(database, customerId, { streetS
 // re-resolved via the creating estimate).
 async function filterRowsToStreet(database, rows, streetScope) {
   if (!streetScope || !streetScope.estimateStreet) return rows;
-  const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
+  const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality, scopeKeysShareLocality } = require('./estimate-property-linkage');
   const kept = [];
+  const propKeyCache = new Map();
   for (const row of rows) {
     let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip);
+    // Dispatch's resolution order for an unstamped row: property row first
+    // (linkAcceptedEstimateProperty stamps FROM it), then the creating
+    // estimate, then the primary default (codex #3367 PR r8 — a recurring
+    // family linked only to a secondary customer_properties row must not
+    // count at the primary property).
+    if ((!street || scopeKeyLacksLocality(street)) && row.property_id) {
+      try {
+        if (!propKeyCache.has(row.property_id)) {
+          const prop = await database('customer_properties')
+            .where({ id: row.property_id })
+            .first('address_line1', 'address_line2', 'city', 'zip');
+          propKeyCache.set(row.property_id, prop
+            ? normalizedStampedStreet(prop.address_line1, prop.address_line2, prop.city, prop.zip)
+            : null);
+        }
+      } catch (propErr) {
+        // Strict scopes must not degrade a property-LINKED row to the
+        // primary default (pre-push P0): a swallowed lookup failure would
+        // pass requireSharedLocality trivially and count a secondary
+        // property's plan at the primary. Default consumers keep the
+        // legacy fall-through.
+        if (streetScope.requireSharedLocality) throw propErr;
+      }
+      const propKey = propKeyCache.get(row.property_id);
+      if (propKey) {
+        street = propKey;
+      } else if (streetScope.requireSharedLocality && propKeyCache.has(row.property_id)) {
+        // Linked to a property row that is missing or cannot be keyed —
+        // unprovable premises for a strict scope.
+        throw new Error('property-linked row unresolvable for strict street scope');
+      }
+    }
     if ((!street || scopeKeyLacksLocality(street)) && row.source_estimate_id) {
       try {
         const src = await database('estimates').where({ id: row.source_estimate_id }).first('address');
-        street = normalizedEstimateStreet(src?.address);
-      } catch { /* fall through to the primary-street default */ }
+        street = normalizedEstimateStreet(src?.address) || street;
+      } catch (estErr) {
+        // Same strict fail-closed rule as the property_id leg (pre-push
+        // P0 ×2): an estimate-LINKED row that cannot resolve must not
+        // relabel itself as the primary property.
+        if (streetScope.requireSharedLocality) throw estErr;
+      }
+      if (streetScope.requireSharedLocality && (!street || scopeKeyLacksLocality(street))) {
+        throw new Error('estimate-linked row unresolvable for strict street scope');
+      }
     }
     street = street || String(streetScope.customerPrimaryStreet || '');
-    if (street && sameScopeKey(street, streetScope.estimateStreet)) kept.push(row);
+    if (street && sameScopeKey(street, streetScope.estimateStreet)) {
+      // Opt-in property-equality proof (codex #3367 PR r7): sameScopeKey's
+      // per-field wildcard accepts disjoint locality evidence (a city-only
+      // primary against a zip-only stamp) across cities. Consumers pricing
+      // MONEY off this scope (report cross-sell) set requireSharedLocality:
+      // a same-street row that cannot be localized may be another
+      // property's obligation, and both keeping and dropping it can be
+      // wrong (unearned combined tier vs offering an owned family) — so
+      // the frame fails loudly and the caller's fail-closed machinery
+      // suppresses. Default consumers (the never-re-price panel scope,
+      // where over-recognition is the documented safe direction) are
+      // unchanged.
+      if (streetScope.requireSharedLocality && !scopeKeysShareLocality(street, streetScope.estimateStreet)) {
+        throw new Error('recurring row locality unprovable for street scope');
+      }
+      kept.push(row);
+    }
   }
   return kept;
 }
@@ -480,6 +567,7 @@ module.exports = {
   toQualifyingKeys,
   filterRowsToStreet,
   loadActiveRecurringServiceRows,
+  loadCatalogFieldsByRowId,
   loadExistingRecurringQualifyingRows,
   qualifyingKeysForRow,
   qualifyingKeysFromRows,

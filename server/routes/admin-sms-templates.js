@@ -42,7 +42,29 @@ function extractTemplatePlaceholders(body) {
   return [...placeholders];
 }
 
+// Placeholders a specific template's FLOW depends on — the render path
+// refuses a body without them (getTemplate opts.requiredVars), so accepting
+// such an edit at write time would take the feature offline while its
+// options endpoint still advertises it (codex #3363 r8). Single source:
+// rain-out.js reads this same map for its render calls.
+const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
+  // Custom Quick Move: the dispatcher's message, the new time, and the
+  // link/reply clause are the three promises the flow makes.
+  rain_out_moved_custom_v1: Object.freeze(['custom_message', 'new_option', 'link_clause']),
+});
+
 function validateTemplateBody(body, variables, templateKey = null) {
+  const required = REQUIRED_TEMPLATE_PLACEHOLDERS[templateKey] || [];
+  if (required.length) {
+    const present = new Set(extractTemplatePlaceholders(body));
+    const missing = required.filter((name) => !present.has(name));
+    if (missing.length) {
+      return {
+        error: `This template must keep {${required.join('}, {')}} — the Quick Move flow refuses to send without them`,
+        missing_placeholders: missing,
+      };
+    }
+  }
   // Double-brace tokens are the email/newsletter syntax — in an SMS body the
   // renderer substitutes the INNER {token} and the leftover braces then read
   // as an unresolved placeholder, silently suppressing every send of this
@@ -390,7 +412,7 @@ router.isTemplateActive = async function(messageType) {
 };
 
 // Get template body by key (returns null if disabled)
-router.getTemplate = async function(templateKey, vars = {}, context = {}) {
+router.getTemplate = async function(templateKey, vars = {}, context = {}, opts = {}) {
   try {
     if (!(await db.schema.hasTable('sms_templates'))) {
       auditSmsTemplateIssue(templateKey, 'missing_table', 'sms_templates table missing', context);
@@ -408,8 +430,26 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}) {
       // still audit because those ARE defects.
       return null;
     }
-    const variant = await SmsTemplateVariants.selectVariant(templateKey).catch(() => null);
+    // opts.noVariants: callers whose flow contracts on ONE exact body (the
+    // rain-out custom rung pre-renders for a segment cap and mirrors a
+    // client counter) pin the base row — a weighted random variant can't be
+    // predicted by a pre-check or a preview.
+    const variant = opts.noVariants
+      ? null
+      : await SmsTemplateVariants.selectVariant(templateKey).catch(() => null);
     let body = variant?.body || t.body;
+    // opts.requiredVars: placeholders the SELECTED body must still carry —
+    // the unresolved-check below only rejects UNKNOWN placeholders, so an
+    // admin edit that deletes a load-bearing one (the dispatcher's
+    // {custom_message}) otherwise renders truthy with the promised content
+    // silently gone (codex #3363). Checked pre-substitution, on the body
+    // that will actually render.
+    for (const name of opts.requiredVars || []) {
+      if (!body.includes(`{${name}}`)) {
+        auditSmsTemplateIssue(templateKey, 'missing_required_placeholder', `template body lost required placeholder {${name}}`, context);
+        return null;
+      }
+    }
     for (const [key, val] of Object.entries(formatSmsTemplateVars(vars))) {
       // Function-form replacement: a STRING replacement treats `$$`/`$&`
       // (and `$n` when the pattern captures) as substitution tokens, so a
@@ -447,5 +487,11 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}) {
 // sides through this same function is the only way that comparison stays true
 // as SCHEMELESS_SMS_HOSTS changes.
 router.stripPortalUrlScheme = stripPortalUrlScheme;
+
+// Single source for flow-required placeholders — the write validator above
+// and rain-out's render calls (getTemplate opts.requiredVars) read the SAME
+// map, so save-time and render-time can never disagree about what a
+// template must keep.
+router.REQUIRED_TEMPLATE_PLACEHOLDERS = REQUIRED_TEMPLATE_PLACEHOLDERS;
 
 module.exports = router;

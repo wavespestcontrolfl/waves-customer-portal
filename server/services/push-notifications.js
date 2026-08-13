@@ -41,7 +41,11 @@ async function sendSubscription(sub, notification) {
     const result = await apns.send(sub.device_token, notification);
     if (result.skipped) return { sent: false, skipped: true, reason: result.reason };
     if (result.expired) {
-      await db('push_subscriptions').where({ id: sub.id }).update({ active: false });
+      // Best-effort cleanup on every platform path: a failed deactivation
+      // UPDATE must never reject the fan-out — that would discard an
+      // earlier device's successful delivery and make push-channel-routing
+      // send a duplicate SMS after a push the customer already received.
+      await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, reason: result.reason };
     }
     return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
@@ -52,7 +56,7 @@ async function sendSubscription(sub, notification) {
     const result = await fcm.send(sub.device_token, notification);
     if (result.skipped) return { sent: false, skipped: true, reason: result.reason };
     if (result.expired) {
-      await db('push_subscriptions').where({ id: sub.id }).update({ active: false });
+      await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, reason: result.reason };
     }
     return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
@@ -60,11 +64,18 @@ async function sendSubscription(sub, notification) {
 
   if (!webpush || !vapidConfigured) return { sent: false, skipped: true, reason: 'push_not_configured' };
   try {
-    await webpush.sendNotification(JSON.parse(sub.subscription_data), JSON.stringify(notification));
+    // timeout aborts the underlying request — a hung push endpoint fails
+    // this leg promptly and cannot deliver later (see apns.js/fcm.js: the
+    // same bound exists on every transport so no leg outlives its caller).
+    await webpush.sendNotification(
+      JSON.parse(sub.subscription_data),
+      JSON.stringify(notification),
+      { timeout: 8000 },
+    );
     return { sent: true };
   } catch (err) {
     if (err.statusCode === 410 || err.statusCode === 404) {
-      await db('push_subscriptions').where({ id: sub.id }).update({ active: false });
+      await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, statusCode: err.statusCode, reason: 'subscription_expired' };
     }
     logger.error(`Push failed: ${err.message}`);
@@ -83,10 +94,29 @@ class PushNotificationService {
     };
   }
 
-  async sendToCustomer(customerId, notification) {
-    const subs = await db('push_subscriptions').where({ customer_id: customerId, active: true });
+  // opts.shouldContinue: optional async gate re-checked before EVERY
+  // provider leg (push-channel-routing passes its send-window boundary
+  // check) — a sequential fan-out that straddles a cutoff stops instead of
+  // delivering the remaining legs past it. Callers without the option
+  // (bell notifications, admin alerts) are unaffected.
+  async sendToCustomer(customerId, notification, opts = {}) {
+    // opts.minUpdatedAt: only fan out to subscriptions with a heartbeat at or
+    // after this instant (push_first freshness) — otherwise a stale
+    // accepting-but-silent token could count as the delivery that suppresses
+    // the SMS while the fresh device failed.
+    const query = db('push_subscriptions').where({ customer_id: customerId, active: true });
+    if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
+    const subs = await query;
     const results = [];
     for (const sub of subs) {
+      if (typeof opts.shouldContinue === 'function') {
+        let go = false;
+        try { go = await opts.shouldContinue(); } catch { go = false; }
+        if (!go) {
+          results.push({ sent: false, skipped: true, reason: 'send_window_closed' });
+          continue;
+        }
+      }
       results.push(await sendSubscription(sub, notification));
     }
     return summarize(results, subs.length);

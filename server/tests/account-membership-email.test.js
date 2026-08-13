@@ -260,4 +260,39 @@ describe('account and membership email sender', () => {
       subject: 'account.request_received email skipped',
     }));
   });
+
+  test('a service-report cross-sell request never sends a lifecycle email (codex #3367 PR r19)', async () => {
+    // The report card tells the customer their request was recorded and
+    // that NO message has been sent; the owner then follows up by hand. A
+    // staff triage click flipping the status would otherwise fire an
+    // automated status email straight at the customer and contradict that
+    // copy. Guarded in the sender, so no caller can reintroduce it.
+    setDbQueues({ customers: [chain({ first: customer() })] });
+
+    const result = await AccountMembershipEmail.sendRequestUpdated({
+      customerId: 'cust-1',
+      request: {
+        id: 'req-xsell', subject: 'Add Lawn Care — requested from service report',
+        category: 'add_service', source: 'service_report', status: 'acknowledged',
+      },
+      statusLabel: 'Acknowledged',
+    });
+
+    expect(result).toMatchObject({ skipped: true, reason: 'service_report_owner_follow_up' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a normal request still sends its lifecycle email', async () => {
+    setDbQueues({ customers: [chain({ first: customer() })] });
+
+    await AccountMembershipEmail.sendRequestUpdated({
+      customerId: 'cust-1',
+      request: { id: 'req-1', subject: 'Help', category: 'billing', source: 'portal', status: 'scheduled' },
+      statusLabel: 'Scheduled',
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'account.request_updated',
+    }));
+  });
 });

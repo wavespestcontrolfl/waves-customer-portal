@@ -2765,6 +2765,37 @@ describe('service report v1', () => {
     expect(email.text).toContain('The PDF service report is attached.');
   });
 
+  test('v1 email carries the inspection-credit note in both arms, and omits it cleanly', () => {
+    const note = 'You have a $125.00 service credit from your inspection — it applies to any service you book by August 25, 2026.';
+    const withNote = buildServiceReportV1Email({
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      inspectionCreditNote: note,
+      data: {
+        serviceType: 'Rodent Inspection',
+        customerName: 'Van Lee',
+        applications: [],
+        findings: [],
+        advisory: {},
+      },
+    });
+    expect(withNote.html).toContain('$125.00 service credit');
+    expect(withNote.html).toContain('August 25, 2026');
+    expect(withNote.text).toContain(note);
+
+    const without = buildServiceReportV1Email({
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      data: {
+        serviceType: 'Rodent Inspection',
+        customerName: 'Van Lee',
+        applications: [],
+        findings: [],
+        advisory: {},
+      },
+    });
+    expect(without.html).not.toContain('service credit');
+    expect(without.text).not.toContain('service credit');
+  });
+
   test('v1 email delivery does not count synthetic clean findings', () => {
     const email = buildServiceReportV1Email({
       reportUrl: 'https://portal.wavespestcontrol.com/report/token-clean',

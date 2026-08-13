@@ -8,6 +8,7 @@ const ALLOWED_EXPECTATION_KEYS = new Set([
   'current_schedule_date',
   'current_schedule_window_start',
   'current_would_auto_route',
+  'current_block_reasons_subset_of',
   'legacy_scheduled_created',
   'route_changed_vs_legacy_schedule',
   'appointment_candidate_changed_vs_legacy',
@@ -40,7 +41,7 @@ describe('call extraction eval fixtures', () => {
       expect(Object.keys(item.expect).length).toBeGreaterThan(0);
       for (const key of Object.keys(item.expect)) {
         expect(ALLOWED_EXPECTATION_KEYS.has(key)).toBe(true);
-        if (key.endsWith('_include') || key.endsWith('_exclude') || key.endsWith('_in') || key === 'legacy_schedule_variance_fields') {
+        if (key.endsWith('_include') || key.endsWith('_exclude') || key.endsWith('_in') || key.endsWith('_subset_of') || key === 'legacy_schedule_variance_fields') {
           expect(Array.isArray(item.expect[key])).toBe(true);
           expect(item.expect[key].length).toBeGreaterThan(0);
           expect(item.expect[key].every((entry) => typeof entry === 'string' && entry.trim())).toBe(true);

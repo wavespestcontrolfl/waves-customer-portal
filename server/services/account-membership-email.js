@@ -433,6 +433,16 @@ async function sendRequestUpdated({
   idempotencyKey,
 } = {}) {
   if (!request?.id) return { ok: false, skipped: true, reason: 'missing_request' };
+  // Service-report cross-sell requests are OWNER-FOLLOW-UP ONLY (codex
+  // #3367 PR r19). The card tells the customer their request was recorded
+  // and that no message has been sent; the offer then belongs to the owner
+  // to price and pitch by hand. A lifecycle email fired by a staff triage
+  // click would contradict that copy and put an automated message in front
+  // of the customer that nobody chose to send. Guarded in the SENDER, not
+  // the one route that calls it, so a future caller cannot reintroduce it.
+  if (clean(request.source) === 'service_report') {
+    return { ok: false, skipped: true, reason: 'service_report_owner_follow_up' };
+  }
   const status = statusLabel || clean(request.status) || 'updated';
   return sendTemplate({
     customerId,

@@ -422,6 +422,517 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
+  test('semiannual PALM coverage stamps the recurring catalog identity on every seeded visit (codex #3349 r14 P1)', async () => {
+    // A bare service_type 'Palm Injection' misfiles at completion: the
+    // exact-name lookup misses and the unique short-name match is the
+    // ONE-TIME palm_injection row — paid recurring visits would get
+    // one-time billing + token-only portal posture.
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const rowsQuery = query({ rows: [] });
+    const parentInsert = query({ returning: [{ id: 'svc-p1', scheduled_date: '2026-06-15' }] });
+    const childInsert = query({ returning: [{ id: 'svc-p2', scheduled_date: '2026-12-15' }] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), parentInsert, childInsert],
+      services: [
+        // Filter looks up BOTH ids (semiannual + one-time), then the
+        // seeding resolve repeats them.
+        query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-onetime' } }),
+        query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
+        query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
+      ],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 2,
+      targetDates: ['2026-06-15', '2026-12-15'],
+    });
+
+    expect(parentInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      service_type: 'Palm Injection',
+      service_id: 'cat-palm-semi',
+      service_key_snapshot: 'palm_injection_semiannual',
+      recurring_pattern: 'semiannual',
+    }));
+    expect(childInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      service_id: 'cat-palm-semi',
+      service_key_snapshot: 'palm_injection_semiannual',
+      recurring_parent_id: 'svc-p1',
+    }));
+  });
+
+  test('an ADOPTED name-only palm visit is backfilled with the recurring catalog identity (codex #3349 r15 pre-push P1)', async () => {
+    // buildInsert stamps only NEW rows; a matched pre-existing name-only
+    // visit must be backfilled or it keeps resolving the one-time row.
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    // Committed to THIS term: name-only rows without identity or
+    // provenance are excluded from palm coverage matching entirely
+    // (codex r18 pre-push P0 — a genuine one-time sale must never be
+    // adopted), so the legacy-adoption case is a term-attached row.
+    const adoptedRow = {
+      id: 'v-adopted', scheduled_date: '2026-06-15', service_type: 'Palm Injection',
+      service_id: null, annual_prepay_term_id: 'term-palm-adopt', status: 'pending',
+    };
+    const rowsQuery = query({ rows: [adoptedRow] });
+    const childInsert = query({ returning: [{ id: 'svc-p2', scheduled_date: '2026-12-15' }] });
+    const backfillUpdate = query({});
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate, childInsert],
+      services: [
+        // Filter looks up BOTH ids (semiannual + one-time), then the
+        // seeding resolve repeats them.
+        query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-onetime' } }),
+        query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
+        query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
+      ],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-adopt',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 1,
+      existingCount: 1,
+    });
+
+    expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-adopted']);
+    expect(backfillUpdate.update).toHaveBeenCalledWith({
+      service_id: 'cat-palm-semi',
+      service_key_snapshot: 'palm_injection_semiannual',
+    });
+  });
+
+  test('an adopted palm visit carrying the STALE one-time id is retargeted; other explicit ids stay (codex #3349 r16 P1)', async () => {
+    // Legacy adoption: booked before the recurring row existed, so it
+    // carries the one-time palm_injection id — completion trusts the id
+    // first, so it must be retargeted in this definitively semiannual
+    // context. An unrelated explicit id is a deliberate booking and stays.
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const rowsQuery = query({
+      rows: [
+        // Committed to THIS term (provenance) — the stale one-time id
+        // retargets.
+        { id: 'v-stale', scheduled_date: '2026-06-15', service_type: 'Palm Injection', service_id: 'cat-palm-onetime', annual_prepay_term_id: 'term-palm-stale', status: 'pending' },
+        // One-time id WITHOUT term provenance = possibly a GENUINE
+        // one-time palm sale (codex r18 pre-push P0) — never converted.
+        { id: 'v-genuine-onetime', scheduled_date: '2026-12-15', service_type: 'Palm Injection', service_id: 'cat-palm-onetime', status: 'pending' },
+      ],
+    });
+    const backfillUpdate = query({});
+    const replacementInsert = query({ returning: [{ id: 'svc-new', scheduled_date: '2026-12-15' }] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate, replacementInsert],
+      services: [
+        // Filter looks up BOTH ids (semiannual + one-time), then the
+        // seeding resolve repeats them.
+        query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-onetime' } }),
+        query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
+        query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
+      ],
+    });
+
+    // The uncommitted one-time row is EXCLUDED from coverage matching, so
+    // coverage seeds a correctly-identified replacement visit instead of
+    // adopting the genuine one-time sale.
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-stale',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 1,
+      existingCount: 1,
+    });
+
+    // Only the stale one-time id is retargeted — v-deliberate is excluded.
+    expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-stale']);
+    expect(backfillUpdate.update).toHaveBeenCalledWith({
+      service_id: 'cat-palm-semi',
+      service_key_snapshot: 'palm_injection_semiannual',
+    });
+  });
+
+  test('a payment-pending reserved palm visit (estimate provenance only) is ADOPTED and retargeted, never replaced (codex r18 pre-push P0)', async () => {
+    // The sold first visit of a not-yet-activated term carries only
+    // source_estimate_id — no term link, no prepaid stamp, no identity.
+    // Estimate provenance counts as commitment: the visit is adopted into
+    // coverage and backfilled, instead of being excluded (which would
+    // seed a replacement and leave the sold visit separately billable).
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const rowsQuery = query({
+      rows: [
+        // The seeded reserved parent carries recurring markers — the
+        // provenance tiebreaker (codex r19 P0 second pass).
+        { id: 'v-reserved', scheduled_date: '2026-06-15', service_type: 'Palm Injection', service_id: null, is_recurring: true, source_estimate_id: 'est-42', status: 'pending' },
+      ],
+    });
+    const backfillUpdate = query({});
+    const childInsert = query({ returning: [{ id: 'svc-p2', scheduled_date: '2026-12-15' }] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate, childInsert],
+      services: [
+        // Filter looks up BOTH ids (semiannual + one-time), then the
+        // seeding resolve repeats them.
+        query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-onetime' } }),
+        query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
+        query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
+      ],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-resv',
+      customer_id: 'customer-palm',
+      source_estimate_id: 'est-42',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 1,
+      existingCount: 1,
+    });
+
+    expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-reserved']);
+  });
+
+  test('a one-time palm visit from the SAME estimate is never consumed as coverage (codex r19 P1)', async () => {
+    // One estimate can sell the recurring program AND a genuine one-time
+    // palm item — both visits carry source_estimate_id. The one-time
+    // identity disqualifies estimate provenance: only a direct term link
+    // or prepaid stamp commits such a row.
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const rowsQuery = query({
+      rows: [
+        { id: 'v-reserved', scheduled_date: '2026-06-15', service_type: 'Palm Injection', service_id: null, is_recurring: true, source_estimate_id: 'est-42', status: 'pending' },
+        { id: 'v-est-onetime', scheduled_date: '2026-09-01', service_type: 'Palm Injection', service_id: 'cat-palm-onetime', source_estimate_id: 'est-42', status: 'pending' },
+        // NAME-ONLY one-time reservation from the same estimate: no
+        // recurring markers, no identity — provenance alone must not
+        // commit it (codex r19 P0 second pass).
+        { id: 'v-onetime-nameonly', scheduled_date: '2027-03-01', service_type: 'Palm Injection', service_id: null, source_estimate_id: 'est-42', status: 'pending' },
+        // Legacy payment-pending PARENT: stale one-time id BUT recurring
+        // markers + estimate provenance — the sold program's visit, so it
+        // commits and the backfill retargets it (codex r19 P0 third pass).
+        { id: 'v-legacy-parent', scheduled_date: '2026-11-20', service_type: 'Palm Injection', service_id: 'cat-palm-onetime', is_recurring: true, source_estimate_id: 'est-42', status: 'pending' },
+        // FOREIGN identity (codex r26 pre-push P0): a name-matched row
+        // carrying another service's id never counts as palm coverage even
+        // with provenance + markers — the backfill cannot own it.
+        { id: 'v-foreign', scheduled_date: '2027-05-01', service_type: 'Palm Injection', service_id: 'svc-something-else', is_recurring: true, source_estimate_id: 'est-42', status: 'pending' },
+      ],
+    });
+    const backfillUpdate = query({});
+    const childInsert = query({ returning: [{ id: 'svc-p2', scheduled_date: '2026-12-15' }] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), backfillUpdate, childInsert],
+      services: [
+        query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-onetime' } }),
+        query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
+        query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
+      ],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-mixed',
+      customer_id: 'customer-palm',
+      source_estimate_id: 'est-42',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 0,
+      existingCount: 2,
+    });
+
+    // The reserved visit AND the legacy stale-id parent are adopted and
+    // backfilled; both one-time items (id-carrying and name-only) keep
+    // their identity and separate billing.
+    expect(backfillUpdate.whereIn).toHaveBeenCalledWith('id', ['v-reserved', 'v-legacy-parent']);
+  });
+
+  test('a visit linked to a DIFFERENT term never commits — stamps and estimates do not cross terms (codex r21 pre-push P0)', async () => {
+    // Renewal boundary: the prior term's stamped visit sits inside the new
+    // term's window. It must not be consumed as the new term's coverage.
+    const colQ2 = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {}, is_recurring: {},
+        recurring_pattern: {}, recurring_parent_id: {}, recurring_ongoing: {},
+        technician_id: {}, window_start: {}, window_end: {}, time_window: {},
+        customer_notes: {}, zone: {}, notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const rowsQ = query({
+      rows: [
+        { id: 'v-prior-term', scheduled_date: '2026-06-20', service_type: 'Palm Injection', service_id: 'cat-palm-semi', annual_prepay_term_id: 'term-OLD', prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice', is_recurring: true, status: 'pending' },
+      ],
+    });
+    const p1 = query({ returning: [{ id: 'svc-t1', scheduled_date: '2026-06-15' }] });
+    const c1 = query({ returning: [{ id: 'svc-t2', scheduled_date: '2026-12-15' }] });
+    setDbQueues({
+      scheduled_services: [colQ2, rowsQ, query({ first: undefined }), p1, c1],
+      services: [
+        query({ first: { id: 'cat-palm-semi' } }),
+        query({ first: { id: 'cat-palm-onetime' } }),
+        query({ first: { id: 'cat-palm-semi', service_key: 'palm_injection_semiannual' } }),
+        query({ first: { id: 'cat-palm-onetime', service_key: 'palm_injection' } }),
+      ],
+    });
+    // The identity-carrying row matches the FILTER via its recurring id,
+    // but the tolerance matcher may still consume the 06-15 slot; the key
+    // pin is commitment: rowCommittedToTerm(term-NEW, v-prior-term) is
+    // false, so the slice prefers... assert via created visits: both sold
+    // visits must exist for the NEW term (the prior-term visit covers at
+    // most a slot by identity, never by commitment).
+    const result = await _private.ensureCoverageRowsForTerm({
+      id: 'term-NEW',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' });
+    // The other-term row is excluded even though it carries the recurring
+    // identity — the new term seeds its FULL sold count.
+    expect(result.existingCount).toBe(0);
+    expect(result.createdCount).toBe(2);
+  });
+
+  test('a FAILED palm identity lookup rejects the refresh — never silently excludes id-carrying rows (codex r21 P0)', async () => {
+    const throwingLookup = query({});
+    throwingLookup.first = jest.fn(async () => { throw new Error('db down'); });
+    const colQ = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {}, is_recurring: {},
+        recurring_pattern: {}, recurring_parent_id: {}, recurring_ongoing: {},
+        technician_id: {}, window_start: {}, window_end: {}, time_window: {},
+        customer_notes: {}, zone: {}, notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    setDbQueues({
+      scheduled_services: [colQ, query({ rows: [] })],
+      services: [throwingLookup],
+    });
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-dbdown',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).rejects.toThrow('db down');
+  });
+
+  test('a LEGACY quarterly nutritional palm term seeds normally — never the injection deferral (codex r20 pre-push P0)', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const parentInsert = query({ returning: [{ id: 'svc-n1', scheduled_date: '2026-06-15' }] });
+    const childInserts = [
+      query({ returning: [{ id: 'svc-n2', scheduled_date: '2026-09-15' }] }),
+      query({ returning: [{ id: 'svc-n3', scheduled_date: '2026-12-15' }] }),
+      query({ returning: [{ id: 'svc-n4', scheduled_date: '2027-03-15' }] }),
+    ];
+    setDbQueues({
+      // NO services queue: the injection identity lookups must never run
+      // for the nutritional program (the fake db throws on unqueued
+      // tables, so this pins the exclusion).
+      scheduled_services: [columnQuery, query({ rows: [] }), query({ first: undefined }), parentInsert, ...childInserts],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-nutritional',
+      customer_id: 'customer-nut',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Tree Nutritional Treatment',
+      coverage_visit_count: 4,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 4,
+    });
+
+    // The bare historical 'Palm Treatment' label (codex r21 P0) is the
+    // nutritional lane too — same untouched path.
+    // scheduledServiceColumns is cached within the process — the second
+    // run consumes no columnInfo entry.
+    setDbQueues({
+      scheduled_services: [
+        query({ rows: [] }), query({ first: undefined }),
+        query({ returning: [{ id: 'svc-l1', scheduled_date: '2026-06-15' }] }),
+        query({ returning: [{ id: 'svc-l2', scheduled_date: '2026-09-15' }] }),
+        query({ returning: [{ id: 'svc-l3', scheduled_date: '2026-12-15' }] }),
+        query({ returning: [{ id: 'svc-l4', scheduled_date: '2027-03-15' }] }),
+      ],
+    });
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-legacy-label',
+      customer_id: 'customer-nut',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Treatment',
+      coverage_visit_count: 4,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 4,
+    });
+  });
+
+  test('palm coverage DEFERS (no visits, no term mutation) when the recurring catalog row is missing (codex r15/r17 pre-push)', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    setDbQueues({
+      scheduled_services: [columnQuery, query({ rows: [] }), query({ first: undefined })],
+      services: [query({ first: undefined }), query({ first: undefined }), query({ first: undefined })],
+      notifications: [query({ first: undefined })],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-nocat',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 0,
+      reason: 'palm_catalog_missing',
+      // The deferral runs before any slide persists — it must expose the
+      // AUTHORITATIVE term end, never an unpersisted extension (codex r18
+      // pre-push P0).
+      effectiveTermEnd: '2027-06-15',
+    });
+  });
+
+  test('the palm catalog check runs BEFORE the term-end slide persists (codex r17 pre-push P1)', () => {
+    // A deferred run must not extend the coverage window — repeated
+    // deferrals would re-apply the payment lag on every refresh and
+    // postpone renewal indefinitely.
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/annual-prepay-renewals.js'), 'utf8');
+    const palmCheck = src.indexOf("palm_injection_semiannual");
+    const slidePersist = src.indexOf('// Persist the slid coverage window');
+    expect(palmCheck).toBeGreaterThan(-1);
+    expect(slidePersist).toBeGreaterThan(-1);
+    expect(palmCheck).toBeLessThan(slidePersist);
+    // And refreshTermSnapshot runs attach + prepaid stamping even on a
+    // palm deferral (codex r18 pre-push P0, superseding the earlier
+    // hard-stop): the prepaid stamp is the anti-double-bill mechanism —
+    // an already-booked palm visit left unstamped would invoice at
+    // completion after the prepay was collected. Identity stays
+    // quarantined via the durable coverage exception.
+    expect(src).not.toContain('palmDeferred');
+    expect(src).toContain('Attach + prepaid stamping run even on a palm-identity DEFERRAL');
+  });
+
+  test('a palm term with a NON-semiannual coverage cadence defers with an exception — nothing seeds (codex r18 pre-push P1)', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, service_id: {},
+        service_key_snapshot: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    setDbQueues({
+      scheduled_services: [columnQuery, query({ rows: [] }), query({ first: undefined })],
+      services: [query({ first: undefined }), query({ first: undefined })],
+      notifications: [query({ first: undefined })],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-palm-badcadence',
+      customer_id: 'customer-palm',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Palm Injection',
+      coverage_visit_count: 2,
+      coverage_cadence: 'monthly',
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 0,
+      reason: 'palm_coverage_cadence_invalid',
+      effectiveTermEnd: '2027-06-15',
+    });
+  });
+
   test('clears prepaid stamps on non-completed visits when a void/refund cancels a term', async () => {
     const columnQuery = query({
       columnInfo: {

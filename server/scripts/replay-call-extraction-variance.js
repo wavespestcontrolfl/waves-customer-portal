@@ -63,6 +63,7 @@ const EXPECTATION_KEYS = new Set([
   'current_schedule_date',
   'current_schedule_window_start',
   'current_would_auto_route',
+  'current_block_reasons_subset_of',
   'legacy_scheduled_created',
   'route_changed_vs_legacy_schedule',
   'appointment_candidate_changed_vs_legacy',
@@ -385,6 +386,45 @@ function evaluateFixtureExpectation(result, fixtureCase, context = {}) {
       );
     } else {
       fixtureError('invalid_current_would_auto_route', expect.current_would_auto_route, 'boolean');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_block_reasons_subset_of')) {
+    if (isStringArray(expect.current_block_reasons_subset_of)) {
+      // Passes when the call auto-routes, or when everything holding it back
+      // is in the allowed list. Replay structurally cannot reproduce two prod
+      // holds — a stored AV verdict that no longer transfers (extraction
+      // wording drift) reads as address_not_validated, and consent gates
+      // added after a case was reviewed can hold it — so a reviewed-good call
+      // asserts "blocked by NOTHING ELSE" instead of a hard auto-route:
+      // any new blocking flag or route reason still fails the case.
+      // Mirrors call-routing-gates blocked_reasons: the umbrella
+      // 'triage_flags' reason unwraps to the specific
+      // appointmentBlockingFlags it summarizes, and ONLY then — on
+      // central-gate vetoes (address_not_validated, off_hour_start) the
+      // route result's appointmentBlockingFlags falls back to ALL merged
+      // flags (routeForV2 `route.appointmentBlockingFlags || flags`), so
+      // counting them there would treat advisory/SMS-only flags as holds
+      // (pre-push codex P1).
+      const allowed = new Set(normalizeExpectedArray(expect.current_block_reasons_subset_of));
+      const actualHolds = [];
+      if (!result.current.wouldAutoRoute) {
+        const reason = result.current.routeReason;
+        if (reason === 'triage_flags') {
+          actualHolds.push(...(result.current.appointmentBlockingFlags || []));
+        } else if (reason) {
+          actualHolds.push(reason);
+        }
+        if (!actualHolds.length) actualHolds.push(reason || 'unknown_block_reason');
+      }
+      const offenders = [...new Set(actualHolds)].filter((hold) => !allowed.has(hold));
+      check(
+        'current_block_reasons_subset_of',
+        offenders.length === 0,
+        actualHolds,
+        expect.current_block_reasons_subset_of
+      );
+    } else {
+      fixtureError('invalid_current_block_reasons_subset_of', expect.current_block_reasons_subset_of, 'array');
     }
   }
   if (Object.prototype.hasOwnProperty.call(expect, 'legacy_scheduled_created')) {

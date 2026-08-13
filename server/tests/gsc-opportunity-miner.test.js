@@ -37,6 +37,15 @@ const {
   classifierQuerySupported,
   listicleFamilyRefreshDedupeKey,
   listicleFamilyRepReachable,
+  noContentYetMapEmittable,
+  noContentYetEmittable,
+  pickCtrRewriteTargetPage,
+  ctrRewriteTargetFor,
+  pagesForCandidateDomains,
+  seoActionRouteIdentity,
+  routeIdentity,
+  materialServingPosition,
+  queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
   canonicalizeServiceCategory,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
@@ -244,11 +253,12 @@ describe('actionForOpportunity', () => {
     expect(actionForOpportunity({ bucket: 'seasonal_rising', query: 'do i have to use hometeam pest defense' }))
       .toBe('new_supporting_blog');
   });
-  test('cannibalization always do_not_publish', () => {
+  test('unknown/retired buckets fall through to do_not_publish', () => {
+    // cannibalization + page_type_mismatch retired 2026-08-12 (canonical
+    // mechanisms: CannibalizationDetector / url-intelligence intent
+    // routes) — any historical row still maps to the safe fallback.
     expect(actionForOpportunity({ bucket: 'cannibalization', query: 'x', service: 'pest', city: 'Bradenton' }))
       .toBe('do_not_publish');
-  });
-  test('page_type_mismatch always do_not_publish (human review)', () => {
     expect(actionForOpportunity({ bucket: 'page_type_mismatch', page_url: 'x', service: 'pest', city: 'Bradenton' }))
       .toBe('do_not_publish');
   });
@@ -319,14 +329,416 @@ describe('dedupeKey', () => {
   });
 });
 
+// ── noContentYetMapEmittable ────────────────────────────────────────
+//
+// The admission test shared by mineNoContentYet and the reachability
+// mirror. Emit ONLY on mapped-and-weak evidence: at/inside
+// answerGapPositionMax an owned page already carries the query
+// (refresh/answer-gap territory); UNMAPPED is missing evidence, not proof
+// of absence (GSC omits low-volume query+page rows), so it fails closed.
+
+describe('noContentYetMapEmittable', () => {
+  const { THRESHOLDS: T } = require('../services/content/scoring-config');
+  test('mapped at/inside answerGapPositionMax → not emittable (served)', () => {
+    expect(noContentYetMapEmittable(9)).toBe(false);
+    expect(noContentYetMapEmittable(T.answerGapPositionMax)).toBe(false);
+  });
+  test('mapped beyond the window → emittable (content gap with visible evidence)', () => {
+    expect(noContentYetMapEmittable(T.answerGapPositionMax + 0.1)).toBe(true);
+    expect(noContentYetMapEmittable(85)).toBe(true);
+  });
+  test('unmapped / non-numeric → not emittable (missing evidence fails closed)', () => {
+    expect(noContentYetMapEmittable(null)).toBe(false);
+    expect(noContentYetMapEmittable(undefined)).toBe(false);
+    expect(noContentYetMapEmittable(NaN)).toBe(false);
+  });
+});
+
+// ── per-domain map coverage (pre-push audit P1, 2026-08-12) ─────────
+//
+// Map syncs fail independently per domain; a candidate's absent mapping is
+// evidence only when every contributing domain has in-window map rows.
+
+describe('queryDomainsCovered (per-tuple map coverage)', () => {
+  const covered = new Set(['wavespestcontrol.com', 'parrishpestcontrol.com']);
+  test('all contributing domains covered → checkable', () => {
+    expect(queryDomainsCovered(['wavespestcontrol.com'], covered)).toBe(true);
+    expect(queryDomainsCovered(['Wavespestcontrol.com', 'parrishpestcontrol.com'], covered)).toBe(true);
+  });
+  test('any uncovered domain → fail closed (sync hole, not content gap)', () => {
+    expect(queryDomainsCovered(['wavespestcontrol.com', 'palmettoflpestcontrol.com'], covered)).toBe(false);
+  });
+  test('missing/empty/null domain provenance → fail closed', () => {
+    expect(queryDomainsCovered([], covered)).toBe(false);
+    expect(queryDomainsCovered(null, covered)).toBe(false);
+    expect(queryDomainsCovered([null], covered)).toBe(false);
+  });
+  test('reachability scopes coverage and evidence to the HUB, matching mineNoContentYet', () => {
+    // The mirror judges the hub only, because mineNoContentYet is
+    // hub-only. Judging spoke domains too would let an uncovered or
+    // strongly-ranked spoke mark the rep unreachable while the miner
+    // emits the hub candidate — both buckets queueing for one intent.
+    const mapped = new Map([
+      ['drought tolerant plants florida\u0000wavespestcontrol.com', 45], // weak on the hub
+    ]);
+    const tuple = (over = {}) => ({
+      impressions: 120, hubImpressions: 120, plainPosition: 20,
+      service_category: 'tree_shrub', city_target: null,
+      domains: ['wavespestcontrol.com', 'palmettoflpestcontrol.com'],
+      ...over,
+    });
+    const rep = (t) => ({ query: 'drought tolerant plants florida', impressions: 120, position: 20, tuples: [t] });
+
+    // Hub demand, hub covered, hub weakly mapped → the miner will emit it.
+    expect(listicleFamilyRepReachable(rep(tuple()), new Map(), undefined,
+      { mapCoveredDomains: covered, mappedPositions: mapped })).toBe(true);
+    // An uncovered SPOKE no longer suppresses it — only the hub matters.
+    expect(listicleFamilyRepReachable(rep(tuple({ domains: ['wavespestcontrol.com', 'unmapped-spoke.com'] })),
+      new Map(), undefined, { mapCoveredDomains: covered, mappedPositions: mapped })).toBe(true);
+    // Spoke-carried demand with almost nothing on the hub → the hub-only
+    // bucket will never emit it, so the family keeps the demand.
+    expect(listicleFamilyRepReachable(rep(tuple({ hubImpressions: 5 })), new Map(), undefined,
+      { mapCoveredDomains: covered, mappedPositions: mapped })).toBe(false);
+    // Hub itself uncovered → no trustworthy evidence → fail closed.
+    expect(listicleFamilyRepReachable(rep(tuple()), new Map(), undefined,
+      { mapCoveredDomains: new Set(['parrishpestcontrol.com']), mappedPositions: mapped })).toBe(false);
+  });
+});
+
+// ── per-domain evidence + CTR target-page selection (audit P1 #5/#6) ─
+
+describe('noContentYetEmittable (evidence per contributing domain)', () => {
+  const { THRESHOLDS: T } = require('../services/content/scoring-config');
+  const weak = T.answerGapPositionMax + 10;
+  const strong = T.answerGapPositionMax - 5;
+  test('every contributing domain mapped weakly → emittable', () => {
+    expect(noContentYetEmittable([weak])).toBe(true);
+    expect(noContentYetEmittable([weak, weak])).toBe(true);
+  });
+  test('any domain served strongly → not emittable (would compete)', () => {
+    expect(noContentYetEmittable([weak, strong])).toBe(false);
+  });
+  test('any domain unmapped → not emittable (missing evidence, no cross-domain vouching)', () => {
+    expect(noContentYetEmittable([weak, null])).toBe(false);
+    expect(noContentYetEmittable([null])).toBe(false);
+  });
+  test('no provenance → fail closed', () => {
+    expect(noContentYetEmittable([])).toBe(false);
+    expect(noContentYetEmittable(null)).toBe(false);
+  });
+});
+
+describe('pickCtrRewriteTargetPage', () => {
+  test('picks the most-impressed mapped page (the snippet losing the clicks)', () => {
+    expect(pickCtrRewriteTargetPage([
+      { page_url: 'https://x/a/', impressions: '40', page_position: '3.1' },
+      { page_url: 'https://x/b/', impressions: '900', page_position: '6.4' },
+    ])).toBe('https://x/b/');
+  });
+  test('ties break on the better position', () => {
+    expect(pickCtrRewriteTargetPage([
+      { page_url: 'https://x/a/', impressions: '100', page_position: '7.7' },
+      { page_url: 'https://x/b/', impressions: '100', page_position: '2.2' },
+    ])).toBe('https://x/b/');
+  });
+  test('no mapped rows / no usable url → null (caller falls through to do_not_publish)', () => {
+    expect(pickCtrRewriteTargetPage([])).toBe(null);
+    expect(pickCtrRewriteTargetPage()).toBe(null);
+    expect(pickCtrRewriteTargetPage([{ page_url: null, impressions: '500' }])).toBe(null);
+  });
+});
+
+describe('freshness + split-collapse contracts (source shape)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+
+  test('map coverage requires ABSOLUTE freshness, not only relative', () => {
+    // A whole-domain sync failure freezes gsc_queries AND the map at the
+    // same old date, so the relative comparison alone reports "covered"
+    // forever while the miner keeps acting on stale evidence.
+    expect(src).toMatch(/m\.map_max >= q\.queries_max - make_interval\(days => \?\)[\s\S]{0,120}m\.map_max >= current_date - make_interval\(days => \?\)/);
+    expect(src).toMatch(/MAP_ABSOLUTE_STALENESS_DAYS = 7/);
+  });
+
+  test('no_content_yet collapses classification splits to ONE candidate per query', () => {
+    // dedupeKey embeds service+city, so two splits of one query would both
+    // persist and draft two posts for one intent.
+    expect(src).toMatch(/const byQuery = new Map\(\);[\s\S]{0,3200}byQuery\.set\(q\.query, \{ q, service, city, impressions, persistable \}\)/);
+    // …and the winner must be PERSISTABLE first, so the collapse agrees
+    // with reachability (which admits a rep when ANY tuple clears).
+    expect(src).toMatch(/\(persistable && !existing\.persistable\)/);
+  });
+
+  test('distinct queries for ONE city-service target do not share a dedupe key', () => {
+    // Why the collapse has to happen at mine time: dedupeKey falls back to
+    // the query when a row has no page_url, so each of these mints its own
+    // key and persistAll's winners-map — which is keyed on dedupe_key —
+    // would keep BOTH, and the runner would draft that one page twice.
+    const cityService = (query) => {
+      const opp = {
+        bucket: 'no_content_yet', query, page_url: null, service: 'termite', city: 'sarasota',
+      };
+      opp.action_type = actionForOpportunity(opp);
+      return opp;
+    };
+    const a = cityService('termite treatment cost sarasota');
+    const b = cityService('termite inspection sarasota fl');
+    expect(a.action_type).toBe('create_or_refresh_city_service_page');
+    expect(b.action_type).toBe('create_or_refresh_city_service_page');
+    expect(dedupeKey(a)).not.toBe(dedupeKey(b));
+  });
+
+  test('no_content_yet emits ONE row per city-service target', () => {
+    const ncy = src.slice(src.indexOf('async mineNoContentYet'), src.indexOf('// ── persistence'));
+    // Grouped by target, strongest score wins.
+    expect(ncy).toMatch(/const key = ownPageKey\(opp\.service, opp\.city\);/);
+    expect(ncy).toMatch(/group\.reduce\(\(best, o\) => \(o\.score > best\.score \? o : best\), group\[0\]\)/);
+    // The losers' demand is not thrown away — the brief sees every
+    // contributing query, not just the winner's intent.
+    expect(ncy).toMatch(/contributing_queries/);
+    // Only the city-service route collapses; cityless blog candidates are
+    // each their own post and pass through untouched.
+    expect(ncy).toMatch(/if \(opp\.action_type !== 'create_or_refresh_city_service_page'\) \{[\s\S]{0,80}collapsed\.push\(opp\)/);
+  });
+
+  test('no_content_yet carries the specialty topic behind broad canonicalization', () => {
+    // 'wasp'/'bed bug' canonicalize to broad 'pest' and 'aeration' to
+    // 'lawn', but those narrow topics are individually FAQ-blocked while the
+    // broad service is not. Without the field the brief keeps its default
+    // FAQ mandate and guardrail-options passes only the broad service, so
+    // the draft earns an FAQ the repo treats as policy-blocked.
+    const ncy = src.slice(src.indexOf('async mineNoContentYet'), src.indexOf('// ── persistence'));
+    expect(ncy).toMatch(/specialty_topic: extractSpecialtyTopic\(\[q\.query\]\)/);
+    // …and the collapse recomputes across the group.
+    expect(ncy).toMatch(/winner\.signal_metadata\.specialty_topic = extractSpecialtyTopic\(\[/);
+  });
+
+  test('a blocked topic on a LOSING query survives the target collapse', () => {
+    const { extractSpecialtyTopic } = require('../services/seo/gsc-opportunity-miner')._internals;
+    // The coverage section makes the draft address every collapsed
+    // phrasing, so a generic winner beside a blocked sibling must still
+    // lose its FAQ mandate — otherwise the page FAQs a blocked topic.
+    expect(extractSpecialtyTopic(['pest control sarasota', 'wasp nest removal sarasota'])).toBe('wasp');
+    // Winner-first ordering: its own topic still wins when it has one.
+    expect(extractSpecialtyTopic(['bed bug treatment sarasota', 'wasp nest removal sarasota'])).toBe('bed-bug');
+    // A wholly generic segment stays null rather than inventing a topic.
+    expect(extractSpecialtyTopic(['pest control sarasota', 'exterminator sarasota'])).toBeNull();
+  });
+
+  test('the collapse winner keeps a QUERY-derived key, never a target key', () => {
+    // A target-keyed row would dedupe just as well but be stable forever,
+    // and the upsert's frozen-row guard skips done/skipped rows ENTIRELY —
+    // so one completed page would silence that target permanently, which is
+    // the exact failure this PR exists to fix.
+    const ncy = src.slice(src.indexOf('async mineNoContentYet'), src.indexOf('// ── persistence'));
+    expect(ncy).toMatch(/opp\.dedupe_key = dedupeKey\(opp\);/);
+    expect(ncy).not.toMatch(/dedupeKey\(\{ \.\.\.opp, query: null \}\)/);
+    // The guard that makes a stable key permanent.
+    expect(src).toMatch(/WHERE opportunity_queue\.status NOT IN \('claimed', 'done', 'pending_review', 'skipped'\)/);
+  });
+
+  test('freshness is proven BEFORE an empty mine is accepted as "no signal"', () => {
+    // A long enough sync outage empties the 28-day window entirely; an
+    // early `return []` before the coverage guard would look like a clean
+    // empty mine and let the sweep expire the lane.
+    const ctr = src.slice(src.indexOf('async mineCtrRewrite'), src.indexOf('async mineDecayRefresh'));
+    expect(ctr.indexOf('_queryPageMapCoveredDomains')).toBeLessThan(ctr.indexOf('if (!filtered.length) return []'));
+    const ncy = src.slice(src.indexOf('async mineNoContentYet'), src.indexOf('// ── persistence'));
+    expect(ncy.indexOf('_queryPageMapCoveredDomains')).toBeLessThan(ncy.indexOf('if (!candidates.length) return []'));
+  });
+
+  test('no_content_yet canonicalizes the service before queueing', () => {
+    // Raw 'tree_shrub'/'specialty' reach the runner as facts_unmappable
+    // and park instead of drafting.
+    expect(src).toMatch(/const canon = canonicalizeServiceCategory\(q\.service_category\);/);
+    // …and the STORED category is only trusted with boundary-aware query
+    // evidence ('ant' inside 'important' must not read as pest).
+    expect(src).toMatch(/classifierQuerySupported\(q\.service_category, canon, q\.query\)/);
+    expect(src).toMatch(/classifierQuerySupported\(t\.service_category, ncyCanon, rep\.query\)/);
+  });
+
+  test('a ctr_rewrite page is claimed only by a PERSISTABLE candidate', () => {
+    expect(src).toMatch(/if \(total < persistFloorFor\(probe\)\) continue;[\s\S]{0,200}claimedPages\.set/);
+  });
+});
+
+describe('degraded buckets THROW so mineAll suppresses their sweep', () => {
+  // The sweep retires every pending row the mine did not re-emit, so an
+  // "unavailable dependency" path that returns [] would look like "ran
+  // fine, nothing qualifies" and wipe the lane. Both hard-unavailable
+  // guards must throw instead — mineAll then records errors[bucket] and
+  // skips that bucket's sweep.
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+
+  test('the seo_actions fence throws rather than returning empty', () => {
+    expect(src).toMatch(/ownedBySeoActions === null\) \{[\s\S]{0,600}throw new Error\('seo_actions ownership fence unavailable/);
+  });
+  test('the hub-coverage guard throws rather than returning empty', () => {
+    // no_content_yet is hub-only, so a fresh SPOKE must not satisfy the
+    // guard: that would skip every hub candidate, look successful, and
+    // let the sweep expire the lane.
+    expect(src).toMatch(/!covered\.has\(HUB_DOMAIN\)\) \{[\s\S]{0,600}throw new Error\(`gsc_query_page_map has no fresh coverage for \$\{HUB_DOMAIN\}`\)/);
+  });
+
+  test('queries whose evidence was unavailable are EXEMPT from the sweep', () => {
+    // Absent evidence is not a recovered signal — the pending row must
+    // survive rather than be retired by a partial outage.
+    expect(src).toMatch(/exemptQueries\.add\(q\.query\)/);
+    expect(src).toMatch(/exemptQueries\.add\(r\.query\)/);
+    expect(src).toMatch(/if \(exemptQueries\.size\) staleQ = staleQ\.whereNotIn\('query', Array\.from\(exemptQueries\)\)/);
+  });
+  test('mineAll skips the sweep for any bucket that errored', () => {
+    expect(src).toMatch(/for \(const bucket of \['ctr_rewrite', 'no_content_yet'\]\) \{[\s\S]{0,120}if \(errors\[bucket\]\) continue;/);
+  });
+});
+
+describe('seoActionRouteIdentity (cross-queue fence key)', () => {
+  test('scheme-less seo_actions urls normalize to the same identity as page urls', () => {
+    // seo_actions stores "wavespestcontrol.com/path"; gsc_query_page_map
+    // stores "https://www.wavespestcontrol.com/path/". Both must key the
+    // same or the fence silently never matches.
+    expect(seoActionRouteIdentity('wavespestcontrol.com/fire-ant-control-palmetto-fl'))
+      .toBe(routeIdentity('https://www.wavespestcontrol.com/fire-ant-control-palmetto-fl/'));
+    expect(seoActionRouteIdentity('https://wavespestcontrol.com/x/'))
+      .toBe(routeIdentity('https://www.wavespestcontrol.com/x'));
+  });
+  test('spoke domains stay distinct from the hub', () => {
+    expect(seoActionRouteIdentity('bradentonflpestcontrol.com/services/x'))
+      .not.toBe(seoActionRouteIdentity('wavespestcontrol.com/services/x'));
+  });
+  test('empty input -> null', () => {
+    expect(seoActionRouteIdentity('')).toBe(null);
+    expect(seoActionRouteIdentity(null)).toBe(null);
+  });
+});
+
+describe('pagesForCandidateDomains (a tuple may only use its own domains evidence)', () => {
+  const rows = [
+    { page_url: 'https://hub/a/', impressions: '900', page_position: '3.0', domains: ['wavespestcontrol.com'] },
+    { page_url: 'https://spoke/b/', impressions: '900', page_position: '3.0', domains: ['venicelawncare.com'] },
+  ];
+  test('keeps only pages produced by the candidate own domains', () => {
+    expect(pagesForCandidateDomains(rows, ['wavespestcontrol.com']).map((r) => r.page_url))
+      .toEqual(['https://hub/a/']);
+    expect(pagesForCandidateDomains(rows, ['VeniceLawnCare.com']).map((r) => r.page_url))
+      .toEqual(['https://spoke/b/']);
+  });
+  test('no provenance on either side -> nothing eligible (fail closed)', () => {
+    expect(pagesForCandidateDomains(rows, [])).toEqual([]);
+    expect(pagesForCandidateDomains(rows, null)).toEqual([]);
+    expect(pagesForCandidateDomains([{ page_url: 'https://x/', impressions: '9' }], ['wavespestcontrol.com']))
+      .toEqual([]);
+  });
+});
+
+describe('ctrRewriteTargetFor (the selected page must itself underperform)', () => {
+  test('selected page below the CTR threshold → target', () => {
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/b/', impressions: '900', clicks: '5', page_position: '6.4' },
+    ])).toBe('https://x/b/');
+  });
+  test('a weak sibling drags the query aggregate down but the top page is healthy → no rewrite', () => {
+    // Query-level CTR ≈ 1.6% (under 2%), yet the most-impressed page
+    // converts at 5% — rewriting its title would damage a working
+    // snippet.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/healthy/', impressions: '1000', clicks: '50', page_position: '3.0' },
+      { page_url: 'https://x/weak/', impressions: '900', clicks: '0', page_position: '7.9' },
+    ])).toBe(null);
+  });
+  test('no rows → null', () => {
+    expect(ctrRewriteTargetFor([])).toBe(null);
+    expect(ctrRewriteTargetFor()).toBe(null);
+  });
+  test('pages outside the bucket ranking window are ineligible', () => {
+    const { THRESHOLDS: T } = require('../services/content/scoring-config');
+    // The query-level avg_position gate can be satisfied while the
+    // most-impressed URL sits far deeper — that page never met the
+    // bucket's criterion and must not collect a metadata rewrite.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/deep/', impressions: '900', clicks: '1', page_position: '31.0' },
+    ])).toBe(null);
+    // The in-window page wins even with fewer impressions.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/deep/', impressions: '900', clicks: '1', page_position: '31.0' },
+      { page_url: 'https://x/shallow/', impressions: '400', clicks: '1', page_position: String(T.ctrRewritePositionMax) },
+    ])).toBe('https://x/shallow/');
+    // Missing position → ineligible (fail closed). null/'' must not read
+    // as position 0 and sneak into the window.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/unknown/', impressions: '900', clicks: '1' },
+    ])).toBe(null);
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/null/', impressions: '900', clicks: '1', page_position: null },
+    ])).toBe(null);
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/empty/', impressions: '900', clicks: '1', page_position: '' },
+    ])).toBe(null);
+  });
+  test('target must carry material demand, absolutely and as a share of the query', () => {
+    // The reviewer's scenario: the query qualifies on demand sitting at
+    // deep URLs, while a bystander page ranks shallow on a handful of
+    // impressions — its 0% CTR is noise, not evidence.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/shallow-tiny/', impressions: '8', clicks: '0', page_position: '4.0' },
+      { page_url: 'https://x/deep-real/', impressions: '900', clicks: '2', page_position: '40.0' },
+    ])).toBe(null);
+    // Material absolute volume but a small share of the query's demand →
+    // still a bystander.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/shallow-minor/', impressions: '50', clicks: '0', page_position: '7.8' },
+      { page_url: 'https://x/deep-major/', impressions: '900', clicks: '2', page_position: '40.0' },
+    ])).toBe(null);
+    // Carries the query: material and dominant → eligible.
+    expect(ctrRewriteTargetFor([
+      { page_url: 'https://x/carries/', impressions: '400', clicks: '1', page_position: '3.0' },
+      { page_url: 'https://x/minor/', impressions: '60', clicks: '0', page_position: '40.0' },
+    ])).toBe('https://x/carries/');
+  });
+});
+
+describe('materialServingPosition (immaterial mappings do not prove serving)', () => {
+  const { THRESHOLDS: T } = require('../services/content/scoring-config');
+  const material = T.answerGapMinQueryImpressions;
+  test('a stray impression at a great position does not count as serving', () => {
+    // 1 impression at position 2 alongside the real demand at 50: the
+    // min-across-URLs would report 2 and suppress a genuine gap.
+    expect(materialServingPosition([
+      { impressions: '1', page_position: '2.0' },
+      { impressions: '400', page_position: '50.0' },
+    ])).toBe(50);
+  });
+  test('material pages report their best position', () => {
+    expect(materialServingPosition([
+      { impressions: String(material), page_position: '12.0' },
+      { impressions: '900', page_position: '4.0' },
+    ])).toBe(4);
+  });
+  test('all mappings immaterial → null (fails closed like unmapped)', () => {
+    expect(materialServingPosition([
+      { impressions: String(material - 1), page_position: '2.0' },
+    ])).toBe(null);
+    expect(materialServingPosition([])).toBe(null);
+    expect(materialServingPosition()).toBe(null);
+  });
+  test('missing positions are skipped, never read as position 0', () => {
+    // Number(null) and Number('') are both 0 — a perfect ranking — so a
+    // bare Number() here would fail OPEN and suppress a real gap.
+    expect(materialServingPosition([{ impressions: '900', page_position: null }])).toBe(null);
+    expect(materialServingPosition([{ impressions: '900', page_position: '' }])).toBe(null);
+    expect(materialServingPosition([{ impressions: '900' }])).toBe(null);
+  });
+});
+
 // ── scoreOpportunity integration of breakdown ───────────────────────
 
 describe('scoreOpportunity', () => {
-  test('cannibalization gets cannibalizationRisk penalty applied', () => {
-    const o = { bucket: 'cannibalization', service: 'pest', query: 'pest control', city: 'Bradenton' };
+  test('breakdown keeps _penalty (0 — no bucket pre-applies one since the review buckets retired)', () => {
+    const o = { bucket: 'striking_distance', service: 'pest', query: 'pest control', city: 'Bradenton' };
     const { total, breakdown } = scoreOpportunity(o, { position: 5, impressions: 200 });
-    expect(breakdown._penalty).toBe(WEIGHTS.cannibalizationRisk);
-    expect(total).toBeLessThan(
+    expect(breakdown._penalty).toBe(0);
+    expect(total).toBe(
       Object.entries(breakdown).filter(([k]) => k !== '_penalty').reduce((a, [, v]) => a + v, 0)
     );
   });
@@ -391,6 +803,53 @@ describe('deriveLinkBoost', () => {
     score_breakdown: { base: 80 },
     signal_metadata: { decay_pct: 0.4 },
     ...over,
+  });
+
+  test('a same-page mixed-source collapse keeps the rewrite floor when a qualifying rewrite parent justifies it', () => {
+    // deriveLinkBoost collapses same-page parents by score. If the decay
+    // parent wins on score, tagging the companion 'decay_refresh' would
+    // hold it to the global floor and drop work the (persistable)
+    // ctr_rewrite parent on the same page justifies at the lower rewrite
+    // floor. Provenance is additive.
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    try {
+      const [companion] = deriveLinkBoost([
+        {
+          bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta', score: 65,
+          page_url: 'https://x/p/', service: 'pest', city: null, query: 'q',
+        },
+        {
+          bucket: 'decay_refresh', action_type: 'refresh_existing_page', score: 69,
+          page_url: 'https://x/p/', service: 'pest', city: null, query: null,
+        },
+      ]);
+      expect(companion.score).toBe(69); // strongest signal still wins the score
+      expect(companion.signal_metadata.source_bucket).toBe('ctr_rewrite'); // …but the permissive floor
+      expect(companion.signal_metadata.source_buckets).toEqual(
+        expect.arrayContaining(['ctr_rewrite', 'decay_refresh'])
+      );
+    } finally {
+      delete process.env.AUTONOMOUS_REWRITE_MIN_SCORE;
+    }
+  });
+
+  test('a BELOW-floor rewrite parent does not grant the rewrite floor to a decay companion', () => {
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    try {
+      const [companion] = deriveLinkBoost([
+        {
+          bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta', score: 40, // under 60
+          page_url: 'https://x/p/', service: 'pest', city: null, query: 'q',
+        },
+        {
+          bucket: 'decay_refresh', action_type: 'refresh_existing_page', score: 80,
+          page_url: 'https://x/p/', service: 'pest', city: null, query: null,
+        },
+      ]);
+      expect(companion.signal_metadata.source_bucket).toBe('decay_refresh');
+    } finally {
+      delete process.env.AUTONOMOUS_REWRITE_MIN_SCORE;
+    }
   });
 
   test('a ctr_rewrite parent spawns an add_internal_links companion that inherits its signal', () => {
@@ -459,10 +918,13 @@ describe('deriveLinkBoost', () => {
   });
 
   test('excludeKeys rotates the cap past occupied rows instead of starving lower-scoring pages', () => {
+    // All three clear the default persistence floor — this test is about
+    // cap ROTATION, not floors (a below-floor companion is dropped before
+    // the cap now; see the starvation test below).
     const parents = [
       ctrParent({ page_url: '/a/', score: 95 }),
       ctrParent({ page_url: '/b/', score: 85 }),
-      ctrParent({ page_url: '/c/', score: 70 }),
+      ctrParent({ page_url: '/c/', score: 80 }),
     ];
     // First run: cap 2 → the top two pages.
     const firstRun = deriveLinkBoost(parents, { cap: 2 });
@@ -472,6 +934,33 @@ describe('deriveLinkBoost', () => {
     const occupied = new Set(firstRun.map((o) => o.dedupe_key));
     const secondRun = deriveLinkBoost(parents, { cap: 2, excludeKeys: occupied });
     expect(secondRun.map((o) => o.page_url)).toEqual(['/c/']);
+  });
+
+  test('non-persistable companions never consume cap slots (no starvation of valid lower-scoring ones)', () => {
+    process.env.AUTONOMOUS_REWRITE_MIN_SCORE = '60';
+    try {
+      // Two decay companions at 69 outscore the rewrite companion at 65,
+      // but decay rides the global 75 floor and would be discarded at
+      // persist time — burning the whole cap and starving the rewrite
+      // companion, which is persistable at its own 60 floor.
+      const out = deriveLinkBoost([
+        {
+          bucket: 'decay_refresh', action_type: 'refresh_existing_page', score: 69,
+          page_url: '/decay-1/', service: 'pest', city: null, query: null,
+        },
+        {
+          bucket: 'decay_refresh', action_type: 'refresh_existing_page', score: 69,
+          page_url: '/decay-2/', service: 'pest', city: null, query: null,
+        },
+        {
+          bucket: 'ctr_rewrite', action_type: 'rewrite_title_meta', score: 65,
+          page_url: '/rewrite/', service: 'pest', city: null, query: 'q',
+        },
+      ], { cap: 2 });
+      expect(out.map((o) => o.page_url)).toEqual(['/rewrite/']);
+    } finally {
+      delete process.env.AUTONOMOUS_REWRITE_MIN_SCORE;
+    }
   });
 
   test('companions derived after the facts boost inherit the boosted parent score', () => {
@@ -622,6 +1111,7 @@ describe('persistAll upsert binding integrity (07-31 regression)', () => {
     }]);
     expect(persisted).toBe(0);
   });
+
 });
 
 // ── answer_gap helpers ───────────────────────────────────────────────
@@ -958,17 +1448,23 @@ describe('listicle_family scoring + action mapping', () => {
   });
 
   test('rep reachability mirrors the REAL query-bucket admission conditions (Codex r12)', () => {
+    const MAP_COVERED = new Set(['wavespestcontrol.com']);
+    // mappedPositions is keyed `query\x00domain` — build the hub entry for
+    // the rep query at a given position.
+    const mapped = (pos, query = 'drought tolerant plants florida') =>
+      new Map([[`${query}\x00wavespestcontrol.com`, pos]]);
     const rep = (over = {}) => ({
       query: 'drought tolerant plants florida',
       impressions: 51,
       position: 20,
       service_category: null,
       city_target: null,
+      domains: ['wavespestcontrol.com'],
       ...over,
     });
     // Beyond 15 with no resolvable service (raw AND inferred blank) →
     // unreachable: mineNoContentYet skips !service.
-    expect(listicleFamilyRepReachable(rep({ query: 'types of fish in florida' }), new Map())).toBe(false);
+    expect(listicleFamilyRepReachable(rep({ query: 'types of fish in florida' }), new Map(), undefined, { mapCoveredDomains: MAP_COVERED })).toBe(false);
     // Striking-distance window (4-15): SQL admission alone is NOT
     // reachability (Codex r16) — the mirrored candidate must also clear
     // persistAll's action-aware floor, and at these signal levels a
@@ -976,18 +1472,25 @@ describe('listicle_family scoring + action mapping', () => {
     // blog floor 45 without): the family keeps the demand.
     expect(listicleFamilyRepReachable(rep({ position: 8 }), new Map([['tree-shrub::', 'https://x/']]))).toBe(false);
     expect(listicleFamilyRepReachable(rep({ position: 8, query: 'types of fish in florida' }), new Map())).toBe(false);
-    // Beyond 15 with NO own page for the service+city → no_content_yet reaches it.
-    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map())).toBe(true);
-    // Beyond 15 but an own page EXISTS for the service+city →
-    // no_content_yet skips it and striking_distance is out of window: NO
-    // bucket emits the rep, so the family must stay eligible. The lookup
-    // mirrors that miner's RAW-classifier-first keying (Codex r13): a raw
-    // 'tree_shrub' classification must find the raw-keyed map entry.
-    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map([['tree-shrub::', 'https://x/']]))).toBe(false);
-    expect(listicleFamilyRepReachable(
-      rep({ position: 20, service_category: 'tree_shrub' }),
-      new Map([['tree_shrub::', 'https://x/']])
-    )).toBe(false);
+    // Beyond 15, contributing domain covered, mapped weakly (best owned
+    // page past answerGapPositionMax) → content gap: no_content_yet
+    // reaches it.
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { mapCoveredDomains: MAP_COVERED, mappedPositions: mapped(45) })).toBe(true);
+    // Beyond 15 but UNMAPPED → missing evidence fails closed (audit P1
+    // #4): mineNoContentYet won't emit, so the mirror reads unreachable
+    // and the family keeps the demand.
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { mapCoveredDomains: MAP_COVERED })).toBe(false);
+    // Beyond 15 with a mapped page at ≤ answerGapPositionMax →
+    // no_content_yet skips it (refresh/answer-gap territory) and
+    // striking_distance is out of window: NO bucket emits the rep, so the
+    // family must stay eligible (noContentYetMapServed mirror).
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { mapCoveredDomains: MAP_COVERED, mappedPositions: mapped(25) })).toBe(false);
+    // Map coverage MISSING for the contributing domain (sync outage):
+    // mineNoContentYet fails closed and emits nothing, so the mirror must
+    // read unreachable — demand stays with the family, no double emission
+    // from either side.
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map())).toBe(false);
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map(), undefined, { mapCoveredDomains: new Set(), mappedPositions: new Map() })).toBe(false);
     // Seasonal-emittable rep → reachable regardless of position/own-page
     // (mineSeasonalRising emits it independently; Codex r13).
     expect(listicleFamilyRepReachable(
@@ -1000,20 +1503,45 @@ describe('listicle_family scoring + action mapping', () => {
     expect(listicleFamilyRepReachable(rep({ position: 0 }), new Map())).toBe(false);
   });
 
+  test('the no_content_yet mirror judges HUB impressions, matching that bucket hub-only scope', () => {
+    const MAP_COVERED = new Set(['wavespestcontrol.com']);
+    const mapped = new Map([['drought tolerant plants florida\u0000wavespestcontrol.com', 45]]);
+    const base = {
+      query: 'drought tolerant plants florida',
+      impressions: 120,
+      position: 20,
+    };
+    // 120 impressions cross-domain but only 30 on the hub: mineNoContentYet
+    // (hub-only) will never emit it, so the family must keep the demand.
+    expect(listicleFamilyRepReachable(
+      { ...base, tuples: [{ impressions: 120, hubImpressions: 30, plainPosition: 20, service_category: 'tree_shrub', city_target: null, domains: ['wavespestcontrol.com'] }] },
+      new Map(), undefined, { mapCoveredDomains: MAP_COVERED, mappedPositions: mapped }
+    )).toBe(false);
+    // Same tuple with the demand actually on the hub → reachable.
+    expect(listicleFamilyRepReachable(
+      { ...base, tuples: [{ impressions: 120, hubImpressions: 120, plainPosition: 20, service_category: 'tree_shrub', city_target: null, domains: ['wavespestcontrol.com'] }] },
+      new Map(), undefined, { mapCoveredDomains: MAP_COVERED, mappedPositions: mapped }
+    )).toBe(true);
+  });
+
   test('reachability judges tuples by the QUERY MINERS aggregation, not the family weighting (Codex r14)', () => {
     // 100 imps at plain-avg 54 (volatile daily rankings): the family's
     // weighted position may sit near 8, but mineStrikingDistance uses
-    // avg(position)=54 (out of window) and mineNoContentYet skips on the
-    // own page — NO bucket emits it, so the family must stay eligible.
+    // avg(position)=54 (out of window) and mineNoContentYet skips when a
+    // mapped page serves the query — NO bucket emits it, so the family
+    // must stay eligible.
+    const MAP_COVERED = new Set(['wavespestcontrol.com']);
+    const mapped = (pos, query = 'drought tolerant plants florida') =>
+      new Map([[`${query}\x00wavespestcontrol.com`, pos]]);
     const volatile = {
       query: 'drought tolerant plants florida',
       impressions: 101,
       position: 8.9, // family weighting — must NOT decide reachability
-      tuples: [{ impressions: 101, plainPosition: 54, service_category: 'tree_shrub', city_target: null }],
+      tuples: [{ impressions: 101, plainPosition: 54, service_category: 'tree_shrub', city_target: null, domains: ['wavespestcontrol.com'] }],
     };
-    expect(listicleFamilyRepReachable(volatile, new Map([['tree_shrub::', 'https://x/']]))).toBe(false);
-    // Same rep with no own page → no_content_yet emits (plain avg > 15).
-    expect(listicleFamilyRepReachable(volatile, new Map())).toBe(true);
+    expect(listicleFamilyRepReachable(volatile, new Map(), undefined, { mapCoveredDomains: MAP_COVERED, mappedPositions: mapped(22) })).toBe(false);
+    // Same rep mapped weakly → no_content_yet emits (plain avg > 15).
+    expect(listicleFamilyRepReachable(volatile, new Map(), undefined, { mapCoveredDomains: MAP_COVERED, mappedPositions: mapped(54) })).toBe(true);
     // Split classification: 30+21 imps across two tuples — each tuple is
     // under the per-tuple ≥50 floor the query miners apply per group, so
     // neither miner emits despite the 51-imp total.
@@ -1022,11 +1550,11 @@ describe('listicle_family scoring + action mapping', () => {
       impressions: 51,
       position: 8,
       tuples: [
-        { impressions: 30, plainPosition: 8, service_category: 'tree_shrub', city_target: null },
-        { impressions: 21, plainPosition: 9, service_category: 'lawn', city_target: null },
+        { impressions: 30, plainPosition: 8, service_category: 'tree_shrub', city_target: null, domains: ['wavespestcontrol.com'] },
+        { impressions: 21, plainPosition: 9, service_category: 'lawn', city_target: null, domains: ['wavespestcontrol.com'] },
       ],
     };
-    expect(listicleFamilyRepReachable(split, new Map())).toBe(false);
+    expect(listicleFamilyRepReachable(split, new Map(), undefined, { mapCoveredDomains: MAP_COVERED })).toBe(false);
     // In-window tuple over the SQL floor — but the mirrored candidate
     // scores ~32, under its persistence floor, so the query bucket would
     // mine-and-drop it: the family keeps the demand (Codex r16).

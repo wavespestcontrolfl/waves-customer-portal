@@ -284,6 +284,58 @@ describe('checkActiveSeriesLocked — race-safe guard (P0: check-then-insert rac
     ]);
   });
 
+  test('an existing ALIAS parent (Palm Tree Injections, null id) matches a palm target (codex r21 pre-push P0)', async () => {
+    // serviceKeyFor is tree-first, so the legacy alias parent classified
+    // tree_shrub while the canonicalized target read palm_injection — the
+    // guard missed it and minted a duplicate per-application palm series.
+    // Both sides now classify palm-first via seedingFamilyKey.
+    const { db } = makeLockEnv({
+      parents: [{ id: 9, service_id: null, service_type: 'Palm Tree Injections', recurring_ongoing: true, scheduled_date: '2026-01-01', status: 'pending' }],
+    });
+    const result = await db.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceType: 'Palm Injection',
+    }));
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0].id).toBe(9);
+  });
+
+  test('alias and canonical palm creators take the SAME family lock (codex r22 pre-push P0)', async () => {
+    const { db, rawCalls } = makeLockEnv({ parents: [] });
+    await db.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceType: 'Palm Tree Injections',
+    }));
+    const { db: db2, rawCalls: rawCalls2 } = makeLockEnv({ parents: [] });
+    await db2.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceType: 'Palm Injection',
+    }));
+    expect(lockKeysFrom(rawCalls)).toEqual(lockKeysFrom(rawCalls2));
+    expect(lockKeysFrom(rawCalls)).toEqual(['5:family:palm_injection']);
+    // …and nutritional creators lock their OWN family.
+    const { db: db3, rawCalls: rawCalls3 } = makeLockEnv({ parents: [] });
+    await db3.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceType: 'Palm Tree Nutritional Treatment',
+    }));
+    expect(lockKeysFrom(rawCalls3)).toEqual(['5:family:palm_nutritional']);
+  });
+
+  test('a NUTRITIONAL palm series never suppresses an injection target — distinct guard identities (codex r21 pre-push P0)', async () => {
+    const { db } = makeLockEnv({
+      parents: [{ id: 11, service_id: null, service_type: 'Palm Tree Nutritional Treatment', recurring_ongoing: true, scheduled_date: '2026-01-01', status: 'pending' }],
+    });
+    const result = await db.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceType: 'Palm Injection',
+    }));
+    expect(result.matches).toHaveLength(0);
+    // …while a nutritional target still matches its own family.
+    const { db: db2 } = makeLockEnv({
+      parents: [{ id: 12, service_id: null, service_type: 'Palm Tree Nutritional Treatment', recurring_ongoing: true, scheduled_date: '2026-01-01', status: 'pending' }],
+    });
+    const result2 = await db2.transaction((trx) => checkActiveSeriesLocked(trx, {
+      customerId: 5, serviceType: 'Palm Treatment',
+    }));
+    expect(result2.matches).toHaveLength(1);
+  });
+
   test('locks BOTH matcher dimensions when the caller carries service_id AND a label', async () => {
     const { db, rawCalls } = makeLockEnv({ parents: [] });
     await db.transaction((trx) => checkActiveSeriesLocked(trx, {
@@ -547,7 +599,11 @@ describe('the series creators consume the guard (source guards)', () => {
     // Standalone-bait creator: guard runs before its parent insert inside
     // the same transaction — a duplicate skips the WHOLE unit, no orphan
     // first visit.
-    const baitGuard = converterSrc.indexOf('serviceType: standaloneRow.service_type');
+    // serviceType flows through guardServiceTypeFor (codex #3349 r10 P1):
+    // an adopted palm-alias label would otherwise family-match an
+    // unrelated Tree & Shrub series through the seeder's tree-first
+    // matcher and skip the palm series as a "duplicate".
+    const baitGuard = converterSrc.indexOf('serviceType: guardServiceTypeFor(standaloneRow.service_type)');
     const baitInsert = converterSrc.indexOf("trx('scheduled_services').insert(standaloneRow)");
     expect(baitGuard).toBeGreaterThan(-1);
     expect(baitInsert).toBeGreaterThan(baitGuard);
@@ -556,12 +612,102 @@ describe('the series creators consume the guard (source guards)', () => {
     const autoGuard = converterSrc.lastIndexOf('checkActiveSeriesLocked(trx, {');
     const autoInsert = converterSrc.indexOf("trx('scheduled_services').insert(row)", autoGuard);
     expect(autoInsert).toBeGreaterThan(autoGuard);
+    // The auto-schedule guard runs whenever a series would seed OR the
+    // unit still reads as recurring, with exactly ONE bypass — the
+    // builder's one-application palm line (codex #3349 P1 + r4 P1): 1x
+    // palm infers 'annual'/the plan fallback while seeding nothing, and
+    // family-matching it against an active semiannual palm series would
+    // swallow a legitimate one-time appointment. The bypass must stay
+    // palm-1x-narrow: a non-seeding COMMERCIAL-lawn unit (8 visits) must
+    // still duplicate-check. The gate sits between the seeding step's
+    // open and the locked guard call.
+    const autoStep = converterSrc.lastIndexOf('await runSeedingStep(async (trx) => {', autoGuard);
+    const seedingGate = converterSrc.indexOf('if (seedingPattern || (pattern && !oneApplicationPalm)) {', autoStep);
+    expect(seedingGate).toBeGreaterThan(autoStep);
+    expect(seedingGate).toBeLessThan(autoGuard);
+    // Injection-scoped since codex r21 (nutritional exclusion).
+    const bypassDef = converterSrc.indexOf('isPalmInjectionFamily(svc)', autoStep);
+    expect(bypassDef).toBeGreaterThan(autoStep);
+    expect(bypassDef).toBeLessThan(seedingGate);
+    expect(converterSrc.slice(bypassDef, seedingGate)).toContain('visitsPerYearForRecurringService(svc) === 1');
+    // The bypass requires NON-CONFLICTING visit fields (codex r13 P1):
+    // { visitsPerYear: 1, visits: 2 } first-alias reads as 1 but is not
+    // DEFINITIVELY one-time — ambiguous rows stand down to the guard.
+    expect(converterSrc.slice(bypassDef, seedingGate)).toContain('!visitCountFieldsConflict(svc)');
+    // Bare raw-inference gating (the pre-fix shape) must not come back.
+    expect(converterSrc).not.toMatch(/if \(pattern\) \{\s*\n\s*const \{ matches/);
     // Skip-with-note on every guarded path; fail-open log retained.
     expect((converterSrc.match(/action: 'recurring_series_skipped'/g) || []).length).toBe(3);
     expect(converterSrc).toContain('duplicate-series guard failed (scheduling proceeds)');
     // A caller-provided transaction is reused (the lock then holds to THEIR
     // commit); otherwise each seeding step opens its own.
     expect(converterSrc).toContain('const seedsInOwnTransaction = !database.isTransaction;');
+  });
+
+  test('palm scheduling FAILS CLOSED without the recurring catalog row on all three converter paths (codex r15 pre-push P0)', () => {
+    // Scheduling palm by bare name resolves the ONE-TIME row at completion
+    // and its typed completion invoices already-billed recurring work — a
+    // money bug. Each path must skip the palm series (manual scheduling +
+    // admin bell) when palm_injection_semiannual is unavailable.
+    expect(converterSrc).toContain('function notifyPalmCatalogMissing');
+    // Auto-schedule unit loop: lookup miss/failure skips the unit.
+    expect(converterSrc).toContain("if (!combinedServiceId && unit.catalogServiceKey === 'palm_injection_semiannual') {");
+    // The bell survives only on the invalid-DATA skip (a schedulable-env
+    // decision); identity-unavailable paths all abort.
+    expect(converterSrc).toContain("notifyPalmCatalogMissing(estimateId, customerId, 'auto-schedule palm unit (invalid recurring data)'");
+    expect(converterSrc).toContain("if (!standaloneRow.service_id && unit.catalogServiceKey === 'palm_injection_semiannual') {");
+    // Reserved path: a missing row (or failed lookup) ABORTS the
+    // acceptance (codex r17 pre-push P0) — the reserved parent already
+    // exists, possibly carrying the stale one-time id, so skip+bell would
+    // leave a completable visit that invoices against the billed plan.
+    // The operational 422 must escape the follow-up catch, or the
+    // acceptance completes around the rollback it forces.
+    expect(converterSrc).toContain('function palmCatalogMissingError()');
+    // 2 reserved-relink sites + 2 lookup-ERROR aborts + 2 lookup-MISS
+    // aborts (codex r22 pre-push P0: skip+bell completed billing without
+    // the sold program — every identity-unavailable path now rolls the
+    // acceptance back).
+    expect((converterSrc.match(/throw palmCatalogMissingError\(\);/g) || []).length).toBe(6);
+    expect(converterSrc).toContain("if (seedErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw seedErr;");
+    // The reserved-bundle promotion catch rethrows too (codex r22 pre-push
+    // P0) — a transient catalog failure must not complete billing without
+    // the sold palm program.
+    expect(converterSrc).toContain("if (standaloneErr.code === 'PALM_RECURRING_CATALOG_MISSING'");
+    // …and the outer comboErr catch rethrows them too (codex r24 pre-push
+    // P0) — every fail-soft layer on the reserved path passes the abort
+    // through.
+    expect(converterSrc).toContain("if (comboErr.code === 'PALM_RECURRING_CATALOG_MISSING'");
+    expect(converterSrc).toContain("if (relinkErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw relinkErr;");
+    // Invalid-but-recurring palm lines never proceed as name-only rows
+    // (codex r18 pre-push P0): the auto-schedule loop skips them to manual
+    // scheduling, and the reserved path — where a parent already exists —
+    // refuses the acceptance outright.
+    expect(converterSrc).toContain('function palmRecurringEvidence');
+    expect(converterSrc).toContain('&& palmRecurringEvidence(svc)) {');
+    expect(converterSrc).toContain('throw palmRecurringLineInvalidError();');
+    expect(converterSrc).toContain('function palmRecurringLineInvalidError()');
+  });
+
+  test('reserved-bundle promotion matches catalog identity and recomputes its window (codex r20 P1)', () => {
+    // alreadyReserved must see an adopted row with a STALE label but the
+    // CORRECT catalog id/snapshot — label-only matching promoted a
+    // duplicate parent + series beside it.
+    expect(converterSrc).toContain('const reservedServiceKeyById = new Map();');
+    expect(converterSrc).toContain('const identityMatch = !!unit.catalogServiceKey && reservedKey === unit.catalogServiceKey;');
+    expect(converterSrc).toContain("String(row.service_key_snapshot || '')");
+    // PALM units match by identity ONLY (codex r21 pre-push P0): the label
+    // key collapses one-time/nutritional/semiannual, and a reserved
+    // one-time palm visit must never suppress the sold recurring series.
+    expect(converterSrc).toContain("const unitIsPalmInjection = unit.catalogServiceKey === 'palm_injection_semiannual';");
+    // …but the reserved PROGRAM row may still carry the one-time identity
+    // (commitReservation engine keys) or a bare injection label pre-relink
+    // (codex r22 P1) — those count as reserved; nutritional never does.
+    expect(converterSrc).toContain("|| reservedKey === 'palm_injection'");
+    expect(converterSrc).toContain("|| isPalmInjectionFamily({}, { service_type: row.service_type });");
+    // And the promoted row's window_end reflects its OWN duration, not the
+    // reserved visit's block.
+    expect(converterSrc).toContain('function windowEndFromStart(');
+    expect(converterSrc).toContain('windowEndFromStart(standaloneRow.window_start, standaloneRow.estimated_duration_minutes)');
   });
 
   test('admin POST /admin/schedule: preflight 409 + in-transaction locked backstop + allowDuplicateSeries escape hatch', () => {

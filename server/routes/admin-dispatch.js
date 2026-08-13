@@ -3303,21 +3303,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
       });
     }
 
-    // A pending outbound-callback booking must be office-CONFIRMED before any
-    // day-of transition — advancing it straight to en_route texts the customer a
-    // tracking link, bypassing the review (and its reminder-arming confirm hook).
-    {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-      if (svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-        && svc.status === 'pending' && !svc.customer_confirmed
-        && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-          code: 'outbound_review_unconfirmed',
-        });
-      }
-    }
-
     // A no-show is terminal. Once a row is no_show this route must not flip
     // it anywhere: re-sending no_show is idempotent success; any other
     // target (cancelled/completed/...) would erase the missed-visit state
@@ -3601,12 +3586,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // transitionJobStatus throws when fromStatus mismatch — surface
       // as 409 so the client can refetch and retry. Other errors
       // bubble to the outer next(err).
-      if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-          code: 'outbound_review_unconfirmed',
-        });
-      }
       if (err && err.message && err.message.includes('not in state')) {
         return res.status(409).json({
           error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
@@ -7321,15 +7300,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (preCommitCompletionPhotoRows.length) {
           await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);
           preCommitCompletionPhotoRows = [];
-        }
-        if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
-          // Completing a pending outbound-review booking is an expected block
-          // from the shared writer — record the failed attempt and conflict.
-          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
-          return res.status(409).json({
-            error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-            code: 'outbound_review_unconfirmed',
-          });
         }
         if (err && err.message && err.message.includes('not in state')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
@@ -12164,11 +12134,81 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
     }
 
     const RainOut = require('../services/rain-out');
-    const options = await RainOut.getOptions(req.params.serviceId);
+    // This route has no assignment check by design, so the name policy
+    // has to come from the CALLER, not the service's technician_id.
+    const options = await RainOut.getOptions(req.params.serviceId, {
+      caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
+    });
     if (!options.ok) {
       return res.status(options.reason === 'not_found' ? 404 : 409).json({ error: options.reason });
     }
     return res.json(options);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/rain-out/custom-preview
+// body: { message, target: { date, window } }
+//
+// Server-side segment counter for the Quick Move sheet's Custom mode:
+// renders the EXACT body commit() would send (same template row, link
+// selection, and renderer normalizations) and returns the 2-segment math —
+// the sheet keeps no client-side render mirrors (codex #3363 r9).
+// Advisory + read-only: never mints short codes, never moves anything;
+// commit() re-renders and enforces.
+router.post('/:serviceId/rain-out/custom-preview', async (req, res, next) => {
+  try {
+    const { message, target } = req.body || {};
+    if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
+      return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
+    }
+    const RainOut = require('../services/rain-out');
+    const result = await RainOut.previewCustomSms({
+      serviceId: req.params.serviceId,
+      customMessage: message,
+      target,
+    });
+    if (!result.ok) {
+      const code = result.reason === 'not_found' ? 404
+        : ['bad_reason', 'bad_target'].includes(result.reason) ? 400 : 409;
+      return res.status(code).json({ error: result.reason });
+    }
+    return res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/rain-out/target-check
+// body: { target: { date, window: { start, end } } }
+//
+// Advisory overlap probe for the Quick Move sheet: the custom-time picker
+// (and any selected preset) re-checks here on every change so the
+// dispatcher sees the overlapped stop's customer + window BEFORE tapping
+// Move instead of discovering it as commit's SLOT_TAKEN rejection.
+// Warn-only + read-only: the sheet never disables Move on this data and
+// nothing is locked or reserved — the rebooker's rung-1-locked probe at
+// commit stays the enforcer.
+// Router-inherited requireTechOrAdmin, NOT requireAdmin: this sheet is the
+// canonical Quick Move surface and every neighbouring rain-out endpoint is
+// tech-reachable, so admin-gating just this one left tech-role dispatchers
+// with a silently-swallowed 403 and no warning at all. The enumeration risk
+// codex raised is closed by the payload instead of the door: `caller` drives
+// nameScope, so a non-admin gets names only for their OWN assigned stops and
+// arbitrary probes come back window-only.
+router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
+  try {
+    const { target } = req.body || {};
+    if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
+      return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
+    }
+    const RainOut = require('../services/rain-out');
+    const result = await RainOut.checkTarget({
+      serviceId: req.params.serviceId,
+      target,
+      caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
+    });
+    if (!result.ok) {
+      return res.status(result.reason === 'not_found' ? 404 : 400).json({ error: result.reason });
+    }
+    return res.json(result);
   } catch (err) { next(err); }
 });
 
@@ -12274,7 +12314,8 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       const code = result.reason === 'not_found' ? 404
         : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later',
           'note_too_long', 'note_link_blocked', 'note_emoji_blocked', 'note_guard_blocked',
-          'note_compliance_blocked', 'note_invalid'].includes(result.reason) ? 400
+          'note_compliance_blocked', 'note_invalid',
+          'custom_route_scope', 'custom_requires_note', 'note_too_many_segments'].includes(result.reason) ? 400
           : 409;
       return res.status(code).json({ error: result.reason, results: result.results || [] });
     }
@@ -12310,23 +12351,6 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newDate, newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
-
-    // A pending outbound-callback booking must be office-CONFIRMED before it can
-    // be rescheduled — SmartRebooker would flip it to 'confirmed' and fire comms
-    // without the confirmation hook's reminder/lead/triage side effects. Confirm
-    // it first, then reschedule.
-    {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-      const reviewRow = await db('scheduled_services').where({ id: req.params.serviceId })
-        .first('source_action', 'status', 'customer_confirmed');
-      if (reviewRow && reviewRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-        && reviewRow.status === 'pending' && !reviewRow.customer_confirmed) {
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before rescheduling.',
-          code: 'outbound_review_unconfirmed',
-        });
-      }
-    }
 
     // Series scope shifts every future occurrence — skip the customer-confirm
     // SMS path (which only handles a single appt) and commit directly.

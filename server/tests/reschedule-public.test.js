@@ -381,7 +381,10 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
 
   test('the non-weather Quick Move reasons get the banner with no chips and no forecast fetch', async () => {
     process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
-    for (const reasonCode of ['running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow']) {
+    // 'custom' included: the custom-move SMS link promises "New time &
+    // other options", so the page must banner the was/now context like
+    // every other Quick Move (codex #3363 r4).
+    for (const reasonCode of ['running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow', 'custom']) {
       wireLog({ ...LOG, reason_code: reasonCode });
       const move = await loadWeatherMove(SVC, NOW);
       expect(move).toMatchObject({

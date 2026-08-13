@@ -551,6 +551,28 @@ function positiveNumber(value) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+// Awaited variant for CTAs whose UI must only confirm on a RECORDED request
+// (codex #3367 r3: a swallowed network error must not render "Request
+// received"). Staff QA views post nothing and report success so the flow is
+// previewable without polluting analytics.
+async function submitReportEvent(token, eventName, metadata = {}) {
+  // Returns { ok, status } — status 0 for network failure. The cross-sell
+  // card needs the 409 (stale offer) distinguished from a transient error:
+  // retrying the same stale payload can never succeed (codex #3367 PR r5).
+  if (!token || !eventName) return { ok: false, status: 0 };
+  if (staffViewTokens.has(token)) return { ok: true, status: 200 };
+  try {
+    const response = await fetch(`${API_BASE}/reports/${token}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventName, channel: 'public_report', metadata }),
+    });
+    return { ok: response.ok, status: response.status };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
 function trackReportEvent(token, eventName, metadata = {}) {
   if (!token || !eventName) return;
   // Staff reads (data payload flagged staffViewer — the /data fetch carried
@@ -2894,6 +2916,144 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
       >
         {copy.cta}
       </a>
+    </section>
+  );
+}
+
+// Cross-sell offer card (owner-approved 2026-08-11, GATE_REPORT_CROSS_SELL).
+// Server-driven: renders only when the LIVE payload carries `crossSell` — the
+// server computes the offer fail-closed (ownership, commercial, secondary-
+// property and pricing-confidence suppressions all live there), so a missing
+// key means no card, never a client-side guess. The CTA books nothing and
+// charges nothing: it records the request and the office follows up (owner
+// sends all customer communications).
+// Per-application price copy is a hard owner rule (AGENTS.md, re-affirmed
+// 2026-07-23): customer-facing estimate surfaces never show "$X/mo" or
+// combined plan totals — the unit is "per application".
+function formatPerApplication(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`;
+}
+
+function applicationsCadence(cadence) {
+  return String(cadence || '').replace(/\bvisits?\b/i, 'applications');
+}
+
+function CrossSellCard({ data, token, mode }) {
+  // idle → sending → sent | failed (failed keeps the button for a retry —
+  // the UI may only confirm after the server recorded the request).
+  const [requestState, setRequestState] = useState('idle');
+  const offer = data?.crossSell;
+  if (mode !== 'live' || !offer?.serviceKey) return null;
+  const option = offer.option || {};
+  const perApplication = formatPerApplication(option.perVisit);
+  const priced = offer.mode === 'priced' && !!offer.option && !!perApplication;
+  const tierChip = priced && option.waveguardTier
+    ? `WaveGuard ${String(option.waveguardTier).replace(/^./, (c) => c.toUpperCase())}`
+    : null;
+  const handleRequest = async () => {
+    if (requestState === 'sending' || requestState === 'sent') return;
+    setRequestState('sending');
+    const result = await submitReportEvent(token, 'cross_sell_requested', {
+      serviceKey: offer.serviceKey,
+      serviceLabel: offer.label,
+      optionId: option.id || null,
+      perApplication: option.perVisit || null,
+      offerMode: offer.mode,
+      // Server-issued digest of everything this card rendered — the click
+      // path rejects any drift from what the customer actually saw.
+      fingerprint: offer.fingerprint || null,
+    });
+    // 409 = the server-recomputed offer no longer matches this render —
+    // retrying the same stale payload can never succeed, so prompt a
+    // refresh instead of a dead retry loop (codex #3367 PR r5).
+    setRequestState(result.ok ? 'sent' : result.status === 409 ? 'stale' : 'failed');
+  };
+  return (
+    <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
+      <div className="section-eyebrow">{priced ? 'Complete your protection' : 'One more layer available'}</div>
+      {/* start-vs-add is SERVER-decided (codex #3367 PR r2): a customer with
+          no plan (one-time treatment) must not be told to add to one. */}
+      <h2>{offer.relationship === 'start' ? `Start ${offer.label}` : `Add ${offer.label} to your plan`}</h2>
+      {priced && (
+        <div className="cross-sell-price">
+          <span className="cross-sell-amount">{perApplication}</span>
+          <span className="cross-sell-unit">per application</span>
+        </div>
+      )}
+      {option.cadence ? <p className="cross-sell-cadence">{applicationsCadence(option.cadence)}</p> : null}
+      {tierChip ? <span className="cross-sell-chip">{tierChip}</span> : null}
+      <div className="cross-sell-cta-row">
+        {requestState === 'sent' ? (
+          <p className="cross-sell-confirm">
+            Request received — we&apos;ll confirm the details with you before anything is scheduled.
+          </p>
+        ) : requestState === 'stale' ? (
+          <button
+            type="button"
+            data-glass-accent=""
+            className="review-cta cross-sell-cta"
+            onClick={() => window.location.reload()}
+          >
+            Offer updated — refresh to see the latest
+          </button>
+        ) : (
+          <button
+            type="button"
+            data-glass-accent=""
+            className="review-cta cross-sell-cta"
+            disabled={requestState === 'sending'}
+            onClick={handleRequest}
+          >
+            {requestState === 'sending'
+              ? 'Sending…'
+              : priced
+                ? `${offer.relationship === 'start' ? 'Start' : 'Add'} ${offer.label}`
+                : `Get my ${offer.label.toLowerCase()} quote`}
+          </button>
+        )}
+      </div>
+      {requestState === 'failed' && (
+        <p className="cross-sell-fine cross-sell-error">
+          That didn&apos;t go through — please try again, or call (941) 297-5749.
+        </p>
+      )}
+      {requestState !== 'sent' && requestState !== 'stale' && (
+        <p className="cross-sell-fine">
+          {priced
+            ? 'No charge today — we’ll confirm the details with you before anything is scheduled.'
+            : 'We’ll measure and confirm exact pricing — no obligation.'}
+        </p>
+      )}
+    </section>
+  );
+}
+
+// Referral card (owner-approved 2026-08-11): rides the gated server payload
+// (data.referral — same GATE_REPORT_CROSS_SELL as the offer, so a dark gate
+// keeps reports byte-identical), and the reward line is COMPOSED SERVER-SIDE
+// from live referral program settings so the card never promises a benefit
+// the program no longer grants. Links to the authenticated portal's existing
+// referral program — no referral mechanics live on this public bearer-token
+// surface.
+function ReferralCard({ data, token, mode }) {
+  if (mode !== 'live' || !data?.referral?.line) return null;
+  return (
+    <section data-glass="card" className="report-card cross-sell-card referral-card" data-section="referral">
+      <div className="section-eyebrow">Share the protection</div>
+      <h2>Know someone with a bug or lawn problem?</h2>
+      <p className="cross-sell-cadence">{data.referral.line}</p>
+      <div className="cross-sell-cta-row">
+        <a
+          data-glass-accent=""
+          className="review-cta cross-sell-cta"
+          href="/?tab=refer"
+          onClick={() => trackReportEvent(token, 'referral_cta_clicked', {})}
+        >
+          Refer a friend
+        </a>
+      </div>
     </section>
   );
 }
@@ -7280,6 +7440,99 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.5;
         }
+        .cross-sell-card h2 {
+          margin-bottom: 4px;
+        }
+        .cross-sell-price {
+          display: flex;
+          align-items: baseline;
+          gap: 8px;
+          margin: 10px 0 2px;
+        }
+        .cross-sell-amount {
+          font-family: ${FONTS.serif};
+          font-size: 34px;
+          font-weight: 600;
+          color: var(--text);
+        }
+        .cross-sell-unit {
+          font-size: 14px;
+          font-weight: 600;
+          color: var(--muted);
+        }
+        .cross-sell-cadence {
+          margin: 0 0 4px;
+          color: var(--muted);
+          font-size: 14px;
+          line-height: 1.5;
+        }
+        .cross-sell-chip {
+          display: inline-block;
+          font-size: 14px;
+          font-weight: 700;
+          letter-spacing: 0.02em;
+          border: 1px solid rgba(4, 57, 94, 0.35);
+          background: rgba(4, 57, 94, 0.07);
+          color: ${B.glassNavy};
+          border-radius: 999px;
+          padding: 3px 10px;
+          margin-top: 10px;
+        }
+        .cross-sell-cta-row {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          margin-top: 16px;
+          flex-wrap: wrap;
+        }
+        .cross-sell-card .cross-sell-cta {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 44px;
+          min-width: 210px;
+          padding: 12px 18px;
+          border: 1px solid ${B.glassNavy};
+          border-radius: 12px;
+          background: ${B.yellow};
+          color: ${B.glassNavy};
+          font: inherit;
+          font-size: 14px;
+          line-height: 1;
+          font-weight: 800;
+          text-decoration: none;
+          cursor: pointer;
+          box-shadow: 3px 3px 0 ${B.glassNavy};
+          transition: ${docTransition('transform', 'box-shadow')};
+        }
+        .cross-sell-card .cross-sell-cta:hover,
+        .cross-sell-card .cross-sell-cta:focus-visible {
+          transform: translate(-1px, -1px);
+          box-shadow: 4px 4px 0 ${B.glassNavy};
+          outline: none;
+        }
+        .cross-sell-confirm {
+          margin: 0;
+          color: var(--text);
+          font-size: 14px;
+          font-weight: 600;
+          line-height: 1.5;
+        }
+        .cross-sell-fine {
+          margin: 12px 0 0;
+          color: var(--muted);
+          font-size: 14px;
+          line-height: 1.5;
+        }
+        .cross-sell-error {
+          color: var(--text);
+          font-weight: 600;
+        }
+        .cross-sell-card .cross-sell-cta:disabled {
+          opacity: 0.7;
+          cursor: default;
+          transform: none;
+        }
         .sr-muted {
           margin: 12px 0 0;
           color: var(--report-muted);
@@ -8309,6 +8562,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           />
         )}
 
+        {/* Cross-sell offer — INTERWOVEN placement (owner 2026-08-11: spaced
+            through the report, not stacked at the bottom): after the visit
+            story (hero / re-entry / timeline), before the findings detail.
+            Live-only; renders nothing unless the payload carries crossSell. */}
+        <CrossSellCard data={data} token={token} mode={mode} />
+
         {/* Pest Report V2 — protection-first dashboard, right under Re-entry so it
             leads the pest report. Surfaces the premium-experience intelligence
             (protection status, next step, bug files, receipt) + the seasonal
@@ -8441,6 +8700,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {isV2LeadLayout && (
           <AppliedProductsSection data={data} mode={mode} />
         )}
+
+        {/* Referral — second interwoven slot, after the treatment record.
+            The two AppliedProductsSection mounts are mutually exclusive on
+            isV2LeadLayout, so exactly one ReferralCard renders per report. */}
+        {isV2LeadLayout && <ReferralCard data={data} token={token} mode={mode} />}
 
         {/* V2 lead layouts (lawn/tree-shrub reportV2) skip the lower coverage
             mount entirely, so a technician-traced map gets its own mount here —
@@ -8611,6 +8875,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           />
         )}
 
+        {/* Referral — standard-layout mount of the same interwoven slot (see
+            the isV2LeadLayout mount above; mutually exclusive). */}
+        {!isV2LeadLayout && <ReferralCard data={data} token={token} mode={mode} />}
+
         {orderedProofMoments.length > 0 && (
           <section data-glass="card" className="sr-section" id="service-highlights">
             <h2>Service Highlights</h2>
@@ -8675,6 +8943,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {/* V2 and pest show the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
         {!data.reportV2 && data.serviceLine !== 'pest' && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
+
+
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
@@ -8783,10 +9053,28 @@ export default function ReportViewPage() {
         return r.json();
       })
       .then((d) => {
+        // A SUPERSEDED effect decides nothing. staffViewTokens is a module
+        // global that outlives this mount, so a cancelled response must not
+        // touch it: an in-flight staff read can resolve AFTER the reader has
+        // navigated away, lost the admin JWT, and reopened the same token,
+        // and it would then re-add a suppression the current load just
+        // cleared — the dropped-request bug below, arriving from behind.
+        if (cancelled) return;
         // Must register BEFORE setData: the view-event effect fires on first
         // render of the report, and a staff read may never post events.
-        if (d && d.staffViewer) staffViewTokens.add(token);
-        if (!cancelled) setData(d);
+        // Mirrors THIS response in both directions. The set used to be
+        // append-only, so once staff opened a token, a later unauthenticated
+        // load of the same token in the same SPA session (admin JWT cleared or
+        // expired, no full reload — the module global outlives it) kept the
+        // suppression: submitReportEvent then returned a fake success and the
+        // customer saw "Request received" with no durable request row written.
+        // Error sentinels (404/410) never carry the flag, so they decide
+        // nothing either way.
+        if (d && !d.error) {
+          if (d.staffViewer) staffViewTokens.add(token);
+          else staffViewTokens.delete(token);
+        }
+        setData(d);
       })
       .catch(() => {
         if (!cancelled) setLoadError(true);

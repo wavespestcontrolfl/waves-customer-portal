@@ -357,6 +357,25 @@ async function markBookingForInspectionCredit(trx, {
   // other surface keeps first-write-wins (ignore), because there the first
   // event IS the booking moment.
   restamp = false,
+  // Explicit booking moment (Codex #3361 r16 P1): a RETRY of a failed
+  // earlier marker (the legacy-completion activation belt) passes the
+  // original instant so the retry cannot shift the ordering evidence a
+  // boundary-adjacent offer compares against. Omitted = call time, the
+  // existing contract for every first-attempt surface.
+  bookedAt = null,
+  // Commit proof for the fast in-memory recovery leg (Codex #3361 r22 P1).
+  // That leg gates on the scheduled_services row being VISIBLE on the
+  // global pool — proof of commit when the caller's transaction INSERTED
+  // the row (every booking surface), but proof of nothing when the row
+  // PRE-EXISTED the transaction (the legacy status-transition surfaces):
+  // a rolled-back completion leaves the row visible as 'pending' and the
+  // retry would insert evidence for a completion that never happened.
+  // Such callers pass the status set their committed transition implies;
+  // the retry then requires it, failing CLOSED on a rollback. A false
+  // negative costs nothing durable — the evidence outbox rides the
+  // caller's trx, so whenever the transition really committed the hourly
+  // sweep still replays it.
+  recoveryStatusIn = null,
 } = {}) {
   // Deliberately UNGATED (Codex #3178 r5 P0): the event is just a fact
   // ("this customer booked"), costs nothing, and grants no money on its
@@ -368,12 +387,13 @@ async function markBookingForInspectionCredit(trx, {
     customer_id: customerId,
     scheduled_service_id: scheduledServiceId,
     source: source ? String(source).slice(0, 40) : null,
-    // The BOOKING moment, frozen at call time (Codex #3178 r26 P2): the
+    // The BOOKING moment, frozen at call time (Codex #3178 r26 P2) — or the
+    // caller's explicit original instant on a retry (r16 above): the
     // post-commit retry reuses this row, and letting the DB default stamp
     // the RETRY time would shift the ordering evidence — a booking made
     // just inside the offer deadline whose marker recovered after the
     // boundary would compare the wrong instant and lose its credit.
-    created_at: new Date(),
+    created_at: bookedAt ? new Date(bookedAt) : new Date(),
   };
   try {
     await trx.transaction(async (sp) => {
@@ -435,6 +455,14 @@ async function markBookingForInspectionCredit(trx, {
         // booking to prove.
         const committed = await db('scheduled_services')
           .where({ id: scheduledServiceId })
+          .modify((q) => {
+            // Pre-existing-row callers (recoveryStatusIn): visibility alone
+            // proves nothing — require the status their transition wrote,
+            // or a rolled-back transition would leak evidence (r22 P1).
+            if (Array.isArray(recoveryStatusIn) && recoveryStatusIn.length) {
+              q.whereIn('status', recoveryStatusIn);
+            }
+          })
           .first('id');
         if (!committed) {
           if (attempt < 6) {
@@ -442,7 +470,7 @@ async function markBookingForInspectionCredit(trx, {
             if (typeof timer.unref === 'function') timer.unref();
             return;
           }
-          logger.warn(`[inspection-credit] booking ${scheduledServiceId} never became visible — evidence retry dropped (booking likely rolled back)`);
+          logger.warn(`[inspection-credit] booking ${scheduledServiceId} never became visible${recoveryStatusIn ? ' in its transition status' : ''} — evidence retry dropped (transaction likely rolled back; the outbox sweep covers a committed one)`);
           return;
         }
         await db('inspection_credit_booking_events')
@@ -1596,6 +1624,98 @@ function inspectionCreditReceiptMemo({ amount, expiresAt } = {}) {
   return `You have a $${amt.toFixed(2)} service credit from your inspection — it applies to any service you book by ${date}.`;
 }
 
+/**
+ * The same promise, looked up by VISIT — for surfaces keyed to the
+ * completed service rather than an invoice. Owner ruling 2026-08-12: the
+ * credit terms ride the service-report email, because the report is the
+ * one write-up every inspection customer receives — a comped or
+ * payer-billed inspection produces no customer receipt, so without this
+ * the customer holds a promise they were never told about.
+ *
+ * Same authority contract as the receipt memo: the persisted OFFER row,
+ * never the live gate, and the FROZEN amount + expiry — a delayed send
+ * must state the same deadline, never a recomputed "N days left". Only an
+ * offer still open and unexpired is announced. Never throws; '' means
+ * "nothing to say" and callers drop the line entirely.
+ */
+async function inspectionCreditMemoForVisit(scheduledServiceId) {
+  try {
+    if (!scheduledServiceId) return '';
+    const offer = await db('inspection_credit_offers')
+      .where({ source_scheduled_service_id: scheduledServiceId, status: 'offered' })
+      .where('expires_at', '>=', new Date())
+      .first('amount', 'expires_at');
+    if (!offer) return '';
+    return inspectionCreditReceiptMemo({ amount: offer.amount, expiresAt: offer.expires_at }) || '';
+  } catch (err) {
+    logger.warn(`[inspection-credit] visit memo lookup failed for ${scheduledServiceId}: ${err.message}`);
+    return '';
+  }
+}
+
+/**
+ * Report-email variant with a DELIVERY VERDICT, not just copy (pre-push
+ * P1 2026-08-12). The report send is idempotency-keyed — once delivered
+ * it never re-renders — so a credit-MARKED visit whose offer cannot be
+ * read must DEFER the send retryably rather than ship without the
+ * promised terms: a transient query fault, or the closeout-crash window
+ * where the durable opt-in marker committed but the offer row waits on
+ * the hourly recovery sweep, would otherwise permanently strip the one
+ * written notice a comped/payer-billed customer gets.
+ *
+ * Verdicts:
+ *   { note: '<memo>' }                    — send with the line
+ *   { note: '' }                          — send without it (unmarked
+ *     visit; or the offer is already settled/lapsed, where announcing
+ *     terms would be false)
+ *   { note: '', retryable: true, reason } — defer; the delivery queue
+ *     retries and the recovery sweep supplies the missing offer
+ *
+ * Unmarked visits return immediately with NO query — the committed
+ * marker is authoritative (offers only exist for marked closeouts), so
+ * ordinary reports take zero extra reads.
+ */
+async function inspectionCreditReportNote(service) {
+  let marked = false;
+  try {
+    const raw = service?.service_data;
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    marked = !!data && data.inspectionCreditOptIn === true;
+  } catch {
+    // Unreadable service_data reads as unmarked — same posture as the
+    // recovery sweep, which matches on the raw column and would not see
+    // this row either.
+    marked = false;
+  }
+  if (!marked || !service?.scheduled_service_id) return { note: '' };
+
+  let offer;
+  try {
+    offer = await db('inspection_credit_offers')
+      .where({ source_scheduled_service_id: service.scheduled_service_id })
+      .first('amount', 'expires_at', 'status');
+  } catch (err) {
+    return {
+      note: '',
+      retryable: true,
+      reason: `inspection-credit offer lookup failed: ${err.message}`,
+    };
+  }
+  if (!offer) {
+    return {
+      note: '',
+      retryable: true,
+      reason: 'inspection-credit offer not yet recorded for a marked visit — recovery sweep pending',
+    };
+  }
+  // A settled offer (redeemed/expired/void) or one already lapsed by send
+  // time is nothing to promise — send clean, don't defer.
+  if (offer.status !== 'offered') return { note: '' };
+  const when = offer.expires_at ? new Date(offer.expires_at) : null;
+  if (!when || Number.isNaN(when.getTime()) || when < new Date()) return { note: '' };
+  return { note: inspectionCreditReceiptMemo({ amount: offer.amount, expiresAt: offer.expires_at }) || '' };
+}
+
 module.exports = {
   etDateOnlyToDate,
   etEndOfDayAfterDays,
@@ -1609,6 +1729,8 @@ module.exports = {
   carriesStandingCreditPromise,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
+  inspectionCreditMemoForVisit,
+  inspectionCreditReportNote,
   queueCreditReceiptResend,
   creditWindowDaysForServiceKey,
   DEFAULT_CREDIT_WINDOW_DAYS,

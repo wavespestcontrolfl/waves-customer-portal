@@ -592,6 +592,15 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
 // re-arms the covered reminder windows guarded on the pre-send snapshot.
 // Returns { sent, error }.
 async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
+  // Shared belt for every notice path (update-details, bulk reschedule, IB
+  // schedule tools): a LEGACY outbound-review row (pending before the
+  // 2026-08-11 review-hold removal) must be activated — reminders armed,
+  // lead converted, review card resolved — before a definitive reschedule
+  // text goes out (Codex #3361 r2 P0). The direct writers call this too;
+  // the helper's guarded stamp makes the hook at-most-once. No-op for
+  // every other row.
+  const { activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
+  await activateLegacyOutboundReviewRowIfNeeded(db, serviceId, 'reschedule-notice');
   const start = normalizeHHMM(startHHMM);
   if (!start) {
     // A date-only visit has no arrival window to promise — never fabricate
@@ -612,19 +621,9 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
   try {
     const svc = await db('scheduled_services')
       .where({ id: serviceId })
-      .first('customer_id', 'service_type', 'status', 'customer_confirmed', 'source_action');
-    // An unreviewed outbound-callback booking must never receive a definitive
-    // reschedule text — the office confirms it first (same guard the dispatch
-    // routes apply before any customer-facing transition).
-    const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-    const unreviewedCallback = svc
-      && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-      && String(svc.status) === 'pending'
-      && !svc.customer_confirmed;
+      .first('customer_id', 'service_type');
     const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
-    if (unreviewedCallback) {
-      error = 'This outbound-callback booking is pending office review — no reschedule text was sent';
-    } else if (!customer) {
+    if (!customer) {
       error = 'Customer not found';
     } else {
       // Fail CLOSED on an unreadable prefs row (the PREFS_UNAVAILABLE
@@ -4393,6 +4392,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             let callFollowUpShiftFrom = null;
             // Collected inside the trx, applied only after a successful commit.
             let liveMoveRow = null;
+            // 'confirmed' for a genuine live move; the row's unchanged
+            // status for an evidence-only tracker rewind.
+            let liveMoveRefreshStatus = 'confirmed';
             await db.transaction(async (trx) => {
               const svc = await trx('scheduled_services').where({ id }).first();
               if (!svc) throw Object.assign(new Error('not found'), { isValidation: true });
@@ -4491,9 +4493,28 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // back on 'confirmed' in the same UPDATE — otherwise it stays live
               // on a future date, matching the rebooker's own path.
               const wasLive = ['en_route', 'on_site'].includes(String(svc.status));
+              let trackRewound = false;
               if (wasLive) {
                 const { LIVE_LIFECYCLE_RESET } = require('../services/rebooker');
                 Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
+              } else {
+                // Stale lifecycle evidence without a live status (track_state
+                // advanced by a manual En Route tap that never synced status,
+                // or stamps a partial reset left behind) rewinds the tracker
+                // too — status stays untouched, matching this path's no-flip
+                // contract for non-live rows. No history row either (no
+                // status transition happened), but the post-commit tracker
+                // cleanup below still runs.
+                // Gated on the date actually changing: the list UI submits
+                // one target date for every selected row without excluding
+                // rows already on it, and rewinding an unmoved visit would
+                // erase its genuine current-attempt state.
+                const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
+                const bulkDateChanged = normalizeDateOnly(svc.scheduled_date) !== normalizeDateOnly(bulkTargetDate);
+                if (bulkDateChanged && needsLifecycleRewind(svc)) {
+                  Object.assign(updates, LIVE_LIFECYCLE_RESET);
+                  trackRewound = true;
+                }
               }
               // Compare-and-swap on the OBSERVED status + schedule fields:
               // the terminal guard and the wasLive classification above came
@@ -4522,14 +4543,22 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // rows matched = the row changed under us; refuse this id (the
               // batch carries the reason).
               const prevDate = normalizeDateOnly(svc.scheduled_date);
-              const updatedRows = await trx('scheduled_services')
-                .where({ id })
-                .where('status', String(svc.status))
-                .where({
-                  scheduled_date: prevDate,
-                  window_start: svc.window_start ?? null,
-                  window_end: svc.window_end ?? null,
-                })
+              // Full observed tracker/lifecycle snapshot joins the CAS: the
+              // rewind decision above came from this trx's read, and tracker
+              // writers advance state, stamps, and SMS guards without
+              // touching status. Any of it makes this miss; the batch
+              // reports the conflict.
+              const updatedRows = await require('../services/rebooker').applyTrackLifecycleCas(
+                trx('scheduled_services')
+                  .where({ id })
+                  .where('status', String(svc.status))
+                  .where({
+                    scheduled_date: prevDate,
+                    window_start: svc.window_start ?? null,
+                    window_end: svc.window_end ?? null,
+                  }),
+                svc,
+              )
                 .update(updates);
               if (updatedRows === 0) {
                 throw Object.assign(
@@ -4547,6 +4576,11 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 const { applyLiveMoveHistory } = require('../services/rebooker');
                 await applyLiveMoveHistory(trx, svc, { actor: req.technicianId || null });
                 liveMoveRow = svc;
+              } else if (trackRewound) {
+                // Evidence-only rewind: post-commit cleanup with the row's
+                // unchanged status; no history append.
+                liveMoveRow = svc;
+                liveMoveRefreshStatus = String(svc.status);
               }
               // Audit row matching the rebooker's reschedule_log conventions.
               await trx('reschedule_log').insert({
@@ -4582,7 +4616,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             if (liveMoveRow) {
               try {
                 const { applyLiveMovePostCommitEffects } = require('../services/rebooker');
-                await applyLiveMovePostCommitEffects(liveMoveRow);
+                await applyLiveMovePostCommitEffects(liveMoveRow, { toStatus: liveMoveRefreshStatus });
               } catch (err) {
                 logger.error(`[admin-schedule] bulk reschedule live-move side effects failed for ${id}: ${err.message}`);
               }
@@ -4599,6 +4633,15 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // mark/re-arm. Default stays the silent resync this branch
                 // always did.
                 const bulkNotify = payload?.notifyCustomer === true;
+                // Activate a moved LEGACY outbound-review row BEFORE the
+                // reminder lookup below (Codex #3361 r3 P0): such a row has
+                // no reminder row until activation, so notifyThisRow would
+                // read false and the notice sender's own belt call — the
+                // only other activation seam on this path — would never
+                // run; a silent bulk move skipped activation entirely.
+                // No-op for every other row; at-most-once via the helper.
+                await require('../services/outbound-review-confirm')
+                  .activateLegacyOutboundReviewRowIfNeeded(db, id, 'bulk-reschedule');
                 // handleReschedule claims a still-pending creation
                 // confirmation (its reschedule notice normally replaces
                 // it), but with sendNotification:false no notice goes
@@ -4610,31 +4653,11 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 const reminderBefore = await db('appointment_reminders')
                   .where({ scheduled_service_id: id })
                   .first('id', 'confirmation_sent', 'suppressed_by_sibling');
-                // An unreviewed outbound-callback booking never texts (the
-                // office confirms first) — and routing it through the silent
-                // path below also re-arms the pending creation confirmation
-                // the cover call would otherwise claim.
-                const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-                // Own catch, fail-closed: a transient failure here must not
-                // ride the outer empty catch and silently skip both the
-                // reminder sync and the failure report.
-                let reviewFlags = null;
-                let reviewLookupFailed = false;
-                if (bulkNotify) {
-                  try {
-                    reviewFlags = await db('scheduled_services').where({ id }).first('source_action', 'status', 'customer_confirmed');
-                    if (!reviewFlags) reviewLookupFailed = true;
-                  } catch { reviewLookupFailed = true; }
-                }
-                const unreviewedCallback = !!reviewFlags
-                  && reviewFlags.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-                  && String(reviewFlags.status) === 'pending'
-                  && !reviewFlags.customer_confirmed;
                 // A sibling-suppressed row's slot OWNER carries the customer
                 // messaging — sending here too would text the customer once
                 // per sibling for one slot. Suppressed rows move silently
                 // (by design, so not a notification failure).
-                const notifyThisRow = bulkNotify && !!reminderBefore && !reminderBefore.suppressed_by_sibling && !unreviewedCallback && !reviewLookupFailed;
+                const notifyThisRow = bulkNotify && !!reminderBefore && !reminderBefore.suppressed_by_sibling;
                 await AppointmentReminders.handleReschedule(id, reminderSyncTime, {
                   sendNotification: false,
                   coverDueWindows: notifyThisRow,
@@ -4649,10 +4672,6 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   if (!notice.sent) {
                     notificationFailures.push({ id, reason: notice.error || 'reschedule text was not sent' });
                   }
-                } else if (bulkNotify && reviewLookupFailed) {
-                  notificationFailures.push({ id, reason: 'Could not verify the booking\'s review status — not texted' });
-                } else if (bulkNotify && unreviewedCallback) {
-                  notificationFailures.push({ id, reason: 'Pending office review (outbound-callback booking) — not texted' });
                 } else if (bulkNotify && !reminderBefore) {
                   notificationFailures.push({ id, reason: 'No reminder record for this visit — not texted' });
                 }
@@ -5428,6 +5447,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // reschedule text after commit. start stays null for date-only visits
     // (no fabricated 08:00 goes into a customer text).
     let scheduleMoveForNotice = null;
+    // Live (or tracker-rewound) row moved to a new date through this edit —
+    // captured inside the trx; drives the rebooker-parity post-commit
+    // effects (tech_status release + customer tracker refresh) after commit.
+    let liveEditMovePostCommitRow = null;
+    let liveEditMoveRefreshStatus = 'confirmed';
+    // Recurring children/boosters whose tracker lifecycle was rewound by
+    // the cadence rewrite below — same post-commit cleanup, applied per
+    // row after commit with each row's unchanged status.
+    const rewoundSeriesRows = [];
 
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
@@ -5501,6 +5529,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // making later resolution tuple-independent. Ambiguous soft-join
         // matches stay untouched — stamping one of several same-day rows
         // could bind the wrong visit; FK-carrying records need no heal.
+        let preTupleRow = null;
         if (updates.scheduled_date !== undefined || updates.service_type !== undefined) {
           // FOR UPDATE first (codex P2 #3152 round 20): the correction and
           // costing paths lock scheduled_services and then touch
@@ -5508,7 +5537,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // then the tuple update below) deadlocks against them. Taking the
           // scheduled-service lock up front puts all three paths in one
           // lock order.
-          const preTupleRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
+          preTupleRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
           const srCols = await trx('service_records').columnInfo();
           // Completed visits only (codex P2 #3152 round 20): the soft-join
           // resolves records by (customer, date, type) — an OPEN visit
@@ -5525,6 +5554,39 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             }
           }
         }
+        // A date move through this edit modal was the one mover with NO
+        // tracker-lifecycle rewind: an en_route/on_site visit (or one
+        // carrying stale stamps from an aborted attempt) kept
+        // track_state + en_route_at/arrived_at/actual_start_time onto the
+        // new date, so the new day's En Route tap silently no-op'd and the
+        // customer report rendered the old attempt's timestamps (live
+        // incident 2026-08-11). Mirror the bulk board move: live status →
+        // full rewind + land on 'confirmed' (+ history/post-commit parity
+        // below); stale evidence without live status → rewind only.
+        // Same-date edits never rewind — a tech can be on site while the
+        // office edits notes/price, and wiping the live attempt would
+        // orphan it. Completed/terminal rows keep their lifecycle: the
+        // stamps ARE the service record.
+        const dateActuallyMoves = updates.scheduled_date !== undefined
+          && preTupleRow
+          && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(preTupleRow.status))
+          && dateOnly(updates.scheduled_date) !== dateOnly(preTupleRow.scheduled_date);
+        let liveEditMoveRow = null;
+        let liveEditWasLive = false;
+        if (dateActuallyMoves) {
+          const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
+          liveEditWasLive = ['en_route', 'on_site'].includes(String(preTupleRow.status));
+          if (liveEditWasLive) {
+            Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
+            liveEditMoveRow = preTupleRow;
+          } else if (needsLifecycleRewind(preTupleRow)) {
+            // Evidence-only rewind: no status flip, no history row — but
+            // the post-commit tracker cleanup (tech pointer + customer
+            // refresh) still applies.
+            Object.assign(updates, LIVE_LIFECYCLE_RESET);
+            liveEditMoveRow = preTupleRow;
+          }
+        }
         // When the appointment's own date or arrival window changes, resync its
         // reminder row in the same transaction — otherwise the 72h/24h cron
         // texts the customer the old date/time. (Recurring children get the
@@ -5534,6 +5596,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start')
           : null;
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        // Rebooker-parity live-move bookkeeping (same split as the bulk
+        // board move): the job_status_history audit row is atomic with the
+        // flip on the trx; the tech_status release + customer tracker
+        // refresh are externally visible and run only after commit.
+        if (liveEditMoveRow) {
+          if (liveEditWasLive) {
+            const { applyLiveMoveHistory } = require('../services/rebooker');
+            await applyLiveMoveHistory(trx, liveEditMoveRow, { actor: req.technicianId || null });
+          }
+          liveEditMovePostCommitRow = liveEditMoveRow;
+          liveEditMoveRefreshStatus = liveEditWasLive ? 'confirmed' : String(liveEditMoveRow.status);
+        }
         if (updates.scheduled_date !== undefined && reminderBefore) {
           callFollowUpShiftFrom = reminderBefore.scheduled_date;
         }
@@ -5765,18 +5839,29 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           };
           const skipChild = skipWeekends !== undefined ? !!skipWeekends : !!parent.skip_weekends;
           const dirChild = (weekendShift !== undefined ? weekendShift : parent.weekend_shift) === 'back' ? 'back' : 'forward';
+          // track_state + lifecycle stamps ride along as rewind evidence: a
+          // pending child can still carry a live tracker or stale stamps
+          // from an aborted attempt (manual En Route taps advance
+          // track_state without syncing status), and re-dating it must not
+          // carry those onto the new date.
+          const seriesEvidenceCols = [
+            'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
+            'track_sms_sent_at', 'arrival_sms_sent_at',
+            // For the post-commit cleanup payload (tech release + refresh).
+            'technician_id', 'customer_id',
+          ];
           const pendingChildren = await trx('scheduled_services')
             .where({ recurring_parent_id: parent.id, is_recurring: true })
             .whereIn('status', ['pending', 'confirmed'])
             .orderBy('scheduled_date')
             .orderBy('created_at')
-            .select('id', 'scheduled_date', 'window_start');
+            .select('id', 'status', 'scheduled_date', 'window_start', ...seriesEvidenceCols);
           const pendingBoosters = await trx('scheduled_services')
             .where({ recurring_parent_id: parent.id, is_recurring: false })
             .whereIn('status', ['pending', 'confirmed'])
             .orderBy('scheduled_date')
             .orderBy('created_at')
-            .select('id', 'scheduled_date', 'window_start');
+            .select('id', 'status', 'scheduled_date', 'window_start', ...seriesEvidenceCols);
           const pendingRewriteIds = [
             ...pendingChildren.map((row) => row.id),
             ...pendingBoosters.map((row) => row.id),
@@ -5827,7 +5912,40 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               if (seriesCols.payer_id) childUpdates.payer_id = parent.payer_id ?? null;
               if (seriesCols.po_number) childUpdates.po_number = parent.po_number ?? null;
               if (seriesCols.self_pay_override) childUpdates.self_pay_override = parent.self_pay_override === true;
-              await trx('scheduled_services').where({ id: child.id }).update(childUpdates);
+              let childRewound = false;
+              if (childDateChanged) {
+                const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
+                if (needsLifecycleRewind(child)) {
+                  Object.assign(childUpdates, LIVE_LIFECYCLE_RESET);
+                  childRewound = true;
+                }
+              }
+              // CAS on the observed status/date/track_state: the rewind
+              // decision came from the unlocked read above, and a
+              // concurrent En Route transition can make the row live after
+              // it — an id-only write would move it without the rewind. A
+              // miss skips the row (it changed under us; the next edit
+              // re-reads).
+              const childUpdated = await require('../services/rebooker').applyTrackLifecycleCas(
+                trx('scheduled_services')
+                  .where({
+                    id: child.id,
+                    status: child.status,
+                    scheduled_date: child.scheduled_date,
+                  }),
+                child,
+              )
+                .update(childUpdates);
+              if (childUpdated === 0) {
+                // All-or-none, matching the rebooker's series CAS: leaving
+                // one occurrence behind while the parent and the rest move
+                // to the new cadence would silently fork the series.
+                throw Object.assign(
+                  new Error('A visit in this plan changed concurrently while the cadence rewrite was pending — re-check and retry'),
+                  { status: 409 },
+                );
+              }
+              if (childRewound) rewoundSeriesRows.push(child);
               if (childDateChanged) {
                 await resetAppointmentReminderForScheduleRewrite(
                   trx,
@@ -5872,7 +5990,33 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 const boosterUpdates = { scheduled_date: nextDateStr };
                 if (seriesCols.skip_weekends) boosterUpdates.skip_weekends = skipChild;
                 if (seriesCols.weekend_shift && skipChild) boosterUpdates.weekend_shift = dirChild;
-                await trx('scheduled_services').where({ id: booster.id }).update(boosterUpdates);
+                let boosterRewound = false;
+                if (boosterDateChanged) {
+                  const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
+                  if (needsLifecycleRewind(booster)) {
+                    Object.assign(boosterUpdates, LIVE_LIFECYCLE_RESET);
+                    boosterRewound = true;
+                  }
+                }
+                // Same CAS as the child rewrite above.
+                const boosterUpdated = await require('../services/rebooker').applyTrackLifecycleCas(
+                  trx('scheduled_services')
+                    .where({
+                      id: booster.id,
+                      status: booster.status,
+                      scheduled_date: booster.scheduled_date,
+                    }),
+                  booster,
+                )
+                  .update(boosterUpdates);
+                if (boosterUpdated === 0) {
+                  // All-or-none — same contract as the child rewrite above.
+                  throw Object.assign(
+                    new Error('A visit in this plan changed concurrently while the cadence rewrite was pending — re-check and retry'),
+                    { status: 409 },
+                  );
+                }
+                if (boosterRewound) rewoundSeriesRows.push(booster);
                 if (boosterDateChanged) {
                   await resetAppointmentReminderForScheduleRewrite(
                     trx,
@@ -6277,6 +6421,26 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     });
 
+    // Rebooker-parity post-commit half of the live-move rewind above:
+    // tech_status release + customer tracker refresh. Best-effort — the
+    // move is committed; a side-effect failure must not fail the edit.
+    if (liveEditMovePostCommitRow) {
+      try {
+        const { applyLiveMovePostCommitEffects } = require('../services/rebooker');
+        await applyLiveMovePostCommitEffects(liveEditMovePostCommitRow, { toStatus: liveEditMoveRefreshStatus });
+      } catch (err) {
+        logger.error(`[schedule/update-details] live-move side effects failed for ${req.params.id}: ${err.message}`);
+      }
+    }
+    for (const rewoundRow of rewoundSeriesRows) {
+      try {
+        const { applyLiveMovePostCommitEffects } = require('../services/rebooker');
+        await applyLiveMovePostCommitEffects(rewoundRow, { toStatus: String(rewoundRow.status) });
+      } catch (err) {
+        logger.error(`[schedule/update-details] track-rewind cleanup failed for series row ${rewoundRow.id}: ${err.message}`);
+      }
+    }
+
     // Trimmed visits: finalize their cancellation-notice claims SILENTLY.
     // The claims were minted suppressed inside the trx, so this closes them
     // out and cancels the visits' 72h/24h reminders without texting anyone —
@@ -6408,6 +6572,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       await refreshAnnualPrepayTermsForCustomer(touched?.customer_id);
     }
 
+    // A moved LEGACY outbound-review row (pending before the 2026-08-11
+    // review-hold removal) activates here even on a SILENT move — this
+    // writer bypasses transitionJobStatus, and without activation the
+    // resynced reminder times have no registered reminders to follow
+    // (Codex #3361 r2 P0). At-most-once via the helper's guarded stamp
+    // (the notice sender's own belt call no-ops after this one); no-op for
+    // every other row.
+    if (scheduleMoveForNotice) {
+      const { activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
+      await activateLegacyOutboundReviewRowIfNeeded(db, req.params.id, 'schedule-update-details');
+    }
+
     // Immediate reschedule text — only when the edit actually moved the
     // visit's date/window AND the caller explicitly opted in (the Edit
     // appointment modal's "Client booking notifications" choice). The
@@ -6424,45 +6600,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         notificationError = 'No arrival time is set for this visit, so no reschedule text was sent';
       } else {
         const AppointmentReminders = require('../services/appointment-reminders');
-        // Check the review gate BEFORE the cover call — handleReschedule
-        // claims a still-pending creation confirmation, and an unreviewed
-        // outbound-callback booking must keep that confirmation pending
-        // (the office-confirm sender is its customer message).
-        const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-        // Best-effort, fail-closed: the edit itself already committed, so a
-        // transient failure here must degrade to "not texted" in the
-        // response — never a 500 that invites a retry of a succeeded edit.
-        const reviewFlags = await db('scheduled_services')
-          .where({ id: req.params.id })
-          .first('source_action', 'status', 'customer_confirmed')
-          .catch(() => undefined);
-        const unreviewedCallback = !!reviewFlags
-          && reviewFlags.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-          && String(reviewFlags.status) === 'pending'
-          && !reviewFlags.customer_confirmed;
-        if (!reviewFlags) {
-          notificationSent = false;
-          notificationError = 'Could not verify the booking\'s review status — no reschedule text was sent';
-        } else if (unreviewedCallback) {
-          notificationSent = false;
-          notificationError = 'This outbound-callback booking is pending office review — no reschedule text was sent';
-        } else {
-          try {
-            // Cover any already-due reminder window before sending so the
-            // 15-min cron can't fire a day-before reminder in the gap between
-            // the commit above and the notice landing (same coverDueWindows
-            // contract the dispatch reschedule route uses).
-            await AppointmentReminders.handleReschedule(req.params.id, `${scheduleMoveForNotice.date}T${scheduleMoveForNotice.start}`, {
-              sendNotification: false,
-              coverDueWindows: true,
-            });
-          } catch (e) {
-            logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
-          }
-          const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start);
-          notificationSent = notice.sent;
-          notificationError = notice.error;
+        try {
+          // Cover any already-due reminder window before sending so the
+          // 15-min cron can't fire a day-before reminder in the gap between
+          // the commit above and the notice landing (same coverDueWindows
+          // contract the dispatch reschedule route uses).
+          await AppointmentReminders.handleReschedule(req.params.id, `${scheduleMoveForNotice.date}T${scheduleMoveForNotice.start}`, {
+            sendNotification: false,
+            coverDueWindows: true,
+          });
+        } catch (e) {
+          logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
         }
+        const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start);
+        notificationSent = notice.sent;
+        notificationError = notice.error;
       }
     }
 
@@ -8174,22 +8326,6 @@ router.put('/:id/status', async (req, res, next) => {
       });
     }
 
-    // A pending outbound-callback booking must be office-CONFIRMED before any
-    // day-of transition — advancing it straight to en_route texts the customer a
-    // tracking link, bypassing the review (and its reminder-arming confirm hook).
-    // Only 'confirmed' / 'cancelled' are allowed until the office confirms it.
-    {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-      if (svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-        && svc.status === 'pending' && !svc.customer_confirmed
-        && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-          code: 'outbound_review_unconfirmed',
-        });
-      }
-    }
-
     const fromStatus = svc.status;
     if (toStatus === 'en_route') {
       const preEnRouteStatuses = new Set(['pending', 'confirmed', 'rescheduled']);
@@ -8253,15 +8389,6 @@ router.put('/:id/status', async (req, res, next) => {
         // transaction — nothing was written. 404 (not 403): same
         // no-existence-oracle contract as the pre-check.
         return res.status(404).json({ error: 'Service not found' });
-      }
-      if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
-        // Expected block from the shared writer's review-booking guard —
-        // conflict, not a 500 (mirrors the pre-guard above for statuses it
-        // doesn't cover, e.g. a race past it).
-        return res.status(409).json({
-          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
-          code: 'outbound_review_unconfirmed',
-        });
       }
       if (err && err.message && err.message.includes('not in state')) {
         return res.status(409).json({

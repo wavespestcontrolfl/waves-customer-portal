@@ -703,6 +703,36 @@ class ContentBriefBuilder {
       ];
     }
 
+    // Collapsed city-service demand, same shape and same reason as the
+    // family block above. mineNoContentYet emits ONE row per (service, city)
+    // target because every query for that segment create-or-refreshes the
+    // SAME page — so without a binding section the losing queries' intent
+    // dies with the winner's phrasing, and they cannot queue separately
+    // either (they resolve to the same page). Data in gsc_signal, the
+    // requirement here (Codex P1).
+    const contributingQueries = Array.isArray(opportunity.signal_metadata?.contributing_queries)
+      ? opportunity.signal_metadata.contributing_queries.filter(Boolean)
+      : [];
+    // Deliberately NOT gated on the action still being city-service. The
+    // decision router can reroute this row (blog, customer-question page)
+    // after the miner collapsed the segment, and the collapsed queries have
+    // nowhere else to go — they were dropped precisely because they resolved
+    // to this one target. Gating on the original action would silently
+    // discard their demand exactly when the reroute makes the winner's
+    // phrasing least representative (Codex P1).
+    if (opportunity.bucket === 'no_content_yet'
+      && contributingQueries.length > 1) {
+      // The noun has to follow the REROUTED action, or a blog brief would be
+      // told it is a city-service page.
+      const coverageSubject = decision.action_type === 'create_or_refresh_city_service_page'
+        ? 'this page is the single target for'
+        : 'this piece carries the whole segment demand behind';
+      requiredSections = [
+        ...requiredSections,
+        `segment coverage: ${coverageSubject} EVERY phrasing of this city+service intent — ${contributingQueries.map((q) => `"${q}"`).join(', ')} — address each one directly rather than only the primary phrasing`,
+      ];
+    }
+
     // Operator-authored intercept brief: the seeded payload is injected
     // VERBATIM — the operator's outline becomes the content plan, sources
     // become required in-post citations, internal links become required
@@ -801,6 +831,14 @@ class ContentBriefBuilder {
         family_queries: opportunity.signal_metadata?.family_queries || null,
         specialty_topic: opportunity.signal_metadata?.specialty_topic || null,
         family_avg_position: opportunity.signal_metadata?.family_avg_position ?? null,
+        // no_content_yet city-service rows: several distinct weak queries can
+        // resolve to one (service, city), and the miner emits only the
+        // strongest so the page is drafted once. The rest ride here, exactly
+        // as family_queries does above, so the writer addresses the whole
+        // segment's demand instead of just the winning query's intent —
+        // otherwise the collapse would silently discard it (Codex P1).
+        contributing_queries: opportunity.signal_metadata?.contributing_queries || null,
+        contributing_impressions: opportunity.signal_metadata?.contributing_impressions ?? null,
       },
       customer_signal: signals.customer_signal
         ? {

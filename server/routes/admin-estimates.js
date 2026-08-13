@@ -564,6 +564,32 @@ router.put('/:id', async (req, res, next) => {
   }
 });
 
+// GET /api/admin/estimates/customer-spend/:customerId — what a linked customer
+// already buys and what they pay PER APPLICATION today, so the builder can show
+// it beside the quote being written. Read-only projection of the same shared
+// loader the Agent Estimate lane and the membership snapshot use, so all three
+// surfaces quote the same figure.
+//
+// ADMIN ONLY: this router is requireTechOrAdmin and the payload is per-service
+// pricing — technicians get 403 rather than a price list (same reasoning as the
+// edit-source customer block below). Fail-soft on a loader error: the builder
+// treats an errored response as "no context" and simply renders no panel, which
+// was the behavior before this endpoint existed.
+router.get('/customer-spend/:customerId', async (req, res, next) => {
+  try {
+    if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    const { loadCurrentServiceSpendContext } = require('../services/estimate-membership-context');
+    const spend = await loadCurrentServiceSpendContext(db, req.params.customerId);
+    res.json({
+      currentServices: spend.currentServices,
+      currentSpendPerVisitTotal: spend.currentSpendPerVisitTotal,
+      currentTierLabel: spend.currentTierLabel,
+      currentDiscountPct: spend.currentDiscountPct,
+      existingServiceKeys: spend.existingServiceKeys,
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/estimates/:id/edit-source — everything the estimate builder
 // needs to reopen an existing estimate for in-place editing: the saved builder
 // inputs + engine profile (when the estimate was authored in the builder), the

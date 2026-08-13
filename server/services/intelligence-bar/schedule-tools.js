@@ -482,7 +482,10 @@ async function moveStopsToDay(input) {
   }
 
   // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
-  const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects } = require('../rebooker');
+  const {
+    LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects,
+    needsLifecycleRewind, applyTrackLifecycleCas,
+  } = require('../rebooker');
   const movedIds = new Set();
   const skippedConflict = [];
   // Moved rows whose requested customer text did NOT go out — reported so
@@ -494,7 +497,13 @@ async function moveStopsToDay(input) {
     // A live (en_route/on_site) stop being moved rewinds its tracker
     // lifecycle exactly like the rebooker's live override does.
     const wasLive = LIVE_MOVE_STATUSES.has(String(s.status));
-    const liveReset = wasLive ? LIVE_LIFECYCLE_RESET : {};
+    // Rewind on stale evidence too, not just live status — see
+    // needsLifecycleRewind in rebooker.js. The status flip and the history
+    // append stay keyed on wasLive; an evidence-only rewind still gets the
+    // post-commit tracker cleanup below without recording a status
+    // transition that never happened.
+    const trackRewound = !wasLive && needsLifecycleRewind(s);
+    const liveReset = wasLive || trackRewound ? LIVE_LIFECYCLE_RESET : {};
     // Compare-and-swap on the OBSERVED status + schedule fields: everything
     // below (the wasLive classification, the lifecycle rewind, the
     // 'confirmed' restamp) was derived from the initial read — if the stop
@@ -522,14 +531,20 @@ async function moveStopsToDay(input) {
     const observedDate = s.scheduled_date instanceof Date
       ? s.scheduled_date.toISOString().slice(0, 10)
       : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null);
-    const updatedRows = await db('scheduled_services')
-      .where('id', s.id)
-      .where('status', String(s.status))
-      .where({
-        scheduled_date: observedDate,
-        window_start: s.window_start ?? null,
-        window_end: s.window_end ?? null,
-      })
+    const updatedRows = await applyTrackLifecycleCas(
+      db('scheduled_services')
+        .where('id', s.id)
+        .where('status', String(s.status))
+        .where({
+          scheduled_date: observedDate,
+          window_start: s.window_start ?? null,
+          window_end: s.window_end ?? null,
+        }),
+      // Full observed tracker/lifecycle snapshot in the CAS — any
+      // concurrent lifecycle or SMS-guard write must make this miss.
+      // See reschedule_appointment in tools.js.
+      s,
+    )
       .update({
         scheduled_date: dateStr,
         notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
@@ -563,6 +578,14 @@ async function moveStopsToDay(input) {
       } catch (err) {
         logger.error(`[intelligence-bar:schedule] live-move side effects failed for ${s.id}: ${err.message}`);
       }
+    } else if (trackRewound) {
+      // Tracker rewind without a status transition: cleanup only, no
+      // history row, refresh with the stop's unchanged status.
+      try {
+        await applyLiveMovePostCommitEffects(s, { toStatus: s.status });
+      } catch (err) {
+        logger.error(`[intelligence-bar:schedule] track-rewind side effects failed for ${s.id}: ${err.message}`);
+      }
     }
     // Audit row matching the rebooker's reschedule_log conventions.
     // Best-effort: the move is committed — a log failure must not report
@@ -591,6 +614,16 @@ async function moveStopsToDay(input) {
   // per stop; failures land in notification_failures.
   for (const s of movable) {
     if (!movedIds.has(s.id)) continue;
+    // Activate a moved LEGACY outbound-review row regardless of the notify
+    // flag (Codex #3361 r3 P0 — same gap as the admin bulk path): this
+    // writer moves rows directly, and a legacy row has no reminder row, so
+    // the notify branch below would report "no reminder record" without
+    // ever reaching the notice sender's activation belt. No-op for every
+    // other row; best-effort by the helper's contract.
+    try {
+      await require('../outbound-review-confirm')
+        .activateLegacyOutboundReviewRowIfNeeded(db, s.id, 'ib-bulk-move');
+    } catch { /* helper is internally best-effort; never strand the batch */ }
     // Opt-in customer text — LAST: after the live-job release and the
     // reschedule_log audit, so a slow
     // SMS provider can never hold tech_status/tracker on the moved job.
@@ -601,17 +634,7 @@ async function moveStopsToDay(input) {
     if (notifyCustomers) {
       try {
         const start = s.window_start ? String(s.window_start).slice(0, 5) : null;
-        // An unreviewed outbound-callback booking gets NO customer text and
-        // no handleReschedule cover (which would claim its still-pending
-        // confirmation slot) — the office reviews it first, same guard as
-        // the dispatch routes.
-        const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../call-booking-source-actions');
-        const unreviewedCallback = s.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
-          && String(s.status) === 'pending'
-          && !s.customer_confirmed;
-        if (unreviewedCallback) {
-          notificationFailures.push({ id: s.id, reason: 'Pending office review (outbound-callback booking) — not texted' });
-        } else if (!start) {
+        if (!start) {
           notificationFailures.push({ id: s.id, reason: 'No arrival time is set for this visit, so no reschedule text was sent' });
         } else {
           const reminderRow = await db('appointment_reminders')

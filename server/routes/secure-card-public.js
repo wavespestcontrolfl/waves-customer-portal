@@ -22,7 +22,11 @@ const {
   completeSecureCardCapture,
 } = require('../services/appointment-card-request');
 
-const TOKEN_RE = /^[a-f0-9]{64}$/;
+// Two minted shapes: 22-char base64url (randomBytes(16), current — sized so
+// the SMS link fits 2 GSM segments) and 64-hex (randomBytes(32), legacy rows
+// whose links are already in customers' hands). Both are unguessable bearer
+// credentials; anything else 404s with no existence oracle.
+const TOKEN_RE = /^(?:[A-Za-z0-9_-]{22}|[a-f0-9]{64})$/;
 
 // Privacy headers on EVERY outcome — including 404s, errors, AND the rate
 // limiter's own 429s, which is why this mounts BEFORE the limiter (Codex

@@ -478,6 +478,13 @@ describe('live-status reschedule override (allowLive)', () => {
       window_end: '11:00:00',
       technician_id: null,
     });
+    // Full tracker/lifecycle snapshot joined the CAS alongside the
+    // scheduling fields (applyTrackLifecycleCas: track_state via where,
+    // null stamps via whereNull) — a concurrent tracker/SMS-guard write
+    // must invalidate the match.
+    expect(updates[0].where).toHaveBeenCalledWith({ track_state: null });
+    expect(updates[0].whereNull).toHaveBeenCalledWith('en_route_at');
+    expect(updates[0].whereNull).toHaveBeenCalledWith('track_sms_sent_at');
     expect(updates[1].update).not.toHaveBeenCalled();
     expect(historyInsert.insert).not.toHaveBeenCalled();
     expect(clearTechCurrentJob).not.toHaveBeenCalled();

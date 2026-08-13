@@ -7,8 +7,13 @@
 // real test-env behavior (all gates dark); the extension suite flips ONLY
 // waveguardExtendExisting.
 let mockExtendExistingGate = false;
+let mockAutoTierGate = false;
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: (gate) => (gate === 'waveguardExtendExisting' ? mockExtendExistingGate : false),
+  isEnabled: (gate) => {
+    if (gate === 'waveguardExtendExisting') return mockExtendExistingGate;
+    if (gate === 'autoWaveguardTierEnroll') return mockAutoTierGate;
+    return false;
+  },
 }));
 
 const {
@@ -31,6 +36,20 @@ function fakeDb({
   addonQueryThrows = false,
   mintedInvoiceLinks = [],
   mintedProbeThrows = false,
+  // Opt-in catalog-join support. WITHOUT catalogRows the builder has no
+  // leftJoin at all, so the catalog and cadence loaders throw and degrade
+  // exactly as they did before this parameter existed — every pre-existing
+  // test keeps its behavior byte-for-byte. Rows carry both loaders' columns
+  // (service_key/service_name for classification, frequency/visits_per_year
+  // for cadence); each loader reads only what it selected.
+  catalogRows = null,
+  // annual_prepay_terms rows backing prepaid scheduled rows. The TERM is the
+  // authoritative source of a prepaid per-application figure
+  // (prepay_amount / coverage_visit_count), so a prepaid fixture without a
+  // matching term here withholds — which is the intended behavior.
+  prepaidTerms = [],
+  prepaidTermsQueryThrows = false,
+  cadenceQueryThrows = false,
 } = {}) {
   const db = (table) => {
     // Per-call state: the extension's minted-invoice probe is the only
@@ -38,7 +57,20 @@ function fakeDb({
     // keys by customer/service_type and must keep returning paidInvoices.
     let probesServiceIds = false;
     const builder = {
+      // coveredTermsAsOf always leftJoins, so the join must exist whenever a
+      // terms fixture is in play. The catalog loader's degrade-on-no-join
+      // behavior is preserved in select() instead of by withholding leftJoin.
+      ...((catalogRows || prepaidTerms.length) ? { leftJoin: () => builder } : {}),
       where: () => builder,
+      // coveredTermsAsOf composes its paid-coverage guard from these; a
+      // missing one throws and the loader degrades to "no live term", which
+      // silently looks like a legitimate withhold.
+      orWhere: () => builder,
+      orWhereNotNull: () => builder,
+      orWhereIn: () => builder,
+      whereNull: () => builder,
+      whereRaw: () => builder,
+      join: () => builder,
       whereIn: (col) => {
         if (col === 'scheduled_service_id') probesServiceIds = true;
         return builder;
@@ -63,7 +95,36 @@ function fakeDb({
         if (table === 'annual_prepay_terms') return prepaidTerm;
         return null;
       },
-      select: async () => {
+      select: async (...cols) => {
+        // The JOINED query is PROJECTED for real (codex #3353 r5): returning
+        // every fixture property regardless of what the caller selected let a
+        // missing column (recurring_interval_days) pass here while resolving
+        // to undefined against a real database. Honoring the projection means
+        // a column the code reads but never selects now fails the test.
+        if (table === 'scheduled_services as s') {
+          // Without a catalog fixture the join is treated as unavailable, so
+          // the catalog/cadence loaders degrade exactly as they do against a
+          // database lacking the services table.
+          if (!catalogRows) throw new Error('relation does not exist');
+          // The cadence projection is the one asking for recurring_pattern;
+          // the identity projection is not. Failing only the former proves
+          // identity survives independently.
+          if (cadenceQueryThrows && cols.flat().some((c) => String(c).includes('recurring_pattern'))) {
+            throw new Error('column does not exist');
+          }
+          const requested = cols.flat().map((col) => {
+            const text = String(col);
+            const aliased = / as /i.test(text) ? text.split(/ as /i)[1] : text;
+            return aliased.includes('.') ? aliased.split('.').pop() : aliased;
+          });
+          return (catalogRows || []).map((row) => Object.fromEntries(
+            requested.filter((key) => key in row).map((key) => [key, row[key]]),
+          ));
+        }
+        if (table === 'annual_prepay_terms' || table === 'annual_prepay_terms as t') {
+          if (prepaidTermsQueryThrows) throw new Error('relation does not exist');
+          return prepaidTerms;
+        }
         if (table === 'scheduled_services') return scheduledRows;
         if (table === 'invoices') {
           if (probesServiceIds) {
@@ -834,6 +895,1350 @@ describe('computeMembershipContext', () => {
 // customer's current qualifying services at the delta rate, and the public
 // projection deliberately carries the prices + visit dates the customer page
 // renders.
+// Staff-panel context for pricing an upgrade: the cadence behind a
+// per-application figure, and a usable basis for the plans that carry no
+// invoice or scheduled price (legacy and monthly-lane members, which used to
+// read "unavailable" and tell the office nothing).
+describe('current-spend cadence and stamped billing basis', () => {
+  const memberWith = (extra) => ({
+    id: 'cust-1', first_name: 'Don', active: true, waveguard_tier: 'Bronze', ...extra,
+  });
+
+  test('catalog cadence surfaces as a label and a visit count', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+      ],
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+      catalogRows: [{
+        id: 'p1', service_key: 'pest_general_quarterly', service_name: 'Pest Control',
+        frequency: 'quarterly', visits_per_year: 4,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      key: 'pest_control',
+      currentPerVisit: 117,
+      cadenceLabel: 'Quarterly',
+      visitsPerYear: 4,
+      spendSource: 'last_paid_invoice',
+    }));
+  });
+
+  test('"bimonthly" reads as every other month, never twice a month', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-01-05', estimated_price: 80 }],
+      catalogRows: [{ id: 'l1', frequency: 'bimonthly', visits_per_year: 6 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].cadenceLabel).toBe('Every other month');
+  });
+
+  test('a single-service account with no invoice or scheduled price falls back to the stamped per-application fee', async () => {
+    const database = fakeDb({
+      customer: memberWith({ billing_mode: 'per_application', per_application_fee: 95 }),
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 95,
+      spendSource: 'per_application_fee',
+      cadenceLabel: 'Quarterly',
+    }));
+  });
+
+  test('a monthly member with no per-visit evidence derives per application from the monthly rate', async () => {
+    const database = fakeDb({
+      customer: memberWith({ monthly_rate: 95 }),
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // $95/mo x 12 / 4 visits — the arithmetic equivalent, labelled as derived
+    // so staff never reads it as an amount the customer was charged.
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 285,
+      spendSource: 'monthly_rate_derived',
+    }));
+  });
+
+  test('a multi-service account never borrows the whole-plan billing stamp for one service', async () => {
+    const database = fakeDb({
+      customer: memberWith({ billing_mode: 'per_application', per_application_fee: 95, monthly_rate: 150 }),
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05' },
+        { id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-01-06' },
+      ],
+      catalogRows: [
+        { id: 'p1', frequency: 'quarterly', visits_per_year: 4 },
+        { id: 'l1', frequency: 'bimonthly', visits_per_year: 6 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // The converter only stamps per_application_fee for a SINGLE-recurring-unit
+    // accept, so on a two-service account it is a whole-plan figure that
+    // belongs to neither line.
+    for (const service of spend.currentServices) {
+      expect(service.currentPerVisit).toBeNull();
+      expect(service.spendSource).toBe('unavailable');
+    }
+    expect(spend.currentSpendPerVisitTotal).toBe(0);
+  });
+
+  test('real payment evidence still outranks the billing stamp', async () => {
+    const database = fakeDb({
+      customer: memberWith({ billing_mode: 'per_application', per_application_fee: 95 }),
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+      ],
+      paidInvoices: [{ service_type: 'pest_control', total: 117, paid_at: '2026-05-20' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 117,
+      spendSource: 'last_paid_invoice',
+    }));
+  });
+
+  test('an annual-prepay contract quotes the PAID allocation, never the list price', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // estimated_price stays the undiscounted list figure; the TERM says what
+    // was actually paid per application. A panel captioned "currently pays"
+    // must show the latter.
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 114,
+      spendSource: 'prepaid_allocation',
+    }));
+  });
+
+  test('a non-uniformly prepaid contract keeps the scheduled price rather than one row\'s allocation', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120 },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('a combined single row never lets the whole-plan total become one component\'s price', async () => {
+    const database = fakeDb({
+      // ONE row, but two recurring families — accountServiceKey groups it
+      // under pest_control alone, so a key-count-only gate would pass and
+      // report the pest+termite plan total as Pest Control's per-app price.
+      customer: memberWith({ monthly_rate: 150 }),
+      scheduledRows: [
+        { id: 'c1', service_type: 'Quarterly Pest + Termite Bait Station', scheduled_date: '2099-01-05' },
+      ],
+      catalogRows: [{ id: 'c1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    const combined = spend.currentServices[0];
+    expect(combined.keys.length).toBeGreaterThan(1);
+    expect(combined.currentPerVisit).toBeNull();
+    expect(combined.spendSource).toBe('unavailable');
+  });
+
+  test('per-property contracts each carry their own billed figure', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'a1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 100, service_address_line1: '1 Palm St', service_address_city: 'Bradenton', service_address_zip: '34203' },
+        { id: 'b1', service_type: 'pest_control', scheduled_date: '2099-01-06', estimated_price: 100, service_address_line1: '2 Oak Ave', service_address_city: 'Venice', service_address_zip: '34285' },
+      ],
+      catalogRows: [{ id: 'a1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // The aggregate is the account's family spend, NOT one visit's charge —
+    // the per-contract figures are what a single property is quoted against,
+    // so both must be present for the panel to itemize instead of showing
+    // "$200.00 per application".
+    const service = spend.currentServices[0];
+    expect(service.currentPerVisit).toBe(200);
+    expect(service.contracts).toHaveLength(2);
+    expect(service.contracts.map((contract) => contract.perVisit)).toEqual([100, 100]);
+  });
+
+  test('a COMBINED invoice never becomes one component\'s per-application price', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'c1', service_type: 'Quarterly Pest + Termite Bait Station', scheduled_date: '2099-01-05', estimated_price: 150 },
+      ],
+      // One charge covering pest AND termite — filed under pest_control by
+      // accountServiceKey, so using it would quote the bundle as pest's price.
+      paidInvoices: [{ service_type: 'Quarterly Pest + Termite Bait Station', total: 150, paid_at: '2026-05-20' }],
+      catalogRows: [{ id: 'c1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].spendSource).not.toBe('last_paid_invoice');
+  });
+
+  test('an active prepaid allocation outranks a superseded per-visit invoice', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      // Paid BEFORE the customer moved onto the annual-prepay term — the
+      // annual-prepay invoice itself carries no service_type, so this older
+      // row is what survives in lastPaidByKey.
+      paidInvoices: [{ service_type: 'pest_control', total: 120, paid_at: '2026-01-10' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 114,
+      spendSource: 'prepaid_allocation',
+    }));
+  });
+
+  test('the live series cadence overrides the catalog default', async () => {
+    const database = fakeDb({
+      customer: memberWith({ monthly_rate: 100 }),
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', recurring_pattern: 'monthly' },
+      ],
+      // Catalog says quarterly; the live series runs monthly. Reading the
+      // catalog would label it 4/yr AND turn $100/mo into $300/application.
+      // catalogRows model the JOINED row, so they carry s.recurring_pattern
+      // alongside the catalog columns.
+      catalogRows: [{ id: 'p1', recurring_pattern: 'monthly', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Monthly',
+      visitsPerYear: 12,
+      currentPerVisit: 100,
+      spendSource: 'monthly_rate_derived',
+    }));
+  });
+
+  // Superseded by the r6 rule: a 'custom' pattern with NO interval days is a
+  // declared live recurrence we cannot name, so it must withhold rather than
+  // inherit the catalog default. This test asserted the inverse when it was
+  // written in r4 — the rule changed, so its expectation did too.
+  test('a bare custom pattern with no interval days withholds cadence', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, recurring_pattern: 'custom' },
+      ],
+      catalogRows: [{ id: 'p1', recurring_pattern: 'custom', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: null,
+      visitsPerYear: null,
+      // The price basis is unaffected — the scheduled price still stands.
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('a custom series resolves its cadence from interval days, not the catalog', async () => {
+    const database = fakeDb({
+      customer: memberWith({ monthly_rate: 100 }),
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05' },
+      ],
+      // 'custom' names nothing on its own, but 42 days IS every-6-weeks (9/yr).
+      // Falling back to the quarterly catalog default would show 4/yr and turn
+      // $100/mo into $300 per application instead of ~$133.
+      catalogRows: [{
+        id: 'p1', recurring_pattern: 'custom', recurring_interval_days: 42,
+        frequency: 'quarterly', visits_per_year: 4,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Every 6 weeks',
+      visitsPerYear: 9,
+      currentPerVisit: 133.33,
+    }));
+  });
+
+  test("the scheduler's monthly_nth_weekday pattern counts as monthly", async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 90 }],
+      catalogRows: [{
+        id: 'p1', recurring_pattern: 'monthly_nth_weekday',
+        frequency: 'quarterly', visits_per_year: 4,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Monthly', visitsPerYear: 12,
+    }));
+  });
+
+  test('contracts on different schedules keep their own cadence; the family stays silent', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'a1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 60, service_address_line1: '1 Palm St', service_address_city: 'Bradenton', service_address_zip: '34203' },
+        { id: 'b1', service_type: 'pest_control', scheduled_date: '2099-01-06', estimated_price: 100, service_address_line1: '2 Oak Ave', service_address_city: 'Venice', service_address_zip: '34285' },
+      ],
+      catalogRows: [
+        { id: 'a1', recurring_pattern: 'monthly', frequency: 'monthly', visits_per_year: 12 },
+        { id: 'b1', recurring_pattern: 'quarterly', frequency: 'quarterly', visits_per_year: 4 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    const service = spend.currentServices[0];
+    // One property is monthly, the other quarterly — showing either above BOTH
+    // would be an arbitrary pick out of an unordered query.
+    expect(service.cadenceLabel).toBeNull();
+    expect(service.visitsPerYear).toBeNull();
+    const byAddress = Object.fromEntries(service.contracts.map((c) => [c.serviceAddress, c]));
+    expect(byAddress['1 Palm St, Bradenton, 34203']).toEqual(expect.objectContaining({ cadenceLabel: 'Monthly', visitsPerYear: 12 }));
+    expect(byAddress['2 Oak Ave, Venice, 34285']).toEqual(expect.objectContaining({ cadenceLabel: 'Quarterly', visitsPerYear: 4 }));
+  });
+
+  test('a prepaid property beside a pay-per-visit one reports a mixed basis, not one source for both', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'a1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice', service_address_line1: '1 Palm St', service_address_city: 'Bradenton', service_address_zip: '34203' },
+        { id: 'b1', service_type: 'pest_control', scheduled_date: '2099-01-06', estimated_price: 100, service_address_line1: '2 Oak Ave', service_address_city: 'Venice', service_address_zip: '34285' },
+      ],
+      catalogRows: [
+        { id: 'a1', frequency: 'quarterly', visits_per_year: 4 },
+        { id: 'b1', frequency: 'quarterly', visits_per_year: 4 },
+      ],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    const service = spend.currentServices[0];
+    expect(service.spendSource).toBe('mixed_basis');
+    const byAddress = Object.fromEntries(service.contracts.map((c) => [c.serviceAddress, c]));
+    expect(byAddress['1 Palm St, Bradenton, 34203'].spendSource).toBe('prepaid_allocation');
+    expect(byAddress['1 Palm St, Bradenton, 34203'].perVisit).toBe(114);
+    expect(byAddress['2 Oak Ave, Venice, 34285'].spendSource).toBe('scheduled_estimate');
+    expect(byAddress['2 Oak Ave, Venice, 34285'].perVisit).toBe(100);
+  });
+
+  test('a weekly series shows NO cadence rather than inheriting the catalog default', async () => {
+    const database = fakeDb({
+      customer: memberWith({ monthly_rate: 100 }),
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05' }],
+      // The scheduler supports weekly; normalizeCoverageCadence can't name it
+      // and cadenceFromIntervalDays rejects 7 days as a non-coverage cadence.
+      // Falling back to the quarterly catalog would show 4/yr and divide
+      // $100/mo by 4 — a per-application figure for a plan that isn't billed
+      // that way.
+      catalogRows: [{
+        id: 'p1', recurring_pattern: 'weekly', recurring_interval_days: 7,
+        frequency: 'quarterly', visits_per_year: 4,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: null,
+      visitsPerYear: null,
+      currentPerVisit: null,
+      spendSource: 'unavailable',
+    }));
+  });
+
+  test('a series declaring no recurrence of its own still uses the catalog cadence', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Quarterly', visitsPerYear: 4,
+    }));
+  });
+
+  test('a prepaid allocation does not carry the superseded invoice\'s payment date', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      paidInvoices: [{ service_type: 'pest_control', total: 120, paid_at: '2026-01-10' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // Otherwise the panel reads "prepaid allocation · 2026-01-10", dating the
+    // current allocation to the payment it superseded.
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      spendSource: 'prepaid_allocation',
+      currentPerVisit: 114,
+      lastPaidAt: null,
+    }));
+  });
+
+  test("a split-remainder prepaid term quotes what was paid, not the list price", async () => {
+    const database = fakeDb({
+      // splitCoverageAmount($455.01, 4) → 113.75 / 113.75 / 113.75 / 113.76.
+      // The cent remainder lands on the final visit BY DESIGN, so demanding
+      // exact equality would reject a perfectly normal term and quote the
+      // $120 list price the paid term disproves.
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p4', service_type: 'pest_control', scheduled_date: '2099-10-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.76, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 455.01, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // $455.01 / 4 = $113.7525 → $113.75 to the cent.
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 113.75,
+      spendSource: 'prepaid_allocation',
+    }));
+  });
+
+  test('a fully prepaid contract with unrelatable allocations withholds rather than showing list price', async () => {
+    const database = fakeDb({
+      // Not a split remainder — two genuinely different allocations. Averaging
+      // would invent a figure nobody paid, and the list price is disproven by
+      // the active term, so the honest answer is nothing.
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 140, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [
+        { id: 't1', prepay_amount: 360, coverage_visit_count: 4 },
+        { id: 't2', prepay_amount: 560, coverage_visit_count: 4 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: null,
+      spendSource: 'unavailable',
+    }));
+  });
+
+  test('a partly-completed prepaid term still quotes the whole term\'s per-application figure', async () => {
+    const database = fakeDb({
+      // A 4-visit $455.03 term allocates 113.75/113.75/113.75/113.78. Two
+      // visits have COMPLETED, so they're filtered out of the active rows and
+      // only the remainder-loaded tail survives. Deriving the figure from
+      // those rows gave $113.78 (or withheld on the spread); the term itself
+      // says $455.03 / 4 = $113.7575 → $113.76.
+      scheduledRows: [
+        { id: 'p3', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.75, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p4', service_type: 'pest_control', scheduled_date: '2099-10-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 113.78, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      catalogRows: [{ id: 'p3', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 455.03, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 113.76,
+      spendSource: 'prepaid_allocation',
+    }));
+  });
+
+  test('cancelled prepay coverage bills at the scheduled price again, not the term figure', async () => {
+    const database = fakeDb({
+      // A voided/refunded/disputed prepay: clearPrepaidStampsForTerm nulls the
+      // per-visit stamps so these visits bill normally, but keeps
+      // annual_prepay_term_id for audit. The term row still exists and still
+      // has its original amount — keying on the link alone would keep quoting
+      // $114 for visits that will now bill $120.
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: null },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: null },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('an independently prepaid visit is not treated as annual-term coverage', async () => {
+    const database = fakeDb({
+      // applyPrepaidCoverageForTerm PRESERVES an out-of-band cash/Zelle stamp
+      // while attachScheduledServices may still have linked the row to the
+      // term. A positive amount plus a term link is therefore not proof the
+      // annual term paid for it — the METHOD is.
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 60, prepaid_method: 'cash' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 60, prepaid_method: 'cash' },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // NOT $114 (456/4) — that term did not pay for these visits.
+    expect(spend.currentServices[0].currentPerVisit).not.toBe(114);
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('after a cancelled prepay the scheduled price outranks the older invoice', async () => {
+    const database = fakeDb({
+      // Stamps cleared by clearPrepaidStampsForTerm, audit link retained.
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: null },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: null },
+      ],
+      // Paid per-visit BEFORE the prepay. Two arrangements ago — these visits
+      // will bill their $120 scheduled price now.
+      paidInvoices: [{ service_type: 'pest_control', total: 100, paid_at: '2026-01-10' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+      lastPaidAt: null,
+    }));
+  });
+
+  test('a stamp whose term is no longer in the covered set bills the scheduled price', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't-missing', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      // Absent from coveredTermsAsOf = coverage is not live. That is a
+      // DEFINITE answer: the visit bills its scheduled price.
+      prepaidTerms: [],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('a stamp left on a RETYPED appointment is not treated as term coverage', async () => {
+    const database = fakeDb({
+      // Coverage-selection cleanup is best-effort, so an appointment retyped
+      // out of the term's coverage keeps its stamp. Completion billing rejects
+      // that coverage via serviceMatchesCoverage; the panel must too, or it
+      // divides the pest term's amount under Lawn Care.
+      scheduledRows: [
+        { id: 'l1', service_type: 'lawn_care', scheduled_date: '2099-01-05', estimated_price: 80, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      catalogRows: [{ id: 'l1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{
+        id: 't1', prepay_amount: 456, coverage_visit_count: 4,
+        customer_id: 'cust-1', coverage_service_type: 'Pest Control',
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).not.toBe(114);
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 80,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test("a stamp pointing at another customer's term is not treated as coverage", async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{
+        id: 't1', prepay_amount: 456, coverage_visit_count: 4,
+        customer_id: 'someone-else', coverage_service_type: 'Pest Control',
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('a FAILED coverage lookup withholds instead of assuming the prepay lapsed', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 114, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [{ id: 't1', prepay_amount: 456, coverage_visit_count: 4 }],
+      // "Not in the covered set" and "the query failed" mean opposite things —
+      // a customer who may still be prepaid must not be quoted $120 on a guess.
+      prepaidTermsQueryThrows: true,
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: null,
+      spendSource: 'unavailable',
+    }));
+  });
+
+  test('seasonal Feb–Oct resolves through the shared cadence helper', async () => {
+    const database = fakeDb({
+      customer: memberWith({ monthly_rate: 90 }),
+      scheduledRows: [{ id: 'm1', service_type: 'mosquito', scheduled_date: '2099-03-05' }],
+      // The coverage vocabulary drops seasonal_feb_oct; the shared helper
+      // knows it is 9 visits.
+      catalogRows: [{
+        id: 'm1', recurring_pattern: 'seasonal_feb_oct',
+        frequency: 'monthly', visits_per_year: 12,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      cadenceLabel: 'Seasonal (Feb–Oct)',
+      visitsPerYear: 9,
+      currentPerVisit: 120,
+    }));
+  });
+
+  test('an unaverageable prepaid contract withholds even when an older invoice exists', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 140, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      // The r7 fix suppressed only the scheduled price, so this superseded
+      // per-visit invoice still surfaced. A paid term disproves it too.
+      paidInvoices: [{ service_type: 'pest_control', total: 120, paid_at: '2026-01-10' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [
+        { id: 't1', prepay_amount: 360, coverage_visit_count: 4 },
+        { id: 't2', prepay_amount: 560, coverage_visit_count: 4 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: null,
+      spendSource: 'unavailable',
+    }));
+  });
+
+  test('two different prepaid terms are never averaged together', async () => {
+    const database = fakeDb({
+      // $100.00 and $100.02 sit within the old count-based tolerance, but a
+      // TWO-visit splitCoverageAmount series can differ by at most one cent —
+      // and these are two distinct terms, so the $100.01 average is invented.
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120, annual_prepay_term_id: 't1', prepaid_amount: 100, prepaid_method: 'annual_prepay_invoice' },
+        { id: 'p2', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 120, annual_prepay_term_id: 't2', prepaid_amount: 100.02, prepaid_method: 'annual_prepay_invoice' },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+      prepaidTerms: [
+        { id: 't1', prepay_amount: 400, coverage_visit_count: 4 },
+        { id: 't2', prepay_amount: 400.08, coverage_visit_count: 4 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBeNull();
+    expect(spend.currentServices[0].spendSource).toBe('unavailable');
+  });
+
+  test('a deposit credit is a payment applied, not a discount on the service', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 117 }],
+      paidInvoices: [{
+        service_type: 'pest_control', total: 68, paid_at: '2026-05-20',
+        line_items: [
+          { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 117, category: 'Pest Control' },
+          // The customer already paid this $49 on the estimate — it reduces
+          // what is DUE, not what the application costs.
+          { description: 'Deposit applied', amount: -49, category: 'deposit_credit' },
+        ],
+      }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 117,
+      spendSource: 'last_paid_invoice',
+    }));
+  });
+
+  test('a one-time add-on is not folded into the recurring per-application price', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 100 }],
+      paidInvoices: [{
+        service_type: 'pest_control', total: 175, paid_at: '2026-05-20',
+        line_items: [
+          { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 100, category: 'Pest Control' },
+          { client_id: 'scheduled_s1_addon_9', description: 'Fire Ant Treatment', amount: 75, category: 'Fire Ant Treatment' },
+        ],
+      }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // service_type names only the primary service, so summing every line
+    // would quote this recurring plan at $175.
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 100,
+      spendSource: 'last_paid_invoice',
+    }));
+  });
+
+  test("an add-on's own discount leaves with the add-on", async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 100 }],
+      paidInvoices: [{
+        service_type: 'pest_control', total: 165, paid_at: '2026-05-20',
+        line_items: [
+          { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 100 },
+          { client_id: 'scheduled_s1_addon_9', description: 'Fire Ant', amount: 75 },
+          { client_id: 'discount_5_scheduled_s1_addon_9', _kind: 'discount', discount_for: 'scheduled_s1_addon_9', description: 'Add-on 10%', amount: -10 },
+        ],
+      }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBe(100);
+  });
+
+  test('a discount on the service line itself still reduces the basis', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 100 }],
+      paidInvoices: [{
+        service_type: 'pest_control', total: 90, paid_at: '2026-05-20',
+        line_items: [
+          { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 100 },
+          { client_id: 'discount_5_scheduled_s1_primary', _kind: 'discount', discount_for: 'scheduled_s1_primary', description: '10% off', amount: -10 },
+        ],
+      }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBe(90);
+  });
+
+  test('an invoice-level manual discount is applied when no discount line carries it', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 }],
+      paidInvoices: [{
+        service_type: 'pest_control', total: 108, paid_at: '2026-05-20', discount_amount: 12,
+        line_items: [
+          { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 120 },
+        ],
+      }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBe(108);
+  });
+
+  test('a discount already represented as a line is never subtracted twice', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 }],
+      paidInvoices: [{
+        service_type: 'pest_control', total: 108, paid_at: '2026-05-20', discount_amount: 12,
+        line_items: [
+          { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 120 },
+          { client_id: 'discount_5_scheduled_s1_primary', _kind: 'discount', discount_for: 'scheduled_s1_primary', description: '10% off', amount: -12 },
+        ],
+      }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBe(108);
+  });
+
+  test('an appointment-wide discount alongside add-ons withholds rather than guessing the split', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 100 }],
+      paidInvoices: [{
+        service_type: 'pest_control', total: 157.5, paid_at: '2026-05-20',
+        line_items: [
+          { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 100 },
+          { client_id: 'scheduled_s1_addon_9', description: 'Fire Ant', amount: 75 },
+          // Spans both lines; nothing records how it was apportioned.
+          { client_id: 'discount_5_appointment', _kind: 'discount', discount_for: null, description: '10% off visit', amount: -17.5 },
+        ],
+      }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // Falls through to the scheduled price rather than inventing a split.
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 100,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('the scheduled basis is the NEXT upcoming priced visit, not an arbitrary row', async () => {
+    const database = fakeDb({
+      // Deliberately out of date order: a repriced later visit must not
+      // become the quoted basis just because it sorted first.
+      scheduledRows: [
+        { id: 'z9', service_type: 'pest_control', scheduled_date: '2099-07-05', estimated_price: 140 },
+        { id: 'a1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 100 },
+      ],
+      catalogRows: [{ id: 'a1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBe(100);
+  });
+
+  test('a stale service_type is overruled by the catalog identity (tier gate on)', async () => {
+    mockAutoTierGate = true;
+    const database = fakeDb({
+      // The repo's documented drift case: the row still says "Pest Control"
+      // but its service_id points at lawn_care_monthly. The tier path already
+      // counts this as Lawn Care, so the panel must not call it Pest Control.
+      scheduledRows: [{ id: 'd1', service_type: 'Pest Control', scheduled_date: '2099-01-05', estimated_price: 95 }],
+      catalogRows: [{
+        id: 'd1', service_key: 'lawn_care_monthly', service_name: 'Lawn Care',
+        frequency: 'monthly', visits_per_year: 12,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      key: 'lawn_care',
+      label: 'Lawn Care',
+      currentPerVisit: 95,
+    }));
+    // The tier counts the same family the panel names — that agreement is
+    // the point of the fix.
+    expect(spend.existingServiceKeys).toEqual(['lawn_care']);
+    mockAutoTierGate = false;
+  });
+
+  test('with the tier gate OFF the panel keeps service_type, matching qualification', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'd1', service_type: 'Pest Control', scheduled_date: '2099-01-05', estimated_price: 95 }],
+      catalogRows: [{
+        id: 'd1', service_key: 'lawn_care_monthly', service_name: 'Lawn Care',
+        frequency: 'monthly', visits_per_year: 12,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // Reading the catalog here while qualification still reads text would
+    // just invert the divergence.
+    expect(spend.currentServices[0].key).toBe('pest_control');
+    expect(spend.existingServiceKeys).toEqual(['pest_control']);
+  });
+
+  test('an uninformative catalog name leaves the row\'s own service_type in charge', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'Pest Control', scheduled_date: '2099-01-05', estimated_price: 95 }],
+      // Names no service family, so it tells us nothing about what this is.
+      catalogRows: [{
+        id: 'p1', service_key: 'premium_home_plan', service_name: 'Premium Home Plan',
+        frequency: 'quarterly', visits_per_year: 4,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      key: 'pest_control',
+      label: 'Pest Control',
+    }));
+  });
+
+  test('an untagged checkout extra is excluded even without an _addon_ id', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 100 }],
+      paidInvoices: [{
+        service_type: 'pest_control', total: 175, paid_at: '2026-05-20',
+        line_items: [
+          { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 100 },
+          // Mobile-checkout extras carry no _addon_ tag — "is it the primary
+          // line" is the question, not "is it tagged an add-on".
+          { description: 'Wasp nest removal', amount: 75 },
+        ],
+      }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBe(100);
+  });
+
+  test('a combined line + manual discount keeps the manual portion', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 }],
+      paidInvoices: [{
+        // discount_amount is the SUM: $12 line + $5 manual.
+        service_type: 'pest_control', total: 103, paid_at: '2026-05-20', discount_amount: 17,
+        line_items: [
+          { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 120 },
+          { client_id: 'd1', _kind: 'discount', discount_for: 'scheduled_s1_primary', description: '10% off', amount: -12 },
+        ],
+      }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // $120 − $12 line − $5 manual remainder.
+    expect(spend.currentServices[0].currentPerVisit).toBe(103);
+  });
+
+  test('a manual discount on an invoice with extras withholds rather than crediting it all to the service', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 100 }],
+      paidInvoices: [{
+        // 10% of ($100 + $75) — computed against the whole subtotal.
+        service_type: 'pest_control', total: 157.5, paid_at: '2026-05-20', discount_amount: 17.5,
+        line_items: [
+          { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 100 },
+          { client_id: 'scheduled_s1_addon_2', description: 'Fire Ant', amount: 75 },
+        ],
+      }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 100,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('a withheld newest invoice is not replaced by older payment history', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 100 }],
+      paidInvoices: [
+        {
+          service_type: 'pest_control', total: 157.5, paid_at: '2026-05-20',
+          line_items: [
+            { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 100 },
+            { client_id: 'scheduled_s1_addon_2', description: 'Fire Ant', amount: 75 },
+            { client_id: 'dw', _kind: 'discount', discount_for: null, description: '10% off visit', amount: -17.5 },
+          ],
+        },
+        // Superseded — must not stand in for the newest visit.
+        { service_type: 'pest_control', total: 80, paid_at: '2025-05-20' },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).not.toBe(80);
+    expect(spend.currentServices[0].spendSource).toBe('scheduled_estimate');
+  });
+
+  test('a non-qualifying catalog service keeps a canonical key and its own name', async () => {
+    mockAutoTierGate = true;
+    const database = fakeDb({
+      scheduledRows: [{ id: 't1', service_type: 'Termite Treatment', scheduled_date: '2099-01-05', estimated_price: 300 }],
+      catalogRows: [{
+        id: 't1', service_key: 'termite_liquid', service_name: 'Termite Liquid Treatment',
+        frequency: 'annual', visits_per_year: 1,
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // Concatenating key + name produced termite_liquid_termite_liquid_treatment.
+    expect(spend.currentServices[0].key).toBe('termite_liquid');
+    expect(spend.currentServices[0].label).toBe('Termite Liquid Treatment');
+    mockAutoTierGate = false;
+  });
+
+  test('catalog identity survives a cadence-query failure', async () => {
+    mockAutoTierGate = true;
+    const database = fakeDb({
+      scheduledRows: [{ id: 'd1', service_type: 'Pest Control', scheduled_date: '2099-01-05', estimated_price: 95 }],
+      catalogRows: [{
+        id: 'd1', service_key: 'lawn_care_monthly', service_name: 'Lawn Care',
+        recurring_pattern: 'monthly', frequency: 'monthly', visits_per_year: 12,
+      }],
+      // Only the wider cadence projection fails.
+      cadenceQueryThrows: true,
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // Cadence is gone, but the identity must not revert to the stale text —
+    // that would put the label back out of step with the tier.
+    expect(spend.currentServices[0].cadenceLabel).toBeNull();
+    expect(spend.currentServices[0].key).toBe('lawn_care');
+    mockAutoTierGate = false;
+  });
+
+  test('a stale PAST visit never becomes the next-upcoming price', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        // Past, still pending — sorts first ascending but is not what the
+        // customer pays next.
+        { id: 'old', service_type: 'pest_control', scheduled_date: '2020-01-05', estimated_price: 80 },
+        { id: 'next', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+      ],
+      catalogRows: [{ id: 'next', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBe(120);
+  });
+
+  test('a visit with add-ons uses the primary line price, not the appointment total', async () => {
+    const database = fakeDb({
+      scheduledRows: [{
+        id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05',
+        // estimated_price is the WHOLE visit: $100 primary + $75 add-on.
+        estimated_price: 175, primary_line_price: 100, line_discount_dollars: 0,
+      }],
+      addonRows: [{ scheduled_service_id: 'p1' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 100,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('a composite visit with no primary-line price withholds instead of quoting the appointment total', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 175 }],
+      addonRows: [{ scheduled_service_id: 'p1' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBeNull();
+  });
+
+  test('an unattributable NEXT visit withholds the contract rather than quoting a later visit', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        // The customer's actual next application: composite with an
+        // appointment-level discount, so its basis is deliberately withheld.
+        {
+          id: 'a1', service_type: 'pest_control', scheduled_date: '2099-01-05',
+          estimated_price: 157.5, primary_line_price: 100, line_discount_dollars: 0,
+          discount_type: 'percentage', discount_amount: 10, discount_dollars: 17.5,
+        },
+        // A later clean visit must not stand in as "what the customer pays".
+        { id: 'z9', service_type: 'pest_control', scheduled_date: '2099-04-05', estimated_price: 100 },
+      ],
+      addonRows: [{ scheduled_service_id: 'a1' }],
+      catalogRows: [{ id: 'a1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: null,
+      spendSource: 'unavailable',
+    }));
+  });
+
+  test('a free callback visit never withholds the contract as the "next" visit', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        // Sorts first by date but is not an application.
+        { id: 'cb', service_type: 'pest_control', scheduled_date: '2099-01-02', estimated_price: 0, is_callback: true },
+        { id: 'r1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+      ],
+      catalogRows: [{ id: 'r1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBe(120);
+  });
+
+  test('a composite visit with an appointment-level discount withholds instead of quoting the undiscounted primary', async () => {
+    const database = fakeDb({
+      scheduledRows: [{
+        id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05',
+        // $100 primary + $75 add-on − 10% appointment discount. The $17.50
+        // spans both lines with no recorded apportionment — the same shape
+        // the invoice path withholds on.
+        estimated_price: 157.5, primary_line_price: 100, line_discount_dollars: 0,
+        discount_type: 'percentage', discount_amount: 10, discount_dollars: 17.5,
+      }],
+      addonRows: [{ scheduled_service_id: 'p1' }],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].currentPerVisit).toBeNull();
+  });
+
+  test('an add-on-only invoice is skipped, not recorded as the service price', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 110 }],
+      paidInvoices: [
+        // A prepay-covered visit whose base billed $0 while a one-time add-on
+        // billed — the add-on's price says nothing about the plan.
+        {
+          service_type: 'pest_control', total: 75, paid_at: '2026-06-20',
+          line_items: [
+            { client_id: 'scheduled_s1_addon_9', description: 'Fire Ant Treatment', amount: 75 },
+          ],
+        },
+        // Skipped, not withheld: the older SERVICE invoice still answers.
+        {
+          service_type: 'pest_control', total: 110, paid_at: '2026-03-20',
+          line_items: [
+            { client_id: 'scheduled_s1_primary', description: 'Pest Control', amount: 110 },
+          ],
+        },
+      ],
+      catalogRows: [{ id: 'p1', frequency: 'quarterly', visits_per_year: 4 }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 110,
+      spendSource: 'last_paid_invoice',
+    }));
+  });
+
+  test('a combined newest invoice supersedes older standalone invoices for EVERY component', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 100 },
+        { id: 't1', service_type: 'termite_bait', scheduled_date: '2099-02-05', estimated_price: 40 },
+      ],
+      paidInvoices: [
+        // The customer's latest termite charge is inside this unattributable
+        // bundle — so the older standalone termite invoice is superseded too.
+        { service_type: 'Quarterly Pest + Termite Bait Station', total: 130, paid_at: '2026-06-20' },
+        { service_type: 'termite_bait', total: 55, paid_at: '2026-01-20' },
+      ],
+      catalogRows: [
+        { id: 'p1', frequency: 'quarterly', visits_per_year: 4 },
+        { id: 't1', frequency: 'quarterly', visits_per_year: 4 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    const termite = spend.currentServices.find((service) => service.key === 'termite_bait');
+    expect(termite).toEqual(expect.objectContaining({
+      currentPerVisit: 40,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+
+  test('a paid invoice resolves its family through the visit\'s catalog identity (tier gate on)', async () => {
+    mockAutoTierGate = true;
+    const database = fakeDb({
+      // The drift case again, now with payment history: the row AND its
+      // invoice both say "Pest Control" while the catalog says lawn. Keyed by
+      // text, the authoritative last-paid amount files under pest_control —
+      // a key nothing reads — and the panel falls back to the scheduled price.
+      scheduledRows: [{ id: 'd1', service_type: 'Pest Control', scheduled_date: '2099-01-05', estimated_price: 95 }],
+      catalogRows: [{
+        id: 'd1', service_key: 'lawn_care_monthly', service_name: 'Lawn Care',
+        frequency: 'monthly', visits_per_year: 12,
+      }],
+      paidInvoices: [{
+        service_type: 'Pest Control', total: 89, paid_at: '2026-05-20', scheduled_service_id: 'd1',
+        line_items: [
+          { client_id: 'scheduled_d1_primary', description: 'Pest Control', amount: 89 },
+        ],
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      key: 'lawn_care',
+      currentPerVisit: 89,
+      spendSource: 'last_paid_invoice',
+    }));
+    mockAutoTierGate = false;
+  });
+
+  test('the catalog identity loads ONCE, shared by qualification, display, and invoices', async () => {
+    mockAutoTierGate = true;
+    const inner = fakeDb({
+      scheduledRows: [{ id: 'd1', service_type: 'Pest Control', scheduled_date: '2099-01-05', estimated_price: 95 }],
+      catalogRows: [{
+        id: 'd1', service_key: 'lawn_care_monthly', service_name: 'Lawn Care',
+        frequency: 'monthly', visits_per_year: 12,
+      }],
+    });
+    // Count identity-shaped catalog queries (service_key projected, no
+    // cadence columns). Two sequential loads — qualification's and the
+    // panel's — could transiently disagree; one shared result cannot.
+    let identityQueries = 0;
+    const database = (table) => {
+      const builder = inner(table);
+      if (table === 'scheduled_services as s') {
+        const originalSelect = builder.select;
+        builder.select = async (...cols) => {
+          const flat = cols.flat().map(String);
+          if (flat.some((c) => c.includes('service_key')) && !flat.some((c) => c.includes('recurring_pattern'))) {
+            identityQueries += 1;
+          }
+          return originalSelect(...cols);
+        };
+      }
+      return builder;
+    };
+    database.fn = inner.fn;
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0].key).toBe('lawn_care');
+    expect(identityQueries).toBe(1);
+    mockAutoTierGate = false;
+  });
+
+  test('with the tier gate OFF a linked invoice keeps its own text, matching the rows', async () => {
+    const database = fakeDb({
+      scheduledRows: [{ id: 'd1', service_type: 'Pest Control', scheduled_date: '2099-01-05', estimated_price: 95 }],
+      catalogRows: [{
+        id: 'd1', service_key: 'lawn_care_monthly', service_name: 'Lawn Care',
+        frequency: 'monthly', visits_per_year: 12,
+      }],
+      paidInvoices: [{
+        service_type: 'Pest Control', total: 89, paid_at: '2026-05-20', scheduled_service_id: 'd1',
+        line_items: [
+          { client_id: 'scheduled_d1_primary', description: 'Pest Control', amount: 89 },
+        ],
+      }],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    // Rows are keyed by text with the gate off; resolving the invoice through
+    // the catalog here would file the amount under a key the rows don't use —
+    // the mirror image of the gate-ON divergence.
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      key: 'pest_control',
+      currentPerVisit: 89,
+      spendSource: 'last_paid_invoice',
+    }));
+  });
+
+  test('a cadence lookup failure leaves the label out instead of breaking the panel', async () => {
+    // No catalogRows — the builder has no leftJoin, so the cadence loader
+    // throws exactly as it does against a database without the services table.
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.currentServices[0]).toEqual(expect.objectContaining({
+      currentPerVisit: 120,
+      cadenceLabel: null,
+      visitsPerYear: null,
+      spendSource: 'scheduled_estimate',
+    }));
+  });
+});
+
 describe('existing-service tier extension snapshot', () => {
   afterEach(() => { mockExtendExistingGate = false; });
 
