@@ -181,6 +181,7 @@ function baseResponses(overrides = {}) {
 
 const CLEAN_LLM_JSON = {
   priorities: ['Check garage corner ant trail'],
+  mentioned_terms: ['ants'],
   watch_items: ['Chemical-sensitivity note on file'],
   last_visit_summary: 'Routine pest service on July 15.',
   open_scope: '',
@@ -391,7 +392,9 @@ describe('grounded allowlist validation of LLM output', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
     const verdict = validateBriefJson(
-      { ...CLEAN_LLM_JSON, priorities: ['Apply PhantomGuard X for emerald ash borer'] },
+      // mentioned_terms empty: the model failed to self-report — the prose
+      // regexes must still catch the novel references.
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Apply PhantomGuard X for emerald ash borer'] },
       grounding,
     );
     expect(verdict.reason).toMatch(/^ungrounded_novel_(product|target):/);
@@ -435,7 +438,9 @@ describe('aggregator serviceHistory is line-scoped', () => {
 });
 
 describe('typed response validation (validateBriefJson + dispatcher validate)', () => {
-  const GROUNDING = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+  // llmFacts carries the call summary so CLEAN_LLM_JSON's self-reported
+  // 'ants' is grounded at the unit level too.
+  const GROUNDING = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { recentCalls: ['Asked about ants in garage'] } };
   const { validateBriefJson } = PrevisitBrief._test;
 
   test('shape rejections carry typed reasons', () => {
@@ -454,7 +459,28 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
 
   test('ungrounded catalog claims reject with the offending term', () => {
     const grounding = { catalogVocabulary: { names: ['termidor sc'], targets: [] }, llmFacts: {} };
-    expect(validateBriefJson({ priorities: ['Apply Termidor SC'], watch_items: [] }, grounding).reason).toBe('ungrounded_product:termidor sc');
+    expect(validateBriefJson({ priorities: ['Apply Termidor SC'], watch_items: [], mentioned_terms: [] }, grounding).reason).toBe('ungrounded_product:termidor sc');
+  });
+
+  test('a missing mentioned_terms list rejects the leg', () => {
+    const { mentioned_terms, ...rest } = CLEAN_LLM_JSON;
+    expect(validateBriefJson(rest, GROUNDING).reason).toBe('mentioned_terms_not_array');
+  });
+
+  test('a listed but ungrounded term rejects the leg', () => {
+    const verdict = validateBriefJson({ ...CLEAN_LLM_JSON, mentioned_terms: ['emerald ash borer'] }, GROUNDING);
+    expect(verdict.reason).toBe('ungrounded_term:emerald ash borer');
+  });
+
+  test('an organism named without a preposition is still caught (regression)', () => {
+    // "Emerald ash borer activity warrants inspection" — no for/targeting/
+    // against shape, not self-reported: the activity-noun regex must catch
+    // it (codex round: narrow sentence shapes let this through).
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Emerald ash borer activity warrants inspection'] },
+      GROUNDING,
+    );
+    expect(verdict.reason).toMatch(/^ungrounded_(novel_target:|term:)/);
   });
 
   test('a clean response yields the sanitized body', () => {

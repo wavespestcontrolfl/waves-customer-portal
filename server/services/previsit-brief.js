@@ -654,9 +654,10 @@ Rules:
 - Never name a pest or organism target that is not in the facts. Never mention Ganoderma or Thielaviopsis.
 - Never include gate codes, garage codes, lockbox codes, or any credential — you have not been given them and must not guess.
 - Plain, terse field language. No greetings, no markdown, no headings.
+- mentioned_terms: list EVERY product name and EVERY pest/organism/disease you mention anywhere in your response, lowercased. Empty array only if you mention none. A term you mention but do not list makes the response invalid.
 
 Return VALID JSON ONLY:
-{"priorities": ["<up to 3 short action items for this visit>"], "watch_items": ["<known issues/quirks worth a glance, from the facts>"], "last_visit_summary": "<1-2 sentences on the last visit, from the facts>", "open_scope": "<open estimate/quote scope in one sentence, or empty string>", "customer_context": "<1-2 sentences of customer quirks/preferences from calls, notes, flags>"}`;
+{"priorities": ["<up to 3 short action items for this visit>"], "watch_items": ["<known issues/quirks worth a glance, from the facts>"], "last_visit_summary": "<1-2 sentences on the last visit, from the facts>", "open_scope": "<open estimate/quote scope in one sentence, or empty string>", "customer_context": "<1-2 sentences of customer quirks/preferences from calls, notes, flags>", "mentioned_terms": ["<every product and pest/organism/disease named in this response, lowercased>"]}`;
 
 function sanitizeList(value, max, itemMax = 200) {
   const list = Array.isArray(value) ? value : [];
@@ -720,6 +721,9 @@ const REFERENCE_STOP_WORDS = new Set([
   'under', 'over', 'front', 'back', 'side', 'corner', 'edge', 'line',
   'area', 'areas', 'yard', 'property', 'home', 'house', 'exterior',
   'interior', 'perimeter', 'activity', 'signs', 'sign', 'visit', 'service',
+  'increased', 'decreased', 'reduced', 'elevated', 'ongoing', 'recent',
+  'continued', 'heavy', 'light', 'minor', 'major', 'previous', 'general',
+  'overall', 'seasonal', 'pest', 'insect',
 ]);
 
 // A reference is grounded when the whole normalized phrase appears in the
@@ -761,6 +765,13 @@ function extractOutputReferences(text) {
   // words and flag ordinary prose ("use caution") as product references.
   for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near)\b)[\w.-]+){0,3})/g)) push(products, m[1]);
   for (const m of text.matchAll(/\b(?:for|targeting|against)\s+((?:[a-z][a-z'-]*\s+){0,3}[a-z][a-z'-]*)/g)) push(targets, m[1]);
+  // Organism references that never pass a preposition: "<X> activity/
+  // damage/infestation" and "signs/evidence of <X>" ("Emerald ash borer
+  // activity warrants inspection"). Case-insensitive captures — organisms
+  // appear sentence-initial too; the stopword filter absorbs generic
+  // modifiers ("increased", "ongoing") the captures drag in.
+  for (const m of text.matchAll(/\b((?:[A-Za-z][\w'-]*\s+){0,3}[A-Za-z][\w'-]*?)\s+(?:activity|infestation|damage|pressure|droppings|nesting|sightings?)\b/g)) push(targets, m[1]);
+  for (const m of text.matchAll(/\b(?:signs?|evidence|presence|history)\s+of\s+((?:[A-Za-z][\w'-]*\s+){0,3}[A-Za-z][\w'-]*)/g)) push(targets, m[1]);
   return { products: [...products], targets: [...targets] };
 }
 
@@ -835,6 +846,19 @@ function validateBriefJson(json, grounding) {
     .filter((v) => typeof v === 'string')
     .join(' ');
   if (FORBIDDEN_TARGET_RE.test(rawText)) return { reason: 'forbidden_genus' };
+  // Structured self-report (complement to the prose regexes below, which
+  // only see a few sentence shapes): the model must list every product
+  // and pest/organism it mentions, and every listed term must be
+  // grounded. A missing list rejects the leg.
+  if (!Array.isArray(json.mentioned_terms)) return { reason: 'mentioned_terms_not_array' };
+  const selfReportGrounding = JSON.stringify(grounding.llmFacts).toLowerCase();
+  for (const term of json.mentioned_terms) {
+    if (typeof term !== 'string') return { reason: 'mentioned_terms_not_string' };
+    if (FORBIDDEN_TARGET_RE.test(term)) return { reason: 'forbidden_genus' };
+    if (!isGroundedReference(term, selfReportGrounding)) {
+      return { reason: `ungrounded_term:${cleanText(term, 60)}` };
+    }
+  }
   const body = {
     priorities: sanitizeList(json.priorities, 3),
     watch_items: sanitizeList(json.watch_items, 6),
