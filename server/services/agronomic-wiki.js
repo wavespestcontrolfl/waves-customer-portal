@@ -1173,8 +1173,18 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       if (outcome.grass_track) slugs.add(`track/${slugify(String(outcome.grass_track))}`);
 
       if (outcome.treatment_date) {
-        // Same month derivation as linkTreatmentOutcome's fan-out.
-        const month = new Date(outcome.treatment_date).getMonth() + 1;
+        // treatment_date is a date-only business field; updateSeasonalPage
+        // selects by EXTRACT(MONTH ...) — the calendar month of the stored
+        // date. Read the month from the literal date, never through
+        // new Date('YYYY-MM-DD').getMonth() (UTC-midnight parse shifts
+        // 'YYYY-MM-01' into the PREVIOUS month in any western-hemisphere
+        // local timezone). pg Date objects parse at local midnight, so
+        // getMonth() on a real Date matches the stored date.
+        const raw = outcome.treatment_date;
+        const literal = /^(\d{4})-(\d{2})-(\d{2})/.exec(typeof raw === 'string' ? raw : '');
+        const month = literal
+          ? Number(literal[2])
+          : (raw instanceof Date && !Number.isNaN(raw.getTime()) ? raw.getMonth() + 1 : null);
         const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
           'july', 'august', 'september', 'october', 'november', 'december'];
         if (monthNames[month - 1]) slugs.add(`seasonal/${monthNames[month - 1]}`);
@@ -1636,6 +1646,19 @@ function aggregateOutcomes(outcomes) {
     seasonDistribution: seasons,
     grassTypeDistribution: grassTypes,
     trackDistribution: tracks,
+    // Photo-verified visual change, aggregated over the FULL outcome set: the
+    // prompt's per-outcome sample is capped at 50 newest, but the sweep
+    // scores oldest-first — a scored outcome outside the sample changes the
+    // skip fingerprint, so its score must reach the prompt through stats or
+    // the regeneration writes a page that never saw it and then skips forever.
+    photoVerified: (() => {
+      const scored = outcomes.filter((o) => o.vision_delta_score != null);
+      if (!scored.length) return { count: 0 };
+      return {
+        count: scored.length,
+        avgVisualChange: avg(scored.map((o) => o.vision_delta_score)),
+      };
+    })(),
   };
 }
 
@@ -1653,6 +1676,7 @@ module.exports.__private = {
   classifyReviewTier,
   sameFlagSets,
   countVisionScored,
+  aggregateOutcomes,
   PRE_ASSESSMENT_MAX_AGE_DAYS,
   POST_ASSESSMENT_MAX_DAYS,
 };

@@ -350,6 +350,10 @@ describe('scoreOutcome', () => {
       pre_best_photo_key: 'lawn/pre.jpg',
       post_best_photo_key: 'lawn/post.jpg',
     }]]);
+    // The failure write is also guarded against a concurrently stamped
+    // verdict and a double-charged attempt slot.
+    expect(failRec.ops).toContainEqual(['whereNull', ['vision_scored_at']]);
+    expect(failRec.ops).toContainEqual(['where', ['vision_score_attempts', 2]]);
   });
 
   test('null-score verdicts and failures never stale-flag wiki pages', async () => {

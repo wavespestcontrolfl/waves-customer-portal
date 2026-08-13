@@ -248,9 +248,14 @@ const VisionDelta = {
       // Same key-pair condition as the success write: if the pair was
       // re-elected mid-flight, attempts were reset to 0 for the NEW pair —
       // charging this failure (or a terminal {error} stamp) against it would
-      // poison a pair that was never tried.
+      // poison a pair that was never tried. whereNull(vision_scored_at) +
+      // the attempt-count guard keep a losing concurrent scorer from
+      // overwriting a verdict another run just stamped, or from double-
+      // charging the same attempt slot.
       const updated = await db('treatment_outcomes')
         .where({ id: outcomeId, ...scoredPair })
+        .whereNull('vision_scored_at')
+        .where('vision_score_attempts', priorAttempts)
         .update(patch);
       if (!updated) {
         logger.info(`[vision-delta] Outcome ${outcomeId} superseded mid-score — failed attempt not charged`);

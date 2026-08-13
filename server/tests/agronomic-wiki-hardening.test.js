@@ -348,6 +348,36 @@ describe('generatePage', () => {
     expect(rec.ops).toContainEqual(['where', [{ stale_flag: false }]]);
   });
 
+  test('markOutcomePagesStale reads the month from the date literal, not local-TZ Date parse', async () => {
+    // '2026-08-01' via new Date().getMonth() is JULY in any western-hemisphere
+    // local timezone (UTC-midnight parse) — the literal month must win so the
+    // flagged page matches updateSeasonalPage's EXTRACT(MONTH ...) selection.
+    const state = useDb({ knowledge_entries: [], products_catalog: [], product_aliases: [] });
+    await wiki.markOutcomePagesStale({
+      id: 'out-2',
+      products_applied: '[]',
+      grass_track: null,
+      treatment_date: '2026-08-01',
+    });
+    const rec = state.calls.knowledge_entries[0];
+    const whereIn = rec.ops.find(([m]) => m === 'whereIn');
+    expect(whereIn[1][1]).toEqual(['seasonal/august']);
+  });
+
+  test('aggregateOutcomes carries photo-verified stats over the FULL set (beyond the 50-row prompt sample)', () => {
+    const outcomes = [
+      { vision_delta_score: 40 },
+      { vision_delta_score: -10 },
+      { vision_delta_score: null },
+      {},
+    ];
+    expect(wiki.__private.aggregateOutcomes(outcomes).photoVerified).toEqual({
+      count: 2,
+      avgVisualChange: 15,
+    });
+    expect(wiki.__private.aggregateOutcomes([{}]).photoVerified).toEqual({ count: 0 });
+  });
+
   test('markOutcomePagesStale includes condition pages matched via the customer assessment observations', async () => {
     const state = useDb({
       knowledge_entries: (rec) => {
