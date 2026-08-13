@@ -5057,10 +5057,17 @@ function initScheduledJobs() {
       // both pass it and double-run the refresh. Same hazard the digest leg
       // already locks against; a lease_held skip means another instance owns
       // this tick's whole chain, so bail out of legs 2-3 too.
-      const result = await runExclusive('wiki-weekly-refresh', () => wiki.weeklyRefreshIfDue());
+      // weeklyRefreshIfDue swallows failures into { error } — rethrow inside
+      // the lock so job_health records the failure instead of a false success.
+      const result = await runExclusive('wiki-weekly-refresh', async () => {
+        const r = await wiki.weeklyRefreshIfDue();
+        if (r?.error) {
+          throw Object.assign(new Error(`wiki refresh failed: ${r.error}`), { result: r });
+        }
+        return r;
+      });
       if (result?.reason === 'lease_held' || result?.reason === 'no_connection') return;
-      if (result?.error) refreshFailed = true;
-      else if (!result.skipped) {
+      if (!result.skipped) {
         logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
       }
     } catch (err) {
@@ -5085,7 +5092,16 @@ function initScheduledJobs() {
     }
     try {
       const KnowledgeBridge = require('./knowledge-bridge');
-      const result = await runExclusive('wiki-kb-sync', () => KnowledgeBridge.syncToClaudeopediaIfDue());
+      // A sync that finished with per-entry errors must not record a healthy
+      // job_health row — rethrow inside the lock (partial progress is already
+      // persisted; the weekly marker semantics are unchanged by the throw).
+      const result = await runExclusive('wiki-kb-sync', async () => {
+        const r = await KnowledgeBridge.syncToClaudeopediaIfDue();
+        if (r?.errors > 0) {
+          throw Object.assign(new Error(`wiki→KB sync completed with ${r.errors} error(s): ${r.created} created, ${r.updated} updated`), { result: r });
+        }
+        return r;
+      });
       if (!result.skipped) {
         logger.info(`Wiki→KB trusted sync done: ${result.created} created, ${result.updated} updated, ${result.errors} errors`);
       }

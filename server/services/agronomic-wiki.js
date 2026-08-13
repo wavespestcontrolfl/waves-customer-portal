@@ -555,7 +555,12 @@ const AgronomicWiki = {
           let weather = post.fawn_temp_f != null || post.fawn_humidity_pct != null || post.fawn_rainfall_7d != null
             ? { temp_f: post.fawn_temp_f, humidity_pct: post.fawn_humidity_pct, rainfall_in: post.fawn_rainfall_7d }
             : null;
-          if (!weather) {
+          // Current-conditions fallback ONLY when the treatment is actually
+          // today (ET): a late confirm or resumed completion can link a
+          // historical treatment, and stamping today's weather onto it would
+          // permanently misattribute the application conditions.
+          const { etDateString } = require('../utils/datetime-et');
+          if (!weather && etDateString(new Date(treatmentDate)) === etDateString()) {
             const fawn = await require('./fawn-weather').getCurrent();
             if (fawn && fawn.station !== 'unavailable') weather = fawn;
           }

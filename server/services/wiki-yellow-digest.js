@@ -64,8 +64,11 @@ function composeYellowDigest(queue) {
   const blockedCount = (queue.blocked || []).length;
   if (!yellow.length && !pending.length) return null;
 
-  // /admin/knowledge is the routed SPA page (App.jsx); /admin/kb is not a route.
-  const reviewUrl = `${adminPortalUrl()}/admin/knowledge`;
+  // Deep-link straight to the Field Intelligence review queue: the hub route
+  // needs area=base to mount KnowledgeBasePage and kbTab=field to open the
+  // queue tab (the old /admin/kb path was a client redirect that only
+  // supplied area=base — recipients landed on the article workspace).
+  const reviewUrl = `${adminPortalUrl()}/admin/knowledge?area=base&kbTab=field`;
   const parts = [`Agronomic brain — weekly review digest`];
   const sections = [];
   if (pending.length) {

@@ -83,7 +83,7 @@ test('claim_vs_data prefers the bridge pair for wiki attribution over slug match
   const dbMock = makeDb({
     product_efficacy: [NEGATIVE_EFFICACY],
     knowledge_base: [KB_PRODUCT],
-    knowledge_bridge: [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bridged', relevance_score: 0.95 }],
+    knowledge_bridge: [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bridged', wiki_slug: 'product/celsius-wg', relevance_score: 0.95 }],
     // slug fallback would return a DIFFERENT id — must not be consulted
     knowledge_entries: [{ id: 'wiki-slug-match' }],
     knowledge_contradictions: [], // no existing open row
@@ -170,7 +170,7 @@ test('peak-vs-shoulder rule attributes the bridged wiki entry and gates it', asy
       dormant_stats: null,
     }],
     knowledge_base: [{ ...KB_PRODUCT, content: 'Apply Celsius WG in summer peak season.' }],
-    knowledge_bridge: [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bridged', relevance_score: 0.95 }],
+    knowledge_bridge: [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bridged', wiki_slug: 'product/celsius-wg', relevance_score: 0.95 }],
     knowledge_entries: [],
     knowledge_contradictions: [],
   });
@@ -188,6 +188,62 @@ test('peak-vs-shoulder rule attributes the bridged wiki entry and gates it', asy
   }));
 });
 
+test('an existing open row with null attribution is backfilled and gated when the bridge resolves', async () => {
+  const updates = [];
+  const dbMock = makeDb({
+    product_efficacy: [NEGATIVE_EFFICACY],
+    knowledge_base: [KB_PRODUCT],
+    knowledge_bridge: [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bridged', wiki_slug: 'product/celsius-wg', relevance_score: 0.95 }],
+    knowledge_entries: [],
+    // Pre-bridge detector left this open row unattributed — the dedupe skips
+    // re-insertion, so without backfill the page stays trusted forever.
+    knowledge_contradictions: [{ id: 'contra-legacy', wiki_entry_id: null, status: 'open' }],
+  });
+  const origDb = dbMock;
+  global.__analyticsDbMock = (table) => {
+    const b = origDb(table);
+    if (table === 'knowledge_contradictions') {
+      const origUpdate = b.update;
+      b.update = (patch) => { updates.push(patch); return origUpdate ? { then: (res, rej) => Promise.resolve(1).then(res, rej) } : undefined; };
+    }
+    return b;
+  };
+
+  const result = await analytics.detectContradictions();
+
+  expect(result.contradictions).toBe(0); // nothing new inserted
+  expect(updates).toEqual([{ wiki_entry_id: 'wiki-bridged' }]);
+  expect(recomputeEntryReviewGate).toHaveBeenCalledWith('wiki-bridged', expect.objectContaining({
+    assumeOpenIds: ['contra-legacy'],
+  }));
+});
+
+test('backfill reverts the attribution when the gate recompute fails', async () => {
+  recomputeEntryReviewGate.mockRejectedValueOnce(new Error('gate write failed'));
+  const updates = [];
+  const dbMock = makeDb({
+    product_efficacy: [NEGATIVE_EFFICACY],
+    knowledge_base: [KB_PRODUCT],
+    knowledge_bridge: [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bridged', wiki_slug: 'product/celsius-wg', relevance_score: 0.95 }],
+    knowledge_entries: [],
+    knowledge_contradictions: [{ id: 'contra-legacy', wiki_entry_id: null, status: 'open' }],
+  });
+  global.__analyticsDbMock = (table) => {
+    const b = dbMock(table);
+    if (table === 'knowledge_contradictions') {
+      b.update = (patch) => { updates.push(patch); return { then: (res, rej) => Promise.resolve(1).then(res, rej) }; };
+    }
+    return b;
+  };
+
+  const result = await analytics.detectContradictions();
+
+  // The thrown gate error is swallowed by the outer catch; attribution must
+  // have been reverted so the next weekly run retries the backfill.
+  expect(result.contradictions).toBe(0);
+  expect(updates).toEqual([{ wiki_entry_id: 'wiki-bridged' }, { wiki_entry_id: null }]);
+});
+
 test('peak-vs-shoulder rolls the insert back when the gate recompute fails', async () => {
   recomputeEntryReviewGate.mockRejectedValueOnce(new Error('gate write failed'));
   const dbMock = makeDb({
@@ -200,7 +256,7 @@ test('peak-vs-shoulder rolls the insert back when the gate recompute fails', asy
       dormant_stats: null,
     }],
     knowledge_base: [{ ...KB_PRODUCT, content: 'Apply Celsius WG in summer peak season.' }],
-    knowledge_bridge: [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bridged', relevance_score: 0.95 }],
+    knowledge_bridge: [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bridged', wiki_slug: 'product/celsius-wg', relevance_score: 0.95 }],
     knowledge_entries: [],
     knowledge_contradictions: [],
   });

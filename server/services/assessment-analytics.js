@@ -651,6 +651,27 @@ async function getCustomerBenchmark(customerId) {
 // CONTRADICTION DETECTION
 // ══════════════════════════════════════════════════════════════
 
+// An open contradiction row that predates bridge attribution can carry
+// wiki_entry_id = null — the dedupe then skips re-insertion forever, so the
+// page it should gate stays agent-trusted. When the current run CAN resolve
+// the wiki entry, attribute the existing row and gate the page now. On gate
+// failure the attribution is reverted so the next weekly run retries.
+async function backfillContradictionAttribution(existing, wikiEntryId) {
+  if (!existing || existing.wiki_entry_id || !wikiEntryId) return false;
+  await db('knowledge_contradictions')
+    .where({ id: existing.id })
+    .update({ wiki_entry_id: wikiEntryId });
+  try {
+    await recomputeEntryReviewGate(wikiEntryId, { assumeOpenIds: [existing.id] });
+  } catch (gateErr) {
+    try {
+      await db('knowledge_contradictions').where({ id: existing.id }).update({ wiki_entry_id: null });
+    } catch { /* revert best-effort */ }
+    throw gateErr;
+  }
+  return true;
+}
+
 async function detectContradictions() {
   const found = [];
 
@@ -680,11 +701,13 @@ async function detectContradictions() {
         .whereNotNull('wiki_entry_id')
         .orderBy('relevance_score', 'desc')
         .select('wiki_entry_id', 'wiki_slug');
-      const bridgeFor = (productName) => {
-        const exact = bridgePairs.find((b) => b.wiki_slug === `product/${slugify(productName)}`);
-        if (exact) return exact;
-        return bridgePairs.length === 1 ? bridgePairs[0] : null;
-      };
+      // Exact-slug match ONLY: a lone pair is not identity — autoLink's
+      // substring matching can bridge a broad KB entry ("Bifen") to a single
+      // wiki page ("Bifen I/T") that is the wrong page for a different
+      // efficacy product ("Bifen XTS"). Anything short of an exact match
+      // falls back to the slug lookup below.
+      const bridgeFor = (productName) =>
+        bridgePairs.find((b) => b.wiki_slug === `product/${slugify(productName)}`) || null;
 
       for (const eff of efficacy) {
         if (!eff.product_name.toLowerCase().includes(kbName) && !kbName.includes(eff.product_name.toLowerCase())) continue;
@@ -739,6 +762,8 @@ async function detectContradictions() {
                 throw gateErr;
               }
               found.push(contradiction);
+            } else {
+              await backfillContradictionAttribution(existing, contradiction.wiki_entry_id);
             }
           }
         }
@@ -788,6 +813,8 @@ async function detectContradictions() {
                   }
                 }
                 found.push(contradiction);
+              } else {
+                await backfillContradictionAttribution(existing, contradiction.wiki_entry_id);
               }
             }
           }
