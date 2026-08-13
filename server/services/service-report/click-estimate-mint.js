@@ -64,6 +64,21 @@ function estimatePathFor(token) {
   return `/estimate/${token}`;
 }
 
+// Lock every prior CTA-mint estimate row for this customer + service.
+// MUST run BEFORE the transaction takes the customer row lock (in-hook
+// audit r5 P1): the acceptance path locks estimates → customer
+// (EstimateConverter), so the mint path has to acquire its estimate locks
+// in the same order — the route passes this as the CTA writer's preLock.
+// The mint re-runs the same query later; the locks are already held by
+// this transaction, so the re-acquire cannot block or invert the order.
+async function lockPriorMintLineage(trx, { customerId, serviceKey }) {
+  return trx('estimates')
+    .where({ customer_id: customerId, source: 'service_report_cta' })
+    .whereNull('archived_at')
+    .whereRaw("estimate_data->'reportCtaMint'->>'serviceKey' = ?", [String(serviceKey || '')])
+    .forUpdate();
+}
+
 // Parse a stored estimates row's mint marker (jsonb hydrates as object,
 // legacy text columns as string).
 function reportCtaMintOf(row) {
@@ -114,11 +129,10 @@ async function mintReportClickEstimate(trx, {
   // lineage is a direct query: every live CTA mint for this customer +
   // service, found and LOCKED here, is either reused (identical offer) or
   // superseded before a new one may exist.
-  const priorMintRows = await trx('estimates')
-    .where({ customer_id: customer.id, source: 'service_report_cta' })
-    .whereNull('archived_at')
-    .whereRaw("estimate_data->'reportCtaMint'->>'serviceKey' = ?", [String(crossSell?.serviceKey || '')])
-    .forUpdate();
+  const priorMintRows = await lockPriorMintLineage(trx, {
+    customerId: customer.id,
+    serviceKey: crossSell?.serviceKey,
+  });
   const liveMints = (priorMintRows || []).filter((row) => priorMintStillLive(row, nowDate));
   if (deduped) {
     const match = liveMints.find((row) => {
@@ -378,4 +392,6 @@ async function mintReportClickEstimate(trx, {
   return { estimateId: created.id, token, url: estimatePathFor(token), reused: false };
 }
 
-module.exports = { mintReportClickEstimate, ClickEstimateDriftError, priorMintStillLive };
+module.exports = {
+  mintReportClickEstimate, ClickEstimateDriftError, priorMintStillLive, lockPriorMintLineage,
+};
