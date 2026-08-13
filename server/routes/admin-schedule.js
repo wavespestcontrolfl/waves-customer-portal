@@ -4544,6 +4544,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // rows matched = the row changed under us; refuse this id (the
               // batch carries the reason).
               const prevDate = normalizeDateOnly(svc.scheduled_date);
+              // Tech-day membership change (bulk board move): shared fence
+              // for the leaving and joining day + drop the stale sequence
+              // number — see scheduling/tech-day-lock.js.
+              if (prevDate !== bulkTargetDate) {
+                const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+                await lockTechDays(trx, [
+                  { techId: svc.technician_id, date: prevDate },
+                  { techId: svc.technician_id, date: bulkTargetDate },
+                ]);
+                updates.route_order = null;
+              }
               // Full observed tracker/lifecycle snapshot joins the CAS: the
               // rewind decision above came from this trx's read, and tracker
               // writers advance state, stamps, and SMS guards without
@@ -5596,6 +5607,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const reminderBefore = reminderFieldsTouched
           ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start')
           : null;
+        if (dateActuallyMoves) {
+          // Tech-day membership change: hold the shared fence for both the
+          // leaving and joining day (see scheduling/tech-day-lock.js — the
+          // nightly reorder's membership read is only safe against writers
+          // holding the same lock), and drop the old day's sequence number so
+          // the stop appends after the new day's ordered run instead of
+          // interleaving a stale route_order.
+          const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+          await lockTechDays(trx, [
+            { techId: preTupleRow.technician_id, date: dateOnly(preTupleRow.scheduled_date) },
+            { techId: preTupleRow.technician_id, date: dateOnly(updates.scheduled_date) },
+          ]);
+          updates.route_order = null;
+        }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         // Rebooker-parity live-move bookkeeping (same split as the bulk
         // board move): the job_status_history audit row is atomic with the

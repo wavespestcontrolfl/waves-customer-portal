@@ -147,10 +147,28 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   const fromTechId = job.technician_id || null;
   let updatedRow;
   const applyAssignment = async (assignmentTrx) => {
+    // Tech-day membership fence (scheduling/tech-day-lock.js): reassignment
+    // moves the stop between two tech-days on the same date — the nightly
+    // reorder's membership read is only safe against writers holding the
+    // same 'slot-reserve' lock. Date key comes from Postgres itself
+    // (to_char) so it collides with the other holders' keys regardless of
+    // how the driver parses DATE columns. route_order: null drops the OLD
+    // tech's sequence number — consumers append NULLs last; carrying the
+    // stale number would interleave it into the new tech's run.
+    const { lockTechDays } = require('./scheduling/tech-day-lock');
+    const dayRow = await assignmentTrx('scheduled_services')
+      .where({ id: jobId })
+      .first(assignmentTrx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+    if (dayRow?.day) {
+      await lockTechDays(assignmentTrx, [
+        { techId: fromTechId, date: dayRow.day },
+        { techId: newTechId, date: dayRow.day },
+      ]);
+    }
     const rows = await assignmentTrx('scheduled_services')
       .where({ id: jobId })
       .whereNotIn('status', TERMINAL_STATUSES)
-      .update({ technician_id: newTechId, updated_at: assignmentTrx.fn.now() })
+      .update({ technician_id: newTechId, route_order: null, updated_at: assignmentTrx.fn.now() })
       .returning('*');
     if (rows.length === 0) {
       throw Object.assign(new Error('terminal status race'), { code: TERMINAL_RACE });

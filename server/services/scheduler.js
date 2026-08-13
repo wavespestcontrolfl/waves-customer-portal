@@ -902,6 +902,13 @@ function initScheduledJobs() {
         const { runAutoDispatch } = require('./auto-dispatch');
         const result = await runAutoDispatch({ triggeredBy: 'cron' });
         logger.info(`[auto-dispatch] cron run ${result.runId} ${result.status}: evaluated=${result.evaluated} recommended=${result.recommended} changed=${result.changed} skipped=${result.skipped} failed=${result.failed}`);
+        // completed_with_errors (guard-read outage or failed applies) and
+        // failed must FAIL job health — the run row already records the
+        // detail; a degraded night must not read as a green
+        // auto-dispatch-recurring (same guard as the 4:20 reorder cron).
+        if (result.status !== 'completed') {
+          throw new Error(`auto-dispatch run ${result.runId} unhealthy: status=${result.status} failed=${result.failed}`);
+        }
       });
     } catch (err) {
       logger.error(`Auto-Dispatch run failed: ${err.message}`);
