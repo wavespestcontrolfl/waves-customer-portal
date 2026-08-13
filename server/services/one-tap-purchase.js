@@ -673,6 +673,7 @@ async function assertTargetStillPurchasable(database, customer, serviceKey) {
   const linkage = require('./estimate-property-linkage');
   const { loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
   let ownedKeys;
+  let streetScope;
   try {
     const primaryStreet = linkage.normalizedStampedStreet(
       customer.address_line1, customer.address_line2, customer.city, customer.zip
@@ -680,13 +681,12 @@ async function assertTargetStillPurchasable(database, customer, serviceKey) {
     if (!primaryStreet || linkage.scopeKeyLacksLocality(primaryStreet)) {
       throw new Error('unprovable primary premises');
     }
-    ownedKeys = await loadOwnedRecurringServiceKeys(database, customer.id, {
-      streetScope: {
-        estimateStreet: primaryStreet,
-        customerPrimaryStreet: primaryStreet,
-        requireSharedLocality: true,
-      },
-    });
+    streetScope = {
+      estimateStreet: primaryStreet,
+      customerPrimaryStreet: primaryStreet,
+      requireSharedLocality: true,
+    };
+    ownedKeys = await loadOwnedRecurringServiceKeys(database, customer.id, { streetScope });
   } catch (err) {
     logger.warn(`[one-tap-purchase] ownership re-check failed, refusing (code=${err?.code || 'none'})`);
     throw httpError(409, OFFER_CHANGED);
@@ -703,7 +703,11 @@ async function assertTargetStillPurchasable(database, customer, serviceKey) {
   const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
   let qualifyingKeys;
   try {
-    qualifyingKeys = await loadExistingQualifyingServiceKeys(database, customer.id);
+    // SAME street scope as the ownership check above (money correctness):
+    // an account-wide lookup would let a qualifying service on ANOTHER
+    // property replay the frozen member discount + setup-fee waiver for a
+    // primary property whose own membership lapsed mid-flight.
+    qualifyingKeys = await loadExistingQualifyingServiceKeys(database, customer.id, { streetScope });
   } catch (err) {
     logger.warn(`[one-tap-purchase] qualifying re-check failed, refusing (code=${err?.code || 'none'})`);
     throw httpError(409, OFFER_CHANGED);
@@ -1145,7 +1149,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       estimateId: purchase.estimate_id,
       serviceLabel,
       appointment: committed || null,
-    });
+    }).catch((e) => logger.error(`[one-tap-purchase] onboarding email failed for customer ${customerId}: ${e.message}`));
   } catch (e) {
     logger.error(`[one-tap-purchase] onboarding email failed for customer ${customerId}: ${e.message}`);
   }

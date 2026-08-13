@@ -719,6 +719,22 @@ describe('confirm', () => {
     expect(body).not.toMatch(/confirmation email/i);
   });
 
+  // ── Per-property membership scoping (pre-push P0): the qualifying
+  // re-check must use the SAME street scope as the ownership check — an
+  // account-wide lookup lets a qualifying service on ANOTHER property
+  // replay the member discount + setup-fee waiver for a primary property
+  // whose own membership lapsed mid-flight.
+  test('the qualifying membership re-check is street-scoped exactly like the ownership check', async () => {
+    const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+    await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    const ownScope = loadOwnedRecurringServiceKeys.mock.calls[0][2].streetScope;
+    expect(ownScope).toBeTruthy();
+    expect(loadExistingQualifyingServiceKeys.mock.calls.length).toBeGreaterThan(0);
+    for (const call of loadExistingQualifyingServiceKeys.mock.calls) {
+      expect(call[2]).toEqual({ streetScope: ownScope });
+    }
+  });
+
   // ── Frozen-offer revalidation (GH r5 P1): the open draft is an ordinary
   // editable draft — an operator PUT can rewrite totals/estimate_data while
   // the ledger stays frozen at the original offer. Any divergence refuses.
