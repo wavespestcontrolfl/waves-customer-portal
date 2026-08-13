@@ -68,7 +68,7 @@ const RESERVICE_TOKEN_RE = /[a-f0-9]{32,}|reservice_token|\/reservice\//i;
 
 function makeBuilder(rows, { insertRows } = {}) {
   const b = {};
-  for (const m of ['where', 'whereNull', 'whereIn', 'whereNot', 'orderBy', 'select', 'limit']) b[m] = jest.fn(() => b);
+  for (const m of ['where', 'whereNull', 'whereIn', 'whereNot', 'whereRaw', 'orderBy', 'select', 'limit']) b[m] = jest.fn(() => b);
   b.first = jest.fn(() => Promise.resolve(rows[0] || null));
   b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   b.insert = jest.fn(() => b);
@@ -472,18 +472,26 @@ describe('GATE ON', () => {
   // sweep covers rows no second call ever touches.
   test('a DELIVERED owner page stamps owner_alerted_at on the ticket', async () => {
     relayAlert.alertOwnerReservice.mockResolvedValue(true); // clearAllMocks does not reset implementations
-    builders.service_requests.update = jest.fn(async () => 1); // the stamp is expected here
+    builders.service_requests.update = jest.fn(() => {
+      const r = { returning: jest.fn(async () => [{ id: 'sr-1' }]) }; // the claim wins
+      return Object.assign(Promise.resolve(1), r);
+    });
     await executeTool('request_reservice', GOOD, CTX);
     expect(builders.service_requests.update).toHaveBeenCalledWith(
       expect.objectContaining({ owner_alerted_at: expect.any(Date) }),
     );
   });
 
-  test('an UNDELIVERED page leaves the receipt unstamped (retryable)', async () => {
+  test('an UNDELIVERED page leaves the receipt unstamped and RELEASES the claim (retryable)', async () => {
     relayAlert.alertOwnerReservice.mockResolvedValue(false);
-    builders.service_requests.update = jest.fn(async () => 1);
+    builders.service_requests.update = jest.fn(() => {
+      const r = { returning: jest.fn(async () => [{ id: 'sr-1' }]) };
+      return Object.assign(Promise.resolve(1), r);
+    });
     await executeTool('request_reservice', GOOD, CTX);
-    expect(builders.service_requests.update).not.toHaveBeenCalled();
+    const payloads = builders.service_requests.update.mock.calls.map(([p]) => p);
+    expect(payloads.some((p) => p && p.owner_alerted_at)).toBe(false); // never stamped
+    expect(payloads.some((p) => p && 'owner_alert_claimed_at' in p && p.owner_alert_claimed_at === null)).toBe(true); // claim released
   });
 
   test('the already-open guard RETRIES the alerts for a voice ticket with no receipt', async () => {
@@ -495,7 +503,10 @@ describe('GATE ON', () => {
       }],
     });
     relayAlert.alertOwnerReservice.mockResolvedValue(true); // clearAllMocks does not reset implementations
-    builders.service_requests.update = jest.fn(async () => 1);
+    builders.service_requests.update = jest.fn(() => {
+      const r = { returning: jest.fn(async () => [{ id: 'sr-old' }]) }; // the claim wins
+      return Object.assign(Promise.resolve(1), r);
+    });
     const out = await executeTool('request_reservice', GOOD, CTX);
     expect(builders.service_requests.insert).not.toHaveBeenCalled(); // still no second ticket
     expect(relayAlert.alertOwnerReservice).toHaveBeenCalledTimes(1); // …but the page is retried
@@ -517,6 +528,18 @@ describe('GATE ON', () => {
     expect(relayAlert.alertOwnerReservice).not.toHaveBeenCalled();
   });
 
+  // ⭐ ONE PAGE PER TICKET, ATOMICALLY. Creator, retry guard, and sweep can all
+  // meet the same unreceipted row; the conditional claim UPDATE has one winner.
+  test('a LOST alert claim pages nobody (concurrent rails cannot double-page)', async () => {
+    relayAlert.alertOwnerReservice.mockResolvedValue(true);
+    builders.service_requests.update = jest.fn(() => {
+      const r = { returning: jest.fn(async () => []) }; // somebody else holds the claim
+      return Object.assign(Promise.resolve(0), r);
+    });
+    await executeTool('request_reservice', GOOD, CTX);
+    expect(relayAlert.alertOwnerReservice).not.toHaveBeenCalled();
+  });
+
   test('the hourly sweep pages unalerted voice tickets and stamps them', async () => {
     const relayReservice = require('../services/voice-agent/relay-reservice');
     primeDb({
@@ -528,7 +551,10 @@ describe('GATE ON', () => {
     });
     relayAlert.alertOwnerReservice.mockResolvedValue(true); // clearAllMocks does not reset implementations
     process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
-    builders.service_requests.update = jest.fn(async () => 1);
+    builders.service_requests.update = jest.fn(() => {
+      const r = { returning: jest.fn(async () => [{ id: 'sr-stranded' }]) }; // the claim wins
+      return Object.assign(Promise.resolve(1), r);
+    });
     const paged = await relayReservice.sweepUnalertedVoiceReservices();
     expect(paged).toBe(1);
     expect(relayAlert.alertOwnerReservice).toHaveBeenCalledTimes(1);

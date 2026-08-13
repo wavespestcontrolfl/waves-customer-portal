@@ -403,6 +403,15 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(row.confirmed_at).toBeUndefined(); // never pre-confirmed
     expect(row.technician_id).toBe('t-1'); // from the re-validated engine slot
 
+    // ⭐ THE VISIT CARRIES THE COORDINATES IT WAS VALIDATED AT. Availability
+    // and the conflict re-check scored from the resolver's geocode; dropping
+    // it from the row let dispatch fall back to the customer-level mirror
+    // point — a visit checked at the property, mapped somewhere else. Same
+    // fields the canonical call-booking insert stores.
+    expect(row.lat).toBe(27.55);
+    expect(row.lng).toBe(-82.55);
+    expect(row.property_id).toBe('prop-1');
+
     // ⭐ window_display IS NOT A RANGE. `window_end` is the job duration, so a
     // stored "9:00 AM - 10:00 AM" would promise a one-hour service block as the
     // arrival window; the customer surfaces derive window_start + 120 minutes

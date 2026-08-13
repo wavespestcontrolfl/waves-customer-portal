@@ -143,19 +143,35 @@ function verifyCallToken(token, callSid, { secret = process.env.VOICE_RELAY_WS_S
  * server's refusal (not a silent downgrade) is what surfaces the misconfig.
  */
 function appendCallAuth(wsUrl, { callSid, secret = process.env.VOICE_RELAY_WS_SECRET, now = Date.now() } = {}) {
+  // ⭐ SANITIZE FIRST, MINT SECOND. The operator-supplied endpoint URL can still
+  // carry the RETIRED `?key=<secret>` from before the per-call token — and the
+  // old early return handed it back verbatim whenever there was nothing to mint
+  // with (no CallSid, no secret), re-emitting the one credential this design
+  // exists to keep out of URLs. The owned params are stripped unconditionally;
+  // a mint failure then renders a URL with NO credentials, which the server
+  // refuses — a visible misconfig, never a leaked secret.
+  const stripOwned = (url) => {
+    try {
+      const u = new URL(url);
+      u.searchParams.delete('key');
+      u.searchParams.delete('callSid');
+      u.searchParams.delete('t');
+      return u.toString();
+    } catch {
+      return String(url || '').replace(/([?&])(key|callSid|t)=[^&]*/g, '$1').replace(/[?&]+$/, '');
+    }
+  };
+  const clean = stripOwned(wsUrl);
   const token = mintCallToken(callSid, { secret, now });
-  if (!token) return wsUrl;
+  if (!token) return clean;
   const sid = String(callSid).trim();
   try {
-    const u = new URL(wsUrl);
-    u.searchParams.delete('key'); // the old reusable credential — never re-emitted
+    const u = new URL(clean);
     u.searchParams.set('callSid', sid);
     u.searchParams.set('t', token);
     return u.toString();
   } catch {
-    // Unparseable/relative — strip any existing params we own, then append.
-    const base = wsUrl.replace(/([?&])(key|callSid|t)=[^&]*/g, '$1').replace(/[?&]+$/, '');
-    return `${base}${base.includes('?') ? '&' : '?'}callSid=${encodeURIComponent(sid)}&t=${encodeURIComponent(token)}`;
+    return `${clean}${clean.includes('?') ? '&' : '?'}callSid=${encodeURIComponent(sid)}&t=${encodeURIComponent(token)}`;
   }
 }
 

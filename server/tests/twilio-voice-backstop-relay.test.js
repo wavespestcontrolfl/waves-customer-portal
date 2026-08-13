@@ -249,6 +249,23 @@ describe('relay-protocol auth/PII helpers', () => {
     expect(appendCallAuth('wss://h/ws', { callSid: '', secret: 'sek' })).toBe('wss://h/ws');
   });
 
+  // ⭐ SANITIZED EVEN WHEN THERE IS NOTHING TO MINT WITH. A stale configured
+  // endpoint can still carry the retired `?key=<secret>`; the old early return
+  // handed it back VERBATIM on a mint failure — re-emitting the one credential
+  // this design keeps out of URLs. A mint failure now renders a URL with no
+  // credentials at all, which the server refuses (visible misconfig, no leak).
+  test('a mint failure still strips a stale raw secret from the endpoint URL', () => {
+    for (const opts of [
+      { callSid: '', secret: 'sek' }, // no CallSid to bind
+      { callSid: 'CA1', secret: '' }, // no secret to mint with
+    ]) {
+      const out = appendCallAuth('wss://h/ws?key=THE-RAW-SECRET&x=1', opts);
+      expect(out).not.toContain('THE-RAW-SECRET');
+      expect(out).not.toContain('key=');
+      expect(out).toContain('x=1'); // only OWNED params are stripped
+    }
+  });
+
   // ⭐ BOUND TO ONE CALL, AND SHORT-LIVED IN BOTH DIRECTIONS. A stale token is
   // refused; so is one minted to live far longer than this code grants, which is
   // what keeps the lifetime a property of the server rather than of whoever

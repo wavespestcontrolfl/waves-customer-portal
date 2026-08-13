@@ -389,6 +389,32 @@ async function requestReserviceText(input = {}, ctx = {}) {
  */
 async function fireReserviceAlertsAndStamp({ row, lane, covered, unverifiedRequester = false, unverifiedNote = null, ctx = {} }) {
   if (!row || !row.id) return false;
+  // ⭐ ONE PAGE PER TICKET, TAKEN ATOMICALLY. Three rails can meet the same
+  // unreceipted row at once — the creator, an already-open retry guard on a
+  // concurrent call, and the hourly sweep — and a receipt checked BEFORE this
+  // helper and stamped after the send is a read-then-act race: two of them
+  // page the owner twice. The claim is an expirable lease (same doctrine as
+  // the hot-alert claim): one conditional UPDATE wins, a failed send releases
+  // it, and a claim whose process died is reclaimable once no live send can
+  // still be running. Fail-OPEN on a claim error — a duplicate page beats a
+  // stranded ticket.
+  let claimed = true;
+  try {
+    const db = require('../../models/db');
+    const rows = await db('service_requests')
+      .where({ id: row.id })
+      .whereNull('owner_alerted_at')
+      .whereRaw("(owner_alert_claimed_at IS NULL OR owner_alert_claimed_at < now() - interval '2 minutes')")
+      .update({ owner_alert_claimed_at: new Date() })
+      .returning('id');
+    claimed = !!(rows && rows.length > 0);
+  } catch (err) {
+    logger.warn(`[voice-relay-reservice] alert claim failed for request ${row.id} — paging anyway (fail-open): ${err.message}`);
+  }
+  if (!claimed) {
+    logger.info(`[voice-relay-reservice] alert for request ${row.id} already claimed/receipted elsewhere — not paging twice`);
+    return false;
+  }
   const category = row.category;
   const urgency = row.urgency || 'routine';
   const subject = row.subject || '';
@@ -453,9 +479,18 @@ async function fireReserviceAlertsAndStamp({ row, lane, covered, unverifiedReque
       const db = require('../../models/db');
       await db('service_requests').where({ id: row.id }).update({ owner_alerted_at: new Date() });
     } catch (err) {
-      // Unstamped-but-paged: the sweep may page once more. A duplicate page
-      // beats a stranded ticket.
+      // Unstamped-but-paged: the lease holds off retries for 2 minutes, then
+      // the sweep may page once more. A duplicate page beats a stranded ticket.
       logger.warn(`[voice-relay-reservice] owner_alerted_at stamp failed for request ${row.id}: ${err.message}`);
+    }
+  } else {
+    // Release the claim so the retry rails (guards + sweep) stay open — same
+    // rule as the hot-alert claim: a failed page must stay retryable.
+    try {
+      const db = require('../../models/db');
+      await db('service_requests').where({ id: row.id }).update({ owner_alert_claimed_at: null });
+    } catch (err) {
+      logger.warn(`[voice-relay-reservice] alert claim release failed for request ${row.id} — the lease expires on its own: ${err.message}`);
     }
   }
   return paged;

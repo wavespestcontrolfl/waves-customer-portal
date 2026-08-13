@@ -12,17 +12,34 @@
  * actually went out, retried on the next voice touch of the same open request,
  * and swept hourly for rows that never got either (relay-reservice
  * sweepUnalertedVoiceReservices).
+ *
+ * `owner_alert_claimed_at` is the send CLAIM — an expirable lease taken
+ * atomically before paging so the creator, the already-open retry guards, and
+ * the hourly sweep can never page the same ticket concurrently. Released on a
+ * failed send; reclaimable after 2 minutes when no receipt exists (a claim
+ * whose process died must not strand the page).
  */
 exports.up = async function up(knex) {
-  if (await knex.schema.hasColumn('service_requests', 'owner_alerted_at')) return;
-  await knex.schema.alterTable('service_requests', (t) => {
-    t.timestamp('owner_alerted_at', { useTz: true });
-  });
+  if (!(await knex.schema.hasColumn('service_requests', 'owner_alerted_at'))) {
+    await knex.schema.alterTable('service_requests', (t) => {
+      t.timestamp('owner_alerted_at', { useTz: true });
+    });
+  }
+  if (!(await knex.schema.hasColumn('service_requests', 'owner_alert_claimed_at'))) {
+    await knex.schema.alterTable('service_requests', (t) => {
+      t.timestamp('owner_alert_claimed_at', { useTz: true });
+    });
+  }
 };
 
 exports.down = async function down(knex) {
-  if (!(await knex.schema.hasColumn('service_requests', 'owner_alerted_at'))) return;
-  await knex.schema.alterTable('service_requests', (t) => {
-    t.dropColumn('owner_alerted_at');
-  });
+  for (const col of ['owner_alerted_at', 'owner_alert_claimed_at']) {
+     
+    if (await knex.schema.hasColumn('service_requests', col)) {
+       
+      await knex.schema.alterTable('service_requests', (t) => {
+        t.dropColumn(col);
+      });
+    }
+  }
 };

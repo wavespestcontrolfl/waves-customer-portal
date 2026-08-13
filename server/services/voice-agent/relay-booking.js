@@ -822,6 +822,14 @@ async function requestBookingText(input = {}, ctx = {}) {
     // today's behaviour for a single-address account; a multi-property account
     // never reaches here (refused above).
     property_id: (propertyLinkage && propertyLinkage.propertyId) || null,
+    // The resolver's coordinates ride with the row, exactly as the canonical
+    // call-booking insert stores them: availability was CHECKED at these
+    // coordinates, and without them dispatch/routing falls back to the
+    // customer-level mirror point — a visit validated at the property could
+    // be mapped somewhere else.
+    ...(propertyLinkage && propertyLinkage.lat != null && propertyLinkage.lng != null
+      ? { lat: propertyLinkage.lat, lng: propertyLinkage.lng }
+      : {}),
     ...(propertyLinkage && propertyLinkage.address ? {
       service_address_line1: propertyLinkage.address.line1 || null,
       service_address_line2: propertyLinkage.address.line2 || null,
