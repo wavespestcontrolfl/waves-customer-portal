@@ -366,6 +366,8 @@ describe('runDeterministicMatching', () => {
     let summary = await runDeterministicMatching();
     expect(summary.expensesLinked).toBe(1);
     expect(state.updates.find(u => u.patch.status === 'matched_expense').patch.matched_expense_id).toBe('exp-1');
+    // the claim locked the candidate expense and revalidated it
+    expect(state.builders.some(x => x.table === 'expenses' && x.b.forUpdate.mock.calls.length > 0)).toBe(true);
 
     state.updates = [];
     state.expenses = [

@@ -858,10 +858,28 @@ async function runDeterministicMatching({ limit } = {}) {
     const strong = candidates.filter(c => centsEqual(c.amount, row.amount) && vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
     if (candidates.length === 1 && strong.length === 1) {
       try {
-        const changed = await db('bank_transactions')
-          .where({ id: row.id, status: 'unmatched' })
-          .update({ status: 'matched_expense', matched_expense_id: strong[0].id, match_method: 'expense_amount_date_vendor', matched_at: new Date(), updated_at: new Date() });
-        if (changed) summary.expensesLinked++;
+        // Claim with the candidate expense LOCKED and every matching
+        // predicate revalidated against its CURRENT values — the earlier
+        // candidate read was unlocked, and a concurrent expense edit
+        // (amount, date, vendor, method) must not produce a link that no
+        // longer satisfies the policy. A changed expense simply skips;
+        // the next pass re-evaluates it.
+        await db.transaction(async (trx) => {
+          const fresh = await trx('expenses').where({ id: strong[0].id }).forUpdate()
+            .first('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
+          if (!fresh) return;
+          const freshDate = toDateStr(fresh.expense_date);
+          const stillValid = centsEqual(fresh.amount, row.amount)
+            && vendorEvidence(row.description, fresh)
+            && !methodIncompatible(row.account_type, fresh.payment_method)
+            && freshDate >= addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS)
+            && freshDate <= addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS);
+          if (!stillValid) return;
+          const changed = await trx('bank_transactions')
+            .where({ id: row.id, status: 'unmatched' })
+            .update({ status: 'matched_expense', matched_expense_id: strong[0].id, match_method: 'expense_amount_date_vendor', matched_at: new Date(), updated_at: new Date() });
+          if (changed) summary.expensesLinked++;
+        });
       } catch (err) {
         if (!isUniqueViolation(err)) throw err; // lost the claim race — skip
       }
