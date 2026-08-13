@@ -25,7 +25,7 @@ const {
   formatETDay, formatETDate, formatETTime,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
-const { customerOnAutopay } = require('../services/autopay-eligibility');
+const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected } = require('../services/billing-lane');
 const DiscountEngine = require('../services/discount-engine');
 const { isReService } = require('../services/re-service');
@@ -1870,6 +1870,22 @@ function compactCheckoutInvoiceLines(rawLines) {
     .slice(0, 8);
 }
 
+// "No card on file — collect on site" alert for the day-view propertyAlerts
+// feed (tech Next Stop card + dispatch chips). Rides the sheet's existing
+// completion-billing prediction as the "is money actually due" authority —
+// payer-billed, prepaid/paid, membership- or annual-covered, and free
+// callback/follow-up visits all collapse to non-'invoice' kinds there, so
+// the badge fires only when completion will cut an invoice this customer
+// has no chargeable way to settle remotely. Deliberately NOT the
+// customerOnAutopay predicate — a saved card with autopay off is still
+// chargeable on file; only a truly empty (or expired/blocked) wallet needs
+// the tech to collect before leaving.
+function noCardOnFileAlert({ hasChargeableMethod, prediction }) {
+  if (hasChargeableMethod) return null;
+  if (!prediction || prediction.kind !== 'invoice' || !(Number(prediction.amount) > 0)) return null;
+  return { type: 'no_card_on_file', text: 'NO CARD ON FILE — collect payment on site' };
+}
+
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
   try {
@@ -2091,7 +2107,6 @@ router.get('/', async (req, res, next) => {
         if (svcPrefs.interior_spray === false) alerts.push({ type: 'service_pref', text: 'EXTERIOR ONLY — no interior treatment' });
         if (svcPrefs.exterior_sweep === false) alerts.push({ type: 'service_pref', text: 'Skip eave/cobweb sweep' });
       }
-
       const zone = s.zone || getZone(s.city, s.zip);
       const autopayActive = await customerOnAutopay({
         id: s.customer_id,
@@ -2164,6 +2179,45 @@ router.get('/', async (req, res, next) => {
           annualCoverageValidated,
         }),
       };
+      // Payment-capture flag — the tech needs to know at the doorstep that
+      // nothing chargeable exists behind this customer (autopay_enabled can
+      // be true with no saved method, so the autopay flag alone lies).
+      // "Chargeable" means what the manual charge path can actually use: a
+      // non-expired card, or a bank method while ACH isn't blocked — NOT
+      // just any payment_methods row. Fail toward NOT flagging, like the
+      // reads above: a wrong badge on a covered customer teaches the tech
+      // to ignore it.
+      if (billingLane.prediction?.kind === 'invoice') {
+        let hasChargeableMethod = true;
+        try {
+          const methods = await db('payment_methods')
+            .where({ customer_id: s.customer_id, processor: 'stripe' })
+            .whereNotNull('stripe_payment_method_id')
+            .select('method_type', 'ach_status', 'exp_month', 'exp_year');
+          hasChargeableMethod = methods.some((m) => {
+            if (isBankMethodType(m.method_type)) {
+              // Both ACH gates the collection paths enforce: the customer-
+              // level health block (billing-v2 default-swap) and the row's
+              // own unverified/failed state (customer-autopay).
+              if (s.ach_status && s.ach_status !== 'active') return false;
+              return !['pending_verification', 'verification_failed'].includes(m.ach_status);
+            }
+            // Legacy rows carry 2-digit years — normalize BEFORE the expiry
+            // check, as the default-swap route does, or a valid '12/32' card
+            // reads as year 32 and isExpiredCardMethod fails closed.
+            const rawYear = parseInt(m.exp_year, 10);
+            return !isExpiredCardMethod({
+              ...m,
+              exp_year: Number.isFinite(rawYear) && rawYear < 100 ? rawYear + 2000 : m.exp_year,
+            });
+          });
+        } catch { hasChargeableMethod = true; }
+        const noCardAlert = noCardOnFileAlert({
+          hasChargeableMethod,
+          prediction: billingLane.prediction,
+        });
+        if (noCardAlert) alerts.push(noCardAlert);
+      }
 
       // Add-on verdicts are kept SEPARATE and handed to traceFeedFields
       // (codex P1 r7): collapsing first with combineRowVerdicts reintroduces
@@ -12214,6 +12268,7 @@ function flushEstimateSlotCaches() {
 }
 
 router._test = {
+  noCardOnFileAlert,
   isTechnicianRequest,
   scopeToAssignedTech,
   technicianOwnsScheduledService,
