@@ -589,14 +589,17 @@ describe('annual-prepay preview — dark by default (GATE_PREPAY_ON_BOOK)', () =
 
   // The modal hides its Billing control on false — an offered choice whose
   // preview 404s would read to the office as a prepay they sold.
+  // `switchEnabled` is the SEPARATE on-site switch lane
+  // (GATE_ONSITE_PREPAY_SWITCH, dark here) — asserted alongside so the two
+  // lanes can never collapse into one flag by accident.
   test('availability reports the gate', async () => {
     await withGate(undefined, async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/schedule/annual-prepay-availability`);
-      await expect(res.json()).resolves.toEqual({ enabled: false });
+      await expect(res.json()).resolves.toEqual({ enabled: false, switchEnabled: false });
     });
     await withGate('true', async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/schedule/annual-prepay-availability`);
-      await expect(res.json()).resolves.toEqual({ enabled: true });
+      await expect(res.json()).resolves.toEqual({ enabled: true, switchEnabled: false });
     });
   });
 });
