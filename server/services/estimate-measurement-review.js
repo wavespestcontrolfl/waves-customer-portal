@@ -389,7 +389,10 @@ async function createReviewRow({ database, estimate, reasonKeys, cleanNote, show
     reasonLabels.length ? `Reasons: ${reasonLabels.join('; ')}.` : null,
     shownLine,
     cleanNote ? `Customer note: ${cleanNote}` : null,
-    'Re-measure and send a revised estimate; the sent estimate stays valid until then.',
+    // Same expiry qualification as the customer copy (codex #3376): a
+    // challenge does NOT extend the estimate, so staff must not assure a
+    // customer the old quote outlives its normal expiration.
+    'Re-measure and send a revised estimate; the sent estimate stays as-is until then but still expires on its normal date.',
   ].filter(Boolean).join(' ');
 
   let request;
