@@ -1245,7 +1245,13 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
               },
             } : {}),
           });
-          if (!outcome.deduped) {
+          // acceptedReuse (GitHub #3391 round P1): acceptance already
+          // resolved the original request, so this tap's fresh row arrives
+          // deduped=false — but the mint found the ACCEPTED fingerprint and
+          // resolved the fresh row too. The work is booked; paging staff to
+          // follow up on it is the exact noise the accept-path resolution
+          // exists to prevent.
+          if (!outcome.deduped && !mintedEstimate?.acceptedReuse) {
             // Bell AFTER the durable row exists; a bell failure leaves the
             // row actionable in the Customer 360 requests panel either way.
             const { triggerNotification } = require('../services/notification-triggers');

@@ -124,6 +124,10 @@ async function mintReportClickEstimate(trx, {
   // pattern as serverRecomputeFromEstimateData's translate require).
   const buildEstimateSendSnapshot = deps.buildEstimateSendSnapshot
     || require('../../routes/admin-estimates').buildEstimateSendSnapshot;
+  // Lazy for the same load-order reason: the composer module is heavy and
+  // the route already loads both.
+  const customerHasOnlyPrimaryPremises = deps.customerHasOnlyPrimaryPremises
+    || require('./cross-sell').customerHasOnlyPrimaryPremises;
 
   const nowDate = now();
 
@@ -145,15 +149,37 @@ async function mintReportClickEstimate(trx, {
   // (expired/declined), because an unarchived expired row can be REVIVED by
   // the public extension flow (in-hook audit r8 P0). Accepted/locked rows
   // stay untouched.
+  // Staff-REVISED rows are never supersedable (GitHub #3391 round P0): the
+  // revise dropped the fingerprint, so a later identical tap can't match
+  // them for reuse — and archiving them would break the customer's
+  // in-flight, possibly delivered, revised token. The blocker below refuses
+  // the whole tap while one is live; this filter is the belt that keeps a
+  // revised row out of the archival loop no matter what.
   const supersedableMints = (priorMintRows || []).filter((row) => (
     !row.archived_at && row.status !== 'accepted' && !row.price_locked_at
+    && !reportCtaMintOf(row)?.fingerprintInvalidatedAt
   ));
 
   const context = crossSell?.engineContext;
   const option = crossSell?.option;
   if (!context?.propertyInput || !context?.targetOnlyServices || !option?.perVisit
-    || !context?.primaryStreet || !context?.pricingSourceStamp) {
+    || !context?.primaryStreet || !context?.pricingSourceStamp || !context?.premisesProof) {
     throw new Error('click-to-estimate mint called without engine context');
+  }
+
+  // ── Staff-revised lineage BLOCKS the tap (GitHub #3391 round P0) ────────
+  // A revise deliberately drops the offer fingerprint (staff just changed
+  // the terms), so a revised row can never reuse — but archiving it would
+  // break the customer's in-flight, possibly already DELIVERED token, and
+  // minting BESIDE it puts two live honorable prices in the customer's
+  // hands. Staff took over this conversation: the tap refuses as drift and
+  // the revised estimate stays the one authoritative live offer.
+  const staffRevisedBlocker = (priorMintRows || []).some((row) => (
+    !row.archived_at && row.status !== 'accepted'
+    && !!reportCtaMintOf(row)?.fingerprintInvalidatedAt
+  ));
+  if (staffRevisedBlocker) {
+    throw new ClickEstimateDriftError('a staff-revised estimate holds this offer — the card is stale');
   }
   // The engine's tier logic speaks CANONICAL keys — the pricing-panel
   // loader maps termite_bait → termite for display parity, and replaying
@@ -199,6 +225,20 @@ async function mintReportClickEstimate(trx, {
   ].some(([composed, fresh]) => composed !== fresh);
   if (priceInputDrifted) {
     throw new ClickEstimateDriftError('price-bearing property inputs changed between pricing and mint');
+  }
+  // A report the fallback SINGLE-PREMISES proof admitted stays priceable
+  // only while the account stays single-premises (GitHub #3391 round P1):
+  // the premises-pair and pricing-source checks above compare the PRIMARY
+  // profile against itself, so a staff has_multi_home flip or a new
+  // customer_properties row landing between composition and this lock is
+  // invisible to them — and the report being priced may belong to that
+  // newly evidenced secondary premises, the exact case the composer's
+  // fallback proof suppresses. Re-run the SAME proof under the lock;
+  // failure is offer drift, for reuse and mint alike. Linkage-proven
+  // reports carry their own address evidence and skip this.
+  if (context.premisesProof === 'single_premises'
+    && !(await customerHasOnlyPrimaryPremises(trx, customer.id, freshCustomer, context.primaryStreet))) {
+    throw new ClickEstimateDriftError('account premises evidence changed between pricing and mint');
   }
 
   // ── Reuse: identical offer, estimate already minted and still live ──────
@@ -256,6 +296,12 @@ async function mintReportClickEstimate(trx, {
       token: fingerprintMatch.token,
       url: estimatePathFor(fingerprintMatch.token),
       reused: true,
+      // The request row was just resolved above — the work is BOOKED, so
+      // the route must not page staff with the "Bundle inquiry" bell even
+      // though the writer's outcome says deduped=false (acceptance resolved
+      // the original request, so this tap inserted a fresh row) — GitHub
+      // #3391 round P1.
+      acceptedReuse: true,
     };
   }
 

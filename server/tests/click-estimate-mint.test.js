@@ -102,6 +102,10 @@ function baseArgs(overrides = {}) {
       ...estimate.estimate_data,
       sendSnapshot: { renderedAt: 'now', tierDiscounts: {}, pricingBundle: { frequencies: [{}] } },
     })),
+    // Single-premises re-proof (GitHub round P1): the default composition
+    // proved the report through its own linkage, so the proof is not
+    // consulted — the premises tests flip premisesProof and this fake.
+    customerHasOnlyPrimaryPremises: jest.fn(async () => true),
     ...(overrides.deps || {}),
   };
   return {
@@ -119,6 +123,7 @@ function baseArgs(overrides = {}) {
         currentServiceKeys: ['lawn'],
         primaryStreet: '12 invented way|parrish|34219',
         pricingSourceStamp: { ...PRICING_SOURCE_STAMP },
+        premisesProof: 'report_linkage',
       },
     },
     requestRow: { id: 'req-3' },
@@ -276,6 +281,9 @@ describe('mintReportClickEstimate', () => {
     const out = await mintReportClickEstimate(trx, baseArgs({ deduped: false }));
     expect(out.reused).toBe(true);
     expect(out.estimateId).toBe('est-old');
+    // An UNACCEPTED reuse still leaves an open request row — the bell-skip
+    // flag belongs to the accepted fast path alone.
+    expect(out.acceptedReuse).toBeUndefined();
     // Nothing archived, nothing inserted — the customer's token stays live.
     expect(ops.inserts).toHaveLength(0);
     expect(ops.updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
@@ -372,6 +380,10 @@ describe('mintReportClickEstimate', () => {
     expect(ops.inserts).toHaveLength(0);
     const rowUpdate = ops.updates.find((u) => u.table === 'service_requests');
     expect(rowUpdate.patch.status).toBe('resolved');
+    // The route keys the "Bundle inquiry" bell off this flag (GitHub round
+    // P1): the work is booked and the fresh row was just resolved, so
+    // deduped=false alone must not page staff.
+    expect(out.acceptedReuse).toBe(true);
   });
 
   test('an UNACCEPTED identical mint does NOT reuse when the customer now owns the service — revalidation precedes reuse (audit r8 P0)', async () => {
@@ -563,6 +575,89 @@ describe('mintReportClickEstimate', () => {
         requireSharedLocality: true,
       },
     }));
+  });
+
+  test('a live STAFF-REVISED lineage row blocks the tap as drift — never archived, never minted beside (GitHub round P0)', async () => {
+    // A revise drops the fingerprint (preserveClickMintMarkersAcrossRevise
+    // stamps fingerprintInvalidatedAt), so the revised row can never match
+    // for reuse — and it may already be DELIVERED. Archiving it breaks the
+    // customer's in-flight token; minting beside it puts two live honorable
+    // prices in their hands. The tap refuses instead.
+    const revised = priorMint({
+      estimate_data: {
+        reportCtaMint: {
+          serviceKey: 'pest_control',
+          fingerprintInvalidatedAt: '2026-08-13T10:00:00Z',
+        },
+      },
+    });
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [revised] });
+    await expect(mintReportClickEstimate(trx, baseArgs({ deduped: false })))
+      .rejects.toThrow(/staff-revised/);
+    expect(ops.inserts).toHaveLength(0);
+    expect(ops.updates).toHaveLength(0);
+  });
+
+  test('an ARCHIVED or ACCEPTED staff-revised row does not block a fresh mint', async () => {
+    // Archived = staff already retired it; accepted = the work is booked
+    // (ownership revalidation guards that case). Neither is a live second
+    // price, so the tap proceeds.
+    const mark = { serviceKey: 'pest_control', fingerprintInvalidatedAt: '2026-08-13T10:00:00Z' };
+    const { trx, ops } = fakeTrx({
+      priorEstimateRows: [
+        priorMint({ id: 'est-archived', archived_at: new Date('2026-08-12T00:00:00Z'), estimate_data: { reportCtaMint: mark } }),
+      ],
+    });
+    const out = await mintReportClickEstimate(trx, baseArgs({ deduped: false }));
+    expect(out.reused).toBe(false);
+    expect(ops.inserts).toHaveLength(1);
+  });
+
+  test('a report admitted by the SINGLE-PREMISES proof re-proves it under the lock — new premises evidence refuses reuse and mint alike (GitHub round P1)', async () => {
+    // Staff sets has_multi_home or adds a customer_properties row between
+    // composition and the tap: the premises-pair and pricing-source checks
+    // compare the primary profile against itself and cannot see it, but the
+    // report may belong to the newly evidenced secondary premises.
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [priorMint()] });
+    const args = baseArgs({ deduped: true });
+    args.crossSell.engineContext.premisesProof = 'single_premises';
+    args.deps.customerHasOnlyPrimaryPremises = jest.fn(async () => false);
+    await expect(mintReportClickEstimate(trx, args))
+      .rejects.toThrow(/premises evidence changed/);
+    expect(ops.inserts).toHaveLength(0);
+    expect(ops.updates).toHaveLength(0);
+    // The proof re-ran with the row re-read UNDER the lock, on the same
+    // scope key the composition anchored to.
+    expect(args.deps.customerHasOnlyPrimaryPremises).toHaveBeenCalledWith(
+      trx, 'cust-9', expect.objectContaining({ id: 'cust-9' }), '12 invented way|parrish|34219',
+    );
+  });
+
+  test('a single-premises report whose proof still holds mints normally', async () => {
+    const { trx, ops } = fakeTrx();
+    const args = baseArgs();
+    args.crossSell.engineContext.premisesProof = 'single_premises';
+    const out = await mintReportClickEstimate(trx, args);
+    expect(out.reused).toBe(false);
+    expect(ops.inserts).toHaveLength(1);
+    expect(args.deps.customerHasOnlyPrimaryPremises).toHaveBeenCalledTimes(1);
+  });
+
+  test('a LINKAGE-proven report never consults the single-premises proof', async () => {
+    // The report carries its own address evidence — a second property on
+    // the account is irrelevant to a visit proven at the primary.
+    const { trx } = fakeTrx();
+    const args = baseArgs();
+    await mintReportClickEstimate(trx, args);
+    expect(args.deps.customerHasOnlyPrimaryPremises).not.toHaveBeenCalled();
+  });
+
+  test('a context with NO premises-proof stamp refuses as a hard error (old composition shape)', async () => {
+    const { trx, ops } = fakeTrx();
+    const args = baseArgs();
+    delete args.crossSell.engineContext.premisesProof;
+    await expect(mintReportClickEstimate(trx, args)).rejects.toThrow(/without engine context/);
+    expect(ops.inserts).toHaveLength(0);
   });
 
   test('the minted row stamps the engine version that actually priced it', async () => {

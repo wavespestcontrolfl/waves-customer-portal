@@ -436,6 +436,37 @@ describe('click-to-estimate mint (GATE_REPORT_CLICK_TO_ESTIMATE)', () => {
     expect(mintReportClickEstimate).not.toHaveBeenCalled();
   });
 
+  test('an ACCEPTED-reuse mint skips the bundle-inquiry bell — the work is booked (GitHub round P1)', async () => {
+    // Acceptance resolved the original request, so the writer inserts a
+    // fresh row (deduped=false) — but the mint matched the ACCEPTED
+    // fingerprint and resolved that fresh row too. Staff must not be paged
+    // to follow up on booked work.
+    const { triggerNotification } = require('../services/notification-triggers');
+    mintReportClickEstimate.mockResolvedValue({
+      estimateId: 'est-1', token: 'tok-1', url: '/estimate/tok-1',
+      reused: true, acceptedReuse: true,
+    });
+    const { q, inserts } = clickDb({ openRequest: null });
+    db.mockImplementation(q);
+    const res = await click('adadadadadadadad0123456789abcdef');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, estimateUrl: '/estimate/tok-1' });
+    expect(inserts.filter((i) => i.table === 'service_requests')).toHaveLength(1);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('an UNACCEPTED reuse on a fresh row still rings the bell — an open request needs eyes', async () => {
+    const { triggerNotification } = require('../services/notification-triggers');
+    mintReportClickEstimate.mockResolvedValue({
+      estimateId: 'est-1', token: 'tok-1', url: '/estimate/tok-1', reused: true,
+    });
+    const { q } = clickDb({ openRequest: null });
+    db.mockImplementation(q);
+    const res = await click('aeaeaeaeaeaeaeae0123456789abcdef');
+    expect(res.status).toBe(200);
+    expect(triggerNotification).toHaveBeenCalledWith('bundle_quote_requested', expect.anything());
+  });
+
   test('mint price drift rolls everything back and 409s like any other offer drift', async () => {
     mintReportClickEstimate.mockRejectedValue(
       Object.assign(new Error('per-application drift'), { clickEstimateDrift: true }),

@@ -47,8 +47,13 @@ describe('composeUnworkedCommsDigest', () => {
     const src = require('fs').readFileSync(
       require('path').join(__dirname, '../services/unworked-comms-watcher.js'), 'utf8',
     );
-    const block = src.split('fe.sent_at > t.created_at')[1].slice(0, 300);
+    const block = src.split('fe.sent_at > t.created_at')[1].slice(0, 800);
     expect(block).toMatch(/COALESCE\(fe\.source, ''\) <> 'service_report_cta'/);
+    // …but a mint an operator LATER actually delivered fulfills the task
+    // (GitHub #3391 round P2): the exclusion re-includes rows whose
+    // deliveryState.sentChannels records a real send.
+    expect(block).toMatch(/jsonb_typeof\(fe\.estimate_data #> '\{deliveryState,sentChannels\}'\) = 'array'/);
+    expect(block).toMatch(/jsonb_array_length/);
   });
 
   test('fully-worked day composes nothing', () => {

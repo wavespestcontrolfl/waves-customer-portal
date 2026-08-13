@@ -90,8 +90,14 @@ async function loadUnkeptPromises() {
           -- Report click-to-estimate mints stamp sent_at for the
           -- publish-without-delivery shape but were never DELIVERED —
           -- a report tap after a promised-quote call must not erase the
-          -- obligation (in-hook audit r7b P1 on #3391).
-          AND COALESCE(e.source, '') <> 'service_report_cta'
+          -- obligation (in-hook audit r7b P1 on #3391). A mint an operator
+          -- LATER actually sent is a real handoff, though (GitHub round
+          -- P2): sendEstimateNow stamps deliveryState.sentChannels, and a
+          -- delivered estimate keeps the promise regardless of its source.
+          AND (COALESCE(e.source, '') <> 'service_report_cta'
+               OR (CASE WHEN jsonb_typeof(e.estimate_data #> '{deliveryState,sentChannels}') = 'array'
+                        THEN jsonb_array_length(e.estimate_data #> '{deliveryState,sentChannels}')
+                        ELSE 0 END) > 0)
           -- End-of-call boundary (codex r23): bridged rows end at
           -- bridge-start + duration; late-created rows (recording/status
           -- callback) already carry post-call created_at — adding

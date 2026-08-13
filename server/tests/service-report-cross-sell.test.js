@@ -252,6 +252,10 @@ describe('buildReportCrossSell', () => {
       expect(withContext.engineContext.targetOnlyServices).toBeTruthy();
       expect(Array.isArray(withContext.engineContext.currentServiceKeys)).toBe(true);
       expect(withContext.engineContext.customer?.id).toBe('cust-1');
+      // Which proof admitted the report rides to the mint (GitHub #3391
+      // round P1): a single-premises-admitted report must re-prove under
+      // the mint lock, a linkage-proven one must not.
+      expect(['report_linkage', 'single_premises']).toContain(withContext.engineContext.premisesProof);
       // The context must not perturb the drift check: read path and click
       // path fingerprint the SAME public payload, or every valid tap 409s.
       expect(withContext.fingerprint).toBe(bare.fingerprint);

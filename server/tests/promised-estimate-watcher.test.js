@@ -94,8 +94,15 @@ describe('runPromisedEstimateWatcher', () => {
     const src = require('fs').readFileSync(
       require('path').join(__dirname, '../services/promised-estimate-watcher.js'), 'utf8',
     );
-    const block = src.split('e.sent_at IS NOT NULL')[1].slice(0, 500);
+    const block = src.split('e.sent_at IS NOT NULL')[1].slice(0, 1200);
     expect(block).toMatch(/COALESCE\(e\.source, ''\) <> 'service_report_cta'/);
+    // …but a mint an operator LATER actually delivered keeps the promise
+    // (GitHub #3391 round P2): the exclusion re-includes rows whose
+    // deliveryState.sentChannels records a real send. The typeof guard
+    // keeps jsonb_array_length off non-array/absent values.
+    expect(block).toMatch(/deliveryState,sentChannels/);
+    expect(block).toMatch(/jsonb_typeof\(e\.estimate_data #> '\{deliveryState,sentChannels\}'\) = 'array'/);
+    expect(block).toMatch(/jsonb_array_length/);
   });
 
   test('quiet day skips without sending or stamping', async () => {

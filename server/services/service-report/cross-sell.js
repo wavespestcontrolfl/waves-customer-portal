@@ -951,7 +951,19 @@ async function buildReportCrossSell(service, database, {
       // primaryStreet is the SAME normalized scope key every frame above
       // anchored to — the mint's membership snapshot must be bounded by it
       // or account-wide rows inflate the accepted tier (GitHub #3391 P1).
-      fingerprinted.engineContext = { ...option.engineContext, customer, primaryStreet };
+      // Which proof admitted this report (GitHub #3391 round): a report the
+      // fallback single-premises proof admitted is only priceable while the
+      // account STAYS single-premises — the mint re-runs that proof under
+      // its lock, because a staff has_multi_home flip or a new
+      // customer_properties row between composition and tap silently makes
+      // this an exact price for possibly the wrong premises. Linkage-proven
+      // reports carry their own address evidence and need no re-proof.
+      fingerprinted.engineContext = {
+        ...option.engineContext,
+        customer,
+        primaryStreet,
+        premisesProof: premisesProven ? 'report_linkage' : 'single_premises',
+      };
     }
     return fingerprinted;
   } catch (err) {
@@ -1112,6 +1124,9 @@ async function buildPortalOffer(customerId, database, { propertyLookup = cacheOn
 module.exports = {
   buildReportCrossSell,
   buildPortalOffer,
+  // The mint re-runs this proof under its transaction lock for reports the
+  // fallback branch admitted (GitHub #3391 round — see premisesProof stamp).
+  customerHasOnlyPrimaryPremises,
   // Test hooks: target matrix + priceability are the card's two decisions.
   _private: {
     pickOfferTarget, startFamilyForIdentity, pickOption, optionIsPriceable, offerFingerprint, OFFER_LADDER,
