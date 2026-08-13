@@ -1091,7 +1091,7 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
     const normalizedActual = Number(actualAmount);
     const discrepancy = Math.round((normalizedActual - expectedAmount) * 100) / 100;
     const matched = Math.abs(discrepancy) < 0.01;
-    const now = new Date().toISOString();
+    let now; // assigned AFTER the payout row lock — see below
 
     let skipped = false;
     // In an externally-owned transaction the caller's commit/rollback
@@ -1104,6 +1104,11 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
       // commit later while carrying an earlier reconciled_at, making the
       // latest-row history checks lie.
       const cur = await trx('stripe_payouts').where('id', payoutId).forUpdate().first('reconciled', 'reconciled_by');
+      // Timestamp AFTER the lock: writers commit in lock order, so
+      // reconciled_at ordering matches commit ordering and the
+      // latest-history checks can trust it. (A pre-lock timestamp could
+      // make a later-committing writer look older.)
+      now = new Date().toISOString();
       if (opts.onlyIfReconciledBy !== undefined || opts.onlyIfUnreconciled) {
         const authorOk = opts.onlyIfReconciledBy === undefined
           || (cur && cur.reconciled && cur.reconciled_by === opts.onlyIfReconciledBy);
@@ -1122,6 +1127,7 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
             .where('payout_id', payoutId)
             .orderBy('reconciled_at', 'desc')
             .orderBy('created_at', 'desc')
+            .orderBy('id', 'desc') // deterministic final tie-breaker
             .first('status', 'reconciled_by');
           if (latest && latest.status === 'rejected' && !String(latest.reconciled_by || '').startsWith('bank-import')) {
             skipped = 'human_rejected';

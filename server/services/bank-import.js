@@ -266,6 +266,7 @@ async function healUnreconciledLinks() {
       .where('payout_id', row.matched_payout_id)
       .orderBy('reconciled_at', 'desc')
       .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc') // deterministic final tie-breaker
       .first('status', 'reconciled_by');
     if (latest && latest.status === 'rejected' && !String(latest.reconciled_by || '').startsWith('bank-import')) {
       const { reconcilePending, ...rest } = row.suggestion || {};
@@ -631,10 +632,13 @@ async function runDeterministicMatching({ limit } = {}) {
     if (rejected.expenseIds.length) expenseQuery = expenseQuery.whereNotIn('id', rejected.expenseIds);
     const candidates = await expenseQuery;
     // Auto-link needs exact cents + vendor evidence + a compatible payment
-    // method + a single such candidate. Incompatible-method expenses still
-    // PARK below — the operator may know the books are mislabeled.
+    // method + a UNIQUE candidate set: one strong candidate among other
+    // same-amount-window expenses still parks — the hands-off rule is that
+    // any plurality goes to the operator, evidence or not. Incompatible-
+    // method expenses PARK too — the operator may know the books are
+    // mislabeled.
     const strong = candidates.filter(c => centsEqual(c.amount, row.amount) && vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
-    if (strong.length === 1) {
+    if (candidates.length === 1 && strong.length === 1) {
       try {
         const changed = await db('bank_transactions')
           .where({ id: row.id, status: 'unmatched' })

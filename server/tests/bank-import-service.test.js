@@ -394,6 +394,20 @@ describe('runDeterministicMatching', () => {
     expect(parked.candidatesTotal).toBe(8);
   });
 
+  test('one STRONG candidate among other window candidates still parks — plurality goes to the operator', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', suggestion: null },
+    ];
+    state.expenses = [
+      { id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10' }, // strong
+      { id: 'exp-2', amount: '312.40', description: 'unrelated', vendor_name: 'Somebody Else', expense_date: '2026-08-12' }, // weak, same window
+    ];
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(0);
+    expect(summary.ambiguous).toBe(1);
+    expect(state.updates.find(u => u.patch.status)).toBeUndefined();
+  });
+
   test('near-miss amount (within candidate tolerance) never auto-links', async () => {
     state.bankRows = [
       { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.41, direction: 'debit', suggestion: null },
