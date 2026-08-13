@@ -231,6 +231,34 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     expect(raws.some((sql) => sql.includes('relay_hot_alert_sent_at'))).toBe(true);
   });
 
+  // ⭐ A HOT LIFECYCLE CUSTOMER HAS NO LEAD BY DESIGN — the page composes from
+  // the call row itself, so the sweep must SELECT what that branch reads.
+  test('a marker with NO lead linkage pages from the call row (from_phone + summary)', async () => {
+    const callRows = [{
+      twilio_call_sid: 'CA-lifecycle-1',
+      metadata: { relay_hot_alert_needed: 'true' }, // no relay_lead_id
+      from_phone: CALLER, call_summary: 'Known customer, wasps in the soffit, urgent.',
+    }];
+    const callBuilder = {};
+    for (const m of ['where', 'whereRaw', 'orderBy', 'limit']) callBuilder[m] = jest.fn(() => callBuilder);
+    callBuilder.select = jest.fn(async () => callRows);
+    callBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'cl-1' }]) }));
+    callBuilder.first = jest.fn(async () => null);
+    const notifBuilder = {};
+    for (const m of ['where', 'whereRaw']) notifBuilder[m] = jest.fn(() => notifBuilder);
+    notifBuilder.first = jest.fn(async () => null);
+    db.mockImplementation((table) => (table === 'notifications' ? notifBuilder : callBuilder));
+    db.raw = jest.fn((sql) => ({ __raw: sql }));
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+
+    const paged = await relayAlert.sweepAbandonedHotAlerts();
+    expect(paged).toBe(1);
+    const [, body] = TwilioService.sendSMS.mock.calls[0];
+    expect(body).toContain('wasps in the soffit'); // the call row fed the page
+    // …and the query selected what the branch reads.
+    expect(callBuilder.select).toHaveBeenCalledWith('twilio_call_sid', 'metadata', 'from_phone', 'call_summary');
+  });
+
   test('a claim ERROR pages anyway (fail-open: a duplicate beats a missed swarm)', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-db-down', markOwnerAlerted: jest.fn() });

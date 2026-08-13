@@ -613,6 +613,8 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     for (const words of [
       'remove my number from your system', "don't bother me anymore", 'leave me alone', 'just leave us alone',
       'remove my phone number from your list', 'take my phone number off your list',
+      // The formal registers of the same total withdrawal.
+      'stop all communications', 'do not communicate with me',
     ]) {
       jest.clearAllMocks();
       await executeTool('capture_lead', {

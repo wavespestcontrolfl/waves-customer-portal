@@ -441,7 +441,9 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
       .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
       .orderBy('created_at', 'asc')
       .limit(limit)
-      .select('twilio_call_sid', 'metadata');
+      // from_phone + call_summary feed the lead-LESS branch below (a hot
+      // lifecycle-customer call composes its page from the call row itself).
+      .select('twilio_call_sid', 'metadata', 'from_phone', 'call_summary');
   } catch (err) {
     logger.error(`[voice-relay-alert] abandoned hot-alert sweep query failed: ${err.message}`);
     return 0;

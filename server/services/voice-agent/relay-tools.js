@@ -928,7 +928,10 @@ async function executeTool(name, input = {}, ctx = {}) {
       // texts they asked to keep. ("…except by email" keeps no texty channel, so
       // it stays a real SMS withdrawal — they left email as the only way in.)
       const totalStop = stopClauses.some((c) => (
-        (/\b(?:contact|contacting|reach|reaching|bother|bothering|number|list)\b/i.test(c.stopped)
+        // "stop all communications" / "do not communicate with me" are the
+        // formal registers of the same total withdrawal — the stem covers
+        // communicate/communicating/communication(s).
+        (/\b(?:contact|contacting|communicat\w*|reach|reaching|bother|bothering|number|list)\b/i.test(c.stopped)
           || /\b(?:leave (?:me|us) alone|take (?:me|us) off (?:your |the )?list|do not contact)\b/i.test(c.stopped))
         && !NON_SMS_CHANNEL.test(c.stopped)
         && !TEXTY.test(c.kept)
