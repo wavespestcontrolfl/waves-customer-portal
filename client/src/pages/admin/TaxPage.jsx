@@ -4018,20 +4018,29 @@ function BankImportTab() {
   const [notice, setNotice] = useState(null);
   // per-row candidate pick for the manual link path (row id → expense id)
   const [linkPick, setLinkPick] = useState({});
+  const [hasMore, setHasMore] = useState(false);
+  const [shown, setShown] = useState(200);
+  const [covYear, setCovYear] = useState(String(new Date().getFullYear()));
+  // last upload payload, kept only while its result reported duplicates —
+  // fuels the explicit force-import path for identical-but-distinct rows
+  const [dupUpload, setDupUpload] = useState(null);
 
   const load = useCallback(() => {
     adminFetch("/admin/tax/bank-import/status")
       .then((s) => setCounts(s?.counts || {}))
       .catch(() => {});
     adminFetch(
-      `/admin/tax/bank-import/transactions${filter ? `?status=${filter}` : ""}`,
+      `/admin/tax/bank-import/transactions?limit=${shown}${filter ? `&status=${filter}` : ""}`,
     )
-      .then((d) => setRows(d.transactions || []))
+      .then((d) => {
+        setRows(d.transactions || []);
+        setHasMore(!!d.hasMore);
+      })
       .catch(() => setRows([]));
-    adminFetch("/admin/tax/bank-import/coverage")
+    adminFetch(`/admin/tax/bank-import/coverage?year=${covYear}`)
       .then((d) => setCoverage(d.months || []))
       .catch(() => setCoverage([]));
-  }, [filter]);
+  }, [filter, shown, covYear]);
   useEffect(load, [load]);
 
   const act = (label, path, body) => {
@@ -4058,26 +4067,46 @@ function BankImportTab() {
       return;
     }
     const reader = new FileReader();
-    reader.onload = () =>
-      act("upload", "/admin/tax/bank-import/upload", {
+    reader.onload = () => {
+      const payload = {
         accountLabel: accountLabel.trim(),
         accountType,
         filename: file.name,
         csv: String(reader.result || ""),
-      }).then((r) => {
-        if (r)
-          setNotice({
-            text:
-              `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skipped.length} skipped) · matching linked ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses` +
-              (r.duplicates > 0 && r.duplicateSamples?.length
-                ? ` — skipped as re-uploads: ${r.duplicateSamples
-                    .slice(0, 3)
-                    .map((d) => `${d.txn_date} ${d.description.slice(0, 24)} $${d.amount}`)
-                    .join("; ")}${r.duplicates > 3 ? "…" : ""}. If one of these was a genuinely separate identical purchase, add it via + Add Expense.`
-                : ""),
-          });
+      };
+      act("upload", "/admin/tax/bank-import/upload", payload).then((r) => {
+        if (!r) return;
+        setDupUpload(r.duplicates > 0 ? payload : null);
+        setNotice({
+          text:
+            `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skipped.length} skipped) · matching linked ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses` +
+            (r.duplicates > 0 && r.duplicateSamples?.length
+              ? ` — skipped as re-uploads: ${r.duplicateSamples
+                  .slice(0, 3)
+                  .map((d) => `${d.txn_date} ${d.description.slice(0, 24)} $${d.amount}`)
+                  .join("; ")}${r.duplicates > 3 ? "…" : ""}`
+              : ""),
+        });
       });
+    };
     reader.readAsText(file);
+  };
+
+  // Re-post the same file with forceDuplicates: rows already present stay
+  // deduped; ONLY the skipped identical rows import as additional copies.
+  const forceImportDuplicates = () => {
+    if (!dupUpload) return;
+    if (
+      !window.confirm(
+        "Import the skipped identical rows as ADDITIONAL transactions? Only do this when they were genuinely separate purchases, not a re-upload of the same statement.",
+      )
+    )
+      return;
+    const payload = { ...dupUpload, forceDuplicates: true };
+    setDupUpload(null);
+    act("upload", "/admin/tax/bank-import/upload", payload).then((r) => {
+      if (r) setNotice({ text: `Force-imported ${r.forced} duplicate row${r.forced === 1 ? "" : "s"}` });
+    });
   };
 
   const currentMonth = coverage[coverage.length - 1];
@@ -4175,6 +4204,21 @@ function BankImportTab() {
           <option value="created_expense">Created expense</option>
           <option value="ignored">Ignored</option>
         </select>
+        <select
+          style={inputStyle}
+          value={covYear}
+          onChange={(e) => setCovYear(e.target.value)}
+          title="Coverage year — switch when backfilling a prior tax year"
+        >
+          {[0, 1, 2, 3].map((back) => {
+            const y = String(new Date().getFullYear() - back);
+            return (
+              <option key={y} value={y}>
+                Coverage {y}
+              </option>
+            );
+          })}
+        </select>
       </div>
 
       {notice && (
@@ -4190,6 +4234,17 @@ function BankImportTab() {
           }}
         >
           {notice.text}
+          {!notice.error && dupUpload && (
+            <button
+              type="button"
+              disabled={!!busy}
+              style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginLeft: 10 }}
+              onClick={forceImportDuplicates}
+              title="Only when the skipped rows were genuinely separate identical purchases, not a re-upload"
+            >
+              Import skipped duplicates anyway
+            </button>
+          )}
         </div>
       )}
 
@@ -4275,6 +4330,11 @@ function BankImportTab() {
                           {(c.vendor_name || c.description || "expense").slice(0, 40)} · {fmtD(c.expense_date)}
                         </option>
                       ))}
+                      {(r.suggestion.candidatesTotal || 0) > r.suggestion.candidates.length && (
+                        <option value="" disabled>
+                          +{r.suggestion.candidatesTotal - r.suggestion.candidates.length} more — narrow via the Expenses tab
+                        </option>
+                      )}
                     </select>
                   ) : (
                     r.suggestion?.categoryName || ""
@@ -4300,7 +4360,9 @@ function BankImportTab() {
                       Link
                     </button>
                   )}
-                  {r.status === "unmatched" && r.direction === "debit" && !r.suggestion?.ignore && !linkPick[r.id] && (
+                  {/* transfer-flagged rows keep Create too — the flag is only a
+                      suggestion, and a legit vendor can trip the heuristic */}
+                  {r.status === "unmatched" && r.direction === "debit" && !linkPick[r.id] && (
                     <button
                       type="button"
                       disabled={!!busy}
@@ -4330,11 +4392,36 @@ function BankImportTab() {
                       Undo
                     </button>
                   )}
+                  {(r.status === "matched_expense" || r.status === "matched_payout") && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...inputStyle, cursor: "pointer", color: D.muted }}
+                      title="Wrong match? Returns the row to Needs Review; the linked expense/payout itself is untouched"
+                      onClick={() => {
+                        if (window.confirm("Unlink this bank row from its matched ledger record?"))
+                          act("unlink", `/admin/tax/bank-import/${r.id}/unlink`);
+                      }}
+                    >
+                      Unlink
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
+        {hasMore && (
+          <div style={{ padding: 12, textAlign: "center" }}>
+            <button
+              type="button"
+              style={{ ...inputStyle, cursor: "pointer", fontWeight: 600 }}
+              onClick={() => setShown((n) => n + 200)}
+            >
+              Load 200 more
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

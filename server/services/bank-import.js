@@ -15,6 +15,7 @@
 const crypto = require('crypto');
 const { parse } = require('csv-parse/sync');
 const db = require('../models/db');
+const logger = require('./logger');
 
 const PAYOUT_DATE_WINDOW_DAYS = 3;  // Stripe arrival vs bank posting drift
 const EXPENSE_DATE_WINDOW_DAYS = 5; // receipt date vs card posting drift
@@ -131,36 +132,55 @@ function parseStatementCsv(csvText) {
   return { rows, skipped };
 }
 
+// Canonical row identity: label is canonicalized INSIDE the hash so
+// "Capone-Checking" vs "capone-checking" can't duplicate a whole statement.
+// The ordinal distinguishes genuinely identical rows (see withRowHashes and
+// the force-duplicates path in the upload route).
+function hashRow(accountLabel, r, ordinal) {
+  const label = String(accountLabel).trim().toUpperCase();
+  const desc = String(r.description).replace(/\s+/g, ' ').toUpperCase();
+  const tuple = `${label}|${r.txn_date}|${desc}|${Number(r.amount).toFixed(2)}|${r.direction}`;
+  return crypto.createHash('sha256').update(`${tuple}|${ordinal}`).digest('hex');
+}
+
 /**
  * Stable per-row identity for dedupe across overlapping uploads. Identical
  * tuples within one file get an occurrence ordinal, so two real $58.12
  * fill-ups on the same day survive while the same statement uploaded twice
- * collapses to nothing.
+ * collapses to nothing. The ordinal is per-FILE — a distinct identical
+ * transaction arriving in a SEPARATE file is indistinguishable from a
+ * re-upload, so it dedupes by default and the upload route surfaces it with
+ * an explicit force-duplicates import path (ordinal continues past the
+ * stored copies there).
  */
 function withRowHashes(accountLabel, rows) {
   const seen = new Map();
   return rows.map(r => {
-    const desc = r.description.replace(/\s+/g, ' ').toUpperCase();
-    const tuple = `${accountLabel}|${r.txn_date}|${desc}|${r.amount.toFixed(2)}|${r.direction}`;
-    const ordinal = seen.get(tuple) || 0;
-    seen.set(tuple, ordinal + 1);
-    const row_hash = crypto.createHash('sha256').update(`${tuple}|${ordinal}`).digest('hex');
-    return { ...r, row_hash };
+    const key = `${r.txn_date}|${String(r.description).replace(/\s+/g, ' ').toUpperCase()}|${Number(r.amount).toFixed(2)}|${r.direction}`;
+    const ordinal = seen.get(key) || 0;
+    seen.set(key, ordinal + 1);
+    return { ...r, ordinal, row_hash: hashRow(accountLabel, r, ordinal) };
   });
 }
 
 // Amount+date alone is weak evidence for expense links — a coincidental
 // same-price purchase in the window would silently hide a real missing
 // expense. Auto-linking additionally requires a shared significant word
-// between the bank description and the expense's vendor/description.
-const STOPWORDS = new Set(['the', 'and', 'inc', 'llc', 'corp', 'card', 'debit', 'purchase', 'payment', 'online']);
+// between the bank description and the expense's VENDOR IDENTITY
+// (vendor_name only — a free-form description that merely mentions the same
+// city is coincidence, not identity). Pure numbers (store #s, card last-4s)
+// and local geography are excluded for the same reason. An expense with no
+// vendor_name can never auto-link; it parks for the operator instead.
+const STOPWORDS = new Set(['the', 'and', 'inc', 'llc', 'corp', 'card', 'debit', 'purchase', 'payment', 'online',
+  // SWFL geography that appears in half the card descriptions
+  'florida', 'bradenton', 'sarasota', 'venice', 'parrish', 'palmetto', 'nokomis', 'osprey', 'ellenton', 'port', 'north', 'lakewood', 'ranch']);
 function significantTokens(text) {
   return new Set(String(text || '').toUpperCase().split(/[^A-Z0-9]+/)
-    .filter(t => t.length >= 4 && !STOPWORDS.has(t.toLowerCase())));
+    .filter(t => t.length >= 4 && !/^\d+$/.test(t) && !STOPWORDS.has(t.toLowerCase())));
 }
 function vendorEvidence(bankDescription, expense) {
   const bankTokens = significantTokens(bankDescription);
-  for (const t of significantTokens(`${expense.vendor_name || ''} ${expense.description || ''}`)) {
+  for (const t of significantTokens(expense.vendor_name || '')) {
     if (bankTokens.has(t)) return true;
   }
   return false;
@@ -180,6 +200,15 @@ function addDays(dateStr, days) {
   const d = new Date(`${dateStr}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
+}
+
+// node-pg returns DATE columns as local-midnight Date objects — calendar
+// arithmetic on the raw value shifts a day depending on server zone (same
+// trap and fix as pnl-report's dateCellStr). Strings pass through by prefix.
+function toDateStr(v) {
+  if (typeof v === 'string') return v.slice(0, 10);
+  const d = new Date(v);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 // The migration's partial unique indexes are the real double-claim guard;
@@ -220,10 +249,11 @@ async function runDeterministicMatching() {
   const unmatched = await db('bank_transactions')
     .where({ status: 'unmatched' })
     .orderBy('txn_date', 'asc')
-    .select('id', 'txn_date', 'description', 'amount', 'direction', 'suggestion');
+    .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'suggestion');
   const summary = { scanned: unmatched.length, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed };
 
   for (const row of unmatched) {
+    const txnDate = toDateStr(row.txn_date);
     const transfer = transferSuggestion(row.description);
     if (transfer) {
       if (!row.suggestion || !row.suggestion.ignore) {
@@ -234,19 +264,23 @@ async function runDeterministicMatching() {
     }
 
     if (row.direction === 'credit') {
+      // Stripe pays out to the BANK account only — a credit on a card
+      // statement is a merchant refund or payment credit, never a payout,
+      // and auto-linking one would hide it from review.
+      if (row.account_type !== 'bank') continue;
       const candidates = await db('stripe_payouts')
         // Only money that actually REACHED the bank can explain a bank
         // credit — pending/in-transit/canceled/failed payouts are excluded.
         .where('status', 'paid')
-        .whereBetween('arrival_date', [
-          new Date(`${addDays(row.txn_date, -PAYOUT_DATE_WINDOW_DAYS)}T00:00:00Z`),
-          new Date(`${addDays(row.txn_date, PAYOUT_DATE_WINDOW_DAYS + 1)}T00:00:00Z`),
-        ])
+        // [D-3, D+3] inclusive: lower bound inclusive, upper bound strictly
+        // below the D+4 midnight so the window matches its documentation.
+        .where('arrival_date', '>=', new Date(`${addDays(txnDate, -PAYOUT_DATE_WINDOW_DAYS)}T00:00:00Z`))
+        .andWhere('arrival_date', '<', new Date(`${addDays(txnDate, PAYOUT_DATE_WINDOW_DAYS + 1)}T00:00:00Z`))
         .whereRaw('abs(amount - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
         .whereNotExists(function claimed() {
           this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_payout_id = stripe_payouts.id');
         })
-        .select('id', 'amount')
+        .select('id', 'amount', 'reconciled')
         .limit(2);
       const exact = candidates.filter(c => centsEqual(c.amount, row.amount));
       if (candidates.length === 1 && exact.length === 1) {
@@ -254,7 +288,22 @@ async function runDeterministicMatching() {
           const changed = await db('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
             .update({ status: 'matched_payout', matched_payout_id: exact[0].id, match_method: 'payout_amount_date', matched_at: new Date(), updated_at: new Date() });
-          if (changed) summary.payoutsLinked++;
+          if (changed) {
+            summary.payoutsLinked++;
+            // Extend the EXISTING reconciliation mechanism (bank_reconciliation
+            // + stripe_payouts.reconciled via stripe-banking) rather than
+            // keeping a parallel Tax-only status — /admin/banking must see the
+            // same truth. Failure here never un-links the row: the link is
+            // real, reconciliation is the ledger echo, and the error surfaces.
+            if (!exact[0].reconciled) {
+              try {
+                const { reconcilePayout } = require('./stripe-banking');
+                await reconcilePayout(exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`, 'bank-import', 'confirmed');
+              } catch (reconErr) {
+                logger.warn(`[bank-import] payout ${exact[0].id} linked but reconciliation write failed: ${reconErr.message}`);
+              }
+            }
+          }
         } catch (err) {
           if (!isUniqueViolation(err)) throw err; // lost the claim race — skip
         }
@@ -265,7 +314,7 @@ async function runDeterministicMatching() {
     }
 
     const candidates = await db('expenses')
-      .whereBetween('expense_date', [addDays(row.txn_date, -EXPENSE_DATE_WINDOW_DAYS), addDays(row.txn_date, EXPENSE_DATE_WINDOW_DAYS)])
+      .whereBetween('expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
       .whereRaw('abs(amount - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
       .whereNotExists(function claimed() {
         this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = expenses.id');
@@ -289,7 +338,11 @@ async function runDeterministicMatching() {
     } else if (candidates.length > 0) {
       summary.ambiguous++;
       await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-        suggestion: { ...(row.suggestion || {}), candidates: candidates.slice(0, 6).map(c => ({ id: c.id, description: c.description, vendor_name: c.vendor_name, expense_date: c.expense_date })) },
+        suggestion: {
+          ...(row.suggestion || {}),
+          candidates: candidates.slice(0, 20).map(c => ({ id: c.id, description: c.description, vendor_name: c.vendor_name, expense_date: toDateStr(c.expense_date) })),
+          candidatesTotal: candidates.length,
+        },
         updated_at: new Date(),
       });
     }
@@ -327,6 +380,7 @@ async function ledgerCoverage(year) {
 module.exports = {
   parseStatementCsv,
   withRowHashes,
+  hashRow,
   transferSuggestion,
   runDeterministicMatching,
   ledgerCoverage,
@@ -334,6 +388,7 @@ module.exports = {
   parseAmount,
   parseDateCell,
   addDays,
+  toDateStr,
   vendorEvidence,
   significantTokens,
 };

@@ -1644,7 +1644,7 @@ router.use('/bank-import', (req, res, next) => {
 
 router.post('/bank-import/upload', async (req, res, next) => {
   try {
-    const { accountLabel, accountType, filename, csv } = req.body || {};
+    const { accountLabel, accountType, filename, csv, forceDuplicates } = req.body || {};
     if (!accountLabel || typeof accountLabel !== 'string' || accountLabel.length > 100) {
       return res.status(400).json({ error: 'accountLabel is required (max 100 chars)' });
     }
@@ -1662,21 +1662,28 @@ router.post('/bank-import/upload', async (req, res, next) => {
       return res.status(400).json({ error: 'no usable rows in that CSV', skipped });
     }
     const hashed = bankImport.withRowHashes(accountLabel.trim(), rows);
-    const inserted = await db('bank_transactions')
-      .insert(hashed.map(r => ({
-        account_label: accountLabel.trim(),
-        account_type: accountType,
-        txn_date: r.txn_date,
-        description: r.description,
-        amount: r.amount,
-        direction: r.direction,
-        source: 'csv',
-        source_file: String(filename || '').slice(0, 300) || null,
-        row_hash: r.row_hash,
-      })))
-      .onConflict('row_hash')
-      .ignore()
-      .returning(['id', 'row_hash']);
+    const toInsert = hashed.map(r => ({
+      account_label: accountLabel.trim(),
+      account_type: accountType,
+      txn_date: r.txn_date,
+      description: r.description,
+      amount: r.amount,
+      direction: r.direction,
+      source: 'csv',
+      source_file: String(filename || '').slice(0, 300) || null,
+      row_hash: r.row_hash,
+    }));
+    // Chunked: 9 binds/row × 8k+ rows in one statement would blow past
+    // PostgreSQL's 65,535 bind-parameter ceiling and fail the whole upload.
+    const inserted = [];
+    for (let i = 0; i < toInsert.length; i += 500) {
+      const batch = await db('bank_transactions')
+        .insert(toInsert.slice(i, i + 500))
+        .onConflict('row_hash')
+        .ignore()
+        .returning(['id', 'row_hash']);
+      inserted.push(...batch);
+    }
     // Duplicates are SURFACED, not silently swallowed: identical rows carry
     // no bank-side ID in a CSV, so a skipped row is *probably* a re-upload
     // but could be a genuinely distinct identical purchase from a partial
@@ -1684,11 +1691,41 @@ router.post('/bank-import/upload', async (req, res, next) => {
     // can add the real one by hand if it wasn't a re-upload.
     const insertedHashes = new Set(inserted.map(r => r.row_hash));
     const duplicateRows = hashed.filter(r => !insertedHashes.has(r.row_hash));
+    // Force path for the split-across-uploads case: a genuinely distinct
+    // identical transaction in a SEPARATE file hashes like a re-upload and
+    // is skipped above. When the operator confirms these are real, continue
+    // each row's ordinal past the stored copies until a hash inserts. Bounded
+    // walk; re-posting force again inserts ANOTHER copy, so the client
+    // confirms before sending it.
+    let forced = 0;
+    if (forceDuplicates === true) {
+      for (const r of duplicateRows) {
+        for (let ord = r.ordinal + 1; ord <= r.ordinal + 25; ord++) {
+          const [ins] = await db('bank_transactions')
+            .insert({
+              account_label: accountLabel.trim(),
+              account_type: accountType,
+              txn_date: r.txn_date,
+              description: r.description,
+              amount: r.amount,
+              direction: r.direction,
+              source: 'csv',
+              source_file: String(filename || '').slice(0, 300) || null,
+              row_hash: bankImport.hashRow(accountLabel.trim(), r, ord),
+            })
+            .onConflict('row_hash')
+            .ignore()
+            .returning(['id']);
+          if (ins) { forced++; break; }
+        }
+      }
+    }
     const matching = await bankImport.runDeterministicMatching();
     res.json({
       success: true,
       parsed: rows.length,
-      imported: inserted.length,
+      imported: inserted.length + forced,
+      forced,
       duplicates: duplicateRows.length,
       duplicateSamples: duplicateRows.slice(0, 10).map(r => ({ txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
       skipped,
@@ -1704,14 +1741,16 @@ router.get('/bank-import/transactions', async (req, res, next) => {
   try {
     const { status, month, account } = req.query;
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
-    let q = db('bank_transactions').orderBy('txn_date', 'desc').orderBy('created_at', 'desc').limit(limit);
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    // limit+1 sentinel row answers hasMore without a second count query.
+    let q = db('bank_transactions').orderBy('txn_date', 'desc').orderBy('created_at', 'desc').limit(limit + 1).offset(offset);
     if (status) q = q.where('status', String(status));
     if (account) q = q.where('account_label', String(account));
     if (month && /^\d{4}-\d{2}$/.test(String(month))) {
       q = q.whereRaw("to_char(txn_date, 'YYYY-MM') = ?", [String(month)]);
     }
     const rows = await q.select('*');
-    res.json({ transactions: rows });
+    res.json({ transactions: rows.slice(0, limit), hasMore: rows.length > limit, offset, limit });
   } catch (err) { next(err); }
 });
 
@@ -1858,6 +1897,66 @@ router.post('/bank-import/:id/unignore', async (req, res, next) => {
       .update({ status: 'unmatched', updated_at: new Date() });
     if (!changed) return res.status(409).json({ error: 'row is not ignored' });
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// Undo a wrong link — automatic, manual, or a mis-picked ambiguous candidate.
+// The row returns to unmatched with the undo recorded in suggestion.lastUnlink;
+// the ledger side is never touched for expenses (deleting a real expense is an
+// Expenses-tab decision). For payouts, the reconciliation echo is REVERSED
+// through the same stripe-banking mechanism (a 'rejected' bank_reconciliation
+// row) so /admin/banking sees the undo too — but ONLY when bank-import wrote
+// the reconciliation; a human's reconciliation is never overridden from here.
+// created_expense rows are deliberately excluded: the expense EXISTS because
+// of this row, so the undo is deleting it in the Expenses tab — the FK SET
+// NULL plus the matcher's self-heal then returns this row to unmatched.
+router.post('/bank-import/:id/unlink', async (req, res, next) => {
+  try {
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (!['matched_expense', 'matched_payout'].includes(row.status)) {
+      return res.status(409).json({ error: `only matched rows can be unlinked (row is ${row.status})` });
+    }
+    const changed = await db('bank_transactions')
+      .where({ id: row.id, status: row.status })
+      .update({
+        status: 'unmatched',
+        matched_expense_id: null,
+        matched_payout_id: null,
+        match_method: null,
+        matched_at: null,
+        suggestion: {
+          ...(row.suggestion || {}),
+          lastUnlink: {
+            at: new Date().toISOString(),
+            was: row.status,
+            method: row.match_method,
+            ...(row.matched_expense_id ? { expenseId: row.matched_expense_id } : {}),
+            ...(row.matched_payout_id ? { payoutId: row.matched_payout_id } : {}),
+          },
+        },
+        updated_at: new Date(),
+      });
+    if (!changed) return res.status(409).json({ error: 'row changed mid-flight — reload' });
+    let reconciliation = null;
+    if (row.status === 'matched_payout' && row.matched_payout_id) {
+      const payout = await db('stripe_payouts').where({ id: row.matched_payout_id }).first('id', 'reconciled', 'reconciled_by');
+      if (payout && payout.reconciled) {
+        if (payout.reconciled_by === 'bank-import') {
+          try {
+            const { reconcilePayout } = require('../services/stripe-banking');
+            await reconcilePayout(payout.id, Number(row.amount), `Unlinked from bank import row ${row.id}`, 'bank-import', 'rejected');
+            reconciliation = 'reversed';
+          } catch (err) {
+            logger.warn(`[bank-import] row ${row.id} unlinked but reconciliation reversal failed: ${err.message}`);
+            reconciliation = 'reversal_failed';
+          }
+        } else {
+          reconciliation = 'kept_manual';
+        }
+      }
+    }
+    res.json({ success: true, reconciliation });
   } catch (err) { next(err); }
 });
 

@@ -59,7 +59,10 @@ Rules:
     messages: [{ role: 'user', content: prompt }],
   });
 
-  const text = response.content[0]?.text || '{}';
+  // A reasoning-capable model can lead with thinking/redacted-thinking
+  // blocks — content[0] would then have no .text and every categorization
+  // would silently parse '{}'. Read the FIRST TEXT block, wherever it sits.
+  const text = response.content?.find(b => b.type === 'text')?.text || '{}';
   let parsed;
   try {
     parsed = JSON.parse(text);

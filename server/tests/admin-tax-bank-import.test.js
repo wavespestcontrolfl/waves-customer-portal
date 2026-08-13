@@ -17,6 +17,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 const state = {
   bankRow: null,
   expenseRow: null,
+  payoutRow: null,
   bankUpdateError: null,
   bankUpdateResult: 1,
   insertedBank: [],
@@ -24,6 +25,9 @@ const state = {
   deletedExpenseIds: [],
   bankUpdates: [],
   category: null,
+  // per-call overrides for the bank insert's returning(): shift one entry per
+  // call; when empty, fall back to echoing every inserted row (no duplicates)
+  insertReturningQueue: null,
 };
 
 function bankBuilder() {
@@ -38,12 +42,17 @@ function bankBuilder() {
       return Promise.resolve(state.bankUpdateResult);
     }),
     insert: jest.fn((rows) => {
-      state.insertedBank.push(...rows);
+      state.insertedBank.push(...(Array.isArray(rows) ? rows : [rows]));
       return b;
     }),
     onConflict: jest.fn(() => b),
     ignore: jest.fn(() => b),
-    returning: jest.fn(() => Promise.resolve(state.insertedBank.map((r, i) => ({ id: `bt-${i}`, row_hash: r.row_hash })))),
+    returning: jest.fn(() => {
+      if (Array.isArray(state.insertReturningQueue) && state.insertReturningQueue.length) {
+        return Promise.resolve(state.insertReturningQueue.shift());
+      }
+      return Promise.resolve(state.insertedBank.map((r, i) => ({ id: `bt-${i}`, row_hash: r.row_hash })));
+    }),
     select: jest.fn(() => b),
     count: jest.fn(() => b),
     groupBy: jest.fn(() => Promise.resolve([])),
@@ -70,6 +79,9 @@ const mockDb = jest.fn((table) => {
   if (table === 'expense_categories') {
     return { where: jest.fn(() => ({ first: jest.fn(() => Promise.resolve(state.category)) })) };
   }
+  if (table === 'stripe_payouts') {
+    return { where: jest.fn(function w() { return this; }), first: jest.fn(() => Promise.resolve(state.payoutRow)) };
+  }
   return bankBuilder();
 });
 mockDb.raw = jest.fn((sql) => sql);
@@ -89,6 +101,10 @@ jest.mock('../services/pnl-report', () => ({
   dateCellStr: jest.requireActual('../services/pnl-report').dateCellStr,
 }));
 jest.mock('../services/invoice-helpers', () => ({ invoiceAmountDue: jest.fn() }));
+// unlink reverses a bank-import-authored reconciliation through the same
+// stripe-banking mechanism — stubbed, asserted in the unlink describe
+jest.mock('../services/stripe-banking', () => ({ reconcilePayout: jest.fn(() => Promise.resolve({})) }));
+const { reconcilePayout } = require('../services/stripe-banking');
 jest.mock('../services/expense-categorizer', () => ({
   autoCategorizeExpense: jest.fn(),
   sanitizeDeductiblePercent: jest.requireActual('../services/expense-categorizer').sanitizeDeductiblePercent,
@@ -137,6 +153,9 @@ beforeEach(() => {
   state.deletedExpenseIds = [];
   state.bankUpdates = [];
   state.category = null;
+  state.payoutRow = null;
+  state.insertReturningQueue = null;
+  reconcilePayout.mockClear();
   delete process.env.GATE_BANK_IMPORT;
 });
 
@@ -291,5 +310,91 @@ describe('link-expense (gate on)', () => {
   test('losing the CAS race answers 409', async () => {
     state.bankUpdateResult = 0;
     expect((await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'exp-9' })).status).toBe(409);
+  });
+});
+
+describe('force-duplicates upload (gate on)', () => {
+  beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; });
+  const csv = 'Date,Description,Amount\n08/10/2026,HD SUPPLY,-204.87';
+
+  test('without the flag, a conflicting row is surfaced as a duplicate, not force-inserted', async () => {
+    state.insertReturningQueue = [[]]; // the bulk insert reports nothing landed
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv });
+    const body = await res.json();
+    expect(body.imported).toBe(0);
+    expect(body.duplicates).toBe(1);
+    expect(body.forced).toBe(0);
+    expect(state.insertedBank).toHaveLength(1); // only the bulk attempt
+  });
+
+  test('with forceDuplicates, the skipped row re-inserts under the NEXT ordinal hash', async () => {
+    state.insertReturningQueue = [
+      [], // bulk insert: everything conflicts
+      [{ id: 'bt-forced' }], // first force attempt (ordinal+1) lands
+    ];
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true });
+    const body = await res.json();
+    expect(body.forced).toBe(1);
+    expect(body.imported).toBe(1);
+    expect(body.duplicates).toBe(1);
+    expect(state.insertedBank).toHaveLength(2);
+    // the forced copy has a DIFFERENT identity than the original attempt
+    expect(state.insertedBank[1].row_hash).not.toBe(state.insertedBank[0].row_hash);
+    expect(state.insertedBank[1]).toMatchObject({ amount: 204.87, direction: 'debit', account_label: 'capone-checking' });
+  });
+});
+
+describe('unlink (gate on)', () => {
+  beforeEach(() => {
+    process.env.GATE_BANK_IMPORT = 'true';
+    state.bankRow = {
+      id: 'bt-1', amount: '2418.66', direction: 'credit', status: 'matched_payout',
+      matched_payout_id: 'po-1', matched_expense_id: null, match_method: 'payout_amount_date', suggestion: null,
+    };
+  });
+
+  test('unlinks a matched expense row back to unmatched with an audit stamp; no reconciliation involved', async () => {
+    state.bankRow = {
+      id: 'bt-1', amount: '58.12', direction: 'debit', status: 'matched_expense',
+      matched_expense_id: 'exp-9', matched_payout_id: null, match_method: 'manual', suggestion: { categoryName: 'Fuel' },
+    };
+    const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
+    expect(res.status).toBe(200);
+    const upd = state.bankUpdates[0];
+    // CAS on the CURRENT status so a concurrent change 409s instead of clobbering
+    expect(upd.wheres).toContainEqual({ id: 'bt-1', status: 'matched_expense' });
+    expect(upd.patch).toMatchObject({ status: 'unmatched', matched_expense_id: null, matched_payout_id: null, match_method: null, matched_at: null });
+    expect(upd.patch.suggestion.lastUnlink).toMatchObject({ was: 'matched_expense', method: 'manual', expenseId: 'exp-9' });
+    expect(upd.patch.suggestion.categoryName).toBe('Fuel'); // prior suggestion survives
+    expect(reconcilePayout).not.toHaveBeenCalled();
+  });
+
+  test('unlinking a payout row reverses a bank-import-authored reconciliation', async () => {
+    state.payoutRow = { id: 'po-1', reconciled: true, reconciled_by: 'bank-import' };
+    const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.reconciliation).toBe('reversed');
+    expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('bt-1'), 'bank-import', 'rejected');
+  });
+
+  test('a HUMAN-authored reconciliation is never overridden from here', async () => {
+    state.payoutRow = { id: 'po-1', reconciled: true, reconciled_by: 'adam' };
+    const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
+    const body = await res.json();
+    expect(body.reconciliation).toBe('kept_manual');
+    expect(reconcilePayout).not.toHaveBeenCalled();
+  });
+
+  test('only matched rows can be unlinked — unmatched and created_expense answer 409', async () => {
+    state.bankRow.status = 'unmatched';
+    expect((await post('/admin/tax/bank-import/bt-1/unlink', {})).status).toBe(409);
+    state.bankRow.status = 'created_expense';
+    expect((await post('/admin/tax/bank-import/bt-1/unlink', {})).status).toBe(409);
+  });
+
+  test('a concurrent status change loses the CAS and answers 409', async () => {
+    state.bankUpdateResult = 0;
+    expect((await post('/admin/tax/bank-import/bt-1/unlink', {})).status).toBe(409);
   });
 });

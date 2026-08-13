@@ -23,7 +23,7 @@ const state = {
 function makeBuilder(table) {
   const b = {};
   const chain = (name) => { b[name] = jest.fn(() => b); };
-  ['where', 'whereNot', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotExists',
+  ['where', 'andWhere', 'whereNot', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotExists',
     'orderBy', 'limit', 'groupBy', 'groupByRaw', 'select', 'first'].forEach(chain);
   b.update = jest.fn((patch) => {
     // Only row-scoped updates (where({id,...})) are the matcher's claims and
@@ -47,9 +47,14 @@ function makeBuilder(table) {
 const mockDb = jest.fn((table) => makeBuilder(table));
 mockDb.raw = jest.fn((sql) => sql);
 jest.mock('../models/db', () => mockDb);
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// A confirmed payout link must echo into the EXISTING reconciliation
+// mechanism — stubbed here, asserted below.
+jest.mock('../services/stripe-banking', () => ({ reconcilePayout: jest.fn(() => Promise.resolve({})) }));
+const { reconcilePayout } = require('../services/stripe-banking');
 
 const {
-  parseStatementCsv, withRowHashes, transferSuggestion,
+  parseStatementCsv, withRowHashes, hashRow, transferSuggestion,
   runDeterministicMatching, parseDateCell, addDays, vendorEvidence,
 } = require('../services/bank-import');
 
@@ -59,6 +64,7 @@ beforeEach(() => {
   state.expenses = [];
   state.updates = [];
   state.queried = [];
+  reconcilePayout.mockClear();
 });
 
 describe('parseStatementCsv', () => {
@@ -146,6 +152,22 @@ describe('withRowHashes', () => {
     const [b] = withRowHashes('capone-card-2222', twoCoffees.slice(0, 1));
     expect(a.row_hash).not.toBe(b.row_hash);
   });
+
+  test('label case/whitespace variants hash identically (canonicalized inside the hash)', () => {
+    const [a] = withRowHashes('Capone-Checking ', twoCoffees.slice(0, 1));
+    const [b] = withRowHashes('capone-checking', twoCoffees.slice(0, 1));
+    expect(a.row_hash).toBe(b.row_hash);
+  });
+
+  test('hashRow continues the ordinal sequence — the force-duplicates path can mint the next copy', () => {
+    const [a, b] = withRowHashes('capone-card', twoCoffees);
+    expect(a.ordinal).toBe(0);
+    expect(b.ordinal).toBe(1);
+    expect(hashRow('capone-card', twoCoffees[0], 1)).toBe(b.row_hash);
+    const third = hashRow('capone-card', twoCoffees[0], 2);
+    expect(third).not.toBe(a.row_hash);
+    expect(third).not.toBe(b.row_hash);
+  });
 });
 
 describe('transferSuggestion', () => {
@@ -173,6 +195,21 @@ describe('vendorEvidence', () => {
 
   test('short and stopword tokens are not evidence', () => {
     expect(vendorEvidence('THE ONLINE CARD PURCHASE LLC', { vendor_name: 'The LLC', description: 'online purchase' })).toBe(false);
+  });
+
+  test('evidence comes from vendor IDENTITY only — a description mentioning the same city is not it', () => {
+    // "VENICE" appears in both, but only in the expense's free-form description
+    expect(vendorEvidence('WAWA 5211 VENICE FL', { vendor_name: 'Ace Hardware', description: 'shop supplies Venice store' })).toBe(false);
+  });
+
+  test('local geography and pure numbers are never evidence, even inside vendor_name', () => {
+    expect(vendorEvidence('WAWA 5211 VENICE FL', { vendor_name: 'Venice Print Co' })).toBe(false); // only VENICE shared
+    expect(vendorEvidence('STORE 5211 PURCHASE', { vendor_name: 'Depot 5211' })).toBe(false); // only the number shared
+    expect(vendorEvidence('WAWA 5211 VENICE FL', { vendor_name: 'Wawa' })).toBe(true); // the actual vendor still matches
+  });
+
+  test('an expense with no vendor_name can never auto-link', () => {
+    expect(vendorEvidence('SITEONE LANDSCAPE SUPPLY', { vendor_name: null, description: 'SiteOne order' })).toBe(false);
   });
 });
 
@@ -206,15 +243,36 @@ describe('date helpers', () => {
 });
 
 describe('runDeterministicMatching', () => {
-  test('a credit with exactly one payout candidate links through a status CAS', async () => {
-    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', suggestion: null }];
-    state.payouts = [{ id: 'po-1', amount: '2418.66' }];
+  test('a credit with exactly one payout candidate links through a status CAS and echoes reconciliation', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: false }];
     const summary = await runDeterministicMatching();
     expect(summary.payoutsLinked).toBe(1);
     const link = state.updates.find(u => u.patch.status === 'matched_payout');
     expect(link.patch.matched_payout_id).toBe('po-1');
     // CAS: the update is scoped to id AND status='unmatched'
     expect(link.where).toContainEqual({ id: 'bt-1', status: 'unmatched' });
+    // the link echoes into the EXISTING reconciliation mechanism
+    expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('bt-1'), 'bank-import', 'confirmed');
+  });
+
+  test('an already-reconciled payout links without re-reconciling', async () => {
+    reconcilePayout.mockClear();
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: true }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(1);
+    expect(reconcilePayout).not.toHaveBeenCalled();
+  });
+
+  test('a CARD-statement credit never enters payout matching (refund/payment credit, not a payout)', async () => {
+    reconcilePayout.mockClear();
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'MERCHANT REFUND', amount: 2418.66, direction: 'credit', account_type: 'card', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: false }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    expect(state.queried.filter(t => t === 'stripe_payouts')).toHaveLength(0);
+    expect(state.updates).toHaveLength(0);
   });
 
   test('a debit with exactly one expense candidate links; two candidates park', async () => {
@@ -263,8 +321,10 @@ describe('runDeterministicMatching', () => {
     expect(summary.expensesLinked).toBe(0);
     expect(summary.ambiguous).toBe(1);
     expect(state.updates.find(u => u.patch.status)).toBeUndefined();
-    // operator-facing suggestion list stays bounded even when the set is larger
-    expect(state.updates.find(u => u.patch.suggestion).patch.suggestion.candidates).toHaveLength(6);
+    // full candidate set is parked with its true total for the operator
+    const parked = state.updates.find(u => u.patch.suggestion).patch.suggestion;
+    expect(parked.candidates).toHaveLength(8);
+    expect(parked.candidatesTotal).toBe(8);
   });
 
   test('near-miss amount (within candidate tolerance) never auto-links', async () => {
