@@ -136,18 +136,22 @@ async function reassuranceRuleCandidates({ now = new Date(), knex = db } = {}) {
     if (!latestByCustomer.has(row.customer_id)) latestByCustomer.set(row.customer_id, row);
   }
   if (!latestByCustomer.size) return [];
-  // "No activity found" may only be said when the visit's findings say so:
-  // any finding beyond the synthetic no-activity/info rows vetoes the claim
-  // (fail closed — an unreadable findings table skips the rule entirely).
+  // "No activity found" may only be said when the visit's findings say so
+  // EXPLICITLY (codex pre-push P1): the visit must carry the technician's
+  // no_activity finding, and ANY other finding — whatever its severity —
+  // vetoes the claim. A visit with no findings rows at all proves nothing
+  // and never reassures. Fail closed: an unreadable findings table skips
+  // the rule entirely (the query throw rides the sweep's per-rule catch).
   const recordIds = [...latestByCustomer.values()].map((r) => r.service_record_id);
   const findingRows = await knex('service_findings')
     .whereIn('service_record_id', recordIds)
-    .select('service_record_id', 'category', 'severity');
-  const vetoed = new Set(
-    findingRows
-      .filter((f) => f.category !== 'no_activity' && String(f.severity || '').toLowerCase() !== 'info')
-      .map((f) => f.service_record_id)
-  );
+    .select('service_record_id', 'category');
+  const hasNoActivity = new Set();
+  const vetoed = new Set();
+  for (const f of findingRows) {
+    if (f.category === 'no_activity') hasNoActivity.add(f.service_record_id);
+    else vetoed.add(f.service_record_id);
+  }
   const today = etDateString(now);
   const toUtcNoonMs = (key) => {
     const [y, m, d] = String(key).split('-').map(Number);
@@ -155,6 +159,7 @@ async function reassuranceRuleCandidates({ now = new Date(), knex = db } = {}) {
   };
   const candidates = [];
   for (const visit of latestByCustomer.values()) {
+    if (!hasNoActivity.has(visit.service_record_id)) continue;
     if (vetoed.has(visit.service_record_id)) continue;
     const visitDay = dateOnlyString(visit.service_date);
     if (!visitDay) continue;
@@ -200,29 +205,13 @@ async function candidatePassesCaps(candidate, { now = new Date(), knex = db } = 
 }
 
 async function deliverAlert(candidate, { knex = db } = {}) {
-  // Ledger row first (the durable record + the idempotency backstop); the
-  // bell/push follows. A unique-violation means another pod already fired
-  // this exact alert — skip silently.
-  let inserted;
-  try {
-    [inserted] = await knex('customer_alerts')
-      .insert({
-        customer_id: candidate.customerId,
-        rule_key: candidate.ruleKey,
-        dedupe_key: candidate.dedupeKey,
-        title: candidate.title,
-        body: candidate.body,
-        payload: JSON.stringify(candidate.payload || {}),
-      })
-      .onConflict(['customer_id', 'dedupe_key'])
-      .ignore()
-      .returning('id');
-  } catch (err) {
-    logger.warn(`[property-alerts] ledger insert failed (${candidate.ruleKey}): ${err.message}`);
-    return { delivered: false, reason: 'ledger_failed' };
-  }
-  if (!inserted) return { delivered: false, reason: 'already_fired' };
-
+  // NOTIFY FIRST, ledger after (codex pre-push P1): the ledger row feeds the
+  // portal card and consumes the frequency cap, so it may only exist for an
+  // alert the customer actually received. notifyCustomer checks the
+  // preference, dedupes on (customerId, dedupeKey) under an advisory lock
+  // (the multi-pod double-fire guard), and returns null on a create/dedupe
+  // failure — none of those outcomes ledger anything, so a failed send is
+  // retried by the next sweep instead of being silently consumed.
   const NotificationService = require('./notification-service');
   const result = await NotificationService.notifyCustomer(
     candidate.customerId,
@@ -237,8 +226,32 @@ async function deliverAlert(candidate, { knex = db } = {}) {
       preferenceKey: 'weather_alerts',
     }
   );
-  if (result?.suppressed) return { delivered: false, reason: 'preference_disabled' };
-  return { delivered: true };
+  if (!result) return { delivered: false, reason: 'notify_failed' };
+  if (result.suppressed) return { delivered: false, reason: 'preference_disabled' };
+
+  // The bell is durable — ledger the alert. onConflict ignore covers the
+  // self-heal path: a prior run whose bell landed but whose ledger insert
+  // failed re-reaches here via notifyCustomer's dedupe (no second push) and
+  // backfills the row.
+  try {
+    await knex('customer_alerts')
+      .insert({
+        customer_id: candidate.customerId,
+        rule_key: candidate.ruleKey,
+        dedupe_key: candidate.dedupeKey,
+        title: candidate.title,
+        body: candidate.body,
+        payload: JSON.stringify(candidate.payload || {}),
+      })
+      .onConflict(['customer_id', 'dedupe_key'])
+      .ignore()
+      .returning('id');
+  } catch (err) {
+    // The customer HAS the bell; the missing ledger row self-heals on the
+    // next sweep (dedupe prevents a duplicate push).
+    logger.warn(`[property-alerts] ledger insert failed after delivery (${candidate.ruleKey}): ${err.message}`);
+  }
+  return { delivered: true, deduped: !!result.deduped };
 }
 
 // ---------------------------------------------------------------------------

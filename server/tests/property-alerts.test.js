@@ -138,6 +138,25 @@ describe('reassurance rule', () => {
     expect(await reassuranceRuleCandidates({ now: JULY_NOW, knex })).toEqual([]);
   });
 
+  test('an info-severity finding vetoes too — severity never launders a finding into "clean"', async () => {
+    const knex = knexFor({
+      'service_records as sr': [VISIT({ service_date: '2026-07-06' })],
+      service_findings: [
+        { service_record_id: 'sr-1', category: 'no_activity' },
+        { service_record_id: 'sr-1', category: 'conducive_condition', severity: 'info' },
+      ],
+    });
+    expect(await reassuranceRuleCandidates({ now: JULY_NOW, knex })).toEqual([]);
+  });
+
+  test('a visit with NO findings rows proves nothing and never reassures', async () => {
+    const knex = knexFor({
+      'service_records as sr': [VISIT({ service_date: '2026-07-06' })],
+      service_findings: [],
+    });
+    expect(await reassuranceRuleCandidates({ now: JULY_NOW, knex })).toEqual([]);
+  });
+
   test('non-lawn visits never carry the lawn claim', async () => {
     const knex = knexFor({
       'service_records as sr': [VISIT({ service_type: 'Quarterly Pest Control', service_date: '2026-07-06' })],
@@ -184,29 +203,40 @@ describe('delivery', () => {
     title: 'Heavy rain in your area', body: 'body', payload: {},
   };
 
-  test('ledger row first, then bell+push with the weather_alerts preference key', async () => {
+  test('notify FIRST (weather_alerts preference key), ledger only after a durable bell', async () => {
     const knex = knexFor({});
     const outcome = await deliverAlert(CANDIDATE, { knex });
     expect(outcome.delivered).toBe(true);
-    expect(knex.__inserts[0].table).toBe('customer_alerts');
     expect(NotificationService.notifyCustomer).toHaveBeenCalledWith(
       'cust-1', 'lawn_health', CANDIDATE.title, CANDIDATE.body,
       expect.objectContaining({ dedupeKey: CANDIDATE.dedupeKey, preferenceKey: 'weather_alerts' }),
     );
+    expect(knex.__inserts).toHaveLength(1);
+    expect(knex.__inserts[0].table).toBe('customer_alerts');
   });
 
-  test('a ledger conflict (another pod fired it) skips the bell entirely', async () => {
-    const knex = knexFor({ __conflict: true });
-    const outcome = await deliverAlert(CANDIDATE, { knex });
-    expect(outcome).toEqual({ delivered: false, reason: 'already_fired' });
-    expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
-  });
-
-  test('a preference opt-out suppresses without erroring', async () => {
+  test('a preference opt-out ledgers NOTHING — no portal row, no consumed cap', async () => {
     NotificationService.notifyCustomer.mockImplementation(async () => ({ id: null, suppressed: true }));
     const knex = knexFor({});
     const outcome = await deliverAlert(CANDIDATE, { knex });
     expect(outcome).toEqual({ delivered: false, reason: 'preference_disabled' });
+    expect(knex.__inserts).toHaveLength(0);
+  });
+
+  test('a notify failure (null) ledgers nothing so the next sweep can retry', async () => {
+    NotificationService.notifyCustomer.mockImplementation(async () => null);
+    const knex = knexFor({});
+    const outcome = await deliverAlert(CANDIDATE, { knex });
+    expect(outcome).toEqual({ delivered: false, reason: 'notify_failed' });
+    expect(knex.__inserts).toHaveLength(0);
+  });
+
+  test('a deduped bell (multi-pod re-fire) still backfills the ledger row without a second push', async () => {
+    NotificationService.notifyCustomer.mockImplementation(async () => ({ id: 'note-1', deduped: true }));
+    const knex = knexFor({});
+    const outcome = await deliverAlert(CANDIDATE, { knex });
+    expect(outcome).toEqual({ delivered: true, deduped: true });
+    expect(knex.__inserts).toHaveLength(1);
   });
 });
 
