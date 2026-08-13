@@ -777,6 +777,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY MON 4:05AM ET — Manatee pool-permit sync (ACA "Pool Permits
+  // (CSV)" report → pool_permit_records). Closed-permit backstop for the
+  // pool-facts lookup: the live GIS layer drops permits when they close and
+  // the assessment roll lags a finished pool by up to a year. Inert unless
+  // GATE_POOL_PERMIT_SYNC is set (checked inside syncPoolPermits — single
+  // source of truth); first enabled run on an empty table backfills from
+  // 2023, then trailing-window refreshes. runExclusive: a deploy overlap
+  // must not run two ACA report sessions at once.
+  // =========================================================================
+  cron.schedule('5 4 * * 1', async () => {
+    try {
+      const res = await runExclusive('pool-permit-sync', () =>
+        require('./property-lookup/manatee-pool-permit-sync').syncPoolPermits());
+      if (res && !res.skipped) {
+        logger.info(`Pool-permit sync: ${res.mode}, ${res.written}/${res.fetched} rows over ${res.windows} window(s)`);
+      }
+    } catch (err) {
+      logger.error(`Pool-permit sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
   // renames from the unit-review queue only: "Gallons" -> gal at factor 1;
   // missing-unit and ambiguous-oz rows stay parked for review). Gate is

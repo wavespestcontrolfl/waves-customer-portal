@@ -245,6 +245,7 @@ async function performPropertyLookupCore(address, options = {}) {
         const permits = await lookupPoolPermitsByParcel({
           county: cached.property_record._parcel.county,
           parcelId: cached.property_record._parcel.paoParcelId,
+          address,
         }).catch(() => null);
         if (permits) {
           cached.property_record._poolPermits = permits;
@@ -394,6 +395,7 @@ async function performPropertyLookupCore(address, options = {}) {
       const permits = await lookupPoolPermitsByParcel({
         county: parcelMeta.county,
         parcelId: parcelMeta.paoParcelId,
+        address,
       }).catch(() => null);
       if (permits) result.propertyRecord._poolPermits = permits;
     }
