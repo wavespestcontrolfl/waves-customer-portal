@@ -3552,7 +3552,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // is not tech-ownership-scoped like admin-schedule, so the predicate
     // enforces assignment itself: only the visit's current technician can
     // field-stamp it.
-    const isFieldLifecycleTakeover = req.techRole === 'technician'
+    const takeoverCandidate = req.techRole === 'technician'
       && req.technicianId
       && String(svc.technician_id || '') === String(req.technicianId)
       && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
@@ -3561,6 +3561,22 @@ router.put('/:serviceId/status', async (req, res, next) => {
       && ['en_route', 'on_site', 'completed'].includes(toStatus);
     try {
       await db.transaction(async (trx) => {
+        // ⭐ OWNERSHIP IS PROVEN UNDER THE ROW LOCK, NOT THE SNAPSHOT. The
+        // pre-transaction `svc` read races a reassignment: dispatch can move
+        // the visit to another technician between that SELECT and this
+        // transaction, and the FORMER tech's transition would still stamp the
+        // field confirm. Re-read FOR UPDATE and re-verify assignment + the
+        // owed-activation state here — the same row-locked re-check
+        // admin-schedule runs for its technician requests.
+        let isFieldLifecycleTakeover = false;
+        if (takeoverCandidate) {
+          const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
+            .first('technician_id', 'customer_confirmed', 'status');
+          isFieldLifecycleTakeover = !!locked
+            && String(locked.technician_id || '') === String(req.technicianId)
+            && locked.customer_confirmed !== true
+            && ['pending', 'confirmed'].includes(String(locked.status));
+        }
         // Lifecycle timestamps live on the same row as status; flip
         // them inside the same trx so a rollback also rolls back the
         // timestamp change. transitionJobStatus owns the status +

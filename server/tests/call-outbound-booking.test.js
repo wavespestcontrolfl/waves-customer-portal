@@ -1130,10 +1130,13 @@ describe('round 27 — clearance is stamped, side effects wait for commits, repa
 describe('field-confirm semantics cover day-of takeovers on BOTH status routes', () => {
   const fs = require('fs');
   const path = require('path');
-  for (const file of ['admin-schedule.js', 'admin-dispatch.js']) {
+  for (const { file, anchor } of [
+    { file: 'admin-schedule.js', anchor: 'const isFieldLifecycleTakeover' },
+    { file: 'admin-dispatch.js', anchor: 'const takeoverCandidate' },
+  ]) {
     test(`${file}: unactivated office-review row moved day-of by its technician stamps field_confirmed_at`, () => {
       const src = fs.readFileSync(path.join(__dirname, '../routes', file), 'utf8');
-      const idx = src.indexOf('const isFieldLifecycleTakeover');
+      const idx = src.indexOf(anchor);
       expect(idx).toBeGreaterThan(-1);
       const predicate = src.slice(idx, idx + 700);
       expect(predicate).toContain('OFFICE_REVIEW_PENDING_SOURCE_ACTIONS');
@@ -1145,16 +1148,20 @@ describe('field-confirm semantics cover day-of takeovers on BOTH status routes',
     });
   }
 
-  // ⭐ ONLY THE VISIT'S OWN TECHNICIAN CAN FIELD-STAMP IT. admin-schedule
-  // scopes technician requests via technicianCurrentVisitFilter + an in-trx
-  // row-locked re-check; admin-dispatch is not ownership-scoped, so its
-  // predicate must enforce assignment itself.
-  test('admin-dispatch.js: the takeover predicate enforces technician ownership', () => {
-    const fs2 = require('fs');
-    const src = fs2.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
-    const idx = src.indexOf('const isFieldLifecycleTakeover');
-    const predicate = src.slice(idx, idx + 700);
-    expect(predicate).toContain('String(svc.technician_id || \'\') === String(req.technicianId)');
-    expect(predicate).toContain('req.technicianId');
+  // ⭐ ONLY THE VISIT'S OWN TECHNICIAN CAN FIELD-STAMP IT — PROVEN UNDER THE
+  // ROW LOCK. admin-schedule scopes technician requests via
+  // technicianCurrentVisitFilter + an in-trx row-locked re-check;
+  // admin-dispatch is not ownership-scoped, so it re-reads the row FOR UPDATE
+  // inside the transaction and re-verifies assignment + the owed-activation
+  // state there — a pre-transaction snapshot races reassignment.
+  test('admin-dispatch.js: ownership + state are re-verified under the transaction row lock', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const idx = src.indexOf('let isFieldLifecycleTakeover = false');
+    expect(idx).toBeGreaterThan(-1);
+    const recheck = src.slice(idx, idx + 700);
+    expect(recheck).toContain('.forUpdate()');
+    expect(recheck).toContain("String(locked.technician_id || '') === String(req.technicianId)");
+    expect(recheck).toContain('locked.customer_confirmed !== true');
+    expect(recheck).toContain("['pending', 'confirmed'].includes(String(locked.status))");
   });
 });
