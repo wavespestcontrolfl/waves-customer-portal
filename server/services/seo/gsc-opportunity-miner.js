@@ -1234,7 +1234,7 @@ function cityServiceTargetKey(service, city) {
   return ownPageKey(canonicalizeServiceCategory(service) || service, city);
 }
 
-function arbitrateCityServiceTargets(opportunities = []) {
+function arbitrateCityServiceTargets(opportunities = [], { frozenKeys = new Set() } = {}) {
   const CS = 'create_or_refresh_city_service_page';
   const byTarget = new Map();
   const out = [];
@@ -1246,14 +1246,19 @@ function arbitrateCityServiceTargets(opportunities = []) {
   }
   for (const group of byTarget.values()) {
     if (group.length === 1) { out.push(group[0]); continue; }
-    // PERSISTABLE candidates first — the standing yield rule: a candidate
-    // that will not clear its own floor must never displace one that will,
-    // or persistAll drops the winner after the eligible twin was already
-    // removed and the target ends the mine with NOTHING (pre-push P1).
-    // When none clear, keep the full group so calibration still sees the
-    // best candidate (persistAll drops it either way).
-    const persistable = group.filter((o) => isPersistable(o));
-    const eligible = persistable.length ? persistable : group;
+    // UNFROZEN candidates first (round-5 P1, mirroring
+    // _arbitratedRefreshPages): a winner whose dedupe key already has a
+    // done/skipped row cannot land — the upsert's frozen-row guard skips
+    // it entirely — so electing it removes the eligible twin and the
+    // target ends the mine with nothing. Then PERSISTABLE — the standing
+    // yield rule: a candidate that will not clear its own floor must never
+    // displace one that will. When nothing survives a narrowing, fall back
+    // a level so calibration still sees the best candidate (persistAll
+    // drops or no-ops it either way).
+    const unfrozen = group.filter((o) => !frozenKeys.has(o.dedupe_key));
+    const landable = unfrozen.length ? unfrozen : group;
+    const persistable = landable.filter((o) => isPersistable(o));
+    const eligible = persistable.length ? persistable : landable;
     const queryBearing = eligible.filter((o) => o.query);
     const pool = queryBearing.length ? queryBearing : eligible;
     const winner = pool.reduce((best, o) => (o.score > best.score ? o : best), pool[0]);
@@ -1707,9 +1712,27 @@ class GscOpportunityMiner {
 
     // Cross-bucket city-service arbitration BEFORE assembly — see
     // arbitrateCityServiceTargets. link_boost companions never carry the
-    // city-service action, so deriving them first is order-safe.
+    // city-service action, so deriving them first is order-safe. Frozen
+    // keys are read first (mirroring _arbitratedRefreshPages, same
+    // fail-soft posture and same narrowed race — the in-txn fence
+    // re-checks in-flight states): a winner aimed at a done/skipped row
+    // cannot land, so it must not displace a twin that can.
+    let cityServiceFrozenKeys = new Set();
+    try {
+      const preArbitration = [...minedOpportunities, ...buckets.link_boost];
+      if (preArbitration.some((o) => o.action_type === 'create_or_refresh_city_service_page')) {
+        const frozenRows = await db('opportunity_queue')
+          .where({ action_type: 'create_or_refresh_city_service_page' })
+          .whereIn('status', ['done', 'skipped'])
+          .select('dedupe_key');
+        cityServiceFrozenKeys = new Set(frozenRows.map((r) => r.dedupe_key));
+      }
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] city-service frozen-key lookup failed (${err.message}) — arbitration proceeds frozen-blind`);
+    }
     const allOpportunities = arbitrateCityServiceTargets(
-      [...minedOpportunities, ...buckets.link_boost]
+      [...minedOpportunities, ...buckets.link_boost],
+      { frozenKeys: cityServiceFrozenKeys }
     );
 
     const counts = Object.fromEntries(
