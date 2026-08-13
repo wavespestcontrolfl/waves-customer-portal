@@ -956,7 +956,13 @@ function findUngroundedClaim(body, grounding) {
     if (!phrase) return true;
     if (groundedText.includes(phrase)) return true;
     const words = phrase.split(' ').filter((w) => w.length >= 4);
-    if (!words.length) return true;
+    // No 4+-letter words left does NOT make the claim grounded: a short
+    // verb object ("Use DDT" → 'ddt') is exactly the shape every
+    // length-gated pass ignores (rare-word scan starts at 4, catalog
+    // vocabulary at 4) — and the whole-phrase check above already
+    // failed, so the claim appears nowhere in the grounding. Fail
+    // closed rather than accept it vacuously.
+    if (!words.length) return false;
     return words.every((w) => wordVariants(w).some((v) => groundedText.includes(v)));
   };
   const labeledFields = [
@@ -1274,9 +1280,13 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
     // acceptance rewrites service_type too) — the read path compares
     // these stamps against the row and withdraws mismatched guidance
     // (briefStaleReason) instead of serving another day's or another
-    // service's products until a later sweep.
+    // service's products until a later sweep. NORMALIZED, exactly the
+    // hashed llmFacts.visit.serviceType: stamping the raw label would
+    // desync from the hash on a label-only rewrite (suffix strip) — the
+    // sweep's cache branch would keep answering 'unchanged' while the
+    // read withdrew the brief forever.
     for_date: calendarDay(svc.scheduled_date),
-    for_service: String(svc.service_type || ''),
+    for_service: grounding.normalizedType,
     priorities: body.priorities,
     watch_items: body.watch_items,
     last_visit: {
@@ -1384,7 +1394,11 @@ function briefStaleReason(brief, svc) {
   if (!brief || !brief.for_date || brief.for_date !== calendarDay(svc.scheduled_date)) {
     return 'date_moved';
   }
-  if (!brief.for_service || brief.for_service !== String(svc.service_type || '')) {
+  // NORMALIZED comparison, matching the stamp and the grounding hash: a
+  // label-only rewrite (same normalized service) must neither withdraw
+  // the brief nor demand a regeneration the 'unchanged' cache branch
+  // will never perform.
+  if (!brief.for_service || brief.for_service !== normalizeServiceType(svc.service_type)) {
     return 'service_changed';
   }
   return null;

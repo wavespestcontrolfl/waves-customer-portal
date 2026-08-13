@@ -420,6 +420,20 @@ describe('grounded allowlist validation of LLM output', () => {
     expect(verdict.reason).toBe('ungrounded_instruction:interior');
   });
 
+  test('a short (≤3-letter) ungrounded product in an instruction is rejected, not vacuously grounded', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    // 'ddt' is under every length-gated pass (rare-word scan and catalog
+    // vocabulary both start at 4 chars) and under instructedClaimGrounded's
+    // significant-word threshold — with the whole-phrase check failed, no
+    // remaining words must mean REJECT, not accept.
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Use DDT'] },
+      grounding,
+    );
+    expect(verdict.reason).toBe('ungrounded_instruction:ddt');
+  });
+
   test('the same common-word instruction passes when the grounding states it', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = {
@@ -552,6 +566,11 @@ describe('briefClearOnReclassification (update-details service switch)', () => {
     // Direct service_type writers (estimate acceptance, call flows) never
     // pass through update-details' clearing — the read must fail closed.
     expect(briefStaleReason(stamped, { scheduled_date: '2026-08-13', service_type: 'Lawn Care Service' })).toBe('service_changed');
+    // Label-only rewrite (same NORMALIZED service): must stay servable —
+    // the stamp is normalized exactly like the hashed grounding fact, so
+    // a raw comparison would withdraw the brief forever while the
+    // sweep's unchanged-hash cache branch never restamps it.
+    expect(briefStaleReason(stamped, { scheduled_date: '2026-08-13', service_type: 'Pest Control Service - 30 min' })).toBeNull();
     expect(briefStaleReason({ priorities: [] }, { scheduled_date: '2026-08-13', service_type: 'Pest Control Service' })).toBe('date_moved');
     expect(briefStaleReason({ for_date: '2026-08-13' }, { scheduled_date: '2026-08-13', service_type: 'Pest Control Service' })).toBe('service_changed');
     expect(briefStaleReason(null, { scheduled_date: '2026-08-13', service_type: 'Pest Control Service' })).toBe('date_moved');
