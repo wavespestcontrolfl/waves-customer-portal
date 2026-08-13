@@ -724,7 +724,13 @@ async function executeTool(name, input = {}, ctx = {}) {
         targetCustomerId = ctx.customerId;
         tier = matchedCallerTier(ctx);
       }
-      if (name === 'get_account_overview') return await relayContext.accountOverviewText(targetCustomerId, { tier });
+      // The overview is receptionist-level and rides the ANI match — except the
+      // balance FIGURE, which is the same number get_invoice_history is gated
+      // on, so it takes the same attestation (relay-context redacts just that
+      // line). Without this the split tier had a second door to the amount.
+      if (name === 'get_account_overview') {
+        return await relayContext.accountOverviewText(targetCustomerId, { tier, attested: callerAttested(ctx) });
+      }
       if (name === 'get_service_history') return await relayContext.serviceHistoryText(targetCustomerId, { tier });
       if (name === 'get_today_eta') {
         const { todayEtaText } = require('./relay-visit');

@@ -889,7 +889,13 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null } 
  * are exported, so a future call site that forgets the option must fail toward
  * LESS disclosure, never more. `full` is only ever reached by asking for it.
  */
-async function accountOverviewText(customerId, { tier = 'redacted' } = {}) {
+// ⭐ THE AMOUNT HAS TWO DOORS. The split tier held `get_invoice_history` behind
+// attestation A and redacted the balance FIGURE in the KNOWN CALLER block — and
+// left this one open, which reads the same number off the same loader. A rule
+// that a caller can route around is not a rule, so the figure is gated here too;
+// everything else the overview says (services, appointments, last visit, whether
+// a balance EXISTS) is receptionist-level and stays on the ANI match.
+async function accountOverviewText(customerId, { tier = 'redacted', attested = false } = {}) {
   const redacted = tier !== 'full';
   const [services, nextAppointment, visits, balance] = await Promise.all([
     loadRecurringServiceNames(customerId).catch(() => []),
@@ -930,7 +936,13 @@ async function accountOverviewText(customerId, { tier = 'redacted' } = {}) {
     parts.push('This is a LOOKED-UP account (the caller\'s phone did not match it): confirm details the caller states themselves, don\'t recite account details to them.');
     return parts.join(' ');
   }
-  if (balance && Number(balance.total) > 0) {
+  if (balance && Number(balance.total) > 0 && !attested) {
+    // Matched, but the carrier will not vouch for the number: they are told
+    // there IS a balance — which they can see in their own portal anyway — and
+    // the figure waits for a human or an attested call.
+    parts.push('Open balance: yes — there is an open balance on this account. Do NOT state or estimate the amount; '
+      + 'the caller can see it in their portal, or a team member can go over it with them.');
+  } else if (balance && Number(balance.total) > 0) {
     parts.push(`Open balance: ${fmtMoney(balance.total)} across ${balance.count} open invoice${balance.count === 1 ? '' : 's'}. You may state this amount to the caller; never read card or bank details (we do not have them to read).`);
   } else if (balance) {
     parts.push('Open balance: none — the account is paid up.');

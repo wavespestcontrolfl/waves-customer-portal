@@ -469,7 +469,7 @@ describe('GATE ON — account tools', () => {
     primeDb({
       scheduled: [{ scheduled_date: '2026-08-18', service_type: 'Pest Control', window_start: '09:00:00', window_end: '15:00:00', status: 'confirmed' }],
     });
-    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full' });
+    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full', callerAttested: true });
     expect(out).toContain('arrival window 9:00 AM to 11:00 AM');
     expect(out).not.toContain('window starting');
     expect(out).not.toContain('3:00 PM'); // window_end is duration data, never spoken
@@ -482,11 +482,31 @@ describe('GATE ON — account tools', () => {
     });
     loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
     openBalanceSummary.mockResolvedValue({ total: 49.5, count: 1, moreCount: 0, invoices: [] });
-    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full' });
+    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full', callerAttested: true });
     expect(out).toContain('Pest Control');
     expect(out).toContain('Tuesday August 18');
     expect(out).toContain('Friday July 31');
     expect(out).toContain('$49.50');
+    assertNoWrites();
+  });
+
+  // ⭐ THE AMOUNT HAS TWO DOORS, AND BOTH TAKE THE SAME LOCK. get_invoice_history
+  // was gated on attestation A and the KNOWN CALLER block redacted the figure —
+  // while this tool read the same number off the same loader for an unattested
+  // caller. Everything else the overview says stays: the caller is still known.
+  test('full tier WITHOUT attestation-A → overview keeps everything but the AMOUNT', async () => {
+    primeDb({
+      scheduled: [{ scheduled_date: '2026-08-18', service_type: 'Pest Control', window_start: '9:00 AM', status: 'confirmed' }],
+      records: [{ service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'mowed edges', structured_notes: null, status: 'completed' }],
+    });
+    loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
+    openBalanceSummary.mockResolvedValue({ total: 49.5, count: 1, moreCount: 0, invoices: [] });
+    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full' });
+    expect(out).not.toContain('$49.50');
+    expect(out).not.toMatch(/\$\d/);
+    expect(out).toMatch(/open balance/i); // the EXISTENCE is still answered
+    expect(out).toContain('Pest Control'); // …and so is everything else
+    expect(out).toContain('Tuesday August 18');
     assertNoWrites();
   });
 
@@ -521,7 +541,7 @@ describe('GATE ON — account tools', () => {
         { service_date: '2026-06-15', service_type: 'Pest Control', technician_notes: 'internal-only-secret', structured_notes: JSON.stringify({ typedReportDelivery: 'internal_only' }), status: 'completed' },
       ],
     });
-    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'full' });
+    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'full', callerAttested: true });
     // customerSafeServiceNotes (mocked as SAFE:-prefix) is the ONLY notes path.
     expect(out).toContain('SAFE:note-1');
     // internal_only typed delivery suppresses notes entirely (same predicate
@@ -546,7 +566,7 @@ describe('GATE ON — account tools', () => {
         technician_notes: 'gate code 4482, customer disputes the invoice', structured_notes: null, status: 'completed',
       }],
     });
-    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'full' });
+    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'full', callerAttested: true });
     expect(out).toContain('Friday July 31');   // the visit itself is still stated
     expect(out).not.toContain('4482');         // the note is not
     expect(out).not.toContain('disputes');
@@ -556,7 +576,7 @@ describe('GATE ON — account tools', () => {
 
   test('balance of zero reads as none', async () => {
     openBalanceSummary.mockResolvedValue({ total: 0, count: 0, moreCount: 0, invoices: [] });
-    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full' });
+    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full', callerAttested: true });
     expect(out).toMatch(/Open balance: none/);
   });
 });
@@ -759,10 +779,14 @@ describe('GATE ON — lookup_customer (output shaping is the point)', () => {
 describe('GATE ON — disclosure tiers (enforced in tool output, not prompt language)', () => {
   beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
 
-  function refCtx({ ani = null, tier = 'full' } = {}) {
+  // `attested` defaults ON here because these cases are about the REF vs ANI
+  // boundary, not the split tier: an unattested matched caller is covered by its
+  // own tests. A looked-up (non-ANI) account is redacted either way.
+  function refCtx({ ani = null, tier = 'full', attested = true } = {}) {
     return {
       customerId: ani,
       customerTier: ani ? tier : 'redacted',
+      callerAttested: !!(ani && attested),
       resolveLookupRef: (ref) => (String(ref).toUpperCase() === 'C1' ? 'c-9001' : null),
     };
   }
@@ -823,7 +847,7 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
     primeDb({
       records: [{ service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'note-1', structured_notes: null, status: 'completed' }],
     });
-    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'full' });
+    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'full', callerAttested: true });
     expect(out).toContain('SAFE:note-1');
   });
 
