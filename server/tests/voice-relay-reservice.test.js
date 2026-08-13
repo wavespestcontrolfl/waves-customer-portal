@@ -222,7 +222,10 @@ describe('GATE ON', () => {
     // The internal admin notification carries it in the title AND the body.
     const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toMatch(/UNVERIFIED REQUESTER/);
-    expect(body).toMatch(/^⚠️ UNVERIFIED third-party requester/);
+    // The note rides inside the stored description (stamped FIRST there so it
+    // survives every truncation) — the body must carry it exactly once.
+    expect(body).toMatch(/⚠️ UNVERIFIED third-party requester/);
+    expect(body.match(/UNVERIFIED third-party requester/g)).toHaveLength(1);
     expect(opts.metadata.unverified_requester).toBe(true);
 
     // …and so does the owner alert (the routing fix that reaches a human).
@@ -458,6 +461,80 @@ describe('GATE ON', () => {
     await executeTool('request_reservice', GOOD, CTX);
     expect(builders.service_requests.insert).not.toHaveBeenCalled();
     expect(relayAlert.alertOwnerReservice).not.toHaveBeenCalled();
+  });
+
+  // ⭐ THE ALERT IS THE ESCAPE HATCH, SO IT GETS A RECEIPT. The ticket queue is
+  // the documented black hole; a process exit between the ticket commit and
+  // the owner page stranded a durable ticket nobody would ever see — and the
+  // already-open dedupe guard then refused a second ticket without ever
+  // re-alerting. The receipt (owner_alerted_at) is stamped on a delivered
+  // page, the guard retries the alerts when it is missing, and the hourly
+  // sweep covers rows no second call ever touches.
+  test('a DELIVERED owner page stamps owner_alerted_at on the ticket', async () => {
+    relayAlert.alertOwnerReservice.mockResolvedValue(true); // clearAllMocks does not reset implementations
+    builders.service_requests.update = jest.fn(async () => 1); // the stamp is expected here
+    await executeTool('request_reservice', GOOD, CTX);
+    expect(builders.service_requests.update).toHaveBeenCalledWith(
+      expect.objectContaining({ owner_alerted_at: expect.any(Date) }),
+    );
+  });
+
+  test('an UNDELIVERED page leaves the receipt unstamped (retryable)', async () => {
+    relayAlert.alertOwnerReservice.mockResolvedValue(false);
+    builders.service_requests.update = jest.fn(async () => 1);
+    await executeTool('request_reservice', GOOD, CTX);
+    expect(builders.service_requests.update).not.toHaveBeenCalled();
+  });
+
+  test('the already-open guard RETRIES the alerts for a voice ticket with no receipt', async () => {
+    primeDb({
+      requests: [{
+        id: 'sr-old', created_at: '2026-08-10T12:00:00Z', source: 'voice_agent',
+        owner_alerted_at: null, subject: 'Re-service request (phone assistant): ants', description: 'ants',
+        urgency: 'routine', category: 'pest_issue', customer_id: CUSTOMER_ID,
+      }],
+    });
+    relayAlert.alertOwnerReservice.mockResolvedValue(true); // clearAllMocks does not reset implementations
+    builders.service_requests.update = jest.fn(async () => 1);
+    const out = await executeTool('request_reservice', GOOD, CTX);
+    expect(builders.service_requests.insert).not.toHaveBeenCalled(); // still no second ticket
+    expect(relayAlert.alertOwnerReservice).toHaveBeenCalledTimes(1); // …but the page is retried
+    expect(builders.service_requests.update).toHaveBeenCalledWith(
+      expect.objectContaining({ owner_alerted_at: expect.any(Date) }),
+    );
+    expect(out).toMatch(/already/i);
+  });
+
+  test('the already-open guard does NOT re-page a ticket that carries the receipt', async () => {
+    primeDb({
+      requests: [{
+        id: 'sr-old', created_at: '2026-08-10T12:00:00Z', source: 'voice_agent',
+        owner_alerted_at: '2026-08-10T12:01:00Z', subject: 's', description: 'd',
+        urgency: 'routine', category: 'pest_issue', customer_id: CUSTOMER_ID,
+      }],
+    });
+    await executeTool('request_reservice', GOOD, CTX);
+    expect(relayAlert.alertOwnerReservice).not.toHaveBeenCalled();
+  });
+
+  test('the hourly sweep pages unalerted voice tickets and stamps them', async () => {
+    const relayReservice = require('../services/voice-agent/relay-reservice');
+    primeDb({
+      requests: [{
+        id: 'sr-stranded', customer_id: CUSTOMER_ID, category: 'pest_issue', urgency: 'urgent',
+        subject: 'Re-service request (phone assistant): roaches', description: 'roaches',
+        source: 'voice_agent', owner_alerted_at: null,
+      }],
+    });
+    relayAlert.alertOwnerReservice.mockResolvedValue(true); // clearAllMocks does not reset implementations
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+    builders.service_requests.update = jest.fn(async () => 1);
+    const paged = await relayReservice.sweepUnalertedVoiceReservices();
+    expect(paged).toBe(1);
+    expect(relayAlert.alertOwnerReservice).toHaveBeenCalledTimes(1);
+    expect(builders.service_requests.update).toHaveBeenCalledWith(
+      expect.objectContaining({ owner_alerted_at: expect.any(Date) }),
+    );
   });
 });
 

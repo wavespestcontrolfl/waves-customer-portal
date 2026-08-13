@@ -114,6 +114,13 @@ function buildHotLeadAlert({ firstName, lastName, phone, city, requestedService,
 // while the winner's send failed and released — hot lead paged by nobody.
 const HOT_ALERT_KEY = 'relay_hot_alert_at';
 const HOT_ALERT_SENT_KEY = 'relay_hot_alert_sent_at';
+// ⭐ THE CLAIM IS A LEASE, NOT A TOMBSTONE. A process that dies between the
+// claim and the send (or the sent receipt) leaves claimed=true/sent=false
+// forever — and every later session would wait, see no receipt, and refuse to
+// page for the rest of time. A claim with no delivery receipt is therefore
+// RECLAIMABLE once it is old enough that no live send can still be running;
+// the reclaim is the same single-statement burn, so exactly one taker wins.
+const HOT_ALERT_CLAIM_LEASE = "interval '2 minutes'";
 
 async function claimHotAlertForCall(callSid) {
   const key = String(callSid || '').trim();
@@ -122,7 +129,11 @@ async function claimHotAlertForCall(callSid) {
     const db = require('../../models/db');
     const rows = await db('call_log')
       .where({ twilio_call_sid: key })
-      .whereRaw(`(metadata->>'${HOT_ALERT_KEY}') IS NULL`)
+      .whereRaw(
+        `((metadata->>'${HOT_ALERT_KEY}') IS NULL `
+        + `OR ((metadata->>'${HOT_ALERT_SENT_KEY}') IS NULL `
+        + `AND (metadata->>'${HOT_ALERT_KEY}')::timestamptz < now() - ${HOT_ALERT_CLAIM_LEASE}))`,
+      )
       .update({
         metadata: db.raw(
           `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${HOT_ALERT_KEY}}', to_jsonb(now()::text), true)`,

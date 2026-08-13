@@ -152,8 +152,19 @@ async function requestReserviceText(input = {}, ctx = {}) {
     .where({ customer_id: customerId, category })
     .whereIn('status', OPEN_REQUEST_STATUSES)
     .orderBy('created_at', 'desc')
-    .first('id', 'created_at');
-  if (openRequest) return alreadyOpenText(lane, openRequest, speakDate);
+    .first('id', 'created_at', 'source', 'owner_alerted_at', 'subject', 'description', 'urgency', 'category', 'customer_id');
+  if (openRequest) {
+    // ⭐ THE OPEN TICKET'S ALERTS ARE RETRIED ON TOUCH (same rule as the
+    // in-transaction guard below): a voice-filed row with no alert receipt is
+    // a ticket whose page died with a process — re-fire and stamp rather than
+    // letting this correct refusal be where the retry dies too.
+    if (openRequest.source === VOICE_REQUEST_SOURCE && !openRequest.owner_alerted_at) {
+      await fireReserviceAlertsAndStamp({
+        row: openRequest, lane, covered: false, unverifiedRequester, unverifiedNote, ctx,
+      }).catch(() => {});
+    }
+    return alreadyOpenText(lane, openRequest, speakDate);
+  }
 
   // Already-booked free re-service in this lane → tell the caller when it is,
   // don't file anything. Reuses the picker's own lane dedupe read
@@ -267,7 +278,7 @@ async function requestReserviceText(input = {}, ctx = {}) {
       .where({ customer_id: customerId, category })
       .whereIn('status', OPEN_REQUEST_STATUSES)
       .orderBy('created_at', 'desc')
-      .first('id', 'created_at');
+      .first('id', 'created_at', 'source', 'owner_alerted_at', 'subject', 'description', 'urgency', 'category', 'customer_id');
     if (raced) return { status: 'already_open', row: raced };
     const [row] = await trx('service_requests')
       .insert({
@@ -304,6 +315,19 @@ async function requestReserviceText(input = {}, ctx = {}) {
       `[voice-relay-reservice] concurrent ${category} request for customer ${customerId} — `
       + `no second ticket filed (callSid=${ctx.callSid || 'n/a'})`
     );
+    // ⭐ THE OPEN TICKET'S ALERTS ARE RETRIED ON TOUCH. A process exit between
+    // the earlier commit and its owner page left a durable ticket in the
+    // documented black-hole queue with nobody paged — and this dedupe guard
+    // was where the retry died: it correctly refused a second ticket and then
+    // never re-alerted either. A voice-filed open row with no alert receipt
+    // gets its alerts fired NOW (and stamped), so the guard is the retry rail
+    // rather than the place retries go to die.
+    const open = filedTicket.row;
+    if (open && open.source === VOICE_REQUEST_SOURCE && !open.owner_alerted_at) {
+      await fireReserviceAlertsAndStamp({
+        row: open, lane, covered, unverifiedRequester, unverifiedNote, ctx,
+      }).catch(() => {});
+    }
     return alreadyOpenText(lane, filedTicket.row, speakDate);
   }
   const created = filedTicket.row;
@@ -322,66 +346,15 @@ async function requestReserviceText(input = {}, ctx = {}) {
   if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated: false });
   if (typeof ctx.markReserviceFiled === 'function') ctx.markReserviceFiled();
 
-  // INTERNAL admin notification — the same feed + deep link the portal's own
-  // POST /api/requests writes to. Internal only; fail-open.
-  let notif = null;
-  try {
-    const NotificationService = require('../notification-service');
-    notif = await NotificationService.notifyAdmin(
-      'service',
-      `${urgency === 'urgent' ? '🚨 URGENT ' : ''}${unverifiedRequester ? '⚠️ UNVERIFIED REQUESTER — ' : ''}`
-      + 'Phone assistant re-service request',
-      `${unverifiedRequester ? `⚠️ ${unverifiedNote}\n\n` : ''}`
-      + `Category: ${category.replace(/_/g, ' ')}\nSubject: ${subject}\n\n"${issue}"`,
-      {
-        icon: urgency === 'urgent' ? '🚨' : '🏠',
-        link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
-        metadata: {
-          requestId: created && created.id,
-          customerId,
-          category,
-          urgency,
-          source: VOICE_REQUEST_SOURCE,
-          callSid: ctx.callSid || null,
-          unverified_requester: unverifiedRequester,
-          ...(unverifiedNote ? { unverified_requester_note: unverifiedNote } : {}),
-        },
-      }
-    );
-  } catch (err) {
-    logger.error(`[voice-relay-reservice] admin notification threw for request ${created && created.id}: ${err.message}`);
-  }
-  // notifyAdmin SWALLOWS DB errors and returns null instead of throwing, so the
-  // catch above never sees a failed insert — routes/requests.js checks `if
-  // (!notif)` for exactly this reason. The request row is durable either way;
-  // an unsurfaced notification is not, so say so loudly enough to page.
-  if (!notif) {
-    logger.error(
-      `[voice-relay-reservice] admin notification did NOT persist for request ${created && created.id} `
-      + `(customer ${customerId}); the service_requests row is durable but may be unsurfaced in the admin feed.`
-    );
-  }
-
-  // ⭐ OWNER-RULED ROUTING FIX. routes/requests.js 409s a covered pest/lawn
-  // ticket precisely because the ticket queue is "a proven black hole — 14
-  // requests, zero resolved"; the re-service streamline exists to bypass it.
-  // The agent cannot use the streamline's booking half (it fires customer
-  // comms, which the agent may NEVER do), so the ticket stays as the durable
-  // record AND the existing INTERNAL owner alert fires for every voice-filed
-  // re-service — reaching a human instead of the queue. No new notification
-  // mechanism: this is relay-alert's own sender, the same one the hot-lead path
-  // and createSelfBooking's confirm alert use, and it is internal-only by
-  // construction (owner phone + messageType 'internal_alert').
-  try {
-    const { alertOwnerReservice } = require('./relay-alert');
-    await alertOwnerReservice({
-      lane, category, urgency, issue, subject, covered, requestId: created && created.id, customerId,
-      unverifiedRequester, unverifiedNote,
-    }, ctx);
-  } catch (err) {
-    // Fail-open: the ticket is already written and the caller is on the line.
-    logger.error(`[voice-relay-reservice] owner alert FAILED for request ${created && created.id}: ${err.message}`);
-  }
+  // Both alerts, plus the durable receipt — see fireReserviceAlertsAndStamp.
+  // The locals are authoritative for the fresh row (returning('*') shapes vary
+  // by driver/mocks); only the id must come from the insert.
+  await fireReserviceAlertsAndStamp({
+    row: {
+      id: created && created.id, customer_id: customerId, category, urgency, subject, description,
+    },
+    lane, covered, unverifiedRequester, unverifiedNote, ctx,
+  }).catch(() => {});
 
   return `Re-service request filed for this account (${LANE_LABEL[lane]}${urgency === 'urgent' ? ', flagged urgent' : ''}). `
     + (unverifiedRequester
@@ -397,8 +370,145 @@ async function requestReserviceText(input = {}, ctx = {}) {
     + 'request is already on their account.';
 }
 
+/**
+ * ⭐ THE ALERTS ARE THE ESCAPE HATCH, SO THEY GET A RECEIPT. The ticket queue is
+ * a documented black hole (owner ruling — 14 requests, zero resolved); the
+ * INTERNAL owner page is what makes a voice-filed ticket reach a human. Running
+ * it as a fire-and-forget side effect made it evaporable: a process exit after
+ * the commit stranded a durable ticket nobody would ever see. This helper fires
+ * both alerts and stamps `service_requests.owner_alerted_at` ONLY when the
+ * owner page actually went out — the stamp is what the retry-on-touch (the
+ * already-open dedupe guard) and the hourly sweep key on.
+ *
+ * ⭐ OWNER-RULED ROUTING FIX underneath: routes/requests.js 409s a covered
+ * pest/lawn ticket precisely because of that black hole; the agent cannot use
+ * the streamline's booking half (it fires customer comms, which the agent may
+ * NEVER do), so the ticket stays the durable record AND relay-alert's own
+ * sender pages a human — internal-only by construction (owner phone +
+ * messageType 'internal_alert').
+ */
+async function fireReserviceAlertsAndStamp({ row, lane, covered, unverifiedRequester = false, unverifiedNote = null, ctx = {} }) {
+  if (!row || !row.id) return false;
+  const category = row.category;
+  const urgency = row.urgency || 'routine';
+  const subject = row.subject || '';
+  const issue = row.description || subject;
+  const customerId = row.customer_id;
+  // INTERNAL admin notification — the same feed + deep link the portal's own
+  // POST /api/requests writes to. Internal only; fail-open.
+  let notif = null;
+  try {
+    const NotificationService = require('../notification-service');
+    notif = await NotificationService.notifyAdmin(
+      'service',
+      `${urgency === 'urgent' ? '🚨 URGENT ' : ''}${unverifiedRequester ? '⚠️ UNVERIFIED REQUESTER — ' : ''}`
+      + 'Phone assistant re-service request',
+      // (the stored description may already carry the ⚠️ note — don't double it)
+      `${unverifiedRequester && unverifiedNote && !String(issue).includes(unverifiedNote) ? `⚠️ ${unverifiedNote}\n\n` : ''}`
+      + `Category: ${String(category || '').replace(/_/g, ' ')}\nSubject: ${subject}\n\n"${issue}"`,
+      {
+        icon: urgency === 'urgent' ? '🚨' : '🏠',
+        link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+        // A consent-adjacent, action-required card — must ring through the
+        // bell policy like the contact-instruction row does.
+        bell: true,
+        metadata: {
+          requestId: row.id,
+          customerId,
+          category,
+          urgency,
+          source: VOICE_REQUEST_SOURCE,
+          callSid: ctx.callSid || null,
+          unverified_requester: unverifiedRequester,
+          ...(unverifiedNote ? { unverified_requester_note: unverifiedNote } : {}),
+        },
+      }
+    );
+  } catch (err) {
+    logger.error(`[voice-relay-reservice] admin notification threw for request ${row.id}: ${err.message}`);
+  }
+  // notifyAdmin SWALLOWS DB errors and returns null instead of throwing —
+  // routes/requests.js checks `if (!notif)` for exactly this reason. A
+  // suppressed sentinel is not a persisted row either.
+  if (!notif || notif.suppressed) {
+    logger.error(
+      `[voice-relay-reservice] admin notification did NOT persist for request ${row.id} `
+      + `(customer ${customerId}); the service_requests row is durable but may be unsurfaced in the admin feed.`
+    );
+  }
+  let paged = false;
+  try {
+    const { alertOwnerReservice } = require('./relay-alert');
+    paged = await alertOwnerReservice({
+      lane, category, urgency, issue, subject, covered, requestId: row.id, customerId,
+      unverifiedRequester, unverifiedNote,
+    }, ctx) === true;
+  } catch (err) {
+    // Fail-open: the ticket is already written and the caller (if any) is on
+    // the line. The MISSING stamp is what keeps this retryable.
+    logger.error(`[voice-relay-reservice] owner alert FAILED for request ${row.id}: ${err.message}`);
+  }
+  if (paged) {
+    try {
+      const db = require('../../models/db');
+      await db('service_requests').where({ id: row.id }).update({ owner_alerted_at: new Date() });
+    } catch (err) {
+      // Unstamped-but-paged: the sweep may page once more. A duplicate page
+      // beats a stranded ticket.
+      logger.warn(`[voice-relay-reservice] owner_alerted_at stamp failed for request ${row.id}: ${err.message}`);
+    }
+  }
+  return paged;
+}
+
+/**
+ * Hourly backstop for the crash window fireReserviceAlertsAndStamp cannot cover
+ * itself: a process exit between the ticket commit and the page leaves an open
+ * voice-filed row with no receipt — and if the customer never calls again, no
+ * touch ever retries it. Small, bounded, self-terminating: rows stamp on
+ * success and leave the population. Gate note: alertOwnerReservice stands down
+ * while VOICE_RELAY_CONTEXT_ENABLED is off, so rows filed before a gate-off
+ * simply wait, stamped only when a page actually goes out.
+ */
+async function sweepUnalertedVoiceReservices({ limit = 10 } = {}) {
+  const db = require('../../models/db');
+  let rows = [];
+  try {
+    rows = await db('service_requests')
+      .where({ source: VOICE_REQUEST_SOURCE })
+      .whereIn('status', OPEN_REQUEST_STATUSES)
+      .whereNull('owner_alerted_at')
+      // Old enough that the filing call's own alert attempt is definitely over.
+      .where('created_at', '<', new Date(Date.now() - 5 * 60 * 1000))
+      .orderBy('created_at', 'asc')
+      .limit(limit)
+      .select('id', 'customer_id', 'category', 'urgency', 'subject', 'description', 'source', 'owner_alerted_at');
+  } catch (err) {
+    logger.error(`[voice-relay-reservice] unalerted-ticket sweep query failed: ${err.message}`);
+    return 0;
+  }
+  let paged = 0;
+  for (const row of rows) {
+    const lane = Object.keys(LANE_CATEGORY).find((l) => LANE_CATEGORY[l] === row.category) || row.category;
+    const unverified = /UNVERIFIED REQUESTER/i.test(String(row.subject || ''));
+    // covered=false on the sweep: coverage was a live-call disclosure decision;
+    // the page copy without it is simply more conservative.
+     
+    const ok = await fireReserviceAlertsAndStamp({
+      row, lane, covered: false, unverifiedRequester: unverified, ctx: {},
+    }).catch(() => false);
+    if (ok) paged += 1;
+  }
+  if (rows.length) {
+    logger.info(`[voice-relay-reservice] unalerted-ticket sweep: ${rows.length} candidate(s), ${paged} paged`);
+  }
+  return paged;
+}
+
 module.exports = {
   requestReserviceText,
+  fireReserviceAlertsAndStamp,
+  sweepUnalertedVoiceReservices,
   LANE_CATEGORY,
   LANE_LABEL,
   OPEN_REQUEST_STATUSES,

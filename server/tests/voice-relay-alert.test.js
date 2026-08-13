@@ -168,6 +168,19 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     expect(updates.some((sql) => sql.includes("- 'relay_hot_alert_at'"))).toBe(true);
   });
 
+  // ⭐ THE CLAIM IS A LEASE, NOT A TOMBSTONE. A process that dies between the
+  // claim and the send leaves claimed-with-no-receipt forever — and every later
+  // session would refuse to page for the rest of time. The claim UPDATE's own
+  // predicate lets a stale unsent claim be re-burned atomically.
+  test('the claim predicate reclaims a stale UNSENT claim (expirable lease)', async () => {
+    const builder = primeClaimDb({ claimWins: true });
+    await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-lease', markOwnerAlerted: jest.fn() });
+    const predicates = builder.whereRaw.mock.calls.map(([sql]) => String(sql));
+    const claimPredicate = predicates.find((sql) => sql.includes('relay_hot_alert_at'));
+    expect(claimPredicate).toContain("interval '2 minutes'"); // stale-claim reclaim window
+    expect(claimPredicate).toContain('relay_hot_alert_sent_at'); // …only when never sent
+  });
+
   test('a claim ERROR pages anyway (fail-open: a duplicate beats a missed swarm)', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-db-down', markOwnerAlerted: jest.fn() });
