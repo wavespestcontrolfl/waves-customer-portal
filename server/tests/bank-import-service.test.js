@@ -284,13 +284,21 @@ describe('runDeterministicMatching', () => {
     expect(cleared.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
   });
 
-  test('an already-reconciled payout links without re-reconciling', async () => {
+  test('the pending flag ALWAYS rides in the claim — the guarded echo resolves current state', async () => {
     reconcilePayout.mockClear();
+    // even a payout that LOOKS reconciled at candidate-read time gets the
+    // flag: the unlocked pre-read can go stale, and the guard inside the
+    // echo (onlyIfUnreconciled, row-locked) is the actual decision point
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
     state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: true }];
     const summary = await runDeterministicMatching();
     expect(summary.payoutsLinked).toBe(1);
-    expect(reconcilePayout).not.toHaveBeenCalled();
+    const link = state.updates.find(u => u.patch.status === 'matched_payout');
+    expect(link.patch.suggestion.reconcilePending).toBe(true);
+    expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.any(String), 'bank-import:bt-1', 'confirmed',
+      expect.objectContaining({ onlyIfUnreconciled: true }));
+    // and the flag clears whether the echo wrote or was atomically skipped
+    expect(state.updates.find(u => typeof u.patch.suggestion === 'string' && u.patch.suggestion.includes("- 'reconcilePending'"))).toBeDefined();
   });
 
   test('a CARD-statement credit never enters payout matching (refund/payment credit, not a payout)', async () => {

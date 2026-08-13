@@ -480,7 +480,7 @@ describe('link-payout (gate on)', () => {
   beforeEach(() => {
     process.env.GATE_BANK_IMPORT = 'true';
     state.bankRow = { id: 'bt-1', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'unmatched', suggestion: { payoutCandidates: [{ id: 'po-9' }] } };
-    state.payoutRow = { id: 'po-9', reconciled: false };
+    state.payoutRow = { id: 'po-9', status: 'paid' };
   });
 
   test('claims via CAS with match_method=manual and echoes reconciliation (pending flag in the claim)', async () => {
@@ -499,13 +499,23 @@ describe('link-payout (gate on)', () => {
     expect(state.bankUpdates[1].patch.suggestion).toContain("- 'reconcilePending'");
   });
 
-  test('an already-reconciled payout links without an echo or pending flag', async () => {
-    state.payoutRow = { id: 'po-9', reconciled: true };
+  test('an already-reconciled payout (guard skip) resolves as already_reconciled — flag still claimed and cleared', async () => {
+    reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-9', skipped: true });
     const res = await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' });
     const body = await res.json();
     expect(body.reconciliation).toBe('already_reconciled');
-    expect(reconcilePayout).not.toHaveBeenCalled();
-    expect(state.bankUpdates[0].patch.suggestion).toBeUndefined();
+    // the flag always rides in the claim; a guard skip clears it too
+    expect(state.bankUpdates[0].patch.suggestion.reconcilePending).toBe(true);
+    expect(state.bankUpdates[1].patch.suggestion).toContain("- 'reconcilePending'");
+  });
+
+  test('a non-paid payout is refused server-side — pending/failed money cannot explain a bank credit', async () => {
+    state.payoutRow = { id: 'po-9', status: 'in_transit' };
+    const res = await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('not paid');
+    expect(state.bankUpdates).toHaveLength(0);
   });
 
   test('an echo failure answers pending — the claim stands and the sweep retries', async () => {

@@ -303,18 +303,22 @@ async function resetDanglingLinks() {
 // retries.
 async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
   const { reconcilePayout } = require('./stripe-banking');
-  await reconcilePayout(payoutId, Number(amount), note, `bank-import:${rowId}`, 'confirmed', {
+  const result = await reconcilePayout(payoutId, Number(amount), note, `bank-import:${rowId}`, 'confirmed', {
     onlyIfUnreconciled: true,
     precondition: (trx) => trx('bank_transactions')
       .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
       .forUpdate().first('id').then(Boolean),
   });
-  // jsonb key-subtraction removes ONLY the flag, and the CAS scopes it to
-  // THIS link — if an unlink + re-match to a different payout landed since,
-  // the newer link keeps its own pending flag and the sweep still retries it
+  // A guard skip resolves the intent too — either the payout is already
+  // reconciled (nothing to echo) or the row is no longer linked (nothing to
+  // clear; the scoped CAS below no-ops). jsonb key-subtraction removes ONLY
+  // the flag, and the CAS scopes it to THIS link — if an unlink + re-match
+  // to a different payout landed since, the newer link keeps its own
+  // pending flag and the sweep still retries it.
   await db('bank_transactions')
     .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
     .update({ suggestion: db.raw("suggestion - 'reconcilePending'"), updated_at: new Date() });
+  return result;
 }
 
 // Rejected-target ruling for a row: every id the operator has ever unlinked
@@ -416,7 +420,7 @@ async function runDeterministicMatching({ limit } = {}) {
         .whereNotExists(function claimed() {
           this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_payout_id = stripe_payouts.id');
         })
-        .select('id', 'amount', 'arrival_date', 'reconciled')
+        .select('id', 'amount', 'arrival_date')
         // 8 is a parking cap, not a uniqueness cap: auto-link still demands
         // candidates.length === 1, so a cap-hidden extra can only PREVENT a
         // link, never fake "exactly one".
@@ -426,13 +430,13 @@ async function runDeterministicMatching({ limit } = {}) {
       const exact = candidates.filter(c => centsEqual(c.amount, row.amount));
       if (candidates.length === 1 && exact.length === 1) {
         try {
-          // Reconciliation intent is persisted ATOMICALLY with the claim:
-          // the reconcilePending flag rides in the same CAS update, so a
-          // crash anywhere before the echo lands still leaves a retryable
-          // marker for the sweep — never a linked-but-unreconciled payout
-          // that nothing ever revisits.
-          const needsEcho = !exact[0].reconciled;
-          const pendingSuggestion = { ...(row.suggestion || {}), reconcilePending: true };
+          // Reconciliation intent is persisted ATOMICALLY with the claim —
+          // ALWAYS, not conditioned on a pre-read of `reconciled` (that read
+          // is unlocked and can go stale mid-flight): a crash anywhere
+          // before the echo resolves still leaves a retryable marker for
+          // the sweep — never a linked-but-unreconciled payout that nothing
+          // ever revisits. The guarded helper resolves the CURRENT state:
+          // already reconciled → skip + clear; unreconciled → echo + clear.
           const changed = await db('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
             .update({
@@ -441,7 +445,7 @@ async function runDeterministicMatching({ limit } = {}) {
               match_method: 'payout_amount_date',
               matched_at: new Date(),
               updated_at: new Date(),
-              ...(needsEcho ? { suggestion: pendingSuggestion } : {}),
+              suggestion: { ...(row.suggestion || {}), reconcilePending: true },
             });
           if (changed) {
             summary.payoutsLinked++;
@@ -450,16 +454,14 @@ async function runDeterministicMatching({ limit } = {}) {
             // keeping a parallel Tax-only status — /admin/banking must see the
             // same truth. Failure here never un-links the row: the link is
             // real, reconciliation is the ledger echo, and the flag retries.
-            if (needsEcho) {
-              try {
-                // guarded + preconditioned inside the helper: a human who
-                // reconciled since the candidate read, or an admin unlink
-                // during this await, makes the echo skip — never clobber.
-                await echoPayoutReconciliation(row.id, exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`);
-              } catch (reconErr) {
-                // flag already persisted with the claim — the sweep retries
-                logger.warn(`[bank-import] payout ${exact[0].id} linked but reconciliation write failed (sweep will retry): ${reconErr.message}`);
-              }
+            try {
+              // guarded + preconditioned inside the helper: a human who
+              // reconciled since the candidate read, or an admin unlink
+              // during this await, makes the echo skip — never clobber.
+              await echoPayoutReconciliation(row.id, exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`);
+            } catch (reconErr) {
+              // flag already persisted with the claim — the sweep retries
+              logger.warn(`[bank-import] payout ${exact[0].id} linked but reconciliation write failed (sweep will retry): ${reconErr.message}`);
             }
           }
         } catch (err) {

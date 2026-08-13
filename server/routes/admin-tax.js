@@ -1987,9 +1987,16 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
       return res.status(400).json({ error: 'only bank-account credits link to payouts' });
     }
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
-    const payout = await db('stripe_payouts').where({ id: payoutId }).first('id', 'reconciled');
+    const payout = await db('stripe_payouts').where({ id: payoutId }).first('id', 'status');
     if (!payout) return res.status(404).json({ error: 'payout not found' });
-    const needsEcho = !payout.reconciled;
+    // Only money that actually REACHED the bank can explain a bank credit —
+    // the same rule the automatic matcher applies, enforced server-side so
+    // a stale or crafted request can't link a pending/failed payout.
+    if (payout.status !== 'paid') {
+      return res.status(400).json({ error: `payout is ${payout.status}, not paid — only settled payouts can explain a bank credit` });
+    }
+    // The pending flag ALWAYS rides in the claim (an unlocked reconciled
+    // pre-read can go stale); the guarded echo below resolves current state.
     let claimed;
     try {
       claimed = await db('bank_transactions')
@@ -2000,23 +2007,21 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
           match_method: 'manual',
           matched_at: new Date(),
           updated_at: new Date(),
-          ...(needsEcho ? { suggestion: { ...(row.suggestion || {}), reconcilePending: true } } : {}),
+          suggestion: { ...(row.suggestion || {}), reconcilePending: true },
         });
     } catch (err) {
       if (err.code === '23505') return res.status(409).json({ error: 'that payout is already linked to another bank row' });
       throw err;
     }
     if (!claimed) return res.status(409).json({ error: 'row was matched by someone else mid-flight' });
-    let reconciliation = 'already_reconciled';
-    if (needsEcho) {
-      try {
-        await bankImport.echoPayoutReconciliation(row.id, payoutId, Number(row.amount), `Manually linked to bank import row ${row.id}`);
-        reconciliation = 'confirmed';
-      } catch (err) {
-        // pending flag persisted with the claim — the matching sweep retries
-        logger.warn(`[bank-import] manual payout link ${row.id}→${payoutId} succeeded but reconciliation write failed (sweep will retry): ${err.message}`);
-        reconciliation = 'pending';
-      }
+    let reconciliation;
+    try {
+      const result = await bankImport.echoPayoutReconciliation(row.id, payoutId, Number(row.amount), `Manually linked to bank import row ${row.id}`);
+      reconciliation = result && result.skipped ? 'already_reconciled' : 'confirmed';
+    } catch (err) {
+      // pending flag persisted with the claim — the matching sweep retries
+      logger.warn(`[bank-import] manual payout link ${row.id}→${payoutId} succeeded but reconciliation write failed (sweep will retry): ${err.message}`);
+      reconciliation = 'pending';
     }
     res.json({ success: true, reconciliation });
   } catch (err) { next(err); }
