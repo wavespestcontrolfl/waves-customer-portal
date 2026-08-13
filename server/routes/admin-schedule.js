@@ -10593,14 +10593,17 @@ router.post('/:id/regenerate-brief', requireAdmin, async (req, res, next) => {
       return res.json({ success: true, brief: briefValue(svc.pre_service_brief) });
     }
 
-    if (!PrevisitBrief.briefGateEnabled()) {
-      return res.status(409).json({ error: 'Pre-visit briefs are turned off (GATE_PREVISIT_BRIEF). Nothing was changed.' });
-    }
-    // Tagger replay first (idempotent — appointment-tagger's own contract
-    // for this route): the operator's retry for a failed booking-time run
-    // (prep email/SMS enrollment, assessment pre-draft) must survive the
-    // generic-brief path.
+    // Tagger replay FIRST — before the brief gate (idempotent —
+    // appointment-tagger's own contract for this route): the operator's
+    // retry for a failed booking-time run (prep email/SMS enrollment,
+    // assessment pre-draft) must work even while GATE_PREVISIT_BRIEF is
+    // off, which is the default.
     await AppointmentTagger.onServiceScheduled(req.params.id, { suppressWelcome: true });
+    if (!PrevisitBrief.briefGateEnabled()) {
+      // Not an error: the tagger replay above DID run — only the generic
+      // brief regeneration is gated off.
+      return res.json({ success: true, brief: null, briefSkipped: 'gate_off' });
+    }
     const outcome = await PrevisitBrief.generateVisitBrief(req.params.id);
     // A skip is not a success: only 'unchanged' (the hash-cache no-op) is a
     // legitimate 200. The row vanishing mid-request reads as 404 (matching

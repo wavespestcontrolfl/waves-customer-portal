@@ -233,14 +233,18 @@ describe('POST /:id/regenerate-brief', () => {
     });
   });
 
-  test('non-WDO visit with the gate OFF → 409, nothing invoked', async () => {
+  test('non-WDO visit with the gate OFF still replays the tagger; brief regen skipped', async () => {
+    // The tagger replay is the operator's retry for a failed booking-time
+    // prep run — it must work while the brief gate is off (the default).
     mockGateEnabled.mockReturnValue(false);
     stubTables({ scheduled_services: VISIT_BRIEF_ROW });
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/schedule/svc-1/regenerate-brief`, { method: 'POST' });
-      expect(res.status).toBe(409);
-      expect((await res.json()).error).toContain('GATE_PREVISIT_BRIEF');
-      expect(mockOnServiceScheduled).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.success).toBe(true);
+      expect(body.briefSkipped).toBe('gate_off');
+      expect(mockOnServiceScheduled).toHaveBeenCalledWith('svc-1', { suppressWelcome: true });
       expect(mockGenerateVisitBrief).not.toHaveBeenCalled();
     });
   });
