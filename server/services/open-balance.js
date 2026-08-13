@@ -112,10 +112,42 @@ async function openBalanceInvoices(customerId, { excludeInvoiceId = null, databa
  */
 async function openBalanceExists(customerId, { excludeInvoiceId = null, database = db } = {}) {
   if (!customerId) return false;
-  const rows = await openInvoiceQuery(customerId, { excludeInvoiceId, database });
+  // ⭐ NO AMOUNTS LEAVE THE DATABASE. The full read's projection carries
+  // subtotal/total/credit_applied because its callers render them; an
+  // existence probe has no business materializing 200 invoices' figures to
+  // reduce them to a boolean. The cents-positive test runs IN SQL — the exact
+  // integer arithmetic invoiceAmountDue performs
+  // (ROUND(total·100) − ROUND(credit·100) > 0), not the float GREATEST the
+  // broad-phase WHERE uses — and the projection is only what the live payer
+  // re-resolution needs. Same eligibility rules, no figures in the process.
+  const query = database('invoices')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['sent', 'viewed', 'overdue'])
+    .whereNull('payer_id')
+    .whereNull('payer_statement_id')
+    .whereRaw('(ROUND(total * 100) - ROUND(COALESCE(credit_applied, 0) * 100)) > 0')
+    .orderBy('created_at', 'asc')
+    .limit(MAX_OPEN_INVOICES)
+    .select('id', 'invoice_number', 'scheduled_service_id');
+  if (excludeInvoiceId) query.whereNot('id', excludeInvoiceId);
+  const rows = await query;
+  const PayerService = require('./payer');
   for (const row of rows) {
-     
-    if (await rowIsSelfPayDue(customerId, row)) return true; // short-circuit
+    // The live payer re-resolution — the same authority and the same
+    // fail-toward-DROP posture as the full read.
+    try {
+       
+      const resolved = await PayerService.resolveForInvoice({
+        customerId: String(customerId),
+        ...(row.scheduled_service_id ? { scheduledServiceId: String(row.scheduled_service_id) } : {}),
+        throwOnError: true,
+      });
+      if (resolved?.payerId) continue;
+    } catch (err) {
+      logger.warn(`[open-balance] payer resolve failed for invoice ${row.invoice_number} — dropping from existence probe (fail closed): ${err.message}`);
+      continue;
+    }
+    return true; // short-circuit at the first qualifying self-pay row
   }
   return false;
 }
