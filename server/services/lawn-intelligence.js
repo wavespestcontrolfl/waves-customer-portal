@@ -50,6 +50,11 @@ async function fetchFawnWeather() {
     soil_temp_f: snapshot.soil_temp_f,
     station: snapshot.station,
     timestamp: snapshot.timestamp,
+    // The STATION's authoritative reading time — without it the persisted
+    // snapshot can only be aged by fetch time, and an old last-observation
+    // row (stale station) would stamp stale measurements into a treatment
+    // outcome as if fresh.
+    observation_time: snapshot.observation_time ?? null,
   };
 }
 

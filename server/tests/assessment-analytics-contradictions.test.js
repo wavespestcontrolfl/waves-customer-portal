@@ -18,7 +18,10 @@ jest.mock('../services/lawn-grass-context', () => ({
 }));
 jest.mock('../services/agronomic-wiki', () => ({
   recomputeEntryReviewGate: jest.fn(async () => {}),
-  escapeLike: (text) => String(text).replace(/[\\%_]/g, (c) => `\\${c}`),
+  // The REAL export (mock-is-not-a-production-export rule): a synthesized
+  // escapeLike here once masked a missing top-level export that made the
+  // production fallback throw and abort the whole detection pass.
+  escapeLike: jest.requireActual('../services/agronomic-wiki').escapeLike,
 }));
 
 const analytics = require('../services/assessment-analytics');

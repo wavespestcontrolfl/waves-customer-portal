@@ -277,7 +277,7 @@ describe('generatePage', () => {
 
 describe('updateSeasonalPage', () => {
   test('returns null without generating when the month has no outcomes, pruning any filler page', async () => {
-    const state = useDb({ treatment_outcomes: [], knowledge_entries: [] });
+    const state = useDb({ treatment_outcomes: [], knowledge_entries: [{ id: 'ke-seasonal' }] });
 
     const result = await wiki.updateSeasonalPage(2);
 
@@ -285,10 +285,21 @@ describe('updateSeasonalPage', () => {
     expect(global.__anthropicCreate).not.toHaveBeenCalled();
     expect(state.inserts.knowledge_entries).toBeUndefined();
     // an existing zero-outcome page is deleted so it can't clog the
-    // stale-refresh budget (del returns 1 in the mock → prune logged)
+    // stale-refresh budget (del returns 1 in the mock → prune logged) —
+    // and its wiki-sync KB mirror is removed FIRST (no cascading FK, so
+    // an orphaned mirror would stay agent-readable forever).
     expect(state.deletes.knowledge_entries).toBe(1);
+    expect(state.deletes.knowledge_base).toBe(1);
     const pruneLog = (state.inserts.knowledge_update_log || []).find((r) => r.action === 'prune');
     expect(pruneLog).toBeTruthy();
+  });
+
+  test('no filler page on a zero-outcome month prunes nothing', async () => {
+    const state = useDb({ treatment_outcomes: [], knowledge_entries: [] });
+    const result = await wiki.updateSeasonalPage(2);
+    expect(result).toBeNull();
+    expect(state.deletes.knowledge_entries).toBeUndefined();
+    expect(state.inserts.knowledge_update_log).toBeUndefined();
   });
 });
 
@@ -681,7 +692,7 @@ describe('updateSeasonalPage prune failure', () => {
   test('a failed zero-outcome prune reports writeState failed, never no_data', async () => {
     const state = useDb({
       treatment_outcomes: [],
-      knowledge_entries: [],
+      knowledge_entries: [{ id: 'ke-seasonal' }],
       knowledge_update_log: [],
     });
     const origMock = global.__wikiDbMock;

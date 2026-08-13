@@ -929,9 +929,22 @@ const AgronomicWiki = {
       if (!outcomes.length) {
         let pruned = 0;
         try {
-          pruned = await db('knowledge_entries')
+          const staleEntry = await db('knowledge_entries')
             .where({ slug, category: 'seasonal' })
-            .del();
+            .first('id');
+          if (staleEntry) {
+            // Remove the wiki-sync mirror BEFORE pruning its source —
+            // knowledge_base has no cascading FK and sync reconciliation
+            // only flags mirrors of still-present untrusted entries, so an
+            // orphaned zero-data mirror would stay agent-readable forever
+            // (same discipline as mergeVariantProductPages).
+            try {
+              await db('knowledge_base')
+                .where({ wiki_entry_id: staleEntry.id, source: 'wiki-sync' })
+                .del();
+            } catch { /* knowledge_base.wiki_entry_id column may not exist */ }
+            pruned = await db('knowledge_entries').where({ id: staleEntry.id }).del();
+          }
         } catch (err) {
           // A failed prune leaves the stale filler page agent-readable —
           // reporting 'no_data' here would let weeklyRefresh write its
@@ -1722,6 +1735,10 @@ module.exports = AgronomicWiki;
 
 module.exports.TRUSTED_STATUSES = TRUSTED_STATUSES;
 module.exports.recomputeEntryReviewGate = recomputeEntryReviewGate;
+// Real production export — assessment-analytics' attribution fallback
+// imports it (a __private-only export made that destructuring undefined
+// and the first fallback call aborted the whole detection pass).
+module.exports.escapeLike = escapeLike;
 
 // Exposed for unit tests only.
 module.exports.__private = {
