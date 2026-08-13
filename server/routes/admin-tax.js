@@ -1742,6 +1742,7 @@ router.post('/bank-import/upload', async (req, res, next) => {
     // statement, not just the skipped rows.
     let forced = 0;
     let forceAlreadyPresent = 0;
+    let forceFailed = 0;
     if (forceDuplicates === true) {
       const tupleCounts = new Map();
       for (const h of hashed) tupleCounts.set(h.tuple_key, (tupleCounts.get(h.tuple_key) || 0) + 1);
@@ -1784,7 +1785,12 @@ router.post('/bank-import/upload', async (req, res, next) => {
             lostIdentityRace = true;
           }
         }
-        if (landed) forced++; else forceAlreadyPresent++;
+        if (landed) forced++;
+        else if (lostIdentityRace) forceAlreadyPresent++;
+        // walk exhausted with THIS token unrecorded = the copy was NOT
+        // imported — reporting it as already-present would silently drop a
+        // real transaction from review; surface it as an explicit failure
+        else forceFailed++;
       }
     }
     // The inserts above are already committed — a matching failure must NOT
@@ -1808,6 +1814,7 @@ router.post('/bank-import/upload', async (req, res, next) => {
       imported: inserted.length + forced,
       forced,
       forceAlreadyPresent,
+      forceFailed,
       duplicates: duplicateRows.length,
       duplicateHashes: duplicateRows.map(r => r.row_hash),
       // one-time confirmation identity for a force re-post (replay-safe)

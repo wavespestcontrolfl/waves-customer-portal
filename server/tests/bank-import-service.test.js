@@ -50,7 +50,7 @@ function makeBuilder(table) {
         rows = rows.filter(r => r.suggestion && r.suggestion.reconcilePending === true);
       }
       // mirror the bounded pass's fresh-vs-examined split
-      const isExamined = (r) => !!(r.suggestion && (r.suggestion.ignore || r.suggestion.candidates || r.suggestion.payoutCandidates));
+      const isExamined = (r) => !!(r.suggestion && (r.suggestion.ignore || r.suggestion.candidates || r.suggestion.payoutCandidates || r.suggestion.noMatch));
       const raws = b.whereRaw.mock.calls.map(c => String(c[0]));
       if (raws.some(s => s.includes('or not jsonb_exists_any'))) rows = rows.filter(r => !isExamined(r));
       else if (raws.some(s => s.includes('suggestion is not null and'))) rows = rows.filter(isExamined);
@@ -308,7 +308,9 @@ describe('runDeterministicMatching', () => {
     const summary = await runDeterministicMatching();
     expect(summary.payoutsLinked).toBe(0);
     expect(state.queried.filter(t => t === 'stripe_payouts')).toHaveLength(0);
-    expect(state.updates).toHaveLength(0);
+    // the only write is the noMatch demotion — never a link or a park
+    expect(state.updates).toHaveLength(1);
+    expect(state.updates[0].patch.suggestion).toEqual({ noMatch: true });
   });
 
   test('a debit with exactly one expense candidate links; two candidates park', async () => {
@@ -467,6 +469,38 @@ describe('runDeterministicMatching', () => {
     // the fresh row was processed (and linked) despite the two older parked rows
     expect(summary.expensesLinked).toBe(1);
     expect(state.updates.find(u => u.patch.status === 'matched_expense')).toBeDefined();
+  });
+
+  test('a processed row with NOTHING to propose is marked noMatch so bounded passes advance past it', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', description: 'MYSTERY VENDOR', amount: 55, direction: 'debit', suggestion: null },
+      { id: 'bt-2', txn_date: '2026-08-11', description: 'CARD REFUND', amount: 12, direction: 'credit', account_type: 'card', suggestion: null },
+    ];
+    state.expenses = [];
+    await runDeterministicMatching();
+    const marks = state.updates.filter(u => u.patch.suggestion && u.patch.suggestion.noMatch === true);
+    expect(marks.map(m => m.where[0].id).sort()).toEqual(['bt-1', 'bt-2']);
+    // already-marked rows are not re-written
+    state.updates = [];
+    state.bankRows = state.bankRows.map(r => ({ ...r, suggestion: { noMatch: true } }));
+    await runDeterministicMatching();
+    expect(state.updates).toHaveLength(0);
+  });
+
+  test("the sweep REVERTS a link whose reconciliation a human rejected — Tax never claims what Banking rejects", async () => {
+    reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-1', skipped: true, reason: 'human_rejected' });
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
+    state.payouts = [{ id: 'po-1', reconciled: false }];
+    const summary = await runDeterministicMatching();
+    expect(summary.reconcileRetried).toBe(0);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert).toBeDefined();
+    expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
+    expect(revert.patch.matched_payout_id).toBeNull();
+    // the rejected payout joins the row's exclusion list and the revert is audited
+    expect(revert.patch.suggestion.rejectedPayoutIds).toEqual(['po-1']);
+    expect(revert.patch.suggestion.autoRevert.payoutId).toBe('po-1');
+    expect(revert.patch.suggestion.reconcilePending).toBeUndefined();
   });
 
   test('a bounded pass reports moreRemaining instead of scanning everything', async () => {

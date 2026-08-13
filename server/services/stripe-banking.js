@@ -1104,13 +1104,14 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
           || (cur && cur.reconciled && cur.reconciled_by === opts.onlyIfReconciledBy);
         const unreconciledOk = !opts.onlyIfUnreconciled || (cur && !cur.reconciled);
         if (!cur || !authorOk || !unreconciledOk) {
-          skipped = true;
+          skipped = 'guard';
           return;
         }
         // onlyIfUnreconciled is an AUTOMATION confirm: "unreconciled" does
         // not distinguish never-reconciled from a HUMAN's explicit rejection
         // ('rejected' clears the payout flag). A human ruling stands —
-        // check the latest reconciliation row under the same lock and skip.
+        // check the latest reconciliation row under the same lock and skip
+        // with a DISTINCT reason so callers can un-finalize their link.
         if (opts.onlyIfUnreconciled) {
           const latest = await trx('bank_reconciliation')
             .where('payout_id', payoutId)
@@ -1118,13 +1119,13 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
             .orderBy('created_at', 'desc')
             .first('status', 'reconciled_by');
           if (latest && latest.status === 'rejected' && !String(latest.reconciled_by || '').startsWith('bank-import')) {
-            skipped = true;
+            skipped = 'human_rejected';
             return;
           }
         }
       }
       if (opts.precondition && !(await opts.precondition(trx))) {
-        skipped = true;
+        skipped = 'precondition';
         return;
       }
       const reconRow = {
@@ -1149,8 +1150,8 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
     });
 
     if (skipped) {
-      logger.info(`[stripe-banking] Payout ${payoutId} reconciliation=${status} SKIPPED — guard onlyIfReconciledBy=${opts.onlyIfReconciledBy} did not match current state`);
-      return { payout_id: payoutId, skipped: true };
+      logger.info(`[stripe-banking] Payout ${payoutId} reconciliation=${status} SKIPPED (${skipped}) — guard did not match current state`);
+      return { payout_id: payoutId, skipped: true, reason: skipped };
     }
 
     logger.info(`[stripe-banking] Payout ${payoutId} reconciliation=${status}: expected=$${expectedAmount}, actual=$${normalizedActual}, matched=${matched}`);

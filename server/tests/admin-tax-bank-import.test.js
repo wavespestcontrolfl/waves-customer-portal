@@ -417,6 +417,15 @@ describe('force-duplicates upload (gate on)', () => {
     expect(state.insertedBank[1]).toMatchObject({ amount: 204.87, direction: 'debit', account_label: 'capone-checking' });
   });
 
+  test('exhausting the ordinal walk reports an explicit forceFailed — never a false already-present', async () => {
+    state.insertReturningQueue = [[], ...Array.from({ length: 25 }, () => [])]; // bulk + all 25 walk attempts conflict
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true, forceRowHashes: [hdSupplyHash], forceToken: 'tok-exhaust-1' });
+    const body = await res.json();
+    expect(body.forced).toBe(0);
+    expect(body.forceAlreadyPresent).toBe(0);
+    expect(body.forceFailed).toBe(1);
+  });
+
   test('losing the DB force-identity race (concurrent retry of the same confirmation) resolves as already present', async () => {
     const identityRace = Object.assign(new Error('duplicate key value violates unique constraint "bank_txn_force_identity_uniq"'), { code: '23505' });
     state.insertReturningQueue = [

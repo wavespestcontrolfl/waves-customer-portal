@@ -4122,14 +4122,18 @@ function BankImportTab() {
     )
       return;
     const payload = { ...dupUpload, forceDuplicates: true };
-    setDupUpload(null);
+    // dupUpload is kept until the request SUCCEEDS: it holds the only copy
+    // of the forceToken, and the server's replay protection only works when
+    // a failed/lost confirmation retries under the SAME token
     act("upload", "/admin/tax/bank-import/upload", payload).then((r) => {
-      if (r)
-        setNotice({
-          text:
-            `Force-imported ${r.forced} duplicate row${r.forced === 1 ? "" : "s"}` +
-            (r.forceAlreadyPresent ? ` (${r.forceAlreadyPresent} already force-imported earlier — nothing re-added)` : ""),
-        });
+      if (!r) return; // failed — token retained, the button retries this confirmation
+      setDupUpload(null);
+      setNotice({
+        text:
+          `Force-imported ${r.forced} duplicate row${r.forced === 1 ? "" : "s"}` +
+          (r.forceAlreadyPresent ? ` (${r.forceAlreadyPresent} already force-imported earlier — nothing re-added)` : "") +
+          (r.forceFailed ? ` · ${r.forceFailed} could NOT be imported (ordinal space exhausted) — add manually via the Expenses tab` : ""),
+      });
     });
   };
 
@@ -4268,7 +4272,9 @@ function BankImportTab() {
           }}
         >
           {notice.text}
-          {!notice.error && dupUpload && (
+          {/* rendered on error notices too — a failed force confirmation
+              must retry under the SAME retained token */}
+          {dupUpload && (
             <button
               type="button"
               disabled={!!busy}

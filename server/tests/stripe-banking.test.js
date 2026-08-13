@@ -537,7 +537,7 @@ describe('stripe banking service', () => {
     test('skips atomically when someone else owns the reconciliation — nothing is written', async () => {
       payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: true, reconciled_by: 'adam' };
       const result = await service.reconcilePayout('local-payout-1', 120, 'undo', 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
-      expect(result).toEqual({ payout_id: 'local-payout-1', skipped: true });
+      expect(result).toMatchObject({ payout_id: 'local-payout-1', skipped: true });
       expect(reconInserts).toHaveLength(0);
       expect(payoutUpdate).toBeNull();
     });
@@ -560,7 +560,7 @@ describe('stripe banking service', () => {
     test('onlyIfUnreconciled skips atomically when a human reconciled first — nothing is written', async () => {
       payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: true, reconciled_by: 'adam' };
       const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import', 'confirmed', { onlyIfUnreconciled: true });
-      expect(result).toEqual({ payout_id: 'local-payout-1', skipped: true });
+      expect(result).toMatchObject({ payout_id: 'local-payout-1', skipped: true });
       expect(reconInserts).toHaveLength(0);
       expect(payoutUpdate).toBeNull();
     });
@@ -570,7 +570,7 @@ describe('stripe banking service', () => {
       const precondition = jest.fn(async () => false);
       const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import', 'confirmed', { onlyIfUnreconciled: true, precondition });
       expect(precondition).toHaveBeenCalledWith(db); // receives the trx
-      expect(result).toEqual({ payout_id: 'local-payout-1', skipped: true });
+      expect(result).toMatchObject({ payout_id: 'local-payout-1', skipped: true });
       expect(reconInserts).toHaveLength(0);
       expect(payoutUpdate).toBeNull();
     });

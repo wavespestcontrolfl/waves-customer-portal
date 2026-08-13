@@ -230,33 +230,26 @@ async function retryPendingReconciliations() {
     .whereRaw("suggestion->>'reconcilePending' = 'true'")
     .select('id', 'amount', 'matched_payout_id', 'suggestion');
   let retried = 0;
+  let humanRejected = 0;
   for (const row of pending) {
     const payout = await db('stripe_payouts').where({ id: row.matched_payout_id }).first('id', 'reconciled');
-    let done = !!(payout && payout.reconciled); // someone else reconciled meanwhile
     if (payout && !payout.reconciled) {
       try {
-        const { reconcilePayout } = require('./stripe-banking');
-        // onlyIfUnreconciled: if a human reconciled between our read and
-        // this write, the guard skips atomically — their state stands, and
-        // "someone reconciled" resolves the pending flag either way. The
-        // precondition re-verifies the link under OUR row's lock so a
-        // concurrent unlink makes this retry skip, not reconcile an orphan.
-        const result = await reconcilePayout(payout.id, Number(row.amount), `Auto-matched to bank import row ${row.id} (retry)`, `bank-import:${row.id}`, 'confirmed', {
-          onlyIfUnreconciled: true,
-          precondition: (trx) => trx('bank_transactions')
-            .where({ id: row.id, status: 'matched_payout', matched_payout_id: payout.id })
-            .forUpdate().first('id').then(Boolean),
-        });
-        done = true;
+        // The shared helper handles the whole outcome ladder: echo when
+        // unreconciled, atomic skip when someone else reconciled or the
+        // link changed, and a full claim REVERT when a human rejected this
+        // payout's reconciliation (their ruling outranks the link). It also
+        // clears the pending flag scoped to this exact link.
+        const result = await echoPayoutReconciliation(row.id, row.matched_payout_id, Number(row.amount), `Auto-matched to bank import row ${row.id} (retry)`);
         if (!(result && result.skipped)) retried++;
+        else if (result.reason === 'human_rejected') humanRejected++;
       } catch (err) {
         logger.warn(`[bank-import] reconciliation retry for payout ${payout.id} failed again: ${err.message}`);
       }
-    }
-    if (done || !payout) {
-      // scoped to the exact link that was processed: if the row was
-      // unlinked and re-matched to ANOTHER payout mid-flight, this no-ops
-      // instead of stripping the newer link's pending flag
+    } else {
+      // payout reconciled meanwhile (intent satisfied) or deleted (nothing
+      // to echo) — clear the flag, scoped to the exact link processed so a
+      // re-matched row's newer flag survives
       await db('bank_transactions')
         .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
         .update({ suggestion: db.raw("suggestion - 'reconcilePending'"), updated_at: new Date() });
@@ -266,7 +259,7 @@ async function retryPendingReconciliations() {
   // (Reversals need no sweep: the unlink route runs its unlink CAS inside
   // the reversal's own transaction, so a failed reversal rolls the unlink
   // back — there is never a committed unlink awaiting reversal.)
-  return { pending: pending.length, retried };
+  return { pending: pending.length, retried, humanRejected };
 }
 
 // A deleted expense/payout SET-NULLs the FK but leaves the status behind —
@@ -309,12 +302,40 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
       .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
       .forUpdate().first('id').then(Boolean),
   });
-  // A guard skip resolves the intent too — either the payout is already
-  // reconciled (nothing to echo) or the row is no longer linked (nothing to
-  // clear; the scoped CAS below no-ops). jsonb key-subtraction removes ONLY
-  // the flag, and the CAS scopes it to THIS link — if an unlink + re-match
-  // to a different payout landed since, the newer link keeps its own
-  // pending flag and the sweep still retries it.
+  // A human's explicit REJECTION of this payout's reconciliation outranks
+  // the link itself: leaving the row matched would have Tax claiming a
+  // payout Banking keeps rejected, with no pending state to repair it.
+  // Revert the claim, remember the payout as rejected for this row (the
+  // matcher's exclusion list), and let the operator decide.
+  if (result && result.skipped && result.reason === 'human_rejected') {
+    const cur = await db('bank_transactions')
+      .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+      .first('suggestion');
+    if (cur) {
+      const { reconcilePending, ...rest } = cur.suggestion || {};
+      await db('bank_transactions')
+        .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+        .update({
+          status: 'unmatched',
+          matched_payout_id: null,
+          match_method: null,
+          matched_at: null,
+          suggestion: {
+            ...rest,
+            rejectedPayoutIds: [...new Set([...(rest.rejectedPayoutIds || []), payoutId])],
+            autoRevert: { at: new Date().toISOString(), payoutId, reason: 'reconciliation rejected by a human on the Banking page' },
+          },
+          updated_at: new Date(),
+        });
+    }
+    return result;
+  }
+  // Any other guard skip resolves the intent too — either the payout is
+  // already reconciled (nothing to echo) or the row is no longer linked
+  // (nothing to clear; the scoped CAS below no-ops). jsonb key-subtraction
+  // removes ONLY the flag, and the CAS scopes it to THIS link — if an
+  // unlink + re-match to a different payout landed since, the newer link
+  // keeps its own pending flag and the sweep still retries it.
   await db('bank_transactions')
     .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
     .update({ suggestion: db.raw("suggestion - 'reconcilePending'"), updated_at: new Date() });
@@ -359,7 +380,18 @@ async function runDeterministicMatching({ limit } = {}) {
   // jsonb_exists_any = the function form of the ?| any-key operator —
   // knex.raw treats bare ? (and ??) as binding placeholders and would eat
   // the operator, silently binding the LIMIT value into it.
-  const EXAMINED_SQL = "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates'])";
+  const EXAMINED_SQL = "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates','noMatch'])";
+  // A processed row that produced NOTHING (no candidates at all, or a
+  // credit the matcher never matches) must still leave the fresh pool, or a
+  // bounded pass would rescan the same oldest rows forever while
+  // moreRemaining stays true. noMatch only demotes it to the examined pool
+  // — leftover budget still rescans it, so a later expense can resolve it.
+  const markScanned = async (row) => {
+    if (row.suggestion && row.suggestion.noMatch) return;
+    await db('bank_transactions')
+      .where({ id: row.id, status: 'unmatched' })
+      .update({ suggestion: { ...(row.suggestion || {}), noMatch: true }, updated_at: new Date() });
+  };
   let unmatched;
   let moreRemaining = false;
   if (!bounded) {
@@ -407,7 +439,7 @@ async function runDeterministicMatching({ limit } = {}) {
       // Stripe pays out to the BANK account only — a credit on a card
       // statement is a merchant refund or payment credit, never a payout,
       // and auto-linking one would hide it from review.
-      if (row.account_type !== 'bank') continue;
+      if (row.account_type !== 'bank') { await markScanned(row); continue; }
       let payoutQuery = db('stripe_payouts')
         // Only money that actually REACHED the bank can explain a bank
         // credit — pending/in-transit/canceled/failed payouts are excluded.
@@ -458,7 +490,12 @@ async function runDeterministicMatching({ limit } = {}) {
               // guarded + preconditioned inside the helper: a human who
               // reconciled since the candidate read, or an admin unlink
               // during this await, makes the echo skip — never clobber.
-              await echoPayoutReconciliation(row.id, exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`);
+              // A human-REJECTED reconciliation reverts the link entirely.
+              const echo = await echoPayoutReconciliation(row.id, exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`);
+              if (echo && echo.skipped && echo.reason === 'human_rejected') {
+                summary.payoutsLinked--;
+                summary.humanRejected = (summary.humanRejected || 0) + 1;
+              }
             } catch (reconErr) {
               // flag already persisted with the claim — the sweep retries
               logger.warn(`[bank-import] payout ${exact[0].id} linked but reconciliation write failed (sweep will retry): ${reconErr.message}`);
@@ -480,6 +517,8 @@ async function runDeterministicMatching({ limit } = {}) {
           },
           updated_at: new Date(),
         });
+      } else if (candidates.length === 0) {
+        await markScanned(row); // nothing to propose — leave the fresh pool
       }
       continue;
     }
@@ -520,6 +559,8 @@ async function runDeterministicMatching({ limit } = {}) {
         },
         updated_at: new Date(),
       });
+    } else {
+      await markScanned(row); // nothing to propose — leave the fresh pool
     }
   }
   return summary;
