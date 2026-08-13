@@ -223,7 +223,7 @@ async function runAutoDispatch(opts = {}) {
     let reminderFreeze = null;
     let anchorMap = null;
     if (tiersOn) {
-      reminderFreeze = await routeTiers.loadReminderFreeze(db, services.map((s) => s.id));
+      reminderFreeze = await routeTiers.loadReminderFreeze(db, services.map((s) => s.id), nowDate);
       // ALL ids, not just change_count>0 — the durable move records (not the
       // best-effort stamp) decide whether a visit has spent drift budget.
       anchorMap = await routeTiers.loadAnchorMap(db, services.map((s) => s.id));
@@ -405,7 +405,7 @@ async function runAutoDispatch(opts = {}) {
           // slipped near enough for a 72h reminder to fire has necessarily
           // changed date and 409s). Fail closed on an unreadable re-check.
           if (tiersOn) {
-            const applyFreeze = await routeTiers.loadReminderFreeze(db, [pm.service.id]);
+            const applyFreeze = await routeTiers.loadReminderFreeze(db, [pm.service.id], new Date());
             if (applyFreeze.failed) {
               await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: 'REMINDER_STATUS_UNKNOWN', reason_description: 'Reminder-sent status unreadable at apply time — frozen (fail closed)', ...pm.result.audit });
               continue;

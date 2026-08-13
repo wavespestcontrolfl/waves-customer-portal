@@ -182,7 +182,7 @@ async function runRouteReorder(opts = {}) {
         summary.skipped.push({ date: dateStr, reason: 'WITHIN_72H', stops: stops.length });
         continue;
       }
-      const freeze = await loadReminderFreeze(db, stops.map((s) => s.id));
+      const freeze = await loadReminderFreeze(db, stops.map((s) => s.id), now);
       if (freeze.failed) {
         // Fail closed — cannot prove no reminder went out for this day.
         summary.skipped.push({ date: dateStr, reason: 'REMINDER_STATUS_UNKNOWN', stops: stops.length });
@@ -301,10 +301,10 @@ async function runRouteReorder(opts = {}) {
                 if (ro !== snap.routeOrder) throw stale(`stop ${row.id} route_order changed during the run`);
               }
               // Freeze re-check at commit time (fail closed on unreadable).
-              const commitFreeze = await loadReminderFreeze(trx, techStops.map((s) => s.id));
+              const commitNow = opts.now || new Date();
+              const commitFreeze = await loadReminderFreeze(trx, techStops.map((s) => s.id), commitNow);
               if (commitFreeze.failed) throw stale('reminder status unreadable at commit');
               if (techStops.some((s) => commitFreeze.frozen.has(s.id))) throw stale('a 72h reminder was sent during the run');
-              const commitNow = opts.now || new Date();
               if (techStops.some((s) => withinFreezeClock(dateStr, s.window_start, commitNow))) {
                 throw stale('day entered the 72h freeze window during the run');
               }

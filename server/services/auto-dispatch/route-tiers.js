@@ -60,6 +60,15 @@ const TIER2_RADIUS_DAYS = 3;
 const DRIFT_BUDGET_DAYS = 5;
 const MIN_DESTINATION_DAYS_OUT = 5;
 const FREEZE_HOURS = 72;
+// The reminder cron's own delivery band (appointment-reminders.js: the 72h
+// branch delivers while hoursUntil <= 72.25; the 24h branch below that). A
+// reminder ROW whose appointment_time is inside this band is CLAIMABLE by the
+// sender — it can be mid-send (SMS out, sent-flag not yet written), so the
+// sent-flag alone cannot prove "no reminder went out". Freezing every visit
+// whose row sits inside the band makes the freeze check and the sender
+// mutually exclusive without a shared lock: outside the band the sender never
+// touches the row, inside the band the visit is frozen regardless of flag.
+const REMINDER_SENDABLE_HOURS = 72.25;
 
 /** Whole calendar days from `fromStr` to `toStr` (YYYY-MM-DD each), UTC-noon
  *  anchored so DST seams can't roll the count. null on unparseable input. */
@@ -173,7 +182,7 @@ function resolveAnchor(service, anchorMap) {
  *   frozen       → ids whose 72h reminder is recorded as sent (directly, or
  *                  via the owning sibling row for the same appointment slot).
  */
-async function loadReminderFreeze(db, serviceIds) {
+async function loadReminderFreeze(db, serviceIds, now = new Date()) {
   if (!serviceIds || serviceIds.length === 0) return { failed: false, frozen: new Set() };
   try {
     const rows = await db('appointment_reminders')
@@ -181,10 +190,20 @@ async function loadReminderFreeze(db, serviceIds) {
       .select('scheduled_service_id', 'customer_id', 'appointment_time',
         'reminder_72h_sent', 'suppressed_by_sibling');
 
+    // Inside the sender's claimable band ⇒ frozen regardless of flag (the row
+    // may be mid-send). Unparseable appointment_time ⇒ frozen (fail closed).
+    const inSendableBand = (apptTime) => {
+      const t = new Date(apptTime).getTime();
+      if (Number.isNaN(t)) return true;
+      return t - now.getTime() < REMINDER_SENDABLE_HOURS * 3600000;
+    };
+
     const frozen = new Set();
     const suppressed = [];
     for (const r of rows) {
-      if (r.suppressed_by_sibling === true) {
+      if (inSendableBand(r.appointment_time)) {
+        frozen.add(r.scheduled_service_id);
+      } else if (r.suppressed_by_sibling === true) {
         // Placeholder — its own flags never mean a send. The slot's OWNER row
         // (checked below) decides.
         suppressed.push(r);
@@ -225,6 +244,7 @@ module.exports = {
   DRIFT_BUDGET_DAYS,
   MIN_DESTINATION_DAYS_OUT,
   FREEZE_HOURS,
+  REMINDER_SENDABLE_HOURS,
   daysBetween,
   tierRadiusForDaysOut,
   tierMoveWindow,

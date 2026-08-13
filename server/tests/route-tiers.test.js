@@ -214,21 +214,52 @@ function reminderDbStub({ rows = [], owners = [], throwOnFirstQuery = false, thr
 
 describe('loadReminderFreeze (72h reminder is the HARD gate)', () => {
   const T = '2026-08-20T12:00:00.000Z';
+  // Fixed clock ~10.5 days before T — the row is safely OUTSIDE the sender's
+  // claimable band, so only the sent flag decides in these cases.
+  const NOW = new Date('2026-08-10T00:00:00Z');
 
   test('sent flag on the visit-linked row freezes the visit', async () => {
     const res = await loadReminderFreeze(reminderDbStub({
       rows: [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: T, reminder_72h_sent: true, suppressed_by_sibling: false }],
-    }), ['s1']);
+    }), ['s1'], NOW);
     expect(res.failed).toBe(false);
     expect(res.frozen.has('s1')).toBe(true);
   });
 
-  test('unsent row does not freeze; no row at all does not freeze', async () => {
+  test('unsent row (outside the send band) does not freeze; no row at all does not freeze', async () => {
     const res = await loadReminderFreeze(reminderDbStub({
       rows: [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: T, reminder_72h_sent: false, suppressed_by_sibling: false }],
-    }), ['s1', 's2']);
+    }), ['s1', 's2'], NOW);
     expect(res.failed).toBe(false);
     expect(res.frozen.size).toBe(0);
+  });
+
+  test('an UNSENT row inside the sender-claimable band freezes (mid-send race)', async () => {
+    // 48h out: the reminder cron may be mid-send (SMS delivered, flag not yet
+    // written), so the flag alone proves nothing — frozen regardless.
+    const res = await loadReminderFreeze(reminderDbStub({
+      rows: [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: '2026-08-12T00:00:00Z', reminder_72h_sent: false, suppressed_by_sibling: false }],
+    }), ['s1'], NOW);
+    expect(res.frozen.has('s1')).toBe(true);
+  });
+
+  test('band boundary: just inside 72.25h freezes, just outside does not', async () => {
+    const mk = (appt) => reminderDbStub({
+      rows: [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: appt, reminder_72h_sent: false, suppressed_by_sibling: false }],
+    });
+    // NOW + 72h → inside (72 < 72.25)
+    let res = await loadReminderFreeze(mk('2026-08-13T00:00:00Z'), ['s1'], NOW);
+    expect(res.frozen.has('s1')).toBe(true);
+    // NOW + 73h → outside
+    res = await loadReminderFreeze(mk('2026-08-13T01:00:00Z'), ['s1'], NOW);
+    expect(res.frozen.has('s1')).toBe(false);
+  });
+
+  test('unparseable appointment_time freezes (fail closed)', async () => {
+    const res = await loadReminderFreeze(reminderDbStub({
+      rows: [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: 'garbage', reminder_72h_sent: false, suppressed_by_sibling: false }],
+    }), ['s1'], NOW);
+    expect(res.frozen.has('s1')).toBe(true);
   });
 
   test('suppressed sibling placeholder: frozen only when the slot OWNER row sent', async () => {
@@ -237,15 +268,15 @@ describe('loadReminderFreeze (72h reminder is the HARD gate)', () => {
     let res = await loadReminderFreeze(reminderDbStub({
       rows: [base],
       owners: [{ customer_id: 'c1', appointment_time: T }],
-    }), ['s1']);
+    }), ['s1'], NOW);
     expect(res.frozen.has('s1')).toBe(true);
     // No sent owner → the placeholder's own pre-set flags mean nothing → free.
-    res = await loadReminderFreeze(reminderDbStub({ rows: [base], owners: [] }), ['s1']);
+    res = await loadReminderFreeze(reminderDbStub({ rows: [base], owners: [] }), ['s1'], NOW);
     expect(res.frozen.has('s1')).toBe(false);
   });
 
   test('FAIL CLOSED: an unreadable reminder table reports failed=true', async () => {
-    const res = await loadReminderFreeze(reminderDbStub({ throwOnFirstQuery: true }), ['s1']);
+    const res = await loadReminderFreeze(reminderDbStub({ throwOnFirstQuery: true }), ['s1'], NOW);
     expect(res.failed).toBe(true);
   });
 
@@ -253,12 +284,12 @@ describe('loadReminderFreeze (72h reminder is the HARD gate)', () => {
     const res = await loadReminderFreeze(reminderDbStub({
       rows: [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: T, reminder_72h_sent: true, suppressed_by_sibling: true }],
       throwOnOwnerQuery: true,
-    }), ['s1']);
+    }), ['s1'], NOW);
     expect(res.failed).toBe(true);
   });
 
   test('empty id list is a clean no-op', async () => {
-    const res = await loadReminderFreeze(reminderDbStub({ throwOnFirstQuery: true }), []);
+    const res = await loadReminderFreeze(reminderDbStub({ throwOnFirstQuery: true }), [], NOW);
     expect(res).toEqual({ failed: false, frozen: new Set() });
   });
 });
