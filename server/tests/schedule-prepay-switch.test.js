@@ -405,6 +405,25 @@ describe('on-site prepay switch — invoices that must not be superseded', () =>
     expect(body.blockReason).toMatch(/estimate deposit credit/i);
   });
 
+  test('an accept invoice with UNRECOGNIZED lines refuses — combined charges must not be voided', async () => {
+    // Root-count can read 1 even when the converter combined services; the
+    // invoice's own lines are the decisive proof (Codex P0 r18).
+    stubTables({
+      invoices: [{
+        ...ACCEPT_INVOICE,
+        total: '415.00',
+        line_items: [
+          { description: 'WaveGuard Membership — one-time setup fee', amount: 99 },
+          { description: 'First service application', amount: 128 },
+          { description: 'Monthly Lawn Care — first application', amount: 188 },
+        ],
+      }],
+    });
+    const { body } = await preview();
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/beyond this plan/i);
+  });
+
   test('a MULTI-SERVICE estimate refuses — its combined accept invoice covers siblings', async () => {
     stubTables({ rootsCount: 2 });
     const { body } = await preview();

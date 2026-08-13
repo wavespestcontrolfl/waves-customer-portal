@@ -2920,10 +2920,12 @@ export default function DispatchPageV2({
           }}
           onBillingChanged={() => {
             // The annual-prepay switch rewrote this visit's money state (lane,
-            // attached invoice, prepaid stamps). Refetch the day and bump the
-            // week cache so the sheet's billing card and the checkout amount
-            // stop showing the pre-switch figures — same pairing the terminal
-            // actions below use.
+            // attached invoice — possibly under a NEW invoice id after an
+            // abort's restore). The open sheet still holds the pre-switch
+            // snapshot, and checkout could reopen against the voided row
+            // (Codex P1 r18) — close it and refetch; the operator reopens to
+            // a fresh row. Same pairing the terminal actions below use.
+            setDetailService(null);
             fetchSchedule(date, { silent: true });
             setScheduleRefreshKey((k) => k + 1);
           }}

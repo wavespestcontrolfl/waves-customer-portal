@@ -9186,6 +9186,20 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     // the prepay mint carries no deposit credit and a covered year cuts no
     // later invoice for it to land on — the paid deposit would strand.
     const lines = invoiceLineItems(inv.line_items);
+    // PROOF the invoice bills only THIS plan (Codex P0 r18): the root-series
+    // count can read 1 even when the converter combined services, so the
+    // decisive check is the invoice's own lines — a per-application accept
+    // mints exactly a setup-fee line and/or a first-application line, and
+    // ANYTHING else means sibling charges ride this invoice and voiding it
+    // would erase them.
+    const RECOGNIZED_ACCEPT_LINES = /^(WaveGuard Membership — one-time setup fee|First service application)$/;
+    // deposit_credit lines are exempt here only so the DEDICATED guard below
+    // refuses them with its accurate ledger-restore reason.
+    const unrecognized = lines.find((li) => String(li?.category || '') !== 'deposit_credit'
+      && !RECOGNIZED_ACCEPT_LINES.test(String(li?.description || '').trim()));
+    if (unrecognized) {
+      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the accept invoice'} carries charges beyond this plan’s setup fee and first application (“${String(unrecognized?.description || '').slice(0, 60)}”). Handle it from Customer 360, where the invoice can be split first` };
+    }
     if (lines.some((li) => String(li?.category || '') === 'deposit_credit')) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit carries an estimate deposit credit. Mint the prepay from Customer 360 so the deposit is applied to it` };
     }

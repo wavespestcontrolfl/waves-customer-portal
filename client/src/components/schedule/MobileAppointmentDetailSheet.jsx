@@ -18,7 +18,7 @@
 //                      pre-filled (defaultCustomer prop).
 // Note save          → PATCH /admin/dispatch/:id/note (new endpoint).
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { TIMEZONE } from '../../lib/timezone';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
@@ -152,6 +152,11 @@ export default function MobileAppointmentDetailSheet({
   // unreachable probe leaves the action hidden.
   const [prepaySwitchEnabled, setPrepaySwitchEnabled] = useState(false);
   const [showPrepaySwitch, setShowPrepaySwitch] = useState(false);
+  // Money moved inside the switch sheet: reported to the caller only when
+  // the sheet CLOSES (Codex P1 r18) — firing mid-flow would let the caller
+  // unmount this sheet under the operator's Done screen, and NOT firing
+  // would leave this detail sheet showing the voided invoice snapshot.
+  const prepaySwitchDirty = useRef(false);
 
   useEffect(() => {
     setCardRequestInfo(null);
@@ -679,8 +684,14 @@ export default function MobileAppointmentDetailSheet({
         {showPrepaySwitch && (
           <PrepaySwitchSheet
             service={service}
-            onClose={() => setShowPrepaySwitch(false)}
-            onSaved={() => onBillingChanged?.(service)}
+            onClose={() => {
+              setShowPrepaySwitch(false);
+              if (prepaySwitchDirty.current) {
+                prepaySwitchDirty.current = false;
+                onBillingChanged?.(service);
+              }
+            }}
+            onSaved={() => { prepaySwitchDirty.current = true; }}
           />
         )}
 
