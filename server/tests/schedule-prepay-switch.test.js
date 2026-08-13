@@ -882,12 +882,16 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
 
 describe('on-site prepay switch — activation status (paid ≠ activated)', () => {
   let syncSpy;
+  let coversSpy;
   beforeEach(() => {
     jest.clearAllMocks();
     mockResolveForInvoice.mockResolvedValue({ payerId: null });
     syncSpy = jest.spyOn(AnnualPrepayRenewals, 'syncTermForInvoicePayment').mockResolvedValue(undefined);
+    // Coverage is judged by the completion path's own authority (Codex P0
+    // r27) — its full validation is unit-tested in the renewals suite.
+    coversSpy = jest.spyOn(AnnualPrepayRenewals, 'annualPrepayCoversVisit').mockResolvedValue(true);
   });
-  afterEach(() => syncSpy.mockRestore());
+  afterEach(() => { syncSpy.mockRestore(); coversSpy.mockRestore(); });
 
   async function getStatus() {
     const app = express();
@@ -911,8 +915,32 @@ describe('on-site prepay switch — activation status (paid ≠ activated)', () 
     const { status, body } = await getStatus();
     expect(status).toBe(200);
     expect(body.activated).toBe(true);
-    // Already active — no repair needed.
+    // Already active — no repair needed; coverage judged by the completion
+    // path's own validator, on the refreshed visit row.
     expect(syncSpy).not.toHaveBeenCalled();
+    expect(coversSpy).toHaveBeenCalled();
+  });
+
+  test('a stamp pointing at a DIFFERENT term never activates (Codex P0 r27)', async () => {
+    stubTables({
+      visit: { ...ACCEPTED_SERIES_VISIT, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'term-OTHER' },
+      invoicesById: { 'inv-prepay': { id: 'inv-prepay', status: 'paid', paid_at: '2026-08-13T00:00:00Z', annual_prepay_term_id: 'term-1' } },
+      term: { id: 'term-1', status: 'active' },
+    });
+    const { body } = await getStatus();
+    expect(body.activated).toBe(false);
+    expect(body.visitCovered).toBe(false);
+  });
+
+  test('the completion validator refusing the stamp refuses activation too', async () => {
+    coversSpy.mockResolvedValue(false);
+    stubTables({
+      visit: { ...ACCEPTED_SERIES_VISIT, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'term-1' },
+      invoicesById: { 'inv-prepay': { id: 'inv-prepay', status: 'paid', paid_at: '2026-08-13T00:00:00Z', annual_prepay_term_id: 'term-1' } },
+      term: { id: 'term-1', status: 'active' },
+    });
+    const { body } = await getStatus();
+    expect(body.activated).toBe(false);
   });
 
   test('paid but PENDING repairs synchronously and answers honestly if still not active', async () => {

@@ -10207,13 +10207,22 @@ router.get('/:id/prepay-switch/status', requireAdmin, async (req, res, next) => 
       }
       term = await readTerm();
     }
+    // Coverage is judged by the COMPLETION PATH'S OWN AUTHORITY (Codex P0
+    // r27): annualPrepayCoversVisit validates the stamp's amount, the live
+    // paid term, the customer binding, and the coverage-service match — a
+    // loose method+id check here could bless a stale stamp from ANOTHER
+    // term, tell the operator to complete, and have the real completion
+    // gate reject coverage and bill again. The stamp must also point at
+    // THIS invoice's term.
     const freshVisit = await db('scheduled_services')
       .where({ id: visit.id })
-      .first('prepaid_method', 'annual_prepay_term_id');
+      .first('id', 'customer_id', 'service_type', 'prepaid_method', 'prepaid_amount',
+        'annual_prepay_term_id', 'scheduled_date');
     const termActive = !!term && termActiveStatuses.includes(String(term.status || ''));
-    const visitCovered = !!freshVisit
-      && String(freshVisit.prepaid_method || '') === 'annual_prepay_invoice'
-      && !!freshVisit.annual_prepay_term_id;
+    const stampMatchesTerm = !!freshVisit && !!term
+      && String(freshVisit.annual_prepay_term_id || '') === String(term.id);
+    const visitCovered = stampMatchesTerm
+      && await AnnualPrepayRenewals.annualPrepayCoversVisit(freshVisit, db);
     res.json({
       invoiceStatus,
       settled,
