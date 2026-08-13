@@ -167,19 +167,35 @@ async function callHistoryText(fromPhone) {
  * Internal notes never leave the building (direction whitelist).
  * Returns scrubbed rows, NEWEST FIRST (callers reverse for speech order).
  */
-async function loadRecentMessages(fromPhone, limit = MESSAGE_HISTORY_LIMIT) {
+async function loadRecentMessages(fromPhone, { customerId = null, tier = 'redacted' } = {}, limit = MESSAGE_HISTORY_LIMIT) {
   const { aniDigitKey } = require('./relay-context');
   const key = aniDigitKey(fromPhone);
   if (!key) return [];
   const db = require('../../models/db');
+  // ⭐ A KNOWN CUSTOMER'S THREAD HAS NO contact_phone TO MATCH. The unified
+  // writer keys a known customer's SMS thread by customer_id and CLEARS
+  // contact_phone on promotion — so a predicate that requires contact_phone
+  // only ever finds UNKNOWN-contact threads, and every established customer
+  // was told "no messages on file" over a thread full of them. The ANI-only
+  // rule survives intact: the FULL tier means the calling number IS
+  // customers.phone, which makes the customer's thread definitionally this
+  // number's thread — so the customer arm exists ONLY at that tier. A
+  // contact-slot (redacted) caller still matches nothing but an
+  // unknown-contact thread keyed to their own number, exactly as before.
+  const fullTierCustomerId = tier === 'full' && customerId ? customerId : null;
   const rows = await db('messages')
     .join('conversations', 'messages.conversation_id', 'conversations.id')
     .where('messages.channel', 'sms')
     .whereIn('messages.direction', ['inbound', 'outbound'])
-    .whereRaw(
-      "RIGHT(regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
-      [key],
-    )
+    .where(function threadIdentity() {
+      this.whereRaw(
+        "RIGHT(regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
+        [key],
+      );
+      if (fullTierCustomerId) {
+        this.orWhere('conversations.customer_id', fullTierCustomerId);
+      }
+    })
     .orderBy('messages.created_at', 'desc')
     .limit(limit)
     .select('messages.direction', 'messages.body', 'messages.created_at');
@@ -194,8 +210,8 @@ async function loadRecentMessages(fromPhone, limit = MESSAGE_HISTORY_LIMIT) {
 }
 
 /** Most recent ~20 messages, direction-labeled, NEWEST LAST (reads like the thread). */
-async function messageHistoryText(fromPhone) {
-  const messages = await loadRecentMessages(fromPhone, MESSAGE_HISTORY_LIMIT);
+async function messageHistoryText(fromPhone, identity = {}) {
+  const messages = await loadRecentMessages(fromPhone, identity, MESSAGE_HISTORY_LIMIT);
   if (!messages.length) {
     return 'No text messages on file with this number.';
   }
@@ -216,9 +232,9 @@ async function messageHistoryText(fromPhone) {
  * where a model is most likely to obey an instruction it finds. The per-line
  * directive filter (voiceSafeText → promptSafeUntrusted) is the other half.
  */
-async function buildRecentTextsBlock(fromPhone) {
+async function buildRecentTextsBlock(fromPhone, identity = {}) {
   try {
-    const messages = await loadRecentMessages(fromPhone, RECENT_TEXTS_BLOCK_LIMIT);
+    const messages = await loadRecentMessages(fromPhone, identity, RECENT_TEXTS_BLOCK_LIMIT);
     if (!messages.length) return null;
     const lines = [
       'RECENT TEXTS — the last few SMS messages between Waves and this caller\'s',

@@ -201,8 +201,14 @@ function fmtMoney(value) {
 function speakDate(value) {
   let iso = null;
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    const { etDateString } = require('../../utils/datetime-et');
-    iso = etDateString(value);
+    // ⭐ A DATE COLUMN IS A CALENDAR DAY, NOT AN INSTANT. node-postgres hydrates
+    // a pg DATE as midnight-UTC on this UTC-process deploy, and projecting that
+    // instant into Eastern (etDateString) lands on the PREVIOUS day — Sandy
+    // announcing every visit, report, and invoice a day early. etCalendarDayOf
+    // is the shared helper that tells a DATE-shaped midnight apart from a real
+    // timestamp and only ET-projects the latter (AGENTS.md DATE trap).
+    const { etCalendarDayOf } = require('../../utils/datetime-et');
+    iso = etCalendarDayOf(value);
   } else if (typeof value === 'string') {
     iso = value.slice(0, 10);
   }
@@ -906,7 +912,7 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null } 
       attested
         ? (async () => {
           const { buildRecentTextsBlock } = require('./relay-history');
-          return buildRecentTextsBlock(from);
+          return buildRecentTextsBlock(from, { customerId: customer.id, tier: customer.tier });
         })().catch(() => null)
         : Promise.resolve(null),
     ]);

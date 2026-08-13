@@ -659,7 +659,9 @@ async function executeTool(name, input = {}, ctx = {}) {
         }
         const relayHistory = require('./relay-history');
         if (name === 'get_call_history') return await relayHistory.callHistoryText(ctx.from);
-        return await relayHistory.messageHistoryText(ctx.from);
+        // The full-tier customer arm rides along (ANI == customers.phone at
+        // that tier, so the customer thread IS this number's thread).
+        return await relayHistory.messageHistoryText(ctx.from, { customerId: ctx.customerId, tier: matchedCallerTier(ctx) });
       }
       // Invoices are ANI-matched-caller only: itemized billing detail belongs
       // to the account holder, and the redacted tier already withholds
