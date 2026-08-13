@@ -4019,28 +4019,37 @@ function BankImportTab() {
   // per-row candidate pick for the manual link path (row id → expense id)
   const [linkPick, setLinkPick] = useState({});
   const [hasMore, setHasMore] = useState(false);
-  const [shown, setShown] = useState(200);
   const [covYear, setCovYear] = useState(String(new Date().getFullYear()));
   // last upload payload, kept only while its result reported duplicates —
   // fuels the explicit force-import path for identical-but-distinct rows
   const [dupUpload, setDupUpload] = useState(null);
 
+  // offset pagination with APPEND semantics — the server caps limit at 500,
+  // so growing a single limit stalls there; offset pages don't
+  const loadRows = useCallback(
+    (offset) => {
+      adminFetch(
+        `/admin/tax/bank-import/transactions?limit=200&offset=${offset}${filter ? `&status=${filter}` : ""}`,
+      )
+        .then((d) => {
+          setRows((prev) => (offset === 0 ? d.transactions || [] : [...prev, ...(d.transactions || [])]));
+          setHasMore(!!d.hasMore);
+        })
+        .catch(() => {
+          if (offset === 0) setRows([]);
+        });
+    },
+    [filter],
+  );
   const load = useCallback(() => {
     adminFetch("/admin/tax/bank-import/status")
       .then((s) => setCounts(s?.counts || {}))
       .catch(() => {});
-    adminFetch(
-      `/admin/tax/bank-import/transactions?limit=${shown}${filter ? `&status=${filter}` : ""}`,
-    )
-      .then((d) => {
-        setRows(d.transactions || []);
-        setHasMore(!!d.hasMore);
-      })
-      .catch(() => setRows([]));
+    loadRows(0);
     adminFetch(`/admin/tax/bank-import/coverage?year=${covYear}`)
       .then((d) => setCoverage(d.months || []))
       .catch(() => setCoverage([]));
-  }, [filter, shown, covYear]);
+  }, [loadRows, covYear]);
   useEffect(load, [load]);
 
   const act = (label, path, body) => {
@@ -4416,7 +4425,7 @@ function BankImportTab() {
             <button
               type="button"
               style={{ ...inputStyle, cursor: "pointer", fontWeight: 600 }}
-              onClick={() => setShown((n) => n + 200)}
+              onClick={() => loadRows(rows.length)}
             >
               Load 200 more
             </button>

@@ -236,9 +236,12 @@ async function retryPendingReconciliations() {
     if (payout && !payout.reconciled) {
       try {
         const { reconcilePayout } = require('./stripe-banking');
-        await reconcilePayout(payout.id, Number(row.amount), `Auto-matched to bank import row ${row.id} (retry)`, 'bank-import', 'confirmed');
+        // onlyIfUnreconciled: if a human reconciled between our read and
+        // this write, the guard skips atomically — their state stands, and
+        // "someone reconciled" resolves the pending flag either way.
+        const result = await reconcilePayout(payout.id, Number(row.amount), `Auto-matched to bank import row ${row.id} (retry)`, 'bank-import', 'confirmed', { onlyIfUnreconciled: true });
         done = true;
-        retried++;
+        if (!(result && result.skipped)) retried++;
       } catch (err) {
         logger.warn(`[bank-import] reconciliation retry for payout ${payout.id} failed again: ${err.message}`);
       }
@@ -365,7 +368,9 @@ async function runDeterministicMatching() {
             if (!exact[0].reconciled) {
               try {
                 const { reconcilePayout } = require('./stripe-banking');
-                await reconcilePayout(exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`, 'bank-import', 'confirmed');
+                // onlyIfUnreconciled (row-locked): a human who reconciled
+                // this payout since our candidate read is never overwritten.
+                await reconcilePayout(exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`, 'bank-import', 'confirmed', { onlyIfUnreconciled: true });
               } catch (reconErr) {
                 // The link is real; the echo failed. Flag the row so
                 // retryPendingReconciliations picks it up on every later

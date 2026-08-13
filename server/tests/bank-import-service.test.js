@@ -270,7 +270,7 @@ describe('runDeterministicMatching', () => {
     // CAS: the update is scoped to id AND status='unmatched'
     expect(link.where).toContainEqual({ id: 'bt-1', status: 'unmatched' });
     // the link echoes into the EXISTING reconciliation mechanism
-    expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('bt-1'), 'bank-import', 'confirmed');
+    expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('bt-1'), 'bank-import', 'confirmed', { onlyIfUnreconciled: true });
   });
 
   test('an already-reconciled payout links without re-reconciling', async () => {
@@ -379,7 +379,7 @@ describe('runDeterministicMatching', () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
     summary = await runDeterministicMatching();
     expect(summary.reconcileRetried).toBe(1);
-    expect(reconcilePayout).toHaveBeenLastCalledWith('po-1', 2418.66, expect.stringContaining('retry'), 'bank-import', 'confirmed');
+    expect(reconcilePayout).toHaveBeenLastCalledWith('po-1', 2418.66, expect.stringContaining('retry'), 'bank-import', 'confirmed', { onlyIfUnreconciled: true });
     const cleared = state.updates.find(u => u.patch.suggestion && !('reconcilePending' in u.patch.suggestion));
     expect(cleared).toBeDefined();
   });

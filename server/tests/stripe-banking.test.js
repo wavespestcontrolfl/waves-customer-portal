@@ -542,6 +542,22 @@ describe('stripe banking service', () => {
       expect(reconInserts).toHaveLength(0);
     });
 
+    test('onlyIfUnreconciled writes when nothing is reconciled yet', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import', 'confirmed', { onlyIfUnreconciled: true });
+      expect(result.skipped).toBeUndefined();
+      expect(reconInserts).toHaveLength(1);
+      expect(payoutUpdate).toMatchObject({ reconciled: true, reconciled_by: 'bank-import' });
+    });
+
+    test('onlyIfUnreconciled skips atomically when a human reconciled first — nothing is written', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: true, reconciled_by: 'adam' };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import', 'confirmed', { onlyIfUnreconciled: true });
+      expect(result).toEqual({ payout_id: 'local-payout-1', skipped: true });
+      expect(reconInserts).toHaveLength(0);
+      expect(payoutUpdate).toBeNull();
+    });
+
     test('no guard passed = unchanged legacy behavior (unconditional write)', async () => {
       payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
       const result = await service.reconcilePayout('local-payout-1', 118.5, 'bank shows less', 'admin', 'confirmed');
