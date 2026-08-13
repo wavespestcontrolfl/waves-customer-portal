@@ -378,10 +378,10 @@ describe('unlink (gate on)', () => {
     // ROW-SPECIFIC: only the reconciliation this row authored can be undone
     expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('bt-1'), 'bank-import:bt-1', 'rejected', { onlyIfReconciledBy: 'bank-import:bt-1' });
     // the unlink update itself carries the reversal-pending flag (crash-safe),
-    // and a follow-up update clears it once the reversal lands
+    // and a follow-up jsonb key-subtraction clears it once the reversal lands
     expect(state.bankUpdates[0].patch.suggestion.reconcileReversalPending).toBe('po-1');
-    expect(state.bankUpdates[1].patch.suggestion).not.toHaveProperty('reconcileReversalPending');
-    expect(state.bankUpdates[1].patch.suggestion.lastUnlink.payoutId).toBe('po-1');
+    expect(state.bankUpdates[0].patch.suggestion.lastUnlink.payoutId).toBe('po-1');
+    expect(state.bankUpdates[1].patch.suggestion).toContain("- 'reconcileReversalPending'");
   });
 
   test('a guard miss (human owns the reconciliation, or none exists) resolves as kept', async () => {
@@ -390,7 +390,7 @@ describe('unlink (gate on)', () => {
     const body = await res.json();
     expect(body.reconciliation).toBe('kept');
     // flag still clears — nothing left to reverse
-    expect(state.bankUpdates[1].patch.suggestion).not.toHaveProperty('reconcileReversalPending');
+    expect(state.bankUpdates[1].patch.suggestion).toContain("- 'reconcileReversalPending'");
   });
 
   test('a reversal failure answers reversal_pending and LEAVES the flag for the sweep', async () => {

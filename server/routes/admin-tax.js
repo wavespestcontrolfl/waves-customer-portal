@@ -1924,8 +1924,10 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
     // that unlinks the row — if the reversal below fails (or the process
     // dies), the matching pass's sweep retries it instead of /admin/banking
     // staying reconciled against an unlinked row forever.
+    // a stale confirm-pending flag makes no sense on an unlinked row
+    const { reconcilePending: _stalePending, ...baseSuggestion } = row.suggestion || {};
     const suggestion = {
-      ...(row.suggestion || {}),
+      ...baseSuggestion,
       lastUnlink: {
         at: new Date().toISOString(),
         was: row.status,
@@ -1960,8 +1962,10 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
         // unlink released the payout — is skipped atomically, never clobbered.
         const result = await reconcilePayout(row.matched_payout_id, Number(row.amount), `Unlinked from bank import row ${row.id}`, `bank-import:${row.id}`, 'rejected', { onlyIfReconciledBy: `bank-import:${row.id}` });
         reconciliation = result && result.skipped ? 'kept' : 'reversed';
-        const { reconcileReversalPending, ...rest } = suggestion;
-        await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
+        // jsonb key-subtraction: clears ONLY the flag, preserving whatever
+        // suggestion state a concurrent pass may have written since
+        await db('bank_transactions').where({ id: row.id })
+          .update({ suggestion: db.raw("suggestion - 'reconcileReversalPending'"), updated_at: new Date() });
       } catch (err) {
         logger.warn(`[bank-import] row ${row.id} unlinked; reconciliation reversal pending retry: ${err.message}`);
         reconciliation = 'reversal_pending';

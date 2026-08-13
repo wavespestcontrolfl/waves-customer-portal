@@ -1066,6 +1066,10 @@ async function getCashFlow(startDate, endDate) {
  *     by that exact author (automated reversals).
  *   - onlyIfUnreconciled: proceed only if the payout is NOT currently
  *     reconciled (automated confirms).
+ *   - precondition: async (trx) => boolean — arbitrary caller-owned check
+ *     run inside the same transaction (after the payout row lock); returning
+ *     false skips the write. Callers use it to lock-and-verify their own
+ *     rows so the reconciliation can't outlive the state that justified it.
  */
 async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, status = 'confirmed', opts = {}) {
   try {
@@ -1097,6 +1101,10 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
           skipped = true;
           return;
         }
+      }
+      if (opts.precondition && !(await opts.precondition(trx))) {
+        skipped = true;
+        return;
       }
       const reconRow = {
         payout_id: payoutId,

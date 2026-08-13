@@ -558,6 +558,23 @@ describe('stripe banking service', () => {
       expect(payoutUpdate).toBeNull();
     });
 
+    test('a false precondition skips atomically inside the transaction — nothing is written', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      const precondition = jest.fn(async () => false);
+      const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import', 'confirmed', { onlyIfUnreconciled: true, precondition });
+      expect(precondition).toHaveBeenCalledWith(db); // receives the trx
+      expect(result).toEqual({ payout_id: 'local-payout-1', skipped: true });
+      expect(reconInserts).toHaveLength(0);
+      expect(payoutUpdate).toBeNull();
+    });
+
+    test('a true precondition lets the write proceed', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import', 'confirmed', { onlyIfUnreconciled: true, precondition: async () => true });
+      expect(result.skipped).toBeUndefined();
+      expect(reconInserts).toHaveLength(1);
+    });
+
     test('no guard passed = unchanged legacy behavior (unconditional write)', async () => {
       payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
       const result = await service.reconcilePayout('local-payout-1', 118.5, 'bank shows less', 'admin', 'confirmed');

@@ -238,8 +238,15 @@ async function retryPendingReconciliations() {
         const { reconcilePayout } = require('./stripe-banking');
         // onlyIfUnreconciled: if a human reconciled between our read and
         // this write, the guard skips atomically — their state stands, and
-        // "someone reconciled" resolves the pending flag either way.
-        const result = await reconcilePayout(payout.id, Number(row.amount), `Auto-matched to bank import row ${row.id} (retry)`, `bank-import:${row.id}`, 'confirmed', { onlyIfUnreconciled: true });
+        // "someone reconciled" resolves the pending flag either way. The
+        // precondition re-verifies the link under OUR row's lock so a
+        // concurrent unlink makes this retry skip, not reconcile an orphan.
+        const result = await reconcilePayout(payout.id, Number(row.amount), `Auto-matched to bank import row ${row.id} (retry)`, `bank-import:${row.id}`, 'confirmed', {
+          onlyIfUnreconciled: true,
+          precondition: (trx) => trx('bank_transactions')
+            .where({ id: row.id, status: 'matched_payout', matched_payout_id: payout.id })
+            .forUpdate().first('id').then(Boolean),
+        });
         done = true;
         if (!(result && result.skipped)) retried++;
       } catch (err) {
@@ -247,8 +254,8 @@ async function retryPendingReconciliations() {
       }
     }
     if (done || !payout) {
-      const { reconcilePending, ...rest } = row.suggestion || {};
-      await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
+      await db('bank_transactions').where({ id: row.id })
+        .update({ suggestion: db.raw("suggestion - 'reconcilePending'"), updated_at: new Date() });
     }
   }
 
@@ -268,13 +275,13 @@ async function retryPendingReconciliations() {
       const { reconcilePayout } = require('./stripe-banking');
       const result = await reconcilePayout(payoutId, Number(row.amount), `Unlinked from bank import row ${row.id} (retry)`, `bank-import:${row.id}`, 'rejected', { onlyIfReconciledBy: `bank-import:${row.id}` });
       if (!(result && result.skipped)) reversed++;
-      const { reconcileReversalPending, ...rest } = row.suggestion || {};
-      await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
+      await db('bank_transactions').where({ id: row.id })
+        .update({ suggestion: db.raw("suggestion - 'reconcileReversalPending'"), updated_at: new Date() });
     } catch (err) {
       // a deleted payout can never be reversed — resolve the flag
       if (/payout not found/i.test(err.message)) {
-        const { reconcileReversalPending, ...rest } = row.suggestion || {};
-        await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
+        await db('bank_transactions').where({ id: row.id })
+          .update({ suggestion: db.raw("suggestion - 'reconcileReversalPending'"), updated_at: new Date() });
       } else {
         logger.warn(`[bank-import] reconciliation reversal retry for payout ${payoutId} failed again: ${err.message}`);
       }
@@ -386,10 +393,21 @@ async function runDeterministicMatching() {
                 // onlyIfUnreconciled (row-locked): a human who reconciled
                 // this payout since our candidate read is never overwritten.
                 // Author is row-specific so a later reversal can only undo
-                // ITS OWN reconciliation, never a newer claim's.
-                await reconcilePayout(exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`, `bank-import:${row.id}`, 'confirmed', { onlyIfUnreconciled: true });
-                const { reconcilePending, ...rest } = pendingSuggestion;
-                await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
+                // ITS OWN reconciliation, never a newer claim's. The
+                // precondition locks OUR bank row inside the reconcile
+                // transaction and verifies the link still stands — an admin
+                // unlink during this await makes the echo skip instead of
+                // reconciling a payout its row no longer claims.
+                await reconcilePayout(exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`, `bank-import:${row.id}`, 'confirmed', {
+                  onlyIfUnreconciled: true,
+                  precondition: (trx) => trx('bank_transactions')
+                    .where({ id: row.id, status: 'matched_payout', matched_payout_id: exact[0].id })
+                    .forUpdate().first('id').then(Boolean),
+                });
+                // jsonb key-subtraction: removes ONLY the flag, never
+                // clobbering suggestion state a concurrent write added
+                await db('bank_transactions').where({ id: row.id })
+                  .update({ suggestion: db.raw("suggestion - 'reconcilePending'"), updated_at: new Date() });
               } catch (reconErr) {
                 // flag already persisted with the claim — the sweep retries
                 logger.warn(`[bank-import] payout ${exact[0].id} linked but reconciliation write failed (sweep will retry): ${reconErr.message}`);
