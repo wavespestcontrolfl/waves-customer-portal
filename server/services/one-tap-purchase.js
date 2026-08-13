@@ -667,15 +667,27 @@ async function voidPurchase(purchase) {
   }
   // Same CAS discipline as release: only a still-open row may be voided —
   // a purchase that completed since this snapshot keeps its committed state.
-  await db('one_tap_purchases')
-    .where({ id: purchase.id })
-    .whereIn('status', ['initiated', 'reserved'])
-    .update({
-      status: 'voided',
-      scheduled_service_id: null,
-      updated_at: db.fn.now(),
-    })
-    .catch(() => {});
+  // When the void lands, archive the synthesized draft too (mirror release):
+  // an unsellable draft must not sit in the admin estimate pipeline where
+  // staff could act on it and duplicate already-owned service.
+  try {
+    const voided = await db('one_tap_purchases')
+      .where({ id: purchase.id })
+      .whereIn('status', ['initiated', 'reserved'])
+      .update({
+        status: 'voided',
+        scheduled_service_id: null,
+        updated_at: db.fn.now(),
+      });
+    if (voided) {
+      await db('estimates')
+        .where({ id: purchase.estimate_id, status: 'draft', source: 'one_tap_purchase' })
+        .whereNull('archived_at')
+        .update({ archived_at: db.fn.now() });
+    }
+  } catch (err) {
+    logger.warn(`[one-tap-purchase] void cleanup incomplete (code=${err?.code || 'none'})`);
+  }
 }
 
 function formatVisitWhen(firstVisit) {
