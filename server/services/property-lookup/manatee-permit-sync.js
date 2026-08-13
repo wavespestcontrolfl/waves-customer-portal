@@ -254,6 +254,20 @@ function parsePoolPermitCsv(csvText) {
 const UPSERT_CHUNK = 500;
 
 /**
+ * Last-wins dedupe on the upsert conflict key. Adjacent report windows
+ * share their boundary date (ACA date params are inclusive), so boundary
+ * records arrive twice — and two copies of one key in a single batched
+ * INSERT .. ON CONFLICT chunk aborts the whole transaction ("command
+ * cannot affect row a second time"). Last-wins keeps the later window's
+ * (fresher) copy.
+ */
+function dedupeByKey(rows, key) {
+  const map = new Map();
+  for (const row of rows) map.set(row[key], row);
+  return [...map.values()];
+}
+
+/**
  * Chunked array upserts inside the caller's transaction. Rows in one call
  * MUST share the same key set (knex unions columns across an array insert
  * and would write NULL for keys a row omits — exactly what the per-report
@@ -300,11 +314,12 @@ async function syncPoolPermits({ timeoutMs } = {}) {
   if (!gateEnvValue('GATE_PERMIT_SYNC')) return { skipped: 'gated' };
   const t0 = Date.now();
   const windows = windowsSince(poolSyncStartIso(), BACKFILL_CHUNK_MONTHS);
-  const allRows = [];
+  const staged = [];
   for (const [from, to] of windows) {
     const csv = await fetchPoolPermitCsv(from, to, timeoutMs);
-    allRows.push(...parsePoolPermitCsv(csv));
+    staged.push(...parsePoolPermitCsv(csv));
   }
+  const allRows = dedupeByKey(staged, 'record_id');
   const fetched = allRows.length;
   const written = allRows.length
     ? await db.transaction((trx) => upsertChunked(trx, 'pool_permit_records', 'record_id', allRows))
@@ -444,6 +459,7 @@ async function syncConstructionPermits({ timeoutMs } = {}) {
       const csv = await fetchAcaReportCsv(REPORTS[reportKey], from, to, timeoutMs);
       staged[reportKey].push(...parseConstructionCsv(csv, reportKey));
     }
+    staged[reportKey] = dedupeByKey(staged[reportKey], 'permit_no');
   }
   const fetched = staged.under_construction.length + staged.cos.length;
   const written = fetched
@@ -494,6 +510,12 @@ async function syncPermits(options = {}) {
 
 const CONSTRUCTION_ACTIVE_MONTHS = 24;
 const NEW_BUILD_CO_MONTHS = 18;
+// A permit absent from the weekly full-range report re-sync (canceled or
+// withdrawn without ever getting a CO) stops having its last_seen_at
+// refreshed — after this many days unseen it no longer counts as active
+// construction. Also fails quiet when the sync itself goes stale: a table
+// nobody refreshes shouldn't keep asserting active construction.
+const ACTIVE_SEEN_WITHIN_DAYS = 30;
 
 function monthsAgoIso(months) {
   const d = new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000);
@@ -546,12 +568,17 @@ async function findConstructionActivity({ parcelPin, looseKey } = {}) {
 
   const activeFloor = monthsAgoIso(CONSTRUCTION_ACTIVE_MONTHS);
   const coFloor = monthsAgoIso(NEW_BUILD_CO_MONTHS);
+  const seenFloor = Date.now() - ACTIVE_SEEN_WITHIN_DAYS * 24 * 60 * 60 * 1000;
   let ucRow = null;
   let nbRow = null;
   for (const row of rows) {
     const issuedAt = toIso(row.issued_date);
     const coIssuedAt = toIso(row.co_date);
-    if (!ucRow && !coIssuedAt && !isTerminalStatus(row.status) && issuedAt && issuedAt >= activeFloor) {
+    // last_seen_at guard: rows the weekly full re-sync stopped seeing have
+    // dropped out of the county's report (canceled/withdrawn without a CO)
+    // — stale rows must not keep asserting active construction.
+    const recentlySeen = row.last_seen_at && new Date(row.last_seen_at).getTime() >= seenFloor;
+    if (!ucRow && recentlySeen && !coIssuedAt && !isTerminalStatus(row.status) && issuedAt && issuedAt >= activeFloor) {
       ucRow = row;
     }
     if (!nbRow && coIssuedAt && coIssuedAt >= coFloor && isNewBuildRow(row, coIssuedAt)) {

@@ -277,6 +277,7 @@ describe('findConstructionActivity', () => {
     db.mockImplementation(() => builder([{
       permit_no: 'BLD9902-0001', status: 'Permit Issued', permit_type: 'Residential',
       type_of_work: 'New Single Family', issued_date: recentIso, co_date: null,
+      last_seen_at: new Date().toISOString(),
     }]));
     const activity = await findConstructionActivity({ parcelPin: '4567890123' });
     expect(activity.underConstruction).toBe(true);
@@ -294,10 +295,22 @@ describe('findConstructionActivity', () => {
     expect(activity.underConstruction).toBe(false);
   });
 
+  test('a permit the weekly re-sync stopped seeing is NOT underConstruction', async () => {
+    const recentIso = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    db.mockImplementation(() => builder([{
+      permit_no: 'BLD9902-0003', status: 'Permit Issued', permit_type: 'Residential',
+      type_of_work: 'New Single Family', issued_date: recentIso, co_date: null,
+      last_seen_at: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString(),
+    }]));
+    const activity = await findConstructionActivity({ parcelPin: '4567890123' });
+    expect(activity.underConstruction).toBe(false);
+  });
+
   test('stale issued permit with no CO is NOT underConstruction (24-month window)', async () => {
     db.mockImplementation(() => builder([{
       permit_no: 'BLD9902-0002', status: 'Permit Issued', permit_type: 'Residential',
       type_of_work: 'New Single Family', issued_date: '2022-01-05', co_date: null,
+      last_seen_at: new Date().toISOString(),
     }]));
     const activity = await findConstructionActivity({ parcelPin: '4567890123' });
     expect(activity.underConstruction).toBe(false);
