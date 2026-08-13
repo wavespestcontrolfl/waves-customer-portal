@@ -96,3 +96,31 @@ test('pointers are NOT written when the KB entry bridges to multiple wiki pages'
   expect(dbMock.state.updates.knowledge_base).toEqual([{ wiki_entry_id: null }]);
   expect(dbMock.state.updates.knowledge_entries).toEqual([{ kb_entry_id: 'kb-1' }]);
 });
+
+test('wiki-sync mirror rows never get their provenance pointer rewritten, even on ambiguity', async () => {
+  const dbMock = makeDb({
+    // The KB row is a syncToClaudeopedia mirror: its wiki_entry_id is the
+    // provenance pointer syncKbCopyTrust and applyKbTrustGate gate on.
+    knowledge_base: [{ slug: 'outcomes-product-bifen-i-t', source: 'wiki-sync' }],
+    knowledge_entries: [{ slug: 'product/bifen-i-t' }],
+    // Ambiguous link set — for a curated row this would CLEAR the pointer
+    knowledge_bridge: (rec) => {
+      const isKbSide = rec.ops.some(([m, args]) => m === 'where' && args[0]?.kb_entry_id);
+      if (isKbSide) {
+        return [
+          { kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-a', kb_slug: null, wiki_slug: null },
+          { kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-b', kb_slug: null, wiki_slug: null },
+        ];
+      }
+      return [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-a' }];
+    },
+  });
+  global.__bridgeDbMock = dbMock;
+
+  await KnowledgeBridge.createLink(LINK_ARGS);
+
+  // Mirror provenance untouched (no knowledge_base update at all); the
+  // wiki-side shortcut pointer is unaffected by the mirror rule.
+  expect(dbMock.state.updates.knowledge_base).toBeUndefined();
+  expect(dbMock.state.updates.knowledge_entries).toEqual([{ kb_entry_id: 'kb-1' }]);
+});

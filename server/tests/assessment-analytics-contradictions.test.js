@@ -239,7 +239,7 @@ test('seasonal dedupe is scoped per product — two products under one KB entry 
     knowledge_entries: [],
     knowledge_contradictions: (rec) => {
       for (const [m, args] of rec.ops) {
-        if (m === 'where' && args[0]?.description) dedupeQueries.push(args[0].description);
+        if (m === 'whereRaw' && String(args[0]).includes('description')) dedupeQueries.push(args[1][0]);
       }
       return []; // nothing pre-existing — both should insert
     },
@@ -251,10 +251,40 @@ test('seasonal dedupe is scoped per product — two products under one KB entry 
   expect(result.contradictions).toBe(2);
   const ids = dbMock.state.inserts.knowledge_contradictions.map((c) => c.wiki_entry_id);
   expect(ids).toEqual(['wiki-bifen-it', 'wiki-bifen-xts']);
-  // The dedupe predicate is the exact deterministic description — product-
-  // scoped, no LIKE patterns (substring collisions and % in catalog names)
-  expect(dedupeQueries.some((q) => String(q).startsWith('Bifen I/T performs worse'))).toBe(true);
-  expect(dedupeQueries.some((q) => String(q).startsWith('Bifen XTS performs worse'))).toBe(true);
+  // The dedupe predicate is the slug-normalized deterministic description —
+  // product-scoped, no LIKE patterns (substring collisions and % in catalog
+  // names), stable across display-name casing/punctuation drift
+  expect(dedupeQueries.some((q) => String(q).startsWith('bifen-i-t-performs-worse'))).toBe(true);
+  expect(dedupeQueries.some((q) => String(q).startsWith('bifen-xts-performs-worse'))).toBe(true);
+});
+
+test('claim dedupe binds slug-normalized text so display-name drift cannot duplicate the gate', async () => {
+  const dedupeBindings = [];
+  const dbMock = makeDb({
+    // computeProductEfficacy picks product_name from an UNORDERED query —
+    // this run sees a lowercase variant of the name a prior run stored.
+    product_efficacy: [{ ...NEGATIVE_EFFICACY, product_name: 'celsius wg' }],
+    knowledge_base: [KB_PRODUCT],
+    knowledge_bridge: [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bridged', wiki_slug: 'product/celsius-wg', relevance_score: 0.95 }],
+    knowledge_entries: [],
+    knowledge_contradictions: (rec) => {
+      for (const [m, args] of rec.ops) {
+        if (m === 'whereRaw' && String(args[0]).includes('kb_claim')) dedupeBindings.push(args[1][0]);
+      }
+      // The prior run's open row (already attributed — backfill is a no-op)
+      return [{ id: 'contra-open', wiki_entry_id: 'wiki-bridged', status: 'open' }];
+    },
+  });
+  global.__analyticsDbMock = dbMock;
+
+  const result = await analytics.detectContradictions();
+
+  // Existing open row found via normalized match — no duplicate insert
+  expect(result.contradictions).toBe(0);
+  expect(dbMock.state.inserts.knowledge_contradictions).toBeUndefined();
+  // The binding is the slugified claim — identical for "celsius wg" and
+  // "Celsius WG", so byte-level display drift cannot miss the dedupe.
+  expect(dedupeBindings[0]).toBe('claudeopedia-describes-celsius-wg-as-effective-recommended');
 });
 
 test('an existing open row with null attribution is backfilled and gated when the bridge resolves', async () => {

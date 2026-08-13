@@ -594,3 +594,50 @@ describe('linkTreatmentOutcome pairing windows', () => {
     spies.forEach((s) => s.mockRestore());
   });
 });
+
+// ── linkTreatmentOutcome weather-enrichment retry ──────────────────────────
+
+describe('linkTreatmentOutcome weather-enrichment retry', () => {
+  test('an existing outcome with no weather retries enrichment on the early-return path', async () => {
+    const state = useDb({
+      treatment_outcomes: [{
+        id: 'to-1', service_record_id: 'sr-1', post_assessment_id: 'post-1',
+        treatment_date: '2026-07-01',
+        avg_temperature: null, avg_humidity: null, total_rainfall: null,
+      }],
+      // Historical treatment + no usable snapshot: the retry must ATTEMPT
+      // (load the post assessment) but fail closed on the freshness gates —
+      // no current-conditions fetch, no wrong-day weather write.
+      lawn_assessments: [{ id: 'post-1', service_date: '2026-07-01', fawn_snapshot: null }],
+    });
+
+    const outcome = await wiki.linkTreatmentOutcome('sr-1');
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(outcome).toEqual(expect.objectContaining({ id: 'to-1' }));
+    // Retry wiring fired: the post assessment was loaded for enrichment
+    expect(state.calls.lawn_assessments).toHaveLength(1);
+    // …but the same-day/freshness gates failed closed: nothing written
+    expect(state.updates.treatment_outcomes).toBeUndefined();
+  });
+
+  test('an existing outcome that already has weather is returned without a retry', async () => {
+    const state = useDb({
+      treatment_outcomes: [{
+        id: 'to-1', service_record_id: 'sr-1', post_assessment_id: 'post-1',
+        treatment_date: '2026-07-01',
+        avg_temperature: 88.2, avg_humidity: 71, total_rainfall: 0.4,
+      }],
+      lawn_assessments: [{ id: 'post-1', service_date: '2026-07-01' }],
+    });
+
+    const outcome = await wiki.linkTreatmentOutcome('sr-1');
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(outcome).toEqual(expect.objectContaining({ id: 'to-1' }));
+    expect(state.calls.lawn_assessments).toBeUndefined();
+    expect(state.updates.treatment_outcomes).toBeUndefined();
+  });
+});

@@ -22,6 +22,17 @@ function slugify(t) {
   return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
 }
 
+// SQL twin of slugify() for dedupe predicates. computeProductEfficacy groups
+// name variants under one product_slug but displays whichever product_name an
+// UNORDERED outcomes query yields first, so the deterministic claim strings
+// built from it can drift in casing/punctuation between runs. Byte-equality
+// dedupe would then miss the existing open contradiction and duplicate the
+// review gate — compare slug-normalized text instead (codex P2 r4). Column
+// names are hardcoded literals at every call site, never user input.
+function slugifiedColumnSql(column) {
+  return `left(btrim(regexp_replace(lower(${column}), '[^a-z0-9]+', '-', 'g'), '-'), 190)`;
+}
+
 function avg(arr) {
   const v = arr.filter(x => x != null);
   return v.length ? Math.round((v.reduce((a, b) => a + b, 0) / v.length) * 100) / 100 : null;
@@ -760,13 +771,15 @@ async function detectContradictions() {
             contradiction.wiki_entry_id = await resolveWikiEntryId();
 
             // Check if already flagged
-            // Exact equality on the deterministic claim string — substring
-            // predicates are not product-exact ("Bifen" matches an existing
-            // "Bifen XTS" claim) and the backfill below would reattribute
-            // another product's row to the wrong wiki page.
+            // Slug-normalized equality on the deterministic claim string —
+            // substring predicates are not product-exact ("Bifen" matches an
+            // existing "Bifen XTS" claim) and the backfill below would
+            // reattribute another product's row to the wrong wiki page, while
+            // byte equality misses when the display name's casing/punctuation
+            // drifts between runs (see slugifiedColumnSql).
             const existing = await db('knowledge_contradictions')
               .where({ kb_entry_id: kbEntry.id, contradiction_type: 'claim_vs_data' })
-              .where({ kb_claim: contradiction.kb_claim })
+              .whereRaw(`${slugifiedColumnSql('kb_claim')} = ?`, [slugify(contradiction.kb_claim)])
               .where({ status: 'open' })
               .first();
 
@@ -818,14 +831,15 @@ async function detectContradictions() {
                 severity: 0.6,
               };
 
-              // Exact equality on the deterministic description — product-
-              // scoped (a broad KB entry can match several products) and
+              // Slug-normalized equality on the deterministic description —
+              // product-scoped (a broad KB entry can match several products),
               // immune to LIKE metacharacters in catalog names
               // ("Prodiamine 65%") and to substring collisions
-              // ("Bifen" vs "Bifen XTS").
+              // ("Bifen" vs "Bifen XTS"), and stable across display-name
+              // casing/punctuation drift (see slugifiedColumnSql).
               const existing = await db('knowledge_contradictions')
                 .where({ kb_entry_id: kbEntry.id, contradiction_type: 'claim_vs_data' })
-                .where({ description: contradiction.description })
+                .whereRaw(`${slugifiedColumnSql('description')} = ?`, [slugify(contradiction.description)])
                 .where({ status: 'open' })
                 .first();
 

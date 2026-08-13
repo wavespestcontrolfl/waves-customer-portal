@@ -371,6 +371,86 @@ async function logUpdate(action, entrySlug, description, opts = {}) {
   }
 }
 
+// Treatment-day weather onto an outcome row (single reading, not a window
+// average — the column names predate this writer; rainfall is the station's
+// 7-day accumulation). Prefer the post-assessment's persisted FAWN snapshot
+// (no network); fall back to a current fetch, which approximates application
+// conditions since the link runs on treatment day. Enrichment only — never
+// blocks or fails the link; a transient failure logs and leaves the weather
+// columns null for the early-return retry path to pick up (codex P2 r4).
+async function backfillOutcomeWeather(outcome, post, treatmentDate) {
+  try {
+    const { etCalendarDayOf, etDateString, parseETDateTime } = require('../utils/datetime-et');
+    // The post-assessment's snapshot only represents application-day
+    // conditions when the assessment happened ON the treatment day —
+    // the legacy pairing accepts assessments up to 60 days later. And
+    // even a same-day assessment can carry a STALE snapshot:
+    // attachWeather persists fawn-weather's cached _lastSnapshot on
+    // fetch failure, with no age limit. So the snapshot's own recorded
+    // moment (observation_time when present, else fetch timestamp)
+    // must ALSO land on the treatment day; missing or unparseable
+    // snapshot metadata fails closed.
+    // Shared freshness bound (≤6h): both the persisted snapshot and the
+    // getCurrent() fallback can carry fawn-weather's age-unlimited
+    // cached _lastSnapshot, and even a same-ET-day snapshot from just
+    // after midnight can be 20+ hours from the application.
+    const FRESH_MS = 6 * 60 * 60 * 1000;
+    const parseMoment = (value) => {
+      if (value == null) return null;
+      const parsed = parseETDateTime(String(value));
+      const ms = parsed?.getTime?.();
+      return Number.isFinite(ms) ? parsed : null;
+    };
+    const postIsTreatmentDay = etCalendarDayOf(post.service_date) === etCalendarDayOf(treatmentDate);
+    let snapshotUsable = false;
+    if (postIsTreatmentDay && post.fawn_snapshot) {
+      try {
+        const snap = typeof post.fawn_snapshot === 'string' ? JSON.parse(post.fawn_snapshot) : post.fawn_snapshot;
+        const parsed = parseMoment(snap?.observation_time ?? snap?.timestamp);
+        snapshotUsable = parsed !== null
+          && etDateString(parsed) === etCalendarDayOf(treatmentDate)
+          && Date.now() - parsed.getTime() < FRESH_MS;
+      } catch { /* unparseable snapshot fails closed */ }
+    }
+    let weather = snapshotUsable
+      && (post.fawn_temp_f != null || post.fawn_humidity_pct != null || post.fawn_rainfall_7d != null)
+      ? { temp_f: post.fawn_temp_f, humidity_pct: post.fawn_humidity_pct, rainfall_in: post.fawn_rainfall_7d }
+      : null;
+    // Current-conditions fallback ONLY when the treatment is actually
+    // today (ET): a late confirm or resumed completion can link a
+    // historical treatment, and stamping today's weather onto it would
+    // permanently misattribute the application conditions.
+    // etCalendarDayOf, not etDateString: service_date is a pg DATE
+    // materialized at UTC midnight — the ET wall clock would shift it
+    // to the previous day and the same-day check would never pass.
+    if (!weather && etCalendarDayOf(treatmentDate) === etDateString()) {
+      const fawn = await require('./fawn-weather').getCurrent();
+      // Same ≤6h bound as the persisted-snapshot path above. The
+      // STATION's observation_time is authoritative when present
+      // (naive strings are ET wall-clock — parseETDateTime handles
+      // that); fetch-time `timestamp` is only a cache-age fallback.
+      // Present-but-unparseable observation_time fails closed.
+      const freshMoment = (value) => {
+        if (value == null) return null;
+        const parsed = parseMoment(value);
+        return parsed !== null ? Date.now() - parsed.getTime() < FRESH_MS : false;
+      };
+      const obsFresh = freshMoment(fawn?.observation_time);
+      const fresh = obsFresh !== null ? obsFresh : freshMoment(fawn?.timestamp) === true;
+      if (fawn && fawn.station !== 'unavailable' && fresh) weather = fawn;
+    }
+    if (weather) {
+      await db('treatment_outcomes').where({ id: outcome.id }).update({
+        avg_temperature: weather.temp_f ?? null,
+        avg_humidity: weather.humidity_pct ?? null,
+        total_rainfall: weather.rainfall_in ?? null,
+      });
+    }
+  } catch (err) {
+    logger.warn(`[agronomic-wiki] outcome ${outcome.id} weather backfill failed: ${err.message}`);
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 // CORE METHODS
 // ══════════════════════════════════════════════════════════════
@@ -393,6 +473,24 @@ const AgronomicWiki = {
         .first();
       if (existing) {
         logger.info(`[agronomic-wiki] treatment_outcome already exists for service_record ${serviceRecordId}`);
+        // Weather enrichment is fire-and-forget below, so a transient FAWN
+        // fetch or update failure would otherwise be abandoned permanently —
+        // nothing else writes these columns. Retry when the existing row
+        // still has no weather at all (codex P2 r4); the helper's same-day
+        // freshness gates still decide whether any value is usable, so a
+        // late retry fails closed rather than stamping wrong-day conditions.
+        if (existing.avg_temperature == null && existing.avg_humidity == null && existing.total_rainfall == null) {
+          setImmediate(async () => {
+            try {
+              const existingPost = existing.post_assessment_id
+                ? await db('lawn_assessments').where({ id: existing.post_assessment_id }).first()
+                : null;
+              if (existingPost) await backfillOutcomeWeather(existing, existingPost, existing.treatment_date);
+            } catch (err) {
+              logger.warn(`[agronomic-wiki] outcome ${existing.id} weather retry failed: ${err.message}`);
+            }
+          });
+        }
         return existing;
       }
 
@@ -545,82 +643,10 @@ const AgronomicWiki = {
       // don't block the confirm — FAWN's external fetch has a 3.5s timeout
       // and must never sit on the confirmation request path)
       setImmediate(async () => {
-        // Treatment-day weather onto the outcome row (single reading, not a
-        // window average — the column names predate this writer; rainfall is
-        // the station's 7-day accumulation). Prefer the post-assessment's
-        // persisted FAWN snapshot (no network); fall back to a current
-        // fetch, which approximates application conditions since the link
-        // runs on treatment day. Enrichment only — never blocks the link.
-        try {
-          const { etCalendarDayOf, etDateString, parseETDateTime } = require('../utils/datetime-et');
-          // The post-assessment's snapshot only represents application-day
-          // conditions when the assessment happened ON the treatment day —
-          // the legacy pairing accepts assessments up to 60 days later. And
-          // even a same-day assessment can carry a STALE snapshot:
-          // attachWeather persists fawn-weather's cached _lastSnapshot on
-          // fetch failure, with no age limit. So the snapshot's own recorded
-          // moment (observation_time when present, else fetch timestamp)
-          // must ALSO land on the treatment day; missing or unparseable
-          // snapshot metadata fails closed.
-          // Shared freshness bound (≤6h): both the persisted snapshot and the
-          // getCurrent() fallback can carry fawn-weather's age-unlimited
-          // cached _lastSnapshot, and even a same-ET-day snapshot from just
-          // after midnight can be 20+ hours from the application.
-          const FRESH_MS = 6 * 60 * 60 * 1000;
-          const parseMoment = (value) => {
-            if (value == null) return null;
-            const parsed = parseETDateTime(String(value));
-            const ms = parsed?.getTime?.();
-            return Number.isFinite(ms) ? parsed : null;
-          };
-          const postIsTreatmentDay = etCalendarDayOf(post.service_date) === etCalendarDayOf(treatmentDate);
-          let snapshotUsable = false;
-          if (postIsTreatmentDay && post.fawn_snapshot) {
-            try {
-              const snap = typeof post.fawn_snapshot === 'string' ? JSON.parse(post.fawn_snapshot) : post.fawn_snapshot;
-              const parsed = parseMoment(snap?.observation_time ?? snap?.timestamp);
-              snapshotUsable = parsed !== null
-                && etDateString(parsed) === etCalendarDayOf(treatmentDate)
-                && Date.now() - parsed.getTime() < FRESH_MS;
-            } catch { /* unparseable snapshot fails closed */ }
-          }
-          let weather = snapshotUsable
-            && (post.fawn_temp_f != null || post.fawn_humidity_pct != null || post.fawn_rainfall_7d != null)
-            ? { temp_f: post.fawn_temp_f, humidity_pct: post.fawn_humidity_pct, rainfall_in: post.fawn_rainfall_7d }
-            : null;
-          // Current-conditions fallback ONLY when the treatment is actually
-          // today (ET): a late confirm or resumed completion can link a
-          // historical treatment, and stamping today's weather onto it would
-          // permanently misattribute the application conditions.
-          // etCalendarDayOf, not etDateString: service_date is a pg DATE
-          // materialized at UTC midnight — the ET wall clock would shift it
-          // to the previous day and the same-day check would never pass.
-          if (!weather && etCalendarDayOf(treatmentDate) === etDateString()) {
-            const fawn = await require('./fawn-weather').getCurrent();
-            // Same ≤6h bound as the persisted-snapshot path above. The
-            // STATION's observation_time is authoritative when present
-            // (naive strings are ET wall-clock — parseETDateTime handles
-            // that); fetch-time `timestamp` is only a cache-age fallback.
-            // Present-but-unparseable observation_time fails closed.
-            const freshMoment = (value) => {
-              if (value == null) return null;
-              const parsed = parseMoment(value);
-              return parsed !== null ? Date.now() - parsed.getTime() < FRESH_MS : false;
-            };
-            const obsFresh = freshMoment(fawn?.observation_time);
-            const fresh = obsFresh !== null ? obsFresh : freshMoment(fawn?.timestamp) === true;
-            if (fawn && fawn.station !== 'unavailable' && fresh) weather = fawn;
-          }
-          if (weather) {
-            await db('treatment_outcomes').where({ id: outcome.id }).update({
-              avg_temperature: weather.temp_f ?? null,
-              avg_humidity: weather.humidity_pct ?? null,
-              total_rainfall: weather.rainfall_in ?? null,
-            });
-          }
-        } catch (err) {
-          logger.warn(`[agronomic-wiki] outcome ${outcome.id} weather backfill failed: ${err.message}`);
-        }
+        // Weather enrichment (see backfillOutcomeWeather) — never blocks the
+        // link; a transient failure leaves the columns null and the
+        // early-return path above retries on the next link attempt.
+        await backfillOutcomeWeather(outcome, post, treatmentDate);
         try {
           // Update product pages
           for (const p of productsApplied) {

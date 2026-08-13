@@ -553,7 +553,7 @@ const KnowledgeBridge = {
   async createLink({ kbEntryId, wikiEntryId, linkType, relevanceScore, linkReason, createdBy }) {
     try {
       // Look up slugs
-      const kb = kbEntryId ? await db('knowledge_base').where({ id: kbEntryId }).select('slug').first() : null;
+      const kb = kbEntryId ? await db('knowledge_base').where({ id: kbEntryId }).select('slug', 'source').first() : null;
       const wiki = wikiEntryId ? await db('knowledge_entries').where({ id: wikiEntryId }).select('slug').first() : null;
 
       const [link] = await db('knowledge_bridge').insert({
@@ -576,12 +576,21 @@ const KnowledgeBridge = {
       // the writers are a weekly locked cron and a manual admin route, and a
       // lost race self-heals on the next autoLink pass.
       if (kbEntryId && wikiEntryId) {
-        const kbSide = await db('knowledge_bridge')
-          .where({ kb_entry_id: kbEntryId }).whereNotNull('wiki_entry_id')
-          .select('wiki_entry_id');
-        const kbTargets = [...new Set(kbSide.map((r) => r.wiki_entry_id))];
-        await db('knowledge_base').where({ id: kbEntryId })
-          .update({ wiki_entry_id: kbTargets.length === 1 ? kbTargets[0] : (kbSide.length === 0 ? wikiEntryId : null) });
+        // EXCEPT on wiki-sync mirror rows: there `wiki_entry_id` is the
+        // mirror's PROVENANCE pointer, written authoritatively by
+        // syncToClaudeopedia — syncKbCopyTrust deactivates mirrors through it
+        // and applyKbTrustGate gates agent-facing reads on it. Clearing it on
+        // an ambiguous link set would leave a newly red/blocked source page's
+        // stale mirror active and agent-visible forever, so autoLink's
+        // shortcut maintenance never touches mirror rows (codex P1 r4).
+        if (kb?.source !== 'wiki-sync') {
+          const kbSide = await db('knowledge_bridge')
+            .where({ kb_entry_id: kbEntryId }).whereNotNull('wiki_entry_id')
+            .select('wiki_entry_id');
+          const kbTargets = [...new Set(kbSide.map((r) => r.wiki_entry_id))];
+          await db('knowledge_base').where({ id: kbEntryId })
+            .update({ wiki_entry_id: kbTargets.length === 1 ? kbTargets[0] : (kbSide.length === 0 ? wikiEntryId : null) });
+        }
         const wikiSide = await db('knowledge_bridge')
           .where({ wiki_entry_id: wikiEntryId }).whereNotNull('kb_entry_id')
           .select('kb_entry_id');
