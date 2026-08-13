@@ -259,7 +259,6 @@ async function submitRecap({
   // Set under the lock if the visit can't be recapped (cancelled/skipped);
   // the transaction aborts having written nothing and we return ok:false.
   let rejectReason = null;
-  let completedThisSubmit = false;
   // Set under the lock if the existing record shows the visit was NOT performed
   // (incomplete / inspection-only / customer-declined) — gates the referral credit.
   let recapPriorNonPerformed = false;
@@ -305,13 +304,7 @@ async function submitRecap({
     }
 
     // 1. Status -> completed. Skip only when already completed (idempotent
-    //    re-recap); any other non-terminal status transitions now. The
-    //    submit that performs this transition under the lock is the ONE
-    //    completion winner — the prewarm below keys off it (pre-push r5
-    //    P1: concurrent/retried submits each ran the paid county/vision
-    //    pipeline against the same cold cache; the lock makes exactly one
-    //    submit the winner, so exactly one warms).
-    completedThisSubmit = lockedStatus !== COMPLETED_STATUS;
+    //    re-recap); any other non-terminal status transitions now.
     if (lockedStatus !== COMPLETED_STATUS) {
       await transitionJobStatus({
         jobId: serviceId,
@@ -625,27 +618,20 @@ async function submitRecap({
     smsError = 'duplicate_suppressed';
   }
 
-  // 5b. Warm the cross-sell card's property-evidence cache — AFTER the SMS
-  // (codex #3382 r2 P1): the transaction durably claims recap_sms_sent_at,
-  // and any wait placed between that claim and the send widens the crash
-  // window in which a retry sees the claim and permanently suppresses an
-  // unsent message. Post-send, fire-and-forget: the customer opening the
-  // link within seconds may get one cold (CTA) view — today's behavior —
-  // and the next view self-heals to a priced card. v1-template records
-  // only (r1: no other template renders the card) and only the completion
-  // winner (r1: retries must not duplicate the paid pipeline); the module
-  // is double-gated and never rejects.
-  if (recordId && completedThisSubmit) {
-    try {
-      const freshRecord = await db('service_records').where({ id: recordId }).first();
-      if (freshRecord && freshRecord.report_template_version === 'service_report_v1') {
-        const { prewarmReportCrossSellEvidence } = require('./service-report/evidence-prewarm');
-        void prewarmReportCrossSellEvidence(freshRecord, db);
-      }
-    } catch (prewarmErr) {
-      logger.warn(`[pest-recap] evidence pre-warm skipped (code=${prewarmErr?.code || 'none'}) for record ${recordId}`);
-    }
-  }
+  // Cross-sell evidence pre-warm is DELIBERATELY NOT wired here (codex
+  // #3382 rounds r1–r3 converged on this): recap-created service_records
+  // carry no report_template_version, and reports-public returns the base
+  // payload for non-v1 records before the builder that composes crossSell —
+  // those reports render the legacy layout with NO card, so warming buys
+  // nothing. The only v1 records this path touches are re-recaps of visits
+  // completed through /complete — where the scheduled row is already
+  // 'completed', this submit is not the transition winner, and the ORIGINAL
+  // completion already warmed through the dispatch call site. Both branches
+  // together make a recap-side warm unreachable; if recap completions ever
+  // start stamping service_report_v1 (a product decision — the v1 layout
+  // presents findings/coverage the recap doesn't capture), wire the warm
+  // AFTER the SMS send above: the transaction durably claims
+  // recap_sms_sent_at, and nothing may sit between that claim and the send.
 
   // Digital business card: a recap completion is a real performed visit —
   // mirror the /complete path's best-effort mint so a customer whose FIRST

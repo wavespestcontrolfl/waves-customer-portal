@@ -116,22 +116,13 @@ describe('completion wiring (source contracts — both handlers are too heavy to
     expect(rewarmAt).toBeGreaterThan(maintenanceAt);
   });
 
-  test('pest-recap: the warm runs AFTER the SMS send — nothing sits between the durable claim and the send (r2 P1)', () => {
-    const calls = recapSrc.match(/prewarmReportCrossSellEvidence/g) || [];
-    expect(calls.length).toBe(2); // require + invocation
-    // Fire-and-forget, never the bounded wait, and strictly after the send.
-    expect(recapSrc).toMatch(/void prewarmReportCrossSellEvidence\(freshRecord, db\)/);
-    expect(recapSrc).not.toMatch(/prewarmReportCrossSellEvidenceBounded/);
-    expect(recapSrc.indexOf('body: smsRecap(recapText)'))
-      .toBeLessThan(recapSrc.indexOf('void prewarmReportCrossSellEvidence(freshRecord, db)'));
-  });
-
-  test('pest-recap: only the completion-transition WINNER warms — retries never duplicate the paid pipeline (r5 P1)', () => {
-    expect(recapSrc).toMatch(/completedThisSubmit = lockedStatus !== COMPLETED_STATUS/);
-    expect(recapSrc).toMatch(/if \(recordId && completedThisSubmit\)/);
-  });
-
-  test('pest-recap: only v1-template records warm — the card renders for no other template (r3 P1)', () => {
-    expect(recapSrc).toMatch(/freshRecord && freshRecord\.report_template_version === 'service_report_v1'/);
+  test('pest-recap: deliberately NOT wired — the path cannot produce a warmable report (r1–r3 convergence)', () => {
+    // Fresh recap records never carry service_report_v1 (no card renders),
+    // and re-recaps of v1 records are never the completion winner (the
+    // original /complete already warmed). The file documents the reasoning
+    // and the claim-safety constraint for whoever wires it later.
+    expect(recapSrc).not.toMatch(/prewarmReportCrossSellEvidence/);
+    expect(recapSrc).toMatch(/DELIBERATELY NOT wired/);
+    expect(recapSrc).toMatch(/nothing may sit between that claim and the send/);
   });
 });
