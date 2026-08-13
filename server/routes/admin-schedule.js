@@ -8945,6 +8945,19 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     const svc = await db('scheduled_services').where({ id: req.params.id }).first();
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (!svc.pre_service_brief) return res.json({ brief: null });
+    // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
+    // off, generic visit briefs cached while the gate was on are WITHDRAWN
+    // from the read path (regeneration is already gated, and a rollback
+    // toggle that keeps serving stored guidance can't withdraw it).
+    // Everything this lane did not write — the legacy WDO brief and any
+    // other/untyped legacy brief — serves exactly as it always has.
+    const PrevisitBrief = require('../services/previsit-brief');
+    if (
+      String(svc.pre_service_brief_type || '') === PrevisitBrief.VISIT_BRIEF_TYPE
+      && !PrevisitBrief.briefGateEnabled()
+    ) {
+      return res.json({ brief: null });
+    }
     res.json({ brief: typeof svc.pre_service_brief === 'string' ? JSON.parse(svc.pre_service_brief) : svc.pre_service_brief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at });
   } catch (err) { next(err); }
 });

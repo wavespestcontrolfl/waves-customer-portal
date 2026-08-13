@@ -229,9 +229,16 @@ async function loadCatalogVocabulary(dbh) {
   }
 }
 
+// recordIds arrive NEWEST-VISIT-FIRST from the line-scoped history walk,
+// and that visit-recency order — not child-row created_at — orders the
+// returned rows. Reopening an old recap deletes and reinserts its
+// service_products (pest-recap.js), which gives a stale visit's rows the
+// newest created_at; sorted by created_at, an edited old record could
+// displace the latest visits' products from the 8-name guidance cap.
+// created_at desc is kept only as the within-record tiebreak.
 async function loadProductHistory(dbh, recordIds) {
   if (!recordIds.length) return [];
-  return dbh('service_products as sp')
+  const rows = await dbh('service_products as sp')
     .leftJoin('products_catalog as pc', 'sp.product_id', 'pc.id')
     .whereIn('sp.service_record_id', recordIds)
     .orderBy('sp.created_at', 'desc')
@@ -248,6 +255,12 @@ async function loadProductHistory(dbh, recordIds) {
       'pc.epa_reg_number',
     )
     .catch(() => []);
+  const rank = new Map(recordIds.map((id, i) => [String(id), i]));
+  // Array.prototype.sort is stable, so within-record created_at order holds.
+  return rows.slice().sort((a, b) => (
+    (rank.get(String(a.service_record_id)) ?? recordIds.length)
+    - (rank.get(String(b.service_record_id)) ?? recordIds.length)
+  ));
 }
 
 // One protocol-window product → the deterministic brief entry.
@@ -670,23 +683,82 @@ function templateBriefBody(grounding) {
   };
 }
 
-// Ungrounded-claim scan (no NLP — exact vocabulary matching): the model
-// may only mention a products_catalog product name or label target term
-// that appeared in its OWN input (the redacted llmFacts, which carry the
-// deterministic fixed product-name lists). Any catalog term in the output
-// that is absent from the input is an invented/renamed product or an
-// ungrounded pest-target claim. Returns the offending term or null.
+// Generic filler words that assert nothing on their own — trimmed out of
+// extracted references before the fuzzy grounding check so "for the
+// garage area" doesn't demand a literal grounded phrase.
+const REFERENCE_STOP_WORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'at', 'with',
+  'for', 'from', 'this', 'that', 'any', 'all', 'new', 'known', 'active',
+  'possible', 'potential', 'near', 'along', 'around', 'inside', 'outside',
+  'under', 'over', 'front', 'back', 'side', 'corner', 'edge', 'line',
+  'area', 'areas', 'yard', 'property', 'home', 'house', 'exterior',
+  'interior', 'perimeter', 'activity', 'signs', 'sign', 'visit', 'service',
+]);
+
+// A reference is grounded when the whole normalized phrase appears in the
+// grounding payload, or (fuzzy tier — word order/articles vary in prose)
+// when every significant word of it does. A phrase left with no
+// significant words asserts nothing and passes.
+function isGroundedReference(candidate, groundedText) {
+  const phrase = String(candidate || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
+  if (!phrase) return true;
+  if (groundedText.includes(phrase)) return true;
+  const words = phrase.split(' ')
+    .filter((w) => /^[a-z][a-z'-]{3,}$/.test(w) && !REFERENCE_STOP_WORDS.has(w));
+  if (!words.length) return true;
+  return words.every((w) => groundedText.includes(w));
+}
+
+// Allowlist-extraction of product-ish / target-ish references from brief
+// prose (no NLP): every extracted reference must fuzzy-match the grounding
+// or the response is rejected. This is the WHOLLY-NOVEL-name complement to
+// the catalog scan below — a model-invented "PhantomGuard X" appears in no
+// catalog, so iterating known vocabulary can never catch it.
+// Product-ish: (a) mixed-internal-cap tokens ("PhantomGuard");
+// (b) runs of 2+ Capitalized/ALLCAPS tokens ("Termidor SC", "Bifen IT") —
+// letterless followers excluded so "July 15" isn't product-shaped;
+// (c) the Capitalized phrase following an application verb.
+// Target-ish: the lowercase phrase following "for"/"targeting"/"against" —
+// how prose names what a product is applied against.
+function extractOutputReferences(text) {
+  const products = new Set();
+  const targets = new Set();
+  const push = (set, value) => {
+    const t = String(value || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
+    if (t) set.add(t);
+  };
+  for (const m of text.matchAll(/\b[A-Z][a-z]+[A-Z][A-Za-z]*\b/g)) push(products, m[0]);
+  for (const m of text.matchAll(/\b[A-Z][A-Za-z]+(?:\s+(?:[A-Z][A-Za-z]*[a-z][A-Za-z]*|[A-Z]{1,5}\d*|\d*[A-Z]+[A-Za-z\d]*))+/g)) push(products, m[0]);
+  // Verb alternatives cover both sentence case and lowercase WITHOUT the /i
+  // flag — under /i the [A-Z] anchor in the capture would match lowercase
+  // words and flag ordinary prose ("use caution") as product references.
+  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near)\b)[\w.-]+){0,3})/g)) push(products, m[1]);
+  for (const m of text.matchAll(/\b(?:for|targeting|against)\s+((?:[a-z][a-z'-]*\s+){0,3}[a-z][a-z'-]*)/g)) push(targets, m[1]);
+  return { products: [...products], targets: [...targets] };
+}
+
+// Ungrounded-claim scan: the model may only mention product names and pest
+// or organism targets that appeared in its OWN input (the redacted
+// llmFacts, which carry the deterministic fixed product-name lists). Two
+// complementary passes share the grounding text:
+//  1. catalog vocabulary — a KNOWN term in the output that is absent from
+//     the input is an invented/renamed product or an ungrounded target;
+//  2. extracted references (above) — a WHOLLY NOVEL name matches no
+//     catalog term, so every product-ish/target-ish reference must
+//     fuzzy-match the grounding to survive.
+// Returns the offending term or null.
 function findUngroundedClaim(body, grounding) {
   const vocab = grounding.catalogVocabulary;
   if (!vocab) return null; // caller handles the unreadable-catalog case
-  const outputText = [
+  const outputFields = [
     ...(body.priorities || []),
     ...(body.watch_items || []),
     body.last_visit_summary,
     body.open_scope,
     body.customer_context,
-  ].filter(Boolean).join(' ').toLowerCase();
-  if (!outputText) return null;
+  ].filter(Boolean);
+  if (!outputFields.length) return null;
+  const outputText = outputFields.join(' ').toLowerCase();
   const groundedText = JSON.stringify(grounding.llmFacts).toLowerCase();
   const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const kind of ['names', 'targets']) {
@@ -695,6 +767,19 @@ function findUngroundedClaim(body, grounding) {
       if (re.test(outputText) && !re.test(groundedText)) {
         return { kind, term };
       }
+    }
+  }
+  // Extraction runs PER FIELD — joined text lets the capitalized-run and
+  // verb-object regexes span a field boundary and manufacture phantom
+  // references ("... Bifen IT" + "Chemical-sensitivity ..." is not a
+  // product called "Bifen IT Chemical").
+  for (const field of outputFields) {
+    const refs = extractOutputReferences(String(field));
+    for (const term of refs.products) {
+      if (!isGroundedReference(term, groundedText)) return { kind: 'novel_product', term };
+    }
+    for (const term of refs.targets) {
+      if (!isGroundedReference(term, groundedText)) return { kind: 'novel_target', term };
     }
   }
   return null;
@@ -732,7 +817,13 @@ function validateBriefJson(json, grounding) {
   };
   const ungrounded = findUngroundedClaim(body, grounding);
   if (ungrounded) {
-    return { reason: `ungrounded_${ungrounded.kind === 'names' ? 'product' : 'target'}:${ungrounded.term}` };
+    const kindLabel = {
+      names: 'product',
+      targets: 'target',
+      novel_product: 'novel_product',
+      novel_target: 'novel_target',
+    }[ungrounded.kind] || ungrounded.kind;
+    return { reason: `ungrounded_${kindLabel}:${ungrounded.term}` };
   }
   return { body };
 }
@@ -918,6 +1009,8 @@ module.exports = {
   _test: {
     assembleGrounding,
     findUngroundedClaim,
+    extractOutputReferences,
+    isGroundedReference,
     validateBriefJson,
     redactDeep,
     loadCatalogVocabulary,

@@ -99,7 +99,8 @@ beforeEach(() => {
 });
 
 describe('GET /:id/visit-brief (+ /wdo-brief alias)', () => {
-  test('returns the stored brief typed on both paths', async () => {
+  test('returns the stored brief typed on both paths (gate on)', async () => {
+    mockGateEnabled.mockReturnValue(true);
     stubTables({ scheduled_services: VISIT_BRIEF_ROW });
     await withServer(async (base) => {
       for (const path of ['visit-brief', 'wdo-brief']) {
@@ -110,6 +111,58 @@ describe('GET /:id/visit-brief (+ /wdo-brief alias)', () => {
         expect(body.brief.priorities).toEqual(['Check garage']);
         expect(body.generatedAt).toBe('2026-08-13T09:15:00.000Z');
       }
+    });
+  });
+
+  test('gate OFF withdraws a cached generic visit brief (kill switch outranks persisted state)', async () => {
+    mockGateEnabled.mockReturnValue(false);
+    stubTables({ scheduled_services: VISIT_BRIEF_ROW });
+    await withServer(async (base) => {
+      for (const path of ['visit-brief', 'wdo-brief']) {
+        const res = await fetch(`${base}/admin/schedule/svc-1/${path}`);
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.brief).toBeNull();
+        // Nothing about the withheld brief leaks.
+        expect(body.type).toBeUndefined();
+        expect(body.generatedAt).toBeUndefined();
+      }
+    });
+  });
+
+  test('gate OFF still serves the legacy WDO brief exactly as before', async () => {
+    mockGateEnabled.mockReturnValue(false);
+    stubTables({
+      scheduled_services: {
+        ...VISIT_BRIEF_ROW,
+        pre_service_brief: JSON.stringify({ risk_score: 'High' }),
+        pre_service_brief_type: 'wdo_inspection',
+      },
+    });
+    await withServer(async (base) => {
+      for (const path of ['visit-brief', 'wdo-brief']) {
+        const res = await fetch(`${base}/admin/schedule/svc-1/${path}`);
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.brief).toEqual({ risk_score: 'High' });
+        expect(body.type).toBe('wdo_inspection');
+      }
+    });
+  });
+
+  test('gate OFF still serves an untyped legacy brief (only this lane\'s type is withdrawn)', async () => {
+    mockGateEnabled.mockReturnValue(false);
+    stubTables({
+      scheduled_services: {
+        ...VISIT_BRIEF_ROW,
+        pre_service_brief: JSON.stringify({ note: 'pre-lane brief' }),
+        pre_service_brief_type: null,
+      },
+    });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/schedule/svc-1/visit-brief`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).brief).toEqual({ note: 'pre-lane brief' });
     });
   });
 

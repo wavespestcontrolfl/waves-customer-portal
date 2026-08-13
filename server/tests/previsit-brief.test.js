@@ -380,6 +380,49 @@ describe('grounded allowlist validation of LLM output', () => {
     expect(out.generated).toBe(true);
     expect(out.via).toBe('template');
   });
+
+  test('a WHOLLY NOVEL product name (in no catalog) is rejected — template', async () => {
+    global.__dispatch = jest.fn(async () => ({
+      ok: true,
+      json: { ...CLEAN_LLM_JSON, priorities: ['Apply PhantomGuard X for emerald ash borer'] },
+    }));
+    const state = useDb(baseResponses({ products_catalog: CATALOG }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('template');
+    expect(storedBrief(state).brief.generated_via).toBe('template');
+    expect(JSON.stringify(storedBrief(state).brief)).not.toContain('PhantomGuard');
+  });
+
+  test('a novel target claim is rejected even when the product is grounded', async () => {
+    global.__dispatch = jest.fn(async () => ({
+      ok: true,
+      // Bifen IT is grounded history; "emerald ash borer" appears nowhere
+      // in the facts and matches no catalog term.
+      json: { ...CLEAN_LLM_JSON, priorities: ['Spot-treat with Bifen IT for emerald ash borer'] },
+    }));
+    useDb(baseResponses({ products_catalog: CATALOG }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('template');
+  });
+
+  test('novel-reference rejection carries a typed reason (unit)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, priorities: ['Apply PhantomGuard X for emerald ash borer'] },
+      grounding,
+    );
+    expect(verdict.reason).toMatch(/^ungrounded_novel_(product|target):/);
+  });
+
+  test('extraction finds mixed-cap, cap-run, verb-object and for-target references', () => {
+    const { extractOutputReferences } = PrevisitBrief._test;
+    const refs = extractOutputReferences('Apply PhantomGuard X for emerald ash borer. Re-check the ants treated with Bifen IT.');
+    expect(refs.products).toEqual(expect.arrayContaining(['phantomguard', 'phantomguard x', 'bifen it']));
+    expect(refs.targets).toEqual(expect.arrayContaining(['emerald ash borer']));
+    // Date-shaped phrases are not product-shaped.
+    expect(extractOutputReferences('Routine pest service on July 15.').products).toEqual([]);
+  });
 });
 
 describe('aggregator serviceHistory is line-scoped', () => {
@@ -759,6 +802,30 @@ describe('line-scoped product history', () => {
     expect(facts.history).toEqual({ available: true });
     expect(facts.visit.newCustomer).toBe(false);
     expect(facts.lastVisit).toBeNull();
+  });
+});
+
+describe('product guidance is ordered by visit recency, not child-row created_at', () => {
+  test('an edited old recap (reinserted rows, newest created_at) cannot displace the latest visit\'s products', async () => {
+    const NEW_RECORD = { ...SERVICE_RECORD, id: 'rec-new', service_date: '2026-08-01' };
+    const FRESH_ROW = { ...PRODUCT_ROW, service_record_id: 'rec-new', product_name: 'Fresh Prod', catalog_name: 'Fresh Prod' };
+    const OLD_EDITED_ROW = { ...PRODUCT_ROW, service_record_id: 'rec-1', product_name: 'Old Edited Prod', catalog_name: 'Old Edited Prod' };
+    const state = useDb(baseResponses({
+      // service_date desc — rec-new is the latest visit.
+      service_records: [NEW_RECORD, SERVICE_RECORD],
+      // Simulates the DB's created_at DESC answer AFTER the old recap was
+      // reopened: pest-recap.js deletes+reinserts its rows, so the OLD
+      // record's row carries the newest created_at and comes back first.
+      service_products: [OLD_EDITED_ROW, FRESH_ROW],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const { brief } = storedBrief(state);
+    // Visit recency wins: the latest visit's product leads the guidance.
+    expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Fresh Prod', 'Old Edited Prod']);
+    // last_visit stays the newest record and lists ITS products only.
+    expect(brief.last_visit.date).toBe('2026-08-01');
+    expect(brief.last_visit.products.map((p) => p.name)).toEqual(['Fresh Prod']);
   });
 });
 
