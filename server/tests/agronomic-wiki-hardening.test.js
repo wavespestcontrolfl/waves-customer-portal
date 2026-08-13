@@ -959,6 +959,20 @@ describe('backfillOutcomeWeather application-moment anchor', () => {
     expect(state.updates.treatment_outcomes).toBeUndefined();
   });
 
+  test('space-separated naive station timestamps parse as ET wall-clock, not UTC', async () => {
+    // 03:30 ET is 5.5h before the 09:00 ET application → inside the ±6h
+    // window and on the treatment day → accepted. If the space-separated
+    // form fell through to new Date() on a UTC host, 03:30 would read as
+    // 2026-06-30 23:30 ET — wrong day AND outside the window — and this
+    // write would not happen.
+    const state = useDb({ treatment_outcomes: [] });
+    const wrote = await backfillOutcomeWeather(
+      outcome, snapshotPost('2026-07-01 03:30'), '2026-07-01', '2026-07-01T09:00',
+    );
+    expect(wrote).toBe(true);
+    expect(state.updates.treatment_outcomes).toHaveLength(1);
+  });
+
   test('fails closed when no application moment is available', async () => {
     const state = useDb({ treatment_outcomes: [] });
     const wrote = await backfillOutcomeWeather(

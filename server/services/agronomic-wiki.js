@@ -406,7 +406,13 @@ async function backfillOutcomeWeather(outcome, post, treatmentDate, applicationM
     const FRESH_MS = 6 * 60 * 60 * 1000;
     const parseMoment = (value) => {
       if (value == null) return null;
-      const parsed = parseETDateTime(String(value));
+      // parseETDateTime's naive-as-ET handling only recognizes the T form;
+      // a space-separated naive timestamp (station payloads pass through
+      // unnormalized) would fall to new Date() and parse as UTC/local —
+      // a 4–5h shift that corrupts both the day gate and the ±6h window.
+      const normalized = String(value).trim()
+        .replace(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}(?::\d{2})?)$/, '$1T$2');
+      const parsed = parseETDateTime(normalized);
       const ms = parsed?.getTime?.();
       return Number.isFinite(ms) ? parsed : null;
     };
