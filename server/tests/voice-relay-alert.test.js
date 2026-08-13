@@ -303,7 +303,14 @@ describe('GATE ON — the alert', () => {
     expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
     const [to, body, opts] = TwilioService.sendSMS.mock.calls[0];
     expect(to).toBe(OWNER);
-    expect(opts).toMatchObject({ messageType: 'internal_alert' }); // hot path adds the per-call dedupe title
+    expect(opts).toMatchObject({
+      messageType: 'internal_alert',
+      // sha256 digest of the FULL CallSid — a truncated tail collides across
+      // history and would mark a NEW hot lead "already delivered".
+      notificationTitle: expect.stringContaining(
+        require('crypto').createHash('sha256').update('CA-hot').digest('hex').slice(0, 16),
+      ),
+    });
     expect(body).toMatch(/URGENT lead/i);
     expect(body).toContain('Pat Rivera');
     expect(body).toContain(CALLER); // the owner needs a number to call back
