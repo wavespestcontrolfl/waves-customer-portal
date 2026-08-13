@@ -226,14 +226,21 @@ describe('ReportViewPage report chrome helpers', () => {
       .toBe('Your technician completed the pest control service and finalized the report.');
   });
 
-  it('uses distinct review request copy for top and bottom placements', () => {
-    const top = reviewRequestCopy('top');
-    const bottom = reviewRequestCopy('bottom');
-    expect(top.title).toBe("How did today's visit go?");
-    expect(bottom.title).toBe('Help the next neighbor choose faster');
-    expect(top.title).not.toBe(bottom.title);
-    expect(top.cta).toBe('Share feedback');
-    expect(bottom.cta).toBe('Share feedback');
+  it('both placements carry the redesigned ask — legacy bottom-mount reports included (codex r2 P2)', () => {
+    const top = reviewRequestCopy('top', 'Casey', 'Adam');
+    const bottom = reviewRequestCopy('bottom', 'Casey', 'Adam');
+    expect(top.title).toBe('How did Adam do today, Casey?');
+    expect(bottom.title).toBe(top.title);
+    expect(bottom.cta).toBe('Rate today’s visit');
+  });
+
+  it('names the technician and the customer when the payload carries them (owner ruling 2026-08-13)', () => {
+    expect(reviewRequestCopy('top', 'Casey', 'Adam').title).toBe('How did Adam do today, Casey?');
+    // First name only, even from a full technician name.
+    expect(reviewRequestCopy('top', 'Casey', 'Adam Benetti').title).toBe('How did Adam do today, Casey?');
+    // Either side missing degrades gracefully, never renders a dangling comma.
+    expect(reviewRequestCopy('top', '', 'Adam').title).toBe('How did Adam do today?');
+    expect(reviewRequestCopy('top', 'Casey', '').title).toBe('How did we do today, Casey?');
   });
 });
 

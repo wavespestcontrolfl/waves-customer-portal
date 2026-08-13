@@ -2876,16 +2876,20 @@ function CompanionSectionHeader({ companion }) {
   );
 }
 
-export function reviewRequestCopy(placement = 'top') {
-  if (placement === 'bottom') {
-    return {
-      title: 'Help the next neighbor choose faster',
-      cta: 'Share feedback',
-    };
-  }
+// Owner ruling 2026-08-13: the ask names the technician and the customer
+// ("How did Adam do today, Casey?"), and the CTA names the specific
+// low-commitment action instead of the generic "Share feedback". BOTH
+// placements carry it (codex #3379 r2 P2): top and bottom are mutually
+// exclusive mounts — pest/V2 reports place the card high, legacy non-pest
+// reports low — so legacy reports were silently keeping the old copy.
+// placement survives for layout classes only.
+export function reviewRequestCopy(placement = 'top', firstName = '', techName = '') {
+  const name = String(firstName || '').trim();
+  const tech = String(techName || '').trim().split(/\s+/)[0];
+  const who = tech || 'we';
   return {
-    title: "How did today's visit go?",
-    cta: 'Share feedback',
+    title: `How did ${who} do today${name ? `, ${name}` : ''}?`,
+    cta: 'Rate today’s visit',
   };
 }
 
@@ -2900,7 +2904,7 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   const location = data?.reviewLocation?.reviewUrl
     ? { key: data.reviewLocation.id, reviewUrl: data.reviewLocation.reviewUrl }
     : reviewLocationForReport(data);
-  const copy = reviewRequestCopy(placement);
+  const copy = reviewRequestCopy(placement, String(data?.customerName || '').split(/\s+/)[0], data?.technicianName);
   return (
     <section data-glass="card" className={`report-card review-request-card review-request-card-${placement}`} data-section={`review-request-${placement}`}>
       <div>
@@ -2936,9 +2940,6 @@ function formatPerApplication(value) {
   return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`;
 }
 
-function applicationsCadence(cadence) {
-  return String(cadence || '').replace(/\bvisits?\b/i, 'applications');
-}
 
 function CrossSellCard({ data, token, mode }) {
   // idle → sending → sent | failed (failed keeps the button for a retry —
@@ -2948,10 +2949,10 @@ function CrossSellCard({ data, token, mode }) {
   if (mode !== 'live' || !offer?.serviceKey) return null;
   const option = offer.option || {};
   const perApplication = formatPerApplication(option.perVisit);
+  // "Parrish, FL" → "Parrish"; missing → headline reads "your home".
+  const city = String(data?.cityState || '').split(',')[0].trim();
+  const cityPhrase = city ? ` in ${city}` : '';
   const priced = offer.mode === 'priced' && !!offer.option && !!perApplication;
-  const tierChip = priced && option.waveguardTier
-    ? `WaveGuard ${String(option.waveguardTier).replace(/^./, (c) => c.toUpperCase())}`
-    : null;
   const handleRequest = async () => {
     if (requestState === 'sending' || requestState === 'sent') return;
     setRequestState('sending');
@@ -2972,18 +2973,23 @@ function CrossSellCard({ data, token, mode }) {
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
-      <div className="section-eyebrow">{priced ? 'Complete your protection' : 'One more layer available'}</div>
-      {/* start-vs-add is SERVER-decided (codex #3367 PR r2): a customer with
-          no plan (one-time treatment) must not be told to add to one. */}
-      <h2>{offer.relationship === 'start' ? `Start ${offer.label}` : `Add ${offer.label} to your plan`}</h2>
-      {priced && (
-        <div className="cross-sell-price">
-          <span className="cross-sell-amount">{perApplication}</span>
-          <span className="cross-sell-unit">per application</span>
-        </div>
-      )}
-      {option.cadence ? <p className="cross-sell-cadence">{applicationsCadence(option.cadence)}</p> : null}
-      {tierChip ? <span className="cross-sell-chip">{tierChip}</span> : null}
+      {/* Owner copy ruling 2026-08-13: the card is ONE centered headline
+          (price folded in, first name leading) + the button. No eyebrow,
+          cadence, or fine print. start-vs-add stays SERVER-decided (codex
+          #3367 PR r2): a customer with no plan (one-time treatment) must
+          not be told to add to one. */}
+      {/* Owner-dictated copy 2026-08-13: no name, and the bare
+          per-application amount with no unit — a documented owner
+          exception in AGENTS.md ("per application" rule). The number IS
+          the per-application price; the click records a request and the
+          office confirms full per-application terms before anything is
+          scheduled (the click-to-estimate PR moves that confirmation onto
+          the estimate page itself). City rides the report payload. */}
+      <h2>
+        {priced
+          ? `Keep your home${cityPhrase} protected for just ${perApplication}!`
+          : `Your exact ${offer.label.toLowerCase()} quote is one tap away`}
+      </h2>
       <div className="cross-sell-cta-row">
         {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
@@ -3009,7 +3015,7 @@ function CrossSellCard({ data, token, mode }) {
             {requestState === 'sending'
               ? 'Sending…'
               : priced
-                ? `${offer.relationship === 'start' ? 'Start' : 'Add'} ${offer.label}`
+                ? 'Keep My Home Protected'
                 : `Get my ${offer.label.toLowerCase()} quote`}
           </button>
         )}
@@ -3019,41 +3025,86 @@ function CrossSellCard({ data, token, mode }) {
           That didn&apos;t go through — please try again, or call (941) 297-5749.
         </p>
       )}
-      {requestState !== 'sent' && requestState !== 'stale' && (
-        <p className="cross-sell-fine">
-          {priced
-            ? 'No charge today — we’ll confirm the details with you before anything is scheduled.'
-            : 'We’ll measure and confirm exact pricing — no obligation.'}
-        </p>
-      )}
     </section>
   );
 }
 
-// Referral card (owner-approved 2026-08-11): rides the gated server payload
-// (data.referral — same GATE_REPORT_CROSS_SELL as the offer, so a dark gate
-// keeps reports byte-identical), and the reward line is COMPOSED SERVER-SIDE
-// from live referral program settings so the card never promises a benefit
-// the program no longer grants. Links to the authenticated portal's existing
-// referral program — no referral mechanics live on this public bearer-token
-// surface.
+// Referral card (owner-approved 2026-08-11; redesigned per owner 2026-08-13:
+// headline + button only, and the click reveals the same share module the
+// portal's Refer tab uses — code, prefilled text and email). Every word and
+// amount is COMPOSED SERVER-SIDE from live referral program settings
+// (headline/cta/shareText ride data.referral) so the card never promises a
+// benefit the program no longer grants and no dollar figure is ever
+// hardcoded client-side. Rides the same GATE_REPORT_CROSS_SELL payload —
+// dark gate keeps reports byte-identical.
 function ReferralCard({ data, token, mode }) {
-  if (mode !== 'live' || !data?.referral?.line) return null;
+  // idle → loading → open | failed. The customer's code and share copy come
+  // from POST /:token/referral-link ON THE TAP — the render payload carries
+  // only headline + CTA, because fetching the code enrolls the customer as
+  // a promoter (a durable row) and a report VIEW must never do that.
+  const [shareState, setShareState] = useState('idle');
+  const [share, setShare] = useState(null);
+  const referral = data?.referral;
+  if (mode !== 'live' || !referral?.headline) return null;
+  const openShare = async () => {
+    if (shareState === 'loading' || shareState === 'open') return;
+    trackReportEvent(token, 'referral_cta_clicked', {});
+    // Staff QA views never enroll the customer or fetch their code — the
+    // same suppression contract as every other report interaction.
+    if (staffViewTokens.has(token)) {
+      setShare(null);
+      setShareState('staff');
+      return;
+    }
+    setShareState('loading');
+    try {
+      const response = await fetch(`${API_BASE}/reports/${token}/referral-link`, { method: 'POST' });
+      if (!response.ok) throw new Error(`referral link ${response.status}`);
+      const body = await response.json();
+      if (!body?.code) throw new Error('referral link empty');
+      setShare(body);
+      setShareState('open');
+    } catch {
+      setShareState('failed');
+    }
+  };
+  const copyCode = async () => {
+    try { await navigator.clipboard?.writeText?.(share.code); } catch { /* clipboard unavailable */ }
+  };
   return (
     <section data-glass="card" className="report-card cross-sell-card referral-card" data-section="referral">
-      <div className="section-eyebrow">Share the protection</div>
-      <h2>Know someone with a bug or lawn problem?</h2>
-      <p className="cross-sell-cadence">{data.referral.line}</p>
-      <div className="cross-sell-cta-row">
-        <a
-          data-glass-accent=""
-          className="review-cta cross-sell-cta"
-          href="/?tab=refer"
-          onClick={() => trackReportEvent(token, 'referral_cta_clicked', {})}
-        >
-          Refer a friend
-        </a>
-      </div>
+      <h2>{referral.headline}</h2>
+      {shareState === 'open' && share ? (
+        <div className="referral-share">
+          <div className="referral-code-chip">
+            <span className="referral-code">{share.code}</span>
+            <button type="button" className="referral-copy" onClick={copyCode}>Copy</button>
+          </div>
+          <div className="referral-share-row">
+            <a data-glass-accent="" className="review-cta cross-sell-cta" href={`sms:?&body=${encodeURIComponent(share.smsBody || '')}`}>Text it</a>
+            <a data-glass-accent="" className="review-cta cross-sell-cta" href={`mailto:?subject=${encodeURIComponent(share.emailSubject || '')}&body=${encodeURIComponent(share.emailBody || '')}`}>Email it</a>
+          </div>
+        </div>
+      ) : shareState === 'staff' ? (
+        <p className="cross-sell-confirm">Staff view — the share module renders for customers.</p>
+      ) : (
+        <div className="cross-sell-cta-row">
+          <button
+            type="button"
+            data-glass-accent=""
+            className="review-cta cross-sell-cta"
+            disabled={shareState === 'loading'}
+            onClick={openShare}
+          >
+            {shareState === 'loading' ? 'One moment…' : referral.cta || 'Refer a friend'}
+          </button>
+        </div>
+      )}
+      {shareState === 'failed' && (
+        <p className="cross-sell-fine cross-sell-error">
+          That didn&apos;t go through — please try again, or call (941) 297-5749.
+        </p>
+      )}
     </section>
   );
 }
@@ -7398,8 +7449,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           letter-spacing: 0;
         }
         .review-request-card {
+          /* Owner ruling 2026-08-13: all three CTA cards center-stack —
+             headline over button — instead of the old side-by-side grid. */
           display: grid;
-          grid-template-columns: minmax(0, 1fr) auto;
+          grid-template-columns: 1fr;
+          justify-items: center;
           align-items: center;
           gap: 16px;
         }
@@ -7440,8 +7494,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.5;
         }
-        .cross-sell-card h2 {
+        .service-report-v1 .cross-sell-card h2,
+        .service-report-v1 .review-request-card h2 {
+          /* !important matches glass-theme.css's own blanket important
+             h2 sizing — owner ruling 2026-08-13: CTA-card headlines run
+             one step smaller than section headings, centered. */
           margin-bottom: 4px;
+          text-align: center;
+          font-size: 22px !important;
         }
         .cross-sell-price {
           display: flex;
@@ -7466,25 +7526,49 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.5;
         }
-        .cross-sell-chip {
-          display: inline-block;
-          font-size: 14px;
-          font-weight: 700;
-          letter-spacing: 0.02em;
-          border: 1px solid rgba(4, 57, 94, 0.35);
-          background: rgba(4, 57, 94, 0.07);
-          color: ${B.glassNavy};
-          border-radius: 999px;
-          padding: 3px 10px;
-          margin-top: 10px;
-        }
         .cross-sell-cta-row {
           display: flex;
           align-items: center;
+          justify-content: center;
           gap: 14px;
           margin-top: 16px;
           flex-wrap: wrap;
         }
+        .referral-share { margin-top: 14px; }
+        .referral-code-chip {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          border: 1.5px dashed ${B.glassNavy};
+          border-radius: 12px;
+          background: rgba(255, 215, 0, 0.12);
+          padding: 12px 14px;
+          margin-bottom: 12px;
+        }
+        .referral-code {
+          font-weight: 800;
+          font-size: 18px;
+          letter-spacing: 0.12em;
+          color: var(--text);
+        }
+        .referral-copy {
+          border: 1px solid ${B.glassNavy};
+          background: #fff;
+          color: ${B.glassNavy};
+          border-radius: 8px;
+          padding: 7px 12px;
+          font: inherit;
+          font-size: 14px;
+          font-weight: 800;
+          cursor: pointer;
+        }
+        .referral-share-row {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+        .referral-share-row .cross-sell-cta { min-width: 0; width: 100%; }
         .cross-sell-card .cross-sell-cta {
           display: inline-flex;
           align-items: center;
@@ -8206,7 +8290,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .one-thing-detail > div,
         .lawn-overall-score,
         .lawn-photo-strip figure,
-        .review-request-card .review-cta {
+        .review-request-card .review-cta,
+        .cross-sell-card .cross-sell-cta {
           border-radius: 10px;
         }
         .sr-cell-label {
@@ -8238,14 +8323,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: var(--soft-blue);
           border-color: var(--soft-blue-border);
         }
-        .review-request-card .review-cta {
+        .review-request-card .review-cta,
+        .cross-sell-card .cross-sell-cta {
           background: ${B.glassNavy};
           border-color: ${B.glassNavy};
           color: #fff;
           box-shadow: none;
         }
         .review-request-card .review-cta:hover,
-        .review-request-card .review-cta:focus-visible {
+        .review-request-card .review-cta:focus-visible,
+        .cross-sell-card .cross-sell-cta:hover,
+        .cross-sell-card .cross-sell-cta:focus-visible {
           transform: none;
           box-shadow: none;
         }
