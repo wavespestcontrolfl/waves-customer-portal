@@ -598,6 +598,28 @@ describe('mintReportClickEstimate', () => {
     expect(ops.updates).toHaveLength(0);
   });
 
+  test('an EXPIRED staff-revised row does not block — the fresh mint supersedes it like any dead lineage row (audit on round 9)', async () => {
+    // The customer's revised token is already dead: 409ing forever would
+    // orphan the card, and leaving the row unarchived would give the
+    // public extension flow something to revive beside the fresh mint.
+    const deadRevised = priorMint({
+      id: 'est-revised-dead',
+      expires_at: new Date('2026-08-01T00:00:00Z'),
+      estimate_data: {
+        reportCtaMint: {
+          serviceKey: 'pest_control',
+          fingerprintInvalidatedAt: '2026-08-13T10:00:00Z',
+        },
+      },
+    });
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [deadRevised] });
+    const out = await mintReportClickEstimate(trx, baseArgs({ deduped: false }));
+    expect(out.reused).toBe(false);
+    expect(ops.inserts).toHaveLength(1);
+    const archive = ops.updates.find((u) => u.table === 'estimates' && u.patch.archived_at);
+    expect(archive.criteria).toEqual({ id: 'est-revised-dead' });
+  });
+
   test('an ARCHIVED or ACCEPTED staff-revised row does not block a fresh mint', async () => {
     // Archived = staff already retired it; accepted = the work is booked
     // (ownership revalidation guards that case). Neither is a live second

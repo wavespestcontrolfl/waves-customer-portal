@@ -73,6 +73,11 @@ describe('opt-out key lockstep (contract)', () => {
     // The auto-renew sender extends AND emails — both forbidden for
     // opted-out estimates (uncapped audit r4 P1).
     expect(read('../services/estimate-auto-renew.js')).toMatch(/noEngagementAutomation === true/);
+    // extendEstimate forces silent for opted-out rows — the extension is
+    // allowed but its SMS/email announcement is not, and the PUBLIC
+    // extension-request flow calls it non-silently (in-hook audit on
+    // #3391 round 9). Central here so every caller inherits the guard.
+    expect(read('../services/estimate-extension.js')).toMatch(/noEngagementAutomation === true/);
     expect(read('../services/service-report/click-estimate-mint.js')).toMatch(/noEngagementAutomation: true/);
   });
 });

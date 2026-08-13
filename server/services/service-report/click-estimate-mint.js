@@ -149,15 +149,22 @@ async function mintReportClickEstimate(trx, {
   // (expired/declined), because an unarchived expired row can be REVIVED by
   // the public extension flow (in-hook audit r8 P0). Accepted/locked rows
   // stay untouched.
-  // Staff-REVISED rows are never supersedable (GitHub #3391 round P0): the
-  // revise dropped the fingerprint, so a later identical tap can't match
-  // them for reuse — and archiving them would break the customer's
-  // in-flight, possibly delivered, revised token. The blocker below refuses
-  // the whole tap while one is live; this filter is the belt that keeps a
-  // revised row out of the archival loop no matter what.
+  // LIVE staff-REVISED rows are never supersedable (GitHub #3391 round
+  // P0): the revise dropped the fingerprint, so a later identical tap
+  // can't match them for reuse — and archiving them would break the
+  // customer's in-flight, possibly delivered, revised token. The blocker
+  // below refuses the whole tap while one is live; this filter is the belt
+  // that keeps a live revised row out of the archival loop no matter what.
+  // A DEAD revised row (expired/declined) is different (in-hook audit on
+  // round 9): the customer's token is already dead, so it supersedes like
+  // any other dead lineage row — leaving it unarchived would both block
+  // fresh taps forever and leave the extension flow something to revive.
+  const staffRevisedAndLive = (row) => (
+    !!reportCtaMintOf(row)?.fingerprintInvalidatedAt && priorMintStillLive(row, nowDate)
+  );
   const supersedableMints = (priorMintRows || []).filter((row) => (
     !row.archived_at && row.status !== 'accepted' && !row.price_locked_at
-    && !reportCtaMintOf(row)?.fingerprintInvalidatedAt
+    && !staffRevisedAndLive(row)
   ));
 
   const context = crossSell?.engineContext;
@@ -167,17 +174,20 @@ async function mintReportClickEstimate(trx, {
     throw new Error('click-to-estimate mint called without engine context');
   }
 
-  // ── Staff-revised lineage BLOCKS the tap (GitHub #3391 round P0) ────────
+  // ── LIVE staff-revised lineage BLOCKS the tap (GitHub #3391 round P0) ───
   // A revise deliberately drops the offer fingerprint (staff just changed
   // the terms), so a revised row can never reuse — but archiving it would
   // break the customer's in-flight, possibly already DELIVERED token, and
   // minting BESIDE it puts two live honorable prices in the customer's
   // hands. Staff took over this conversation: the tap refuses as drift and
-  // the revised estimate stays the one authoritative live offer.
-  const staffRevisedBlocker = (priorMintRows || []).some((row) => (
-    !row.archived_at && row.status !== 'accepted'
-    && !!reportCtaMintOf(row)?.fingerprintInvalidatedAt
-  ));
+  // the revised estimate stays the one authoritative live offer. Only
+  // while it IS live (in-hook audit on round 9): the same
+  // priorMintStillLive predicate the reuse path trusts — an expired or
+  // declined revised row must not 409 fresh taps forever, it supersedes
+  // like any other dead lineage row (accepted rows fall to the ownership
+  // revalidation below, archived rows are already retired).
+  const staffRevisedBlocker = (priorMintRows || [])
+    .some((row) => row.status !== 'accepted' && staffRevisedAndLive(row));
   if (staffRevisedBlocker) {
     throw new ClickEstimateDriftError('a staff-revised estimate holds this offer — the card is stale');
   }
