@@ -2575,10 +2575,11 @@ class GscOpportunityMiner {
       const prev = byPair.get(key);
       if (prev) {
         prev.impressions += imp;
+        prev.queries.push(q.query);
         if (imp > prev.repImpressions) { prev.representative = q.query; prev.repImpressions = imp; }
       } else {
         byPair.set(key, {
-          service, city, impressions: imp, representative: q.query, repImpressions: imp,
+          service, city, impressions: imp, representative: q.query, repImpressions: imp, queries: [q.query],
         });
       }
     }
@@ -2601,6 +2602,17 @@ class GscOpportunityMiner {
           // every draft of this lane hard-fails (cloud P1). Kept OUT of
           // `query` itself so the dedupe key stays target-stable.
           representative_query: pair.representative || null,
+          // The specific topic behind specialty→pest canonicalization,
+          // judged across EVERY contributing query, representative first —
+          // same rule as the other emitting buckets: 'wasp'/'bed bug' are
+          // individually FAQ-blocked while broad 'pest' is not, and without
+          // this the brief keeps its default FAQ mandate and the publish
+          // guard only sees the broad service (cloud P1, the exact
+          // no_content_yet lesson from #3372 applied to this new emitter).
+          specialty_topic: extractSpecialtyTopic([
+            pair.representative,
+            ...pair.queries.filter((x) => x !== pair.representative),
+          ]),
         },
       };
       const { total, breakdown } = scoreOpportunity(opp, {

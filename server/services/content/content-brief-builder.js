@@ -13,6 +13,7 @@
  * what brief #1 would look like" without writing anything.
  */
 
+const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
@@ -495,7 +496,12 @@ class ContentBriefBuilder {
             persist: false,
           });
         } catch (err) {
-          logger.warn(`[brief-builder] SERP profile failed for "${serpKeyword}": ${err.message}`);
+          // Digest, never the raw keyword: GSC queries are arbitrary
+          // external text (names, addresses, phone numbers all appear in
+          // real exports) and non-card PII must not reach the logs —
+          // same sha256-12 convention as the miner's queryDigest.
+          const kwDigest = crypto.createHash('sha256').update(String(serpKeyword)).digest('hex').slice(0, 12);
+          logger.warn(`[brief-builder] SERP profile failed for query#${kwDigest} (opp ${opportunity.id || '?'}): ${err.message}`);
         }
       }
     }

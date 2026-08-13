@@ -2655,3 +2655,24 @@ describe('local_gap representative query + label validation (Codex P1s on #3378)
     expect(bb).toMatch(/target_keyword: opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null,/);
   });
 });
+
+describe('local_gap specialty topic + log hygiene (round-2 cloud P1s)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+  const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+
+  test('the pair derives specialty_topic across ALL queries, representative first', () => {
+    // "wasp control sarasota" canonicalizes to broad pest; without the
+    // topic the brief keeps its FAQ mandate and the publish guard never
+    // sees the blocked topic — the exact no_content_yet lesson.
+    expect(lg).toMatch(/specialty_topic: extractSpecialtyTopic\(\[\s*pair\.representative,/);
+    expect(lg).toMatch(/prev\.queries\.push\(q\.query\)/);
+  });
+
+  test('the brief-builder SERP failure log carries a digest, never the raw keyword', () => {
+    const bb = fs.readFileSync(require.resolve('../services/content/content-brief-builder'), 'utf8');
+    expect(bb).toMatch(/sha256'\)\.update\(String\(serpKeyword\)\)/);
+    expect(bb).not.toMatch(/SERP profile failed for "\$\{serpKeyword\}"/);
+    expect(bb).not.toMatch(/SERP profile failed for "\$\{opportunity\.query\}"/);
+  });
+});
