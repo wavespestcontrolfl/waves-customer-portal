@@ -479,9 +479,9 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   // failure just hides the warning. While the live check is in flight
   // the options payload's same-day preset annotation (opt.conflicts)
   // fills in.
-  const [liveConflicts, setLiveConflicts] = useState(null);
+  const [liveCheck, setLiveCheck] = useState(null);
   useEffect(() => {
-    setLiveConflicts(null);
+    setLiveCheck(null);
     if (!(selectedDate && selectedStart && selectedEnd)) return undefined;
     const controller = new AbortController();
     const timer = setTimeout(async () => {
@@ -496,18 +496,27 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         });
         const data = await res.json().catch(() => null);
         if (!controller.signal.aborted && res.ok && Array.isArray(data?.conflicts)) {
-          setLiveConflicts(data.conflicts);
+          setLiveCheck(data);
         }
       } catch { /* advisory only — commit still rejects real overlaps */ }
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
   }, [selectedDate, selectedStart, selectedEnd, service.id]);
-  // A route-scope same-day push shifts the remaining route stops by the
-  // same delta (commit moves tail-first), so an overlap with a stop
-  // that's moving too is not a definite failure — drop flagged siblings
-  // from the warning while scope=route (codex #3375 P2).
-  const scopedConflicts = (list) => (list || []).filter((c) => !(scope === 'route' && c.isRouteSibling));
-  const activeConflicts = scopedConflicts(liveConflicts ?? selected?.conflicts);
+  // Two lists, one scope toggle (codex #3375 P2 ×2):
+  //   conflicts      — what the ANCHOR's window hits. A route-scope push
+  //                    shifts the remaining stops by the same delta
+  //                    (commit moves tail-first), so an overlap with a
+  //                    stop that's moving too is not a definite failure:
+  //                    drop flagged siblings while scope=route.
+  //   routeConflicts — what those SHIFTED stops would land on. Only real
+  //                    while scope=route, and the reason a route Move can
+  //                    fail halfway with the earlier stops already booked
+  //                    and already texted.
+  const conflictsFor = (src) => [
+    ...(src?.conflicts || []).filter((c) => !(scope === 'route' && c.isRouteSibling)),
+    ...(scope === 'route' ? (src?.routeConflicts || []) : []),
+  ];
+  const activeConflicts = conflictsFor(liveCheck ?? selected);
   const conflictLabel = (c) => {
     const who = c.customerName || (c.isHold ? 'an estimate-slot hold' : 'another appointment');
     const when = c.windowStart
@@ -692,9 +701,9 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                         <span style={{ color: '#71717A', fontWeight: 400 }}> — storm may pass</span>
                       )}
                     </span>
-                    {(scopedConflicts(opt.conflicts).length > 0 || opt.rainChance != null) && (
+                    {(conflictsFor(opt).length > 0 || opt.rainChance != null) && (
                       <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
-                        {scopedConflicts(opt.conflicts).length > 0 && (
+                        {conflictsFor(opt).length > 0 && (
                           <span style={{ fontSize: 12, fontWeight: 500, color: '#B45309' }}>overlaps</span>
                         )}
                         {opt.rainChance != null && (

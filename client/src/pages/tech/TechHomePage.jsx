@@ -1257,8 +1257,16 @@ function RainOutSheet({ service, onClose, onDone }) {
   // same delta (commit moves tail-first), so an overlap with a stop
   // that's moving too is not a definite failure — drop flagged siblings
   // from the warning while scope=route (codex #3375 P2).
-  const scopedConflicts = (list) => (list || []).filter((c) => !(scope === 'route' && c.isRouteSibling));
-  const selectedConflicts = scopedConflicts(selected?.conflicts);
+  // `conflicts` = what THIS stop's new window hits, minus the stops that
+  // shift with a route push (they vacate before it lands).
+  // `routeConflicts` = what those shifted stops would themselves land on —
+  // only real while scope=route, and the reason a route Move can fail
+  // halfway with the earlier stops already booked and already texted.
+  const conflictsFor = (src) => [
+    ...(src?.conflicts || []).filter((c) => !(scope === 'route' && c.isRouteSibling)),
+    ...(scope === 'route' ? (src?.routeConflicts || []) : []),
+  ];
+  const selectedConflicts = conflictsFor(selected);
   const conflictLabel = (c) => {
     const who = c.customerName || (c.isHold ? 'an estimate-slot hold' : 'another appointment');
     const when = c.windowStart
@@ -1407,9 +1415,9 @@ function RainOutSheet({ service, onClose, onDone }) {
                         <span style={{ color: DARK.muted, fontSize: 12 }}> — storm may pass</span>
                       )}
                     </span>
-                    {(scopedConflicts(opt.conflicts).length > 0 || opt.rainChance != null) && (
+                    {(conflictsFor(opt).length > 0 || opt.rainChance != null) && (
                       <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
-                        {scopedConflicts(opt.conflicts).length > 0 && (
+                        {conflictsFor(opt).length > 0 && (
                           <span style={{ fontSize: 12, fontWeight: 700, color: '#f59e0b' }}>overlaps</span>
                         )}
                         {opt.rainChance != null && (

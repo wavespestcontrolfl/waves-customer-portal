@@ -633,13 +633,15 @@ function sameDayOptions(now = new Date()) {
 // non-identifying, and they're what makes the warning actionable.
 const TARGET_CONFLICT_LIMIT = 3;
 const NAME_ALL = Symbol('rain-out:name-all');
-async function conflictsForTarget(serviceId, date, window, { routeSiblingIds = null, nameScope = null } = {}) {
+async function conflictsForTarget(serviceId, date, window, {
+  routeSiblingIds = null, nameScope = null, excludeServiceIds = null,
+} = {}) {
   const { findConflictingVisits } = require('./scheduling/occupancy');
   const rows = await findConflictingVisits({
     date,
     windowStart: window.start,
     windowEnd: window.end,
-    excludeServiceIds: [serviceId],
+    excludeServiceIds: excludeServiceIds || [serviceId],
     excludeStatuses: ['cancelled', 'completed'],
   });
   if (!rows.length) return [];
@@ -677,6 +679,9 @@ async function conflictsForTarget(serviceId, date, window, { routeSiblingIds = n
       windowEnd = minutesToHHMM(startMin + duration);
     }
     return {
+      // Row id, not customer data — the sheets never render it; it exists
+      // so the route-scope merge can dedupe one stop hit by two members.
+      id: String(row.id),
       windowStart: toHHMM(row.window_start),
       windowEnd,
       customerName: (canName(row) && row.customer_id)
@@ -696,6 +701,77 @@ async function conflictsForTarget(serviceId, date, window, { routeSiblingIds = n
       isRouteSibling: isSibling(row),
     };
   });
+}
+
+// A route-scope Move commits EVERY remaining stop, and the rebooker runs
+// its occupancy gate per member — so a sibling's landing window can
+// SLOT_TAKEN while the anchor's own target is clear, and the route ends up
+// PARTIALLY moved (the stops before the straggler already booked and
+// already texted). Probing only the anchor's window left that invisible
+// until it happened (codex #3375 P2), which is the same offer/commit
+// mismatch this advisory exists to close, in its most expensive form.
+//
+// Project each member's landing window exactly the way commit() does —
+// same-day: shift both bounds by the anchor's delta, or fall back to the
+// anchor's own window when the stop has no parseable pair (commit's
+// windowless-mover fallback); day move: keep its own window on the target
+// date, and a windowless stop stays inert to the predicate. EVERY swept id
+// is excluded: members moving together aren't conflicts, the same
+// reasoning isRouteSibling encodes for the anchor probe. Member-vs-member
+// collisions are the shapes commit documents as deliberately loud
+// (pre-overlapped pairs, inverted route_order, a windowless mover) and
+// stay out of scope — they can't be judged from the pre-move schedule
+// anyway, since commit moves tail-first and each stop vacates before the
+// next lands.
+async function routeScopeConflicts({ serviceId, service, route, target, nameScope = null }) {
+  if (!route.length) return [];
+  const targetDate = String(target.date).split('T')[0];
+  const anchorDateStr = service.scheduled_date
+    ? String(service.scheduled_date instanceof Date
+        ? service.scheduled_date.toISOString()
+        : service.scheduled_date).slice(0, 10)
+    : null;
+  const isSameDay = targetDate === anchorDateStr;
+  const anchorStartMin = hhmmToMinutes(toHHMM(service.window_start));
+  const targetStartMin = hhmmToMinutes(target.window.start);
+  const siblingDelta = (isSameDay && anchorStartMin != null && targetStartMin != null)
+    ? targetStartMin - anchorStartMin
+    : 0;
+  const sweptIds = [...new Set([String(serviceId), ...route.map((j) => String(j.id))])];
+
+  const windows = route.map((job) => {
+    if (isSameDay) {
+      const startMin = hhmmToMinutes(toHHMM(job.window_start));
+      const endMin = hhmmToMinutes(toHHMM(job.window_end));
+      return (startMin != null && endMin != null)
+        ? { start: minutesToHHMM(startMin + siblingDelta), end: minutesToHHMM(endMin + siblingDelta) }
+        : target.window;
+    }
+    const start = toHHMM(job.window_start);
+    const end = toHHMM(job.window_end);
+    return (start && end) ? { start, end } : null;
+  });
+  // One probe per DISTINCT landing window — a windowless same-day route
+  // collapses onto the anchor's window, and the anchor probe already
+  // covered that one.
+  const seen = new Set([`${target.window.start}|${target.window.end}`]);
+  const distinct = windows.filter((w) => {
+    if (!w) return false;
+    const key = `${w.start}|${w.end}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (!distinct.length) return [];
+
+  const probed = await Promise.all(distinct.map((w) => conflictsForTarget(
+    serviceId, targetDate, w, { nameScope, excludeServiceIds: sweptIds },
+  )));
+  const byId = new Map();
+  for (const conflict of probed.flat()) {
+    if (!byId.has(conflict.id)) byId.set(conflict.id, conflict);
+  }
+  return [...byId.values()].slice(0, TARGET_CONFLICT_LIMIT);
 }
 
 /**
@@ -720,7 +796,19 @@ async function checkTarget({ serviceId, target }) {
     // decide, and this is the ONLY path that resolves names globally.
     nameScope: NAME_ALL,
   });
-  return { ok: true, conflicts };
+  // Returned alongside (not merged): the sheet shows these only while the
+  // scope toggle is on "this + rest of route", the one case commit moves
+  // them. Best-effort — a probe failure degrades to the anchor-only
+  // warning rather than blocking the sheet.
+  let routeConflicts = [];
+  try {
+    routeConflicts = await routeScopeConflicts({
+      serviceId, service, route, target, nameScope: NAME_ALL,
+    });
+  } catch (err) {
+    logger.info(`[rain-out] route-scope conflict probe failed for ${serviceId}: ${err.message}`);
+  }
+  return { ok: true, conflicts, routeConflicts };
 }
 
 /**
@@ -792,6 +880,20 @@ async function getOptions(serviceId) {
     } catch (err) {
       logger.info(`[rain-out] conflict probe failed for ${serviceId} ${opt.date} ${opt.window.start}: ${err.message}`);
       opt.conflicts = [];
+    }
+    // What the shifted rest-of-route would land on — shown only while the
+    // sheet's scope toggle is on "rest of route" (same fail-open posture).
+    try {
+      opt.routeConflicts = await routeScopeConflicts({
+        serviceId,
+        service,
+        route,
+        target: { date: opt.date, window: opt.window },
+        nameScope: service.technician_id || null,
+      });
+    } catch (err) {
+      logger.info(`[rain-out] route-scope probe failed for ${serviceId} ${opt.date} ${opt.window.start}: ${err.message}`);
+      opt.routeConflicts = [];
     }
   }
 

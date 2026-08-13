@@ -1778,6 +1778,7 @@ describe('rain-out service', () => {
           excludeStatuses: ['cancelled', 'completed'],
         }));
         expect(options.sameDay[0].conflicts).toEqual([{
+          id: 'svc-9',
           windowStart: '11:00',
           windowEnd: '12:00',
           customerName: 'cust-9a cust-9b',
@@ -1825,6 +1826,7 @@ describe('rain-out service', () => {
         const options = await RainOut.getOptions('svc-1');
 
         expect(options.sameDay[0].conflicts).toEqual([{
+          id: 'svc-8',
           windowStart: '11:00',
           windowEnd: '12:00',
           customerName: null,
@@ -1912,7 +1914,9 @@ describe('rain-out service', () => {
 
       expect(result).toEqual({
         ok: true,
+        routeConflicts: [],
         conflicts: [{
+          id: 'svc-9',
           windowStart: '14:00',
           windowEnd: '15:00',
           customerName: 'cust-9a cust-9b',
@@ -2059,6 +2063,84 @@ describe('rain-out service', () => {
       expect(result.conflicts.filter((c) => !c.isRouteSibling)).toHaveLength(1);
     });
 
+    test('route scope: probes each sibling\'s SHIFTED window, excluding every swept id', async () => {
+      // Anchor 09:00 → 14:00 is a +5h push, so the 10:00-11:00 sibling lands
+      // on 15:00-16:00. The anchor's own target is clear; only the sibling's
+      // landing window collides. Probing the anchor alone (the old behavior)
+      // showed NOTHING and let the route move halfway before SLOT_TAKEN.
+      findConflictingVisits.mockImplementation(async ({ windowStart }) => (
+        windowStart === '15:00'
+          ? [{
+            id: 'svc-blocker', customer_id: 'cust-b', technician_id: 'tech-2', status: 'confirmed',
+            service_type: 'Lawn Treatment', window_start: '15:00:00', window_end: '16:00:00',
+            estimated_duration_minutes: 60, reservation_expires_at: null,
+          }]
+          : []
+      ));
+      wireDb({
+        scheduled_services: [
+          chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: etDateString(), window_start: '09:00', route_order: 1,
+            }),
+          }),
+          chain({ rows: [{ id: 'svc-2', window_start: '10:00:00', window_end: '11:00:00' }] }),
+        ],
+        customers: [chain({ rows: [{ id: 'cust-b', first_name: 'cust-b', last_name: null }] })],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: etDateString(), window: { start: '14:00', end: '15:00' } },
+      });
+
+      expect(result.conflicts).toEqual([]);
+      expect(result.routeConflicts).toEqual([
+        expect.objectContaining({ id: 'svc-blocker', customerName: 'cust-b', windowStart: '15:00' }),
+      ]);
+      // Members moving together are never conflicts with each other — the
+      // sibling probe excludes the anchor AND the whole swept route, the
+      // same reasoning isRouteSibling encodes on the anchor probe.
+      expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+        windowStart: '15:00',
+        windowEnd: '16:00',
+        excludeServiceIds: ['svc-1', 'svc-2'],
+        excludeStatuses: ['cancelled', 'completed'],
+      }));
+    });
+
+    test('route scope: a day move keeps each sibling\'s own window on the target date', async () => {
+      findConflictingVisits.mockResolvedValue([]);
+      wireDb({
+        scheduled_services: [
+          chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: '2026-06-11', window_start: '09:00', route_order: 1,
+            }),
+          }),
+          chain({
+            rows: [
+              { id: 'svc-2', window_start: '10:00:00', window_end: '11:00:00' },
+              // Windowless stop: inert to the overlap predicate wherever it
+              // sits, so commit never probes it and neither does this.
+              { id: 'svc-3', window_start: null, window_end: null },
+            ],
+          }),
+        ],
+      });
+
+      await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: '2026-06-20', window: { start: '14:00', end: '15:00' } },
+      });
+
+      const probes = findConflictingVisits.mock.calls.map((c) => `${c[0].date} ${c[0].windowStart}-${c[0].windowEnd}`);
+      expect(probes).toEqual([
+        '2026-06-20 14:00-15:00', // the anchor's own target
+        '2026-06-20 10:00-11:00', // the sibling, own window, new date — no shift
+      ]);
+    });
+
     test('clear window → ok with no conflicts; bad target and missing service reject', async () => {
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1' }) })],
@@ -2067,7 +2149,7 @@ describe('rain-out service', () => {
         serviceId: 'svc-1',
         target: { date: '2026-08-12', window: { start: '14:00', end: '15:00' } },
       });
-      expect(clear).toEqual({ ok: true, conflicts: [] });
+      expect(clear).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
 
       expect(await RainOut.checkTarget({ serviceId: 'svc-1', target: { date: '2026-08-12' } }))
         .toEqual({ ok: false, reason: 'bad_target' });
