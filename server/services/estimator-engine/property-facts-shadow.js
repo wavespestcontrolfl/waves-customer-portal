@@ -44,6 +44,21 @@ const SUBPREMISE_RE = /(?:\b(?:unit|apt|apartment|ste|suite|lot)\s*[#]?\s*[\w-]+
 // SUBPREMISE_RE (pre-existing behavior shared with the V2 shadow).
 const DWELLING_SUBPREMISE_RE = /(?:\b(?:unit|apt|apartment|ste|suite)\s*[#]?\s*[\w-]+|#\s*\w+)\s*$/i;
 
+// A UNIT-FIRST address carries the same signal: "Unit 7, 123 Main St" is a
+// subpremise exactly as "123 Main St Unit 7" is, and the end-anchored form
+// above missed it, so a flattened Single Family lookup kept whole-structure
+// scope and the county area/master lot priced the whole property (codex r51
+// P1 — the scope-classification half of the r41 unit-first street-number
+// fix). The designator must be followed by its token and then a street
+// NUMBER, mirroring hasPrimaryStreetNumber's leading-unit rule; dwelling
+// designators only, same as the end-anchored form.
+const LEADING_DWELLING_SUBPREMISE_RE = /^\s*(?:(?:unit|apt|apartment|ste|suite)\s*[#]?\s*[\w-]+|#\s*\w+)\s*(?:,\s*|\s+at\s+|\s+)\d/i;
+
+function hasDwellingSubpremise(line) {
+  const stripped = stripTrailingLocality(line);
+  return DWELLING_SUBPREMISE_RE.test(stripped) || LEADING_DWELLING_SUBPREMISE_RE.test(stripped);
+}
+
 // Strip the trailing locality so the unit suffix sits at the end of the
 // string. Handles BOTH comma styles — ", Venice, FL 34285" and the equally
 // common ", Parrish FL 34219" (requiring a comma before the state left the
@@ -67,10 +82,10 @@ function stripTrailingLocality(address) {
 }
 
 function hasSubpremiseSignal({ address, extraction }) {
-  if (address && DWELLING_SUBPREMISE_RE.test(stripTrailingLocality(address))) return true;
+  if (address && hasDwellingSubpremise(address)) return true;
   const extractionAddress = extraction?.property?.service_address;
   if (typeof extractionAddress === 'string') {
-    return !!(extractionAddress && DWELLING_SUBPREMISE_RE.test(stripTrailingLocality(extractionAddress)));
+    return !!(extractionAddress && hasDwellingSubpremise(extractionAddress));
   }
   // The extraction schema's field names (raw_text/street_line_1/
   // street_line_2 — codex r6 P1: the legacy raw/line1 reads matched
@@ -81,7 +96,7 @@ function hasSubpremiseSignal({ address, extraction }) {
     extractionAddress?.raw, extractionAddress?.line1];
   if (String(extractionAddress?.street_line_2 || '').trim()) return true;
   // Free-text lines carry localities too (raw_text especially).
-  return lines.some((line) => line && DWELLING_SUBPREMISE_RE.test(stripTrailingLocality(line)));
+  return lines.some((line) => line && hasDwellingSubpremise(line));
 }
 
 // The PRE-CHANGE address parse, kept verbatim: the enhanced parse
@@ -151,6 +166,23 @@ function isCondoRecord({ aggregated, propertyType, landUseDescription }) {
   if (aggregated === true) return false;
   return CONDO_TYPES.test(String(propertyType || ''))
     || CONDO_TYPES.test(String(landUseDescription || ''));
+}
+
+// …but the record only stands in for unit OCCUPANCY when the caller is
+// someone who occupies one unit. A condo-association manager or HOA board
+// member requesting COMMON-AREA service is not — treating their condo-typed
+// record as a suite cleared the association's building area and master
+// parcel as though they occupied one unit (codex r51 P1). The structured
+// hoa_common_area_service boolean and an hoa/common-area risk type carry
+// the same rule (they already outrank type text everywhere else — pre-push
+// r3). Owner/tenant/unknown keep the r49 behavior.
+function condoRecordOccupancy({ condoRecord, extraction, intent }) {
+  if (condoRecord !== true) return false;
+  const rel = String(extraction?.caller?.relationship_to_property || '').toLowerCase();
+  if (/property.?manager|manager|management|association|hoa|board/.test(rel)) return false;
+  if (extraction?.property?.hoa_common_area_service === true) return false;
+  if (/hoa|common.?area|association/i.test(String(intent?.commercial_risk_type || ''))) return false;
+  return true;
 }
 
 function inferServiceScope({
@@ -498,9 +530,12 @@ function computePropertyFactsV2Shadow({ propertyRecord, extraction, intent, prop
       subpremiseSignal: subpremiseSignalForScope, aggregated, propertyType,
       landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
     });
-    const condoRecord = isCondoRecord({
-      aggregated, propertyType,
-      landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
+    const condoRecord = condoRecordOccupancy({
+      condoRecord: isCondoRecord({
+        aggregated, propertyType,
+        landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
+      }),
+      extraction, intent,
     });
     const serviceScope = inferServiceScope({
       propertyType, isCommercial, tenant, aggregated, unitSignal, unitScopeSuites, partBuilding,
@@ -676,5 +711,6 @@ module.exports = {
     hasSubpremiseSignal,
     hasPartBuildingEvidence,
     isCondoRecord,
+    condoRecordOccupancy,
   },
 };

@@ -122,6 +122,18 @@ function emailProseForScan(body) {
       // being treated (same rule as the work-signature strip, codex r9 P2).
       continue;
     }
+    // An underscore divider is Outlook's reply separator AND a common form
+    // decoration — the line itself doesn't say which; what FOLLOWS does.
+    // Breaking at every `__` cut a form's payload before its Message: field
+    // (codex r51 P1), so the divider ends the scan only when a quoted
+    // header block follows; otherwise it's decoration and the scan skips it
+    // (the From:-field rule above then judges the payload normally).
+    if (/^\s*_{2,}\s*$/.test(line)) {
+      let j = i + 1;
+      while (j < lines.length && !lines[j].trim()) j += 1;
+      if (j < lines.length && /^\s*From:\s/i.test(lines[j]) && looksLikeQuotedHeaderBlock(lines, j)) break;
+      continue;
+    }
     // Structural markers (separator, reply header, forwarded header) end
     // the sender's own text wherever they appear. "Sent from" counts only
     // in its DEVICE-signature form — "Sent from our warehouse, where we

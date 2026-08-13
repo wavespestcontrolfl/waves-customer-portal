@@ -283,6 +283,47 @@ describe('maybeDraftEstimateFromEmailLead', () => {
       expect(scannedMessage()).not.toContain('Original ask');
     });
 
+    test('an underscore divider inside a form does not end the scan', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'New website inquiry',
+          body_text: [
+            'New website inquiry',
+            '________________',
+            'From: Jane Doe',
+            'Message: pest control for our warehouse.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toContain('warehouse');
+    });
+
+    test('an Outlook underscore separator before a quoted header block still cuts', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'RE: quote',
+          body_text: [
+            'Here is my number.',
+            '________________________________',
+            'From: Jane Doe <jane@example.com>',
+            'Sent: Tuesday, August 11, 2026 2:04 PM',
+            'To: contact@wavespestcontrolvenice.com',
+            'Subject: quote',
+            '',
+            'Original ask about our warehouse.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toContain('my number');
+      expect(scannedMessage()).not.toContain('warehouse');
+    });
+
     test('a forwarded-message separator ends the scan before its header block', async () => {
       await maybeDraftEstimateFromEmailLead({
         email: {

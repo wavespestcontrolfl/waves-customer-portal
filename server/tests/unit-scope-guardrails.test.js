@@ -1368,3 +1368,95 @@ describe('an owner-occupied commercial condo is a unit without any address suffi
     expect(shadowPrivate.inferOwnershipType({ ...args, unitScopeSuites: true })).toBe('commercial_condominium');
   });
 });
+
+describe('a unit-first address is a subpremise for scope too (r51)', () => {
+  const { _private: shadowPrivate } = require('../services/estimator-engine/property-facts-shadow');
+
+  test('the enhanced signal recognizes a leading designator ahead of the street number', () => {
+    expect(shadowPrivate.hasSubpremiseSignal({
+      address: 'Unit 7, 123 Main St, Bradenton, FL 34201', extraction: null,
+    })).toBe(true);
+    expect(shadowPrivate.hasSubpremiseSignal({
+      address: 'Apt 4 at 123 Main Street, Venice, FL 34285', extraction: null,
+    })).toBe(true);
+    // No street number after the designator: not a serviceable unit-first
+    // address ("62nd Avenue East, Unit 7" keeps failing elsewhere too).
+    expect(shadowPrivate.hasSubpremiseSignal({
+      address: 'Unit 7, Bayview Terrace, Venice, FL', extraction: null,
+    })).toBe(false);
+  });
+
+  test('the legacy signal is unchanged — the kill switch keeps prior V2 behavior', () => {
+    expect(shadowPrivate.hasUnitSignal({
+      tenant: false, address: 'Unit 7, 123 Main St, Bradenton, FL 34201', extraction: null,
+    })).toBe(false);
+    expect(shadowPrivate.hasUnitSignal({
+      tenant: false, address: 'Unit 7, 123 Main St, Bradenton, FL 34201', extraction: null, enhanced: true,
+    })).toBe(true);
+  });
+
+  test('a tenant at a unit-first address on a flattened record is a residential unit', () => {
+    // The r51 shape: provider flattened the record to Single Family, the
+    // unit designator LEADS the address, and the whole-structure veto must
+    // not keep the county area/master lot pricing the whole property.
+    const model = resolveUnitScopeModel({
+      propertyRecord: { propertyType: 'Single Family' },
+      extraction: { caller: { relationship_to_property: 'tenant' }, property: {} },
+      intent: { is_commercial: false, address: 'Unit 7, 123 Main St, Bradenton, FL 34201' },
+      propertyFacts: { tenant: true, home: { value: 2400, source: 'county_assessed' } },
+      address: 'Unit 7, 123 Main St, Bradenton, FL 34201',
+    });
+    expect(model.subpremiseSignal).toBe(true);
+    expect(model.serviceScope).toBe('residential_unit');
+    const facts = { home: { value: 2400, source: 'county_assessed', confidence: 'high' } };
+    applyUnitScopeToPropertyFacts(facts, model);
+    expect(facts.home.value).toBeNull();
+  });
+});
+
+describe('association callers keep association scope on condo records (r51)', () => {
+  const { _private: shadowPrivate } = require('../services/estimator-engine/property-facts-shadow');
+
+  const managerModel = (extraction, intent = {}) => resolveUnitScopeModel({
+    propertyRecord: { propertyType: 'Commercial Condo' },
+    extraction,
+    intent: { is_commercial: true, address: '3400 Cattlemen Rd, Sarasota, FL 34232', ...intent },
+    propertyFacts: { tenant: false, home: { value: 24000, source: 'county_assessed' } },
+    address: '3400 Cattlemen Rd, Sarasota, FL 34232',
+  });
+
+  test('an association manager on a condo record is never a suite', () => {
+    const model = managerModel({
+      caller: { relationship_to_property: 'property manager' }, property: {},
+    });
+    expect(model.serviceScope).not.toBe('commercial_suite');
+    // The building measurement survives for common-area pricing.
+    const facts = { home: { value: 24000, source: 'county_assessed', confidence: 'high' } };
+    applyUnitScopeToPropertyFacts(facts, model);
+    expect(facts.home.value).toBe(24000);
+  });
+
+  test('the structured hoa_common_area_service boolean carries the same rule', () => {
+    const model = managerModel({
+      caller: { relationship_to_property: 'owner' },
+      property: { hoa_common_area_service: true },
+    });
+    expect(model.serviceScope).not.toBe('commercial_suite');
+  });
+
+  test('an hoa/common-area risk type carries the same rule', () => {
+    expect(shadowPrivate.condoRecordOccupancy({
+      condoRecord: true,
+      extraction: { caller: { relationship_to_property: 'owner' }, property: {} },
+      intent: { commercial_risk_type: 'hoa_common_area' },
+    })).toBe(false);
+  });
+
+  test('an owner without association signals keeps the r49 suite behavior', () => {
+    expect(shadowPrivate.condoRecordOccupancy({
+      condoRecord: true,
+      extraction: { caller: { relationship_to_property: 'owner' }, property: {} },
+      intent: {},
+    })).toBe(true);
+  });
+});

@@ -303,10 +303,15 @@ function resolveUnitScopeModel({ propertyRecord, extraction, intent, propertyFac
   // gated); the V2 shadow path opts out by default — see inferServiceScope.
   // A condo RECORD is unit occupancy in itself — the owner-occupied
   // commercial condo has neither tenancy nor a Unit/Suite suffix to signal
-  // with (codex r49 P1). Same shared predicate as the V2 path.
-  const condoRecord = shadowPrivate.isCondoRecord({
-    aggregated, propertyType,
-    landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
+  // with (codex r49 P1) — but only for a caller who OCCUPIES one unit: an
+  // association manager or an HOA common-area ask keeps building/association
+  // scope (codex r51 P1). Same shared predicates as the V2 path.
+  const condoRecord = shadowPrivate.condoRecordOccupancy({
+    condoRecord: shadowPrivate.isCondoRecord({
+      aggregated, propertyType,
+      landUseDescription: parcel.landUseDescription || propertyRecord?._raw?.landUse || null,
+    }),
+    extraction, intent,
   });
   let serviceScope = shadowPrivate.inferServiceScope({
     propertyType, isCommercial, tenant, aggregated, unitSignal,
