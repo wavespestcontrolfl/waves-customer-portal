@@ -552,7 +552,13 @@ const AgronomicWiki = {
         // fetch, which approximates application conditions since the link
         // runs on treatment day. Enrichment only — never blocks the link.
         try {
-          let weather = post.fawn_temp_f != null || post.fawn_humidity_pct != null || post.fawn_rainfall_7d != null
+          const { etCalendarDayOf, etDateString, parseETDateTime } = require('../utils/datetime-et');
+          // The post-assessment's snapshot only represents application-day
+          // conditions when the assessment happened ON the treatment day —
+          // the legacy pairing accepts assessments up to 60 days later.
+          const postIsTreatmentDay = etCalendarDayOf(post.service_date) === etCalendarDayOf(treatmentDate);
+          let weather = postIsTreatmentDay
+            && (post.fawn_temp_f != null || post.fawn_humidity_pct != null || post.fawn_rainfall_7d != null)
             ? { temp_f: post.fawn_temp_f, humidity_pct: post.fawn_humidity_pct, rainfall_in: post.fawn_rainfall_7d }
             : null;
           // Current-conditions fallback ONLY when the treatment is actually
@@ -562,7 +568,6 @@ const AgronomicWiki = {
           // etCalendarDayOf, not etDateString: service_date is a pg DATE
           // materialized at UTC midnight — the ET wall clock would shift it
           // to the previous day and the same-day check would never pass.
-          const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
           if (!weather && etCalendarDayOf(treatmentDate) === etDateString()) {
             const fawn = await require('./fawn-weather').getCurrent();
             // Require a fresh reading (≤6h) before persisting: getCurrent()
@@ -573,7 +578,6 @@ const AgronomicWiki = {
             // that); fetch-time `timestamp` is only a cache-age fallback.
             // Present-but-unparseable observation_time fails closed.
             const FRESH_MS = 6 * 60 * 60 * 1000;
-            const { parseETDateTime } = require('../utils/datetime-et');
             const freshMoment = (value) => {
               if (value == null) return null;
               const ms = parseETDateTime(String(value))?.getTime?.();
