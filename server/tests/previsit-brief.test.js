@@ -542,14 +542,19 @@ describe('briefClearOnReclassification (update-details service switch)', () => {
     expect(briefClearOnReclassification('wdo_inspection', 'visit_brief_v1')).toEqual(CLEAR);
   });
 
-  test('briefServableForDate matches ET calendar day incl. the UTC-midnight DATE shape, fails closed on a move or missing stamp', () => {
-    const { briefServableForDate } = PrevisitBrief;
-    expect(briefServableForDate({ for_date: '2026-08-13' }, '2026-08-13')).toBe(true);
+  test('briefStaleReason: ET calendar day incl. the UTC-midnight DATE shape, service identity, fail-closed stamps', () => {
+    const { briefStaleReason } = PrevisitBrief;
+    const stamped = { for_date: '2026-08-13', for_service: 'Pest Control Service' };
+    expect(briefStaleReason(stamped, { scheduled_date: '2026-08-13', service_type: 'Pest Control Service' })).toBeNull();
     // node-postgres materializes DATE columns as UTC-midnight Dates.
-    expect(briefServableForDate({ for_date: '2026-08-13' }, new Date('2026-08-13T00:00:00Z'))).toBe(true);
-    expect(briefServableForDate({ for_date: '2026-08-13' }, '2026-08-15')).toBe(false);
-    expect(briefServableForDate({ priorities: [] }, '2026-08-13')).toBe(false);
-    expect(briefServableForDate(null, '2026-08-13')).toBe(false);
+    expect(briefStaleReason(stamped, { scheduled_date: new Date('2026-08-13T00:00:00Z'), service_type: 'Pest Control Service' })).toBeNull();
+    expect(briefStaleReason(stamped, { scheduled_date: '2026-08-15', service_type: 'Pest Control Service' })).toBe('date_moved');
+    // Direct service_type writers (estimate acceptance, call flows) never
+    // pass through update-details' clearing — the read must fail closed.
+    expect(briefStaleReason(stamped, { scheduled_date: '2026-08-13', service_type: 'Lawn Care Service' })).toBe('service_changed');
+    expect(briefStaleReason({ priorities: [] }, { scheduled_date: '2026-08-13', service_type: 'Pest Control Service' })).toBe('date_moved');
+    expect(briefStaleReason({ for_date: '2026-08-13' }, { scheduled_date: '2026-08-13', service_type: 'Pest Control Service' })).toBe('service_changed');
+    expect(briefStaleReason(null, { scheduled_date: '2026-08-13', service_type: 'Pest Control Service' })).toBe('date_moved');
   });
 
   test('ANY service change clears a generic visit brief (guidance is service-scoped)', () => {

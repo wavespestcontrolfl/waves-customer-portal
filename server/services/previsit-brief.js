@@ -1268,13 +1268,15 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
     version: VISIT_BRIEF_TYPE,
     grounding_hash: groundingHash,
     generated_via: via,
-    // The ET calendar day this brief was generated FOR. A reschedule
-    // leaves the stored row behind while the sweep's today-only filter
-    // stops considering the visit until its new day — the read path uses
-    // this stamp to withdraw the old day's guidance (protocol-window
-    // products included) instead of serving it for days
-    // (briefServableForDate).
+    // The ET calendar day and service identity this brief was generated
+    // FOR. Any writer can reschedule the visit or rewrite its
+    // service_type directly (update-details is only ONE mover; estimate
+    // acceptance rewrites service_type too) — the read path compares
+    // these stamps against the row and withdraws mismatched guidance
+    // (briefStaleReason) instead of serving another day's or another
+    // service's products until a later sweep.
     for_date: calendarDay(svc.scheduled_date),
+    for_service: String(svc.service_type || ''),
     priorities: body.priorities,
     watch_items: body.watch_items,
     last_visit: {
@@ -1362,17 +1364,30 @@ async function runSweep(dbh = db) {
   return result;
 }
 
-// Read-path staleness check for a stored visit brief: servable only when
-// its for_date stamp matches the visit's CURRENT scheduled date (ET). A
-// reschedule strands the stored row on the old day's grounding —
-// protocol-window product guidance included — while the sweep's
-// today-only filter won't reconsider the visit until its new day (where
-// the hash mismatch regenerates it); serving the row in between hands
-// the tech another day's guidance. Missing for_date fails closed too:
-// the gate has never been on in prod, so no stamp-less legacy rows
-// exist, and a brief that can't prove its day must not assert one.
-function briefServableForDate(brief, scheduledDate) {
-  return !!brief && !!brief.for_date && brief.for_date === calendarDay(scheduledDate);
+// Read-path staleness check for a stored visit brief: null when
+// servable, else the stale reason. The brief must have been generated
+// FOR the visit's CURRENT scheduled date (ET) and CURRENT service_type:
+// - date_moved: a reschedule strands the stored row on the old day's
+//   grounding while the sweep's today-only filter won't reconsider the
+//   visit until its new day (where the hash mismatch regenerates it) —
+//   serving it in between hands the tech another day's guidance.
+// - service_changed: many writers rewrite service_type directly (edit
+//   modal, estimate acceptance, call flows) — clearing at every writer
+//   can't be made exhaustive, so the read fails closed instead: history
+//   products must never stand in for another service's authoritative
+//   guidance (lawn-protocol authority rule). The sweep regenerates via
+//   the grounding-hash mismatch (both stamps derive from hashed facts).
+// Missing stamps fail closed too: the gate has never been on in prod,
+// so no stamp-less legacy rows exist, and a brief that can't prove what
+// it was generated for must not assert it.
+function briefStaleReason(brief, svc) {
+  if (!brief || !brief.for_date || brief.for_date !== calendarDay(svc.scheduled_date)) {
+    return 'date_moved';
+  }
+  if (!brief.for_service || brief.for_service !== String(svc.service_type || '')) {
+    return 'service_changed';
+  }
+  return null;
 }
 
 // Decision for update-details on an ACTUAL service_type change (callers
@@ -1408,7 +1423,7 @@ module.exports = {
   briefGateEnabled,
   generateVisitBrief,
   briefClearOnReclassification,
-  briefServableForDate,
+  briefStaleReason,
   runSweep,
   VISIT_BRIEF_TYPE,
   WDO_BRIEF_TYPE,

@@ -8974,14 +8974,14 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       if (!PrevisitBrief.briefGateEnabled()) {
         return res.json({ brief: null });
       }
-      // A rescheduled visit keeps its stored brief while the sweep's
-      // today-only filter won't reconsider it until the new day — the
-      // old day's guidance (protocol-window products included) is
-      // WITHDRAWN on read rather than served for days
-      // (briefServableForDate; the new day's sweep regenerates via the
-      // grounding-hash mismatch, scheduledDate being part of the hash).
-      if (!PrevisitBrief.briefServableForDate(parsedBrief, svc.scheduled_date)) {
-        return res.json({ brief: null, stale: 'date_moved' });
+      // A reschedule or a direct service_type rewrite (edit modal,
+      // estimate acceptance, call flows) leaves the stored brief behind —
+      // stale guidance is WITHDRAWN on read rather than served until a
+      // later sweep (briefStaleReason; the sweep regenerates via the
+      // grounding-hash mismatch, both stamps being hashed facts).
+      const staleReason = PrevisitBrief.briefStaleReason(parsedBrief, svc);
+      if (staleReason) {
+        return res.json({ brief: null, stale: staleReason });
       }
     }
     res.json({ brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at });

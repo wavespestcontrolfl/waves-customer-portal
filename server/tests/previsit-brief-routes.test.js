@@ -49,12 +49,15 @@ const mockGenerateVisitBrief = jest.fn(async () => ({ generated: true }));
 jest.mock('../services/previsit-brief', () => ({
   briefGateEnabled: (...args) => mockGateEnabled(...args),
   generateVisitBrief: (...args) => mockGenerateVisitBrief(...args),
-  // Mirrors the production predicate's contract (missing stamp fails
-  // closed); the real ET calendar-day comparison is unit-tested in
-  // previsit-brief.test.js — fixtures here use plain date strings.
-  briefServableForDate: (brief, scheduledDate) => (
-    !!brief && !!brief.for_date && brief.for_date === String(scheduledDate)
-  ),
+  // Mirrors the production predicate's contract (missing stamps fail
+  // closed; date checked before service); the real ET calendar-day
+  // comparison is unit-tested in previsit-brief.test.js — fixtures here
+  // use plain date strings.
+  briefStaleReason: (brief, svc) => {
+    if (!brief || !brief.for_date || brief.for_date !== String(svc.scheduled_date)) return 'date_moved';
+    if (!brief.for_service || brief.for_service !== String(svc.service_type || '')) return 'service_changed';
+    return null;
+  },
   WDO_BRIEF_TYPE: 'wdo_inspection',
   VISIT_BRIEF_TYPE: 'visit_brief_v1',
 }));
@@ -101,7 +104,7 @@ const VISIT_BRIEF_ROW = {
   id: 'svc-1',
   service_type: 'Pest Control Service',
   scheduled_date: '2026-08-13',
-  pre_service_brief: JSON.stringify({ version: 'visit_brief_v1', for_date: '2026-08-13', priorities: ['Check garage'] }),
+  pre_service_brief: JSON.stringify({ version: 'visit_brief_v1', for_date: '2026-08-13', for_service: 'Pest Control Service', priorities: ['Check garage'] }),
   pre_service_brief_type: 'visit_brief_v1',
   pre_service_brief_generated_at: '2026-08-13T09:15:00.000Z',
 };
@@ -194,6 +197,21 @@ describe('GET /:id/visit-brief (+ /wdo-brief alias)', () => {
         expect(body.stale).toBe('date_moved');
         expect(body.type).toBeUndefined();
       }
+    });
+  });
+
+  test('a service-changed brief is withdrawn on read (stale: service_changed) — direct writers bypass update-details', async () => {
+    mockGateEnabled.mockReturnValue(true);
+    // e.g. estimate acceptance rewrote service_type directly: the stored
+    // pest guidance must not stand in for the lawn visit's protocol
+    // window.
+    stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, service_type: 'Lawn Care Service' } });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/schedule/svc-1/visit-brief`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.brief).toBeNull();
+      expect(body.stale).toBe('service_changed');
     });
   });
 
