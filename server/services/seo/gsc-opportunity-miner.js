@@ -2416,10 +2416,21 @@ class GscOpportunityMiner {
       .groupBy('city_target', 'service_category')
       .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore]);
 
-    const out = [];
+    // CANONICALIZE, then MERGE by canonical pair, BEFORE scoring. The sync
+    // stores snake_case ('tree_shrub') and a 'specialty' bucket that
+    // canonicalizes to 'pest' — persisting the raw value parks the row as
+    // facts_unmappable downstream, and a noncanonical service also mints a
+    // different ownPageKey, which would slip past the cross-bucket target
+    // arbitration and allow two drafts of one page (pre-push P1). There is
+    // no per-query classifier validation here, unlike no_content_yet: the
+    // bucket aggregates before it mines, so the query evidence is gone —
+    // an uncanonicalizable category is simply skipped (fail closed).
+    // 'specialty' + 'pest' rows for one city merge into ONE pest pair,
+    // impressions summed — same demand, one target.
+    const byPair = new Map();
     for (const q of queries) {
       const city = normalizeCity(q.city_target);
-      const service = q.service_category;
+      const service = canonicalizeServiceCategory(q.service_category);
       if (!city || !service) continue;
 
       // Use the normalized own-page map. Earlier iteration queried
@@ -2430,15 +2441,22 @@ class GscOpportunityMiner {
       // bucket asks "does a page exist for this city+service pair", so
       // any page classified to the pair genuinely answers it.
       if (ownPagesByServiceCity.get(ownPageKey(service, city))) continue;
+      const key = ownPageKey(service, city);
+      const prev = byPair.get(key);
+      if (prev) prev.impressions += parseInt(q.impressions, 10) || 0;
+      else byPair.set(key, { service, city, impressions: parseInt(q.impressions, 10) || 0 });
+    }
 
+    const out = [];
+    for (const pair of byPair.values()) {
       const opp = {
         bucket: 'local_gap',
         query: null,
         page_url: null,
-        service,
-        city,
+        service: pair.service,
+        city: pair.city,
         signal_metadata: {
-          impressions: parseInt(q.impressions, 10),
+          impressions: pair.impressions,
         },
       };
       const { total, breakdown } = scoreOpportunity(opp, {
@@ -3509,25 +3527,46 @@ class GscOpportunityMiner {
       .where({ action_type: CS })
       .whereIn('status', ['pending', 'claimed', 'pending_review'])
       .forUpdate()
-      .select('dedupe_key', 'service', 'city');
+      .select('dedupe_key', 'service', 'city', 'status', 'bucket', 'query');
     if (!inflight.length) return opportunities;
     const occupied = new Map();
     for (const r of inflight) {
       if (!r.service || !r.city) continue;
       const key = ownPageKey(r.service, r.city);
-      if (!occupied.has(key)) occupied.set(key, new Set());
-      occupied.get(key).add(r.dedupe_key);
+      if (!occupied.has(key)) occupied.set(key, []);
+      occupied.get(key).push(r);
     }
     let deferred = 0;
+    const supersede = [];
     const out = opportunities.filter((o) => {
       if (o.action_type !== CS || !o.service || !o.city) return true;
-      const keys = occupied.get(ownPageKey(o.service, o.city));
+      const rows = (occupied.get(ownPageKey(o.service, o.city)) || [])
+        .filter((r) => r.dedupe_key !== o.dedupe_key);
       // The candidate's OWN row does not occupy its target — that is the
       // ordinary upsert-refresh path.
-      if (!keys || (keys.size === 1 && keys.has(o.dedupe_key))) return true;
-      deferred += 1;
-      return false;
+      if (!rows.length) return true;
+      // A PENDING queryless local_gap twin is SUPERSEDED by a query-bearing
+      // winner, not deferred to: no sweep covers local_gap (its rows are
+      // queryless, and the recovered-query sweep only walks ctr_rewrite +
+      // no_content_yet), so deferring here would let the lean row block the
+      // preferred rich one until 14-day expiry while itself staying
+      // claimable — inverting the winner rule (pre-push P1). The rows are
+      // FOR UPDATE-locked, so claimNext cannot grab one mid-supersession;
+      // 'expired' is revivable per the retirement doctrine.
+      const blocking = rows.filter((r) => !(
+        r.status === 'pending' && r.bucket === 'local_gap' && !r.query && o.query
+      ));
+      if (blocking.length) { deferred += 1; return false; }
+      supersede.push(...rows.map((r) => r.dedupe_key));
+      return true;
     });
+    if (supersede.length) {
+      await trx('opportunity_queue')
+        .whereIn('dedupe_key', supersede)
+        .where({ status: 'pending' })
+        .update({ status: 'expired', skip_reason: 'city_service_superseded', updated_at: new Date() });
+      logger.info(`[gsc-opp-miner] city-service revalidation: ${supersede.length} pending queryless twin(s) superseded by query-bearing winners`);
+    }
     if (deferred) {
       logger.info(`[gsc-opp-miner] city-service revalidation: ${deferred} candidate(s) deferred — target already in flight under a different key`);
     }

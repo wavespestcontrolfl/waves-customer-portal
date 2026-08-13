@@ -2254,18 +2254,24 @@ describe('_revalidateCityServiceBatch — in-flight target fence under the persi
     signal_metadata: {},
   });
   const fakeTrx = (inflightRows) => {
-    const trx = jest.fn(() => ({
-      where: jest.fn().mockReturnThis(),
-      whereIn: jest.fn().mockReturnThis(),
-      forUpdate: jest.fn().mockReturnThis(),
-      select: jest.fn().mockResolvedValue(inflightRows),
-    }));
+    const updates = [];
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn((col, vals) => { chain._inKeys = vals; return chain; }),
+        forUpdate: jest.fn().mockReturnThis(),
+        select: jest.fn().mockResolvedValue(inflightRows),
+        update: jest.fn((patch) => { updates.push({ keys: chain._inKeys, patch }); return Promise.resolve(chain._inKeys?.length || 0); }),
+      };
+      return chain;
+    });
+    trx._updates = updates;
     return trx;
   };
 
-  test('a target occupied under a DIFFERENT key defers the new winner', async () => {
+  test('a claimed target under a DIFFERENT key defers the new winner', async () => {
     const miner = new GscOpportunityMiner();
-    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::old query', service: 'termite', city: 'sarasota' }];
+    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::old query', service: 'termite', city: 'sarasota', status: 'claimed', bucket: 'no_content_yet', query: 'old query' }];
     const out = await miner._revalidateCityServiceBatch(
       fakeTrx(inflight),
       [candidate('local_gap', 'local_gap::termite::sarasota::_')]
@@ -2273,9 +2279,37 @@ describe('_revalidateCityServiceBatch — in-flight target fence under the persi
     expect(out).toHaveLength(0);
   });
 
+  test('a PENDING queryless local_gap twin is SUPERSEDED by a query-bearing winner, not deferred to', async () => {
+    // No sweep covers local_gap (queryless; the recovered-query sweep only
+    // walks ctr_rewrite + no_content_yet) — deferring would let the lean
+    // row block the rich one until expiry while itself staying claimable.
+    const miner = new GscOpportunityMiner();
+    const inflight = [{ dedupe_key: 'local_gap::termite::sarasota::_', service: 'termite', city: 'sarasota', status: 'pending', bucket: 'local_gap', query: null }];
+    const trx = fakeTrx(inflight);
+    const ncy = { ...candidate('no_content_yet', 'no_content_yet::termite::sarasota::termite inspection'), query: 'termite inspection sarasota' };
+    const out = await miner._revalidateCityServiceBatch(trx, [ncy]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('no_content_yet');
+    expect(trx._updates).toHaveLength(1);
+    expect(trx._updates[0].keys).toEqual(['local_gap::termite::sarasota::_']);
+    expect(trx._updates[0].patch.status).toBe('expired');
+    expect(trx._updates[0].patch.skip_reason).toBe('city_service_superseded');
+  });
+
+  test('the supersession NEVER runs in reverse — a queryless candidate defers to a pending query-bearing row', async () => {
+    const miner = new GscOpportunityMiner();
+    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::q', service: 'termite', city: 'sarasota', status: 'pending', bucket: 'no_content_yet', query: 'q' }];
+    const trx = fakeTrx(inflight);
+    const out = await miner._revalidateCityServiceBatch(
+      trx, [candidate('local_gap', 'local_gap::termite::sarasota::_')]
+    );
+    expect(out).toHaveLength(0);
+    expect(trx._updates).toHaveLength(0);
+  });
+
   test('a candidate refreshing its OWN row passes — the ordinary upsert path', async () => {
     const miner = new GscOpportunityMiner();
-    const inflight = [{ dedupe_key: 'local_gap::termite::sarasota::_', service: 'termite', city: 'sarasota' }];
+    const inflight = [{ dedupe_key: 'local_gap::termite::sarasota::_', service: 'termite', city: 'sarasota', status: 'pending', bucket: 'local_gap', query: null }];
     const out = await miner._revalidateCityServiceBatch(
       fakeTrx(inflight),
       [candidate('local_gap', 'local_gap::termite::sarasota::_')]
@@ -2285,13 +2319,23 @@ describe('_revalidateCityServiceBatch — in-flight target fence under the persi
 
   test('an unrelated in-flight target defers nothing; non-CS rows are untouched', async () => {
     const miner = new GscOpportunityMiner();
-    const inflight = [{ dedupe_key: 'local_gap::pest::venice::_', service: 'pest', city: 'venice' }];
+    const inflight = [{ dedupe_key: 'local_gap::pest::venice::_', service: 'pest', city: 'venice', status: 'pending', bucket: 'local_gap', query: null }];
     const blog = { bucket: 'no_content_yet', action_type: 'new_supporting_blog', dedupe_key: 'x', query: 'q', service: 'termite', city: null, score: 50, signal_metadata: {} };
     const out = await miner._revalidateCityServiceBatch(
       fakeTrx(inflight),
       [candidate('local_gap', 'local_gap::termite::sarasota::_'), blog]
     );
     expect(out).toHaveLength(2);
+  });
+
+  test('mineLocalGap canonicalizes and MERGES specialty into pest before keying', () => {
+    // Raw 'tree_shrub'/'specialty' would park as facts_unmappable AND mint
+    // a different ownPageKey that slips past the cross-bucket arbitration.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+    expect(lg).toMatch(/canonicalizeServiceCategory\(q\.service_category\)/);
+    expect(lg).toMatch(/prev\.impressions \+= parseInt\(q\.impressions, 10\)/);
   });
 
   test('a batch with no city-service rows never touches the queue', async () => {
