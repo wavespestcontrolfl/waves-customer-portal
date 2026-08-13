@@ -751,41 +751,62 @@ async function routeScopeConflicts({ serviceId, service, route, target, nameScop
     const end = toHHMM(job.window_end);
     return (start && end) ? { start, end } : null;
   });
-  // Two members projected onto the SAME landing window is a definite
-  // failure, and the only member-vs-member shape that can be judged from
-  // here — no schedule state needed, just the projection (codex #3375
-  // P2). The live case is a same-day WINDOWLESS sibling: commit gives it
-  // `target.window` verbatim (not an order-preserving shift of its own),
-  // and a forward push runs tail-first, so the sibling books and texts
-  // FIRST and the anchor then SLOT_TAKENs against it. The anchor probe
-  // can't see it either — a null window_start is inert to the overlap
-  // predicate — so without this the sheet shows nothing at all. Two
-  // siblings sharing a current window collide the same way. These are the
-  // shapes commit() documents as deliberately loud; now they're loud
-  // BEFORE the tap. Ordering shapes (a uniform shift of an already-ordered
-  // route) still can't be judged statically and stay out.
-  const anchorKey = `${target.window.start}|${target.window.end}`;
-  // Pairwise over EVERY projected landing including the anchor's own
-  // target, using the canonical half-open predicate (occupancy.js:
-  // `window_start < probeEnd AND effective_end > probeStart`) — not key
-  // equality, which would miss 14:00-15:00 against 14:30-15:30 (codex
-  // #3375 P1). Identical windows are just the degenerate case, and stay
-  // caught because duplicates sit in this list separately. The reported
-  // span is the INTERSECTION: the slice actually contested.
-  const allLandings = [target.window, ...windows.filter(Boolean)];
+  // Member-vs-member collisions: simulate commit()'s own sweep. commit
+  // probes each member's target against every OTHER member's row — it
+  // excludes only the row it is moving — so a not-yet-processed member
+  // still occupies its CURRENT window and an already-processed one
+  // occupies its LANDED window. Walking that same order is the only way
+  // to see the shapes a projection-only comparison misses (codex #3375
+  // P1): with a manual route_order that inverts time order, tail-first no
+  // longer implies "vacated first", and a sibling can land on the
+  // ANCHOR's still-current row while their two landings never overlap
+  // each other. It also subsumes the projected-landing cases — a
+  // same-day WINDOWLESS mover takes `target.window` verbatim, and two
+  // siblings sharing a window collide — because whichever is processed
+  // second meets the first at its landed position. These are the shapes
+  // commit() documents as deliberately loud; now they are loud BEFORE the
+  // tap. The reported span is the INTERSECTION: the slice contested.
+  const cur = (row) => {
+    const start = toHHMM(row.window_start);
+    const end = toHHMM(row.window_end);
+    return (start && end) ? { start, end } : null;
+  };
+  const members = [
+    { id: String(serviceId), current: cur(service), landing: target.window },
+    ...route.map((job, i) => ({ id: String(job.id), current: cur(job), landing: windows[i] })),
+  ];
+  // Same order commit uses: tail-first on a same-day forward push so each
+  // target window is already clear, head-first otherwise.
+  const ordered = (isSameDay && siblingDelta > 0) ? [...members].reverse() : members;
+  const positions = new Map(members.map((m) => [m.id, m.current]));
+  const moved = new Set();
   const overlapSpans = new Map();
-  for (let i = 0; i < allLandings.length; i += 1) {
-    for (let j = i + 1; j < allLandings.length; j += 1) {
-      const aStart = hhmmToMinutes(allLandings[i].start);
-      const aEnd = hhmmToMinutes(allLandings[i].end);
-      const bStart = hhmmToMinutes(allLandings[j].start);
-      const bEnd = hhmmToMinutes(allLandings[j].end);
-      if (aStart == null || aEnd == null || bStart == null || bEnd == null) continue;
-      if (!(aStart < bEnd && aEnd > bStart)) continue;
-      const start = minutesToHHMM(Math.max(aStart, bStart));
-      const end = minutesToHHMM(Math.min(aEnd, bEnd));
-      overlapSpans.set(`${start}|${end}`, { start, end });
+  for (const m of ordered) {
+    const landing = m.landing;
+    const lStart = landing ? hhmmToMinutes(landing.start) : null;
+    const lEnd = landing ? hhmmToMinutes(landing.end) : null;
+    if (lStart != null && lEnd != null) {
+      for (const other of members) {
+        if (other.id === m.id) continue;
+        // On a DAY move a not-yet-moved member is still sitting on the old
+        // date, which a target-date probe cannot match at all.
+        if (!moved.has(other.id) && !isSameDay) continue;
+        const pos = positions.get(other.id);
+        if (!pos) continue; // windowless rows are inert to the predicate
+        const pStart = hhmmToMinutes(pos.start);
+        const pEnd = hhmmToMinutes(pos.end);
+        if (pStart == null || pEnd == null) continue;
+        // Canonical half-open predicate (occupancy.js: window_start <
+        // probeEnd AND effective_end > probeStart) — not key equality,
+        // which would miss 14:00-15:00 against 14:30-15:30.
+        if (!(pStart < lEnd && pEnd > lStart)) continue;
+        const start = minutesToHHMM(Math.max(pStart, lStart));
+        const end = minutesToHHMM(Math.min(pEnd, lEnd));
+        overlapSpans.set(`${start}|${end}`, { start, end });
+      }
     }
+    positions.set(m.id, landing);
+    moved.add(m.id);
   }
   const selfCollisions = [...overlapSpans.values()].map((w) => ({
     id: `route-collision:${w.start}|${w.end}`,
@@ -800,6 +821,7 @@ async function routeScopeConflicts({ serviceId, service, route, target, nameScop
     isRouteSelfCollision: true,
   }));
 
+  const anchorKey = `${target.window.start}|${target.window.end}`;
   // One external probe per DISTINCT landing window — the anchor's own
   // window is already covered by the anchor probe.
   const distinctByKey = new Map();
@@ -834,7 +856,10 @@ async function checkTarget({ serviceId, target }) {
   }
   const service = await db('scheduled_services')
     .where({ id: serviceId })
-    .first('id', 'technician_id', 'scheduled_date', 'window_start', 'route_order');
+    // window_end too: the route-scope simulation needs the anchor's CURRENT
+    // occupied span, not just its start — a sibling can land on the row the
+    // anchor has not vacated yet.
+    .first('id', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'route_order');
   if (!service) return { ok: false, reason: 'not_found' };
   // Route siblings flagged (not excluded) so one response serves both
   // scopes — the sheet filters by its live scope toggle without refetching.

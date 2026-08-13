@@ -2209,6 +2209,37 @@ describe('rain-out service', () => {
       })]);
     });
 
+    test('route scope: an inverted route_order lands a sibling on the anchor\'s STILL-CURRENT row', async () => {
+      // route_order says svc-2 comes after the anchor, but its window is
+      // EARLIER (manual ordering inverts time order). A +1h push targets the
+      // anchor at 10:00 and projects svc-2 onto 09:00 — the two landings
+      // never overlap each other, so comparing projections alone saw
+      // nothing. But a forward push runs tail-first: svc-2 moves FIRST,
+      // onto the 09:00 row the anchor has not vacated yet, and commit
+      // rejects it. Only simulating commit's order catches this.
+      findConflictingVisits.mockResolvedValue([]);
+      wireDb({
+        scheduled_services: [
+          chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: etDateString(),
+              window_start: '09:00', window_end: '10:00', route_order: 1,
+            }),
+          }),
+          chain({ rows: [{ id: 'svc-2', window_start: '08:00:00', window_end: '09:00:00', route_order: 2 }] }),
+        ],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: etDateString(), window: { start: '10:00', end: '11:00' } },
+      });
+
+      expect(result.routeConflicts).toEqual([expect.objectContaining({
+        isRouteSelfCollision: true, windowStart: '09:00', windowEnd: '10:00',
+      })]);
+    });
+
     test('route scope: PARTIALLY overlapping projected landings collide too', async () => {
       // 10:00-11:00 and 10:30-11:30 both shift +5h → 15:00-16:00 and
       // 15:30-16:30. Different windows, so key equality saw nothing, but
