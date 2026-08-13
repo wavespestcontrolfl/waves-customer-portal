@@ -1598,6 +1598,7 @@ async function deductProductInventory(trx, {
   if (insufficient && !allowNegative) {
     const err = new Error(`${inventoryProduct.name} requires ${deductedAmount} ${inventoryUnit}, but only ${stockBefore} ${inventoryUnit} is on hand.`);
     err.statusCode = 400;
+    err.isOperational = true;
     err.code = 'waveguard_inventory_lockout';
     throw err;
   }
@@ -13835,6 +13836,7 @@ module.exports._test = {
   shouldRejectPhotoCaptionBannedCopy,
   internalOnlyProductsBlockPayload,
   completionOwnershipError,
+  deductProductInventory,
   serviceReportEmailEligible,
   membershipDuesCoverVisit,
   shouldAutoInvoiceCompletion,
