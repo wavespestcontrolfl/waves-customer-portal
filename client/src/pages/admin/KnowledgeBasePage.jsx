@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { BookOpen, Brain, Gauge, Plus, ShieldCheck, Sprout } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { getAdminUser } from "../../lib/adminAuth";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -41,14 +42,11 @@ function adminFetch(path, options = {}) {
 
 // Regeneration is admin-only server-side (requireAdmin on /admin/wiki/update —
 // each call burns a DEEP-model generation); showing the button to technicians
-// would render a reachable control that only 403s. Same role source as
-// KnowledgePage's admin-only Health tab.
+// would render a reachable control that only 403s. Role comes from the
+// canonical parser so this gate can never drift from the rest of the
+// admin UI.
 function staffRole() {
-  try {
-    return JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.role || null;
-  } catch {
-    return null;
-  }
+  return getAdminUser()?.role || null;
 }
 
 function useIsMobile(breakpoint = 768) {

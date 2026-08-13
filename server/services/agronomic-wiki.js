@@ -693,7 +693,11 @@ const AgronomicWiki = {
   // gates fail closed, so rows past the window simply age out instead of
   // getting wrong-day conditions stamped.
   // ────────────────────────────────────────────────────────────
-  async sweepMissingOutcomeWeather({ limit = 25 } = {}) {
+  // limit is a runaway ceiling far above a real day's visit volume, not a
+  // page: the eligible window is a single ET day, so the whole set fits in
+  // one pass and permanently-unenrichable rows (deleted assessment,
+  // unusable snapshot) can never crowd retryable ones out of the batch.
+  async sweepMissingOutcomeWeather({ limit = 200 } = {}) {
     const stats = { checked: 0, enriched: 0 };
     try {
       // Enrichment can only succeed on the treatment's own ET day — bound
