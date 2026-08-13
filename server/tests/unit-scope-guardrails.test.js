@@ -1744,8 +1744,16 @@ describe('r63 — a reordered unit address is the same property', () => {
     // caller's tenancy/stated area survive the re-gather.
   });
 
+  test('the comma-free "at" form canonicalizes too (r64)', () => {
+    expect(sameStreetAddress(
+      'Apt 4 at 123 Main St, Bradenton, FL',
+      '123 Main St Apt 4, Bradenton, FL',
+    )).toBe(true);
+  });
+
   test('two explicit different units stay separate properties', () => {
     expect(sameStreetAddress('Unit 7, 123 Main St', '123 Main St Unit 9')).toBe(false);
+    expect(sameStreetAddress('Apt 4 at 123 Main St', '123 Main St Apt 9')).toBe(false);
   });
 
   test('a leading token that is not a designator never reorders', () => {

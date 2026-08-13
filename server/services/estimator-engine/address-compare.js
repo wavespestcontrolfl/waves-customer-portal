@@ -73,12 +73,19 @@ function canonicalizeRouteTokens(tokens) {
 // a recognized designator segment followed by a digit-leading street may
 // reorder (no FL city starts with a digit).
 const LEADING_UNIT_SEGMENT_RE = /^(?:(?:unit|apt|apartment|ste|suite)\s*#?\s*[\w-]+|#\s*\w+)$/i;
+// The comma-free "Apt 4 at 123 Main St" form is expressly supported by
+// hasPrimaryStreetNumber, so it must canonicalize here too (codex r64 P1).
+const LEADING_UNIT_AT_RE = /^\s*((?:unit|apt|apartment|ste|suite)\s*#?\s*[\w-]+|#\s*\w+)\s+at\s+(\d.*)$/i;
 
 function canonicalizeLeadingUnit(s) {
   const str = String(s || '');
   const parts = str.split(',');
-  if (parts.length < 2) return str;
   const first = parts[0].trim();
+  const atForm = first.match(LEADING_UNIT_AT_RE);
+  if (atForm) {
+    return [`${atForm[2].trim()} ${atForm[1].trim()}`, ...parts.slice(1)].join(', ');
+  }
+  if (parts.length < 2) return str;
   const second = (parts[1] || '').trim();
   if (LEADING_UNIT_SEGMENT_RE.test(first) && /^\d/.test(second)) {
     return [`${second} ${first}`, ...parts.slice(2)].join(', ');
