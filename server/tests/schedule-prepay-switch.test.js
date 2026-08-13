@@ -76,6 +76,8 @@ const ACCEPT_INVOICE = {
   total: '227.00',
   credit_applied: '0.00',
   paid_at: null,
+  sent_at: null,
+  stripe_payment_intent_id: null,
   payer_id: null,
   annual_prepay_term_id: null,
   line_items: [
@@ -243,6 +245,29 @@ describe('on-site prepay switch — invoices that must not be superseded', () =>
     const { body } = await preview();
     expect(body.eligible).toBe(false);
     expect(body.blockReason).toMatch(/account credit applied/i);
+  });
+
+  // Codex P0, this PR: the void happens after the tender, so a DELIVERED
+  // invoice is payable by the customer for the whole collection window.
+  test('an invoice already sent to the customer refuses — it could be paid mid-tender', async () => {
+    stubTables({ invoices: [{ ...ACCEPT_INVOICE, status: 'sent', sent_at: '2026-08-11T12:00:00Z' }] });
+    const { body } = await preview();
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/already gone out to the customer/i);
+  });
+
+  test('a draft that was somehow delivered (sent_at set) still refuses', async () => {
+    stubTables({ invoices: [{ ...ACCEPT_INVOICE, sent_at: '2026-08-11T12:00:00Z' }] });
+    const { body } = await preview();
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/already gone out to the customer/i);
+  });
+
+  test('an invoice carrying a PaymentIntent refuses — a payment is already in flight', async () => {
+    stubTables({ invoices: [{ ...ACCEPT_INVOICE, stripe_payment_intent_id: 'pi_123' }] });
+    const { body } = await preview();
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/already gone out to the customer/i);
   });
 
   test('a payer-billed invoice refuses', async () => {

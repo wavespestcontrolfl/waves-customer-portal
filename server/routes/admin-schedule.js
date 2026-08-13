@@ -9473,7 +9473,6 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     // credit restore, third-party billing) that belong to the office, not to
     // a one-tap field action.
     const SUPERSEDE_DEAD_STATUSES = new Set(['void', 'cancelled', 'canceled', 'refunded']);
-    const SUPERSEDE_OPEN_STATUSES = new Set(['draft', 'sent', 'viewed', 'overdue']);
     let supersedes = [];
     if (isAcceptedSwitch && supersedeVisitIds.length > 0) {
       let attachedInvoices;
@@ -9481,7 +9480,7 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
         attachedInvoices = await db('invoices')
           .whereIn('scheduled_service_id', supersedeVisitIds)
           .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'paid_at',
-            'payer_id', 'annual_prepay_term_id', 'line_items');
+            'payer_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id');
       } catch (invErr) {
         logger.warn(`[schedule:prepay-preview] attached-invoice lookup failed for series ${supersedeVisitIds.join(',')}: ${invErr.message} — refusing`);
         return blocked('couldn’t confirm what this visit is already invoiced for — refresh and try again');
@@ -9494,8 +9493,26 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
         if (inv.annual_prepay_term_id) {
           return blocked('already has an annual prepay invoice on this visit — collect or void that one first');
         }
-        if (!SUPERSEDE_OPEN_STATUSES.has(status) || inv.paid_at) {
-          return blocked(`can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is already ${status === 'prepaid' ? 'settled by account credit' : status}. Refund or resolve it first, then mint the prepay from Customer 360`);
+        // Money already collected or in flight — a refund decision, not a
+        // field action. Checked before delivery so the operator gets the
+        // accurate reason.
+        if (inv.paid_at || ['paid', 'prepaid', 'processing'].includes(status)) {
+          return blocked(`can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is already ${status === 'prepaid' ? 'settled by account credit' : status}. Resolve it first, then mint the prepay from Customer 360`);
+        }
+        // UNDELIVERED DRAFTS ONLY (Codex P0, this PR). The switch voids the
+        // superseded invoice AFTER the prepay is collected, and that gap is
+        // minutes long on a tender. A DELIVERED invoice is payable by the
+        // customer for the whole gap — their pay link is live — so both could
+        // collect, and the void would then refuse, leaving the office to
+        // refund. An invoice that was never sent has no link in anyone's
+        // hands; one carrying a PaymentIntent already has a payment in
+        // flight. Both refuse: voiding a delivered invoice is a deliberate
+        // office decision, never a step buried inside a field action.
+        if (inv.sent_at || inv.stripe_payment_intent_id) {
+          return blocked(`can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has already gone out to the customer, so it could be paid while you collect the prepay. Void it from Invoices first, then switch`);
+        }
+        if (status !== 'draft') {
+          return blocked(`can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is ${status}, not an unsent draft. Resolve it first, then mint the prepay from Customer 360`);
         }
         if (Number(inv.credit_applied || 0) > 0) {
           return blocked(`can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has account credit applied. Void it from Invoices (which returns the credit) and mint the prepay from Customer 360`);

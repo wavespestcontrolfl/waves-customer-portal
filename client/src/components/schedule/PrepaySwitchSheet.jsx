@@ -133,10 +133,14 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
     return failures;
   };
 
+  // `collected` rides INTO the cleanup state and back out of a retry: a
+  // send-path switch whose void failed and later succeeded must not report
+  // "collected" and tell the operator to complete a visit whose term is still
+  // payment_pending.
   const finish = async (invoice, { collected }) => {
     const failures = await voidSuperseded();
     if (failures.length > 0) {
-      setCleanupFailed(failures);
+      setCleanupFailed({ failures, invoice, collected });
       return;
     }
     onSaved?.();
@@ -156,9 +160,21 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
       if (!invoice?.id) throw new Error('The prepay invoice did not come back — check Invoices before retrying');
       if (chargeInPerson) {
         setCollecting(invoice);
-      } else {
-        await finish(invoice, { collected: false });
+        return;
       }
+      // The mint returns 201 even when the SMS/email leg failed. Voiding the
+      // per-application invoice on the strength of a prepay invoice the
+      // customer never received would leave them with no bill at all and
+      // nothing to pay — keep the existing invoice and say what happened.
+      if (result?.delivery && result.delivery.ok === false) {
+        setActionError(
+          `The ${money(preview.prepayTotal)} prepay invoice was created (${invoice.invoice_number || 'see Invoices'}) but could NOT be delivered`
+          + `${result.delivery.error ? `: ${result.delivery.error}` : '.'} `
+          + 'The per-application invoice was left in place. Resend the prepay invoice from Invoices, then void the old one.',
+        );
+        return;
+      }
+      await finish(invoice, { collected: false });
     } catch (e) {
       setActionError(e.message || 'Could not create the prepay invoice');
     } finally {
@@ -218,15 +234,18 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
     return (
       <Shell>
         <div className="text-alert-fg font-medium" style={{ fontSize: 15, marginBottom: 8 }}>
-          Prepay collected — but the old invoice is still open
+          {cleanupFailed.collected
+            ? 'Prepay collected — but the old invoice is still open'
+            : 'Prepay invoice sent — but the old invoice is still open'}
         </div>
         <div className="text-zinc-900" style={{ fontSize: 13, marginBottom: 10 }}>
-          {cleanupFailed.map((inv) => `${inv.invoiceNumber || 'Invoice'} (${money(inv.total)})`).join(', ')}{' '}
-          could not be voided. Completing this visit will reuse it and bill {customerName} for a visit they just
-          prepaid. Void it from Invoices now.
+          {cleanupFailed.failures.map((inv) => `${inv.invoiceNumber || 'Invoice'} (${money(inv.total)})`).join(', ')}{' '}
+          could not be voided. Completing this visit will reuse it and bill {customerName}
+          {cleanupFailed.collected ? ' for a visit they just prepaid' : ' on top of the prepay invoice they were just sent'}.
+          Void it from Invoices now.
         </div>
         <div className="text-ink-secondary" style={{ fontSize: 12, marginBottom: 14 }}>
-          {cleanupFailed[0]?.error}
+          {cleanupFailed.failures[0]?.error}
         </div>
         <div className="flex gap-2">
           <button
@@ -236,8 +255,15 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
               setBusy('cleanup');
               const failures = await voidSuperseded();
               setBusy('');
-              if (failures.length === 0) { setCleanupFailed(null); onSaved?.(); setDone({ collected: true }); }
-              else setCleanupFailed(failures);
+              if (failures.length === 0) {
+                onSaved?.();
+                // Report what actually happened, not what the retry did: a
+                // send-path switch is still uncollected.
+                setDone({ invoice: cleanupFailed.invoice, collected: cleanupFailed.collected });
+                setCleanupFailed(null);
+              } else {
+                setCleanupFailed({ ...cleanupFailed, failures });
+              }
             }}
             className="flex-1 rounded-full bg-zinc-900 text-white font-medium u-focus-ring disabled:opacity-60"
             style={{ padding: '12px 16px', fontSize: 14 }}

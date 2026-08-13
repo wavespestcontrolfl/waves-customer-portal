@@ -53,7 +53,7 @@ let calls;
 
 // Routes each fetch by path so assertions can talk about intent ("was the old
 // invoice voided?") instead of call indexes.
-function stubFetch({ preview = PREVIEW, voidFails = false, mintFails = false } = {}) {
+function stubFetch({ preview = PREVIEW, voidFails = false, mintFails = false, deliveryFails = false } = {}) {
   calls = [];
   global.fetch = vi.fn(async (url, options = {}) => {
     const path = String(url);
@@ -62,7 +62,12 @@ function stubFetch({ preview = PREVIEW, voidFails = false, mintFails = false } =
     if (path.includes('annual-prepay-preview')) return ok(preview);
     if (path.includes('/annual-prepay-invoice')) {
       if (mintFails) return { ok: false, status: 409, json: async () => ({ error: 'already has a term' }) };
-      return ok({ invoice: { id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok', total: 512 } });
+      // The mint returns 201 even when the send leg failed — `delivery.ok`
+      // is the only signal that the customer never got the pay link.
+      return ok({
+        invoice: { id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok', total: 512 },
+        ...(deliveryFails ? { delivery: { ok: false, error: 'SMS gateway rejected' } } : {}),
+      });
     }
     if (path.endsWith('/void')) {
       if (voidFails) return { ok: false, status: 400, json: async () => ({ error: 'invoice is not voidable' }) };
@@ -144,6 +149,42 @@ describe('PrepaySwitchSheet', () => {
     expect(await screen.findByText(/the old invoice is still open/i)).toBeInTheDocument();
     expect(screen.getByText(/bill Trang Nguyen for a visit they just prepaid/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Retry void/ })).toBeInTheDocument();
+  });
+
+  it('a failed DELIVERY keeps the old invoice — the customer never got the prepay link', async () => {
+    stubFetch({ deliveryFails: true });
+    render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Send the invoice instead/ }));
+    expect(await screen.findByText(/could NOT be delivered/)).toBeInTheDocument();
+    expect(screen.getByText(/per-application invoice was left in place/)).toBeInTheDocument();
+    expect(voidedIds()).toEqual([]);
+  });
+
+  it('a cleanup retry on the SEND path does not claim the money was collected', async () => {
+    // Void fails once, then succeeds — the retry must still report "sent",
+    // not "collected": the term is payment_pending until the customer pays.
+    let voidAttempts = 0;
+    stubFetch();
+    const base = global.fetch;
+    global.fetch = vi.fn(async (url, options = {}) => {
+      if (String(url).endsWith('/void')) {
+        voidAttempts += 1;
+        calls.push({ path: String(url), method: 'POST', body: null });
+        if (voidAttempts === 1) return { ok: false, status: 400, json: async () => ({ error: 'temporary' }) };
+        return { ok: true, json: async () => ({ status: 'void' }) };
+      }
+      return base(url, options);
+    });
+
+    render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Send the invoice instead/ }));
+    expect(await screen.findByText(/Prepay invoice sent — but the old invoice is still open/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Retry void/ }));
+    expect(await screen.findByText('Annual prepay invoice sent')).toBeInTheDocument();
+    expect(screen.queryByText('Annual prepay collected')).not.toBeInTheDocument();
+    // …and it must not tell the operator to complete a visit nothing covers.
+    expect(screen.queryByText(/Complete the visit next/)).not.toBeInTheDocument();
   });
 
   it('a mint failure surfaces the server reason and voids nothing', async () => {
