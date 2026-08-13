@@ -254,7 +254,11 @@ async function retryPendingReconciliations() {
       }
     }
     if (done || !payout) {
-      await db('bank_transactions').where({ id: row.id })
+      // scoped to the exact link that was processed: if the row was
+      // unlinked and re-matched to ANOTHER payout mid-flight, this no-ops
+      // instead of stripping the newer link's pending flag
+      await db('bank_transactions')
+        .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
         .update({ suggestion: db.raw("suggestion - 'reconcilePending'"), updated_at: new Date() });
     }
   }
@@ -379,9 +383,12 @@ async function runDeterministicMatching() {
                     .where({ id: row.id, status: 'matched_payout', matched_payout_id: exact[0].id })
                     .forUpdate().first('id').then(Boolean),
                 });
-                // jsonb key-subtraction: removes ONLY the flag, never
-                // clobbering suggestion state a concurrent write added
-                await db('bank_transactions').where({ id: row.id })
+                // jsonb key-subtraction removes ONLY the flag, and the CAS
+                // scopes it to THIS link — if an unlink + re-match to a
+                // different payout landed since, the newer link keeps its
+                // own pending flag and the sweep still retries it
+                await db('bank_transactions')
+                  .where({ id: row.id, status: 'matched_payout', matched_payout_id: exact[0].id })
                   .update({ suggestion: db.raw("suggestion - 'reconcilePending'"), updated_at: new Date() });
               } catch (reconErr) {
                 // flag already persisted with the claim — the sweep retries

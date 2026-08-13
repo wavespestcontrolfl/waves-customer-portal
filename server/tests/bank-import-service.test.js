@@ -272,9 +272,11 @@ describe('runDeterministicMatching', () => {
     // author under the unreconciled guard plus a still-linked precondition…
     expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('bt-1'), 'bank-import:bt-1', 'confirmed',
       expect.objectContaining({ onlyIfUnreconciled: true, precondition: expect.any(Function) }));
-    // …and the flag clears via jsonb key-subtraction once the echo lands
+    // …and the flag clears via jsonb key-subtraction, CAS-scoped to THIS
+    // link so it can never strip a newer link's pending flag
     const cleared = state.updates.find(u => typeof u.patch.suggestion === 'string' && u.patch.suggestion.includes("- 'reconcilePending'"));
     expect(cleared).toBeDefined();
+    expect(cleared.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
   });
 
   test('an already-reconciled payout links without re-reconciling', async () => {
@@ -390,6 +392,7 @@ describe('runDeterministicMatching', () => {
       expect.objectContaining({ onlyIfUnreconciled: true, precondition: expect.any(Function) }));
     const cleared = state.updates.find(u => typeof u.patch.suggestion === 'string' && u.patch.suggestion.includes("- 'reconcilePending'"));
     expect(cleared).toBeDefined();
+    expect(cleared.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
   });
 
   test("an operator's unlink ruling excludes that exact target from automatic rematching", async () => {
