@@ -600,6 +600,12 @@ export class ApiClient {
     return this.request(`/one-tap/${purchaseId}/slots`);
   }
 
+  // Read-only purchase snapshot — the resume path after a hosted
+  // SetupIntent redirect re-hydrates the overlay from this.
+  oneTapGet(purchaseId) {
+    return this.request(`/one-tap/${purchaseId}`);
+  }
+
   oneTapConfirm(purchaseId, payload) {
     return this.request(`/one-tap/${purchaseId}/confirm`, {
       method: 'POST',

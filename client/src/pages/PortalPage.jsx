@@ -996,6 +996,34 @@ function RecommendationsCard({ data }) {
   // One-tap purchase overlay target (bet 3) — a priced offer card while the
   // server said oneTap:true. Everything else keeps the request-only CTA.
   const [purchaseCard, setPurchaseCard] = useState(null);
+  // Resume payload after a hosted SetupIntent redirect (3DS/bank auth): the
+  // return handler saves the card, fetches the purchase snapshot, and
+  // reopens the overlay at the right step.
+  const [purchaseResume, setPurchaseResume] = useState(null);
+  const resumeProcessedRef = useRef(false);
+  useEffect(() => {
+    if (resumeProcessedRef.current) return;
+    const returned = getReturnedSetupIntent('one_tap_card');
+    const params = new URLSearchParams(window.location.search);
+    const resumeId = params.get('one_tap_resume');
+    if (!returned || !resumeId) return;
+    resumeProcessedRef.current = true;
+    (async () => {
+      let cardJustSaved = false;
+      try {
+        await api.saveStripeCard(null, returned.setupIntentId);
+        cardJustSaved = true;
+      } catch { /* state fetch below reports hasCardOnFile either way */ }
+      try {
+        const state = await api.oneTapGet(resumeId);
+        if (state.open) setPurchaseResume({ ...state, cardJustSaved });
+      } catch { /* purchase moved on — nothing to resume */ }
+      clearReturnedSetupIntent();
+      const url = new URL(window.location.href);
+      url.searchParams.delete('one_tap_resume');
+      window.history.replaceState({}, '', url.toString());
+    })();
+  }, []);
   if (!data?.cards?.length) return null;
   const muted = PORTAL_SHELL.muted;
   const setCardState = (id, value) => setRequestStates((prev) => ({ ...prev, [id]: value }));
@@ -1111,11 +1139,12 @@ function RecommendationsCard({ data }) {
           );
         })}
       </div>
-      {purchaseCard && (
+      {(purchaseCard || purchaseResume) && (
         <OneTapPurchaseOverlay
           open
           card={purchaseCard}
-          onClose={() => setPurchaseCard(null)}
+          resume={purchaseCard ? null : purchaseResume}
+          onClose={() => { setPurchaseCard(null); setPurchaseResume(null); }}
         />
       )}
     </section>
@@ -1148,7 +1177,7 @@ function oneTapDayLabel(date) {
   return dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
-function OneTapPurchaseOverlay({ open, card, onClose }) {
+function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   useLockBodyScroll(open);
   const dialogRef = useModalFocus(open, onClose);
   const compact = useIsMobile(760);
@@ -1178,7 +1207,7 @@ function OneTapPurchaseOverlay({ open, card, onClose }) {
   releaseRef.current = { purchaseId: init?.purchaseId || null, done: step === 'done' };
 
   useEffect(() => {
-    if (!open || !card) return undefined;
+    if (!open || (!card && !resume)) return undefined;
     let stale = false;
     setStep('terms');
     setInit(null);
@@ -1189,6 +1218,32 @@ function OneTapPurchaseOverlay({ open, card, onClose }) {
     setNeedsCard(false);
     setCardSaved(false);
     setResult(null);
+    // Resume path (return from a hosted SetupIntent redirect): the server
+    // snapshot re-hydrates the flow — no re-init, the price lock and hold
+    // (if still live) stand. Card was just saved by the return handler.
+    if (resume) {
+      setInit({
+        purchaseId: resume.purchaseId,
+        estimateId: resume.estimateId,
+        serviceKey: resume.serviceKey,
+        label: resume.label,
+        perVisit: resume.perVisit,
+        cadenceLabel: resume.cadenceLabel || '',
+        visitsPerYear: resume.visitsPerYear,
+        terms: resume.terms,
+        hasCardOnFile: resume.hasCardOnFile,
+        holdMinutes: resume.holdMinutes,
+      });
+      setCardSaved(!!resume.cardJustSaved);
+      if (resume.holdLive && resume.slot) {
+        setSelectedSlot({ slotId: null, ...resume.slot });
+        setStep('confirm');
+      } else {
+        setStep('time');
+        refreshSlots(resume.purchaseId);
+      }
+      return () => { stale = true; };
+    }
     api.oneTapInit({
       fingerprint: card.fingerprint || null,
       serviceKey: card.serviceKey,
@@ -1203,7 +1258,22 @@ function OneTapPurchaseOverlay({ open, card, onClose }) {
       setInitError(err?.status === 409 ? 'stale' : (err?.message || 'Something went wrong — please try again.'));
     });
     return () => { stale = true; };
-  }, [open, card]);
+  }, [open, card, resume]);
+
+  // Leaving the confirm step ("Change time") unmounts the Payment Element's
+  // container — tear the Stripe objects down with it so the mount effect can
+  // rebuild from scratch on return (a lingering elementsRef made it bail and
+  // the customer got a dead card form).
+  useEffect(() => {
+    if (step === 'confirm') return;
+    if (paymentElementRef.current) {
+      try { paymentElementRef.current.unmount(); } catch { /* already gone */ }
+    }
+    paymentElementRef.current = null;
+    elementsRef.current = null;
+    stripeRef.current = null;
+    setCardReady(false);
+  }, [step]);
 
   // Release the hold when the overlay closes without a completed purchase.
   useEffect(() => {
@@ -1294,9 +1364,14 @@ function OneTapPurchaseOverlay({ open, card, onClose }) {
     setCardBusy(true);
     setCardError('');
     try {
+      // One-tap-specific return context: a hosted redirect (3DS, bank auth)
+      // navigates away and loses the overlay — the flow + purchase id in
+      // the return URL let the dashboard resume this purchase at confirm.
+      const returnUrl = new URL(buildSetupIntentReturnUrl('one_tap_card'));
+      returnUrl.searchParams.set('one_tap_resume', init.purchaseId);
       const { error, setupIntent } = await stripeRef.current.confirmSetup({
         elements: elementsRef.current,
-        confirmParams: { return_url: buildSetupIntentReturnUrl('portal_add_card') },
+        confirmParams: { return_url: returnUrl.toString() },
         redirect: 'if_required',
       });
       if (error) {
@@ -1608,7 +1683,11 @@ function OneTapPurchaseOverlay({ open, card, onClose }) {
                 ) : null}
               </div>
               <div style={{ fontSize: 14, color: muted, lineHeight: 1.5, textAlign: 'center' }}>
-                A confirmation email and an app notification are on the way.
+                {/* Only promise what can send: email is nullable on
+                    phone-authenticated accounts (server says emailQueued). */}
+                {result?.emailQueued
+                  ? 'A confirmation email and an app notification are on the way.'
+                  : 'A confirmation notification is on the way.'}
               </div>
               <button type="button" data-glass-accent="" style={PORTAL_PRIMARY_ACTION} onClick={onClose}>
                 Done

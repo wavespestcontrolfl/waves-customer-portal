@@ -3832,6 +3832,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // HOURLY — Archive expired one-tap purchase drafts
+  //
+  // A one-tap init synthesizes a 24h draft estimate. The overlay's close
+  // handler voids + archives it, but a crashed tab or closed laptop never
+  // fires that — and the admin estimate pipeline lists every unarchived
+  // draft. This sweep voids open purchases whose draft has expired and
+  // archives the drafts so abandons age out within ~25h. Inert while
+  // GATE_ONE_TAP_PURCHASE has never been on (no rows).
+  // =========================================================================
+  cron.schedule('40 * * * *', async () => {
+    try {
+      const { sweepStaleOneTapDrafts } = require('./one-tap-purchase');
+      await sweepStaleOneTapDrafts();
+    } catch (err) {
+      logger.error(`One-tap stale-draft sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Estimate actuals reconcile — nightly, joins completed services back to
   // the accepted estimate that created them and writes the priced-vs-observed
   // ledger (estimate_actuals). Systematic-bias aggregates are read via

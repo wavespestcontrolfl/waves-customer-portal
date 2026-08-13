@@ -248,6 +248,15 @@ async function initPurchase({ customerId, clicked, ip, userAgent }) {
   if (!membershipSnapshot) {
     throw httpError(503, 'Your account context could not be loaded just now — please try again shortly.');
   }
+  // P1 fence: a customer whose owned services do not qualify them as an
+  // existing member (snapshot isExistingCustomer false — e.g. rodent
+  // monitoring only) owes the $99 WaveGuard setup fee on a new recurring
+  // start. This flow suppresses the setup invoice (skipSetupInvoice) and
+  // the per-application rail never bills setup, so selling to them here
+  // would silently waive a required fee. Members only.
+  if (!membershipSnapshot.isExistingCustomer) {
+    throw httpError(409, 'One-tap purchase is not available on this account — send us a request instead.');
+  }
 
   // monthly_total derives from the discounted annual so the converter's
   // billing-cadence correspondence guard (|annual − monthly×12| ≤ $0.50)
@@ -313,6 +322,12 @@ async function initPurchase({ customerId, clicked, ip, userAgent }) {
     customer_id: customerId,
     status: 'draft',
     source: 'one_tap_purchase',
+    // Denormalized identity: the admin estimate list renders and searches
+    // these columns directly (no customers join) — without them a one-tap
+    // estimate shows blank and is unfindable by name/phone.
+    customer_name: `${basis.customer.first_name || ''} ${basis.customer.last_name || ''}`.trim() || null,
+    customer_phone: basis.customer.phone || null,
+    customer_email: basis.customer.email || null,
     address: pricingAi.addressForCustomer(basis.customer) || null,
     monthly_total: monthlyTotal,
     annual_total: annualAfter,
@@ -417,9 +432,12 @@ async function reserve({ customerId, purchaseId, slotId }) {
   }
 }
 
-// ── release ──────────────────────────────────────────────────────────────
-// Client calls on overlay close/back; the 15-min reservation sweeper is the
-// backstop for abandoned holds.
+// ── release (= abandon) ──────────────────────────────────────────────────
+// Client calls on overlay close. TERMINAL: the attempt is voided and its
+// synthesized draft archived — an abandoned one-tap draft must never sit in
+// the admin estimate pipeline (the default admin query lists every
+// unarchived draft). Re-picks inside the flow never call this (reserveSlot
+// replaces prior holds itself); a fresh open just inits a fresh purchase.
 async function release({ customerId, purchaseId }) {
   const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
   if (purchase.status === 'completed') throw httpError(409, 'This purchase is already confirmed.');
@@ -429,25 +447,112 @@ async function release({ customerId, purchaseId }) {
       estimateId: purchase.estimate_id,
     });
   }
-  if (purchase.status === 'reserved') {
-    // CAS on the snapshot's state AND hold identity (P1): if confirm commits
-    // while releaseReservation above is in flight, a blind id-keyed update
-    // would knock the completed ledger row back to initiated and orphan the
-    // committed visit's linkage. A lost CAS is fine — the row moved on.
-    await db('one_tap_purchases')
-      .where({
-        id: purchase.id,
-        status: 'reserved',
-        scheduled_service_id: purchase.scheduled_service_id,
-      })
-      .update({
-        status: 'initiated',
-        scheduled_service_id: null,
-        slot_id: null,
-        updated_at: db.fn.now(),
-      });
+  // CAS on the still-open states + the snapshot's hold identity (P1): if
+  // confirm commits while releaseReservation above is in flight, a blind
+  // id-keyed update would corrupt the completed ledger row. A lost CAS is
+  // fine — the row moved on.
+  const voided = await db('one_tap_purchases')
+    .where({ id: purchase.id, scheduled_service_id: purchase.scheduled_service_id })
+    .whereIn('status', ['initiated', 'reserved'])
+    .update({
+      status: 'voided',
+      scheduled_service_id: null,
+      slot_id: null,
+      updated_at: db.fn.now(),
+    });
+  if (voided) {
+    await db('estimates')
+      .where({ id: purchase.estimate_id, status: 'draft', source: 'one_tap_purchase' })
+      .whereNull('archived_at')
+      .update({ archived_at: db.fn.now() })
+      .catch(() => {});
   }
   return { released: true };
+}
+
+// ── purchase state (resume) ──────────────────────────────────────────────
+// Read-only snapshot for the client's resume path (return from a hosted
+// SetupIntent redirect): enough to reopen the overlay at the right step
+// without re-initing. Everything re-derives from stored rows — nothing the
+// client sends is trusted.
+async function getPurchaseState({ customerId, purchaseId }) {
+  const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
+  const estimate = await db('estimates')
+    .where({ id: purchase.estimate_id })
+    .first('id', 'status', 'expires_at', 'estimate_data');
+  let line = null;
+  try {
+    const estData = typeof estimate?.estimate_data === 'string'
+      ? JSON.parse(estimate.estimate_data)
+      : estimate?.estimate_data;
+    line = estData?.result?.recurring?.services?.[0] || null;
+  } catch { line = null; }
+
+  let slot = null;
+  let holdLive = false;
+  if (purchase.scheduled_service_id) {
+    const hold = await db('scheduled_services')
+      .where({ id: purchase.scheduled_service_id })
+      .first('scheduled_date', 'window_start', 'reservation_expires_at');
+    if (hold) {
+      holdLive = !!(hold.reservation_expires_at && new Date(hold.reservation_expires_at) > new Date());
+      slot = {
+        date: dateOnly(hold.scheduled_date),
+        windowStart: hhmm(hold.window_start),
+        windowEnd: arrivalEndFor(hold.window_start),
+        holdExpiresAt: hold.reservation_expires_at || null,
+      };
+    }
+  }
+
+  const { findConsentedChargeableCard } = require('./payment-method-consents');
+  let hasCardOnFile = false;
+  try {
+    hasCardOnFile = !!(await findConsentedChargeableCard(customerId));
+  } catch { hasCardOnFile = false; }
+
+  return {
+    purchaseId: purchase.id,
+    estimateId: purchase.estimate_id,
+    status: purchase.status,
+    open: ['initiated', 'reserved'].includes(purchase.status)
+      && estimate?.status === 'draft' && !estimateExpired(estimate),
+    serviceKey: purchase.service_key,
+    label: line?.name || String(purchase.service_key || 'service').replace(/_/g, ' '),
+    perVisit: Number(purchase.per_visit),
+    cadenceLabel: line?.frequencyLabel || '',
+    visitsPerYear: Number(line?.visitsPerYear) || null,
+    terms: { version: purchase.terms_version, text: purchase.terms_snapshot },
+    hasCardOnFile,
+    slot,
+    holdLive,
+    holdMinutes: HOLD_MINUTES,
+  };
+}
+
+// ── stale-draft sweep ────────────────────────────────────────────────────
+// Backstop for abandons that never fired release (closed laptop, crashed
+// tab): void open purchases whose synthesized estimate has expired and
+// archive those drafts so they age out of the admin pipeline. Runs from the
+// scheduler beside the slot-reservation hold cleanup.
+async function sweepStaleOneTapDrafts() {
+  const staleEstimates = await db('estimates')
+    .where({ source: 'one_tap_purchase', status: 'draft' })
+    .whereNull('archived_at')
+    .where('expires_at', '<', new Date())
+    .select('id');
+  if (!staleEstimates.length) return { voided: 0 };
+  const ids = staleEstimates.map((e) => e.id);
+  const voided = await db('one_tap_purchases')
+    .whereIn('estimate_id', ids)
+    .whereIn('status', ['initiated', 'reserved'])
+    .update({ status: 'voided', scheduled_service_id: null, slot_id: null, updated_at: db.fn.now() });
+  await db('estimates')
+    .whereIn('id', ids)
+    .whereNull('archived_at')
+    .update({ archived_at: db.fn.now() });
+  logger.info(`[one-tap-purchase] stale-draft sweep archived ${ids.length} draft(s), voided ${voided} purchase(s)`);
+  return { voided };
 }
 
 // ── slots (re-fetch) ─────────────────────────────────────────────────────
@@ -788,12 +893,17 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   // marketing pref can never suppress it; deduped per purchase.
   const perVisitText = `$${Number(purchase.per_visit).toFixed(2)}`;
   const visitLine = firstVisit?.date ? ` First visit: ${formatVisitWhen(firstVisit)}.` : '';
+  // Only promise an email that can actually send: portal auth is phone-based
+  // and customer email is nullable — both email services skip silently
+  // without an address, so the copy must not claim otherwise.
+  const emailQueued = !!(customer.email && String(customer.email).includes('@'));
+  const emailLine = emailQueued ? ' A confirmation email is on the way.' : '';
   try {
     void Promise.resolve(NotificationService.notifyCustomer(
       customerId,
       'service',
       `${serviceLabel} is confirmed`,
-      `${serviceLabel} was added to your plan at ${perVisitText} per application.${visitLine} A confirmation email is on the way.`,
+      `${serviceLabel} was added to your plan at ${perVisitText} per application.${visitLine}${emailLine}`,
       {
         link: '/',
         dedupeKey: `one_tap_purchase:${purchase.id}`,
@@ -824,6 +934,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
     firstVisit,
     perVisit: Number(purchase.per_visit),
     label: serviceLabel,
+    emailQueued,
   };
 }
 
@@ -833,6 +944,8 @@ module.exports = {
   release,
   slots,
   confirm,
+  getPurchaseState,
+  sweepStaleOneTapDrafts,
   TERMS_VERSION,
   TERMS_TEXT,
   HOLD_MINUTES,

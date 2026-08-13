@@ -120,6 +120,24 @@ router.delete('/:purchaseId/reserve', async (req, res, next) => {
   }
 });
 
+// Read-only purchase snapshot for the client resume path (return from a
+// hosted SetupIntent redirect). Ownership enforced in the service (404).
+router.get('/:purchaseId', async (req, res, next) => {
+  try {
+    if (!gateEnvValue('GATE_ONE_TAP_PURCHASE')) return gateOff(res);
+    const purchaseId = validPurchaseId(req, res);
+    if (!purchaseId) return undefined;
+    const result = await oneTapPurchase.getPurchaseState({
+      customerId: req.customerId,
+      purchaseId,
+    });
+    return res.json(result);
+  } catch (err) {
+    if (sendServiceError(res, err)) return undefined;
+    return next(err);
+  }
+});
+
 router.get('/:purchaseId/slots', async (req, res, next) => {
   try {
     if (!gateEnvValue('GATE_ONE_TAP_PURCHASE')) return gateOff(res);
