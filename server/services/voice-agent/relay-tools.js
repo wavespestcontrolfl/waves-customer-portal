@@ -731,7 +731,12 @@ async function executeTool(name, input = {}, ctx = {}) {
       if (name === 'get_account_overview') {
         return await relayContext.accountOverviewText(targetCustomerId, { tier, attested: callerAttested(ctx) });
       }
-      if (name === 'get_service_history') return await relayContext.serviceHistoryText(targetCustomerId, { tier });
+      // History dates/names ride the ANI match; the visit SUMMARIES are report
+      // detail and take the same attestation lock as get_service_report — the
+      // helper drops just that line when the carrier will not vouch.
+      if (name === 'get_service_history') {
+        return await relayContext.serviceHistoryText(targetCustomerId, { tier, attested: callerAttested(ctx) });
+      }
       if (name === 'get_today_eta') {
         const { todayEtaText } = require('./relay-visit');
         return await todayEtaText(targetCustomerId, { tier });
@@ -952,6 +957,13 @@ async function executeTool(name, input = {}, ctx = {}) {
       // with no words still writes nothing — that case names no channel, which
       // is why `smsOptOut` stays false for it.)
       const optOutRequested = smsOptOut;
+      // ⭐ THE RECORD AGREES WITH THE ACTION. The classifier — not the model's
+      // optional boolean — is what triggers suppression now, so the persisted
+      // lead data and the lifecycle-customer notification must say the same
+      // thing: a caller whose "stop texting me" was honoured must never be
+      // filed with `do_not_contact_request: false`, or the audit trail claims
+      // no withdrawal happened while the canonical suppression is live.
+      if (smsOptOut) extracted.do_not_contact_request = true;
       const callerVerified = ctx.callerVerified === true;
       if (optOutRequested && !callerVerified) {
         logger.warn(

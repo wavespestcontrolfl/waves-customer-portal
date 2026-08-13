@@ -510,6 +510,21 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
   });
 
+  // ⭐ AND THE RECORD AGREES WITH THE ACTION. The classifier is the trigger, so
+  // the persisted lead data must say what actually happened — a caller whose
+  // "stop texting me" was honoured must never be filed with
+  // do_not_contact_request:false while the canonical suppression is live.
+  test('the honoured opt-out is persisted as do_not_contact_request:true, not the model\'s false', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Asked us to stop texting.',
+      contact_preference: 'stop texting me',
+      do_not_contact_request: false,
+    }, CTX);
+    const update = leadUpdate();
+    expect(update).toBeTruthy();
+    expect(JSON.parse(update.extracted_data)).toMatchObject({ do_not_contact_request: true });
+  });
+
   test('an explicitly STATED "stop texting me" does suppress SMS', async () => {
     await executeTool('capture_lead', {
       call_summary: 'Asked us to stop texting.',

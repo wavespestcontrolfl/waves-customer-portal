@@ -1006,19 +1006,30 @@ async function accountOverviewText(customerId, { tier = 'redacted', attested = f
   return parts.join(' ');
 }
 
-async function serviceHistoryText(customerId, { tier = 'redacted' } = {}) {
+// ⭐ VISIT SUMMARIES ARE REPORT DETAIL, AND REPORT DETAIL HAD A THIRD DOOR.
+// `get_service_report` is attestation-gated because what a technician found
+// inside somebody's home is one of the four reads a spoofed caller ID pays for —
+// and this tool spoke the same parser-approved summaries to a full-tier ANI
+// match with no attestation at all. Same rule as the balance figure: dates and
+// service names are receptionist-level and stay on the ANI match; the SUMMARY
+// line needs the carrier's vouch, and without it the line is simply not built.
+async function serviceHistoryText(customerId, { tier = 'redacted', attested = false } = {}) {
   const redacted = tier !== 'full';
   const visits = await loadCompletedVisits(customerId, 5);
   if (!visits.length) return 'No completed visits on file for this account.';
+  const speakSummaries = !redacted && attested;
   const lines = visits.map((v) => {
     const head = [v.date, v.service].filter(Boolean).join(' — ');
     // Redacted tier: dates + service names ONLY — no visit summaries (they can
     // carry property-specific detail that belongs to the account holder).
-    return !redacted && v.summary ? `${head}: ${v.summary}` : head;
+    return speakSummaries && v.summary ? `${head}: ${v.summary}` : head;
   }).filter(Boolean);
   const tail = redacted
     ? ' (Looked-up account: dates and service names only — confirm, don\'t recite further detail.)'
-    : '';
+    : (!attested
+      ? ' (Dates and service names only on this call — do not describe what was found or done at the property; '
+        + 'the caller can see full reports in their portal, or a team member can go over them.)'
+      : '');
   return `Last ${lines.length} completed visit${lines.length === 1 ? '' : 's'} (newest first): ${lines.join(' | ')}${tail}`;
 }
 

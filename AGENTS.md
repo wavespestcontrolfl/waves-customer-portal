@@ -1182,14 +1182,19 @@ violations at the severity noted.
   **The SPLIT TIER (owner ruling 2026-08-12) is the default that does not wait
   for that measurement**: an ANI match alone still recognises the caller and
   answers the receptionist questions (who they are, appointments, today's ETA,
-  open estimates, service history), but the four reads a spoofed caller ID would
-  pay for — `get_invoice_history` (amounts), `get_message_history` and
+  open estimates, visit dates and service names), but the reads a spoofed caller
+  ID would pay for — `get_invoice_history` (amounts), `get_message_history` and
   `get_call_history` (the bodies of texts and calls), `get_service_report`
-  (what a technician found inside the home) — require attestation A, as does the
-  balance FIGURE in the KNOWN CALLER block and the session's recent-texts block
-  (not fetched at all without it). Enforced in `relay-tools.ATTESTATION_ONLY_TOOLS`
-  BEFORE the tool runs, so a new sensitive tool cannot be added without deciding
-  which side of the line it is on; fails closed on a missing flag.
+  (what a technician found inside the home) — require attestation A, as do the
+  balance FIGURE (in the KNOWN CALLER block AND `get_account_overview` — the
+  amount is not even FETCHED unattested), the visit SUMMARY lines in
+  `get_service_history` (report detail through another door), and the session's
+  recent-texts block (not fetched at all without it). Enforced in
+  `relay-tools.ATTESTATION_ONLY_TOOLS` BEFORE the tool runs, so a new sensitive
+  tool cannot be added without deciding which side of the line it is on; fails
+  closed on a missing flag. When gating a read, gate EVERY reader of the same
+  loader — the balance figure and the report summaries each turned out to have a
+  second door.
   Recognition is additionally bound to a freshness window on that call_log row
   and to ONE session per CallSid — burned atomically as a metadata key on the
   row itself (`relay_session_claimed_at`), so the claim holds across instances

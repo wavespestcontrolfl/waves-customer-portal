@@ -595,6 +595,25 @@ describe('GATE ON — account tools', () => {
     assertNoWrites();
   });
 
+  // ⭐ VISIT SUMMARIES ARE REPORT DETAIL — THE THIRD DOOR, SAME LOCK. What a
+  // technician found at the property is attestation-gated on get_service_report
+  // and on the invoice/message/call tools; the history tool spoke the same
+  // parser-approved summaries to an unattested full-tier match. Dates and
+  // service names stay (receptionist-level); the summary line is simply not
+  // built without the carrier's vouch.
+  test('get_service_history WITHOUT attestation-A → dates + names only, no summaries', async () => {
+    primeDb({
+      records: [
+        { service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'note-1', structured_notes: null, status: 'completed' },
+      ],
+    });
+    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'full' });
+    expect(out).toContain('Friday July 31 — Lawn Care'); // the receptionist half survives
+    expect(out).not.toContain('SAFE:note-1'); // the report half does not
+    expect(out).toMatch(/do not describe what was found/i);
+    assertNoWrites();
+  });
+
   // ⭐ RAW TECHNICIAN NOTES NEVER EGRESS ON A REPORT PATH (AGENTS.md; owner
   // ruling 2026-07-16). The fee scrub alone returns an ordinary visit's note
   // VERBATIM, so a history read that stood on it spoke the technician's
