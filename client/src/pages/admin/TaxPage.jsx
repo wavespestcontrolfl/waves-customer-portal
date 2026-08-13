@@ -3997,6 +3997,7 @@ const BANK_STATUS_COLORS = {
   matched_expense: D.green,
   matched_payout: D.blue,
   created_expense: D.green,
+  refund_applied: D.green,
   ignored: D.muted,
 };
 const BANK_STATUS_LABELS = {
@@ -4004,6 +4005,7 @@ const BANK_STATUS_LABELS = {
   matched_expense: "expense",
   matched_payout: "payout",
   created_expense: "created",
+  refund_applied: "refund",
   ignored: "ignored",
 };
 
@@ -4385,6 +4387,22 @@ function BankImportTab() {
                         </option>
                       )}
                     </select>
+                  ) : r.status === "unmatched" && r.direction === "credit" && r.suggestion?.refundCandidates?.length ? (
+                    <select
+                      style={{ ...inputStyle, maxWidth: 240 }}
+                      value={linkPick[r.id] || ""}
+                      onChange={(e) => setLinkPick((p) => ({ ...p, [r.id]: e.target.value }))}
+                      title="Original purchases this card refund could offset — applying reduces that expense"
+                    >
+                      <option value="">
+                        {r.suggestion.refundCandidates.length} possible original purchase{r.suggestion.refundCandidates.length > 1 ? "s" : ""}…
+                      </option>
+                      {r.suggestion.refundCandidates.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {(c.vendor_name || c.description || "expense").slice(0, 34)} · {fmtM(c.amount)} · {fmtD(c.expense_date)}
+                        </option>
+                      ))}
+                    </select>
                   ) : r.status === "unmatched" && r.direction === "credit" && r.suggestion?.payoutCandidates?.length ? (
                     <select
                       style={{ ...inputStyle, maxWidth: 240 }}
@@ -4430,27 +4448,31 @@ function BankImportTab() {
                       type="button"
                       disabled={!!busy}
                       style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
-                      onClick={() =>
-                        act("link-payout", `/admin/tax/bank-import/${r.id}/link-payout`, { payoutId: linkPick[r.id] }).then((res) => {
+                      onClick={() => {
+                        const isCardRefund = r.account_type === "card";
+                        const path = isCardRefund
+                          ? `/admin/tax/bank-import/${r.id}/apply-refund`
+                          : `/admin/tax/bank-import/${r.id}/link-payout`;
+                        const body = isCardRefund ? { expenseId: linkPick[r.id] } : { payoutId: linkPick[r.id] };
+                        act(isCardRefund ? "apply-refund" : "link-payout", path, body).then((res) => {
                           if (res)
                             setLinkPick((p) => {
                               const next = { ...p };
                               delete next[r.id];
                               return next;
                             });
-                        })
-                      }
+                        });
+                      }}
                     >
-                      Link payout
+                      {r.account_type === "card" ? "Apply refund" : "Link payout"}
                     </button>
                   )}
                   {/* transfer-flagged rows keep Create too — the flag is only a
                       suggestion, and a legit vendor can trip the heuristic.
-                      Card-statement credits get "Record refund" (negative
-                      expense offsetting the original purchase). The category
-                      selector lives HERE so it stays reachable in every
-                      review state (transfer warning, parked candidates). */}
-                  {r.status === "unmatched" && (r.direction === "debit" || (r.direction === "credit" && r.account_type === "card")) && !linkPick[r.id] && (
+                      The category selector lives HERE so it stays reachable
+                      in every review state (transfer warning, parked
+                      candidates). Card refunds go through Apply refund. */}
+                  {r.status === "unmatched" && r.direction === "debit" && !linkPick[r.id] && (
                     <>
                       <select
                         style={{ ...inputStyle, maxWidth: 170, marginRight: 6 }}
@@ -4484,7 +4506,7 @@ function BankImportTab() {
                           })
                         }
                       >
-                        {r.direction === "credit" ? "Record refund" : "Create expense"}
+                        Create expense
                       </button>
                     </>
                   )}

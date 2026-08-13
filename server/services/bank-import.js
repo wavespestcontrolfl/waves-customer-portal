@@ -548,7 +548,7 @@ async function runDeterministicMatching({ limit } = {}) {
   // jsonb_exists_any = the function form of the ?| any-key operator —
   // knex.raw treats bare ? (and ??) as binding placeholders and would eat
   // the operator, silently binding the LIMIT value into it.
-  const EXAMINED_SQL = "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates','noMatch'])";
+  const EXAMINED_SQL = "jsonb_exists_any(suggestion, array['ignore','candidates','payoutCandidates','refundCandidates','noMatch'])";
   // A processed row that produced NOTHING (no candidates at all, or a
   // credit the matcher never matches) must still leave the fresh pool, or a
   // bounded pass would rescan the same oldest rows forever while
@@ -629,10 +629,32 @@ async function runDeterministicMatching({ limit } = {}) {
     }
 
     if (row.direction === 'credit') {
-      // Stripe pays out to the BANK account only — a credit on a card
-      // statement is a merchant refund or payment credit, never a payout,
-      // and auto-linking one would hide it from review.
-      if (row.account_type !== 'bank') { await markScanned(row); continue; }
+      // Stripe pays out to the BANK account only — a card-statement credit
+      // is merchant-refund territory. Park candidate ORIGINAL expenses
+      // (wide lookback — refunds lag purchases by weeks; vendor evidence +
+      // amount ≥ the credit + card-compatible method) for the operator's
+      // apply-refund action. NEVER auto-applied: reducing a ledger expense
+      // is always a human call.
+      if (row.account_type !== 'bank') {
+        const originals = await db('expenses')
+          .whereBetween('expense_date', [addDays(txnDate, -90), txnDate])
+          .where('amount', '>=', row.amount)
+          .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
+        const refundCandidates = originals.filter(c => vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
+        if (refundCandidates.length) {
+          summary.ambiguous++;
+          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+            suggestion: suggestionMerge({
+              refundCandidates: refundCandidates.slice(0, 8).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: toDateStr(c.expense_date) })),
+              refundCandidatesTotal: refundCandidates.length,
+            }),
+            updated_at: new Date(),
+          });
+        } else {
+          await markScanned(row);
+        }
+        continue;
+      }
       let payoutQuery = db('stripe_payouts')
         // Only money that actually REACHED the bank can explain a bank
         // credit — pending/in-transit/canceled/failed payouts are excluded.
@@ -789,16 +811,23 @@ async function runDeterministicMatching({ limit } = {}) {
  * before the next matching pass heals the stale status.
  */
 async function ledgerCoverage(year) {
-  const rows = await db('bank_transactions')
-    .where('direction', 'debit')
-    .whereNot('status', 'ignored')
-    .whereRaw('extract(year from txn_date) = ?', [Number(year)])
+  // Refund-aware: an applied refund credit NETS against the month's outflow,
+  // and a debit's covered value is capped at the CURRENT linked expense
+  // amount (apply-refund reduces it after linking) — otherwise a $58 debit
+  // linked to a now-$38 expense would still report $58 covered.
+  const rows = await db('bank_transactions as bt')
+    .leftJoin('expenses as e', 'e.id', 'bt.matched_expense_id')
+    .whereNot('bt.status', 'ignored')
+    .whereRaw('extract(year from bt.txn_date) = ?', [Number(year)])
+    .where(function scope() {
+      this.where('bt.direction', 'debit').orWhere('bt.status', 'refund_applied');
+    })
     .select(
-      db.raw("to_char(txn_date, 'YYYY-MM') as month"),
-      db.raw('sum(amount) as total'),
-      db.raw("sum(amount) filter (where status in ('matched_expense','created_expense') and matched_expense_id is not null) as covered"),
+      db.raw("to_char(bt.txn_date, 'YYYY-MM') as month"),
+      db.raw("sum(case when bt.direction = 'debit' then bt.amount else -bt.amount end) as total"),
+      db.raw("sum(case when bt.direction = 'debit' and bt.status in ('matched_expense','created_expense') and bt.matched_expense_id is not null then least(bt.amount, greatest(coalesce(e.amount, 0), 0)) else 0 end) as covered"),
     )
-    .groupByRaw("to_char(txn_date, 'YYYY-MM')")
+    .groupByRaw("to_char(bt.txn_date, 'YYYY-MM')")
     .orderBy('month');
   return rows.map(r => {
     const total = Number(r.total) || 0;
@@ -816,6 +845,7 @@ module.exports = {
   echoPayoutReconciliation,
   isPlausibleExpenseLink,
   isPlausiblePayoutLink,
+  methodIncompatible,
   effectivePayoutAmount,
   suggestionMerge,
   ledgerCoverage,

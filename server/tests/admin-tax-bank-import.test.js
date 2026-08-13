@@ -25,6 +25,7 @@ const state = {
   bankUpdateResult: 1,
   insertedBank: [],
   insertedExpenses: [],
+  expenseUpdates: [],
   deletedExpenseIds: [],
   bankUpdates: [],
   category: null,
@@ -80,7 +81,12 @@ function expensesBuilder() {
     insert: jest.fn((row) => { state.insertedExpenses.push(row); return b; }),
     returning: jest.fn(() => Promise.resolve([{ id: 'exp-new', ...state.insertedExpenses[state.insertedExpenses.length - 1] }])),
     where: jest.fn(() => b),
+    forUpdate: jest.fn(() => b),
     first: jest.fn(() => Promise.resolve(state.expenseRow)),
+    update: jest.fn((patch) => {
+      state.expenseUpdates.push(patch);
+      return { returning: jest.fn(() => Promise.resolve([{ id: state.expenseRow?.id || 'exp-9', ...patch }])) };
+    }),
     del: jest.fn(() => { state.deletedExpenseIds.push('exp-new'); return Promise.resolve(1); }),
   };
   return b;
@@ -185,6 +191,7 @@ beforeEach(() => {
   state.bankUpdateResult = 1;
   state.insertedBank = [];
   state.insertedExpenses = [];
+  state.expenseUpdates = [];
   state.deletedExpenseIds = [];
   state.bankUpdates = [];
   state.category = null;
@@ -326,25 +333,12 @@ describe('create-expense (gate on)', () => {
     expect(mockDb.transaction).toHaveBeenCalled();
   });
 
-  test('bank credits and non-unmatched rows are refused', async () => {
+  test('credits (any account) and non-unmatched rows are refused — refunds use apply-refund', async () => {
     state.bankRow.direction = 'credit';
-    state.bankRow.account_type = 'bank'; // deposit/payout territory, never a refund
     expect((await post('/admin/tax/bank-import/bt-1/create-expense', {})).status).toBe(400);
-    state.bankRow.account_type = 'card';
     state.bankRow.direction = 'debit';
     state.bankRow.status = 'ignored';
     expect((await post('/admin/tax/bank-import/bt-1/create-expense', {})).status).toBe(409);
-  });
-
-  test('a card-statement credit records a NEGATIVE expense (refund) offsetting the purchase', async () => {
-    state.bankRow.direction = 'credit'; // account_type is already 'card'
-    const res = await post('/admin/tax/bank-import/bt-1/create-expense', {});
-    expect(res.status).toBe(200);
-    const exp = state.insertedExpenses[0];
-    expect(exp.amount).toBe(-58.12);
-    expect(exp.tax_deductible_amount).toBe(-29.06); // 50% meals policy applies to the refund too
-    expect(exp.notes).toContain('[Refund');
-    expect(state.bankUpdates[0].patch.status).toBe('created_expense');
   });
 
   test('unknown categoryId is a 400, not a silent uncategorized insert', async () => {
@@ -523,6 +517,70 @@ describe('force-duplicates upload (gate on)', () => {
     expect(body.forced).toBe(1); // …but only the scoped one was forced
     expect(state.insertedBank).toHaveLength(3); // 2 bulk attempts + 1 force
     expect(state.insertedBank[2]).toMatchObject({ description: 'HD SUPPLY' });
+  });
+});
+
+describe('apply-refund (gate on)', () => {
+  beforeEach(() => {
+    process.env.GATE_BANK_IMPORT = 'true';
+    state.bankRow = { id: 'bt-1', amount: '20.00', txn_date: '2026-08-09', description: 'WAWA 5211 REFUND', direction: 'credit', account_type: 'card', account_label: 'capone-card-1234', status: 'unmatched', suggestion: { refundCandidates: [{ id: 'exp-9' }] } };
+    state.expenseRow = { id: 'exp-9', amount: '58.12', tax_deductible_amount: '29.06', notes: '[Bank import capone-card-1234]', vendor_name: 'Wawa', description: 'gas', payment_method: 'card' };
+  });
+
+  test('an expenseId outside the parked refundCandidates is refused — no arbitrary ledger reductions', async () => {
+    const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-other' });
+    expect(res.status).toBe(400);
+    expect(state.expenseUpdates).toHaveLength(0);
+    expect(state.bankUpdates).toHaveLength(0);
+  });
+
+  test('vendor/method re-verification under the lock rejects a changed expense', async () => {
+    state.expenseRow = { id: 'exp-9', amount: '58.12', tax_deductible_amount: '29.06', vendor_name: 'Totally Different LLC', description: 'x', payment_method: 'ach' };
+    const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });
+    expect(res.status).toBe(409);
+    expect(state.bankUpdates).toHaveLength(0);
+  });
+
+  test('REDUCES the original expense (proportional deductible, floor 0) and claims the credit row', async () => {
+    const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });
+    expect(res.status).toBe(200);
+    const upd = state.expenseUpdates[0];
+    expect(upd.amount).toBe(38.12); // 58.12 - 20.00 — never a negative ledger row
+    expect(upd.tax_deductible_amount).toBe(19.06); // 29.06 × (38.12 / 58.12)
+    expect(upd.notes).toContain('[Refund $20.00 applied');
+    const claim = state.bankUpdates[0];
+    expect(claim.wheres).toContainEqual({ id: 'bt-1', status: 'unmatched' });
+    expect(claim.patch).toMatchObject({ status: 'refund_applied', match_method: 'refund' });
+    expect(sugOf(claim)).toMatchObject({ refundAppliedTo: 'exp-9', refundAmount: 20 });
+  });
+
+  test('a refund larger than the remaining expense is refused', async () => {
+    state.bankRow.amount = '99.99';
+    const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });
+    expect(res.status).toBe(400);
+    expect(state.bankUpdates).toHaveLength(0);
+  });
+
+  test('validates inputs: missing expenseId, debit row, bank credit, non-unmatched, unknown expense', async () => {
+    expect((await post('/admin/tax/bank-import/bt-1/apply-refund', {})).status).toBe(400);
+    state.bankRow.direction = 'debit';
+    expect((await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' })).status).toBe(400);
+    state.bankRow.direction = 'credit';
+    state.bankRow.account_type = 'bank';
+    expect((await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' })).status).toBe(400);
+    state.bankRow.account_type = 'card';
+    state.bankRow.status = 'ignored';
+    expect((await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' })).status).toBe(409);
+    state.bankRow.status = 'unmatched';
+    state.expenseRow = null; // parked candidate whose expense row is gone
+    expect((await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' })).status).toBe(404);
+  });
+
+  test('losing the claim CAS rolls the expense adjustment back and answers 409', async () => {
+    state.bankUpdateResult = 0;
+    const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });
+    expect(res.status).toBe(409);
+    expect(mockDb.transaction).toHaveBeenCalled(); // real DB rolls the update back with the throw
   });
 });
 

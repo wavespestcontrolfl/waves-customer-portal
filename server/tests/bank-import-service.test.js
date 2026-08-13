@@ -59,7 +59,7 @@ function makeBuilder(table) {
         rows = rows.filter(r => r.suggestion && r.suggestion.reconcilePending === true);
       }
       // mirror the bounded pass's fresh-vs-examined split
-      const isExamined = (r) => !!(r.suggestion && (r.suggestion.ignore || r.suggestion.candidates || r.suggestion.payoutCandidates || r.suggestion.noMatch));
+      const isExamined = (r) => !!(r.suggestion && (r.suggestion.ignore || r.suggestion.candidates || r.suggestion.payoutCandidates || r.suggestion.refundCandidates || r.suggestion.noMatch));
       const raws = b.whereRaw.mock.calls.map(c => String(c[0]));
       if (raws.some(s => s.includes('or not jsonb_exists_any'))) rows = rows.filter(r => !isExamined(r));
       else if (raws.some(s => s.includes('suggestion is not null and'))) rows = rows.filter(isExamined);
@@ -494,6 +494,20 @@ describe('runDeterministicMatching', () => {
     state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: null }];
     const second = await runDeterministicMatching();
     expect(second.expensesLinked).toBe(1);
+  });
+
+  test('a card-statement credit parks refund candidates (vendor evidence, amount ≥ credit) — never auto-applies', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA 5211 REFUND', amount: 20, direction: 'credit', account_type: 'card', suggestion: null }];
+    state.expenses = [
+      { id: 'exp-1', amount: '58.12', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-01', payment_method: 'card' },
+      { id: 'exp-2', amount: '58.12', description: 'unrelated', vendor_name: 'SiteOne', expense_date: '2026-08-01', payment_method: 'card' },
+    ];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).refundCandidates);
+    expect(sugOf(parked).refundCandidates).toHaveLength(1); // vendor-evidence filtered
+    expect(sugOf(parked).refundCandidates[0].id).toBe('exp-1');
+    expect(state.updates.find(u => u.patch.status)).toBeUndefined(); // nothing auto-applied
   });
 
   test('an amount+date-only match WITHOUT provenance parks instead of auto-linking', async () => {

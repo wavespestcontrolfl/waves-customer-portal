@@ -1903,30 +1903,25 @@ router.post('/bank-import/suggest', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Create a real expense from a staged debit — or a NEGATIVE expense
-// (refund) from a card-statement credit, so returned money offsets the
-// original purchase instead of the ledger reporting the gross amount as
-// fully deductible. Bank-account credits stay excluded (they are payout/
-// deposit territory, never refunds of card spend). The insert and the
-// bank-row claim happen in ONE transaction with a CAS on
-// status='unmatched' — a double-click, a match landing mid-flight, or a
-// crash between the two statements can never leave an orphan expense
-// feeding the P&L.
+// Create a real expense from a staged debit. Card-statement credits
+// (refunds) do NOT create rows here — negative expenses would violate the
+// ledger's [0, amount] deductible invariant and the P&L clamps; refunds go
+// through /bank-import/:id/apply-refund, which REDUCES the original
+// expense instead. The insert and the bank-row claim happen in ONE
+// transaction with a CAS on status='unmatched' — a double-click, a match
+// landing mid-flight, or a crash between the two statements can never
+// leave an orphan expense feeding the P&L.
 router.post('/bank-import/:id/create-expense', async (req, res, next) => {
   try {
     const row = await db('bank_transactions').where({ id: req.params.id }).first();
     if (!row) return res.status(404).json({ error: 'row not found' });
-    const isRefund = row.direction === 'credit' && row.account_type === 'card';
-    if (row.direction !== 'debit' && !isRefund) {
-      return res.status(400).json({ error: 'only debits (expenses) and card-statement credits (refunds) can enter the ledger' });
-    }
+    if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits become expenses — card refunds use apply-refund' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
 
     const suggested = row.suggestion?.categoryId || null;
     const categoryId = req.body?.categoryId || suggested;
     const usedAi = !req.body?.categoryId && !!suggested;
-    const signedAmount = isRefund ? -parseFloat(row.amount) : parseFloat(row.amount);
-    let deductible = signedAmount;
+    let deductible = parseFloat(row.amount);
     if (categoryId) {
       const cat = await db('expense_categories').where({ id: categoryId }).first('name');
       if (!cat) return res.status(400).json({ error: 'unknown categoryId' });
@@ -1941,7 +1936,7 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
         const [inserted] = await trx('expenses').insert({
           category_id: categoryId,
           description: row.description.slice(0, 300),
-          amount: signedAmount,
+          amount: row.amount,
           tax_deductible_amount: deductible,
           expense_date: txnDate,
           vendor_name: row.description.slice(0, 200),
@@ -1949,7 +1944,7 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
           payment_method: row.account_type === 'card' ? 'card' : 'ach',
           tax_year: txnDate.slice(0, 4),
           quarter,
-          notes: `[Bank import ${row.account_label}]${isRefund ? ' [Refund — offsets the original purchase]' : ''}${usedAi ? ' [AI-categorized — verify]' : ''}`,
+          notes: `[Bank import ${row.account_label}]${usedAi ? ' [AI-categorized — verify]' : ''}`,
         }).returning('*');
         const claimed = await trx('bank_transactions')
           .where({ id: row.id, status: 'unmatched' })
@@ -1999,6 +1994,90 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
     }
     if (!claimed) return res.status(409).json({ error: 'row was matched by someone else mid-flight' });
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// Apply a card-statement credit (merchant refund) to the ORIGINAL expense:
+// the expense's amount is REDUCED and its deductible scaled proportionally
+// (floor 0) — never a negative ledger row, which would violate the
+// [0, amount] deductible invariant and the P&L clamps. Operator-picked from
+// the matcher's parked refundCandidates; the adjustment and the bank-row
+// claim commit in one transaction with the expense row locked.
+router.post('/bank-import/:id/apply-refund', async (req, res, next) => {
+  try {
+    const { expenseId } = req.body || {};
+    if (!expenseId) return res.status(400).json({ error: 'expenseId is required' });
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'credit' || row.account_type !== 'card') {
+      return res.status(400).json({ error: 'only card-statement credits apply as refunds' });
+    }
+    if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    // Money-correctness: the target must be one of THIS credit's persisted
+    // refundCandidates — a stale or crafted id must never reduce an
+    // arbitrary ledger expense. The vendor/method checks re-run under the
+    // lock below (the expense can change between parking and applying).
+    const parkedIds = (row.suggestion?.refundCandidates || []).map(c => c.id);
+    if (!parkedIds.includes(expenseId)) {
+      return res.status(400).json({ error: 'that expense is not one of this credit\'s refund candidates — run matching to refresh them' });
+    }
+    const refund = Number(row.amount);
+    let adjusted;
+    try {
+      adjusted = await db.transaction(async trx => {
+        const expense = await trx('expenses').where({ id: expenseId }).forUpdate().first('id', 'amount', 'tax_deductible_amount', 'notes', 'vendor_name', 'description', 'payment_method');
+        if (!expense) { const e = new Error('expense not found'); e.status = 404; throw e; }
+        if (!bankImport.vendorEvidence(row.description, expense) || bankImport.methodIncompatible(row.account_type, expense.payment_method)) {
+          const e = new Error('expense no longer matches this credit (vendor/payment-method) — run matching to refresh candidates');
+          e.status = 409;
+          throw e;
+        }
+        const oldAmount = Number(expense.amount);
+        if (!(refund <= oldAmount) || oldAmount <= 0) {
+          const e = new Error(`refund ($${refund.toFixed(2)}) exceeds the expense's remaining amount ($${oldAmount.toFixed(2)})`);
+          e.status = 400;
+          throw e;
+        }
+        const newAmount = Math.round((oldAmount - refund) * 100) / 100;
+        // proportional: preserves category policies AND operator-set custom
+        // percentages, clamped to the ledger invariant [0, newAmount].
+        // NULL stays NULL — the P&L's COALESCE(deductible, amount) fallback
+        // means NULL is "fully deductible", and it keeps scaling correctly
+        // on its own; converting it to a number here would silently flip
+        // the expense to zero-deductible.
+        const newDeductible = expense.tax_deductible_amount == null
+          ? null
+          : Math.min(newAmount, Math.max(0, Math.round(Number(expense.tax_deductible_amount) * (oldAmount ? newAmount / oldAmount : 0) * 100) / 100));
+        const [updated] = await trx('expenses').where({ id: expenseId }).update({
+          amount: newAmount,
+          tax_deductible_amount: newDeductible,
+          // etDateString: a business-date stamp — UTC would say "tomorrow"
+          // during evening ET hours on Railway. Appended UNSLICED — notes is
+          // unrestricted text and truncation would destroy prior audit trail.
+          notes: `${expense.notes ? `${expense.notes} ` : ''}[Refund $${refund.toFixed(2)} applied ${etDateString()} from bank import ${row.account_label}]`,
+        }).returning(['id', 'amount', 'tax_deductible_amount']);
+        const claimed = await trx('bank_transactions')
+          .where({ id: row.id, status: 'unmatched' })
+          .update({
+            status: 'refund_applied',
+            match_method: 'refund',
+            matched_at: new Date(),
+            updated_at: new Date(),
+            suggestion: bankImport.suggestionMerge({ refundAppliedTo: expenseId, refundAmount: refund }),
+          });
+        if (!claimed) {
+          const e = new Error('row was matched by someone else mid-flight');
+          e.code = 'CLAIM_LOST';
+          throw e; // rolls the expense adjustment back with it
+        }
+        return updated;
+      });
+    } catch (err) {
+      if (err.code === 'CLAIM_LOST') return res.status(409).json({ error: err.message });
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      throw err;
+    }
+    res.json({ success: true, expense: adjusted });
   } catch (err) { next(err); }
 });
 
