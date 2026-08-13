@@ -559,8 +559,11 @@ const AgronomicWiki = {
           // today (ET): a late confirm or resumed completion can link a
           // historical treatment, and stamping today's weather onto it would
           // permanently misattribute the application conditions.
-          const { etDateString } = require('../utils/datetime-et');
-          if (!weather && etDateString(new Date(treatmentDate)) === etDateString()) {
+          // etCalendarDayOf, not etDateString: service_date is a pg DATE
+          // materialized at UTC midnight — the ET wall clock would shift it
+          // to the previous day and the same-day check would never pass.
+          const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
+          if (!weather && etCalendarDayOf(treatmentDate) === etDateString()) {
             const fawn = await require('./fawn-weather').getCurrent();
             if (fawn && fawn.station !== 'unavailable') weather = fawn;
           }
