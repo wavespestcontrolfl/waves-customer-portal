@@ -1081,8 +1081,15 @@ async function executeTool(name, input = {}, ctx = {}) {
       // later point leaves the sweep something to find (the lead-less branch
       // pages from the call row itself). Fail-soft; the lead write never
       // depends on it.
+      // ⭐ NO OBLIGATION WITHOUT A LANE TO OWE IT TO. The sweep's recovery
+      // carve-out deliberately bypasses the context gate so a rollback cannot
+      // strand pages owed from when the lane WAS on — which means a marker
+      // stamped while the gate is OFF would still page the owner through that
+      // carve-out, breaking the gate-off zero-behavior promise. Only an
+      // enabled lane creates the obligation; recovery then only ever replays
+      // debts that were legitimate when incurred.
       const wasHotCapture = String(input.lead_quality || '').toLowerCase() === 'hot';
-      if (wasHotCapture && ctx.callSid) {
+      if (wasHotCapture && ctx.callSid && require('./relay-context').isContextEnabled()) {
         try {
           const db = require('../../models/db');
           await db('call_log')

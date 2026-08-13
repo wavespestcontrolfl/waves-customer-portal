@@ -89,6 +89,44 @@ describe('GATE OFF — dark', () => {
     }
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
   });
+
+  // ⭐ NO OBLIGATION WITHOUT A LANE. The sweep's recovery carve-out bypasses
+  // the gate BY DESIGN (a rollback must not strand pages owed from when the
+  // lane was on) — so a marker stamped while the gate is OFF would still page
+  // the owner later. The stamp itself must therefore be gated.
+  test('a hot capture while the gate is OFF stamps NO relay_hot_alert_needed marker', async () => {
+    const db = require('../models/db');
+    const builder = {};
+    builder.where = jest.fn(() => builder);
+    builder.update = jest.fn(async () => 1);
+    db.mockImplementation(() => builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const { executeTool: exec } = require('../services/voice-agent/relay-tools');
+    await exec('capture_lead', { ...HOT_LEAD }, { from: CALLER, callSid: 'CA-dark-hot', markCaptured: jest.fn() });
+    const stamped = builder.update.mock.calls.some(([payload]) =>
+      JSON.stringify(payload && payload.metadata && payload.metadata.bindings || '').includes('relay_hot_alert_needed'));
+    expect(stamped).toBe(false);
+    assertNeverCustomerFacing();
+  });
+
+  test('the SAME hot capture with the gate ON does stamp the obligation marker', async () => {
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+    const db = require('../models/db');
+    const builder = {};
+    for (const m of ['where', 'whereRaw', 'first']) builder[m] = jest.fn(() => builder);
+    builder.update = jest.fn(() => {
+      const p = Promise.resolve(1);
+      p.returning = jest.fn(async () => []);
+      return p;
+    });
+    db.mockImplementation(() => builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const { executeTool: exec } = require('../services/voice-agent/relay-tools');
+    await exec('capture_lead', { ...HOT_LEAD }, { from: CALLER, callSid: 'CA-lit-hot', markCaptured: jest.fn() });
+    const stamped = builder.update.mock.calls.some(([payload]) =>
+      JSON.stringify(payload && payload.metadata && payload.metadata.bindings || '').includes('relay_hot_alert_needed'));
+    expect(stamped).toBe(true);
+  });
 });
 
 // ⭐ ONE PAGE PER CALL, DURABLY. The session latch is per RelayConversation,
