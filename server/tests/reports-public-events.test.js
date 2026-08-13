@@ -494,6 +494,56 @@ describe('POST /reports/:token/referral-link (owner ruling 2026-08-13: share mod
     });
   });
 
+  test('sibling profile (23505) resolves the household promoter read-only, scoped to the account (r5)', async () => {
+    isEnabled.mockReturnValue(true);
+    const pgError = new Error('duplicate key value violates unique constraint "referral_promoters_customer_phone_key"');
+    pgError.code = '23505';
+    mockReferralEngine.enrollPromoter.mockRejectedValue(pgError);
+    // The endpoint then reads: customers (profile) → account-scoped join.
+    const profileRead = chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1', phone: '+15555550100', account_id: 'acct-1' }) });
+    const joined = {
+      join: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ id: 'promo-h', customer_id: 'cust-0', referral_code: 'WAVES-HOUSE01', referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-HOUSE01' }),
+    };
+    const serviceRead = chain({ first: jest.fn().mockResolvedValue(serviceRow) });
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return serviceRead;
+      if (table === 'customers') return profileRead;
+      if (table === 'referral_promoters as rp') return joined;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    mockReferralEngine.getPromoterReferralLink.mockReturnValue('https://portal.wavespestcontrol.com/r/WAVES-HOUSE01');
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/reports/${tokenFor('7')}/referral-link`, { method: 'POST' });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.code).toBe('WAVES-HOUSE01');
+    });
+    // Account boundary was applied to the join.
+    expect(joined.where).toHaveBeenCalledWith('c.account_id', 'acct-1');
+  });
+
+  test('cross-account phone collision stays a 503 — never a foreign code (r5 money posture)', async () => {
+    isEnabled.mockReturnValue(true);
+    const pgError = new Error('duplicate key value violates unique constraint');
+    pgError.code = '23505';
+    mockReferralEngine.enrollPromoter.mockRejectedValue(pgError);
+    const profileRead = chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1', phone: '+15555550100', account_id: 'acct-1' }) });
+    const joined = { join: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
+    const serviceRead = chain({ first: jest.fn().mockResolvedValue(serviceRow) });
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return serviceRead;
+      if (table === 'customers') return profileRead;
+      if (table === 'referral_promoters as rp') return joined;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/reports/${tokenFor('8')}/referral-link`, { method: 'POST' });
+      expect(response.status).toBe(503);
+    });
+  });
+
   test('engine failure answers 503, not a fake link — and the raw error never reaches the logs', async () => {
     isEnabled.mockReturnValue(true);
     // A PG unique-violation quotes the conflicting value — here, a phone
@@ -501,7 +551,16 @@ describe('POST /reports/:token/referral-link (owner ruling 2026-08-13: share mod
     const pgError = new Error('duplicate key value violates unique constraint "referral_promoters_customer_phone_key" Detail: Key (customer_phone)=(+19415551234) already exists.');
     pgError.code = '23505';
     mockReferralEngine.enrollPromoter.mockRejectedValue(pgError);
-    mockDbWithService();
+    // 23505 first consults the household path — a legacy profile without
+    // account_id skips it and rethrows the original, which is what this
+    // test is about: the raw constraint text never reaching the logs.
+    const serviceRead = chain({ first: jest.fn().mockResolvedValue(serviceRow) });
+    const profileRead = chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1', phone: '+19415551234', account_id: null }) });
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return serviceRead;
+      if (table === 'customers') return profileRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
     await withServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/reports/${tokenFor('0')}/referral-link`, { method: 'POST' });
       expect(response.status).toBe(503);

@@ -1392,7 +1392,34 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
     if (!settings?.program_active) {
       return res.status(404).json({ error: 'Report not found' });
     }
-    const { promoter } = await referralEngine.enrollPromoter(service.customer_id);
+    // enrollPromoter is strictly per-customer (codex #3379 r5: every other
+    // consumer resolves by customer_id, so the engine must not grow a
+    // second identity model). Multi-property siblings share a phone while
+    // referral_promoters.customer_phone stays unique, so a sibling
+    // profile's first tap loses the insert to that constraint (23505) —
+    // resolve the HOUSEHOLD promoter read-only instead, scoped to the same
+    // account_id (phone alone is not identity: recycled/shared numbers
+    // cross unrelated customers, and handing over a foreign code would
+    // credit rewards to the wrong account). No account-scoped match =
+    // a genuine cross-account collision → the catch's 503, manual
+    // resolution — never a guessed attribution.
+    let promoter;
+    try {
+      ({ promoter } = await referralEngine.enrollPromoter(service.customer_id));
+    } catch (err) {
+      if (err?.code !== '23505') throw err;
+      const profile = await db('customers')
+        .where({ id: service.customer_id })
+        .first('id', 'phone', 'account_id');
+      promoter = profile?.phone && profile?.account_id
+        ? await db('referral_promoters as rp')
+          .join('customers as c', 'rp.customer_id', 'c.id')
+          .where('rp.customer_phone', profile.phone)
+          .where('c.account_id', profile.account_id)
+          .first('rp.*')
+        : null;
+      if (!promoter) throw err;
+    }
     const code = String(promoter?.referral_code || '').trim();
     const link = referralEngine.getPromoterReferralLink(promoter, settings);
     if (!code || !link) {

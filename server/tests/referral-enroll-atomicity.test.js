@@ -2,10 +2,9 @@
 // referral tap made concurrent first-enrollments reachable, and the
 // unlocked path could split customers.referral_code from the surviving
 // promoter's code. Enrollment now runs inside ONE transaction opened by a
-// customer-row lock. These tests pin the shape: every enroll read/write
-// rides the transaction, the customer read takes the row lock, and the
-// second (serialized) caller lands on the already-enrolled path with the
-// winner's code instead of minting its own.
+// customer-row lock — and identity stays STRICTLY per-customer (r5): the
+// multi-property household case is resolved read-only by the report
+// endpoint, never by teaching this engine a second identity model.
 
 jest.mock('../models/db', () => {
   const mock = jest.fn();
@@ -171,98 +170,14 @@ test('a serialized second caller takes the already-enrolled path with the winner
   expect(state.inserts).toHaveLength(1);
 });
 
-test('a sibling profile sharing the phone reuses the household promoter — no insert, no 503 (r2 P2)', async () => {
-  const state = freshState();
-  primeDb(state);
-  const first = await engine.enrollPromoter('cust-1');
-  // Second property profile: different customer_id, same phone.
-  state.promoterAccountId = 'acct-1';
-  state.customer = { id: 'cust-2', account_id: 'acct-1', phone: '+15555550100', email: 'x@example.com', first_name: 'Casey', last_name: 'Placeholder', referral_code: null };
-  const sibling = await engine.enrollPromoter('cust-2');
-  expect(sibling.alreadyEnrolled).toBe(true);
-  expect(sibling.promoter.referral_code).toBe(first.promoter.referral_code);
-  expect(state.inserts).toHaveLength(1);
-  // The sibling's own customer row stays CODELESS (pre-push r3 P1):
-  // customers.referral_code is UNIQUE and the winning profile's row
-  // already holds this code — copying it would 23505 forever.
-  expect(state.customer.referral_code).toBeNull();
-  expect(state.updates.filter((u) => u.table === 'customers')).toHaveLength(1); // the winner's write only
-});
 
-test('a sibling losing the insert race retries once and lands on the winner (23505)', async () => {
-  const state = freshState();
-  primeDb(state);
-  // First attempt: lookups miss (the winner commits between this caller's
-  // lookups and its insert) and the insert hits the unique phone constraint.
-  let raced = false;
-  const trxRacing = makeTrx(state);
-  const trxAfter = makeTrx(state);
-  db.transaction.mockImplementation(async (cb) => {
-    if (!raced) {
-      raced = true;
-      // Simulate the winner's committed row appearing only AFTER this
-      // attempt's lookups: hide it during the callback, then fail the insert.
-      state.promoterAccountId = 'acct-1';
-      const winner = { id: 'promo-w', customer_id: 'cust-0', customer_phone: '+15555550100', referral_code: 'WAVES-WINNER01', referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-WINNER01' };
-      const hidden = { ...state, promoter: null };
-      const trx = makeTrx(hidden);
-      const result = cb(new Proxy(trx, {
-        apply(target, thisArg, args) {
-          const chain = Reflect.apply(target, thisArg, args);
-          if (args[0] === 'referral_promoters') {
-            chain.insert = jest.fn(() => ({
-              returning: jest.fn(async () => {
-                state.promoter = winner; // winner is now visible to the retry
-                const err = new Error('duplicate key value violates unique constraint');
-                err.code = '23505';
-                throw err;
-              }),
-            }));
-          }
-          return chain;
-        },
-      }));
-      return result;
-    }
-    return cb(trxAfter);
-  });
-  const { promoter, alreadyEnrolled } = await engine.enrollPromoter('cust-1');
-  expect(alreadyEnrolled).toBe(true);
-  expect(promoter.referral_code).toBe('WAVES-WINNER01');
-});
 
-test('P0 guard: a phone match in a DIFFERENT account is never reused — foreign codes stay foreign', async () => {
+
+
+test('the promoter lookup takes FOR UPDATE — concurrent legacy repairs serialize on the row', async () => {
   const state = freshState();
   primeDb(state);
   await engine.enrollPromoter('cust-1');
-  // Unrelated customer, same (recycled) phone, different account.
-  state.promoterAccountId = 'acct-1';
-  state.customer = { id: 'cust-9', account_id: 'acct-OTHER', phone: '+15555550100', email: 'y@example.com', first_name: 'Riley', last_name: 'Fixture', referral_code: null };
-  // The fallback finds nothing (account mismatch) → first-enroll path →
-  // insert (the real DB would 23505 on the shared phone → 503 = manual
-  // resolution, the correct money posture; the fake just records the path).
-  const second = await engine.enrollPromoter('cust-9');
-  expect(second.alreadyEnrolled).toBe(false);
-  expect(state.phoneFallbacks.some((f) => f.account === 'acct-OTHER')).toBe(true);
-  expect(second.promoter.referral_code).not.toBe('');
-});
-
-test('no account_id → no phone fallback at all (legacy single-profile rows)', async () => {
-  const state = freshState();
-  primeDb(state);
-  state.customer = { ...state.customer, account_id: null };
-  await engine.enrollPromoter('cust-1');
-  expect(state.phoneFallbacks).toHaveLength(0);
-});
-
-test('both promoter lookups take FOR UPDATE — the repair path is serialized on the row (r4 P1)', async () => {
-  const state = freshState();
-  primeDb(state);
-  const first = await engine.enrollPromoter('cust-1');
+  await engine.enrollPromoter('cust-1'); // second call hits the found path
   expect(state.ownLookupLocked).toBe(true);
-  state.promoterAccountId = 'acct-1';
-  state.customer = { id: 'cust-2', account_id: 'acct-1', phone: '+15555550100', email: 'x@example.com', first_name: 'Casey', last_name: 'Placeholder', referral_code: null };
-  const sibling = await engine.enrollPromoter('cust-2');
-  expect(sibling.promoter.referral_code).toBe(first.promoter.referral_code);
-  expect(state.phoneFallbacks.every((f) => f.locked)).toBe(true);
 });
