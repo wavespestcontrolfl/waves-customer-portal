@@ -2648,15 +2648,15 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
     setSubmitting(true);
     setError('');
     try {
-      const shown = String(measuredBasis?.value || '').replace(/[^0-9]/g, '');
+      // The server derives what the estimate showed from its own authoritative
+      // basis — browser-supplied figures are ignored (forgeable), so none are
+      // sent (local audit P1).
       const r = await fetch(`${API_BASE}/estimates/${token}/measurement-review`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           reasons: Array.from(selected),
           note: note.trim() || undefined,
-          shownSqFt: shown ? Number(shown) : undefined,
-          shownSource: measuredBasis?.source || undefined,
         }),
       });
       const body = await r.json().catch(() => ({}));

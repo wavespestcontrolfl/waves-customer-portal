@@ -134,6 +134,7 @@ async function createEstimateMeasurementReview({
     })
     : (fn) => fn(database, estimate);
 
+  const serialized = typeof database.transaction === 'function';
   return runSerialized(async (dbx, lockedEstimate) => createReviewRow({
     database: dbx,
     estimate: lockedEstimate,
@@ -141,10 +142,22 @@ async function createEstimateMeasurementReview({
     cleanNote,
     shownSqFt,
     shownSource,
+    serialized,
   }));
 }
 
-async function createReviewRow({ database, estimate, reasonKeys, cleanNote, shownSqFt, shownSource }) {
+async function createReviewRow({ database, estimate, reasonKeys, cleanNote, shownSqFt, shownSource, serialized = false }) {
+  // Pre-insert dedupe. Under the serialized path this runs while HOLDING the
+  // estimate row lock, so it is authoritative — and it must be, because on
+  // Postgres a 23505 unique violation ABORTS the surrounding transaction and
+  // any follow-up query in the catch would 500 (local audit P1). The catch
+  // below only services the unserialized (mock/test) path.
+  const existingOpen = await database('service_requests')
+    .where({ estimate_id: estimate.id, requested_service: MEASUREMENT_REVIEW_SERVICE_KEY })
+    .whereNotIn(database.raw("COALESCE(status, 'new')"), OPEN_REQUEST_TERMINAL_STATUSES)
+    .first();
+  if (existingOpen) return { success: true, deduped: true };
+
   const customer = await resolveEstimateCustomer(database, estimate, {
     // Attribution reflects the actual entry point, not the add-service flow
     // this resolver was born in (codex #3376).
@@ -192,6 +205,10 @@ async function createReviewRow({ database, estimate, reasonKeys, cleanNote, show
     // open challenge on the same estimate is the same ask — return the
     // existing one instead of erroring the sheet.
     if (err.code === '23505') {
+      // Serialized path: the row lock made the pre-check authoritative, and
+      // the aborted transaction cannot run another query — rethrow and let
+      // the transaction roll back (this indicates a bug, not a normal race).
+      if (serialized) throw err;
       const dupe = await database('service_requests')
         .where({ estimate_id: estimate.id, requested_service: MEASUREMENT_REVIEW_SERVICE_KEY })
         .whereNotIn(database.raw("COALESCE(status, 'new')"), OPEN_REQUEST_TERMINAL_STATUSES)

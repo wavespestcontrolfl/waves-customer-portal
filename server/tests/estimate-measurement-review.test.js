@@ -62,7 +62,7 @@ function mockDb({ estimate = ESTIMATE_ROW, insertResult, insertError, dupeRow } 
           },
         }),
         where: () => ({
-          whereNotIn: () => ({ first: async () => dupeRow }),
+          whereNotIn: () => ({ first: async () => (typeof dupeRow === 'function' ? dupeRow() : dupeRow) }),
         }),
       };
     }
@@ -230,10 +230,28 @@ describe('createEstimateMeasurementReview', () => {
     expect(JSON.parse(database.inserts[0].pricing_revision).reasons).toEqual([]);
   });
 
-  test('a duplicate open request dedupes instead of erroring the sheet', async () => {
+  test('a duplicate open request dedupes via the PRE-CHECK (authoritative under the row lock)', async () => {
     const err = new Error('duplicate key');
     err.code = '23505';
     const database = mockDb({ insertError: err, dupeRow: { id: 'req-existing' } });
+    const result = await createEstimateMeasurementReview({
+      estimateToken: 'tok-1',
+      reasons: ['bigger'],
+      database,
+      viewabilityCheck: viewable,
+    });
+    expect(result).toEqual({ success: true, deduped: true });
+    // Pre-check dedupe: no insert is even attempted.
+    expect(database.inserts).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('unserialized path: a 23505 race still dedupes via the catch (pre-check missed)', async () => {
+    const err = new Error('duplicate key');
+    err.code = '23505';
+    let calls = 0;
+    // Pre-check sees nothing (race window); the catch re-query finds the row.
+    const database = mockDb({ insertError: err, dupeRow: () => (calls++ === 0 ? null : { id: 'req-existing' }) });
     const result = await createEstimateMeasurementReview({
       estimateToken: 'tok-1',
       reasons: ['bigger'],

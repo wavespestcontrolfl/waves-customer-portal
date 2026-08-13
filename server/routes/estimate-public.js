@@ -12207,15 +12207,18 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
     // a pest-only estimate 404s identically to an unknown token (codex
     // #3376: no lawn line, no lawn challenge).
     const reviewEstResult = estimateRow ? resolvePricingEstResult(parseEstimateDataSafe(estimateRow)) : {};
-    const lawnBasisPresent = !!(measuredBasisForSection('lawn_care', reviewEstResult)
-      || measuredBasisForSection('commercial_lawn', reviewEstResult));
+    const reviewBasis = measuredBasisForSection('lawn_care', reviewEstResult)
+      || measuredBasisForSection('commercial_lawn', reviewEstResult);
     const result = await createEstimateMeasurementReview({
       estimateToken: req.params.token,
       reasons: req.body?.reasons,
       note: req.body?.note,
-      shownSqFt: req.body?.shownSqFt,
-      shownSource: req.body?.shownSource,
-      lawnBasisPresent,
+      // What the estimate showed is derived SERVER-SIDE from the authoritative
+      // basis, never from the request body (local audit P1: a token holder
+      // could forge the pricing-basis metadata staff act on).
+      shownSqFt: reviewBasis ? Number(String(reviewBasis.value).replace(/[^0-9]/g, '')) : undefined,
+      shownSource: reviewBasis ? reviewBasis.source : undefined,
+      lawnBasisPresent: !!reviewBasis,
     });
     res.status(result.deduped ? 200 : 201).json(result);
   } catch (err) {
@@ -21143,11 +21146,20 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       ...(showYourWorkEnabled ? { showYourWork } : {}),
       // "Does the lawn size look off?" challenge sheet — the link renders
       // only when this is true, so gate-off responses stay byte-identical
-      // (absent, not false). Draft previews never offer it: the request row
-      // would attach a real service_requests row to an unsent draft.
-      ...(featureGates.isEnabled('estimateMeasurementReview') && !adminDraftPreview
-        ? { measurementReviewEnabled: true }
-        : {}),
+      // (absent, not false). Draft previews never offer it (a request row
+      // would attach to an unsent draft), and the flag mirrors the POST's
+      // OWN eligibility (local audit P1: accepted/declined estimates stay
+      // publicly viewable, and pest-only estimates have no lawn basis —
+      // both would render a link whose submission can only 404).
+      ...((() => {
+        if (!featureGates.isEnabled('estimateMeasurementReview') || adminDraftPreview) return {};
+        const { isMeasurementReviewEligible } = require('../services/estimate-measurement-review');
+        if (!isMeasurementReviewEligible(estimate)) return {};
+        const mrEstResult = resolvePricingEstResult(estimateDataForIntelligence);
+        return (measuredBasisForSection('lawn_care', mrEstResult) || measuredBasisForSection('commercial_lawn', mrEstResult))
+          ? { measurementReviewEnabled: true }
+          : {};
+      })()),
       // Estimate glass COPY release — category-scoped (owner call 2026-07-05:
       // pest + lawn first; other categories keep the old copy until their glass
       // copy packs are approved). NOTE: the glass THEME is unconditional on
