@@ -118,7 +118,7 @@ beforeEach(() => {
           // Unchanged tech-day: mirror the loaded stops for this date+tech.
           return (stopsByDate[filters.scheduled_date] || [])
             .filter((s) => s.technician_id === filters.technician_id)
-            .map((s) => ({ id: s.id, window_start: s.window_start, time_window: s.time_window, window_end: s.window_end, estimated_duration_minutes: s.estimated_duration_minutes, route_order: s.route_order, lat: s.lat, lng: s.lng }));
+            .map((s) => ({ id: s.id, window_start: s.window_start, time_window: s.time_window, estimated_duration_minutes: s.estimated_duration_minutes, auto_dispatch_locked: s.auto_dispatch_locked, auto_dispatch_excluded: s.auto_dispatch_excluded, route_order: s.route_order, lat: s.lat, lng: s.lng }));
         },
         update: async (u) => { attempted.push({ id: filters.id, ...u }); return 1; },
       };
@@ -333,23 +333,59 @@ test('feasibility guard semantics: one untimed stop between windows FITS (the pr
   const a = stop('a', { window_start: '09:00' });
   const u = stop('u', { window_start: null });
   const b = stop('b', { window_start: '10:00' });
-  // 09:00 (60m) → untimed (60m) → b starts 11:00 ≤ 12:00 window end: feasible.
+  // 09:00 (60m) → untimed (60m) → b starts 11:00 ≤ 12:00 arrival deadline: feasible.
   expect(violatesWindowFeasibility(RO, [a, u, b], [a, u, b])).toBe(false);
-  // An explicit window_end tighter than +2h is honored: b must start by 10:30.
-  const bTight = stop('b', { window_start: '10:00', window_end: '10:30' });
-  expect(violatesWindowFeasibility(RO, [a, u, bTight], [a, u, bTight])).toBe(true);
   // Custom durations count: a 150-minute untimed job blows the default window.
   const uLong = stop('u', { window_start: null, estimated_duration_minutes: 150 });
   expect(violatesWindowFeasibility(RO, [a, uLong, b], [a, uLong, b])).toBe(true);
 });
 
-test('effectiveWindowRange: window_end honored, +120 default, real band ends', () => {
+test('feasibility uses the optimizer\'s ACTUAL leg durations when aligned (fallback model only otherwise)', () => {
+  const { violatesWindowFeasibility } = require('../services/route-reorder')._internals;
+  const RO = require('../services/route-optimizer');
+  const a = stop('a', { window_start: '09:00', lat: 1, lng: 1 });
+  const b = stop('b', { window_start: '10:00', lat: 1, lng: 2 });
+  // Fallback model (test mock: 0 minutes/leg): 09:00+60 → b starts 10:00 — fits.
+  expect(violatesWindowFeasibility(RO, [a, b], [a, b])).toBe(false);
+  // Real Google legs say the drive to b takes 130 minutes: 10:00 + 2:10 =
+  // 12:10 > 12:00 arrival deadline — the same order is provably undriveable.
+  const legs = [
+    { from: 'HQ', to: 'a', distanceMeters: 1, durationMinutes: 0 },
+    { from: 'a', to: 'b', distanceMeters: 1, durationMinutes: 130 },
+    { from: 'b', to: 'HQ', distanceMeters: 1, durationMinutes: 0 },
+  ];
+  expect(violatesWindowFeasibility(RO, [a, b], [a, b], legs)).toBe(true);
+  // Misaligned/partial legs are never trusted — falls back to the model.
+  expect(violatesWindowFeasibility(RO, [a, b], [a, b], [legs[0]])).toBe(false);
+});
+
+test('effectiveWindowRange: arrival deadline is ALWAYS start+120 (stored window_end = service end, ignored), real band ends', () => {
   const { effectiveWindowRange } = require('../services/route-reorder')._internals;
-  expect(effectiveWindowRange({ window_start: '09:00:00', window_end: '11:30:00' })).toEqual({ startMin: 540, endMin: 690 });
+  // A 3-hour 09:00 job has a noon window_end, but the promised ARRIVAL
+  // deadline is 11:00 — same rule as the SMS formatter's arrivalWindowRange.
+  expect(effectiveWindowRange({ window_start: '09:00:00', window_end: '12:00:00' })).toEqual({ startMin: 540, endMin: 660 });
   expect(effectiveWindowRange({ window_start: '09:00' })).toEqual({ startMin: 540, endMin: 660 });
   expect(effectiveWindowRange({ window_start: null, time_window: 'morning' })).toEqual({ startMin: 480, endMin: 720 });
   expect(effectiveWindowRange({ window_start: null, time_window: 'afternoon' })).toEqual({ startMin: 720, endMin: 1020 });
   expect(effectiveWindowRange({ window_start: null, time_window: null })).toBeNull();
+});
+
+test('a tech-day containing an auto_dispatch_locked or _excluded stop is skipped whole', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay().map((s, i) => (i === 1 ? { ...s, auto_dispatch_locked: true } : s));
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+  let ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'LOCKED_STOP' }));
+
+  jest.clearAllMocks();
+  ledgerInserts.length = 0;
+  db.mockImplementation((table) => tableChain(table));
+  stopsByDate['2026-08-18'] = backtrackDay().map((s, i) => (i === 2 ? { ...s, auto_dispatch_excluded: true } : s));
+  const res2 = await runRouteReorder({ now: NOW });
+  expect(res2.applied).toBe(0);
+  ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'LOCKED_STOP' }));
 });
 
 test('effectiveWindowStart: window_start wins, legacy bands map, free text is unconstrained', () => {

@@ -133,18 +133,19 @@ const hhmmToMin = (hhmm) => {
 };
 
 /**
- * The [start, end] minute-of-day range a stop is PROMISED to begin within,
- * or null when unconstrained. window_start rows: end = window_end when set,
- * else start + 120 — the 72h reminder promises "time + 2h window", so that
- * default IS the customer promise, not a guess. Legacy bands get their real
- * band ends (morning = 08:00–12:00, afternoon = 12:00–17:00); a literal
- * HH:MM in time_window gets the same +120 promise window.
+ * The [start, end] minute-of-day ARRIVAL range a stop is PROMISED to begin
+ * within, or null when unconstrained. window_start rows: ALWAYS start + 120
+ * — the customer's arrival promise is "time + 2h window" (the same rule the
+ * SMS formatter's arrivalWindowRange enforces), NEVER the stored window_end,
+ * which is a service-END estimate: a 3-hour 09:00 job has a noon window_end
+ * but its promised arrival deadline is 11:00 (codex GitHub round P1). Legacy
+ * bands get their real band ends (morning = 08:00–12:00, afternoon =
+ * 12:00–17:00); a literal HH:MM in time_window gets the same +120 promise.
  */
 function effectiveWindowRange(stop) {
   if (stop.window_start) {
     const ws = hhmmToMin(String(stop.window_start).slice(0, 5));
-    const we = stop.window_end ? hhmmToMin(String(stop.window_end).slice(0, 5)) : ws + 120;
-    return { startMin: ws, endMin: Math.max(we, ws) };
+    return { startMin: ws, endMin: ws + 120 };
   }
   const raw = String(stop.time_window || '').trim().toLowerCase();
   if (raw === 'morning') return { startMin: 8 * 60, endMin: 12 * 60 };
@@ -163,26 +164,43 @@ function effectiveWindowRange(stop) {
  * but the optimizer can still wedge untimed stops BETWEEN fixed windows —
  * 09:00 stop → three 60-minute untimed stops → 10:00 stop passes chronology
  * yet the tech cannot make the second window. Simulate the day under the ONE
- * shared leg model (fallbackLegMetrics minutes over haversine — the same
- * model the savings decision uses): depart HQ at the 08:00 day open, each
- * stop takes estimated_duration_minutes (default 60), a promised stop may
- * wait for its window to OPEN but must START no later than its window end
- * (effectiveWindowRange — the actual customer promise). The simulation is
- * optimistic (no buffers, straight-line travel), so a failure here is a real
- * impossibility — and rejection only SKIPS the day (safe direction), never
- * writes.
+ * best travel truth available: the optimizer's ACTUAL per-leg durations
+ * (Google road minutes) when the returned legs align with the geocoded
+ * sequence — the fallback haversine model is documented as underestimating
+ * some trips, so preferring real legs is what makes a "pass" trustworthy
+ * (uncapped audit P1) — else the shared fallback leg model. Depart HQ at the
+ * 08:00 day open, each stop takes estimated_duration_minutes (default 60),
+ * a promised stop may wait for its window to OPEN but must START no later
+ * than its arrival deadline (effectiveWindowRange — the actual customer
+ * promise). The simulation is optimistic (no buffers), so a failure here is
+ * a real impossibility — and rejection only SKIPS the day (safe direction),
+ * never writes.
  */
-function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops) {
+function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, legs) {
   const byId = new Map(sourceStops.map((s) => [s.id, s]));
+  const geocodedCount = orderedStops.filter((o) => {
+    const s = byId.get(o.id) || o;
+    return parseFloat(s.lat) && parseFloat(s.lng);
+  }).length;
+  // legs[0] = HQ→stop1, legs[i] = stop(i)→stop(i+1) over the GEOCODED
+  // sequence (coordless stops are appended with no legs); usable only when
+  // every arrival leg is present and numeric.
+  const useLegs = Array.isArray(legs)
+    && legs.length >= geocodedCount
+    && legs.slice(0, geocodedCount).every((l) => Number.isFinite(l?.durationMinutes));
   let clock = 8 * 60; // minute-of-day, ET day open
   let prev = RouteOptimizer.HQ;
+  let geoIdx = 0;
   for (const stop of orderedStops) {
     const s = byId.get(stop.id) || stop;
     const lat = parseFloat(s.lat);
     const lng = parseFloat(s.lng);
     let travelMin = 0;
     if (lat && lng) {
-      travelMin = RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng)).minutes || 0;
+      travelMin = useLegs
+        ? legs[geoIdx].durationMinutes
+        : (RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng)).minutes || 0);
+      geoIdx += 1;
       prev = { lat, lng };
     }
     let startMin = clock + travelMin;
@@ -279,8 +297,9 @@ async function runRouteReorder(opts = {}) {
           select: [
             'scheduled_services.id', 'scheduled_services.technician_id',
             'scheduled_services.route_order', 'scheduled_services.window_start',
-            'scheduled_services.time_window', 'scheduled_services.window_end',
+            'scheduled_services.time_window',
             'scheduled_services.estimated_duration_minutes',
+            'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
             'scheduled_services.service_type',
             'scheduled_services.zone', 'scheduled_services.created_at',
             ...guardedCoordSelects(db),
@@ -332,6 +351,16 @@ async function runRouteReorder(opts = {}) {
         techIds.add(techId);
         const entryBase = { date: dateStr, technician_id: techId, stops: techStops.length };
         try {
+          // Staff controls are absolute: auto_dispatch_locked (temporary)
+          // and auto_dispatch_excluded (permanent) mark visits the
+          // autonomous systems may not touch. Keep the WHOLE tech-day fixed
+          // rather than reorder around a pinned stop (codex GitHub round
+          // P2) — rewriting its neighbors would still change the pinned
+          // visit's real position in the run.
+          if (techStops.some((s) => s.auto_dispatch_locked || s.auto_dispatch_excluded)) {
+            summary.skipped.push({ ...entryBase, reason: 'LOCKED_STOP' });
+            continue;
+          }
           const withCoords = techStops.filter((s) => parseFloat(s.lat) && parseFloat(s.lng));
           if (withCoords.length > GOOGLE_WAYPOINT_CAP) {
             // Google Routes cap — skip and SAY SO; never silently truncate.
@@ -418,7 +447,7 @@ async function runRouteReorder(opts = {}) {
           // between fixed windows; if the simulated day provably cannot make
           // every promised window, skip the tech-day rather than write an
           // undriveable sequence.
-          if (violatesWindowFeasibility(RouteOptimizer, result.orderedStops, techStops)) {
+          if (violatesWindowFeasibility(RouteOptimizer, result.orderedStops, techStops, result.legs)) {
             summary.skipped.push({ ...entryBase, reason: 'WINDOW_FIT_CONFLICT', ...metrics });
             continue;
           }
@@ -486,8 +515,9 @@ async function runRouteReorder(opts = {}) {
                 .forUpdate('scheduled_services')
                 .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
                 .select('scheduled_services.id', 'scheduled_services.window_start',
-                  'scheduled_services.time_window', 'scheduled_services.window_end',
+                  'scheduled_services.time_window',
                   'scheduled_services.estimated_duration_minutes',
+                  'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
                   'scheduled_services.route_order', ...guardedCoordSelects(trx));
               const num = (v) => (v == null || v === '' ? null : parseFloat(v));
               // Full guard-input signature: window RANGE + service duration —
@@ -496,7 +526,8 @@ async function runRouteReorder(opts = {}) {
               const windowSig = (s) => {
                 const r = effectiveWindowRange(s);
                 const dur = Number(s.estimated_duration_minutes) > 0 ? Number(s.estimated_duration_minutes) : 60;
-                return `${r ? `${r.startMin}-${r.endMin}` : 'open'}|${dur}`;
+                const locked = (s.auto_dispatch_locked || s.auto_dispatch_excluded) ? 'L' : '-';
+                return `${r ? `${r.startMin}-${r.endMin}` : 'open'}|${dur}|${locked}`;
               };
               const snapshot = new Map(techStops.map((s) => [s.id, {
                 window: windowSig(s),
