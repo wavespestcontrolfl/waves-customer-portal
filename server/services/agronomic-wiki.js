@@ -445,9 +445,12 @@ async function backfillOutcomeWeather(outcome, post, treatmentDate) {
         avg_humidity: weather.humidity_pct ?? null,
         total_rainfall: weather.rainfall_in ?? null,
       });
+      return true;
     }
+    return false;
   } catch (err) {
     logger.warn(`[agronomic-wiki] outcome ${outcome.id} weather backfill failed: ${err.message}`);
+    return false;
   }
 }
 
@@ -673,6 +676,44 @@ const AgronomicWiki = {
   },
 
   // ────────────────────────────────────────────────────────────
+  // sweepMissingOutcomeWeather — hourly retry for weather enrichment.
+  // The confirm-time enrichment is fire-and-forget and its only callers
+  // (assessment confirm, Complete Service) link each service record ONCE —
+  // a transient FAWN or update failure on that first attempt has no later
+  // trigger, so nothing would ever write avg_temperature/avg_humidity/
+  // total_rainfall (codex P2 r5). Sweep recent outcomes still missing ALL
+  // weather fields and re-run the backfill; its same-day/≤6h freshness
+  // gates fail closed, so rows past the window simply age out instead of
+  // getting wrong-day conditions stamped.
+  // ────────────────────────────────────────────────────────────
+  async sweepMissingOutcomeWeather({ limit = 25 } = {}) {
+    const stats = { checked: 0, enriched: 0 };
+    try {
+      // Enrichment can only succeed on the treatment's own ET day — bound
+      // the scan to the last day (with slack for pg DATE at UTC midnight);
+      // over-selecting is safe because the backfill's gates fail closed.
+      const rows = await db('treatment_outcomes')
+        .whereNull('avg_temperature')
+        .whereNull('avg_humidity')
+        .whereNull('total_rainfall')
+        .whereNotNull('post_assessment_id')
+        .where('treatment_date', '>=', daysFrom(new Date(), -1))
+        .orderBy('treatment_date', 'desc')
+        .limit(limit);
+      for (const row of rows) {
+        stats.checked++;
+        const post = await db('lawn_assessments').where({ id: row.post_assessment_id }).first();
+        if (!post) continue;
+        if (await backfillOutcomeWeather(row, post, row.treatment_date)) stats.enriched++;
+      }
+      return stats;
+    } catch (err) {
+      logger.error(`[agronomic-wiki] weather backfill sweep failed: ${err.message}`);
+      return { ...stats, error: err.message };
+    }
+  },
+
+  // ────────────────────────────────────────────────────────────
   // updateProductPage — aggregate outcomes for a product, generate wiki page
   // ────────────────────────────────────────────────────────────
   async updateProductPage(productName, { rethrow = false, withState = false } = {}) {
@@ -871,17 +912,26 @@ const AgronomicWiki = {
       // is definitionally filler (the query spans all years) — prune it so it
       // can't clog the stale-refresh budget or surface in agent reads.
       if (!outcomes.length) {
+        let pruned = 0;
         try {
-          const pruned = await db('knowledge_entries')
+          pruned = await db('knowledge_entries')
             .where({ slug, category: 'seasonal' })
             .del();
-          if (pruned) {
-            await logUpdate('prune', slug, `Pruned zero-outcome seasonal page for ${monthName}`, {
-              triggerType: 'wiki_generation',
-            });
-          }
         } catch (err) {
+          // A failed prune leaves the stale filler page agent-readable —
+          // reporting 'no_data' here would let weeklyRefresh write its
+          // six-day success marker over it, deferring the retry a whole
+          // week (codex P2 r5). Fail the leg instead: rethrow under
+          // REFRESH_OPTS, writeState 'failed' otherwise — either way the
+          // weekly marker is withheld and tomorrow's run retries.
           logger.error(`[agronomic-wiki] Failed to prune empty seasonal page ${slug}: ${err.message}`);
+          if (rethrow) throw err;
+          return withState ? { entry: null, writeState: 'failed' } : null;
+        }
+        if (pruned) {
+          await logUpdate('prune', slug, `Pruned zero-outcome seasonal page for ${monthName}`, {
+            triggerType: 'wiki_generation',
+          });
         }
         logger.info(`[agronomic-wiki] No outcomes found for month ${month} — skipping seasonal page`);
         return withState ? { entry: null, writeState: 'no_data' } : null;

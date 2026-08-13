@@ -689,7 +689,21 @@ async function backfillContradictionAttribution(existing, wikiEntryId) {
     try {
       await recomputeEntryReviewGate(wikiEntryId);
     } catch (err) {
-      logger.error(`[assessment-analytics] corrective gate recompute failed for ${wikiEntryId}: ${err.message}`);
+      // One immediate retry, then PROPAGATE (same retry-then-throw idiom as
+      // syncKbCopyTrust's gating update). A swallowed failure here leaves
+      // the gate this function just forced on a page whose contradiction is
+      // no longer open — the resolved row has no wiki_entry_id, so the admin
+      // resolve route can't recompute its page, and later detector runs
+      // select status:'open' only: nothing would ever clear it. Throwing
+      // surfaces the run as errored (weekly job_health) instead of silently
+      // recording success over an indefinitely blocked page/mirror.
+      try {
+        await recomputeEntryReviewGate(wikiEntryId);
+        logger.warn(`[assessment-analytics] corrective gate recompute for ${wikiEntryId} succeeded on retry`);
+      } catch (retryErr) {
+        logger.error(`[assessment-analytics] corrective gate recompute failed for ${wikiEntryId}: ${retryErr.message}`);
+        throw retryErr;
+      }
     }
     return false;
   }

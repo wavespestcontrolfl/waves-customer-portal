@@ -399,3 +399,62 @@ test('peak-vs-shoulder rolls the insert back when the gate recompute fails', asy
   expect(result.contradictions).toBe(0);
   expect(dbMock.state.deletes.knowledge_contradictions).toBe(1);
 });
+
+test('a transiently failing corrective un-gate is retried once and succeeds', async () => {
+  // call 1: forced gate (assumeOpenIds) — ok; call 2: corrective — fails;
+  // call 3: immediate retry — succeeds.
+  recomputeEntryReviewGate
+    .mockResolvedValueOnce(undefined)
+    .mockRejectedValueOnce(new Error('transient gate failure'));
+  const dbMock = makeDb({
+    product_efficacy: [NEGATIVE_EFFICACY],
+    knowledge_base: [KB_PRODUCT],
+    knowledge_bridge: [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bridged', wiki_slug: 'product/celsius-wg', relevance_score: 0.95 }],
+    knowledge_entries: [],
+    knowledge_contradictions: [{ id: 'contra-legacy', wiki_entry_id: null, status: 'open' }],
+  });
+  global.__analyticsDbMock = (table) => {
+    const b = dbMock(table);
+    if (table === 'knowledge_contradictions') {
+      // Conditional claim misses — the row was resolved mid-flight
+      b.update = () => ({ then: (res, rej) => Promise.resolve(0).then(res, rej) });
+    }
+    return b;
+  };
+
+  const result = await analytics.detectContradictions();
+
+  expect(result.error).toBeUndefined();
+  expect(result.contradictions).toBe(0);
+  expect(recomputeEntryReviewGate).toHaveBeenCalledTimes(3);
+  expect(recomputeEntryReviewGate).toHaveBeenNthCalledWith(2, 'wiki-bridged');
+  expect(recomputeEntryReviewGate).toHaveBeenNthCalledWith(3, 'wiki-bridged');
+});
+
+test('a corrective un-gate that fails twice PROPAGATES instead of recording success', async () => {
+  recomputeEntryReviewGate
+    .mockResolvedValueOnce(undefined)
+    .mockRejectedValueOnce(new Error('gate down'))
+    .mockRejectedValueOnce(new Error('gate still down'));
+  const dbMock = makeDb({
+    product_efficacy: [NEGATIVE_EFFICACY],
+    knowledge_base: [KB_PRODUCT],
+    knowledge_bridge: [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bridged', wiki_slug: 'product/celsius-wg', relevance_score: 0.95 }],
+    knowledge_entries: [],
+    knowledge_contradictions: [{ id: 'contra-legacy', wiki_entry_id: null, status: 'open' }],
+  });
+  global.__analyticsDbMock = (table) => {
+    const b = dbMock(table);
+    if (table === 'knowledge_contradictions') {
+      b.update = () => ({ then: (res, rej) => Promise.resolve(0).then(res, rej) });
+    }
+    return b;
+  };
+
+  const result = await analytics.detectContradictions();
+
+  // The run must surface as errored — a resolved row's page left forcibly
+  // gated has no later clearing path (detectors select open rows only).
+  expect(result.error).toBe('gate still down');
+  expect(result.contradictions).toBe(0);
+});

@@ -61,7 +61,7 @@ function makeDb(responses = {}) {
       return [];
     };
     const b = {};
-    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereIn', 'orderBy', 'orderByRaw', 'limit', 'offset', 'select', 'groupBy']) {
+    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'orderBy', 'orderByRaw', 'limit', 'offset', 'select', 'groupBy']) {
       b[m] = (...args) => {
         rec.ops.push([m, args]);
         if (typeof args[0] === 'function') args[0].call(b);
@@ -639,5 +639,68 @@ describe('linkTreatmentOutcome weather-enrichment retry', () => {
     expect(outcome).toEqual(expect.objectContaining({ id: 'to-1' }));
     expect(state.calls.lawn_assessments).toBeUndefined();
     expect(state.updates.treatment_outcomes).toBeUndefined();
+  });
+});
+
+// ── sweepMissingOutcomeWeather ─────────────────────────────────────────────
+
+describe('sweepMissingOutcomeWeather', () => {
+  test('re-attempts enrichment for all-null rows but fails closed outside the freshness window', async () => {
+    const state = useDb({
+      // Historical treatment day: the sweep must ATTEMPT (load the post
+      // assessment, run the backfill) but the same-day/freshness gates fail
+      // closed — no current-conditions fetch, no wrong-day write.
+      treatment_outcomes: (rec) => (rec.ops.some(([m]) => m === 'whereNull')
+        ? [{ id: 'to-1', post_assessment_id: 'post-1', treatment_date: '2026-07-01' }]
+        : []),
+      lawn_assessments: [{ id: 'post-1', service_date: '2026-07-01', fawn_snapshot: null }],
+    });
+
+    const result = await wiki.sweepMissingOutcomeWeather();
+
+    expect(result).toEqual({ checked: 1, enriched: 0 });
+    expect(state.calls.lawn_assessments).toHaveLength(1);
+    expect(state.updates.treatment_outcomes).toBeUndefined();
+  });
+
+  test('a failed sweep query surfaces as an error result, not a healthy run', async () => {
+    useDb({
+      treatment_outcomes: () => { throw new Error('scan failed'); },
+    });
+
+    const result = await wiki.sweepMissingOutcomeWeather();
+
+    expect(result.error).toBe('scan failed');
+    expect(result.checked).toBe(0);
+  });
+});
+
+// ── updateSeasonalPage prune failure ───────────────────────────────────────
+
+describe('updateSeasonalPage prune failure', () => {
+  test('a failed zero-outcome prune reports writeState failed, never no_data', async () => {
+    const state = useDb({
+      treatment_outcomes: [],
+      knowledge_entries: [],
+      knowledge_update_log: [],
+    });
+    const origMock = global.__wikiDbMock;
+    global.__wikiDbMock = (table) => {
+      const b = origMock(table);
+      if (table === 'knowledge_entries') {
+        b.del = async () => { throw new Error('delete failed'); };
+      }
+      return b;
+    };
+
+    // withState path: 'failed', so weeklyRefresh withholds the six-day
+    // success marker while the stale filler page is still agent-readable.
+    const res = await wiki.updateSeasonalPage(2, { withState: true });
+    expect(res).toEqual({ entry: null, writeState: 'failed' });
+
+    // rethrow path (weeklyRefresh REFRESH_OPTS): the error propagates.
+    await expect(wiki.updateSeasonalPage(2, { rethrow: true, withState: true }))
+      .rejects.toThrow('delete failed');
+    expect(state.inserts.knowledge_update_log).toBeUndefined();
   });
 });

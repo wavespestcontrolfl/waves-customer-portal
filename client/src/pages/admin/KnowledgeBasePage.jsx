@@ -39,6 +39,18 @@ function adminFetch(path, options = {}) {
   });
 }
 
+// Regeneration is admin-only server-side (requireAdmin on /admin/wiki/update —
+// each call burns a DEEP-model generation); showing the button to technicians
+// would render a reachable control that only 403s. Same role source as
+// KnowledgePage's admin-only Health tab.
+function staffRole() {
+  try {
+    return JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.role || null;
+  } catch {
+    return null;
+  }
+}
+
 function useIsMobile(breakpoint = 768) {
   const [isMobile, setIsMobile] = useState(
     typeof window !== "undefined" && window.innerWidth < breakpoint,
@@ -1588,13 +1600,15 @@ function FieldIntelligenceTab({ showToast, isMobile }) {
             Block
           </button>
         )}
-        <button
-          disabled={busySlug === selected.slug}
-          onClick={() => handleRegenerate(selected.slug)}
-          style={sBtn(D.border, D.text)}
-        >
-          Regenerate
-        </button>
+        {staffRole() === "admin" && (
+          <button
+            disabled={busySlug === selected.slug}
+            onClick={() => handleRegenerate(selected.slug)}
+            style={sBtn(D.border, D.text)}
+          >
+            Regenerate
+          </button>
+        )}
         <select
           value=""
           onChange={(e) => handleTierPin(selected.slug, e.target.value)}

@@ -124,3 +124,45 @@ test('wiki-sync mirror rows never get their provenance pointer rewritten, even o
   expect(dbMock.state.updates.knowledge_base).toBeUndefined();
   expect(dbMock.state.updates.knowledge_entries).toEqual([{ kb_entry_id: 'kb-1' }]);
 });
+
+test('a failed link write returns a distinguishable failure, never a bare null', async () => {
+  const dbMock = makeDb({
+    knowledge_base: [{ slug: 'kb/prod' }],
+    knowledge_entries: [{ slug: 'product/prod' }],
+  });
+  global.__bridgeDbMock = (table) => {
+    const b = dbMock(table);
+    if (table === 'knowledge_bridge') {
+      b.insert = () => { throw new Error('insert exploded'); };
+    }
+    return b;
+  };
+
+  const link = await KnowledgeBridge.createLink(LINK_ARGS);
+
+  // An onConflict-ignored upsert returns null; an actual failure must be
+  // distinguishable so autoLink can count it in stats.errors.
+  expect(link).toEqual({ failed: true, error: 'insert exploded' });
+});
+
+test('autoLink counts per-link failures in stats.errors', async () => {
+  const isCategoryScan = (rec) => rec.ops.some(([m, a]) => m === 'where' && a[0]?.category === 'product');
+  const dbMock = makeDb({
+    knowledge_base: (rec) => (isCategoryScan(rec) ? [{ id: 'kb-1', title: 'Product: Bifen', slug: 'kb/bifen' }] : []),
+    knowledge_entries: (rec) => (isCategoryScan(rec) ? [{ id: 'wiki-1', title: 'Product: Bifen', slug: 'product/bifen' }] : []),
+  });
+  global.__bridgeDbMock = (table) => {
+    const b = dbMock(table);
+    if (table === 'knowledge_bridge') {
+      b.insert = () => { throw new Error('insert exploded'); };
+    }
+    return b;
+  };
+
+  const stats = await KnowledgeBridge.autoLink();
+
+  // The failed pair is an ERROR, not a silent omission — the weekly job's
+  // health check examines linkStats.errors only.
+  expect(stats.errors).toBe(1);
+  expect(stats.productLinks).toBe(0);
+});

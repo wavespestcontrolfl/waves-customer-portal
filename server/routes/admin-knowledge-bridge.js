@@ -73,6 +73,12 @@ router.post('/link', async (req, res, next) => {
       createdBy: 'manual',
     });
 
+    // createLink converts write failures into { failed, error } (a bare null
+    // is an idempotent onConflict ignore) — surface them, never success:true.
+    if (link?.failed) {
+      return res.status(500).json({ error: `Link creation failed: ${link.error}` });
+    }
+
     res.json({ success: true, link });
   } catch (err) {
     next(err);

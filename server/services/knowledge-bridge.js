@@ -602,7 +602,12 @@ const KnowledgeBridge = {
       return link || null;
     } catch (err) {
       logger.error(`[knowledge-bridge] createLink failed: ${err.message}`);
-      return null;
+      // Distinguishable failure: an onConflict-ignored upsert legitimately
+      // returns null, so a bare null here would let autoLink record a
+      // partially failed bridge population as healthy — the weekly job's
+      // health check examines linkStats.errors only (codex P2 r5). Callers
+      // check `failed` and count it in their error stats.
+      return { failed: true, error: err.message };
     }
   },
 
@@ -636,7 +641,8 @@ const KnowledgeBridge = {
               linkReason: `Product name match: "${kbProd.title}" ↔ "${wikiProd.title}"`,
               createdBy: 'auto_link',
             });
-            if (link) stats.productLinks++;
+            if (link?.failed) stats.errors++;
+            else if (link) stats.productLinks++;
           }
         }
       }
@@ -664,7 +670,8 @@ const KnowledgeBridge = {
               linkReason: `Condition name match: "${kbCond.title}" ↔ "${wikiCond.title}"`,
               createdBy: 'auto_link',
             });
-            if (link) stats.conditionLinks++;
+            if (link?.failed) stats.errors++;
+            else if (link) stats.conditionLinks++;
           }
         }
       }
@@ -694,7 +701,8 @@ const KnowledgeBridge = {
               linkReason: `Seasonal match: "${kbEntry.title}" ↔ "${wikiEntry.title}"`,
               createdBy: 'auto_link',
             });
-            if (link) stats.seasonalLinks++;
+            if (link?.failed) stats.errors++;
+            else if (link) stats.seasonalLinks++;
           }
         }
       }
@@ -1347,8 +1355,10 @@ Return a JSON object with:
             await db('knowledge_base').where({ id: existing.id }).update({ ...kbData, updated_at: new Date() });
             stats.updated++;
 
-            // Ensure bridge link exists
-            await KnowledgeBridge.createLink({
+            // Ensure bridge link exists — a failed link write counts as a
+            // run error so the health check doesn't record a partial sync
+            // as healthy (createLink returns { failed } instead of throwing).
+            const link = await KnowledgeBridge.createLink({
               kbEntryId: existing.id,
               wikiEntryId: wiki.id,
               linkType: 'data_enrichment',
@@ -1356,6 +1366,7 @@ Return a JSON object with:
               linkReason: 'Wiki-to-Claudeopedia sync',
               createdBy: 'wiki_sync',
             });
+            if (link?.failed) stats.errors++;
           } else {
             const [newEntry] = await db('knowledge_base').insert({
               ...kbData,
@@ -1367,7 +1378,7 @@ Return a JSON object with:
 
             if (newEntry) {
               stats.created++;
-              await KnowledgeBridge.createLink({
+              const link = await KnowledgeBridge.createLink({
                 kbEntryId: newEntry.id,
                 wikiEntryId: wiki.id,
                 linkType: 'data_enrichment',
@@ -1375,6 +1386,7 @@ Return a JSON object with:
                 linkReason: 'Wiki-to-Claudeopedia initial sync',
                 createdBy: 'wiki_sync',
               });
+              if (link?.failed) stats.errors++;
             }
           }
         } catch (entryErr) {
