@@ -783,6 +783,11 @@ describe('executeMerge', () => {
       .rejects.toThrow(/two different people/);
   });
 
+  it('registers customer_alerts with the rowwise drop-collisions handler (shared advisory rows fold, never abort — codex #3390)', () => {
+    const { UNIQUE_COLLISION_HANDLERS, repointRowwiseDropCollisions } = dedupe._test;
+    expect(UNIQUE_COLLISION_HANDLERS.customer_alerts).toBe(repointRowwiseDropCollisions);
+  });
+
   it('moves non-colliding CRM tags and drops duplicate tags instead of aborting', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };
