@@ -259,35 +259,10 @@ async function retryPendingReconciliations() {
     }
   }
 
-  // Reversal side: an unlink whose reconciliation reversal failed left
-  // suggestion.reconcileReversalPending = <payoutId>. Retry under the
-  // ROW-SPECIFIC author guard (atomic inside reconcilePayout) — the reversal
-  // can only undo the reconciliation THIS row authored; a guard miss means a
-  // human or a newer claim owns the state now, which also resolves the flag.
-  const reversals = await db('bank_transactions')
-    .whereRaw("suggestion->>'reconcileReversalPending' is not null")
-    .select('id', 'amount', 'suggestion');
-  let reversed = 0;
-  for (const row of reversals) {
-    const payoutId = row.suggestion && row.suggestion.reconcileReversalPending;
-    if (!payoutId) continue;
-    try {
-      const { reconcilePayout } = require('./stripe-banking');
-      const result = await reconcilePayout(payoutId, Number(row.amount), `Unlinked from bank import row ${row.id} (retry)`, `bank-import:${row.id}`, 'rejected', { onlyIfReconciledBy: `bank-import:${row.id}` });
-      if (!(result && result.skipped)) reversed++;
-      await db('bank_transactions').where({ id: row.id })
-        .update({ suggestion: db.raw("suggestion - 'reconcileReversalPending'"), updated_at: new Date() });
-    } catch (err) {
-      // a deleted payout can never be reversed — resolve the flag
-      if (/payout not found/i.test(err.message)) {
-        await db('bank_transactions').where({ id: row.id })
-          .update({ suggestion: db.raw("suggestion - 'reconcileReversalPending'"), updated_at: new Date() });
-      } else {
-        logger.warn(`[bank-import] reconciliation reversal retry for payout ${payoutId} failed again: ${err.message}`);
-      }
-    }
-  }
-  return { pending: pending.length, retried, reversalsPending: reversals.length, reversed };
+  // (Reversals need no sweep: the unlink route runs its unlink CAS inside
+  // the reversal's own transaction, so a failed reversal rolls the unlink
+  // back — there is never a committed unlink awaiting reversal.)
+  return { pending: pending.length, retried };
 }
 
 // A deleted expense/payout SET-NULLs the FK but leaves the status behind —
@@ -323,7 +298,7 @@ async function runDeterministicMatching() {
     .where({ status: 'unmatched' })
     .orderBy('txn_date', 'asc')
     .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'suggestion');
-  const summary = { scanned: unmatched.length, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, reconcileReversed: reconciliation.reversed };
+  const summary = { scanned: unmatched.length, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending };
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);

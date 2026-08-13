@@ -49,9 +49,6 @@ function makeBuilder(table) {
       if (b.whereRaw.mock.calls.some(c => String(c[0]).includes('reconcilePending'))) {
         rows = rows.filter(r => r.suggestion && r.suggestion.reconcilePending === true);
       }
-      if (b.whereRaw.mock.calls.some(c => String(c[0]).includes('reconcileReversalPending'))) {
-        rows = rows.filter(r => r.suggestion && r.suggestion.reconcileReversalPending);
-      }
     }
     return Promise.resolve(rows).then(resolve, reject);
   };
@@ -392,17 +389,6 @@ describe('runDeterministicMatching', () => {
     expect(reconcilePayout).toHaveBeenLastCalledWith('po-1', 2418.66, expect.stringContaining('retry'), 'bank-import:bt-1', 'confirmed',
       expect.objectContaining({ onlyIfUnreconciled: true, precondition: expect.any(Function) }));
     const cleared = state.updates.find(u => typeof u.patch.suggestion === 'string' && u.patch.suggestion.includes("- 'reconcilePending'"));
-    expect(cleared).toBeDefined();
-  });
-
-  test('a pending reconciliation REVERSAL retries under the reconciled-by guard and clears', async () => {
-    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'unmatched', suggestion: { lastUnlink: { was: 'matched_payout', payoutId: 'po-1' }, reconcileReversalPending: 'po-1' } }];
-    const summary = await runDeterministicMatching();
-    expect(summary.reconcileReversed).toBe(1);
-    // the guard is ROW-SPECIFIC: only THIS row's reconciliation can be undone
-    expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('retry'), 'bank-import:bt-1', 'rejected', { onlyIfReconciledBy: 'bank-import:bt-1' });
-    // jsonb key-subtraction clears only the flag (lastUnlink survives by construction)
-    const cleared = state.updates.find(u => typeof u.patch.suggestion === 'string' && u.patch.suggestion.includes("- 'reconcileReversalPending'"));
     expect(cleared).toBeDefined();
   });
 

@@ -1644,7 +1644,7 @@ router.use('/bank-import', (req, res, next) => {
 
 router.post('/bank-import/upload', async (req, res, next) => {
   try {
-    const { accountLabel, accountType, filename, csv, forceDuplicates } = req.body || {};
+    const { accountLabel, accountType, filename, csv, forceDuplicates, forceRowHashes } = req.body || {};
     if (!accountLabel || typeof accountLabel !== 'string' || accountLabel.length > 100) {
       return res.status(400).json({ error: 'accountLabel is required (max 100 chars)' });
     }
@@ -1694,12 +1694,19 @@ router.post('/bank-import/upload', async (req, res, next) => {
     // Force path for the split-across-uploads case: a genuinely distinct
     // identical transaction in a SEPARATE file hashes like a re-upload and
     // is skipped above. When the operator confirms these are real, continue
-    // each row's ordinal past the stored copies until a hash inserts. Bounded
-    // walk; re-posting force again inserts ANOTHER copy, so the client
-    // confirms before sending it.
+    // each row's ordinal past the stored copies until a hash inserts.
+    // ⛔ Force is scoped to EXPLICIT row hashes from the FIRST response's
+    // duplicate set: on the confirming re-post every previously inserted row
+    // conflicts too, so an unscoped force would duplicate the whole
+    // statement, not just the skipped rows.
     let forced = 0;
     if (forceDuplicates === true) {
-      for (const r of duplicateRows) {
+      if (!Array.isArray(forceRowHashes) || forceRowHashes.length === 0 || forceRowHashes.length > 10000
+        || !forceRowHashes.every(h => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h))) {
+        return res.status(400).json({ error: 'forceDuplicates requires forceRowHashes: the duplicateHashes array from the original upload response' });
+      }
+      const forceSet = new Set(forceRowHashes);
+      for (const r of duplicateRows.filter(d => forceSet.has(d.row_hash))) {
         for (let ord = r.ordinal + 1; ord <= r.ordinal + 25; ord++) {
           const [ins] = await db('bank_transactions')
             .insert({
@@ -1727,6 +1734,7 @@ router.post('/bank-import/upload', async (req, res, next) => {
       imported: inserted.length + forced,
       forced,
       duplicates: duplicateRows.length,
+      duplicateHashes: duplicateRows.map(r => r.row_hash),
       duplicateSamples: duplicateRows.slice(0, 10).map(r => ({ txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
       skipped,
       matching,
@@ -1906,10 +1914,14 @@ router.post('/bank-import/:id/unignore', async (req, res, next) => {
 // Undo a wrong link — automatic, manual, or a mis-picked ambiguous candidate.
 // The row returns to unmatched with the undo recorded in suggestion.lastUnlink;
 // the ledger side is never touched for expenses (deleting a real expense is an
-// Expenses-tab decision). For payouts, the reconciliation echo is REVERSED
-// through the same stripe-banking mechanism (a 'rejected' bank_reconciliation
-// row) so /admin/banking sees the undo too — but ONLY when bank-import wrote
-// the reconciliation; a human's reconciliation is never overridden from here.
+// Expenses-tab decision). For payout rows, releasing the claim and REVERSING
+// the reconciliation echo are ONE transaction: the unlink CAS runs inside
+// reconcilePayout's precondition hook, so the payout stays claimed until the
+// reversal commits with it — another matching pass can never observe a
+// released-but-still-reconciled payout (which would link it with no echo and
+// then lose the reconciliation to this reversal). The row-specific author
+// guard means only the reconciliation THIS row authored can be undone; a
+// human's reconciliation is never overridden from here.
 // created_expense rows are deliberately excluded: the expense EXISTS because
 // of this row, so the undo is deleting it in the Expenses tab — the FK SET
 // NULL plus the matcher's self-heal then returns this row to unmatched.
@@ -1920,10 +1932,6 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
     if (!['matched_expense', 'matched_payout'].includes(row.status)) {
       return res.status(409).json({ error: `only matched rows can be unlinked (row is ${row.status})` });
     }
-    // For payout rows, the reversal-pending flag rides in the SAME update
-    // that unlinks the row — if the reversal below fails (or the process
-    // dies), the matching pass's sweep retries it instead of /admin/banking
-    // staying reconciled against an unlinked row forever.
     // a stale confirm-pending flag makes no sense on an unlinked row
     const { reconcilePending: _stalePending, ...baseSuggestion } = row.suggestion || {};
     const suggestion = {
@@ -1935,12 +1943,15 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
         ...(row.matched_expense_id ? { expenseId: row.matched_expense_id } : {}),
         ...(row.matched_payout_id ? { payoutId: row.matched_payout_id } : {}),
       },
-      ...(row.status === 'matched_payout' && row.matched_payout_id
-        ? { reconcileReversalPending: row.matched_payout_id }
-        : {}),
     };
-    const changed = await db('bank_transactions')
-      .where({ id: row.id, status: row.status })
+    // CAS on the status (and, for payouts, the exact payout id) so a
+    // concurrent change 409s instead of being clobbered.
+    const doUnlink = (dbOrTrx) => dbOrTrx('bank_transactions')
+      .where({
+        id: row.id,
+        status: row.status,
+        ...(row.status === 'matched_payout' ? { matched_payout_id: row.matched_payout_id } : {}),
+      })
       .update({
         status: 'unmatched',
         matched_expense_id: null,
@@ -1950,28 +1961,40 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
         suggestion,
         updated_at: new Date(),
       });
-    if (!changed) return res.status(409).json({ error: 'row changed mid-flight — reload' });
-    let reconciliation = null;
-    if (suggestion.reconcileReversalPending) {
-      try {
-        const { reconcilePayout } = require('../services/stripe-banking');
-        // The onlyIfReconciledBy guard is checked under a row lock INSIDE
-        // reconcilePayout, and the author is ROW-SPECIFIC: this reversal can
-        // only undo the reconciliation THIS row authored. A human's
-        // reconciliation — or a newer claim by another bank row after this
-        // unlink released the payout — is skipped atomically, never clobbered.
-        const result = await reconcilePayout(row.matched_payout_id, Number(row.amount), `Unlinked from bank import row ${row.id}`, `bank-import:${row.id}`, 'rejected', { onlyIfReconciledBy: `bank-import:${row.id}` });
-        reconciliation = result && result.skipped ? 'kept' : 'reversed';
-        // jsonb key-subtraction: clears ONLY the flag, preserving whatever
-        // suggestion state a concurrent pass may have written since
-        await db('bank_transactions').where({ id: row.id })
-          .update({ suggestion: db.raw("suggestion - 'reconcileReversalPending'"), updated_at: new Date() });
-      } catch (err) {
-        logger.warn(`[bank-import] row ${row.id} unlinked; reconciliation reversal pending retry: ${err.message}`);
-        reconciliation = 'reversal_pending';
-      }
+
+    if (row.status === 'matched_expense' || !row.matched_payout_id) {
+      const changed = await doUnlink(db);
+      if (!changed) return res.status(409).json({ error: 'row changed mid-flight — reload' });
+      return res.json({ success: true, reconciliation: null });
     }
-    res.json({ success: true, reconciliation });
+
+    const { reconcilePayout } = require('../services/stripe-banking');
+    let unlinked = false;
+    let result;
+    try {
+      result = await reconcilePayout(row.matched_payout_id, Number(row.amount), `Unlinked from bank import row ${row.id}`, `bank-import:${row.id}`, 'rejected', {
+        onlyIfReconciledBy: `bank-import:${row.id}`,
+        // the unlink itself happens HERE, inside the reversal's transaction —
+        // reversal failure rolls the unlink back (the claim is kept until the
+        // reversal completes; the operator just retries)
+        precondition: async (trx) => {
+          unlinked = (await doUnlink(trx)) === 1;
+          return unlinked;
+        },
+      });
+    } catch (err) {
+      logger.warn(`[bank-import] unlink of row ${row.id} rolled back — reconciliation reversal failed: ${err.message}`);
+      return res.status(502).json({ error: `reconciliation reversal failed (${err.message}) — the row is still linked; retry` });
+    }
+    if (result && result.skipped && !unlinked) {
+      // Author-guard miss: there is no bank-import reconciliation by this
+      // row to reverse (never echoed, human owns it, or a newer claim owns
+      // it) — plain unlink, nothing to undo on the banking side.
+      const changed = await doUnlink(db);
+      if (!changed) return res.status(409).json({ error: 'row changed mid-flight — reload' });
+      return res.json({ success: true, reconciliation: 'kept' });
+    }
+    res.json({ success: true, reconciliation: 'reversed' });
   } catch (err) { next(err); }
 });
 
