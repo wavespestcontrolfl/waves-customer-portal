@@ -493,6 +493,21 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
     expect(verdict.reason).toMatch(/^ungrounded_novel_term:/);
   });
 
+  test('a recombined product name never rides on a grounded sibling', () => {
+    // Grounding carries "Bifen IT"; "Bifen SC" shares every significant
+    // word ("sc" is under the threshold) — exact-phrase grounding must
+    // reject it (codex round: fixed-product rule).
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { products: ['Bifen IT'], recentCalls: ['Asked about ants in garage'] },
+    };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Apply Bifen SC to the perimeter'] },
+      grounding,
+    );
+    expect(verdict.reason).toMatch(/^ungrounded_novel_product:/);
+  });
+
   test('a clean response yields the sanitized body', () => {
     const verdict = validateBriefJson({ ...CLEAN_LLM_JSON }, GROUNDING);
     expect(verdict.reason).toBeUndefined();

@@ -648,19 +648,18 @@ async function assembleGrounding(svc, dbh = db) {
     sinceLastVisit,
     openScope,
     catalogVocabulary,
-    // Per-section population counts, stored in the brief. Some grounding
-    // sources swallow their own DB errors into empty results (the context
-    // aggregator's legs, since-last-visit) — a populated section
-    // collapsing to zero between runs is treated as a suspected outage by
-    // the regression guard in generateVisitBrief, not as truth.
+    // Per-section population counts for the FAIL-SOFT sources only (the
+    // context aggregator's legs and since-last-visit swallow their own DB
+    // errors into empty results) — a populated one collapsing to zero
+    // between runs is treated as a suspected outage by the regression
+    // guard in generateVisitBrief. Strict sources (history, products,
+    // prefs, estimate) propagate failures and abort generation, so an
+    // empty result there IS truth (e.g. a corrected recap removing its
+    // last product) and must never be held by the guard.
     coverage: {
-      history: history.lineRecords.length,
-      products: productRows.length,
       calls: (context?.recentCalls || []).length,
       flags: (context?.flags || []).length,
       sinceLastVisit: sinceLastVisit ? 1 : 0,
-      prefs: prefs ? 1 : 0,
-      estimate: openScope?.sourceEstimate ? 1 : 0,
     },
     // Every free-text slice is run through the shared access-code redactor
     // at this boundary (belt over the context-aggregator's own layer):
@@ -891,10 +890,19 @@ function findUngroundedClaim(body, grounding) {
   // verb-object regexes span a field boundary and manufacture phantom
   // references ("... Bifen IT" + "Chemical-sensitivity ..." is not a
   // product called "Bifen IT Chemical").
+  // Product references ground on the EXACT normalized phrase — the fuzzy
+  // every-word tier would let a renamed/recombined variant ("Bifen SC")
+  // ride on a grounded sibling ("Bifen IT") because short suffixes fall
+  // under the significant-word threshold. Targets keep the fuzzy tier
+  // (word order and articles vary in organism prose).
+  const groundedExact = (term) => {
+    const phrase = String(term || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
+    return !phrase || groundedText.includes(phrase);
+  };
   for (const field of outputFields) {
     const refs = extractOutputReferences(String(field));
     for (const term of refs.products) {
-      if (!isGroundedReference(term, groundedText)) return { kind: 'novel_product', term };
+      if (!groundedExact(term)) return { kind: 'novel_product', term };
     }
     for (const term of refs.targets) {
       if (!isGroundedReference(term, groundedText)) return { kind: 'novel_target', term };
@@ -1093,12 +1101,14 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {}, for
     return { skipped: true, reason: 'unchanged', brief: existing };
   }
 
-  // Grounding-regression guard (belt over the strict lookups): several
-  // grounding sources swallow their own DB errors into empty results, so
-  // a transient outage can change the hash and read as "data gone". A
-  // section that was populated in the stored brief but is empty now is a
-  // suspected outage — keep the prior brief. The admin regenerate route
-  // passes force to accept a genuine data removal.
+  // Grounding-regression guard (belt over the strict lookups): the
+  // FAIL-SOFT sources tracked in coverage swallow their own DB errors
+  // into empty results, so a transient outage can change the hash and
+  // read as "data gone". A tracked section that was populated in the
+  // stored brief but is empty now is a suspected outage — keep the prior
+  // brief. Strict sources are deliberately NOT tracked (their empties are
+  // truth). The admin regenerate route passes force to accept a genuine
+  // data removal in a fail-soft source too.
   if (
     !force
     && String(svc.pre_service_brief_type || '') === VISIT_BRIEF_TYPE
