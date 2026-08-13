@@ -53,6 +53,17 @@ function priorMintStillLive(row, now) {
 // mintReportClickEstimate(trx, args) → { estimateId, token, url, reused }
 // Runs INSIDE the CTA writer's transaction — a throw rolls back the request
 // row, the analytics event, and every estimate write together.
+// RELATIVE estimate path (uncapped audit r4 P1): the report and estimate
+// pages are one SPA, and the tapping browser is already ON the right origin
+// — prod, preview, or dev. An absolute prod URL (estimateViewUrl) fails the
+// client's same-origin guard everywhere except prod, silently recording the
+// request but never opening the estimate. The client resolves this against
+// its own origin; nothing durable stores it (the request-row linkage keeps
+// only id/token).
+function estimatePathFor(token) {
+  return `/estimate/${token}`;
+}
+
 // Parse a stored estimates row's mint marker (jsonb hydrates as object,
 // legacy text columns as string).
 function reportCtaMintOf(row) {
@@ -78,7 +89,6 @@ async function mintReportClickEstimate(trx, {
   deps = {},
 }) {
   const {
-    estimateViewUrl,
     estimateExpiresAt,
     serverRecomputeFromEstimateData,
   } = deps.persistence || require('../admin-estimate-persistence');
@@ -119,7 +129,7 @@ async function mintReportClickEstimate(trx, {
       return {
         estimateId: match.id,
         token: match.token,
-        url: estimateViewUrl(match.token),
+        url: estimatePathFor(match.token),
         reused: true,
       };
     }
@@ -365,7 +375,7 @@ async function mintReportClickEstimate(trx, {
     updated_at: nowDate,
   });
 
-  return { estimateId: created.id, token, url: estimateViewUrl(token), reused: false };
+  return { estimateId: created.id, token, url: estimatePathFor(token), reused: false };
 }
 
 module.exports = { mintReportClickEstimate, ClickEstimateDriftError, priorMintStillLive };

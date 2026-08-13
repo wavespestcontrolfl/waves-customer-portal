@@ -116,7 +116,10 @@ describe('mintReportClickEstimate', () => {
     const { trx, ops } = fakeTrx();
     const out = await mintReportClickEstimate(trx, baseArgs());
     expect(out.reused).toBe(false);
-    expect(out.url).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/estimate\//);
+    // RELATIVE path (uncapped audit r4 P1): an absolute prod URL fails the
+    // client's same-origin guard on preview/dev origins — the client
+    // resolves this against its own origin.
+    expect(out.url).toMatch(/^\/estimate\/[A-Za-z0-9_-]+$/);
     const insert = ops.inserts.find((i) => i.table === 'estimates');
     expect(insert.row.status).toBe('sent');
     expect(insert.row.sent_at).toBeTruthy();
@@ -169,7 +172,7 @@ describe('mintReportClickEstimate', () => {
     const { trx, ops } = fakeTrx({ priorEstimateRows: [priorMint()] });
     const out = await mintReportClickEstimate(trx, baseArgs({ deduped: true }));
     expect(out.reused).toBe(true);
-    expect(out.url).toContain('tok-old');
+    expect(out.url).toBe('/estimate/tok-old');
     expect(ops.inserts).toHaveLength(0);
     expect(ops.updates).toHaveLength(0);
   });

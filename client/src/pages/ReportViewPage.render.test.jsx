@@ -560,22 +560,23 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
     Reflect.deleteProperty(window, 'location');
     window.location = { ...originalLocation, assign: assignSpy, reload: vi.fn() };
     try {
-      // Same-origin as THIS page (the report and estimate pages are one
-      // SPA) — the guard compares against the browser's actual origin, so
-      // prod and preview environments both redirect on their own host.
-      const sameOriginUrl = `${window.location.origin}/estimate/tok-abc`;
+      // The REAL server-composed value (uncapped audit r4 P1): the mint
+      // returns a RELATIVE /estimate/:token path, which resolves against
+      // the browser's actual origin — prod, preview, and dev all redirect
+      // on their own host.
+      const serverComposedUrl = '/estimate/tok-abc';
       mountWithFetch(vi.fn(async (url, init) => {
         if (init && init.method === 'POST') {
           return {
             ok: true,
             status: 200,
-            json: async () => ({ ok: true, estimateUrl: sameOriginUrl }),
+            json: async () => ({ ok: true, estimateUrl: serverComposedUrl }),
           };
         }
         return { ok: true, status: 200, json: async () => payload };
       }));
       fireEvent.click(await screen.findByRole('button', { name: 'Keep My Home Protected' }));
-      await waitFor(() => expect(assignSpy).toHaveBeenCalledWith(sameOriginUrl));
+      await waitFor(() => expect(assignSpy).toHaveBeenCalledWith(`${window.location.origin}/estimate/tok-abc`));
       // The recorded-request confirmation renders BEHIND the navigation, so
       // a blocked redirect still shows durable-state copy, never a dead card.
       expect(screen.getByText(/Request received/)).toBeInTheDocument();

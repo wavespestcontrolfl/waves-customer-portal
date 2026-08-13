@@ -67,9 +67,12 @@ describe('opt-out key lockstep (contract)', () => {
   const path = require('path');
   const read = (p) => fs.readFileSync(path.join(__dirname, p), 'utf8');
 
-  test('both enforcement modules and the mint reference the same marker key', () => {
+  test('every enforcement module and the mint reference the same marker key', () => {
     expect(read('../services/estimate-follow-up.js')).toMatch(/noEngagementAutomation === true/);
     expect(read('../services/estimate-engagement-engine.js')).toMatch(/noEngagementAutomation === true/);
+    // The auto-renew sender extends AND emails — both forbidden for
+    // opted-out estimates (uncapped audit r4 P1).
+    expect(read('../services/estimate-auto-renew.js')).toMatch(/noEngagementAutomation === true/);
     expect(read('../services/service-report/click-estimate-mint.js')).toMatch(/noEngagementAutomation: true/);
   });
 });
