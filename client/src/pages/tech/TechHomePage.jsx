@@ -1268,7 +1268,11 @@ function RainOutSheet({ service, onClose, onDone }) {
   ];
   const selectedConflicts = conflictsFor(selected);
   const conflictLabel = (c) => {
-    const who = c.customerName || (c.isHold ? 'an estimate-slot hold' : 'another appointment');
+    // A self-collision is two of THIS route's own stops projected onto one
+    // window — naming a customer would be wrong, the fix is a different time.
+    const who = c.isRouteSelfCollision
+      ? 'another stop on this route landing at the same time'
+      : (c.customerName || (c.isHold ? 'an estimate-slot hold' : 'another appointment'));
     const when = c.windowStart
       ? `, ${fmtHHMM(c.windowStart)}${c.windowEnd ? `-${fmtHHMM(c.windowEnd)}` : ''}`
       : '';

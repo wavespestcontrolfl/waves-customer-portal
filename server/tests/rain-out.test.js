@@ -2148,6 +2148,67 @@ describe('rain-out service', () => {
       }));
     });
 
+    test('route scope: a windowless same-day sibling collides with the anchor\'s own target', async () => {
+      // commit() hands a windowless same-day mover `target.window` verbatim,
+      // and a forward push runs tail-first — so the sibling books and texts
+      // FIRST, then the anchor SLOT_TAKENs against it. Its null window_start
+      // is inert to the overlap predicate, so the anchor probe cannot see it
+      // either: without this the sheet showed nothing at all.
+      findConflictingVisits.mockResolvedValue([]);
+      wireDb({
+        scheduled_services: [
+          chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: etDateString(), window_start: '09:00', route_order: 1,
+            }),
+          }),
+          chain({ rows: [{ id: 'svc-2', window_start: null, window_end: null }] }),
+        ],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: etDateString(), window: { start: '14:00', end: '15:00' } },
+      });
+
+      expect(result.conflicts).toEqual([]);
+      expect(result.routeConflicts).toEqual([expect.objectContaining({
+        isRouteSelfCollision: true,
+        windowStart: '14:00',
+        windowEnd: '15:00',
+        customerName: null,
+      })]);
+    });
+
+    test('route scope: two siblings sharing a window collide with each other', async () => {
+      findConflictingVisits.mockResolvedValue([]);
+      wireDb({
+        scheduled_services: [
+          chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: etDateString(), window_start: '09:00', route_order: 1,
+            }),
+          }),
+          chain({
+            rows: [
+              { id: 'svc-2', window_start: '10:00:00', window_end: '11:00:00' },
+              { id: 'svc-3', window_start: '10:00:00', window_end: '11:00:00' },
+            ],
+          }),
+        ],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: etDateString(), window: { start: '14:00', end: '15:00' } },
+      });
+
+      // Both shift +5h onto the same 15:00-16:00 landing.
+      expect(result.routeConflicts).toEqual([expect.objectContaining({
+        isRouteSelfCollision: true, windowStart: '15:00', windowEnd: '16:00',
+      })]);
+    });
+
     test('route scope: a day move keeps each sibling\'s own window on the target date', async () => {
       findConflictingVisits.mockResolvedValue([]);
       wireDb({

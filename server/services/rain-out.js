@@ -751,27 +751,61 @@ async function routeScopeConflicts({ serviceId, service, route, target, nameScop
     const end = toHHMM(job.window_end);
     return (start && end) ? { start, end } : null;
   });
-  // One probe per DISTINCT landing window — a windowless same-day route
-  // collapses onto the anchor's window, and the anchor probe already
-  // covered that one.
-  const seen = new Set([`${target.window.start}|${target.window.end}`]);
-  const distinct = windows.filter((w) => {
-    if (!w) return false;
+  // Two members projected onto the SAME landing window is a definite
+  // failure, and the only member-vs-member shape that can be judged from
+  // here — no schedule state needed, just the projection (codex #3375
+  // P2). The live case is a same-day WINDOWLESS sibling: commit gives it
+  // `target.window` verbatim (not an order-preserving shift of its own),
+  // and a forward push runs tail-first, so the sibling books and texts
+  // FIRST and the anchor then SLOT_TAKENs against it. The anchor probe
+  // can't see it either — a null window_start is inert to the overlap
+  // predicate — so without this the sheet shows nothing at all. Two
+  // siblings sharing a current window collide the same way. These are the
+  // shapes commit() documents as deliberately loud; now they're loud
+  // BEFORE the tap. Ordering shapes (a uniform shift of an already-ordered
+  // route) still can't be judged statically and stay out.
+  const anchorKey = `${target.window.start}|${target.window.end}`;
+  const landings = new Map([[anchorKey, target.window]]);
+  const collidingKeys = new Set();
+  for (const w of windows) {
+    if (!w) continue;
     const key = `${w.start}|${w.end}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+    if (landings.has(key)) collidingKeys.add(key);
+    else landings.set(key, w);
+  }
+  const selfCollisions = [...collidingKeys].map((key) => {
+    const w = landings.get(key);
+    return {
+      id: `route-collision:${key}`,
+      windowStart: w.start,
+      windowEnd: w.end,
+      customerName: null,
+      serviceType: null,
+      isHold: false,
+      isRouteSibling: false,
+      // The sheets render dedicated copy: this is two of THIS route's own
+      // stops, not someone else's booking.
+      isRouteSelfCollision: true,
+    };
   });
-  if (!distinct.length) return [];
 
-  const probed = await Promise.all(distinct.map((w) => conflictsForTarget(
-    serviceId, targetDate, w, { nameScope, excludeServiceIds: sweptIds },
-  )));
+  // One external probe per DISTINCT landing window — the anchor's own
+  // window is already covered by the anchor probe.
+  const distinct = [...landings.entries()]
+    .filter(([key]) => key !== anchorKey)
+    .map(([, w]) => w);
+  const probed = distinct.length
+    ? await Promise.all(distinct.map((w) => conflictsForTarget(
+      serviceId, targetDate, w, { nameScope, excludeServiceIds: sweptIds },
+    )))
+    : [];
   const byId = new Map();
   for (const conflict of probed.flat()) {
     if (!byId.has(conflict.id)) byId.set(conflict.id, conflict);
   }
-  return [...byId.values()].slice(0, TARGET_CONFLICT_LIMIT);
+  // Self-collisions first: they're certain, where a probe result can go
+  // stale between here and the tap.
+  return [...selfCollisions, ...byId.values()].slice(0, TARGET_CONFLICT_LIMIT);
 }
 
 /**
