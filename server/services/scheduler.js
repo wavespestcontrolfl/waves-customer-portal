@@ -2534,7 +2534,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // HOURLY :15, 5AM–5PM ET — Pre-visit pocket-reference briefs (owner GO
+  // HALF-HOURLY :15/:45, 5AM–7:45PM ET — Pre-visit pocket-reference briefs (owner GO
   // 2026-08-06): generate the visit brief for every one of TODAY's
   // scheduled visits. The 5:15 pass runs after overnight reschedules
   // settle and before route start. DARK unless GATE_PREVISIT_BRIEF=true —
@@ -2542,13 +2542,15 @@ function initScheduledJobs() {
   // here too so the dark path never takes the runExclusive advisory lock.
   // :15 is an unoccupied minute in the 5am block (0/10/30/45 taken).
   // =========================================================================
-  // The 5:15 pass is the primary sweep; the hourly 6:15–17:15 passes are
-  // the idempotent backstop for visits BOOKED (or a gate FLIPPED) after
-  // it ran — without them a same-day booking would never receive a brief.
-  // Near-free on stable routes: an unchanged grounding hash skips both
-  // the LLM call and the write, and the runExclusive lock is shared so
-  // overlapping ticks can't double-run.
-  cron.schedule('15 5-17 * * *', async () => {
+  // The 5:15 pass is the primary sweep; the later passes are the
+  // idempotent backstop for visits BOOKED (or a gate FLIPPED) after it
+  // ran — without them a same-day booking would never receive a brief.
+  // The window runs through 19:45 because the dispatch grids book
+  // half-hour slots through 19:30 (TimeGridDay). Near-free on stable
+  // routes: an unchanged grounding hash skips both the LLM call and the
+  // write, and the runExclusive lock is shared so overlapping ticks
+  // can't double-run.
+  cron.schedule('15,45 5-19 * * *', async () => {
     const PrevisitBrief = require('./previsit-brief');
     if (!PrevisitBrief.briefGateEnabled()) return;
     logger.info('Running: pre-visit brief sweep');

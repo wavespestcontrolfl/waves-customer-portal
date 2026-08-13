@@ -707,6 +707,29 @@ describe('lawn bounded product section', () => {
     expect(mockWindowContext.mock.calls[0][1].grassTrack).toBe('st_augustine');
   });
 
+  test('a protocol-wide gate demotes every product to conditional (fail closed)', async () => {
+    mockSummarize.mockReturnValue({
+      window: { key: 'aug', month: 8, title: 'August window', visitType: 'granular', goal: 'Summer stress' },
+      products: [
+        { productName: 'Prodiamine 65 WDG', role: 'pre_emergent', applicationMode: 'spray', ratePer1000: 0.185, rateUnit: 'oz', defaultInPlan: true },
+      ],
+      gates: [
+        { key: 'valid_calibration_required', type: 'equipment', severity: 'blocking', title: 'Calibration current', ruleText: 'Spreader calibration must be within 30 days.' },
+      ],
+    });
+    const state = useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const { brief } = storedBrief(state);
+    // A blocked product must never present as the fixed list — it ships
+    // conditional, with the protocol gates attached for the tech.
+    expect(brief.product_guidance.products).toEqual([]);
+    expect(brief.product_guidance.conditional_products.map((p) => p.name)).toEqual(['Prodiamine 65 WDG']);
+    expect(brief.product_guidance.protocol_gates.map((g) => g.key)).toEqual(['valid_calibration_required']);
+  });
+
   test('unknown grass track (no assignment) fails CLOSED — no guessed window', async () => {
     mockGrassContext.mockResolvedValueOnce({ trackKey: null });
     const state = useDb(baseResponses({

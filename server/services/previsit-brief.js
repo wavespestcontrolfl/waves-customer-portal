@@ -369,13 +369,27 @@ async function loadLawnWindowGuidance(dbh, svc) {
     if (!summary) {
       return { ...NO_LAWN_GUIDANCE, reason: 'no_active_protocol' };
     }
+    // PROTOCOL-level gates (calibration requirements, ordinance blackouts,
+    // annual-rate ceilings) apply to the whole visit and cannot be
+    // evaluated here — fail closed: while any exist, NO product presents
+    // as fixed; everything ships as conditional with the protocol gates
+    // attached so the tech sees the constraint (never a blocked product
+    // as the fixed list).
+    const protocolGates = (summary.gates || []).map((g) => ({
+      key: g.key || null,
+      type: g.type || null,
+      severity: g.severity || null,
+      title: cleanText(g.title, 160),
+      ruleText: cleanText(g.ruleText, 300),
+    }));
     const shaped = (summary.products || [])
       .map((p) => ({
         shapedEntry: shapeWindowProduct(p),
-        // FIXED only when default-in-plan AND gate-free — a default row
-        // with gates (maxTempF, soil conditions, blackout sensitivity) is
-        // still conditional guidance.
-        fixed: p.defaultInPlan === true && !hasProductGates(p),
+        // FIXED only when default-in-plan AND gate-free at BOTH layers —
+        // a default row with product gates (maxTempF, soil conditions,
+        // blackout sensitivity) or any protocol-wide gate is still
+        // conditional guidance.
+        fixed: p.defaultInPlan === true && !hasProductGates(p) && protocolGates.length === 0,
         gates: (p.gates && typeof p.gates === 'object') ? p.gates : {},
       }))
       .filter((p) => p.shapedEntry.name);
@@ -384,6 +398,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
       available: !!summary.window,
       grassTrack: grass.trackKey || null,
       assignedWindowKey,
+      protocol_gates: protocolGates,
       window: summary.window ? {
         key: summary.window.key,
         month: summary.window.month,
