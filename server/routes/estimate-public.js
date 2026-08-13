@@ -12209,19 +12209,21 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
     // leave stale metadata on the request (local audit P1s). Never trusts
     // the request body (a token holder could forge what "the estimate
     // showed").
-    const basisFor = (row) => {
+    const basisFor = async (row) => {
       if (!row) return null;
-      // What the customer SAW takes precedence (codex #3376 P1): engine-
-      // input estimates display the anchor-derived basis stamped onto the
-      // pricing bundle (measuredBasisAnchor, cache-carried) — recording the
-      // stored-data figure would re-open the shown-vs-recorded divergence
-      // the anchor exists to prevent. Cache miss falls back to the stored
-      // derivation, which is also what the view falls back to.
-      const cachedBundle = getEstimatePricingCache(row);
-      const anchor = cachedBundle?.measuredBasisAnchor
-        ? (cachedBundle.measuredBasisAnchor.lawn_care || cachedBundle.measuredBasisAnchor.commercial_lawn)
-        : null;
-      const basis = anchor
+      // What the customer SAW is authoritative (codex #3376): the pricing
+      // bundle's own stamped sections. Cache hit reuses the displayed
+      // bundle; cache miss (>10 min, other process) REBUILDS it — the same
+      // pure-JS engine replay the view itself would run — instead of
+      // reverting to stored data the page may never have shown.
+      let bundle = getEstimatePricingCache(row);
+      if (!bundle) {
+        bundle = await buildPricingBundle(row).catch(() => null);
+      }
+      const stamped = (bundle?.services || []).find(
+        (s) => s && s.key !== 'bundle' && s.intelligence?.measuredBasis
+      )?.intelligence.measuredBasis;
+      const basis = stamped
         || (() => {
           const estResult = resolvePricingEstResult(parseEstimateDataSafe(row));
           return measuredBasisForSection('lawn_care', estResult)
@@ -21229,8 +21231,13 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // email/address match is hidden too; that slice challenges through
         // a reply instead.
         if (!estimate.customer_id && !estimate.customer_phone) return {};
-        const mrEstResult = resolvePricingEstResult(estimateDataForIntelligence);
-        return (measuredBasisForSection('lawn_care', mrEstResult) || measuredBasisForSection('commercial_lawn', mrEstResult))
+        // The flag mirrors what the page RENDERS: the pricing bundle's own
+        // stamped sections (codex #3376: engineInputs-only estimates carry
+        // the basis only on the regenerated bundle — a stored-data check
+        // would show the area line with no challenge action).
+        return (pricingBundle?.services || []).some(
+          (s) => s && s.key !== 'bundle' && s.intelligence?.measuredBasis
+        )
           ? { measurementReviewEnabled: true }
           : {};
       })()),

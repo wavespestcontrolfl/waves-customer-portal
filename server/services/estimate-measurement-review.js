@@ -90,7 +90,7 @@ async function createEstimateMeasurementReview({
   // with the locked row. Default fail-OPEN only for direct unit callers;
   // the route always passes the real check.
   callSideBlockedFor = async () => false,
-  // basisFor(estimateRow) -> { sqft, source } | null — the priced lawn basis,
+  // basisFor(estimateRow) -> Promise<{ sqft, source } | null> — the basis
   // built by the route from the SAME helpers that render the area line.
   // Called TWICE: pre-lock for the fast 404 (pest-only estimates take no
   // lawn challenge, indistinguishable from an unknown token) and AGAIN on
@@ -115,7 +115,7 @@ async function createEstimateMeasurementReview({
   // customer who accepted the price challenges through the office, not the
   // sheet — viewability alone still renders accepted estimates); and the
   // lawn-basis requirement (no lawn line, no lawn challenge).
-  if (!estimate || !viewabilityCheck(estimate) || !isMeasurementReviewEligible(estimate) || !basisFor(estimate)) {
+  if (!estimate || !viewabilityCheck(estimate) || !isMeasurementReviewEligible(estimate) || !(await basisFor(estimate))) {
     const err = new Error('Estimate not found');
     err.status = 404;
     throw err;
@@ -159,7 +159,7 @@ async function createEstimateMeasurementReview({
     // request waited on the lock. Status checks and the basis both re-derive
     // from the locked row; the stored metadata is the locked basis, never
     // the pre-lock read.
-    const lockedBasis = basisFor(lockedEstimate);
+    const lockedBasis = await basisFor(lockedEstimate);
     if (!viewabilityCheck(lockedEstimate) || !isMeasurementReviewEligible(lockedEstimate) || !lockedBasis) {
       const err = new Error('Estimate not found');
       err.status = 404;
