@@ -76,21 +76,25 @@ function slotPeople(customerRow) {
 }
 
 function matchPerson(person, candidates) {
-  // Identity evidence, strongest first — but a shared identifier is not
-  // identity on its own: households legitimately share an email or a phone
-  // line, and a number can transfer between listed people (Jane switching
-  // to Bob's existing number must not pair Jane with Bob). An email or
-  // phone match therefore identifies only when it is UNIQUE among the
-  // candidates; ambiguous matches fall through to the name, and the
-  // ambiguous pool is the last resort when nothing else disambiguates.
-  const emailHits = candidates.filter((c) => norm(person.email) && norm(person.email) === norm(c.email));
-  if (emailHits.length === 1) return emailHits[0];
-  const phoneHits = candidates.filter((c) => phoneKey(person.phone) && phoneKey(person.phone) === phoneKey(c.phone));
-  if (phoneHits.length === 1) return phoneHits[0];
-  return candidates.find((c) => norm(person.name) && norm(person.name) === norm(c.name))
-    || emailHits[0]
-    || phoneHits[0]
-    || null;
+  // Score every candidate by how many identifiers agree. Households share
+  // email addresses and phone lines, and an identifier can move between
+  // listed people (Jane adopting Bob's email or number must not pair Jane
+  // with Bob) — so a single shared identifier never outranks
+  // multi-identifier agreement: the person's own prior entry still agrees
+  // on name + the unchanged identifier. Identifier precedence
+  // (email > phone > name) only breaks equal-score ties; a tie that
+  // precedence can't break keeps the earliest slot, deterministically.
+  let best = null;
+  for (const c of candidates) {
+    const emailHit = norm(person.email) && norm(person.email) === norm(c.email) ? 1 : 0;
+    const phoneHit = phoneKey(person.phone) && phoneKey(person.phone) === phoneKey(c.phone) ? 1 : 0;
+    const nameHit = norm(person.name) && norm(person.name) === norm(c.name) ? 1 : 0;
+    const score = emailHit + phoneHit + nameHit;
+    if (!score) continue;
+    const rank = score * 8 + emailHit * 4 + phoneHit * 2 + nameHit;
+    if (!best || rank > best.rank) best = { candidate: c, rank };
+  }
+  return best ? best.candidate : null;
 }
 
 function changedFields(beforePerson, afterPerson) {

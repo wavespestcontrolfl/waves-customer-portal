@@ -166,6 +166,29 @@ describe('diffServiceContacts', () => {
     ]);
   });
 
+  test('adopting another listed contact\'s email does not swap identities', () => {
+    // Jane changes her email to Bob's existing address while Bob remains
+    // listed. Her name and phone still identify her own prior entry (2
+    // agreeing identifiers beat Bob's 1), so this is one email update.
+    const before = {
+      ...jane,
+      service_contact2_name: 'Bob Neighbor',
+      service_contact2_phone: '+15557775555',
+      service_contact2_email: 'bob@example.com',
+    };
+    const after = {
+      ...before,
+      service_contact_email: 'bob@example.com',
+    };
+    expect(diffServiceContacts(before, after)).toEqual([
+      expect.objectContaining({
+        action: 'service_contact_updated',
+        person: expect.objectContaining({ name: 'Jane Smith' }),
+        changed: ['email'],
+      }),
+    ]);
+  });
+
   test('a phone newly shared with another listed contact does not swap identities', () => {
     // Jane changes her phone to Bob's existing household number. Her email
     // and name are unchanged — she must match herself (one phone update),
