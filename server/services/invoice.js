@@ -4173,6 +4173,23 @@ const InvoiceService = {
         .where("notes", "like", `%${restoreMarker}%`)
         .first("id");
       if (existing) return null;
+      // NEVER restore beside live AR for the same visit (Codex on-site-switch
+      // P0 r9): a prepay that went unpaid until the visit COMPLETED had a
+      // fresh per-application invoice minted by completion — recreating the
+      // old setup-fee + first-application invoice next to it would bill the
+      // application twice. Anything non-terminal on the visit means the
+      // billing already moved on; leave it to manual review.
+      if (row.scheduled_service_id) {
+        const liveOnVisit = await trx("invoices")
+          .where({ scheduled_service_id: row.scheduled_service_id })
+          .whereNot({ id: row.id })
+          .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
+          .first("id", "invoice_number");
+        if (liveOnVisit) {
+          logger.warn(`[invoice] switch-supersede restore skipped for ${row.invoice_number || row.id}: visit already carries live invoice ${liveOnVisit.invoice_number || liveOnVisit.id} — manual review`);
+          return null;
+        }
+      }
       const lines = parseInvoiceLineItems(row.line_items)
         .map((li) => ({
           description: String(li?.description || ""),

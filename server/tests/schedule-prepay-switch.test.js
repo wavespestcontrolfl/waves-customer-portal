@@ -120,6 +120,7 @@ function stubTables({
   // on the customer) — NOT attached to this visit, so the resolver's
   // series-scoped select must never see them.
   invoicesById = {},
+  liveOnVisit = undefined,
   replacementRow = undefined,
   term = undefined,
   addonCount = 0,
@@ -138,14 +139,17 @@ function stubTables({
     let notesLike = false;
     let voidOnly = false;
     let whereId = null;
+    let byVisit = false;
     q.where = jest.fn((...args) => {
       if (args[0] === 'notes') notesLike = true;
       if (args[0] && typeof args[0] === 'object') {
         if (args[0].status === 'void') voidOnly = true;
         if (args[0].id !== undefined) whereId = args[0].id;
+        if (args[0].scheduled_service_id !== undefined) byVisit = true;
       }
       return q;
     });
+    q.whereNot = jest.fn(() => q);
     q.whereNull = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
     q.whereIn = jest.fn(() => q);
@@ -177,6 +181,7 @@ function stubTables({
       // with the stubbed replacement row.
       if (table === 'invoices') {
         if (notesLike) return replacementRow;
+        if (byVisit) return liveOnVisit;
         const rows = Array.isArray(invoices) ? invoices : [];
         if (whereId != null) {
           return rows.find((r) => String(r.id) === String(whereId)) || invoicesById[String(whereId)];
@@ -518,6 +523,9 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
     // Collect path: no delivery attempted.
     expect(mockSendInvoice).not.toHaveBeenCalled();
     expect(body.delivery).toBeNull();
+    // Overlap asserted twice: once entering the lock, once with the
+    // AUTHORITATIVE recomputed term start (Codex P0 r9).
+    expect(mockLockOverlap.mock.calls.length).toBeGreaterThanOrEqual(2);
     // Durable pointer from the retired row to its replacing prepay, so the
     // term-cancel sync can restore it long after this sheet is gone.
     const stamp = stubTables.updates.find((u) => u.table === 'invoices' && u.patch.notes);
@@ -653,6 +661,14 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     stubTables({ invoices: [{ ...VOIDED_ROW, notes: 'Some unrelated historical invoice' }] });
     const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
     expect(body.restored).toEqual([]);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
+
+  test('skips the restore when the visit already carries a LIVE invoice (completion re-billed)', async () => {
+    stubTables({ invoices: [VOIDED_ROW], liveOnVisit: { id: 'inv-completion', invoice_number: 'WPC-2026-0410' } });
+    const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(body.restored).toEqual([]);
+    expect(body.failed).toEqual([]);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 

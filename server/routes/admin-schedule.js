@@ -9768,8 +9768,9 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
         // Advisory lock + overlap re-check: a concurrent Customer 360 mint,
         // /secure selection, or a RETRY of this same switch serializes here
         // and collapses to one term.
+        const lockCustomerId = target.anchor.customer_id || target.visit.customer_id;
         await lockAndAssertNoAnnualPrepayOverlap(
-          trx, target.anchor.customer_id || target.visit.customer_id, mintPayload.termStart, false,
+          trx, lockCustomerId, mintPayload.termStart, false,
           'Customer already has an annual prepay term through',
         );
         // Lock the visit and the customer (same order as the accept
@@ -9781,6 +9782,15 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           .first('id', 'status', 'customer_id');
         if (!liveVisit || ['cancelled', 'canceled', 'rescheduled', 'no_show'].includes(String(liveVisit.status || ''))) {
           const err = new Error('This visit is no longer live — refresh the schedule');
+          err.switchConflict = true;
+          throw err;
+        }
+        // Identity pin (Codex P0 r9): the advisory lock above was taken for
+        // the PRE-transaction customer. A visit reassigned to a different
+        // customer in the gap would mint under a lock nobody holds for that
+        // customer — refuse instead.
+        if (String(liveVisit.customer_id) !== String(lockCustomerId)) {
+          const err = new Error('This visit was reassigned to a different customer — refresh the schedule');
           err.switchConflict = true;
           throw err;
         }
@@ -9822,6 +9832,15 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           throw err;
         }
         mintPayload = live.mintPayload;
+        // Re-assert overlap with the AUTHORITATIVE term start (Codex P0 r9):
+        // the first assert ran against the pre-transaction start, and a
+        // concurrent date move could shift the recomputed start into an
+        // existing term's window. Same advisory lock (idempotent within the
+        // transaction), fresh boundary.
+        await lockAndAssertNoAnnualPrepayOverlap(
+          trx, lockCustomerId, mintPayload.termStart, false,
+          'Customer already has an annual prepay term through',
+        );
 
         // Lock EVERY invoice attached to the series before resolving (Codex
         // P0 r5): the resolver's read and the CAS below must see the same
@@ -10071,6 +10090,21 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
             .first('id', 'invoice_number');
           if (existing) {
             return { restored: { replacedInvoiceId: id, invoiceId: existing.id, invoiceNumber: existing.invoice_number || null } };
+          }
+          // Same live-AR guard as the term-cancel restore (Codex P0 r9): a
+          // visit that completed while the prepay sat unpaid already minted
+          // its own per-application invoice — restoring the old one beside
+          // it would bill the application twice. Skip; billing moved on.
+          if (row.scheduled_service_id) {
+            const liveOnVisit = await trx('invoices')
+              .where({ scheduled_service_id: row.scheduled_service_id })
+              .whereNot({ id: row.id })
+              .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
+              .first('id', 'invoice_number');
+            if (liveOnVisit) {
+              logger.warn(`[schedule:prepay-switch] undo restore skipped for ${row.invoice_number || id}: visit already carries live invoice ${liveOnVisit.invoice_number || liveOnVisit.id}`);
+              return { skipped: true };
+            }
           }
           const lines = invoiceLineItems(row.line_items)
             .map((li) => ({

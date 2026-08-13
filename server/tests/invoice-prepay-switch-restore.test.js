@@ -38,20 +38,27 @@ const VOIDED_ROW = {
 // Conn stub shaped like a knex TRANSACTION (isTransaction) so the helper
 // restores inside the caller's trx: a candidate-id select, a row-locked
 // re-read, and the restore-marker probe.
-function conn({ rows = [VOIDED_ROW], replacement = undefined } = {}) {
+function conn({ rows = [VOIDED_ROW], replacement = undefined, liveOnVisit = undefined } = {}) {
   const fn = jest.fn(() => {
     const q = {};
     let notesLike = false;
     let whereId = null;
+    let byVisit = false;
     q.where = jest.fn((...args) => {
       if (args[0] === 'notes') notesLike = true;
-      if (args[0] && typeof args[0] === 'object' && args[0].id !== undefined) whereId = args[0].id;
+      if (args[0] && typeof args[0] === 'object') {
+        if (args[0].id !== undefined) whereId = args[0].id;
+        if (args[0].scheduled_service_id !== undefined) byVisit = true;
+      }
       return q;
     });
+    q.whereNot = jest.fn(() => q);
+    q.whereNotIn = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
     q.select = jest.fn(async () => rows.map((r) => ({ id: r.id })));
     q.first = jest.fn(async () => {
       if (notesLike) return replacement;
+      if (byVisit) return liveOnVisit;
       if (whereId != null) return rows.find((r) => String(r.id) === String(whereId));
       return undefined;
     });
@@ -104,6 +111,13 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
 
   test('a row with unreadable line items is skipped (warned), never minted at $0', async () => {
     const c = conn({ rows: [{ ...VOIDED_ROW, line_items: 'not-json' }] });
+    const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
+    expect(restored).toEqual([]);
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  test('NEVER restores beside live AR on the same visit — a completed visit already re-billed', async () => {
+    const c = conn({ liveOnVisit: { id: 'inv-completion', invoice_number: 'WPC-2026-0410' } });
     const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
     expect(restored).toEqual([]);
     expect(createSpy).not.toHaveBeenCalled();
