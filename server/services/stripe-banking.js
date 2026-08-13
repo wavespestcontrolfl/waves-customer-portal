@@ -1098,8 +1098,13 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
     // governs these writes together with its own.
     const runInTransaction = opts.trx ? (fn) => fn(opts.trx) : (fn) => db.transaction(fn);
     await runInTransaction(async (trx) => {
+      // EVERY reconciliation writer — human or automation — serializes on
+      // the payout row before touching history. Without this, an unguarded
+      // human write could interleave with a guarded automated one and
+      // commit later while carrying an earlier reconciled_at, making the
+      // latest-row history checks lie.
+      const cur = await trx('stripe_payouts').where('id', payoutId).forUpdate().first('reconciled', 'reconciled_by');
       if (opts.onlyIfReconciledBy !== undefined || opts.onlyIfUnreconciled) {
-        const cur = await trx('stripe_payouts').where('id', payoutId).forUpdate().first('reconciled', 'reconciled_by');
         const authorOk = opts.onlyIfReconciledBy === undefined
           || (cur && cur.reconciled && cur.reconciled_by === opts.onlyIfReconciledBy);
         const unreconciledOk = !opts.onlyIfUnreconciled || (cur && !cur.reconciled);
