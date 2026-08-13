@@ -108,6 +108,7 @@ describe('createEstimateMeasurementReview', () => {
       note: '',
       database: mockDb(),
       viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     })).rejects.toMatchObject({ status: 400 });
   });
 
@@ -117,12 +118,14 @@ describe('createEstimateMeasurementReview', () => {
       reasons: ['bigger'],
       database: mockDb({ estimate: null }),
       viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     })).rejects.toMatchObject({ status: 404, message: 'Estimate not found' });
     await expect(createEstimateMeasurementReview({
       estimateToken: 'tok-1',
       reasons: ['bigger'],
       database: mockDb({ estimate: { ...ESTIMATE_ROW, status: 'accepted' } }),
       viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     })).rejects.toMatchObject({ status: 404, message: 'Estimate not found' });
   });
 
@@ -133,7 +136,7 @@ describe('createEstimateMeasurementReview', () => {
       reasons: ['bigger'],
       database,
       viewabilityCheck: viewable,
-      lawnBasisPresent: false,
+      basisFor: () => null,
     })).rejects.toMatchObject({ status: 404, message: 'Estimate not found' });
     expect(database.inserts).toHaveLength(0);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -164,6 +167,7 @@ describe('createEstimateMeasurementReview', () => {
       reasons: ['bigger'],
       database,
       viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     });
     expect(result.success).toBe(true);
     expect(lockCalls).toContain('forUpdate');
@@ -193,6 +197,7 @@ describe('createEstimateMeasurementReview', () => {
       reasons: ['bigger'],
       database,
       viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     })).rejects.toMatchObject({ status: 404 });
     expect(database.inserts).toHaveLength(0);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -209,9 +214,77 @@ describe('createEstimateMeasurementReview', () => {
       reasons: ['bigger'],
       database: mockDb(),
       viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     });
     expect(result).toEqual({ success: true, deduped: false });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(2);
+  });
+
+  test('404s when a concurrent revision REMOVES the lawn basis during the lock wait (local-audit P1)', async () => {
+    const database = mockDb();
+    database.transaction = async (fn) => {
+      const trx = (table) => database(table);
+      trx.raw = database.raw;
+      // Locked re-read returns a REVISED row the basis derivation no longer
+      // recognizes (lawn line removed by a concurrent revision).
+      const revised = { ...ESTIMATE_ROW, estimate_data: { revised: true } };
+      const lockedTrx = (table) => {
+        if (table === 'estimates') {
+          return {
+            where: () => ({
+              forUpdate: () => ({ first: async () => revised }),
+              first: async () => revised,
+            }),
+          };
+        }
+        return database(table);
+      };
+      lockedTrx.raw = database.raw;
+      return fn(lockedTrx);
+    };
+    await expect(createEstimateMeasurementReview({
+      estimateToken: 'tok-1',
+      reasons: ['bigger'],
+      database,
+      viewabilityCheck: viewable,
+      // Pre-lock row has a basis; the locked (revised) row does not.
+      basisFor: (row) => (row?.estimate_data?.revised ? null : { sqft: 7500, source: 'AI satellite measurement' }),
+    })).rejects.toMatchObject({ status: 404 });
+    expect(database.inserts).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('404s when the call-side linkage verdict blocks the LOCKED row (local-audit P0)', async () => {
+    const database = mockDb();
+    database.transaction = async (fn) => {
+      const trx = (table) => database(table);
+      trx.raw = database.raw;
+      const lockedTrx = (table) => {
+        if (table === 'estimates') {
+          return {
+            where: () => ({
+              forUpdate: () => ({ first: async () => ESTIMATE_ROW }),
+              first: async () => ESTIMATE_ROW,
+            }),
+          };
+        }
+        return database(table);
+      };
+      lockedTrx.raw = database.raw;
+      return fn(lockedTrx);
+    };
+    await expect(createEstimateMeasurementReview({
+      estimateToken: 'tok-1',
+      reasons: ['bigger'],
+      database,
+      viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
+      // Call processing invalidated the linkage between the route's
+      // pre-check and the lock — fail closed with zero writes.
+      callSideBlockedFor: async () => true,
+    })).rejects.toMatchObject({ status: 404 });
+    expect(database.inserts).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('404s a non-viewable estimate BEFORE any write (codex r2: leaked/archived/expired tokens)', async () => {
@@ -224,6 +297,7 @@ describe('createEstimateMeasurementReview', () => {
       // linkage-invalidated / unpublished) even though the status string is
       // 'sent' — must 404 with zero rows written and zero notifications.
       viewabilityCheck: () => false,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     })).rejects.toMatchObject({ status: 404, message: 'Estimate not found' });
     expect(database.inserts).toHaveLength(0);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -235,9 +309,8 @@ describe('createEstimateMeasurementReview', () => {
       estimateToken: 'tok-1',
       reasons: ['less_lawn', 'rock_or_beds'],
       note: 'Back half is river rock <script>',
-      shownSqFt: 7500,
-      shownSource: 'AI satellite measurement',
       database,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
       viewabilityCheck: viewable,
     });
     expect(result).toEqual({ success: true, deduped: false });
@@ -270,6 +343,7 @@ describe('createEstimateMeasurementReview', () => {
       note: 'The side yard is fenced off',
       database,
       viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     });
     expect(result.success).toBe(true);
     expect(JSON.parse(database.inserts[0].pricing_revision).reasons).toEqual([]);
@@ -284,6 +358,7 @@ describe('createEstimateMeasurementReview', () => {
       reasons: ['bigger'],
       database,
       viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     });
     expect(result).toEqual({ success: true, deduped: true });
     // Pre-check dedupe: no insert is even attempted.
@@ -302,6 +377,7 @@ describe('createEstimateMeasurementReview', () => {
       reasons: ['bigger'],
       database,
       viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     });
     expect(result).toEqual({ success: true, deduped: true });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -314,6 +390,7 @@ describe('createEstimateMeasurementReview', () => {
       reasons: ['bigger'],
       database: mockDb(),
       viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     });
     expect(result).toEqual({ success: true, deduped: false });
   });

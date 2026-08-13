@@ -1864,7 +1864,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // widget can explain the per-application price instead of asserting one.
     // Absent whenever the quote has no priced lawn line — the widget then
     // falls back to its own estimate copy and makes no priced-basis claim.
-    const lawnArea = deriveLawnArea(estimate);
+    // DARK until astro #464 deploys (local audit P1): emitting this field
+    // activates the deployed widget's source labels, which until #464
+    // include the banned verify-on-first-visit wording. The gate makes this
+    // push safe regardless of deploy order; flip GATE_PUBLIC_QUOTE_LAWN_AREA
+    // after #464 is live.
+    const lawnArea = require('../config/feature-gates').isEnabled('publicQuoteLawnArea')
+      ? deriveLawnArea(estimate)
+      : null;
     if (lawnArea) {
       response.lawn_area = lawnArea;
     }

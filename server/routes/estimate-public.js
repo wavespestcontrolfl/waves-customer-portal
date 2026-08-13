@@ -12203,22 +12203,33 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const { createEstimateMeasurementReview } = require('../services/estimate-measurement-review');
-    // Lawn-basis verdict from the SAME helpers that render the area line —
-    // a pest-only estimate 404s identically to an unknown token (codex
-    // #3376: no lawn line, no lawn challenge).
-    const reviewEstResult = estimateRow ? resolvePricingEstResult(parseEstimateDataSafe(estimateRow)) : {};
-    const reviewBasis = measuredBasisForSection('lawn_care', reviewEstResult)
-      || measuredBasisForSection('commercial_lawn', reviewEstResult);
+    // basisFor derives the priced lawn basis from WHATEVER row the service
+    // hands it — the service calls it pre-lock (fast 404 for pest-only
+    // estimates) and again on the LOCKED row, so a concurrent revision can't
+    // leave stale metadata on the request (local audit P1s). Never trusts
+    // the request body (a token holder could forge what "the estimate
+    // showed").
+    const basisFor = (row) => {
+      if (!row) return null;
+      const estResult = resolvePricingEstResult(parseEstimateDataSafe(row));
+      const basis = measuredBasisForSection('lawn_care', estResult)
+        || measuredBasisForSection('commercial_lawn', estResult);
+      if (!basis) return null;
+      return {
+        sqft: Number(String(basis.value).replace(/[^0-9]/g, '')) || null,
+        source: basis.source,
+      };
+    };
     const result = await createEstimateMeasurementReview({
       estimateToken: req.params.token,
       reasons: req.body?.reasons,
       note: req.body?.note,
-      // What the estimate showed is derived SERVER-SIDE from the authoritative
-      // basis, never from the request body (local audit P1: a token holder
-      // could forge the pricing-basis metadata staff act on).
-      shownSqFt: reviewBasis ? Number(String(reviewBasis.value).replace(/[^0-9]/g, '')) : undefined,
-      shownSource: reviewBasis ? reviewBasis.source : undefined,
-      lawnBasisPresent: !!reviewBasis,
+      basisFor,
+      // The route's pre-check above is the fast path; the service re-checks
+      // this DURABLE verdict on the LOCKED row through the trx connection
+      // before any customer/request write (local audit P0 — call processing
+      // can invalidate the linkage after the pre-check).
+      callSideBlockedFor: (dbx, row) => callSideBlockForEstimateData(dbx, parseEstimateDataSafe(row)),
     });
     res.status(result.deduped ? 200 : 201).json(result);
   } catch (err) {

@@ -1085,6 +1085,15 @@ const gates = {
   // Enable with GATE_ESTIMATE_MEASUREMENT_REVIEW=true.
   estimateMeasurementReview: isProd ? process.env.GATE_ESTIMATE_MEASUREMENT_REVIEW === 'true' : true,
 
+  // The `lawn_area` block on POST /public/quote/calculate — the priced
+  // treatable-area basis the website estimator renders as "Priced for N sq
+  // ft". Ships DARK because merely EMITTING the field activates the deployed
+  // astro widget's source labels, and until astro PR #464 deploys those
+  // labels include the banned verify-on-first-visit wording (owner ruling
+  // 2026-08-12). Flip AFTER #464 is live on the hub + spokes.
+  // Enable with GATE_PUBLIC_QUOTE_LAWN_AREA=true.
+  publicQuoteLawnArea: isProd ? process.env.GATE_PUBLIC_QUOTE_LAWN_AREA === 'true' : true,
+
   // Commercial estimate glass parity — the customer estimate page renders an
   // authored commercial proposal's line items INSIDE the glass layout (plus
   // the commercial copy pack + inclusions) instead of the bare "formal

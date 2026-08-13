@@ -79,16 +79,25 @@ async function createEstimateMeasurementReview({
   estimateToken,
   reasons,
   note,
-  shownSqFt,
-  shownSource,
   database = db,
   viewabilityCheck = defaultViewabilityCheck,
-  // Whether the estimate actually carries a priced lawn basis — computed by
-  // the route from the SAME helpers that render the area line (codex #3376:
-  // a pest-only estimate must not accept a lawn challenge; 404 keeps it
-  // indistinguishable from an unknown token). Defaults true only for direct
-  // service callers/tests; the route always passes the real verdict.
-  lawnBasisPresent = true,
+  // callSideBlockedFor(dbx, estimateRow) -> Promise<bool> — the DURABLE
+  // call-side linkage verdict (AGENTS.md call-pipeline fail-closed rules),
+  // re-checked INSIDE the transaction on the locked row (local audit P0:
+  // call processing can invalidate the linkage after the route's pre-check,
+  // and the service must not create/link a customer from wrong-lead data).
+  // Reads through the transaction connection so the verdict is consistent
+  // with the locked row. Default fail-OPEN only for direct unit callers;
+  // the route always passes the real check.
+  callSideBlockedFor = async () => false,
+  // basisFor(estimateRow) -> { sqft, source } | null — the priced lawn basis,
+  // built by the route from the SAME helpers that render the area line.
+  // Called TWICE: pre-lock for the fast 404 (pest-only estimates take no
+  // lawn challenge, indistinguishable from an unknown token) and AGAIN on
+  // the LOCKED row (local audit P1: a concurrent revision can change or
+  // remove the basis while this request waits — stored metadata must come
+  // from the locked row, never the pre-lock read).
+  basisFor = () => null,
 } = {}) {
   const token = String(estimateToken || '').trim();
   if (!token) {
@@ -113,7 +122,7 @@ async function createEstimateMeasurementReview({
   // customer who accepted the price challenges through the office, not the
   // sheet — viewability alone still renders accepted estimates); and the
   // lawn-basis requirement (no lawn line, no lawn challenge).
-  if (!estimate || !viewabilityCheck(estimate) || !isMeasurementReviewEligible(estimate) || !lawnBasisPresent) {
+  if (!estimate || !viewabilityCheck(estimate) || !isMeasurementReviewEligible(estimate) || !basisFor(estimate)) {
     const err = new Error('Estimate not found');
     err.status = 404;
     throw err;
@@ -133,13 +142,27 @@ async function createEstimateMeasurementReview({
       return fn(trx, locked || estimate);
     })
     : (fn) => fn(database, estimate);
+  // Unserialized fallback: no lock exists, so the pre-lock basis is the best
+  // available — used only by unit-test mocks; the route always passes knex.
+
 
   const serialized = typeof database.transaction === 'function';
-  return runSerialized(async (dbx, lockedEstimate) => {
-    // Re-validate on the LOCKED row (local audit P1): a concurrent accept,
-    // decline, archive, expiry, or linkage invalidation can commit while
-    // this request waited on the lock — the pre-lock checks are then stale.
-    if (!viewabilityCheck(lockedEstimate) || !isMeasurementReviewEligible(lockedEstimate)) {
+  const outcome = await runSerialized(async (dbx, lockedEstimate) => {
+    // Re-validate EVERYTHING on the LOCKED row (local audit P1s): a
+    // concurrent accept/decline/archive/expiry/linkage-invalidation — or a
+    // revision that changes/removes the lawn basis — can commit while this
+    // request waited on the lock. Status checks and the basis both re-derive
+    // from the locked row; the stored metadata is the locked basis, never
+    // the pre-lock read.
+    const lockedBasis = basisFor(lockedEstimate);
+    if (!viewabilityCheck(lockedEstimate) || !isMeasurementReviewEligible(lockedEstimate) || !lockedBasis) {
+      const err = new Error('Estimate not found');
+      err.status = 404;
+      throw err;
+    }
+    // Call-side verdict on the LOCKED row, through the trx connection
+    // (local audit P0) — fail closed before any customer/request write.
+    if (await callSideBlockedFor(dbx, lockedEstimate)) {
       const err = new Error('Estimate not found');
       err.status = 404;
       throw err;
@@ -149,11 +172,46 @@ async function createEstimateMeasurementReview({
       estimate: lockedEstimate,
       reasonKeys,
       cleanNote,
-      shownSqFt,
-      shownSource,
+      shownSqFt: lockedBasis.sqft,
+      shownSource: lockedBasis.source,
       serialized,
     });
   });
+
+  // Office notification AFTER the transaction commits (local audit P1):
+  // inside the trx a later commit failure would leave a notification
+  // pointing at a rolled-back request, and notifyAdmin's own DB/network
+  // round-trips would hold the estimate row lock for their duration.
+  if (outcome && outcome.notify) {
+    await sendOfficeNotification(outcome.notify);
+    delete outcome.notify;
+  }
+  return outcome;
+}
+
+// notifyAdmin swallows persistence errors and resolves null/suppressed
+// rather than rejecting, and this is the flow's ONLY handoff — retry once,
+// then log LOUDLY; the request row stands either way (extension-route
+// pattern).
+async function sendOfficeNotification({ subject, description, customerId, estimateId, requestId }) {
+  const attempt = () => NotificationService.notifyAdmin(
+    'estimate_measurement_review',
+    subject,
+    description,
+    {
+      // Deep-link to the Customer 360 PANEL (codex #3376: the standalone
+      // requests page is gone; note the ?customerId=<id> panel form).
+      link: `/admin/customers?customerId=${customerId}`,
+      metadata: { estimateId, requestId, customerId },
+    }
+  ).catch((err) => {
+    logger.error(`[estimate-measurement-review] admin notification threw for request ${requestId}: ${err.message}`);
+    return null;
+  });
+  const delivered = (await attempt())?.id || (await attempt())?.id;
+  if (!delivered) {
+    logger.error(`[estimate-measurement-review] admin notification FAILED TWICE for request ${requestId} — request row stands, office unnotified; surface via the requests panel sweep`);
+  }
 }
 
 async function createReviewRow({ database, estimate, reasonKeys, cleanNote, shownSqFt, shownSource, serialized = false }) {
@@ -230,32 +288,20 @@ async function createReviewRow({ database, estimate, reasonKeys, cleanNote, show
 
   logger.info(`[estimate-measurement-review] request ${request.id} for estimate ${estimate.id} (${reasonKeys.join(',') || 'note-only'})`);
 
-  // Office-only notification — never the customer. notifyAdmin swallows
-  // persistence errors and resolves null/suppressed rather than rejecting
-  // (local audit P1: a .catch here is dead code), and it is the flow's ONLY
-  // handoff — retry once, then log LOUDLY; the request row stands either way
-  // (same pattern as the extension route's auto-grant notification).
-  const notifyOffice = () => NotificationService.notifyAdmin(
-    'estimate_measurement_review',
-    subject,
-    description,
-    {
-      // Deep-link to the Customer 360 PANEL (codex #3376: the standalone
-      // requests page is gone — requests are worked from the notification
-      // deep-link; note the ?customerId=<id> panel form, NOT /customers/<id>).
-      link: `/admin/customers?customerId=${customer.id}`,
-      metadata: { estimateId: estimate.id, requestId: request.id, customerId: customer.id },
-    }
-  ).catch((err) => {
-    logger.error(`[estimate-measurement-review] admin notification threw for request ${request.id}: ${err.message}`);
-    return null;
-  });
-  const delivered = (await notifyOffice())?.id || (await notifyOffice())?.id;
-  if (!delivered) {
-    logger.error(`[estimate-measurement-review] admin notification FAILED TWICE for request ${request.id} — request row stands, office unnotified; surface via the requests panel sweep`);
-  }
-
-  return { success: true, deduped: false };
+  // Notification payload only — the SEND happens after the transaction
+  // commits (local audit P1: an in-trx send can point at a rolled-back
+  // request and holds the estimate row lock through network round-trips).
+  return {
+    success: true,
+    deduped: false,
+    notify: {
+      subject,
+      description,
+      customerId: customer.id,
+      estimateId: estimate.id,
+      requestId: request.id,
+    },
+  };
 }
 
 module.exports = {
