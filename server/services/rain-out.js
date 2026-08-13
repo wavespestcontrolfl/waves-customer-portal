@@ -616,9 +616,11 @@ function sameDayOptions(now = new Date()) {
 
 // Advisory overlap probe for the Quick Move sheets (owner ask 2026-08-12:
 // picking a time that overlaps another appointment gave no warning until
-// commit's SLOT_TAKEN). Same tech-blind predicate AND the same status
-// exclusions the rebooker enforces at its commit gate (rebooker.js
-// occupancyClash: cancelled + completed don't occupy) so the sheet warns
+// commit's SLOT_TAKEN). Same tech-blind predicate — occupancy.js's own
+// listOccupiedWindows/windowsOverlap pair, which is the range variant of
+// the SQL findConflictingVisits runs — AND the same status exclusions the
+// rebooker enforces at its commit gate (rebooker.js occupancyClash:
+// cancelled + completed don't occupy) so the sheet warns
 // on exactly what commit would reject — an offer/commit mismatch in either
 // direction is how the /book 409 dead-end loop happened. Read-only, no
 // rung-1 lock (offer surface — occupancy.js EXEMPT list); the rebooker's
@@ -652,17 +654,51 @@ function nameScopeFor(caller, service) {
   }
   return null;
 }
-async function conflictsForTarget(serviceId, date, window, {
-  routeSiblingIds = null, nameScope = null, excludeServiceIds = null,
-} = {}) {
-  const { findConflictingVisits } = require('./scheduling/occupancy');
-  const rows = await findConflictingVisits({
-    date,
-    windowStart: window.start,
-    windowEnd: window.end,
-    excludeServiceIds: excludeServiceIds || [serviceId],
+// ONE occupancy snapshot per request, filtered in memory per candidate
+// window — the per-window query was O(options x route stops) round trips on
+// every sheet open (codex #3375 P1). This is still the canonical mechanism,
+// not a parallel one: listOccupiedWindows is occupancy.js's own range
+// variant of the SAME predicate (identical status/hold/windowless
+// conventions, and it precomputes endMin with the same
+// estimated_duration_minutes-or-60 fallback the SQL COALESCEs), and
+// windowsOverlap is the exported half-open comparison the SQL implements.
+async function loadOccupancy({ dateFrom, dateTo, nameScope = null }) {
+  const { listOccupiedWindows } = require('./scheduling/occupancy');
+  const rows = await listOccupiedWindows({
+    dateFrom,
+    dateTo,
+    // Same status exclusions the rebooker enforces at its commit gate.
     excludeStatuses: ['cancelled', 'completed'],
   });
+  const canName = (row) => (nameScope === NAME_ALL
+    ? true
+    : !!nameScope && String(row.technician_id) === String(nameScope));
+  // One customer lookup for the whole response, and only for rows this
+  // caller is allowed to see named.
+  const customerIds = [...new Set(rows.filter(canName).map((r) => r.customer_id).filter(Boolean))];
+  const customers = customerIds.length
+    ? await db('customers').whereIn('id', customerIds).select('id', 'first_name', 'last_name')
+    : [];
+  const nameById = new Map(customers.map((c) => [
+    String(c.id),
+    [c.first_name, c.last_name].filter(Boolean).join(' ').trim() || null,
+  ]));
+  return { rows, canName, nameById };
+}
+
+const EMPTY_OCCUPANCY = { rows: [], canName: () => false, nameById: new Map() };
+
+function conflictsForTarget(occupancy, serviceId, date, window, {
+  routeSiblingIds = null, excludeServiceIds = null,
+} = {}) {
+  const { windowsOverlap } = require('./scheduling/occupancy');
+  const startMin = hhmmToMinutes(window.start);
+  const endMin = hhmmToMinutes(window.end);
+  if (startMin == null || endMin == null) return [];
+  const excluded = new Set((excludeServiceIds || [serviceId]).map(String));
+  const rows = occupancy.rows.filter((r) => r.date === date
+    && !excluded.has(String(r.id))
+    && windowsOverlap(r.startMin, r.endMin, startMin, endMin));
   if (!rows.length) return [];
   // Partition BEFORE the cap. The sheets drop flagged siblings while
   // scope=route, so slicing in query order could spend the whole cap on
@@ -674,35 +710,17 @@ async function conflictsForTarget(serviceId, date, window, {
   const isSibling = (row) => !!routeSiblingIds?.has(String(row.id));
   const kept = [...rows.filter((r) => !isSibling(r)), ...rows.filter(isSibling)]
     .slice(0, TARGET_CONFLICT_LIMIT);
-  const canName = (row) => (nameScope === NAME_ALL
-    ? true
-    : !!nameScope && String(row.technician_id) === String(nameScope));
-  const customerIds = [...new Set(kept.filter(canName).map((r) => r.customer_id).filter(Boolean))];
-  const customers = customerIds.length
-    ? await db('customers').whereIn('id', customerIds).select('id', 'first_name', 'last_name')
-    : [];
-  const nameById = new Map(customers.map((c) => [
-    String(c.id),
-    [c.first_name, c.last_name].filter(Boolean).join(' ').trim() || null,
-  ]));
+  const { canName, nameById } = occupancy;
   return kept.map((row) => {
-    // window_end is nullable (admin edits can leave a start with no end) —
-    // derive the occupied end the same way the overlap predicate does, so
-    // the warning quotes the span that actually blocked.
-    let windowEnd = toHHMM(row.window_end);
-    const startMin = hhmmToMinutes(toHHMM(row.window_start));
-    if (!windowEnd && startMin != null) {
-      const duration = Number(row.estimated_duration_minutes) > 0
-        ? Number(row.estimated_duration_minutes)
-        : 60;
-      windowEnd = minutesToHHMM(startMin + duration);
-    }
+    // startMin/endMin come from listOccupiedWindows, which already applied
+    // the predicate's own nullable-window_end fallback — so the warning
+    // quotes the span that actually blocked.
     return {
       // Row id, not customer data — the sheets never render it; it exists
       // so the route-scope merge can dedupe one stop hit by two members.
       id: String(row.id),
-      windowStart: toHHMM(row.window_start),
-      windowEnd,
+      windowStart: minutesToHHMM(row.startMin),
+      windowEnd: minutesToHHMM(row.endMin),
       customerName: (canName(row) && row.customer_id)
         ? (nameById.get(String(row.customer_id)) || null)
         : null,
@@ -742,7 +760,7 @@ async function conflictsForTarget(serviceId, date, window, {
 // stay out of scope — they can't be judged from the pre-move schedule
 // anyway, since commit moves tail-first and each stop vacates before the
 // next lands.
-async function routeScopeConflicts({ serviceId, service, route, target, nameScope = null }) {
+function routeScopeConflicts({ occupancy, serviceId, service, route, target }) {
   if (!route.length) return [];
   const targetDate = String(target.date).split('T')[0];
   const anchorDateStr = service.scheduled_date
@@ -876,11 +894,9 @@ async function routeScopeConflicts({ serviceId, service, route, target, nameScop
     if (key !== anchorKey && !distinctByKey.has(key)) distinctByKey.set(key, w);
   }
   const distinct = [...distinctByKey.values()];
-  const probed = distinct.length
-    ? await Promise.all(distinct.map((w) => conflictsForTarget(
-      serviceId, targetDate, w, { nameScope, excludeServiceIds: sweptIds },
-    )))
-    : [];
+  const probed = distinct.map((w) => conflictsForTarget(
+    occupancy, serviceId, targetDate, w, { excludeServiceIds: sweptIds },
+  ));
   const byId = new Map();
   for (const conflict of probed.flat()) {
     if (!byId.has(conflict.id)) byId.set(conflict.id, conflict);
@@ -910,9 +926,19 @@ async function checkTarget({ serviceId, target, caller = null }) {
   // Route siblings flagged (not excluded) so one response serves both
   // scopes — the sheet filters by its live scope toggle without refetching.
   const route = await remainingRouteJobs(service.technician_id, etDateString(), serviceId, service);
-  const conflicts = await conflictsForTarget(serviceId, String(target.date).split('T')[0], target.window, {
+  const targetDate = String(target.date).split('T')[0];
+  // Fail-open exactly as before: a snapshot failure hides the badges, it
+  // never blocks the sheet.
+  let occupancy = EMPTY_OCCUPANCY;
+  try {
+    occupancy = await loadOccupancy({
+      dateFrom: targetDate, dateTo: targetDate, nameScope: nameScopeFor(caller, service),
+    });
+  } catch (err) {
+    logger.info(`[rain-out] occupancy snapshot failed for ${serviceId} ${targetDate}: ${err.message}`);
+  }
+  const conflicts = conflictsForTarget(occupancy, serviceId, targetDate, target.window, {
     routeSiblingIds: new Set(route.map((j) => String(j.id))),
-    nameScope: nameScopeFor(caller, service),
   });
   // Returned alongside (not merged): the sheet shows these only while the
   // scope toggle is on "this + rest of route", the one case commit moves
@@ -920,9 +946,7 @@ async function checkTarget({ serviceId, target, caller = null }) {
   // warning rather than blocking the sheet.
   let routeConflicts = [];
   try {
-    routeConflicts = await routeScopeConflicts({
-      serviceId, service, route, target, nameScope: nameScopeFor(caller, service),
-    });
+    routeConflicts = routeScopeConflicts({ occupancy, serviceId, service, route, target });
   } catch (err) {
     logger.info(`[rain-out] route-scope conflict probe failed for ${serviceId}: ${err.message}`);
   }
@@ -989,30 +1013,27 @@ async function getOptions(serviceId, { caller = null } = {}) {
   // the pill without a badge, never blocks the sheet (same fail-open
   // posture as the rain badges).
   const routeSiblingIds = new Set(route.map((j) => String(j.id)));
+  // ONE snapshot covering every date this payload annotates — today's
+  // presets plus the day options — instead of a query per option per route
+  // stop (codex #3375 P1). Fail-open in one place: no snapshot, no badges.
+  const annotatedDates = [todayStr, ...days.map((d) => d.date)].filter(Boolean).sort();
+  let occupancy = EMPTY_OCCUPANCY;
+  try {
+    occupancy = await loadOccupancy({
+      dateFrom: annotatedDates[0],
+      dateTo: annotatedDates[annotatedDates.length - 1],
+      nameScope: nameScopeFor(caller, service),
+    });
+  } catch (err) {
+    logger.info(`[rain-out] occupancy snapshot failed for ${serviceId}: ${err.message}`);
+  }
   for (const opt of sameDay) {
-    try {
-      opt.conflicts = await conflictsForTarget(serviceId, opt.date, opt.window, {
-        routeSiblingIds,
-        nameScope: nameScopeFor(caller, service),
-      });
-    } catch (err) {
-      logger.info(`[rain-out] conflict probe failed for ${serviceId} ${opt.date} ${opt.window.start}: ${err.message}`);
-      opt.conflicts = [];
-    }
+    opt.conflicts = conflictsForTarget(occupancy, serviceId, opt.date, opt.window, { routeSiblingIds });
     // What the shifted rest-of-route would land on — shown only while the
-    // sheet's scope toggle is on "rest of route" (same fail-open posture).
-    try {
-      opt.routeConflicts = await routeScopeConflicts({
-        serviceId,
-        service,
-        route,
-        target: { date: opt.date, window: opt.window },
-        nameScope: nameScopeFor(caller, service),
-      });
-    } catch (err) {
-      logger.info(`[rain-out] route-scope probe failed for ${serviceId} ${opt.date} ${opt.window.start}: ${err.message}`);
-      opt.routeConflicts = [];
-    }
+    // sheet's scope toggle is on "rest of route".
+    opt.routeConflicts = routeScopeConflicts({
+      occupancy, serviceId, service, route, target: { date: opt.date, window: opt.window },
+    });
   }
 
   // Day options need the route-scope probe too (codex #3375 P1): the
@@ -1023,20 +1044,11 @@ async function getOptions(serviceId, { caller = null } = {}) {
   // this the tech picks a "clean" Thursday, commit moves and texts the
   // early stops, then SLOT_TAKENs on the sibling. Probed concurrently:
   // one batch per option instead of days × route round-trips.
-  await Promise.all(days.map(async (opt) => {
-    try {
-      opt.routeConflicts = await routeScopeConflicts({
-        serviceId,
-        service,
-        route,
-        target: { date: opt.date, window: opt.window },
-        nameScope: nameScopeFor(caller, service),
-      });
-    } catch (err) {
-      logger.info(`[rain-out] route-scope probe failed for ${serviceId} ${opt.date}: ${err.message}`);
-      opt.routeConflicts = [];
-    }
-  }));
+  for (const opt of days) {
+    opt.routeConflicts = routeScopeConflicts({
+      occupancy, serviceId, service, route, target: { date: opt.date, window: opt.window },
+    });
+  }
 
   // Custom-reason availability for the sheet: the option renders only when
   // the gate is on AND the template row is live — a missing/disabled row

@@ -41,8 +41,27 @@ jest.mock('../services/workflows/missed-appointment', () => ({
 // default so getOptions' same-day annotation is inert in unrelated tests;
 // the overlap-advisory describe drives it per test.
 jest.mock('../services/scheduling/occupancy', () => ({
+  // windowsOverlap is pure interval math and IS the predicate under test —
+  // requireActual it so a mock can never disagree with the SQL semantics.
+  ...jest.requireActual('../services/scheduling/occupancy'),
   findConflictingVisits: jest.fn().mockResolvedValue([]),
+  listOccupiedWindows: jest.fn().mockResolvedValue([]),
 }));
+
+// Adapts scheduled_services-shaped fixtures into listOccupiedWindows' output
+// shape: a normalized `date` plus startMin/endMin, with the SAME nullable
+// window_end fallback (estimated_duration_minutes, else 60) the SQL COALESCEs.
+const toMin = (hhmm) => {
+  const [h, m] = String(hhmm).slice(0, 5).split(':').map(Number);
+  return (h * 60) + (m || 0);
+};
+const occ = (date, rows) => rows.map((r) => {
+  const startMin = toMin(r.window_start);
+  const endMin = r.window_end != null
+    ? toMin(r.window_end)
+    : startMin + (Number(r.estimated_duration_minutes) > 0 ? Number(r.estimated_duration_minutes) : 60);
+  return { ...r, date, startMin, endMin };
+});
 
 const db = require('../models/db');
 const MissedAppointment = require('../services/workflows/missed-appointment');
@@ -1743,21 +1762,17 @@ describe('rain-out service', () => {
     });
 
     test('annotates same-day presets with overlap conflicts (name + window), day options skipped', async () => {
-      const { findConflictingVisits } = require('../services/scheduling/occupancy');
+      const { listOccupiedWindows } = require('../services/scheduling/occupancy');
       // 13:00Z = 09:00 ET → same-day presets at 11:00 and 13:00.
       jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
       try {
         SmartRebooker.findRescheduleOptions.mockResolvedValue([
           { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120 },
         ]);
-        findConflictingVisits.mockImplementation(async ({ windowStart }) => (
-          windowStart === '11:00'
-            ? [{
-              id: 'svc-9', customer_id: 'cust-9', technician_id: 'tech-1', status: 'confirmed', service_type: 'Mosquito Treatment',
-              window_start: '11:00:00', window_end: '12:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
-            }]
-            : []
-        ));
+        listOccupiedWindows.mockResolvedValue(occ('2026-06-11', [{
+          id: 'svc-9', customer_id: 'cust-9', technician_id: 'tech-1', status: 'confirmed', service_type: 'Mosquito Treatment',
+          window_start: '11:00:00', window_end: '12:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
+        }]));
         wireDb({
           scheduled_services: [
             chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
@@ -1773,10 +1788,11 @@ describe('rain-out service', () => {
         expect(options.sameDay[0].window.start).toBe('11:00');
         // Same exclusions the rebooker's commit gate enforces — the badge
         // must warn on exactly what commit would SLOT_TAKEN.
-        expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
-          excludeServiceIds: ['svc-1'],
+        expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({
           excludeStatuses: ['cancelled', 'completed'],
         }));
+        // ONE snapshot for the whole payload, not a query per option.
+        expect(listOccupiedWindows).toHaveBeenCalledTimes(1);
         expect(options.sameDay[0].conflicts).toEqual([{
           id: 'svc-9',
           windowStart: '11:00',
@@ -1792,28 +1808,24 @@ describe('rain-out service', () => {
         expect(options.days[0].conflicts).toBeUndefined();
       } finally {
         jest.useRealTimers();
-        findConflictingVisits.mockReset();
-        findConflictingVisits.mockResolvedValue([]);
+        listOccupiedWindows.mockReset();
+        listOccupiedWindows.mockResolvedValue([]);
       }
     });
 
     test('another technician\'s stop is never named on the tech-reachable payload', async () => {
-      const { findConflictingVisits } = require('../services/scheduling/occupancy');
+      const { listOccupiedWindows } = require('../services/scheduling/occupancy');
       jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
       try {
         SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
         // getOptions is served by GET /api/tech/services/:id/rain-out-options,
         // so a globally-probed row belonging to ANOTHER tech must come back
         // window-only — names stay on the admin-only checkTarget path.
-        findConflictingVisits.mockImplementation(async ({ windowStart }) => (
-          windowStart === '11:00'
-            ? [{
-              id: 'svc-8', customer_id: 'cust-8', technician_id: 'tech-OTHER', status: 'confirmed',
-              service_type: 'Mosquito Treatment', window_start: '11:00:00', window_end: '12:00:00',
-              estimated_duration_minutes: 60, reservation_expires_at: null,
-            }]
-            : []
-        ));
+        listOccupiedWindows.mockResolvedValue(occ('2026-06-11', [{
+          id: 'svc-8', customer_id: 'cust-8', technician_id: 'tech-OTHER', status: 'confirmed',
+          service_type: 'Mosquito Treatment', window_start: '11:00:00', window_end: '12:00:00',
+          estimated_duration_minutes: 60, reservation_expires_at: null,
+        }]));
         const customersQuery = chain({ rows: [{ id: 'cust-8', first_name: 'cust-8a', last_name: 'cust-8b' }] });
         wireDb({
           scheduled_services: [
@@ -1838,13 +1850,13 @@ describe('rain-out service', () => {
         expect(customersQuery.whereIn).not.toHaveBeenCalled();
       } finally {
         jest.useRealTimers();
-        findConflictingVisits.mockReset();
-        findConflictingVisits.mockResolvedValue([]);
+        listOccupiedWindows.mockReset();
+        listOccupiedWindows.mockResolvedValue([]);
       }
     });
 
     test('day options carry a route-scope probe even though their anchor window is pre-filtered', async () => {
-      const { findConflictingVisits } = require('../services/scheduling/occupancy');
+      const { listOccupiedWindows } = require('../services/scheduling/occupancy');
       jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
       try {
         SmartRebooker.findRescheduleOptions.mockResolvedValue([
@@ -1853,15 +1865,11 @@ describe('rain-out service', () => {
         // The rebooker cleared the anchor's 08:00 slot on the 12th, but a
         // route-scope move also carries the 10:00 sibling onto that date —
         // and THAT window is taken there.
-        findConflictingVisits.mockImplementation(async ({ date, windowStart }) => (
-          date === '2026-06-12' && windowStart === '10:00'
-            ? [{
-              id: 'svc-blocker', customer_id: null, technician_id: 'tech-1', status: 'confirmed',
-              service_type: 'Estimate', window_start: '10:00:00', window_end: '11:00:00',
-              estimated_duration_minutes: 60, reservation_expires_at: '2026-06-12T10:00:00Z',
-            }]
-            : []
-        ));
+        listOccupiedWindows.mockResolvedValue(occ('2026-06-12', [{
+          id: 'svc-blocker', customer_id: null, technician_id: 'tech-1', status: 'confirmed',
+          service_type: 'Estimate', window_start: '10:00:00', window_end: '11:00:00',
+          estimated_duration_minutes: 60, reservation_expires_at: '2026-06-12T10:00:00Z',
+        }]));
         wireDb({
           scheduled_services: [
             chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
@@ -1877,17 +1885,17 @@ describe('rain-out service', () => {
         ]);
       } finally {
         jest.useRealTimers();
-        findConflictingVisits.mockReset();
-        findConflictingVisits.mockResolvedValue([]);
+        listOccupiedWindows.mockReset();
+        listOccupiedWindows.mockResolvedValue([]);
       }
     });
 
     test('a conflict-probe failure renders the preset without a badge, never blocks the sheet', async () => {
-      const { findConflictingVisits } = require('../services/scheduling/occupancy');
+      const { listOccupiedWindows } = require('../services/scheduling/occupancy');
       jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
       try {
         SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
-        findConflictingVisits.mockRejectedValue(new Error('db down'));
+        listOccupiedWindows.mockRejectedValue(new Error('db down'));
         wireDb({
           scheduled_services: [
             chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
@@ -1902,8 +1910,8 @@ describe('rain-out service', () => {
         expect(options.sameDay.every((opt) => Array.isArray(opt.conflicts) && opt.conflicts.length === 0)).toBe(true);
       } finally {
         jest.useRealTimers();
-        findConflictingVisits.mockReset();
-        findConflictingVisits.mockResolvedValue([]);
+        listOccupiedWindows.mockReset();
+        listOccupiedWindows.mockResolvedValue([]);
       }
     });
 
@@ -1929,18 +1937,18 @@ describe('rain-out service', () => {
   });
 
   describe('checkTarget (overlap advisory for the sheets)', () => {
-    const { findConflictingVisits } = require('../services/scheduling/occupancy');
+    const { listOccupiedWindows } = require('../services/scheduling/occupancy');
 
     afterEach(() => {
-      findConflictingVisits.mockReset();
-      findConflictingVisits.mockResolvedValue([]);
+      listOccupiedWindows.mockReset();
+      listOccupiedWindows.mockResolvedValue([]);
     });
 
     test('maps overlapping rows to name + window with the commit-gate exclusions', async () => {
-      findConflictingVisits.mockResolvedValue([{
+      listOccupiedWindows.mockResolvedValue(occ('2026-08-12', [{
         id: 'svc-9', customer_id: 'cust-9', status: 'confirmed', service_type: 'Mosquito Treatment',
         window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
-      }]);
+      }]));
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1' }) })],
         customers: [chain({ rows: [{ id: 'cust-9', first_name: 'cust-9a', last_name: 'cust-9b' }] })],
@@ -1965,20 +1973,20 @@ describe('rain-out service', () => {
           isRouteSibling: false,
         }],
       });
-      expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
-        date: '2026-08-12',
-        windowStart: '14:00',
-        windowEnd: '15:00',
-        excludeServiceIds: ['svc-1'],
+      // Same status exclusions the rebooker's commit gate enforces, over a
+      // snapshot scoped to the target date.
+      expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({
+        dateFrom: '2026-08-12',
+        dateTo: '2026-08-12',
         excludeStatuses: ['cancelled', 'completed'],
       }));
     });
 
     test('a null window_end derives the occupied end from the duration, like the overlap predicate', async () => {
-      findConflictingVisits.mockResolvedValue([{
+      listOccupiedWindows.mockResolvedValue(occ('2026-08-12', [{
         id: 'svc-9', customer_id: 'cust-9', status: 'pending', service_type: 'Lawn Treatment',
         window_start: '14:00:00', window_end: null, estimated_duration_minutes: 90, reservation_expires_at: null,
-      }]);
+      }]));
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1' }) })],
         customers: [chain({ rows: [{ id: 'cust-9', first_name: 'cust-9', last_name: null }] })],
@@ -1998,11 +2006,11 @@ describe('rain-out service', () => {
     });
 
     test('a live estimate-slot hold is labeled isHold with no name lookup', async () => {
-      findConflictingVisits.mockResolvedValue([{
+      listOccupiedWindows.mockResolvedValue(occ('2026-08-12', [{
         id: 'hold-1', customer_id: null, status: 'pending', service_type: null,
         window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: null,
         reservation_expires_at: new Date('2026-08-12T20:00:00Z'),
-      }]);
+      }]));
       // No customers queue on purpose — a hold has no customer to look up.
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1' }) })],
@@ -2023,7 +2031,7 @@ describe('rain-out service', () => {
     });
 
     test('flags overlapping stops a route-scope push would shift (isRouteSibling)', async () => {
-      findConflictingVisits.mockResolvedValue([
+      listOccupiedWindows.mockResolvedValue(occ(etDateString(), [
         {
           id: 'svc-2', customer_id: 'cust-2', status: 'pending', service_type: 'Quarterly Pest Control',
           window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
@@ -2032,7 +2040,7 @@ describe('rain-out service', () => {
           id: 'svc-77', customer_id: 'cust-77', status: 'confirmed', service_type: 'Lawn Treatment',
           window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
         },
-      ]);
+      ]));
       wireDb({
         scheduled_services: [
           chain({
@@ -2073,9 +2081,9 @@ describe('rain-out service', () => {
         id, customer_id: customerId, status: 'pending', service_type: 'Quarterly Pest Control',
         window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
       });
-      findConflictingVisits.mockResolvedValue([
+      listOccupiedWindows.mockResolvedValue(occ(etDateString(), [
         row('svc-2', 'cust-2'), row('svc-3', 'cust-3'), row('svc-4', 'cust-4'), row('svc-99', 'cust-99'),
-      ]);
+      ]));
       wireDb({
         scheduled_services: [
           chain({
@@ -2112,15 +2120,21 @@ describe('rain-out service', () => {
       // on 15:00-16:00. The anchor's own target is clear; only the sibling's
       // landing window collides. Probing the anchor alone (the old behavior)
       // showed NOTHING and let the route move halfway before SLOT_TAKEN.
-      findConflictingVisits.mockImplementation(async ({ windowStart }) => (
-        windowStart === '15:00'
-          ? [{
-            id: 'svc-blocker', customer_id: 'cust-b', technician_id: 'tech-2', status: 'confirmed',
-            service_type: 'Lawn Treatment', window_start: '15:00:00', window_end: '16:00:00',
-            estimated_duration_minutes: 60, reservation_expires_at: null,
-          }]
-          : []
-      ));
+      listOccupiedWindows.mockResolvedValue(occ(etDateString(), [
+        {
+          id: 'svc-blocker', customer_id: 'cust-b', technician_id: 'tech-2', status: 'confirmed',
+          service_type: 'Lawn Treatment', window_start: '15:00:00', window_end: '16:00:00',
+          estimated_duration_minutes: 60, reservation_expires_at: null,
+        },
+        // The sibling's OWN row sits in the snapshot too, overlapping the very
+        // window it is projected onto — if swept ids were not excluded it
+        // would report itself as its own conflict.
+        {
+          id: 'svc-2', customer_id: 'cust-2', technician_id: 'tech-1', status: 'confirmed',
+          service_type: 'Quarterly Pest Control', window_start: '15:30:00', window_end: '16:30:00',
+          estimated_duration_minutes: 60, reservation_expires_at: null,
+        },
+      ]));
       wireDb({
         scheduled_services: [
           chain({
@@ -2140,18 +2154,12 @@ describe('rain-out service', () => {
       });
 
       expect(result.conflicts).toEqual([]);
+      // svc-blocker surfaces; svc-2 does NOT, though its row overlaps the same
+      // window — members moving together are never conflicts with each other,
+      // the reasoning isRouteSibling encodes on the anchor probe.
       expect(result.routeConflicts).toEqual([
         expect.objectContaining({ id: 'svc-blocker', customerName: 'cust-b', windowStart: '15:00' }),
       ]);
-      // Members moving together are never conflicts with each other — the
-      // sibling probe excludes the anchor AND the whole swept route, the
-      // same reasoning isRouteSibling encodes on the anchor probe.
-      expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
-        windowStart: '15:00',
-        windowEnd: '16:00',
-        excludeServiceIds: ['svc-1', 'svc-2'],
-        excludeStatuses: ['cancelled', 'completed'],
-      }));
     });
 
     test('route scope: a windowless same-day sibling collides with the anchor\'s own target', async () => {
@@ -2160,7 +2168,7 @@ describe('rain-out service', () => {
       // FIRST, then the anchor SLOT_TAKENs against it. Its null window_start
       // is inert to the overlap predicate, so the anchor probe cannot see it
       // either: without this the sheet showed nothing at all.
-      findConflictingVisits.mockResolvedValue([]);
+      listOccupiedWindows.mockResolvedValue(occ(etDateString(), []));
       wireDb({
         scheduled_services: [
           chain({
@@ -2188,7 +2196,7 @@ describe('rain-out service', () => {
     });
 
     test('route scope: two siblings sharing a window collide with each other', async () => {
-      findConflictingVisits.mockResolvedValue([]);
+      listOccupiedWindows.mockResolvedValue(occ(etDateString(), []));
       wireDb({
         scheduled_services: [
           chain({
@@ -2222,11 +2230,11 @@ describe('rain-out service', () => {
       // with no assignment check by design, so the name policy has to key on
       // the CALLER. Scoping to the service's own technician_id would hand
       // tech-2 every name on tech-1's route just by naming tech-1's service.
-      findConflictingVisits.mockResolvedValue([{
+      listOccupiedWindows.mockResolvedValue(occ('2026-08-12', [{
         id: 'svc-9', customer_id: 'cust-9', technician_id: 'tech-1', status: 'confirmed',
         service_type: 'Mosquito Treatment', window_start: '14:00:00', window_end: '15:00:00',
         estimated_duration_minutes: 60, reservation_expires_at: null,
-      }]);
+      }]));
       const customersQuery = chain({ rows: [{ id: 'cust-9', first_name: 'cust-9', last_name: null }] });
       wireDb({
         scheduled_services: [
@@ -2249,11 +2257,11 @@ describe('rain-out service', () => {
     });
 
     test('an unidentified caller gets no names (fail closed)', async () => {
-      findConflictingVisits.mockResolvedValue([{
+      listOccupiedWindows.mockResolvedValue(occ('2026-08-12', [{
         id: 'svc-9', customer_id: 'cust-9', technician_id: 'tech-1', status: 'confirmed',
         service_type: 'Mosquito Treatment', window_start: '14:00:00', window_end: '15:00:00',
         estimated_duration_minutes: 60, reservation_expires_at: null,
-      }]);
+      }]));
       wireDb({
         scheduled_services: [
           chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1', technician_id: 'tech-1' }) }),
@@ -2275,7 +2283,7 @@ describe('rain-out service', () => {
       // window_start + estimated_duration_minutes (60 default), so this row
       // is occupied 08:00-09:30 — treating it as windowless would let the
       // anchor's projected 09:00 landing look clear.
-      findConflictingVisits.mockResolvedValue([]);
+      listOccupiedWindows.mockResolvedValue(occ(etDateString(), []));
       wireDb({
         scheduled_services: [
           chain({
@@ -2314,7 +2322,7 @@ describe('rain-out service', () => {
       // nothing. But a forward push runs tail-first: svc-2 moves FIRST,
       // onto the 09:00 row the anchor has not vacated yet, and commit
       // rejects it. Only simulating commit's order catches this.
-      findConflictingVisits.mockResolvedValue([]);
+      listOccupiedWindows.mockResolvedValue(occ(etDateString(), []));
       wireDb({
         scheduled_services: [
           chain({
@@ -2344,7 +2352,7 @@ describe('rain-out service', () => {
       // the canonical half-open predicate overlaps them and commit's
       // per-member gate rejects the second. The reported span is the
       // contested intersection.
-      findConflictingVisits.mockResolvedValue([]);
+      listOccupiedWindows.mockResolvedValue(occ(etDateString(), []));
       wireDb({
         scheduled_services: [
           chain({
@@ -2377,7 +2385,7 @@ describe('rain-out service', () => {
       // target exactly. `end > otherStart` is false, so no warning — the
       // same boundary the SQL predicate uses, or every back-to-back route
       // would warn.
-      findConflictingVisits.mockResolvedValue([]);
+      listOccupiedWindows.mockResolvedValue(occ(etDateString(), []));
       wireDb({
         scheduled_services: [
           chain({
@@ -2408,7 +2416,7 @@ describe('rain-out service', () => {
       // latent double-book, but it is pre-existing on main and reaches every
       // reschedule caller. Contrast the same-day case above, where commit's
       // windowless-mover fallback gives the row a real span.
-      findConflictingVisits.mockResolvedValue([]);
+      listOccupiedWindows.mockResolvedValue(occ('2026-06-20', []));
       wireDb({
         scheduled_services: [
           chain({
@@ -2433,13 +2441,19 @@ describe('rain-out service', () => {
       });
 
       expect(result.routeConflicts).toEqual([]);
-      // And no probe was spent on a landing commit never checks.
-      const probed = findConflictingVisits.mock.calls.map((c) => c[0].windowStart);
-      expect(probed).toEqual(['09:00']); // the anchor's own target only
+      // One snapshot for the request — no per-window fanout.
+      expect(listOccupiedWindows).toHaveBeenCalledTimes(1);
     });
 
     test('route scope: a day move keeps each sibling\'s own window on the target date', async () => {
-      findConflictingVisits.mockResolvedValue([]);
+      // A stop already booked at 10:00 on the TARGET date. On a day move the
+      // sibling keeps its own 10:00-11:00 window (no shift), so it lands right
+      // on this row — proving its own window was checked on the new date.
+      listOccupiedWindows.mockResolvedValue(occ('2026-06-20', [{
+        id: 'svc-there', customer_id: 'cust-t', technician_id: 'tech-1', status: 'confirmed',
+        service_type: 'Lawn Treatment', window_start: '10:00:00', window_end: '11:00:00',
+        estimated_duration_minutes: 60, reservation_expires_at: null,
+      }]));
       wireDb({
         scheduled_services: [
           chain({
@@ -2456,18 +2470,18 @@ describe('rain-out service', () => {
             ],
           }),
         ],
+        customers: [chain({ rows: [{ id: 'cust-t', first_name: 'cust-t', last_name: null }] })],
       });
 
-      await RainOut.checkTarget({
+      const result = await RainOut.checkTarget({
         serviceId: 'svc-1',
         caller: { isAdmin: true, technicianId: 'tech-1' },
         target: { date: '2026-06-20', window: { start: '14:00', end: '15:00' } },
       });
 
-      const probes = findConflictingVisits.mock.calls.map((c) => `${c[0].date} ${c[0].windowStart}-${c[0].windowEnd}`);
-      expect(probes).toEqual([
-        '2026-06-20 14:00-15:00', // the anchor's own target
-        '2026-06-20 10:00-11:00', // the sibling, own window, new date — no shift
+      expect(result.conflicts).toEqual([]); // the anchor's own 14:00 is clear
+      expect(result.routeConflicts).toEqual([
+        expect.objectContaining({ id: 'svc-there', windowStart: '10:00', windowEnd: '11:00' }),
       ]);
     });
 
