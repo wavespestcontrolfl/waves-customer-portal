@@ -226,6 +226,14 @@ async function runRouteReorder(opts = {}) {
             summary.skipped.push({ ...entryBase, reason: 'TOO_FEW_GEOCODED_STOPS', geocoded: withCoords.length });
             continue;
           }
+          if (withCoords.length !== techStops.length) {
+            // A stop without usable coordinates has no defensible position in
+            // an autonomously computed order (optimizeRoute would push it to
+            // the end with zero evidence that's driveable). An operator can
+            // make that call on the board; this pass skips the tech-day.
+            summary.skipped.push({ ...entryBase, reason: 'COORDLESS_STOPS', geocoded: withCoords.length });
+            continue;
+          }
           if (summary.applied.length >= config.maxAppliesPerRun) {
             summary.skipped.push({ ...entryBase, reason: 'MAX_APPLIES_REACHED' });
             continue;
@@ -292,14 +300,21 @@ async function runRouteReorder(opts = {}) {
             // advisory lock.
             await db.transaction(async (trx) => {
               const live = await trx('scheduled_services')
-                .where('scheduled_date', dateStr)
-                .where('technician_id', techId)
-                .whereNotIn('status', EXCLUDE_STATUSES)
-                .forUpdate()
-                .select('id', 'window_start', 'route_order');
+                .where('scheduled_services.scheduled_date', dateStr)
+                .where('scheduled_services.technician_id', techId)
+                .whereNotIn('scheduled_services.status', EXCLUDE_STATUSES)
+                // Lock the scheduled_services rows only — FOR UPDATE cannot
+                // target the nullable side of the customers left join.
+                .forUpdate('scheduled_services')
+                .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+                .select('scheduled_services.id', 'scheduled_services.window_start',
+                  'scheduled_services.route_order', ...guardedCoordSelects(trx));
+              const num = (v) => (v == null || v === '' ? null : parseFloat(v));
               const snapshot = new Map(techStops.map((s) => [s.id, {
                 window: s.window_start ? String(s.window_start).slice(0, 5) : null,
                 routeOrder: s.route_order == null ? null : Number(s.route_order),
+                lat: num(s.lat),
+                lng: num(s.lng),
               }]));
               if (live.length !== techStops.length) throw stale('tech-day membership changed during the run');
               for (const row of live) {
@@ -312,6 +327,12 @@ async function runRouteReorder(opts = {}) {
                 // newer order with the autonomous one (codex round-3 P1).
                 const ro = row.route_order == null ? null : Number(row.route_order);
                 if (ro !== snap.routeOrder) throw stale(`stop ${row.id} route_order changed during the run`);
+                // Effective (divergence-guarded) coordinates too — the order
+                // was computed FOR those points; an address/coord change
+                // mid-optimization invalidates it (codex round-12 P1).
+                if (num(row.lat) !== snap.lat || num(row.lng) !== snap.lng) {
+                  throw stale(`stop ${row.id} coordinates changed during the run`);
+                }
               }
               // Freeze re-check at commit time (fail closed on unreadable).
               const commitNow = opts.now || new Date();

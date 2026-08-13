@@ -85,15 +85,16 @@ beforeEach(() => {
     const trx = () => {
       const filters = {};
       const c = {
-        where: (a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[a] = b; return c; },
+        where: (a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[String(a).replace('scheduled_services.', '')] = b; return c; },
         whereNotIn: () => c,
         forUpdate: () => c,
+        leftJoin: () => c,
         select: async () => {
           if (liveRowsOverride) return liveRowsOverride;
           // Unchanged tech-day: mirror the loaded stops for this date+tech.
           return (stopsByDate[filters.scheduled_date] || [])
             .filter((s) => s.technician_id === filters.technician_id)
-            .map((s) => ({ id: s.id, window_start: s.window_start, route_order: s.route_order }));
+            .map((s) => ({ id: s.id, window_start: s.window_start, route_order: s.route_order, lat: s.lat, lng: s.lng }));
         },
         update: async (u) => { attempted.push({ id: filters.id, ...u }); return 1; },
       };
@@ -224,8 +225,8 @@ test('commit-time revalidation: a changed tech-day rolls back untouched (STALE_T
   stopsByDate['2026-08-18'] = backtrackDay();
   // Staff moved stop B off the day while the optimizer ran.
   liveRowsOverride = [
-    { id: 'A', window_start: '09:00', route_order: 2 },
-    { id: 'C', window_start: '09:00', route_order: 3 },
+    { id: 'A', window_start: '09:00', route_order: 2, lat: 1, lng: 1 },
+    { id: 'C', window_start: '09:00', route_order: 3, lat: 1, lng: 2 },
   ];
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);
@@ -238,9 +239,32 @@ test('commit-time revalidation: a changed tech-day rolls back untouched (STALE_T
 test('commit-time revalidation: a changed window_start rolls back untouched', async () => {
   stopsByDate['2026-08-18'] = backtrackDay();
   liveRowsOverride = [
-    { id: 'A', window_start: '09:00', route_order: 2 },
-    { id: 'B', window_start: '14:00', route_order: 1 }, // staff changed the window mid-run
-    { id: 'C', window_start: '09:00', route_order: 3 },
+    { id: 'A', window_start: '09:00', route_order: 2, lat: 1, lng: 1 },
+    { id: 'B', window_start: '14:00', route_order: 1, lat: 1, lng: 3 }, // staff changed the window mid-run
+    { id: 'C', window_start: '09:00', route_order: 3, lat: 1, lng: 2 },
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
+test('a tech-day containing a coordless stop is skipped whole (no guessed placement)', async () => {
+  stopsByDate['2026-08-18'] = [...backtrackDay(), stop('D', { lat: null, lng: null, route_order: 4 })];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'COORDLESS_STOPS', geocoded: 3 }));
+});
+
+test('commit-time revalidation: changed coordinates mid-run roll back untouched', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00', route_order: 2, lat: 1, lng: 1 },
+    { id: 'B', window_start: '09:00', route_order: 1, lat: 2, lng: 5 }, // address corrected mid-run
+    { id: 'C', window_start: '09:00', route_order: 3, lat: 1, lng: 2 },
   ];
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);
@@ -267,9 +291,9 @@ test('commit-time revalidation: a MANUAL reorder mid-run wins — autonomous wri
   // Dispatcher hand-reordered while the optimizer ran: same stops, same
   // windows, different route_order. The operator's newer order must survive.
   liveRowsOverride = [
-    { id: 'A', window_start: '09:00', route_order: 1 },
-    { id: 'B', window_start: '09:00', route_order: 3 },
-    { id: 'C', window_start: '09:00', route_order: 2 },
+    { id: 'A', window_start: '09:00', route_order: 1, lat: 1, lng: 1 },
+    { id: 'B', window_start: '09:00', route_order: 3, lat: 1, lng: 3 },
+    { id: 'C', window_start: '09:00', route_order: 2, lat: 1, lng: 2 },
   ];
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);
