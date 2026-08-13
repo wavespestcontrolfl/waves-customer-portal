@@ -155,8 +155,20 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
     expect(createSpy).not.toHaveBeenCalled();
   });
 
-  test('NEVER restores beside live AR on the same visit — a completed visit already re-billed', async () => {
+  test('live AR on the visit ⇒ restore the SETUP FEE ONLY, never the application again', async () => {
     const c = conn({ liveOnVisit: { id: 'inv-completion', invoice_number: 'WPC-2026-0410' } });
+    const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
+    expect(restored).toHaveLength(1);
+    expect(createSpy.mock.calls[0][0].lineItems).toEqual([
+      { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 },
+    ]);
+  });
+
+  test('an application-only row beside live AR skips benignly — nothing left to restore', async () => {
+    const c = conn({
+      rows: [{ ...VOIDED_ROW, line_items: JSON.stringify([{ description: 'First service application', amount: 128 }]) }],
+      liveOnVisit: { id: 'inv-completion' },
+    });
     const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
     expect(restored).toEqual([]);
     expect(createSpy).not.toHaveBeenCalled();

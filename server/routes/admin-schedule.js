@@ -9240,6 +9240,28 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
       visitIds: [...new Set([visit.id, anchor.id].filter(Boolean).map(String))],
     };
   }
+  // A multi-service accept mints ONE combined invoice for the whole
+  // estimate (Codex P0 r17): switching a single series would void sibling
+  // services' charges with it. Refuse when the estimate carries more than
+  // one recurring root series — that reconciliation belongs to Customer
+  // 360, where the invoice can be split first. Fail closed on a bad read.
+  try {
+    const roots = await conn('scheduled_services')
+      .where({ source_estimate_id: anchor.source_estimate_id })
+      .whereNull('recurring_parent_id')
+      .where(function recurringRoots() {
+        this.where('is_recurring', true).orWhereNotNull('recurring_pattern');
+      })
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+      .count({ n: '*' })
+      .first();
+    if (Number(roots?.n) > 1) {
+      return { ok: false, status: 409, blockReason: 'is part of a multi-service plan — its accept invoice covers other services too. Handle this switch from Customer 360, where the invoice can be split first' };
+    }
+  } catch (err) {
+    logger.warn(`[schedule:prepay-switch] series-root count failed for estimate ${anchor.source_estimate_id}: ${err.message} — refusing`);
+    return { ok: false, status: 409, blockReason: 'couldn’t confirm what the accept invoice covers — refresh and try again' };
+  }
   let estimate;
   try {
     estimate = await conn('estimates')
@@ -10132,7 +10154,11 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
             .first('id', 'status');
           const prepayDead = !!prepayRow
             && ['void', 'cancelled', 'canceled', 'refunded'].includes(String(prepayRow.status || '').toLowerCase());
-          if (!prepayDead) return { skipped: true };
+          // Surfaced, not silently skipped (Codex P0 r17): the operator must
+          // know the restore is BLOCKED by a live year, not done.
+          if (!prepayDead) {
+            return { failed: { id, invoiceNumber: row.invoice_number || null, error: 'the annual prepay that superseded it is still live — void it from Invoices first, then retry' } };
+          }
           // NEVER restore beside coverage of the RESTORED VISIT, checked
           // INSIDE the transaction under the SAME per-customer advisory lock
           // every prepay mint takes (Codex P0 r5): a concurrent mint
@@ -10161,6 +10187,13 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
           // visit that completed while the prepay sat unpaid already minted
           // its own per-application invoice — restoring the old one beside
           // it would bill the application twice. Skip; billing moved on.
+          let lines = invoiceLineItems(row.line_items)
+            .map((li) => ({
+              description: String(li?.description || ''),
+              quantity: Number(li?.quantity) > 0 ? Number(li.quantity) : 1,
+              unit_price: Number(li?.unit_price ?? li?.amount),
+            }))
+            .filter((li) => li.description && Number.isFinite(li.unit_price));
           if (row.scheduled_service_id) {
             const liveOnVisit = await trx('invoices')
               .where({ scheduled_service_id: row.scheduled_service_id })
@@ -10168,17 +10201,19 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
               .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
               .first('id', 'invoice_number');
             if (liveOnVisit) {
-              logger.warn(`[schedule:prepay-switch] undo restore skipped for ${row.invoice_number || id}: visit already carries live invoice ${liveOnVisit.invoice_number || liveOnVisit.id}`);
-              return { skipped: true };
+              // The visit completed while the prepay sat unpaid — completion
+              // billed the APPLICATION, but the setup fee lived only on the
+              // superseded invoice. Restore JUST the fee lines beside the
+              // completion invoice (Codex P0 r17); an application-only row
+              // has nothing left to restore and skips benignly.
+              lines = lines.filter((li) => /setup fee/i.test(li.description));
+              if (lines.length === 0) {
+                logger.info(`[schedule:prepay-switch] undo restore skipped for ${row.invoice_number || id}: visit invoice ${liveOnVisit.invoice_number || liveOnVisit.id} already bills the application and no setup fee rode the superseded row`);
+                return { skipped: true };
+              }
+              logger.info(`[schedule:prepay-switch] undo restoring SETUP FEE ONLY for ${row.invoice_number || id}: application covered by live invoice ${liveOnVisit.invoice_number || liveOnVisit.id}`);
             }
           }
-          const lines = invoiceLineItems(row.line_items)
-            .map((li) => ({
-              description: String(li?.description || ''),
-              quantity: Number(li?.quantity) > 0 ? Number(li.quantity) : 1,
-              unit_price: Number(li?.unit_price ?? li?.amount),
-            }))
-            .filter((li) => li.description && Number.isFinite(li.unit_price));
           if (lines.length === 0) return { failed: { id, invoiceNumber: row.invoice_number || null, error: 'no readable line items' } };
           let recreated;
           try {

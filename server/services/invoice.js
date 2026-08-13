@@ -4239,12 +4239,18 @@ const InvoiceService = {
         .where("notes", "like", `%${restoreMarker}%`)
         .first("id");
       if (existing) return null;
-      // NEVER restore beside live AR for the same visit (Codex on-site-switch
-      // P0 r9): a prepay that went unpaid until the visit COMPLETED had a
-      // fresh per-application invoice minted by completion — recreating the
-      // old setup-fee + first-application invoice next to it would bill the
-      // application twice. Anything non-terminal on the visit means the
-      // billing already moved on; leave it to manual review.
+      let lines = parseInvoiceLineItems(row.line_items)
+        .map((li) => ({
+          description: String(li?.description || ""),
+          quantity: Number(li?.quantity) > 0 ? Number(li.quantity) : 1,
+          unit_price: Number(li?.unit_price ?? li?.amount),
+        }))
+        .filter((li) => li.description && Number.isFinite(li.unit_price));
+      // Live AR on the same visit means completion already billed the
+      // APPLICATION while the prepay sat unpaid (Codex P0 r9). The setup fee
+      // lived only on the superseded invoice, so restore JUST the fee lines
+      // beside the completion invoice (Codex P0 r17); an application-only
+      // row has nothing left to restore and skips benignly.
       if (row.scheduled_service_id) {
         const liveOnVisit = await trx("invoices")
           .where({ scheduled_service_id: row.scheduled_service_id })
@@ -4252,17 +4258,14 @@ const InvoiceService = {
           .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
           .first("id", "invoice_number");
         if (liveOnVisit) {
-          logger.warn(`[invoice] switch-supersede restore skipped for ${row.invoice_number || row.id}: visit already carries live invoice ${liveOnVisit.invoice_number || liveOnVisit.id} — manual review`);
-          return null;
+          lines = lines.filter((li) => /setup fee/i.test(li.description));
+          if (lines.length === 0) {
+            logger.info(`[invoice] switch-supersede restore skipped for ${row.invoice_number || row.id}: visit invoice ${liveOnVisit.invoice_number || liveOnVisit.id} already bills the application and no setup fee rode the superseded row`);
+            return null;
+          }
+          logger.info(`[invoice] switch-supersede restoring SETUP FEE ONLY for ${row.invoice_number || row.id}: application covered by ${liveOnVisit.invoice_number || liveOnVisit.id}`);
         }
       }
-      const lines = parseInvoiceLineItems(row.line_items)
-        .map((li) => ({
-          description: String(li?.description || ""),
-          quantity: Number(li?.quantity) > 0 ? Number(li.quantity) : 1,
-          unit_price: Number(li?.unit_price ?? li?.amount),
-        }))
-        .filter((li) => li.description && Number.isFinite(li.unit_price));
       if (lines.length === 0) {
         logger.warn(`[invoice] switch-supersede restore skipped for ${row.invoice_number || row.id}: no readable line items`);
         return null;

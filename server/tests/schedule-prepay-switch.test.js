@@ -132,6 +132,7 @@ function stubTables({
   term = undefined,
   addonCount = 0,
   seriesCount = 4,
+  rootsCount = 1,
   casResult = 1,
 } = {}) {
   stubTables.casCalls = [];
@@ -157,7 +158,11 @@ function stubTables({
       return q;
     });
     q.whereNot = jest.fn(() => q);
-    q.whereNull = jest.fn(() => q);
+    let rootsProbe = false;
+    q.whereNull = jest.fn((col) => {
+      if (col === 'recurring_parent_id') rootsProbe = true;
+      return q;
+    });
     q.whereNotIn = jest.fn(() => q);
     q.whereIn = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
@@ -201,7 +206,10 @@ function stubTables({
         return estimate || undefined;
       }
       if (table === 'scheduled_service_addons') return { n: addonCount };
-      if (table === 'scheduled_services') return isCount ? { n: seriesCount } : visit;
+      if (table === 'scheduled_services') {
+        if (isCount) return { n: rootsProbe ? rootsCount : seriesCount };
+        return visit;
+      }
       return term;
     });
     return q;
@@ -395,6 +403,13 @@ describe('on-site prepay switch — invoices that must not be superseded', () =>
     const { body } = await preview();
     expect(body.eligible).toBe(false);
     expect(body.blockReason).toMatch(/estimate deposit credit/i);
+  });
+
+  test('a MULTI-SERVICE estimate refuses — its combined accept invoice covers siblings', async () => {
+    stubTables({ rootsCount: 2 });
+    const { body } = await preview();
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/multi-service plan/i);
   });
 
   test('a payer-billed invoice refuses', async () => {
@@ -653,8 +668,24 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 
-  test('skips the restore when the visit already carries a LIVE invoice (completion re-billed)', async () => {
+  test('a live completion invoice on the visit ⇒ restore the SETUP FEE ONLY (Codex P0 r17)', async () => {
     stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY, liveOnVisit: { id: 'inv-completion', invoice_number: 'WPC-2026-0410' } });
+    const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(body.restored).toHaveLength(1);
+    const created = mockCreateInvoice.mock.calls[0][0];
+    // The application is already billed by the completion invoice — only the
+    // fee that lived solely on the superseded row comes back.
+    expect(created.lineItems).toEqual([
+      { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 },
+    ]);
+  });
+
+  test('an APPLICATION-ONLY row beside a live completion invoice skips benignly', async () => {
+    stubTables({
+      invoices: [{ ...VOIDED_ROW, line_items: [{ description: 'First service application', amount: 128 }] }],
+      invoicesById: DEAD_PREPAY,
+      liveOnVisit: { id: 'inv-completion', invoice_number: 'WPC-2026-0410' },
+    });
     const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
     expect(body.restored).toEqual([]);
     expect(body.failed).toEqual([]);
@@ -686,13 +717,14 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 
-  test('a superseding prepay that is still LIVE blocks the restore — stale abort vs a live year', async () => {
+  test('a superseding prepay that is still LIVE surfaces as a FAILURE, never silent success', async () => {
     stubTables({
       invoices: [VOIDED_ROW],
       invoicesById: { 'inv-prepay': { id: 'inv-prepay', status: 'paid' } },
     });
     const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
     expect(body.restored).toEqual([]);
+    expect(body.failed[0].error).toMatch(/still live/i);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 
