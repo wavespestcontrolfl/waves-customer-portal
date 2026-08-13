@@ -403,6 +403,14 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(row.confirmed_at).toBeUndefined(); // never pre-confirmed
     expect(row.technician_id).toBe('t-1'); // from the re-validated engine slot
 
+    // ⭐ window_display IS NOT A RANGE. `window_end` is the job duration, so a
+    // stored "9:00 AM - 10:00 AM" would promise a one-hour service block as the
+    // arrival window; the customer surfaces derive window_start + 120 minutes
+    // themselves and rely on stored text being a bare start (or NULL), which is
+    // exactly what the phone-booking writer stores.
+    expect(row.window_display).toBe('9:00 AM');
+    expect(row.window_display).not.toMatch(/[-–]/);
+
     // The pending request surfaces in the EXISTING admin confirm queue.
     const triageInsert = trxBuilders.triage_items.insert;
     expect(triageInsert).toHaveBeenCalledTimes(1);

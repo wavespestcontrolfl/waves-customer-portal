@@ -775,7 +775,16 @@ async function requestBookingText(input = {}, ctx = {}) {
     scheduled_date: dateStr,
     window_start: windowStart,
     window_end: slot.end_time || slot.endTime24 || null,
-    window_display: slot.start_label && slot.end_label ? `${slot.start_label} - ${slot.end_label}`.slice(0, 30) : null,
+    // ⭐ A BARE START, NEVER A RANGE — because `end_time` is the JOB DURATION,
+    // not the arrival window. Writing "9:00 AM - 10:30 AM" here would promise a
+    // 90-minute service block as the window; every customer surface owes the
+    // caller `window_start` + 120 minutes (arrivalWindowRange), and they derive
+    // that themselves precisely because stored display text cannot be trusted to
+    // mean it. The invariant those loaders rely on is spelled out in
+    // estimate-public.js: a stored value is only ever a bare start time (what
+    // the phone-booking writer in call-recording-processor stores) or NULL. This
+    // writer is the same lifecycle, so it stores the same thing.
+    window_display: slot.start_label ? String(slot.start_label).slice(0, 30) : null,
     service_type: catalogRow.name,
     service_id: catalogRow.id || null,
     estimated_price: priceInfo.price,
