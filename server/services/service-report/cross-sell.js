@@ -930,8 +930,155 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
   }
 }
 
+// buildPortalOffer(customerId, database) → offer payload | null.
+// The portal-home variant of the report card (portal roadmap bet 2, owner
+// rulings 2026-08-13): same offer matrix, same ownership authority, same
+// pricing and demotion rules — shared with buildReportCrossSell above so the
+// two surfaces can never disagree about what a customer may be offered.
+// What differs, and why:
+//   - No visit row exists, so the report-identity corroboration ladder has
+//     no portal equivalent. The single-premises proof is therefore ALWAYS
+//     required (the same posture the unlinked-report branch takes).
+//   - No identity-start branch: with zero recurring ownership there is no
+//     visit family to start, and the owner ruled recommendation cards never
+//     push one-time services — an owns-nothing account simply gets no offer.
+//   - relationship is always 'add' by construction (the offer only renders
+//     on recurring evidence).
+// Best-effort by contract: every failure path returns null — the portal
+// home must never notice this feature exists.
+async function buildPortalOffer(customerId, database, { propertyLookup = cacheOnlyPropertyLookup } = {}) {
+  try {
+    if (!customerId || !database) return null;
+
+    const customer = await database('customers').where({ id: customerId }).first();
+    if (!customer || customer.active === false || customer.deleted_at) return null;
+
+    // Commercial properties never get the card (same doctrine as the report:
+    // the engine refuses real prices there and commercial expansion is a
+    // proposal conversation). Re-checked on the lookup-resolved type below.
+    const { isCommercialProperty } = require('../pricing-engine/commercial-helpers');
+    if (isCommercialProperty({ propertyType: customer.property_type })) return null;
+
+    // FAIL CLOSED without a provable primary premises: every downstream
+    // frame (ownership scoping, profile fields, the estimate seed) is
+    // anchored to the customer row's own address — the property the portal
+    // profile displays (select-property ⇒ customer row = property).
+    const linkage = require('../estimate-property-linkage');
+    const primaryStreet = linkage.normalizedStampedStreet(
+      customer.address_line1, customer.address_line2, customer.city, customer.zip
+    );
+    if (!primaryStreet) return null;
+    if (linkage.scopeKeyLacksLocality(primaryStreet)) return null;
+    if (!(await customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet))) {
+      return null;
+    }
+
+    // FAIL CLOSED on ownership (same doctrine as customer-pricing-ai's
+    // PRICING_UNAVAILABLE): a thrown catalog join means we cannot know what
+    // the customer already buys, so no recommendation may render.
+    const { loadOwnedRecurringServiceKeys } = require('../waveguard-existing-services');
+    const streetScope = {
+      estimateStreet: primaryStreet,
+      customerPrimaryStreet: primaryStreet,
+      requireSharedLocality: true,
+    };
+    const ownedKeys = await loadOwnedRecurringServiceKeys(database, customerId, { streetScope });
+    if (!ownedKeys.length) return null;
+
+    // Plan-rate ledger evidence: suppress/demote only, never advance —
+    // identical role to the report path.
+    const { loadComponents } = require('../plan-rate-ledger');
+    const planRateFamilies = (await loadComponents(database, customerId))
+      .filter((row) => Number(row.monthly_rate) > 0)
+      .map((row) => String(row.family_key || ''))
+      .filter((key) => key && key !== 'unattributed');
+
+    const targetKey = pickOfferTarget(ownedKeys);
+    // Owns everything → nothing to offer (owner matrix: the referral card
+    // fills the slot, which needs no offer payload).
+    if (!targetKey) return null;
+    if (offerVocabulary(planRateFamilies).has(targetKey)) return null;
+
+    const evidencedOwnedKeys = [...ownedKeys, ...planRateFamilies];
+
+    // Best-effort seed — a failed estimate read must not kill the card, it
+    // just prices without the seed (and likely degrades to the CTA).
+    let propertySeed = null;
+    try {
+      propertySeed = await loadEstimateSeed(database, customerId, primaryStreet);
+    } catch (err) {
+      logger.warn(`[portal-offer] estimate seed skipped (${err.message})`);
+    }
+
+    // Verified-correction probe: identical to the report path — the absence
+    // of a usable lookup result is what needs probing.
+    let lookupProducedResult = false;
+    const trackedPropertyLookup = async (address) => {
+      const found = await propertyLookup(address);
+      if (found && !hasGlobalVerifyFlag(found.enriched || {})) lookupProducedResult = true;
+      return found;
+    };
+
+    const { buildCustomerPricingResponse, addressForCustomer } = require('../customer-pricing-ai');
+    const result = await buildCustomerPricingResponse({
+      customer,
+      prompt: OFFER_PROMPTS[targetKey],
+      db: database,
+      propertyLookup: trackedPropertyLookup,
+      propertySeed,
+    });
+
+    let correctionsUnapplied = false;
+    if (!lookupProducedResult) {
+      try {
+        const { hasVerifiedOverrides } = require('../property-lookup/lookup-cache');
+        correctionsUnapplied = await hasVerifiedOverrides(addressForCustomer(customer));
+      } catch (err) {
+        correctionsUnapplied = true;
+        logger.warn(`[portal-offer] verified-override probe failed, demoting to CTA (${err.message})`);
+      }
+    }
+
+    if (!result || result.code === 'PRICING_UNAVAILABLE') return null;
+    if ((result.alreadyIncluded || []).length) return null;
+    if (isCommercialProperty({ propertyType: result.property?.propertyType })) return null;
+
+    const { incomplete: baselineIncomplete, unexpected: baselineUnexpected } = qualifyingBaselineMismatch(
+      evidencedOwnedKeys, result.currentServiceKeys
+    );
+
+    const option = result.ok ? pickOption(result.options, targetKey) : null;
+    const ambiguousTreeEvidence = targetKey === 'tree_shrub' && !!propertySeed?.zeroTreeCountAmbiguous;
+    const seedRequiresVerification = !!propertySeed?.requiresFieldVerification;
+    const priced = optionIsPriceable(option) && !baselineIncomplete && !baselineUnexpected
+      && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification;
+
+    const payload = {
+      serviceKey: targetKey,
+      label: OFFER_LABELS[targetKey],
+      mode: priced ? 'priced' : 'quote_cta',
+      relationship: 'add',
+      // Per-application is the ONLY price field this payload may carry —
+      // same public-surface serialization rule as the report card.
+      option: priced ? {
+        id: option.id,
+        label: option.label,
+        cadence: option.cadence || '',
+        perVisit: option.perVisit || null,
+        waveguardTier: option.waveguardTier || null,
+        confidence: option.confidence || null,
+      } : null,
+    };
+    return { ...payload, fingerprint: offerFingerprint(payload) };
+  } catch (err) {
+    logger.warn(`[portal-offer] suppressed (${err.message})`);
+    return null;
+  }
+}
+
 module.exports = {
   buildReportCrossSell,
+  buildPortalOffer,
   // Test hooks: target matrix + priceability are the card's two decisions.
   _private: {
     pickOfferTarget, startFamilyForIdentity, pickOption, optionIsPriceable, offerFingerprint, OFFER_LADDER,
