@@ -229,9 +229,13 @@ function contextPromptAddendum() {
     '  instead, not me", "email only" — capture it on capture_lead: their own words in',
     '  contact_preference, plus preferred_contact_method and do_not_contact_request when they',
     '  apply. Do this even if the rest of the call was about something else.',
-    '- You cannot change anything about how Waves contacts them, and you must not say you',
-    '  have. Acknowledge it plainly ("I\'ve made a note of that for the team") and let a',
-    '  Waves team member action it. Never promise they will stop receiving messages.',
+    '- The ONE change the system makes itself: a verified caller\'s explicit "stop texting',
+    '  me" is applied immediately — but ONLY when the capture_lead result explicitly says',
+    '  the SMS opt-out was applied. When it says so, you may tell the caller text messages',
+    '  to this number have been stopped. If it does not say so, or for ANY other preference',
+    '  (email, "call my husband instead", broader do-not-contact), you cannot change it and',
+    '  must not say you have: acknowledge plainly ("I\'ve made a note of that for the team")',
+    '  and let a Waves team member action it.',
   ].join('\n');
 }
 

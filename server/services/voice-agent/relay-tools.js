@@ -1113,6 +1113,14 @@ async function executeTool(name, input = {}, ctx = {}) {
       const alreadyPaged = typeof ctx.isOwnerAlerted === 'function'
         ? ctx.isOwnerAlerted() === true
         : ctx.ownerAlerted === true;
+      // ⭐ THE MODEL IS TOLD WHAT THE TOOL DID. The prompt only permits telling
+      // a caller their texts are stopped when this result SAYS the opt-out was
+      // applied — without it Sandy either denied a suppression that happened
+      // (false consent status) or promised one that failed.
+      const suppressionNote = smsSuppressionApplied
+        ? ' The SMS opt-out WAS applied: you may tell the caller text messages to this number have been '
+          + 'stopped. Any email or broader contact preference still goes to a human.'
+        : '';
       const pageCaveat = wasHot && !ownerPaged && !alreadyPaged
         ? ' IMPORTANT: the urgent page to the team could NOT be confirmed — do NOT tell the caller a team '
           + 'member is being notified right away. Say a Waves team member will follow up as soon as possible, '
@@ -1122,10 +1130,10 @@ async function executeTool(name, input = {}, ctx = {}) {
         return 'Noted on this customer\'s account — this is an existing customer, so no new lead was created and '
           + 'none should be. The call and your summary are on their record for the office to review. Tell the caller '
           + 'a Waves team member will follow up, and do not say a new request or appointment was created.'
-          + pageCaveat;
+          + suppressionNote + pageCaveat;
       }
       return 'Lead saved successfully. Let the caller know a Waves team member will follow up shortly to confirm '
-        + 'details and scheduling.' + pageCaveat;
+        + 'details and scheduling.' + suppressionNote + pageCaveat;
     }
 
     if (name === 'get_availability') {

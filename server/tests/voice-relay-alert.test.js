@@ -100,13 +100,19 @@ describe('GATE OFF — dark', () => {
 describe('GATE ON — the durable one-page-per-CALL receipt', () => {
   const db = require('../models/db');
 
-  function primeClaimDb({ claimWins, metadata = { relay_hot_alert_at: 't1', relay_hot_alert_sent_at: 't2' } }) {
+  function primeClaimDb({ claimWins, metadata = { relay_hot_alert_at: 't1', relay_hot_alert_sent_at: 't2' }, deliveredRow = null }) {
     const builder = {};
     for (const m of ['where', 'whereRaw']) builder[m] = jest.fn(() => builder);
     builder.update = jest.fn(() => ({ returning: jest.fn(async () => (claimWins ? [{ id: 'cl-1' }] : [])) }));
     // The row exists; `metadata` is what the loser's state read sees.
     builder.first = jest.fn(async () => ({ id: 'cl-1', metadata }));
-    db.mockImplementation(() => builder);
+    // The DELIVERY-evidence probe reads the notifications table by title —
+    // its own builder, empty unless a test primes deliveredRow.
+    const notif = {};
+    for (const m of ['where', 'whereRaw']) notif[m] = jest.fn(() => notif);
+    notif.first = jest.fn(async () => deliveredRow);
+    notif.update = jest.fn(() => ({ returning: jest.fn(async () => []) }));
+    db.mockImplementation((table) => (table === 'notifications' ? notif : builder));
     db.raw = jest.fn((sql) => ({ __raw: sql }));
     return builder;
   }
@@ -150,7 +156,10 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
       }),
     }));
     builder.first = jest.fn(async () => ({ id: 'cl-1', metadata: {} })); // released, no receipt
-    db.mockImplementation(() => builder);
+    const notif = {};
+    for (const m of ['where', 'whereRaw']) notif[m] = jest.fn(() => notif);
+    notif.first = jest.fn(async () => null); // no delivery evidence
+    db.mockImplementation((table) => (table === 'notifications' ? notif : builder));
     db.raw = jest.fn((sql) => ({ __raw: sql }));
     const ctx = { callSid: 'CA-takeover', markOwnerAlerted: jest.fn() };
     const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx);
@@ -199,7 +208,7 @@ describe('GATE ON — the alert', () => {
     expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
     const [to, body, opts] = TwilioService.sendSMS.mock.calls[0];
     expect(to).toBe(OWNER);
-    expect(opts).toEqual({ messageType: 'internal_alert' });
+    expect(opts).toMatchObject({ messageType: 'internal_alert' }); // hot path adds the per-call dedupe title
     expect(body).toMatch(/URGENT lead/i);
     expect(body).toContain('Pat Rivera');
     expect(body).toContain(CALLER); // the owner needs a number to call back
@@ -333,7 +342,7 @@ describe('re-service owner alert (owner ruling)', () => {
     expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
     const [to, body, opts] = TwilioService.sendSMS.mock.calls[0];
     expect(to).toBe(OWNER);
-    expect(opts).toEqual({ messageType: 'internal_alert' });
+    expect(opts).toMatchObject({ messageType: 'internal_alert' }); // hot path adds the per-call dedupe title
     expect(body).toMatch(/URGENT/);
     expect(body).toContain('ants back in the kitchen');
     expect(body).toMatch(/do not leave this in the request queue/i);

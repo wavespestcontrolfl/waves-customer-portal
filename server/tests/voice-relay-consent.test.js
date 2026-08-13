@@ -438,12 +438,14 @@ describe('existing-customer contact instructions still reach a human', () => {
 describe('the prompt says capture, not act', () => {
   const { buildBasePrompt } = require('../services/voice-agent/relay-conversation');
 
-  test('gate-on prompt tells her to capture it and explicitly not to promise a change', () => {
+  test('gate-on prompt: capture everything; confirm ONLY a tool-confirmed SMS stop', () => {
     const p = buildBasePrompt(true);
-    expect(p).toContain('IF THEY TELL YOU HOW TO CONTACT THEM');
     expect(p).toContain('contact_preference');
-    expect(p).toMatch(/cannot change anything about how Waves contacts them/i);
-    expect(p).toMatch(/Never promise they will stop receiving messages/i);
+    // The one system-applied change is the verified SMS stop — and only when
+    // the tool result SAYS it applied; everything else stays a human's.
+    expect(p).toMatch(/ONLY when the capture_lead result explicitly says/i);
+    expect(p).toMatch(/If it does not say so.*you cannot change it/is);
+    expect(p).toMatch(/made a note of that for the team/i);
   });
 });
 

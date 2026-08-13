@@ -200,6 +200,31 @@ async function releaseHotAlertClaim(callSid) {
   }
 }
 
+// The DISTINCTIVE per-call notification title — the delivery-level dedupe key.
+// buildInternalAlertPayload honours options.notificationTitle verbatim, so this
+// exact string lands on the notifications row and a retry after an AMBIGUOUS
+// receipt failure (page delivered, receipt write lost) can probe for it instead
+// of paging twice. The CallSid tail is an opaque id, not PII.
+function hotAlertNotificationTitle(callSid) {
+  const tail = String(callSid || '').slice(-8) || 'unknown';
+  return `🚨 Hot lead — phone assistant call …${tail}`;
+}
+
+async function hotAlertAlreadyDelivered(callSid) {
+  const key = String(callSid || '').trim();
+  if (!key) return false;
+  try {
+    const db = require('../../models/db');
+    const row = await db('notifications')
+      .where({ category: 'alert' })
+      .where('title', hotAlertNotificationTitle(key))
+      .first('id');
+    return !!row;
+  } catch {
+    return false; // unknown ⇒ page (a duplicate beats a missed swarm)
+  }
+}
+
 async function alertOwnerHotLead(lead = {}, ctx = {}) {
   try {
     const { isContextEnabled } = require('./relay-context');
@@ -263,9 +288,25 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
       existingCustomer: Boolean(ctx.customerId),
     });
 
+    // ⭐ THE DELIVERY-LEVEL DEDUPE. A page that was DELIVERED but whose sent
+    // receipt failed to write leaves claimed-but-unsent — the lease expires and
+    // the sweep would page again. The notification row IS delivery evidence:
+    // probe for this call's distinctive title before sending, and a hit just
+    // repairs the receipt instead of re-paging.
+    if (await hotAlertAlreadyDelivered(ctx.callSid)) {
+      if (claim.durable) await markHotAlertSent(ctx.callSid);
+      if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
+      logger.info(`[voice-relay-alert] hot-lead page already delivered for callSid=${ctx.callSid} — receipt repaired, not paging twice`);
+      return true;
+    }
+
     // The SAME sender + messageType the self-booking confirm alert uses.
     const TwilioService = require('../twilio');
-    const sent = await TwilioService.sendSMS(to, body, { messageType: 'internal_alert' });
+    const sent = await TwilioService.sendSMS(to, body, {
+      messageType: 'internal_alert',
+      // The dedupe key doubles as the bell title; the body carries the detail.
+      notificationTitle: hotAlertNotificationTitle(ctx.callSid),
+    });
     // ⭐ `success: true` IS NOT DELIVERY ON THIS PATH. The internal-alert
     // redirect (services/twilio.js redirectInternalAdminSmsToNotification)
     // returns success:true with `notificationUndelivered` / `notificationError`
