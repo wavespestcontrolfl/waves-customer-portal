@@ -28,8 +28,13 @@ const {
   getCachedLookup,
   getVerifiedOverrides,
   saveLookup,
+  markLookupAttempt,
   saveVerifiedOverride,
 } = require('../services/property-lookup/lookup-cache');
+const {
+  unitScopeGuardrailsEnabled,
+  hasPrimaryStreetNumber,
+} = require('../services/estimator-engine/unit-scope-model');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
@@ -160,7 +165,34 @@ function isTimeoutFailure(err, timeout) {
 // public-property-lookup.js can run the same AI search + satellite + trio
 // AI vision pipeline without duplicating the logic.
 // ─────────────────────────────────────────────
+// Attempt stamps are OBSERVABILITY ONLY and fail open by contract: several
+// suites mock the lookup-cache module without this export, and a stamp must
+// never break (or mask) a lookup (codex r37 P1 — the unguarded call threw
+// 'markLookupAttempt is not a function' inside the error path).
+async function stampLookupAttempt(address, status, reason = null) {
+  if (typeof markLookupAttempt !== 'function') return;
+  try {
+    await markLookupAttempt(address, status, reason);
+  } catch { /* fail-open */ }
+}
+
+// Thin wrapper: an uncaught throw anywhere after the 'pending' attempt
+// stamp would otherwise leave the row pending forever — indistinguishable
+// from a running lookup, silently undercounting the failure segments
+// (codex r9 P2). The wrapper stamps a terminal 'error' outcome and
+// rethrows; behavior toward callers is unchanged.
 async function performPropertyLookup(address, options = {}) {
+  try {
+    return await performPropertyLookupCore(address, options);
+  } catch (err) {
+    if (options.persist !== false) {
+      await stampLookupAttempt(address, 'error', String(err?.message || err).slice(0, 200));
+    }
+    throw err;
+  }
+}
+
+async function performPropertyLookupCore(address, options = {}) {
   const t0 = Date.now();
   // options.persist === false: read-everything, WRITE-NOTHING mode for
   // replay/diagnostic callers (estimator-replay) — skips the cache-hit
@@ -268,14 +300,25 @@ async function performPropertyLookup(address, options = {}) {
           if (persist) await attachAddressAuditToCachedLookup(address, marker);
         }
       }
+      // A cache hit is an ATTEMPT — the lifecycle contract is "every
+      // attempt stamps the row", and counting only live lookups
+      // undercounts served traffic (codex r36 P1). Respects persist:false.
+      if (persist) await stampLookupAttempt(address, 'cache_hit');
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
     }
   }
 
   // Cache-only probe missed (or was combined with refresh): never fall
   // through to the live pipeline — the caller prices from the stored
-  // profile alone.
+  // profile alone. BEFORE the attempt stamp: a probe that declines the
+  // live pipeline is not a lookup attempt, and stamping it 'pending' would
+  // leave a permanently pending row.
   if (cacheOnly) return null;
+
+  // Attempt stamp BEFORE geocoding (owner ruling 2026-08-11): a lookup that
+  // dies before saveLookup must still leave a countable row. Fail-open
+  // inside markLookupAttempt; skipped in write-nothing mode.
+  if (persist) await stampLookupAttempt(address, 'pending');
 
   const result = {
     address: String(address).trim(),
@@ -320,7 +363,11 @@ async function performPropertyLookup(address, options = {}) {
   // floorplans, and permit data through Claude/OpenAI/Gemini search. The shaped object
   // intentionally matches the old normalized property-record shape so the
   // pricing engine and field-verify logic do not need a provider branch.
-  const aiProperty = await lookupPropertyFromAITrio(address, geo).catch((err) => {
+  // Attempt-status diagnostics: the trio consumes its providers' timeouts
+  // internally, so it reports suspected per-leg timeouts through this
+  // out-param (observational only — feeds the finalize stamp below).
+  const lookupDiag = {};
+  const aiProperty = await lookupPropertyFromAITrio(address, geo, lookupDiag).catch((err) => {
     result.errors.push({ source: 'ai-property', message: err?.message || String(err) });
     return null;
   });
@@ -694,6 +741,62 @@ async function performPropertyLookup(address, options = {}) {
 
   // ── STEP 5: Persist ── (fail-open; never caches a failed lookup)
   if (persist) await saveLookup(address, result);
+
+  // Finalize the attempt stamp with WHY this lookup resolved or didn't —
+  // "no parcel" used to bucket incomplete addresses, geocode failures, new
+  // construction, and provider timeouts together, and record-less attempts
+  // left no row at all. Purely observational: never alters the result.
+  if (persist) {
+    const record = result.propertyRecord;
+    let status = 'no_record';
+    let reason = null;
+    // Vacant/unassessed detection runs BEFORE the parcel-ID branch: such a
+    // record usually still carries a parcel ID, so the resolved branch
+    // would swallow it (codex pre-push P1). The label is deliberately
+    // NEUTRAL — the detector's own contract cannot distinguish an ordinary
+    // empty lot from assessment lag on new construction, so a
+    // construction-specific label would corrupt the segment (codex r3 P2).
+    let vacantSuspected = false;
+    if (record) {
+      try {
+        const { detectUnassessedVacantParcel } = require('../services/property-lookup/ai-property-lookup');
+        vacantSuspected = !!detectUnassessedVacantParcel(record);
+      } catch { /* detector unavailable — fall through to parcel branches */ }
+    }
+    // PREREQUISITE failures classify before record success (codex r3 P2):
+    // a numberless address that a provider snapped to SOME record, or a
+    // geocode-less lookup whose record can't be cached (no satellite),
+    // must not read as 'resolved' — the failure is what the segment needs.
+    if (!hasPrimaryStreetNumber(address)) {
+      status = 'incomplete_address';
+      reason = 'no primary street number';
+    } else if (!geo) {
+      status = 'geocode_failed';
+      reason = result.errors.find((e) => e.source === 'satellite')?.message || null;
+    } else if (record && vacantSuspected) {
+      status = 'vacant_or_unassessed';
+    } else if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId
+      // Address-search county records carry their confirmed parcel id on
+      // _raw (no GIS parcel object → no _parcel meta) — a normal fallback
+      // path that must not read as no_parcel (codex r7 P2).
+      || record._raw?.parcelId || hasCountyEvidence(record))) {
+      status = 'resolved';
+    } else if (record) {
+      status = 'no_parcel';
+    } else if ((lookupDiag.providerTimeouts || []).length
+      || result.errors.some((e) => /timeout|timed out|abort/i.test(String(e.message)))
+      // Whole-budget exhaustion stays as the coarse fallback signal; the
+      // trio's per-leg diag above is the precise one (codex r3 P2).
+      || (Number(timing?.totalBudgetMs) > 0 && result.meta.lookupMs >= Number(timing.totalBudgetMs))) {
+      status = 'provider_timeout';
+      reason = (lookupDiag.providerTimeouts || []).join(',')
+        || result.errors.map((e) => e.source).join(',')
+        || 'lookup budget exhausted';
+    } else {
+      reason = result.errors.map((e) => e.source).join(',') || null;
+    }
+    await stampLookupAttempt(address, status, reason);
+  }
 
   return result;
 }
@@ -1537,7 +1640,12 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   const residentialDisplayType =
     (rc?.propertyType && normalizePricingPropertyType(rc.propertyType) !== 'commercial')
       ? rc.propertyType
-      : (visionPropertyType || 'Single Family');
+      // Gate ON: with no record and no confident vision type there is no
+      // classification — surface 'Unknown' (observable, recoverable)
+      // instead of a plausible-but-wrong 'Single Family'. Pricing paths
+      // normalize Unknown to the same neutral default dollars; only the
+      // LABEL stops lying (owner ruling 2026-08-11).
+      : (visionPropertyType || (unitScopeGuardrailsEnabled() ? 'Unknown' : 'Single Family'));
 
   // County-facts turf prior: vision produced no turf number (satellite miss,
   // obstructed imagery, brand-new construction) but the county roll gave

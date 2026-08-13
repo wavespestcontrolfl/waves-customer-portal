@@ -279,6 +279,66 @@ function recurringLineDisplayLabel(line) {
   return RECURRING_LINE_LABELS[key] || '';
 }
 
+// The measured basis behind a lawn price, for the public quote widget.
+//
+// Lawn is priced per treatable sq ft, so the area IS the price explanation.
+// The widget renders "Priced for N sq ft" ONLY when this block is present —
+// so it must carry the figure the engine actually priced from (lawnMeta.lsf /
+// the lawn line's lawnSqFt), never the raw vision number, which the engine may
+// cap or replace (TURF_CAPPED_TO_PARCEL, plausibleMaxTurfCap).
+//
+// `source` maps the engine's turfBasis ladder onto the widget's label set.
+// Deliberately conservative: only a tech measurement or an uncapped vision
+// figure gets a definite label. Every estimated/capped/fallback basis maps
+// to the ESTIMATE family ('lot_estimate' et al), because claiming satellite
+// precision for a lot-ratio guess is the same over-claim the estimate page
+// avoids by labelling a county seed "County records (estimated)".
+//
+// Copy contract (owner ruling 2026-08-12: NO verify-on-first-visit wording —
+// it writes a work order for the field tech): astro PR #464 renders these
+// keys as "Estimated from property records". Until #464 deploys, the live
+// widget still shows the older verify wording for these keys — merge #464
+// with (or before) this PR.
+const TURF_BASIS_TO_PUBLIC_SOURCE = {
+  measuredTurfSf: 'measured',
+  lawnSqFt: 'confirmed',
+  estimatedTurfSf: 'ai_satellite',
+  countyPrior: 'county',
+  plausibleMaxTurfCap: 'lot_estimate',
+  lotFallback: 'lot_estimate',
+  legacyHardscapeEstimate: 'footprint_estimate',
+};
+
+function deriveLawnArea(estimate) {
+  // commercial_lawn auto-prices from measured turf the same way (codex #3376
+  // r1) — the commercial customer deserves the same basis line.
+  const lawnLine = (estimate?.lineItems || []).find(
+    (l) => l && (l.service === 'lawn_care' || l.service === 'commercial_lawn')
+  );
+  if (!lawnLine) return null;
+  // Residential lines carry lawnSqFt; priceCommercialLawn stores its priced
+  // area as turfSf (codex #3376 r2) — read both, residential name first.
+  const turfSqFt = Number(lawnLine.lawnSqFt ?? lawnLine.turfSf);
+  if (!Number.isFinite(turfSqFt) || turfSqFt <= 0) return null;
+  const basis = String(lawnLine.turfBasis || '').trim();
+  // A parcel-capped vision figure RETAINS turfBasis 'estimatedTurfSf' — the
+  // clamp rides on property.turfFlags (codex #3376 r1). A capped number is
+  // not a satellite measurement; demote it to the estimate family.
+  const capped = Array.isArray(estimate?.property?.turfFlags)
+    && estimate.property.turfFlags.includes('TURF_CAPPED_TO_PARCEL');
+  return {
+    turf_sqft: Math.round(turfSqFt),
+    // Unknown/new bases fall to the verify family rather than defaulting to a
+    // satellite claim — a basis added later must not silently inherit one.
+    // NOTE: emit ONLY keys the widget's TURF_SOURCE_LABELS knows — its
+    // fallback for unknown keys is the satellite label, so a novel key here
+    // would resurface the exact over-claim this map exists to prevent.
+    source: capped && basis === 'estimatedTurfSf'
+      ? 'lot_estimate'
+      : (TURF_BASIS_TO_PUBLIC_SOURCE[basis] || 'lot_estimate'),
+  };
+}
+
 // Per-service per-application breakdown, so a MULTI-service quote can be
 // quoted the way it bills instead of falling back to a combined monthly
 // total — the unit rule applies to the public quote widget exactly as it does
@@ -782,6 +842,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
       engineInput.measuredTurfSf = num(ep.measuredTurfSf);
       engineInput.estimatedTurfSf = num(ep.estimatedTurfSf);
+      // Turf PROVENANCE rides with the figure (codex #3376 final head): a
+      // county-prior or parcel-capped lookup profile stripped of these
+      // fields would re-grade as a plain vision measurement downstream and
+      // lawn_area would claim 'ai_satellite' for a ratio guess or a capped
+      // number — the exact over-claim the source mapping exists to prevent.
+      if (ep.turfSource) engineInput.turfSource = ep.turfSource;
+      if (ep.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
       engineInput.imperviousSurfacePercent = num(ep.imperviousSurfacePercent ?? ep.imperviosSurfacePercent);
       engineInput.estimatedBedAreaSf = num(ep.estimatedBedAreaSf);
       engineInput.estimatedBedAreaPercent = num(ep.estimatedBedAreaPercent);
@@ -1301,6 +1368,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         manualQuoteLines,
         engineResult: {
           summary: estimate?.summary || {},
+          // Turf provenance flags (TURF_CAPPED_TO_PARCEL) — the estimate
+          // view's measured-basis line demotes the satellite claim off these
+          // when a staff-sent wizard draft renders (codex #3376 r2).
+          ...(Array.isArray(estimate?.property?.turfFlags) && estimate.property.turfFlags.length
+            ? { property: { turfFlags: estimate.property.turfFlags } }
+            : {}),
           lineItems: (estimate?.lineItems || []).map(item => ({
             service: item.service,
             name: item.name || item.label || item.displayName,
@@ -1339,6 +1412,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // never applies a WaveGuard/% discount to it.
             discountable: item.discountable === false ? false : undefined,
             excludeFromPctDiscount: item.excludeFromPctDiscount === true ? true : undefined,
+            // The priced treatable area + provenance (lawn/commercial lawn
+            // lines): the estimate view's measured-basis line reads these off
+            // the mirrored draft when staff later sends it (codex #3376 r2 —
+            // without them the slim mirror can never render the area line).
+            lawnSqFt: item.lawnSqFt ?? undefined,
+            turfSf: item.turfSf ?? undefined,
+            turfBasis: item.turfBasis ?? undefined,
           })),
           waveGuard: estimate?.waveGuard || null,
         },
@@ -1787,6 +1867,21 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // the result page uses this to avoid falling back to the combined
     // monthly total (codex 2642 r3).
     response.multi_recurring = recurringQuoteLines(estimate).length > 1;
+    // Additive: the treatable area the lawn price was computed from, so the
+    // widget can explain the per-application price instead of asserting one.
+    // Absent whenever the quote has no priced lawn line — the widget then
+    // falls back to its own estimate copy and makes no priced-basis claim.
+    // DARK until astro #464 deploys (local audit P1): emitting this field
+    // activates the deployed widget's source labels, which until #464
+    // include the banned verify-on-first-visit wording. The gate makes this
+    // push safe regardless of deploy order; flip GATE_PUBLIC_QUOTE_LAWN_AREA
+    // after #464 is live.
+    const lawnArea = require('../config/feature-gates').isEnabled('publicQuoteLawnArea')
+      ? deriveLawnArea(estimate)
+      : null;
+    if (lawnArea) {
+      response.lawn_area = lawnArea;
+    }
     if (commercialDisclaimer) {
       response.estimated_pricing = true;
       response.disclaimer = commercialDisclaimer;
@@ -1946,6 +2041,7 @@ module.exports._internals = {
   buildCompactCustomerServiceInterest,
   derivePerApplication,
   derivePerApplicationBreakdown,
+  deriveLawnArea,
   shouldRefreshWizardDraft,
   resolveRealLotSqFt,
   resolveEntryChannel,

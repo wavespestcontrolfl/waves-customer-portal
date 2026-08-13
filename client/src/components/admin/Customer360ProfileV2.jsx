@@ -4972,6 +4972,28 @@ export default function Customer360ProfileV2({
     );
 
   const c = data.customer;
+  // Single seeding path for the edit-customer modal — the desktop pill, the
+  // mobile Edit pill, and the ⋯ menu item must prefill identical fields (the
+  // menu copy once dropped profileLabel, so the mobile modal showed it blank).
+  const openEditModal = () => {
+    setEditForm({
+      firstName: c.firstName || "",
+      lastName: c.lastName || "",
+      email: c.email || "",
+      phone: c.phone || "",
+      profileLabel: c.profileLabel || "",
+      addressLine1: c.address?.line1 || "",
+      addressLine2: c.address?.line2 || "",
+      city: c.address?.city || "",
+      state: c.address?.state || "",
+      zip: c.address?.zip || "",
+      monthlyRate: c.monthlyRate ?? "",
+      tier: c.tier || "",
+      pipelineStage: c.pipelineStage || "new_lead",
+    });
+    setEditErr("");
+    setEditOpen(true);
+  };
   const notificationPrefs = data.notificationPrefs || {};
   const prefs = data.preferences || {};
   const hs = data.healthScore || {};
@@ -5499,25 +5521,7 @@ export default function Customer360ProfileV2({
               </button>
               {isAdmin && (
                 <button
-                  onClick={() => {
-                    setEditForm({
-                      firstName: c.firstName || "",
-                      lastName: c.lastName || "",
-                      email: c.email || "",
-                      phone: c.phone || "",
-                      profileLabel: c.profileLabel || "",
-                      addressLine1: c.address?.line1 || "",
-                      addressLine2: c.address?.line2 || "",
-                      city: c.address?.city || "",
-                      state: c.address?.state || "",
-                      zip: c.address?.zip || "",
-                      monthlyRate: c.monthlyRate ?? "",
-                      tier: c.tier || "",
-                      pipelineStage: c.pipelineStage || "new_lead",
-                    });
-                    setEditErr("");
-                    setEditOpen(true);
-                  }}
+                  onClick={openEditModal}
                   className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
                 >
                   Edit
@@ -7373,6 +7377,14 @@ export default function Customer360ProfileV2({
               Call
             </CallBridgeLink>
           )}
+          {isAdmin && (
+            <button
+              onClick={openEditModal}
+              className="inline-flex items-center h-9 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring"
+            >
+              Edit
+            </button>
+          )}
           <div ref={menuRef} className="relative">
             {" "}
             <button
@@ -7393,22 +7405,7 @@ export default function Customer360ProfileV2({
                   <button
                     role="menuitem"
                     onClick={() => {
-                      setEditForm({
-                        firstName: c.firstName || "",
-                        lastName: c.lastName || "",
-                        email: c.email || "",
-                        phone: c.phone || "",
-                        addressLine1: c.address?.line1 || "",
-                        addressLine2: c.address?.line2 || "",
-                        city: c.address?.city || "",
-                        state: c.address?.state || "",
-                        zip: c.address?.zip || "",
-                        monthlyRate: c.monthlyRate ?? "",
-                        tier: c.tier || "",
-                        pipelineStage: c.pipelineStage || "new_lead",
-                      });
-                      setEditErr("");
-                      setEditOpen(true);
+                      openEditModal();
                       setMenuOpen(false);
                     }}
                     className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"

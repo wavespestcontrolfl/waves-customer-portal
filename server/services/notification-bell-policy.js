@@ -58,6 +58,12 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
   'billing',
   'dispute',
   'estimate_converted',
+  // Customer challenged the lawn measurement on a sent estimate ("does the
+  // lawn size look off?") — same class as new_lead/inbound_sms: customer-
+  // initiated and time-sensitive (the sheet promises a same-day re-check),
+  // and this notification is the ONLY handoff the flow emits (codex #3376
+  // r2 P1: without a bell path the policy suppressed it silently).
+  'estimate_measurement_review',
 ]);
 
 // Fixed list of silenced-by-default categories the owner may re-enable via

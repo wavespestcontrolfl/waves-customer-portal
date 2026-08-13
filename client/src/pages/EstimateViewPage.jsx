@@ -2616,6 +2616,156 @@ function RecurringCardModal({ intent, onSuccess, onCancel }) {
   );
 }
 
+// "Does the lawn size look off?" — the customer challenge sheet (owner GO
+// 2026-08-12, mockup-approved). Chips + optional note → POST measurement-
+// review → the office re-measures. Copy rules: NO tech-visit promise (owner
+// ruling — it writes a work order for the field tech) and the estimate
+// explicitly stays AS-IS while we re-check (qualified by its normal
+// expiration date — a challenge does NOT extend the estimate; codex #3376
+// P2: an unqualified validity promise could mislead near expiry). Photo
+// upload from the mockup is
+// deferred — no public upload path exists on this surface yet.
+const MEASUREMENT_REVIEW_CHIPS = [
+  { key: 'less_lawn', label: 'We have less lawn than that' },
+  { key: 'rock_or_beds', label: 'Part of the yard is rock or beds' },
+  { key: 'new_pool_or_landscaping', label: 'New pool or landscaping' },
+  { key: 'fenced_area', label: "A fenced area shouldn't be treated" },
+  { key: 'bigger', label: "It's bigger than that" },
+];
+
+function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
+  const [selected, setSelected] = useState(() => new Set());
+  const [note, setNote] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState('');
+
+  const toggle = (key) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+
+  const submit = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      // The server derives what the estimate showed from its own authoritative
+      // basis — browser-supplied figures are ignored (forgeable), so none are
+      // sent (local audit P1).
+      const r = await fetch(`${API_BASE}/estimates/${token}/measurement-review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reasons: Array.from(selected),
+          note: note.trim() || undefined,
+        }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body?.error || 'Request could not be sent. Try again.');
+      setDone(true);
+    } catch (err) {
+      setError(err?.message || 'Request could not be sent. Try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const canSubmit = !submitting && (selected.size > 0 || note.trim().length > 0);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Does the lawn size look off?"
+      onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onClose(); }}
+      data-glass-scrim=""
+      style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+    >
+      <div data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
+        {done ? (
+          <>
+            <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.glassNavy }}>Got it — we&rsquo;ll re-check the lawn size</div>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
+              We&rsquo;ll re-measure and send an updated estimate — usually same day. Your current estimate stays as-is in the meantime (through its normal expiration date).
+            </div>
+            {/* data-glass-accent: the gold glass CTA (owner 2026-08-12 —
+                primary sheet actions match the estimate's gold CTAs); the
+                inline gold is the non-glass fallback. */}
+            <button type="button" data-glass-accent="" onClick={onClose} style={{ width: '100%', padding: '12px 16px', borderRadius: 12, border: 'none', background: COLORS.yellow, color: COLORS.glassNavy, fontSize: 15, fontWeight: 700, cursor: 'pointer' }}>
+              Done
+            </button>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.glassNavy }}>Does the lawn size look off?</div>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 14px' }}>
+              Tell us what we got wrong. We&rsquo;ll re-measure and send an updated estimate — usually same day.
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+              {MEASUREMENT_REVIEW_CHIPS.map(({ key, label }) => {
+                const on = selected.has(key);
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => toggle(key)}
+                    aria-pressed={on}
+                    style={{
+                      padding: '8px 14px',
+                      borderRadius: 999,
+                      border: `1.5px solid ${on ? COLORS.glassNavy : ESTIMATE_BORDER}`,
+                      background: on ? COLORS.glassNavy : COLORS.white,
+                      color: on ? COLORS.white : COLORS.glassNavy,
+                      fontSize: 14,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+            <textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              maxLength={500}
+              rows={3}
+              placeholder="Anything else we should know? (optional)"
+              style={{ width: '100%', boxSizing: 'border-box', borderRadius: 10, border: `1.5px solid ${ESTIMATE_BORDER}`, padding: '10px 12px', fontSize: 14, fontFamily: 'inherit', color: COLORS.glassNavy, resize: 'vertical', marginBottom: 12 }}
+            />
+            {error ? (
+              <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginBottom: 12 }}>{error}</div>
+            ) : null}
+            <div style={{ display: 'grid', gap: 10 }}>
+              {/* data-glass-accent: the gold glass CTA (owner 2026-08-12 —
+                  primary sheet actions match the estimate's gold CTAs); the
+                  inline gold is the non-glass fallback. Disabled state dims
+                  via opacity, which the glass override doesn't touch. */}
+              <button
+                type="button"
+                data-glass-accent=""
+                onClick={submit}
+                disabled={!canSubmit}
+                style={{ padding: '12px 16px', borderRadius: 12, border: 'none', background: COLORS.yellow, color: COLORS.glassNavy, fontSize: 15, fontWeight: 700, cursor: canSubmit ? 'pointer' : 'default', opacity: canSubmit ? 1 : 0.55 }}
+              >
+                {submitting ? 'Sending…' : 'Request re-measure'}
+              </button>
+              <button type="button" onClick={onClose} disabled={submitting} style={{ padding: '10px 16px', borderRadius: 10, border: 'none', background: 'none', color: ESTIMATE_BODY, fontSize: 14, cursor: 'pointer' }}>
+                Cancel
+              </button>
+            </div>
+            <div style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5, marginTop: 12, textAlign: 'center' }}>
+              Your current estimate stays as-is while we re-check — nothing changes until you see the updated number, and its normal expiration date still applies.
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
@@ -3446,6 +3596,9 @@ export function ServiceSection({
   termiteComparison = null,
   onSelectBondTerm = null,
   bondBusy = false,
+  // Opens the "Does the lawn size look off?" sheet. Wired only when the
+  // server payload flags measurementReviewEnabled (gate-on, non-preview).
+  onMeasurementChallenge = null,
 }) {
   // On phones the corner-pinned WaveGuard badge's 170px heading clearance
   // eats most of the card width and crunches the headline — stack the badge
@@ -3589,6 +3742,18 @@ export function ServiceSection({
             // cadence total accept/billing charges, so the bundle card keeps
             // its combined /mo total.
             preferPerApplicationPrice={section.key !== 'bundle'}
+            // The area this section's price was computed from, next to the
+            // price it explains (owner 2026-08-12). Never on the 'bundle'
+            // card: that card carries a combined total, so hanging one
+            // member service's area off it would read as the basis for the
+            // whole plan — the same over-claim preferPerApplicationPrice
+            // excludes bundles for.
+            measuredBasis={section.key === 'bundle' ? null : (section.intelligence?.measuredBasis || null)}
+            // The challenge link renders only where the basis line does.
+            // Wrapped so the sheet receives the BASIS, not the click event.
+            onMeasurementChallenge={section.key !== 'bundle' && section.intelligence?.measuredBasis && onMeasurementChallenge
+              ? () => onMeasurementChallenge(section.intelligence.measuredBasis)
+              : null}
             // The bundle card used to keep its combined /mo total here; that
             // is a plan total the estimate surface must not carry ("per
             // month" audit 2026-08-01) — its headline now names the billing
@@ -3805,6 +3970,10 @@ function EstimateViewPageInner() {
   const [serviceMode, setServiceMode] = useState('recurring');
   const [paymentPreference, setPaymentPreference] = useState(null);
   const [ctaPhase, setCtaPhaseState] = useState('configure');
+  // "Does the lawn size look off?" sheet — holds the measuredBasis the
+  // customer challenged (null = closed). Only openable when the server
+  // payload flags measurementReviewEnabled.
+  const [measurementReviewBasis, setMeasurementReviewBasis] = useState(null);
   // Mirrors ctaPhase SYNCHRONOUSLY. ctaPhase is React state, so async work
   // started before a phase change — e.g. a SlotPicker AI slot search —
   // captures the OLD phase in its closure: when it resolved mid-submission
@@ -5338,6 +5507,9 @@ function EstimateViewPageInner() {
                 onAddOnToggle={onToggleAddOn}
                 onSelectBondTerm={onSelectBondTerm}
                 bondBusy={bondBusy}
+                onMeasurementChallenge={data?.measurementReviewEnabled && !adminDraftPreview
+                  ? (basis) => setMeasurementReviewBasis(basis || {})
+                  : null}
                 disabled={cardsDisabled || isLockedMirrorSection(section)}
                 renderFlags={renderFlags}
                 waveGuardTier={waveGuardTier}
@@ -5733,6 +5905,14 @@ function EstimateViewPageInner() {
         <SlotIssueBanner
           kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
           onRetry={() => setSlotsRefreshSignal((v) => v + 1)}
+        />
+      ) : null}
+
+      {measurementReviewBasis ? (
+        <MeasurementReviewSheet
+          token={token}
+          measuredBasis={measurementReviewBasis}
+          onClose={() => setMeasurementReviewBasis(null)}
         />
       ) : null}
 

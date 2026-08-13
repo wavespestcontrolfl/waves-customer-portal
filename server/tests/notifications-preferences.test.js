@@ -106,6 +106,17 @@ describe('notification preference updates', () => {
       .toEqual({ tech_en_route: false });
   });
 
+  test('exposes and persists the weather-alerts opt-out (property-alerts lane, codex #3390)', () => {
+    // Read direction: default ON when the column is absent; an explicit
+    // opt-out surfaces false so the portal toggle renders the real state.
+    expect(preferencePayload({})).toMatchObject({ weatherAlerts: true });
+    expect(preferencePayload({ weather_alerts: false })).toMatchObject({ weatherAlerts: false });
+
+    // Write direction: weatherAlerts maps to its own column.
+    expect(notificationPrefsDbUpdates({ weatherAlerts: false }))
+      .toEqual({ weather_alerts: false });
+  });
+
   test('maps per-notification delivery channels to their db columns', () => {
     const updates = notificationPrefsDbUpdates(
       {

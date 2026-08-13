@@ -3447,6 +3447,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // PROPERTY ALERTS SWEEP (GATE_PROPERTY_ALERTS; off = shadow-log only)
+  // Daily 10:05 AM ET — bell + native push advisories (rain/skip-irrigation,
+  // clean-inspection reassurance). MUST stay mid-morning ET: notifyCustomer's
+  // push path has no send-window fence of its own, so this schedule IS the
+  // quiet-hours guarantee. Runs after the 4:40 weather sync so the rain
+  // window reads today's refreshed observed data.
+  // =========================================================================
+  cron.schedule('5 10 * * *', async () => {
+    try {
+      // runExclusive: customer-facing bell/push sends — a deploy overlap
+      // must not double-sweep (the ledger's unique dedupe key is the second
+      // line of defense).
+      await runExclusive('property-alerts-sweep', async () => {
+        const { runPropertyAlertsSweep } = require('./property-alerts');
+        const result = await runPropertyAlertsSweep();
+        logger.info(`[property-alerts] cron run: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Property alerts sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 5 MIN — Retry queued service report PDF renders
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {

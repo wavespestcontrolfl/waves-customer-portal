@@ -149,6 +149,16 @@ const gates = {
   // permanent record and its S3 cache key does not vary on this gate).
   reportCrossSell: process.env.GATE_REPORT_CROSS_SELL === 'true',
 
+  // Warm the property-evidence cache at visit completion so the cross-sell
+  // card can price at render (the composer reads cache-only — a customer
+  // must never wait on county APIs). Runs the composer itself with a
+  // persisting lookup, post-commit and fire-and-forget, so every render
+  // suppression also suppresses the spend. External-API + vision spend per
+  // completed report on a cold cache — ships dark, owner flips. Inert
+  // unless GATE_REPORT_CROSS_SELL is also on. Gate off: completions behave
+  // exactly as today and the card keeps falling back to the quote CTA.
+  reportCrossSellPrewarm: process.env.GATE_REPORT_CROSS_SELL_PREWARM === 'true',
+
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is
   // ready … Invoice for today's visit: {pay_url}") has been unreachable since
@@ -172,6 +182,29 @@ const gates = {
   // only be reached from Customer 360 as before. Kill switch: unset or any
   // non-'true' value; nothing is minted retroactively when it flips.
   prepayOnBook: process.env.GATE_PREPAY_ON_BOOK === 'true',
+
+  // Switching an ALREADY-ACCEPTED per-application customer to annual prepay
+  // from the appointment sheet — the "changed their mind on site" case
+  // (owner ask 2026-08-12). Opens the same prepay-on-book preview + Customer
+  // 360 mint on an ESTIMATE-ORIGIN series, which the preview otherwise
+  // refuses because the accept flow owns that choice; once the estimate is
+  // accepted the quote is closed and its prepay door is gone, so this is the
+  // only door left. Owner ruling 2026-08-12: the $99 setup fee already
+  // invoiced on the accept-minted draft is WAIVED on the switch — the flow
+  // supersedes (voids) that unpaid invoice, so the prepaid year is exactly
+  // visits × per-visit price. Money surface — fail-closed ==='true' in EVERY
+  // environment. Gate off: the availability probe answers switchEnabled
+  // false, the sheet renders no prepay action, and the preview refuses
+  // estimate-origin series exactly as today. Kill switch: unset or any
+  // non-'true' value; nothing already minted is affected when it flips.
+  //
+  // Deliberate overlap with GATE_PREPAY_ON_BOOK: this gate also admits the
+  // preview's COMMITTED mode for a NON-estimate series, so the sheet's
+  // action works on a phone-booked recurring plan too (the on-site twin of
+  // prepay-on-book). It never admits the pre-save DRAFT probe — that stays
+  // the New Appointment modal's, behind its own gate. Both are read-only;
+  // every mint still goes through the Customer 360 route and its guards.
+  onsitePrepaySwitch: process.env.GATE_ONSITE_PREPAY_SWITCH === 'true',
 
   // Setting a recurring plan's LENGTH from Edit appointment. The count is not
   // a stored field — a fixed plan is recurring_ongoing=false plus exactly N
@@ -1087,6 +1120,24 @@ const gates = {
   // and the POST endpoint itself.
   // Enable with GATE_ESTIMATE_EXTENSION_REQUEST=true.
   estimateExtensionRequest: isProd ? process.env.GATE_ESTIMATE_EXTENSION_REQUEST === 'true' : true,
+
+  // "Does the lawn size look off?" — the customer challenge sheet on the
+  // treatable-area line of the estimate (owner GO 2026-08-12). Parks a
+  // service_requests row ('lawn_area_review') + admin notification; the sent
+  // estimate never changes until the office re-measures. Gates BOTH the /data
+  // payload flag (which is what renders the link) and the POST endpoint.
+  // No customer comms anywhere in the flow. Ships DARK.
+  // Enable with GATE_ESTIMATE_MEASUREMENT_REVIEW=true.
+  estimateMeasurementReview: isProd ? process.env.GATE_ESTIMATE_MEASUREMENT_REVIEW === 'true' : true,
+
+  // The `lawn_area` block on POST /public/quote/calculate — the priced
+  // treatable-area basis the website estimator renders as "Priced for N sq
+  // ft". Ships DARK because merely EMITTING the field activates the deployed
+  // astro widget's source labels, and until astro PR #464 deploys those
+  // labels include the banned verify-on-first-visit wording (owner ruling
+  // 2026-08-12). Flip AFTER #464 is live on the hub + spokes.
+  // Enable with GATE_PUBLIC_QUOTE_LAWN_AREA=true.
+  publicQuoteLawnArea: isProd ? process.env.GATE_PUBLIC_QUOTE_LAWN_AREA === 'true' : true,
 
   // Commercial estimate glass parity — the customer estimate page renders an
   // authored commercial proposal's line items INSIDE the glass layout (plus

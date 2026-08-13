@@ -14,7 +14,7 @@
  *     (context-aggregator — already redacts access codes — plus
  *     since-last-visit, service_products history joined to
  *     products_catalog, the estimate source, and the shared
- *     property-alerts compiler);
+ *     nextstop-alerts compiler);
  *   - one LLM pass at the WORKHORSE-equivalent visitBrief text policy
  *     (jsonMode, cross-provider) rewriting PROSE only;
  *   - deterministic template fallback on any LLM miss — the brief must
@@ -51,7 +51,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
-const { compilePropertyAlerts } = require('./property-alerts');
+const { compilePropertyAlerts } = require('./nextstop-alerts');
 // The shared deterministic access-code redactor (context-aggregator's own
 // layer) — re-applied here to EVERY free-text slice at the LLM boundary.
 const { redactAccessCodes } = require('./context-aggregator');

@@ -2918,6 +2918,17 @@ export default function DispatchPageV2({
             });
             setShowNewAppt(true);
           }}
+          onBillingChanged={() => {
+            // The annual-prepay switch rewrote this visit's money state (lane,
+            // attached invoice — possibly under a NEW invoice id after an
+            // abort's restore). The open sheet still holds the pre-switch
+            // snapshot, and checkout could reopen against the voided row
+            // (Codex P1 r18) — close it and refetch; the operator reopens to
+            // a fresh row. Same pairing the terminal actions below use.
+            setDetailService(null);
+            fetchSchedule(date, { silent: true });
+            setScheduleRefreshKey((k) => k + 1);
+          }}
           onCancelled={() => {
             // Silent only while the project editor is mounted underneath —
             // ordinary day-row sheets keep the loud gate so a failed

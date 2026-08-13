@@ -23,7 +23,14 @@ let mockState;
 jest.mock('../models/db', () => {
   const builderFor = (table) => {
     const chain = {
-      where: () => chain,
+      where: (...args) => { mockState.wheres.push({ table, args }); return chain; },
+      whereNot: () => chain,
+      whereNotNull: () => chain,
+      orderBy: () => chain,
+      limit: () => chain,
+      // The prior-thread scope scan is the only reader here; anything else
+      // selecting from a table this mock doesn't stage gets an empty set.
+      select: async () => (table === 'emails' ? mockState.threadEmails : []),
       update: async (payload) => {
         mockState.updates.push({ table, payload });
         return 1;
@@ -86,7 +93,7 @@ const EXTRACTED = {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { inserts: [], updates: [] };
+  mockState = { inserts: [], updates: [], threadEmails: [], wheres: [] };
   mockReadiness.mockReturnValue({ ready: true, serviceInterest: 'Pest Control', missing: [] });
   mockBuilder.mockReturnValue({
     monthly: 62, annual: 744, oneTimeTotal: 0,
@@ -118,6 +125,17 @@ describe('parseExtractedAddress', () => {
       line1: '123 Palm Ave', city: null, state: null, zip: null,
     });
     expect(parseExtractedAddress('')).toEqual({ line1: null, city: null, state: null, zip: null });
+  });
+
+  test('a unit-first classifier address leads with its street', () => {
+    // "Unit 7" as line1 misread the street as the city and readiness asked
+    // for an address the customer had already supplied (codex GH r57 P2).
+    expect(parseExtractedAddress('Unit 7, 123 Main St, Bradenton, FL 34201')).toEqual({
+      line1: '123 Main St, Unit 7', city: 'Bradenton', state: 'FL', zip: '34201',
+    });
+    // A numberless street never swaps — line1 stays the designator and the
+    // address-quality gate asks for the street, which is the right recovery.
+    expect(parseExtractedAddress('Unit 7, Bayview Ter, Venice, FL').line1).toBe('Unit 7');
   });
 
   test('unit designators fold into line1 so the real city survives', () => {
@@ -167,6 +185,263 @@ describe('maybeDraftEstimateFromEmailLead', () => {
     expect(result.created).toBe(false);
     expect(result.skipped).toBe('duplicate');
     expect(mockState.inserts).toHaveLength(0);
+  });
+
+  // A `From:` line is a reply header in a reply and a PAYLOAD FIELD in an
+  // automated form notification. Cutting the body at the first `From:`
+  // discarded the whole request when the notification opened with one, and
+  // the premises wording in its `Message:` field never reached the scan.
+  describe('form-notification bodies that open with a From: field', () => {
+    const scannedMessage = () => mockReadiness.mock.calls[0][0].intake.message;
+
+    test('a leading From: field keeps the request text that follows it', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'New website inquiry',
+          body_text: [
+            'From: Jane Doe',
+            'Phone: 941-555-0184',
+            'Service: Pest Control',
+            'Message: We need quarterly service for our warehouse on 48th Ave E.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toContain('warehouse');
+    });
+
+    test('a preamble line above the From: field does not make it a reply header', async () => {
+      // Form notifications routinely open with a banner line before their
+      // fields; gating on "content precedes it" still dropped the request.
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'New inquiry',
+          body_text: [
+            'New website inquiry',
+            'From: Jane Doe',
+            'Phone: 941-555-0184',
+            'Message: service our warehouse on 48th Ave E.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toContain('warehouse');
+    });
+
+    test('the sender field itself is never scanned as premises wording', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'New website inquiry',
+          body_text: [
+            'From: Jane Doe, Sarasota Warehouse Supply',
+            'Message: quarterly service for my house please.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      // An employer in the sender line says nothing about the treated
+      // premises (codex r9 P2) — only the request text below it counts.
+      expect(scannedMessage()).not.toContain('Warehouse Supply');
+      expect(scannedMessage()).toContain('my house');
+    });
+
+    test('a real reply header still ends the sender\'s own text', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'Re: quote',
+          body_text: [
+            'Sounds good, my number is below.',
+            '',
+            'From: Jane Doe <jane@example.com>',
+            'Sent: Tuesday, August 11, 2026 2:04 PM',
+            'To: contact@wavespestcontrolvenice.com',
+            'Subject: quote',
+            '',
+            'Original ask about our warehouse.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toContain('Sounds good');
+      expect(scannedMessage()).not.toContain('Original ask');
+    });
+
+    test('a top-quoted header block with no prose above it is still quoted history', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'Fwd: quote',
+          body_text: [
+            'From: Jane Doe <jane@example.com>',
+            'Date: Tue, Aug 11, 2026 at 2:04 PM',
+            'To: contact@wavespestcontrolvenice.com',
+            'Subject: quote',
+            '',
+            'Original ask about our warehouse.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).not.toContain('Original ask');
+    });
+
+    test('an underscore divider inside a form does not end the scan', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'New website inquiry',
+          body_text: [
+            'New website inquiry',
+            '________________',
+            'From: Jane Doe',
+            'Message: pest control for our warehouse.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toContain('warehouse');
+    });
+
+    test('an Outlook underscore separator before a quoted header block still cuts', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'RE: quote',
+          body_text: [
+            'Here is my number.',
+            '________________________________',
+            'From: Jane Doe <jane@example.com>',
+            'Sent: Tuesday, August 11, 2026 2:04 PM',
+            'To: contact@wavespestcontrolvenice.com',
+            'Subject: quote',
+            '',
+            'Original ask about our warehouse.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toContain('my number');
+      expect(scannedMessage()).not.toContain('warehouse');
+    });
+
+    test('a forwarded-message separator ends the scan before its header block', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: {
+          ...EMAIL,
+          subject: 'Fwd: quote',
+          body_text: [
+            '---------- Forwarded message ---------',
+            'From: Jane Doe <jane@example.com>',
+            'Message: our warehouse needs service.',
+          ].join('\n'),
+        },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).not.toContain('warehouse');
+    });
+  });
+
+  // PRIOR means received BEFORE this email — a retry of an older message
+  // must not read the thread's later mail as its history (codex r53 P1).
+  describe('prior-thread read is bounded to earlier mail', () => {
+    const emailsWheres = () => mockState.wheres
+      .filter((w) => w.table === 'emails')
+      .map((w) => w.args);
+
+    test('the query bounds on received_at when this email carries one', async () => {
+      await maybeDraftEstimateFromEmailLead({ email: EMAIL, extracted: EXTRACTED, lead: LEAD });
+      expect(emailsWheres()).toEqual(expect.arrayContaining([
+        ['received_at', '<', EMAIL.received_at],
+      ]));
+    });
+
+    test('an email without received_at keeps the whole-thread read', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: { ...EMAIL, received_at: null },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(emailsWheres().some((args) => args[0] === 'received_at')).toBe(false);
+    });
+  });
+
+  // The premises wording that decides residential-vs-commercial usually
+  // arrives in the FIRST message of a thread; the reply that finally supplies
+  // a phone often says nothing about the property. The lead row cannot carry
+  // it (leads has no description column and the email insert writes no
+  // transcript_summary), so the scan reads the thread's own stored mail.
+  describe('prior-thread scope evidence', () => {
+    const scannedMessage = () => mockReadiness.mock.calls[0][0].intake.message;
+
+    test('an earlier commercial email in the thread reaches the readiness scan', async () => {
+      mockState.threadEmails = [{
+        subject: 'Pest control for our warehouse',
+        body_text: 'We need quarterly service for our 12,000 sq ft warehouse.\n\nThanks',
+        snippet: null,
+      }];
+      await maybeDraftEstimateFromEmailLead({
+        email: { ...EMAIL, subject: 'Re: following up', body_text: 'Here is my number.' },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toContain('warehouse');
+      expect(scannedMessage()).toContain('12,000 sq ft');
+    });
+
+    test('the read is scoped to THIS lead — a stranger sharing the thread never carries (r58)', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: { ...EMAIL, subject: 'Re: following up', body_text: 'Here is my number.' },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      const emailWheres = mockState.wheres.filter((w) => w.table === 'emails').map((w) => w.args);
+      expect(emailWheres).toEqual(expect.arrayContaining([['lead_id', 'lead-1']]));
+    });
+
+    test('no lead id means no thread read at all', async () => {
+      mockState.threadEmails = [{ subject: 'warehouse ask', body_text: 'our warehouse', snippet: null }];
+      await maybeDraftEstimateFromEmailLead({
+        email: { ...EMAIL, subject: 'Quote please', body_text: 'For my house.' },
+        extracted: EXTRACTED,
+        lead: { ...LEAD, id: null },
+      });
+      expect(scannedMessage()).not.toContain('warehouse');
+    });
+
+    test('a thread with no earlier mail scans this message alone', async () => {
+      await maybeDraftEstimateFromEmailLead({
+        email: { ...EMAIL, subject: 'Quote please', body_text: 'For my house.' },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toBe('Quote please\nFor my house.');
+    });
+
+    test('a failed thread read degrades to this message, never losing the lead', async () => {
+      const db = require('../models/db');
+      db.mockImplementationOnce(() => ({
+        where: () => { throw new Error('connection reset'); },
+      }));
+      const result = await maybeDraftEstimateFromEmailLead({
+        email: { ...EMAIL, subject: 'Quote please', body_text: 'For my house.' },
+        extracted: EXTRACTED,
+        lead: LEAD,
+      });
+      expect(scannedMessage()).toBe('Quote please\nFor my house.');
+      expect(result.created).toBe(true);
+    });
   });
 
   test('ready extraction inserts a priced email_inquiry draft and links the lead', async () => {

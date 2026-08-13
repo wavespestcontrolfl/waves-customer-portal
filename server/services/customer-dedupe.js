@@ -664,6 +664,11 @@ const UNIQUE_COLLISION_HANDLERS = {
   // identical content, not divergent data — move the tags the winner lacks,
   // drop the loser's copies of tags the winner already has.
   customer_tags: repointRowwiseDropCollisions,
+  // UNIQUE(customer_id, dedupe_key): both duplicate profiles receiving the
+  // same rule/date advisory is identical content (the same alert about the
+  // same property) — keep the winner's ledger row, drop the loser's copy
+  // (codex #3390: absent here, a shared alert aborted the whole merge).
+  customer_alerts: repointRowwiseDropCollisions,
 };
 
 // Customer ids also hide behind polymorphic recipient columns the
@@ -3773,6 +3778,7 @@ module.exports = {
     mergeSingletonPrefRow,
     repointRowwiseDropCollisions,
     mergeConversationRows,
+    UNIQUE_COLLISION_HANDLERS,
     resetFkCache: () => { fkColumnsCache = null; },
   },
 };

@@ -120,13 +120,13 @@ describe('mowingAlertText — technician-facing line', () => {
     const dispatchSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
     expect(dispatchSrc).toContain("require('../utils/mowing-schedule')");
     expect(dispatchSrc).toMatch(/mowingAlertText\(prefs\)/);
-    // admin-schedule's typed block moved to the shared property-alerts
+    // admin-schedule's typed block moved to the shared nextstop-alerts
     // compiler (also consumed by the pre-visit brief) — the mowing alert
     // renders through it.
     const scheduleSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
-    expect(scheduleSrc).toContain("require('../services/property-alerts')");
+    expect(scheduleSrc).toContain("require('../services/nextstop-alerts')");
     expect(scheduleSrc).toMatch(/compilePropertyAlerts\(\{/);
-    const compilerSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'property-alerts.js'), 'utf8');
+    const compilerSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'nextstop-alerts.js'), 'utf8');
     expect(compilerSrc).toContain("require('../utils/mowing-schedule')");
     expect(compilerSrc).toMatch(/mowingAlertText\(prefs\)/);
   });

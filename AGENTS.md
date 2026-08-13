@@ -1359,6 +1359,24 @@ violations at the severity noted.
   rate limit (60/15min via the shared /64-collapsing key), 64kb body cap
   ahead of the global parsers, GET 405. Treat the gate, the rate limit, and
   the static-reply-only surface as security-critical).
+  `/api/estimates/:token/measurement-review` (POST; the "does the lawn size
+  look off?" challenge on a sent estimate — parks ONE `service_requests` row
+  (`requested_service='lawn_area_review'`) + an admin bell; the estimate is
+  NEVER mutated and the customer is NEVER auto-messaged (owner sends all
+  comms). Guards: `GATE_ESTIMATE_MEASUREMENT_REVIEW` dark by default with a
+  gate-aware limiter skip so dark-gate probes see the same generic 404 as
+  unknown/malformed tokens; estimate token format gate; 5/hr rate limit on
+  the shared IPv6-safe key; full customer-viewability + accepted/declined
+  exclusion + priced-lawn-basis requirement, ALL re-validated on the LOCKED
+  estimate row inside the write transaction; the durable call-side linkage
+  verdict re-checked under the estimates → leads → call_log lock order and
+  HELD through customer resolution and the insert; open-request dedupe on
+  the `service_requests` partial unique index, pre-checked under the lock
+  (a 23505 inside the transaction is a bug, not a race); `shownSqFt`/
+  `shownSource` derived server-side from the authoritative measured basis —
+  request-body figures are ignored. Treat the gate, the lock ordering, the
+  generic-404 indistinguishability, and the no-comms contract as
+  security-critical.)
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

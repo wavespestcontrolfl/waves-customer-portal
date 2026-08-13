@@ -618,6 +618,21 @@ async function submitRecap({
     smsError = 'duplicate_suppressed';
   }
 
+  // Cross-sell evidence pre-warm is DELIBERATELY NOT wired here (codex
+  // #3382 rounds r1–r3 converged on this): recap-created service_records
+  // carry no report_template_version, and reports-public returns the base
+  // payload for non-v1 records before the builder that composes crossSell —
+  // those reports render the legacy layout with NO card, so warming buys
+  // nothing. The only v1 records this path touches are re-recaps of visits
+  // completed through /complete — where the scheduled row is already
+  // 'completed', this submit is not the transition winner, and the ORIGINAL
+  // completion already warmed through the dispatch call site. Both branches
+  // together make a recap-side warm unreachable; if recap completions ever
+  // start stamping service_report_v1 (a product decision — the v1 layout
+  // presents findings/coverage the recap doesn't capture), wire the warm
+  // AFTER the SMS send above: the transaction durably claims
+  // recap_sms_sent_at, and nothing may sit between that claim and the send.
+
   // Digital business card: a recap completion is a real performed visit —
   // mirror the /complete path's best-effort mint so a customer whose FIRST
   // completed visit lands through the recap flow still gets their card, tied

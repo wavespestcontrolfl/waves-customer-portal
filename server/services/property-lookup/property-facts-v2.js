@@ -219,6 +219,10 @@ function lotApplicabilityFor({ propertySubtype, ownershipType }) {
   if (ownershipType === 'residential_condominium' || ownershipType === 'commercial_condominium'
     || ownershipType === 'association_common_property') return 'common_master_parcel';
   if (ownershipType === 'leased_suite') return 'no_individual_lot';
+  // A tenant leasing an ENTIRE freestanding building still sits on one real
+  // parcel — lot-driven services legitimately treat it, so this is a
+  // private parcel, never 'no individual lot' (codex r40 P1).
+  if (ownershipType === 'leased_whole_building') return 'private_parcel';
   const subtype = normalizeSubtype(propertySubtype);
   if (subtype === 'condominium' || subtype === 'condo' || subtype === 'apartment') return 'common_master_parcel';
   if (ownershipType === 'fee_simple') return 'private_parcel';
@@ -269,6 +273,30 @@ const STRUCTURE_KINDS_BY_SCOPE = {
 // Scopes a unit/suite-targeted selection may draw from, per structure kind.
 const UNIT_SCOPES = new Set(['unit', 'suite']);
 
+// A commercial TENANT whose evidence shows no part-building signal is
+// classified `entire_commercial_building` / `leased_whole_building` so their
+// real parcel survives (codex r38/r39/r40 P1s). That absence is not proof
+// they lease the whole building, though — a suite tenant whose address omits
+// the Suite suffix and whose county record reads a generic 'Commercial'
+// lands here too. When such a tenant STATED their own area, that number is
+// the only one describing the treated space, exactly as the V1 commercial-
+// tenant rung already rules (`source-arbitration.js` — county sqft covers
+// the whole building, not the caller's unit); without this the county
+// building area was selected and `applyV2ToPropertyFacts` overwrote the
+// tenant-safe V1 value, pricing a suite as the whole building (codex r48
+// P1). Only the caller's own stated area carries the suite kind here —
+// county/listing rows are emitted as `building_area_sqft` — so a tenant who
+// stated nothing still keeps the building measurement. `leased_whole_building`
+// exists ONLY under the unit-scope gate, so the kill switch still restores
+// prior behavior end to end.
+function structureKindsFor({ serviceScope, ownershipType }) {
+  const kinds = STRUCTURE_KINDS_BY_SCOPE[serviceScope] || [];
+  if (serviceScope === 'entire_commercial_building' && ownershipType === 'leased_whole_building') {
+    return ['commercial_suite_area_sqft', ...kinds];
+  }
+  return kinds;
+}
+
 function isCommercialServiceScope(serviceScope) {
   return serviceScope === 'commercial_suite'
     || serviceScope === 'entire_commercial_building'
@@ -285,8 +313,8 @@ function confidenceFromEvidence(ev) {
   return Math.round(authority * (0.6 + 0.2 * directness + 0.2 * extraction) * 100) / 100;
 }
 
-function selectStructureArea({ serviceScope, evidence, warnings }) {
-  const kinds = STRUCTURE_KINDS_BY_SCOPE[serviceScope] || [];
+function selectStructureArea({ serviceScope, ownershipType, evidence, warnings }) {
+  const kinds = structureKindsFor({ serviceScope, ownershipType });
   const unresolved = {
     value: null, kind: 'unknown', scope: 'unknown',
     pricingValue: null, pricingDisposition: null,
@@ -438,7 +466,9 @@ function selectPropertyFactsV2(input) {
   const serviceScope = SERVICE_SCOPES.includes(input?.serviceScope) ? input.serviceScope : 'unknown';
   const deduped = dedupeEvidence(input?.evidence);
 
-  const structureArea = selectStructureArea({ serviceScope, evidence: deduped, warnings });
+  const structureArea = selectStructureArea({
+    serviceScope, ownershipType: input?.ownershipType, evidence: deduped, warnings,
+  });
   const stories = selectStories({ serviceScope, evidence: deduped, warnings });
   const lot = selectLot({
     propertySubtype: input?.propertySubtype,
@@ -452,7 +482,8 @@ function selectPropertyFactsV2(input) {
     serviceScope,
   });
   const resolvedKinds = new Set([
-    ...(structureArea.value != null ? STRUCTURE_KINDS_BY_SCOPE[serviceScope] || [] : []),
+    ...(structureArea.value != null
+      ? structureKindsFor({ serviceScope, ownershipType: input?.ownershipType }) : []),
     ...(lot.privateLotSqft != null || lot.applicability !== 'private_parcel' ? ['private_lot_area_sqft'] : []),
   ]);
   // The selected structure kind satisfies any required area kind for the
