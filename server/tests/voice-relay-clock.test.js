@@ -157,7 +157,24 @@ describe('renderClockBlock', () => {
   });
 
   test('buildClockBlock loads + renders in one call', async () => {
-    expect(await relayContext.buildClockBlock(SUMMER_10AM_ET)).toContain('The office is OPEN right now');
+    // The closure flags are stamped with the ET day they were loaded FOR, and
+    // the renderer degrades on a mismatch — so this same-day assertion renders
+    // at 10:00 ET on the REAL current ET day, not a frozen calendar date.
+    const { parseETDateTime, etDateString } = require('../utils/datetime-et');
+    const todayTenAmEt = parseETDateTime(`${etDateString()}T10:00`);
+    expect(await relayContext.buildClockBlock(todayTenAmEt)).toContain('The office is OPEN right now');
+  });
+
+  // ⭐ MIDNIGHT INVALIDATES THE FLAGS. Loaded once per session for a specific
+  // ET day, rendered every turn with the live date: after a rollover the block
+  // must claim NOTHING about open/closed rather than attach yesterday's flags
+  // to today's date.
+  test('a session that crosses ET midnight degrades to closedUnknown', () => {
+    const stale = { ...HOURS, closedToday: false, closedTomorrow: false, closedForDate: '2026-08-12' };
+    const out = relayContext.renderClockBlock(stale, new Date('2026-08-13T14:00:00Z')); // Aug 13 ET
+    expect(out).toMatch(/could not be confirmed/i);
+    expect(out).not.toContain('The office is OPEN right now');
+    expect(out).toMatch(/Right now in Florida/); // the time itself still speaks
   });
 });
 

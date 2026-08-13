@@ -284,6 +284,13 @@ async function loadOfficeHours() {
       const closed = await getBlackoutDates(todayStr, tomorrowStr);
       closedToday = closed.has(todayStr);
       closedTomorrow = closed.has(tomorrowStr);
+      // ⭐ THE FLAGS ARE STAMPED WITH THE DAY THEY DESCRIBE. This loads once per
+      // session while renderClockBlock re-reads the current ET date every turn
+      // — a call crossing ET midnight would otherwise attach YESTERDAY's
+      // closure flags to today's date and give wrong reopening guidance. The
+      // renderer compares this stamp to the live date and degrades to
+      // closedUnknown (state the time, claim nothing) on a rollover.
+      return { startMin, endMin, closedToday, closedTomorrow, closedForDate: todayStr };
     } catch (err) {
       // ⭐ UNKNOWN, NOT OPEN. Defaulting a failed lookup to "working day" makes
       // the block ANNOUNCE that the office is open — and promise a reopening
@@ -293,7 +300,6 @@ async function loadOfficeHours() {
       logger.warn(`[voice-relay-context] closed-day lookup failed — clock block will not claim open/closed: ${err.message}`);
       return { startMin, endMin, closedUnknown: true };
     }
-    return { startMin, endMin, closedToday, closedTomorrow };
   } catch (err) {
     logger.warn(`[voice-relay-context] office hours lookup failed — clock block will omit open/closed: ${err.message}`);
     return null;
@@ -317,8 +323,22 @@ function renderClockBlock(hours, now = new Date()) {
     const parts = etParts(now);
     const nowMinutes = parts.hour * 60 + parts.minute;
     const dateLine = `${WEEKDAYS[parts.dayOfWeek]} ${MONTHS[parts.month - 1]} ${parts.day}, ${parts.year}`;
-    const startMin = hours && Number.isFinite(hours.startMin) ? hours.startMin : null;
-    const endMin = hours && Number.isFinite(hours.endMin) ? hours.endMin : null;
+    let startMin = hours && Number.isFinite(hours.startMin) ? hours.startMin : null;
+    let endMin = hours && Number.isFinite(hours.endMin) ? hours.endMin : null;
+    // ⭐ MIDNIGHT INVALIDATES THE CLOSURE FLAGS. They were loaded once at
+    // session start FOR a specific ET day; this renderer runs every turn with
+    // the live date. Once the calendar rolls, yesterday's closedToday/-Tomorrow
+    // would be attached to today's date — so a rolled-over session degrades to
+    // closedUnknown: the time still speaks, open/closed and reopening promises
+    // do not.
+    if (hours && hours.closedForDate) {
+      const { etDateString } = require('../../utils/datetime-et');
+      if (etDateString(now) !== hours.closedForDate) {
+        hours = { startMin: hours.startMin, endMin: hours.endMin, closedUnknown: true };
+        startMin = Number.isFinite(hours.startMin) ? hours.startMin : null;
+        endMin = Number.isFinite(hours.endMin) ? hours.endMin : null;
+      }
+    }
 
     const lines = [
       'CURRENT TIME — the live clock for this call, so your callback promises are',

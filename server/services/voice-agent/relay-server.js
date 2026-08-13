@@ -79,11 +79,17 @@ async function burnCallToken(token, callSid) {
   const tokenHash = require('crypto').createHash('sha256').update(String(token)).digest('hex');
   try {
     const db = require('../../models/db');
-    const burnWrite = db('voice_relay_token_burns')
+    // ⭐ MATERIALIZED ONCE. A Knex QueryBuilder is a THENABLE, and every
+    // `.then()` on it starts a fresh query — racing the builder and then
+    // touching it again in cleanup issued TWO inserts per upgrade (and, after
+    // a timeout, a brand-new query while the stalled one still held its pool
+    // slot). One Promise.resolve() executes it exactly once; the race and the
+    // late-loser catch both hold that same promise.
+    const burnPromise = Promise.resolve(db('voice_relay_token_burns')
       .insert({ token_hash: tokenHash, call_sid: String(callSid).slice(0, 64), burned_at: new Date() })
       .onConflict('token_hash')
       .ignore()
-      .returning('token_hash');
+      .returning('token_hash'));
     let deadlineTimer;
     const deadline = new Promise((_, reject) => {
       deadlineTimer = setTimeout(
@@ -94,13 +100,13 @@ async function burnCallToken(token, callSid) {
     });
     let rows;
     try {
-      rows = await Promise.race([burnWrite, deadline]);
+      rows = await Promise.race([burnPromise, deadline]);
     } finally {
       clearTimeout(deadlineTimer);
       // A late loser must never surface as unhandled (the write may still
       // land after the deadline — the burn row is then simply present for
-      // the retry, which is correct).
-      Promise.resolve(burnWrite).catch(() => {});
+      // the retry, which is correct). Same promise, no re-execution.
+      burnPromise.catch(() => {});
     }
     if (!rows || rows.length === 0) return false; // replay — somebody already has it
     // Opportunistic sweep of rows no token can still be valid for. Detached:
