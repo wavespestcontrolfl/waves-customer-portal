@@ -503,6 +503,12 @@ async function assembleGrounding(svc, dbh = db) {
   if (context?.sourceHealth?.recentCalls === 'unavailable') {
     throw new Error('recent-calls lookup unavailable — refusing to regenerate over the cached brief');
   }
+  // The aggregator's own billing sentinel: an invoice-query outage also
+  // zeroes the balance and drops the overdue flag — hashed, that would
+  // overwrite a valid cached brief without its billing warning.
+  if (context?.billing?.unavailable) {
+    throw new Error('billing context unavailable — refusing to regenerate over the cached brief');
+  }
 
   // Access/pet/chemical guidance is copied DETERMINISTICALLY from this
   // row — a lookup outage must not collapse into "no preferences": the
