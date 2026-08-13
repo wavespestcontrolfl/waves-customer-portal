@@ -1388,6 +1388,12 @@ const gates = {
   // unset or any non-'true' value — estimates and accepts revert to the
   // 2026-08-05 review-bell behavior.
   waveguardExtendExisting: process.env.GATE_WAVEGUARD_EXTEND_EXISTING === 'true',
+
+  // Bank Import (2026-08-13): statement-CSV staging + expense reconciliation
+  // under /admin/tax. Staff-only and read-mostly, but OFF in every
+  // environment until Adam flips it — routes read GATE_BANK_IMPORT through
+  // gateEnvValue() at call time so a flip needs no redeploy.
+  bankImport: process.env.GATE_BANK_IMPORT === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

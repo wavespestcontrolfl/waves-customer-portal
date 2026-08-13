@@ -1611,4 +1611,211 @@ router.get('/export/tax-package', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ═══════════════════════════════════════════════════════════════
+// BANK IMPORT (GATE_BANK_IMPORT) — statement CSV → staging → reconcile
+// ═══════════════════════════════════════════════════════════════
+// Staging only: nothing under /bank-import writes to `expenses` except the
+// explicit create-expense action below, which reuses the exact policy the
+// manual POST /expenses applies (server-owned partial deduction, AI-verify
+// flag). See services/bank-import.js for the matching policy.
+
+const bankImport = require('../services/bank-import');
+const { gateEnvValue } = require('../config/feature-gates');
+
+const MAX_STATEMENT_BYTES = 2 * 1024 * 1024;
+
+// /bank-import/status always answers (the client uses it to decide whether
+// to show the tab at all); every other bank-import route 404s when dark.
+router.get('/bank-import/status', async (req, res, next) => {
+  try {
+    if (!gateEnvValue('GATE_BANK_IMPORT')) return res.json({ enabled: false });
+    const counts = await db('bank_transactions').select('status').count('* as n').groupBy('status');
+    res.json({
+      enabled: true,
+      counts: Object.fromEntries(counts.map(c => [c.status, parseInt(c.n, 10)])),
+    });
+  } catch (err) { next(err); }
+});
+
+router.use('/bank-import', (req, res, next) => {
+  if (!gateEnvValue('GATE_BANK_IMPORT')) return res.status(404).json({ error: 'not found' });
+  next();
+});
+
+router.post('/bank-import/upload', async (req, res, next) => {
+  try {
+    const { accountLabel, filename, csv } = req.body || {};
+    if (!accountLabel || typeof accountLabel !== 'string' || accountLabel.length > 100) {
+      return res.status(400).json({ error: 'accountLabel is required (max 100 chars)' });
+    }
+    if (typeof csv !== 'string' || csv.length === 0) {
+      return res.status(400).json({ error: 'csv text is required' });
+    }
+    if (Buffer.byteLength(csv, 'utf8') > MAX_STATEMENT_BYTES) {
+      return res.status(400).json({ error: 'statement too large (2MB max)' });
+    }
+    const { rows, skipped } = bankImport.parseStatementCsv(csv);
+    if (rows.length === 0) {
+      return res.status(400).json({ error: 'no usable rows in that CSV', skipped });
+    }
+    const hashed = bankImport.withRowHashes(accountLabel.trim(), rows);
+    const inserted = await db('bank_transactions')
+      .insert(hashed.map(r => ({
+        account_label: accountLabel.trim(),
+        txn_date: r.txn_date,
+        description: r.description,
+        amount: r.amount,
+        direction: r.direction,
+        source: 'csv',
+        source_file: String(filename || '').slice(0, 300) || null,
+        row_hash: r.row_hash,
+      })))
+      .onConflict('row_hash')
+      .ignore()
+      .returning('id');
+    const matching = await bankImport.runDeterministicMatching();
+    res.json({
+      success: true,
+      parsed: rows.length,
+      imported: inserted.length,
+      duplicates: rows.length - inserted.length,
+      skipped,
+      matching,
+    });
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.get('/bank-import/transactions', async (req, res, next) => {
+  try {
+    const { status, month, account } = req.query;
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
+    let q = db('bank_transactions').orderBy('txn_date', 'desc').orderBy('created_at', 'desc').limit(limit);
+    if (status) q = q.where('status', String(status));
+    if (account) q = q.where('account_label', String(account));
+    if (month && /^\d{4}-\d{2}$/.test(String(month))) {
+      q = q.whereRaw("to_char(txn_date, 'YYYY-MM') = ?", [String(month)]);
+    }
+    const rows = await q.select('*');
+    res.json({ transactions: rows });
+  } catch (err) { next(err); }
+});
+
+router.post('/bank-import/match', async (req, res, next) => {
+  try {
+    res.json({ success: true, matching: await bankImport.runDeterministicMatching() });
+  } catch (err) { next(err); }
+});
+
+// AI category suggestions for unmatched debits — operator-triggered and
+// bounded like /expenses/auto-categorize; writes only the suggestion jsonb,
+// never an expense row.
+router.post('/bank-import/suggest', async (req, res, next) => {
+  try {
+    const rawLimit = parseInt(req.body?.limit, 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, rawLimit)) : 20;
+    const rows = await db('bank_transactions')
+      .where({ status: 'unmatched', direction: 'debit' })
+      .whereRaw("(suggestion is null or (suggestion->>'categoryId') is null)")
+      .whereRaw("coalesce(suggestion->>'ignore','') <> 'true'")
+      .orderBy('txn_date', 'asc')
+      .limit(limit)
+      .select('id', 'description', 'amount', 'suggestion');
+    const results = [];
+    for (const row of rows) {
+      try {
+        const ai = await autoCategorizeExpense(null, row.description, row.amount);
+        if (ai?.categoryId) {
+          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+            suggestion: { ...(row.suggestion || {}), categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning },
+            updated_at: new Date(),
+          });
+          results.push({ id: row.id, category: ai.categoryName, applied: true });
+        } else {
+          results.push({ id: row.id, applied: false, error: 'no matching category' });
+        }
+      } catch (err) {
+        results.push({ id: row.id, applied: false, error: err.message });
+      }
+    }
+    res.json({ success: true, processed: results.length, results });
+  } catch (err) { next(err); }
+});
+
+// Create a real expense from a staged debit. CAS on status='unmatched' so a
+// double-click (or a match landing mid-flight) can never create two expenses
+// from one bank row.
+router.post('/bank-import/:id/create-expense', async (req, res, next) => {
+  try {
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits become expenses' });
+    if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+
+    const suggested = row.suggestion?.categoryId || null;
+    const categoryId = req.body?.categoryId || suggested;
+    const usedAi = !req.body?.categoryId && !!suggested;
+    let deductible = parseFloat(row.amount);
+    if (categoryId) {
+      const cat = await db('expense_categories').where({ id: categoryId }).first('name');
+      if (!cat) return res.status(400).json({ error: 'unknown categoryId' });
+      const partial = categoryDeductibleAmount(cat.name, deductible);
+      if (partial !== null) deductible = partial;
+    }
+    const txnDate = dateCellStr(row.txn_date);
+    const quarter = `Q${Math.ceil(Number(txnDate.slice(5, 7)) / 3)}`;
+    const [expense] = await db('expenses').insert({
+      category_id: categoryId,
+      description: row.description.slice(0, 300),
+      amount: row.amount,
+      tax_deductible_amount: deductible,
+      expense_date: txnDate,
+      vendor_name: row.description.slice(0, 200),
+      payment_method: 'card',
+      tax_year: txnDate.slice(0, 4),
+      quarter,
+      notes: `[Bank import ${row.account_label}]${usedAi ? ' [AI-categorized — verify]' : ''}`,
+    }).returning('*');
+
+    const claimed = await db('bank_transactions')
+      .where({ id: row.id, status: 'unmatched' })
+      .update({ status: 'created_expense', matched_expense_id: expense.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() });
+    if (!claimed) {
+      // Lost the race after inserting — roll the orphan expense back.
+      await db('expenses').where({ id: expense.id }).del();
+      return res.status(409).json({ error: 'row was matched by someone else mid-flight' });
+    }
+    res.json({ success: true, expense });
+  } catch (err) { next(err); }
+});
+
+router.post('/bank-import/:id/ignore', async (req, res, next) => {
+  try {
+    const changed = await db('bank_transactions')
+      .where({ id: req.params.id }).whereIn('status', ['unmatched'])
+      .update({ status: 'ignored', updated_at: new Date() });
+    if (!changed) return res.status(409).json({ error: 'only unmatched rows can be ignored' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+router.post('/bank-import/:id/unignore', async (req, res, next) => {
+  try {
+    const changed = await db('bank_transactions')
+      .where({ id: req.params.id, status: 'ignored' })
+      .update({ status: 'unmatched', updated_at: new Date() });
+    if (!changed) return res.status(409).json({ error: 'row is not ignored' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+router.get('/bank-import/coverage', async (req, res, next) => {
+  try {
+    const year = /^\d{4}$/.test(String(req.query.year || '')) ? String(req.query.year) : String(etParts().year);
+    res.json({ year, months: await bankImport.ledgerCoverage(year) });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

@@ -10,6 +10,7 @@ import {
   ListChecks,
   Package,
   Percent,
+  Landmark,
   Receipt,
   ShieldCheck,
   Truck,
@@ -176,6 +177,7 @@ const TAX_SECTIONS = [
   { key: "exemptions", label: "Exemptions", Icon: FileText },
   { key: "equipment", label: "Equipment", Icon: Package },
   { key: "expenses", label: "Expenses", Icon: ListChecks },
+  { key: "bankimport", label: "Bank Import", Icon: Landmark },
   { key: "mileage", label: "Mileage", Icon: Truck },
   { key: "revenue", label: "Revenue", Icon: DollarSign },
   { key: "pnl", label: "P&L", Icon: BarChart3 },
@@ -3986,15 +3988,322 @@ function AccountsReceivableTab() {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════
+// BANK IMPORT TAB (GATE_BANK_IMPORT)
+// ═══════════════════════════════════════════════════════════════
+
+const BANK_STATUS_COLORS = {
+  unmatched: D.amber,
+  matched_expense: D.green,
+  matched_payout: D.blue,
+  created_expense: D.green,
+  ignored: D.muted,
+};
+const BANK_STATUS_LABELS = {
+  unmatched: "review",
+  matched_expense: "expense",
+  matched_payout: "payout",
+  created_expense: "created",
+  ignored: "ignored",
+};
+
+function BankImportTab() {
+  const [counts, setCounts] = useState({});
+  const [rows, setRows] = useState([]);
+  const [coverage, setCoverage] = useState([]);
+  const [filter, setFilter] = useState("");
+  const [accountLabel, setAccountLabel] = useState("capone-checking");
+  const [busy, setBusy] = useState("");
+  const [notice, setNotice] = useState(null);
+
+  const load = useCallback(() => {
+    adminFetch("/admin/tax/bank-import/status")
+      .then((s) => setCounts(s?.counts || {}))
+      .catch(() => {});
+    adminFetch(
+      `/admin/tax/bank-import/transactions${filter ? `?status=${filter}` : ""}`,
+    )
+      .then((d) => setRows(d.transactions || []))
+      .catch(() => setRows([]));
+    adminFetch("/admin/tax/bank-import/coverage")
+      .then((d) => setCoverage(d.months || []))
+      .catch(() => setCoverage([]));
+  }, [filter]);
+  useEffect(load, [load]);
+
+  const act = (label, path, body) => {
+    setBusy(label);
+    setNotice(null);
+    return adminFetch(path, { method: "POST", body: JSON.stringify(body || {}) })
+      .then((r) => {
+        load();
+        return r;
+      })
+      .catch((e) => {
+        setNotice({ error: true, text: e.message });
+        load();
+      })
+      .finally(() => setBusy(""));
+  };
+
+  const onFile = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!accountLabel.trim()) {
+      setNotice({ error: true, text: "Set an account label before uploading" });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () =>
+      act("upload", "/admin/tax/bank-import/upload", {
+        accountLabel: accountLabel.trim(),
+        filename: file.name,
+        csv: String(reader.result || ""),
+      }).then((r) => {
+        if (r)
+          setNotice({
+            text: `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skipped.length} skipped) · matching linked ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses`,
+          });
+      });
+    reader.readAsText(file);
+  };
+
+  const currentMonth = coverage[coverage.length - 1];
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+        <StatCard label="Needs Review" value={counts.unmatched || 0} color={D.amber} />
+        <StatCard
+          label="Matched"
+          value={(counts.matched_expense || 0) + (counts.matched_payout || 0)}
+          color={D.green}
+        />
+        <StatCard label="Created" value={counts.created_expense || 0} color={D.green} />
+        <StatCard label="Ignored" value={counts.ignored || 0} />
+      </div>
+
+      <div
+        style={{
+          background: D.card,
+          border: `1px solid ${D.border}`,
+          borderRadius: 12,
+          padding: 16,
+          marginBottom: 16,
+          display: "flex",
+          gap: 10,
+          flexWrap: "wrap",
+          alignItems: "center",
+        }}
+      >
+        <input
+          style={{ ...inputStyle, width: 180 }}
+          value={accountLabel}
+          onChange={(e) => setAccountLabel(e.target.value)}
+          placeholder="Account label (e.g. capone-card-1234)"
+          title="Stamped on every imported row so checking and each card stay separate"
+        />
+        <label
+          style={{
+            ...inputStyle,
+            cursor: "pointer",
+            background: D.heading,
+            color: D.white,
+            border: "none",
+            fontWeight: 600,
+          }}
+        >
+          {busy === "upload" ? "Importing…" : "Upload statement CSV"}
+          <input type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={onFile} />
+        </label>
+        <button
+          type="button"
+          style={{ ...inputStyle, cursor: "pointer", fontWeight: 600 }}
+          disabled={!!busy}
+          onClick={() =>
+            act("match", "/admin/tax/bank-import/match").then((r) => {
+              if (r)
+                setNotice({
+                  text: `Matching pass: ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses linked, ${r.matching.ambiguous} ambiguous`,
+                });
+            })
+          }
+        >
+          {busy === "match" ? "Matching…" : "Run matching"}
+        </button>
+        <button
+          type="button"
+          style={{ ...inputStyle, cursor: "pointer", fontWeight: 600 }}
+          disabled={!!busy}
+          onClick={() =>
+            act("suggest", "/admin/tax/bank-import/suggest", { limit: 20 }).then(
+              (r) => {
+                if (r) setNotice({ text: `AI suggested categories for ${r.processed} rows` });
+              },
+            )
+          }
+          title="AI proposes an expense category for unmatched debits — nothing is created until you click Create"
+        >
+          {busy === "suggest" ? "Suggesting…" : "Suggest categories (AI)"}
+        </button>
+        <select style={inputStyle} value={filter} onChange={(e) => setFilter(e.target.value)}>
+          <option value="">All statuses</option>
+          <option value="unmatched">Needs review</option>
+          <option value="matched_expense">Matched to expense</option>
+          <option value="matched_payout">Stripe payout</option>
+          <option value="created_expense">Created expense</option>
+          <option value="ignored">Ignored</option>
+        </select>
+      </div>
+
+      {notice && (
+        <div
+          style={{
+            border: `1px solid ${notice.error ? D.red : D.border}`,
+            background: notice.error ? `${D.red}11` : D.card,
+            color: notice.error ? D.red : D.text,
+            borderRadius: 8,
+            padding: "8px 14px",
+            fontSize: 12,
+            marginBottom: 16,
+          }}
+        >
+          {notice.text}
+        </div>
+      )}
+
+      {currentMonth && (
+        <div
+          style={{
+            background: D.card,
+            border: `1px solid ${D.border}`,
+            borderRadius: 12,
+            padding: 16,
+            marginBottom: 16,
+          }}
+        >
+          <div style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}>
+            {currentMonth.month} ledger coverage —{" "}
+            <span style={{ color: D.heading, fontWeight: 700 }}>
+              {currentMonth.pct == null ? "—" : `${currentMonth.pct}%`}
+            </span>{" "}
+            of bank outflow is in the expenses ledger · {fmtM(currentMonth.unexplained)} unexplained
+          </div>
+          <div style={{ height: 6, background: D.border, borderRadius: 3, overflow: "hidden" }}>
+            <div
+              style={{
+                height: "100%",
+                width: `${currentMonth.pct || 0}%`,
+                background: (currentMonth.pct || 0) >= 90 ? D.green : D.amber,
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr style={{ color: D.muted, textAlign: "left" }}>
+              {["Date", "Account", "Description", "Amount", "Status", "Suggestion", ""].map((h) => (
+                <th key={h} style={{ padding: "10px 12px", borderBottom: `1px solid ${D.border}`, fontWeight: 600, textTransform: "uppercase", fontSize: 10, letterSpacing: 0.5 }}>
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={7} style={{ padding: 24, color: D.muted, textAlign: "center" }}>
+                  No imported transactions yet — upload a Capital One CSV export to start.
+                </td>
+              </tr>
+            )}
+            {rows.map((r) => (
+              <tr key={r.id} style={{ borderBottom: `1px solid ${D.border}` }}>
+                <td style={{ padding: "8px 12px", whiteSpace: "nowrap" }}>{fmtD(r.txn_date)}</td>
+                <td style={{ padding: "8px 12px", color: D.muted }}>{r.account_label}</td>
+                <td style={{ padding: "8px 12px", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.description}>
+                  {r.description}
+                </td>
+                <td style={{ padding: "8px 12px", fontFamily: MONO, whiteSpace: "nowrap", color: r.direction === "credit" ? D.green : D.text }}>
+                  {r.direction === "credit" ? "+" : "−"}
+                  {fmtM(r.amount)}
+                </td>
+                <td style={{ padding: "8px 12px" }}>
+                  <Badge small color={BANK_STATUS_COLORS[r.status]}>
+                    {BANK_STATUS_LABELS[r.status] || r.status}
+                  </Badge>
+                </td>
+                <td style={{ padding: "8px 12px", color: D.muted, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {r.suggestion?.ignore
+                    ? "internal transfer?"
+                    : r.suggestion?.categoryName ||
+                      (r.suggestion?.candidates ? `${r.suggestion.candidates.length} possible matches` : "")}
+                </td>
+                <td style={{ padding: "8px 12px", whiteSpace: "nowrap" }}>
+                  {r.status === "unmatched" && r.direction === "debit" && !r.suggestion?.ignore && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginRight: 6 }}
+                      onClick={() => act("create", `/admin/tax/bank-import/${r.id}/create-expense`)}
+                    >
+                      Create expense
+                    </button>
+                  )}
+                  {r.status === "unmatched" && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...inputStyle, cursor: "pointer", color: D.muted }}
+                      onClick={() => act("ignore", `/admin/tax/bank-import/${r.id}/ignore`)}
+                    >
+                      Ignore
+                    </button>
+                  )}
+                  {r.status === "ignored" && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...inputStyle, cursor: "pointer", color: D.muted }}
+                      onClick={() => act("unignore", `/admin/tax/bank-import/${r.id}/unignore`)}
+                    >
+                      Undo
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export default function TaxPage() {
   const [activeTab, setActiveTab] = useState("overview");
+  // GATE_BANK_IMPORT: the leaf only exists when the server says the gate is
+  // on (status is the one bank-import endpoint that answers while dark).
+  const [bankImportOn, setBankImportOn] = useState(false);
+  const tabGroups = bankImportOn
+    ? TAX_TAB_GROUPS.map((g) =>
+        g.key === "expenses" ? { ...g, tabs: [...g.tabs, "bankimport"] } : g,
+      )
+    : TAX_TAB_GROUPS;
   const activeGroup =
-    TAX_TAB_GROUPS.find((g) => g.tabs.includes(activeTab)) || TAX_TAB_GROUPS[0];
+    tabGroups.find((g) => g.tabs.includes(activeTab)) || tabGroups[0];
   const [dashboard, setDashboard] = useState(null);
   const [quickPnl, setQuickPnl] = useState(null);
   const [arSummary, setArSummary] = useState(null);
 
   useEffect(() => {
+    adminFetch("/admin/tax/bank-import/status")
+      .then((s) => setBankImportOn(!!s?.enabled))
+      .catch(() => {});
     adminFetch("/admin/tax/dashboard")
       .then(setDashboard)
       .catch(() => {});
@@ -4014,14 +4323,14 @@ export default function TaxPage() {
       <AdminCommandHeader
         title="Taxes"
         icon={Receipt}
-        sections={TAX_TAB_GROUPS.map((g) =>
+        sections={tabGroups.map((g) =>
           g.tabs.includes("advisor") && d?.pendingAlerts?.high
             ? { key: g.key, label: `${g.label} (${d.pendingAlerts.high})`, Icon: g.Icon }
             : { key: g.key, label: g.label, Icon: g.Icon },
         )}
         activeKey={activeGroup.key}
         onSectionChange={(key) => {
-          const g = TAX_TAB_GROUPS.find((x) => x.key === key);
+          const g = tabGroups.find((x) => x.key === key);
           if (g) setActiveTab(g.tabs[0]);
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
@@ -4423,6 +4732,7 @@ export default function TaxPage() {
       {activeTab === "exemptions" && <ExemptionsTab />}
       {activeTab === "equipment" && <EquipmentTab />}
       {activeTab === "expenses" && <ExpensesTab />}
+      {activeTab === "bankimport" && <BankImportTab />}
       {activeTab === "mileage" && <MileageTab />}
       {activeTab === "revenue" && <RevenueTab />}
       {activeTab === "filings" && <FilingCalendarTab />}
