@@ -119,10 +119,36 @@ async function sourcePerformance({ days = 90 } = {}) {
   const cohort = await db('estimates')
     .where('created_at', '>=', cutoff)
     .whereNull('archived_at')
-    .select('id', 'source', 'status', 'created_at', 'sent_at', 'viewed_at', 'accepted_at');
+    .select(
+      'id', 'source', 'status', 'created_at', 'sent_at', 'viewed_at', 'accepted_at',
+      // Real-delivery witness for click-mints, computed in SQL so the
+      // cohort scan never hydrates estimate_data blobs. Same truth line the
+      // promised-estimate / unworked-comms watchers draw (channels.email.ok
+      // / channels.sms.real — sentChannels also carries SMS suppression
+      // sentinels).
+      db.raw("(estimate_data #>> '{deliveryState,channels,email,ok}' = 'true' OR estimate_data #>> '{deliveryState,channels,sms,real}' = 'true') AS cta_real_delivery"),
+    );
   for (const row of cohort) {
     const bucket = buckets.get(sourceKey(row.source));
     bucket.drafted += 1;
+    // Report click-mints are the publish-without-delivery shape (uncapped
+    // audit on 65af7c027 P1): status='sent' + sent_at are stamped at mint
+    // with NOTHING delivered, so counting them as sent would pin this
+    // bucket at a 100% send rate with near-zero latency. "Sent" here means
+    // an operator LATER really delivered it — and latency runs to that
+    // handoff (sendEstimateNow refreshes sent_at at delivery), never to
+    // the self-serve view the tap's redirect produces seconds after mint.
+    if (String(row.source || '') === 'service_report_cta') {
+      if (row.cta_real_delivery === true) {
+        bucket.sent += 1;
+        const created = new Date(row.created_at).getTime();
+        const handoff = row.sent_at ? new Date(row.sent_at).getTime() : NaN;
+        if (Number.isFinite(created) && Number.isFinite(handoff) && handoff >= created) {
+          latencies.get(sourceKey(row.source)).push((handoff - created) / 3600000);
+        }
+      }
+      continue;
+    }
     // sent_at alone is not first delivery: every resend overwrites it
     // (inflating latency), and it stays NULL when a customer acceptance
     // wins the in-flight `sending` claim. So "sent" = any delivery

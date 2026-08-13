@@ -115,6 +115,30 @@ describe('sourcePerformance', () => {
     expect(report.resolved).toBe(3);
   });
 
+  test('report click-mints count as sent ONLY on real delivery — never the publish-without-delivery stamp (audit on 65af7c027 P1)', async () => {
+    const created = daysAgo(5);
+    mockQueues.estimates = [
+      [
+        // Zero-delivery mint: sent + sent_at stamped at mint, nothing
+        // delivered — drafted, NOT sent.
+        { id: 'm1', source: 'service_report_cta', status: 'sent', created_at: created, sent_at: created, cta_real_delivery: false },
+        // Viewed via the tap's own redirect seconds later — still not
+        // delivery evidence for this source.
+        { id: 'm2', source: 'service_report_cta', status: 'viewed', created_at: created, sent_at: created, viewed_at: hoursAfter(created, 0.01), cta_real_delivery: null },
+        // Operator later REALLY sent it: sent_at refreshed to the handoff;
+        // latency runs to the handoff, not the earlier self-serve view.
+        { id: 'm3', source: 'service_report_cta', status: 'sent', created_at: created, sent_at: hoursAfter(created, 30), viewed_at: hoursAfter(created, 0.01), cta_real_delivery: true },
+      ],
+      [], // resolved query
+    ];
+    mockQueues.estimate_learning_events = [[]];
+    const out = await sourcePerformance({ windowDays: 30 });
+    const cta = out.sources.find((s) => s.source === 'service_report_cta');
+    expect(cta.drafted).toBe(3);
+    expect(cta.sent).toBe(1);
+    expect(cta.sendLatencyHoursMedian).toBe(30);
+  });
+
   test('empty window returns an empty source list', async () => {
     mockQueues.estimates = [[], []];
     mockQueues.estimate_learning_events = [[]];
