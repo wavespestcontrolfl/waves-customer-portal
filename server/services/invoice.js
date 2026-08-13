@@ -4235,6 +4235,20 @@ const InvoiceService = {
         logger.warn(`[invoice] switch-supersede restore skipped for ${preRow.id}: a prepaid year covers ${assertDate} — restoring would double-bill`);
         return null;
       }
+      // The superseding prepay must have NO unresolved Stripe outcome
+      // (Codex P0 r29): a charged-but-orphaned or ambiguous tender means
+      // money may be collected with nothing local — restoring the old
+      // receivable beside it re-bills a paid customer. Fail toward manual
+      // review on any refusal or unverifiable read.
+      const sbForRecon = /\[prepay-switch-superseded-by:([^\]]+)\]/.exec(String(preRow.notes || ""));
+      if (sbForRecon) {
+        try {
+          await require("./stripe").assertNoInvoiceChargeReconciliationPending(sbForRecon[1], trx);
+        } catch (reconErr) {
+          logger.warn(`[invoice] switch-supersede restore deferred for ${preRow.id}: prepay ${sbForRecon[1]} has an unresolved charge outcome (${reconErr.message}) — manual review`);
+          return null;
+        }
+      }
       if (preRow.scheduled_service_id) {
         const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
         await acquireScheduledInvoiceMintLock(trx, preRow.scheduled_service_id);
@@ -4388,6 +4402,18 @@ const InvoiceService = {
           }
         }
         if (expirable) {
+          // A charge can have succeeded at Stripe with NOTHING local — the
+          // supported STRIPE_CHARGED_DB_FAILED shape leaves the draft with
+          // no PI and no payments row (Codex P0 r29). The canonical
+          // reconciliation guard reads the durable tender-attempt and
+          // orphan-charge markers; anything pending — or an unverifiable
+          // read — leaves the draft for manual review, never auto-void.
+          try {
+            await require("./stripe").assertNoInvoiceChargeReconciliationPending(prepay.id, conn);
+          } catch (reconErr) {
+            logger.warn(`[invoice] switch-restore sweep leaving prepay ${prepay.id} for manual review: ${reconErr.message}`);
+            continue;
+          }
           try {
             await this.voidInvoice(prepay.id);
             dead = true;

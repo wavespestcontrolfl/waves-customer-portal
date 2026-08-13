@@ -10339,6 +10339,16 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
           if (!prepayDead) {
             return { failed: { id, invoiceNumber: row.invoice_number || null, error: 'the annual prepay that superseded it is still live — void it from Invoices first, then retry' } };
           }
+          // And the prepay's Stripe outcome must be RESOLVED (Codex P0 r29):
+          // an orphaned/ambiguous saved-card tender can mean money collected
+          // with nothing local — restoring here would re-bill a paid
+          // customer. Fail closed to manual review on refusal OR an
+          // unverifiable read.
+          try {
+            await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(supersededBy[1], trx);
+          } catch (reconErr) {
+            return { failed: { id, invoiceNumber: row.invoice_number || null, error: `the superseding prepay has an unresolved Stripe charge outcome (${reconErr.message}) — reconcile it in Stripe/Invoices before restoring` } };
+          }
           // Already restored (raced a duplicate, or an earlier response was
           // lost) — report the existing replacement, mint nothing.
           const existing = await trx('invoices')

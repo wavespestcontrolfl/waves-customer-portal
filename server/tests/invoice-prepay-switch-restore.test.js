@@ -18,6 +18,10 @@ jest.mock('../services/invoice-followups', () => ({
   scheduleForInvoice: jest.fn(async () => undefined),
 }));
 const mockTermSync = jest.fn(async () => undefined);
+const mockReconAssert = jest.fn(async () => undefined);
+jest.mock('../services/stripe', () => ({
+  assertNoInvoiceChargeReconciliationPending: (...args) => mockReconAssert(...args),
+}));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: (...args) => mockTermSync(...args) }));
 // The restore serializes on the SAME per-customer advisory lock every prepay
 // mint takes (lazily required to dodge the admin-customers ⇄ invoice cycle).
@@ -116,6 +120,8 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
   beforeEach(() => {
     mockLockOverlap.mockReset();
     mockLockOverlap.mockResolvedValue(undefined);
+    mockReconAssert.mockReset();
+    mockReconAssert.mockResolvedValue(undefined);
     createSpy = jest.spyOn(InvoiceService, 'create')
       .mockResolvedValue({ id: 'inv-new', invoice_number: 'WPC-2026-0402' });
   });
@@ -240,6 +246,15 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
     expect(mockLockOverlap).toHaveBeenCalledWith(c, 'cust-1', '2099-05-12', true);
   });
 
+  test('an UNRESOLVED Stripe charge outcome on the prepay defers the restore (Codex P0 r29)', async () => {
+    const orphanErr = new Error('Invoice has an unresolved Stripe charge pi_orphan');
+    orphanErr.code = 'STRIPE_CHARGED_DB_FAILED';
+    mockReconAssert.mockRejectedValue(orphanErr);
+    const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', conn());
+    expect(restored).toEqual([]);
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
   test('a null prepayInvoiceId is a no-op', async () => {
     const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay(null, conn());
     expect(restored).toEqual([]);
@@ -251,6 +266,8 @@ describe('sweepOrphanedPrepaySwitchRestores — the durable repair job', () => {
   beforeEach(() => {
     mockTermSync.mockClear();
     mockTermSync.mockResolvedValue(undefined);
+    mockReconAssert.mockReset();
+    mockReconAssert.mockResolvedValue(undefined);
     restoreSpy = jest.spyOn(InvoiceService, 'restoreSwitchSupersededInvoicesForPrepay')
       .mockResolvedValue([{ replacedInvoiceId: 'inv-old', invoiceId: 'inv-new', invoiceNumber: 'WPC-2026-0402' }]);
   });
@@ -350,6 +367,28 @@ describe('sweepOrphanedPrepaySwitchRestores — the durable repair job', () => {
     expect(voidSpy).toHaveBeenCalledWith('inv-prepay');
     expect(restoreSpy).toHaveBeenCalledWith('inv-prepay', c);
     expect(restored).toHaveLength(1);
+    voidSpy.mockRestore();
+  });
+
+  test('an old draft with an UNRESOLVED charge outcome is NEVER auto-expired (Codex P0 r29)', async () => {
+    // STRIPE_CHARGED_DB_FAILED leaves no PI and no payments row locally —
+    // only the durable orphan/attempt markers know money may be collected.
+    const orphanErr = new Error('Invoice has an unresolved Stripe charge pi_orphan');
+    orphanErr.code = 'STRIPE_CHARGED_DB_FAILED';
+    mockReconAssert.mockRejectedValue(orphanErr);
+    const voidSpy = jest.spyOn(InvoiceService, 'voidInvoice').mockResolvedValue({ status: 'void' });
+    const c = conn({
+      rows: [VOIDED_ROW],
+      byId: { 'inv-prepay': {
+        id: 'inv-prepay', status: 'draft', sent_at: null, paid_at: null,
+        stripe_payment_intent_id: null,
+        created_at: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+      } },
+    });
+    const restored = await InvoiceService.sweepOrphanedPrepaySwitchRestores(c);
+    expect(voidSpy).not.toHaveBeenCalled();
+    expect(restoreSpy).not.toHaveBeenCalled();
+    expect(restored).toEqual([]);
     voidSpy.mockRestore();
   });
 

@@ -51,6 +51,10 @@ jest.mock('../services/invoice', () => ({
 // the real admin-customers module is far too heavy for this harness.
 const mockLockOverlap = jest.fn(async () => {});
 const mockRestoreAssertDate = jest.fn();
+const mockReconAssert = jest.fn(async () => undefined);
+jest.mock('../services/stripe', () => ({
+  assertNoInvoiceChargeReconciliationPending: (...args) => mockReconAssert(...args),
+}));
 jest.mock('../routes/admin-customers', () => ({
   _private: { lockAndAssertNoAnnualPrepayOverlap: (...args) => mockLockOverlap(...args) },
 }));
@@ -725,6 +729,8 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     mockCreateInvoice.mockResolvedValue({ id: 'inv-new', invoice_number: 'WPC-2026-0401' });
     mockResolveForInvoice.mockResolvedValue({ payerId: null });
     mockLockOverlap.mockResolvedValue(undefined);
+    mockReconAssert.mockReset();
+    mockReconAssert.mockResolvedValue(undefined);
   });
 
   const VOIDED_ROW = {
@@ -793,6 +799,17 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY });
     const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
     expect(body.restored).toHaveLength(1);
+  });
+
+  test('an UNRESOLVED Stripe outcome on the superseding prepay surfaces as a failure (Codex P0 r29)', async () => {
+    const orphanErr = new Error('Invoice has an unresolved Stripe charge pi_orphan');
+    orphanErr.code = 'STRIPE_CHARGED_DB_FAILED';
+    mockReconAssert.mockRejectedValueOnce(orphanErr);
+    stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY });
+    const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(body.restored).toEqual([]);
+    expect(body.failed[0].error).toMatch(/unresolved Stripe charge outcome/i);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 
   test("a void row WITHOUT this estimate's accept stamp restores nothing (crafted ids are inert)", async () => {
