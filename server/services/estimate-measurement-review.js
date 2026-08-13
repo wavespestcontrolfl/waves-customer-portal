@@ -108,13 +108,6 @@ async function createEstimateMeasurementReview({
 
   const reasonKeys = normalizeReasons(reasons);
   const cleanNote = cleanText(note, 500);
-  // A challenge with neither a chip nor a note carries nothing the office
-  // can act on — reject rather than park an empty request.
-  if (!reasonKeys.length && !cleanNote) {
-    const err = new Error('Tell us what looks off so we can re-check it.');
-    err.status = 400;
-    throw err;
-  }
 
   const estimate = await database('estimates').where({ token }).first();
   // All three gates, all 404 (indistinguishable): the full customer-
@@ -125,6 +118,18 @@ async function createEstimateMeasurementReview({
   if (!estimate || !viewabilityCheck(estimate) || !isMeasurementReviewEligible(estimate) || !basisFor(estimate)) {
     const err = new Error('Estimate not found');
     err.status = 404;
+    throw err;
+  }
+
+  // Content validation only AFTER the token has fully cleared the public
+  // eligibility gates (codex #3376 final head P0): a 400 for an unknown-but-
+  // well-formed token would only fire while the gate is LIVE, letting
+  // anonymous probes distinguish gate state and breaking the required
+  // gate-off/unknown/malformed 404 indistinguishability. A real customer
+  // with an empty sheet still gets the helpful 400.
+  if (!reasonKeys.length && !cleanNote) {
+    const err = new Error('Tell us what looks off so we can re-check it.');
+    err.status = 400;
     throw err;
   }
 

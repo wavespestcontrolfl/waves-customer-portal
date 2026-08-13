@@ -18467,7 +18467,19 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   attachTermiteBondSelector(services, estData);
   // Same resolver as buildPricingServices — basis and price ladder must come
   // from ONE result object (ui-verify caught them diverging; see helper).
-  attachMeasuredBasis(services, resolvePricingEstResult(estData));
+  // Engine-invocation bundles carry measuredBasisAnchor: the basis computed
+  // from the SAME regenerated engine result their frequencies were priced
+  // from (codex #3376 final head P2) — it outranks the stored-estData
+  // derivation, including on pricing-cache replays.
+  if (payload.measuredBasisAnchor) {
+    for (const section of services) {
+      if (!section || !section.intelligence || section.key === 'bundle') continue;
+      const anchor = payload.measuredBasisAnchor[section.key];
+      if (anchor) section.intelligence.measuredBasis = anchor;
+    }
+  } else {
+    attachMeasuredBasis(services, resolvePricingEstResult(estData));
+  }
   const combinedRecurring = withCombinedLowConfidenceRange(
     buildCombinedRecurring(contractPayload, estimate, estData, services),
     lowConfidenceRange,
@@ -18726,7 +18738,21 @@ function applyPresentationOverridesToBundle(payload = {}, estData = {}) {
   return next;
 }
 
-function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
+function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts = {}) {
+  // Engine-invocation path: the displayed frequencies were priced from a
+  // freshly generated anchorEngineResult, NOT the stored estData (codex
+  // #3376 final head P2) — the basis must come from the SAME regenerated
+  // result or the card can claim the old square footage beside a price
+  // computed from the new one. Stamped onto the payload as plain JSON so
+  // pricing-cache replays keep the anchor-derived basis too.
+  if (opts.anchorEngineResult) {
+    const anchorBasis = {};
+    for (const key of ['lawn_care', 'commercial_lawn']) {
+      const basis = measuredBasisForSection(key, opts.anchorEngineResult);
+      if (basis) anchorBasis[key] = basis;
+    }
+    payload.measuredBasisAnchor = Object.keys(anchorBasis).length ? anchorBasis : null;
+  }
   const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData);
   const withQuoteState = attachQuoteRequirement(alignedPayload, estData);
   // Floor-capped prepay has no sellable incentive — mirror the SSR
@@ -20146,7 +20172,7 @@ async function buildPricingBundleInner(estimate) {
     setupFee: engineFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
     firstVisitFees: engineFirstVisitFees,
     source: 'engine_invocation',
-  }), estimate, estData);
+  }), estimate, estData, { anchorEngineResult });
   setEstimatePricingCache(estimate, payload);
   return payload;
 }

@@ -101,7 +101,7 @@ describe('isMeasurementReviewEligible', () => {
 });
 
 describe('createEstimateMeasurementReview', () => {
-  test('rejects an empty challenge (no chip, no note) with a 400', async () => {
+  test('rejects an empty challenge on a VALID estimate with a 400', async () => {
     await expect(createEstimateMeasurementReview({
       estimateToken: 'tok-1',
       reasons: [],
@@ -110,6 +110,20 @@ describe('createEstimateMeasurementReview', () => {
       viewabilityCheck: viewable,
       basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     })).rejects.toMatchObject({ status: 400 });
+  });
+
+  test('an empty challenge on an UNKNOWN token 404s — never a gate-state oracle (codex final-head P0)', async () => {
+    // Pre-fix, the empty-body 400 fired before the token lookup: the same
+    // probe returned 404 while the gate was dark and 400 while live,
+    // leaking gate state to anonymous probes.
+    await expect(createEstimateMeasurementReview({
+      estimateToken: 'tok-unknown',
+      reasons: [],
+      note: '',
+      database: mockDb({ estimate: null }),
+      viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
+    })).rejects.toMatchObject({ status: 404, message: 'Estimate not found' });
   });
 
   test('404s an unknown token and an ineligible estimate identically', async () => {
