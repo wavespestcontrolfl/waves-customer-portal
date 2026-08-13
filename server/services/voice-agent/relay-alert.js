@@ -461,6 +461,7 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
     const meta = typeof row.metadata === 'string' ? (() => { try { return JSON.parse(row.metadata); } catch { return {}; } })() : (row.metadata || {});
     const leadId = meta.relay_lead_id || null;
     let lead = null;
+    let lookupFailed = false;
     if (leadId) {
       try {
          
@@ -468,8 +469,15 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
           .where({ id: leadId })
           .whereNull('deleted_at')
           .first('first_name', 'last_name', 'phone', 'city', 'transcript_summary');
-      } catch { /* fall through */ }
+      } catch (err) {
+        // ⭐ A FAILED LOOKUP PROVES NOTHING. Clearing the obligation on a
+        // transient DB error permanently suppressed the page — the marker is
+        // only cleared when a SUCCESSFUL lookup shows the lead is gone.
+        lookupFailed = true;
+        logger.warn(`[voice-relay-alert] lead lookup failed for ${row.twilio_call_sid} — obligation retained: ${err.message}`);
+      }
     }
+    if (lookupFailed) continue; // next hourly run retries
     if (!lead) {
       // A HOT call from a LIFECYCLE customer has no lead BY DESIGN (capture
       // records on the account instead) — the page is still owed, composed

@@ -1048,6 +1048,30 @@ async function executeTool(name, input = {}, ctx = {}) {
           logger.error(`[voice-relay] verbal do-not-contact could NOT be recorded callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
         }
       }
+      // ⭐ THE OBLIGATION IS ESTABLISHED BEFORE THE LEAD COMMITS. Writing it
+      // after left a gap: a process exit between the lead insert and the
+      // marker stamp produced a durable hot lead with neither a receipt nor an
+      // obligation the sweep could discover. Hotness is known from the input,
+      // so a hot capture stamps relay_hot_alert_needed FIRST — a crash at any
+      // later point leaves the sweep something to find (the lead-less branch
+      // pages from the call row itself). Fail-soft; the lead write never
+      // depends on it.
+      const wasHotCapture = String(input.lead_quality || '').toLowerCase() === 'hot';
+      if (wasHotCapture && ctx.callSid) {
+        try {
+          const db = require('../../models/db');
+          await db('call_log')
+            .where({ twilio_call_sid: ctx.callSid })
+            .update({
+              metadata: db.raw(
+                "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+                [JSON.stringify({ relay_hot_alert_needed: 'true' })],
+              ),
+            });
+        } catch (obligationErr) {
+          logger.warn(`[voice-relay] hot-alert obligation pre-stamp failed callSid=${ctx.callSid}: ${obligationErr.message}`);
+        }
+      }
       const leadResult = await createLeadFromExtraction(extracted, {
         phone: callerPhone,
         // WHO this call is, kept separate from WHERE to call back: callerPhone
@@ -1085,13 +1109,10 @@ async function executeTool(name, input = {}, ctx = {}) {
       // deliberately gets NO lead (leadId null), but a HOT call from them still
       // owes the owner a page — the obligation marker must not depend on a lead
       // existing, or a crashed page for an existing customer never sweeps.
-      const wasHotCapture = String(input.lead_quality || '').toLowerCase() === 'hot';
-      if ((capturedLeadId || wasHotCapture) && ctx.callSid) {
+      if (capturedLeadId && ctx.callSid) {
         try {
           const db = require('../../models/db');
-          const linkage = {};
-          if (capturedLeadId) linkage.relay_lead_id = String(capturedLeadId);
-          if (wasHotCapture) linkage.relay_hot_alert_needed = 'true';
+          const linkage = { relay_lead_id: String(capturedLeadId) };
           await db('call_log')
             .where({ twilio_call_sid: ctx.callSid })
             .update({

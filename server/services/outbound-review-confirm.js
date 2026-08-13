@@ -77,10 +77,19 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // call's own answer: nothing stamps, and the sweep excludes cancel/skip
   // rejections, so there is no retry churn.
   try {
-    const fresh = await db('scheduled_services').where({ id: svc.id }).first('status');
+    const fresh = await db('scheduled_services').where({ id: svc.id }).first('status', 'field_confirmed_at');
     if (!fresh || ['cancelled', 'skipped', 'rescheduled'].includes(String(fresh.status))) {
       logger.info(`[${routeTag}] activation stood down for ${svc.id} — row is ${fresh ? fresh.status : 'gone'}`);
       return false;
+    }
+    // ⭐ THE FIELD-CONFIRM MODE IS RE-APPLIED ON EVERY RAIL. A field-confirmed
+    // row whose first activation failed reaches the sweep WITHOUT the calling
+    // route's in-memory skipCardRequest — the durable stamp is what makes the
+    // retry honour the owner rule (tech collects the card in person; no
+    // funnel, no clearance stamp).
+    if (fresh.field_confirmed_at && !opts.skipCardRequest) {
+      opts = { ...opts, skipCardRequest: true, suppressCardAskWithoutClearance: false };
+      logger.info(`[${routeTag}] ${svc.id} is field-confirmed (durable stamp) — card funnel skipped on this rail`);
     }
   } catch (freshErr) {
     // Unknown is not safe: refusing to activate leaves the row unstamped,

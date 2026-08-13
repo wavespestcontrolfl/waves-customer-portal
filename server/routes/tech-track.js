@@ -112,6 +112,16 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
     // retry rail — the same hole the two admin confirm routes had, and voice
     // rows reach this path too now that the office-review set includes them.
     // The stamp moved to the hook's success, below.
+    // ⭐ THE FIELD-CONFIRM MODE IS PERSISTED, NOT JUST PASSED. skipCardRequest
+    // used to live only in this route's call — a failed core leg then left the
+    // row for the hourly sweep, whose retry ran WITHOUT it and pushed the
+    // field-confirmed booking through the card funnel the owner rule says to
+    // skip. Stamped in the same transaction as the confirmation; every
+    // activation rail reads it.
+    await trx('scheduled_services')
+      .where({ id: svc.id })
+      .whereNull('field_confirmed_at')
+      .update({ field_confirmed_at: new Date() });
     await transitionJobStatus({
       jobId: svc.id,
       fromStatus: 'pending',
