@@ -333,7 +333,7 @@ async function invoiceHistoryText(customerId, { tier = 'redacted' } = {}) {
     // the limit AFTER resolution.
     .limit(INVOICE_HISTORY_LIMIT * 5)
     .select('invoice_number', 'status', 'service_type', 'service_date', 'created_at', 'total',
-      'scheduled_service_id');
+      'credit_applied', 'scheduled_service_id');
   const PayerService = require('../payer');
   const paidRows = [];
   for (const row of candidatePaidRows) {
@@ -378,9 +378,25 @@ async function invoiceHistoryText(customerId, { tier = 'redacted' } = {}) {
   if (paidRows.length) {
     const lines = paidRows.map((inv) => {
       const number = promptSafe(inv.invoice_number, 30);
-      const amount = fmtMoney(inv.total);
       const when = speakDate(inv.service_date || inv.created_at);
-      const state = String(inv.status) === 'processing' ? 'payment processing' : 'paid';
+      const status = String(inv.status);
+      // ⭐ 'prepaid' IS NOT 'paid'. That status means the invoice was covered
+      // by ACCOUNT CREDIT — no payment happened — so announcing "<gross> paid"
+      // told the customer money moved when it did not. And a paid/processing
+      // row can carry partial credit: the cash figure is the cents-authoritative
+      // net (invoiceAmountDue: total minus credit_applied), the same money
+      // truth every charge path uses — never the raw gross total.
+      let amount;
+      let state;
+      if (status === 'prepaid') {
+        amount = fmtMoney(inv.total);
+        state = 'covered by account credit (no payment was made)';
+      } else {
+        const credited = Number(inv.credit_applied) > 0;
+        amount = fmtMoney(invoiceAmountDue(inv));
+        state = (status === 'processing' ? 'payment processing' : 'paid')
+          + (credited ? ' (remainder covered by account credit)' : '');
+      }
       return `${number ? `Invoice ${number}` : 'An invoice'}${when ? ` from ${when}` : ''}`
         + `${amount ? `, ${amount}` : ''} — ${state}`;
     });

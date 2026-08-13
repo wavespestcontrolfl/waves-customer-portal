@@ -122,7 +122,11 @@ async function surfaceContactInstructionForCustomer(customer, extracted = {}, op
   let stamped = false;
   if (!opts.sweepRetry && opts.callSid) {
     try {
-      await db('call_log')
+      // ⭐ ZERO ROWS IS NOT A STAMP. An update whose CallSid matches no
+      // call_log row writes nothing — treating it as durable meant a failed
+      // delivery below left NO recovery marker for the hourly sweep, and the
+      // stated instruction (possibly a do-not-contact) was silently lost.
+      const updated = await db('call_log')
         .where({ twilio_call_sid: opts.callSid })
         .update({
           metadata: db.raw(
@@ -137,12 +141,20 @@ async function surfaceContactInstructionForCustomer(customer, extracted = {}, op
             })],
           ),
         });
-      stamped = true;
+      stamped = Number(updated) > 0;
+      if (!stamped) {
+        logger.error(`[voice-agent-lead] contact-instruction obligation pre-stamp matched NO call_log row callSid=${opts.callSid} — no sweep recovery exists for this instruction`);
+      }
     } catch (stampErr) {
       logger.error(`[voice-agent-lead] contact-instruction obligation pre-stamp failed callSid=${opts.callSid}: ${stampErr.message}`);
     }
   }
   const result = await fileContactInstructionNotification(customer, instruction, opts, dnc);
+  // ⭐ NO MARKER + NO DELIVERY = the instruction has NO durable artifact.
+  // Say so at error level — this is the one path with nothing left to retry.
+  if (!stamped && !opts.sweepRetry && !result.persisted && !result.suppressed) {
+    logger.error(`[voice-agent-lead] contact instruction for customer ${customer.id} has NO durable artifact (unstamped + undelivered) callSid=${opts.callSid || 'n/a'}`);
+  }
   const surfaced = result.persisted;
   if (stamped && (surfaced || result.suppressed)) {
     await db('call_log')

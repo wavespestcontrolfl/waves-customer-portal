@@ -509,6 +509,29 @@ describe('existing-customer contact instructions still reach a human', () => {
     expect(clearWrites()).toHaveLength(0); // failure keeps the marker
   });
 
+  // ⭐ ZERO ROWS IS NOT A STAMP. An update whose CallSid matches no call_log
+  // row writes nothing — treating it as durable meant a failed delivery left
+  // NO recovery marker for the sweep and the instruction (possibly a
+  // do-not-contact) vanished silently. That one path must at least say so
+  // at error level.
+  test('a stamp that matches NO call_log row is not treated as durable', async () => {
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    tables.call_log = makeBuilder('call_log', []);
+    tables.call_log.update = jest.fn((payload) => {
+      writes.push({ table: 'call_log', verb: 'update', payload });
+      return Promise.resolve(0); // no row matched the CallSid
+    });
+    NotificationService.notifyAdmin.mockImplementation(async () => { throw new Error('bell down'); });
+    await createLeadFromExtraction(
+      { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
+      { phone: CALLER, callSid: 'CA-dnc-ghost', smsSuppressionApplied: true },
+    );
+    const logger = require('../services/logger');
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/matched NO call_log row/i));
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/NO durable artifact/));
+    expect(clearWrites()).toHaveLength(0); // nothing was stamped, nothing to clear
+  });
+
   test('the suppressed sentinel clears the pre-stamped marker — deliberate zero-artifact', async () => {
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true, reason: 'internal_test' });

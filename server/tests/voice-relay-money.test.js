@@ -487,6 +487,33 @@ describe('get_invoice_history — matched caller only', () => {
     assertNoWrites();
   });
 
+  // ⭐ 'prepaid' IS NOT 'paid'. That status means the invoice was covered by
+  // ACCOUNT CREDIT — no payment happened — and a paid row can carry partial
+  // credit, where the cash figure is the cents-authoritative net
+  // (invoiceAmountDue), never the raw gross total.
+  test('a prepaid invoice is spoken as covered by account credit, never as paid', async () => {
+    openBalanceSummary.mockResolvedValue({ total: 0, count: 0, moreCount: 0, invoices: [] });
+    primeDb({
+      invoices: [{ invoice_number: 'WPC-2026-0260', status: 'prepaid', service_type: 'Pest Control', service_date: '2026-06-15', total: 112, credit_applied: 112 }],
+    });
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).toContain('WPC-2026-0260');
+    expect(out).toMatch(/covered by account credit \(no payment was made\)/);
+    expect(out).not.toMatch(/0260[^|]*— paid/); // never announced as cash-paid
+  });
+
+  test('a partially credited paid invoice speaks the NET cash amount, not the gross total', async () => {
+    openBalanceSummary.mockResolvedValue({ total: 0, count: 0, moreCount: 0, invoices: [] });
+    primeDb({
+      invoices: [{ invoice_number: 'WPC-2026-0261', status: 'paid', service_type: 'Lawn Care', service_date: '2026-06-20', total: 120, credit_applied: 20 }],
+    });
+    const out = await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).toContain('WPC-2026-0261');
+    expect(out).toContain('$100'); // total minus credit_applied, via invoiceAmountDue
+    expect(out).not.toContain('$120'); // the gross figure is never spoken
+    expect(out).toMatch(/remainder covered by account credit/);
+  });
+
   test('paid-side read stays self-pay (no payer-owned statements) and selects no token', async () => {
     primeDb({ invoices: [] });
     await executeTool('get_invoice_history', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
