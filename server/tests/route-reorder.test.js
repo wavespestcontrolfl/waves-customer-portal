@@ -351,6 +351,21 @@ test('ledger row shape: one route_optimization_planner_runs row per run', async 
   expect(result).toHaveProperty('auto_dispatch');
 });
 
+test('a failed ledger insert degrades the run status (audit record is part of the contract)', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  db.mockImplementation((table) => {
+    const c = tableChain(table);
+    if (table === 'route_optimization_planner_runs') {
+      c.insert = () => { throw new Error('insert failed'); };
+    }
+    return c;
+  });
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(1); // the reorder itself committed
+  expect(res.ledgerId).toBeNull();
+  expect(res.status).toBe('completed_with_errors'); // but the run is not green
+});
+
 test('GATE_ROUTE_REORDER off ⇒ hard no-op (no queries, no ledger)', async () => {
   const orig = process.env.GATE_ROUTE_REORDER;
   delete process.env.GATE_ROUTE_REORDER;

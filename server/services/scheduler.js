@@ -925,12 +925,20 @@ function initScheduledJobs() {
     if (!gateEnvValue('GATE_ROUTE_REORDER')) return;
     logger.info('Running: Route-Tiers nightly reorder');
     try {
-      // runExclusive: read-then-act — a deploy overlap must not double-run and
-      // bypass the per-run apply cap.
+      // runExclusive x2: 'route-tiers-nightly' guards against deploy-overlap
+      // double-runs of THIS job; nesting inside 'auto-dispatch-recurring'
+      // serializes the two autonomous schedule WRITERS — auto-dispatch's
+      // apply pass can land moves onto reorder-band days (destination floor
+      // is 5 days out, band is 1–6), and SERIALIZABLE isolation alone cannot
+      // fence a concurrent writer running at weaker isolation. If the 4:10
+      // run is still holding the lock, tonight's reorder tick is skipped
+      // (advisory lock is non-blocking) and picked up tomorrow.
       await runExclusive('route-tiers-nightly', async () => {
-        const { runRouteReorderIfEnabled } = require('./route-reorder');
-        const result = await runRouteReorderIfEnabled();
-        logger.info(`[route-reorder] cron run ${result.status}: applied=${result.applied ?? 0} skipped=${result.skipped ?? 0} failed=${result.failed ?? 0} ledger=${result.ledgerId ?? 'none'}`);
+        await runExclusive('auto-dispatch-recurring', async () => {
+          const { runRouteReorderIfEnabled } = require('./route-reorder');
+          const result = await runRouteReorderIfEnabled();
+          logger.info(`[route-reorder] cron run ${result.status}: applied=${result.applied ?? 0} skipped=${result.skipped ?? 0} failed=${result.failed ?? 0} ledger=${result.ledgerId ?? 'none'}`);
+        });
       });
     } catch (err) {
       logger.error(`Route-Tiers reorder run failed: ${err.message}`);

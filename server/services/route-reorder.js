@@ -385,7 +385,10 @@ async function runRouteReorder(opts = {}) {
 
   // ── Ledger: one route_optimization_planner_runs row per nightly run. ──
   const ledger = await writeLedgerRow({ status, today, bandStart, bandEnd, techIds, config, summary });
-  return { status, ledgerId: ledger, applied: summary.applied.length, skipped: summary.skipped.length, failed: summary.failed.length };
+  // A lost ledger row means the promised audit record is missing — the run
+  // must surface as an exception, never report green (codex round-13 P1).
+  const finalStatus = ledger == null && status === 'completed' ? 'completed_with_errors' : status;
+  return { status: finalStatus, ledgerId: ledger, applied: summary.applied.length, skipped: summary.skipped.length, failed: summary.failed.length };
 }
 
 /** Summarize the same night's auto-dispatch day-move run for the ledger
