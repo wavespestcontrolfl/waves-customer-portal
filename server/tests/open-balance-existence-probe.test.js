@@ -52,10 +52,13 @@ test('a qualifying self-pay row → true; a payer-billed row is DROPPED', async 
   expect(await openBalanceExists('c-1', { database })).toBe(true);
 });
 
-test('a payer-resolve OUTAGE fails toward DROP, same as the full read', async () => {
+// ⭐ A DROPPED ROW IS NOT A "NO". This boolean gets SPOKEN as "no open balance"
+// — a candidate lost to a transient resolve failure makes the answer
+// INDETERMINATE, which the voice layer speaks as "couldn't check".
+test('a payer-resolve OUTAGE returns INDETERMINATE (null), never a confident false', async () => {
   const { database } = makeDb([{ id: 'i1', invoice_number: 'WPC-1', scheduled_service_id: null }]);
   PayerService.resolveForInvoice.mockRejectedValue(new Error('payer service down'));
-  expect(await openBalanceExists('c-1', { database })).toBe(false);
+  expect(await openBalanceExists('c-1', { database })).toBe(null);
 });
 
 test('no customer / no rows → false', async () => {

@@ -132,9 +132,14 @@ async function openBalanceExists(customerId, { excludeInvoiceId = null, database
   if (excludeInvoiceId) query.whereNot('id', excludeInvoiceId);
   const rows = await query;
   const PayerService = require('./payer');
+  // ⭐ A DROPPED ROW IS NOT A "NO". The full read fails a resolve-outage row
+  // toward DROP because SHOWING a possibly-payer-billed invoice is the harm
+  // there. Here the harm is inverted: this boolean gets SPOKEN as "no open
+  // balance" to a customer who may owe money, so a candidate lost to a
+  // transient failure makes the answer INDETERMINATE (null) — the voice layer
+  // already degrades null to "couldn't check, a team member can confirm".
+  let anyResolveFailed = false;
   for (const row of rows) {
-    // The live payer re-resolution — the same authority and the same
-    // fail-toward-DROP posture as the full read.
     try {
        
       const resolved = await PayerService.resolveForInvoice({
@@ -144,12 +149,13 @@ async function openBalanceExists(customerId, { excludeInvoiceId = null, database
       });
       if (resolved?.payerId) continue;
     } catch (err) {
-      logger.warn(`[open-balance] payer resolve failed for invoice ${row.invoice_number} — dropping from existence probe (fail closed): ${err.message}`);
+      logger.warn(`[open-balance] payer resolve failed for invoice ${row.invoice_number} — existence answer degrades to indeterminate: ${err.message}`);
+      anyResolveFailed = true;
       continue;
     }
     return true; // short-circuit at the first qualifying self-pay row
   }
-  return false;
+  return anyResolveFailed ? null : false;
 }
 
 /**

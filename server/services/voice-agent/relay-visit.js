@@ -426,10 +426,14 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
   if (products.length) {
     const rendered = products
       .map((p) => {
-        const name = promptSafeUntrusted(p.product_name, 60);
+        // ⭐ THE SAME COMPLIANCE SCREEN THE FINDINGS TAKE. Product names and
+        // technician-entered areas/targets are free text too — "Pet-Safe Barrier
+        // Spray" in a catalog name is banned customer copy exactly like it is in
+        // a finding, and the injection flattener alone does not catch it.
+        const name = complianceSafe(p.product_name, 60);
         if (!name) return null;
-        const area = promptSafeUntrusted(p.application_area, 40);
-        const targets = parseArray(p.targets).map((t) => promptSafeUntrusted(t, 30)).filter(Boolean).slice(0, 4);
+        const area = complianceSafe(p.application_area, 40);
+        const targets = parseArray(p.targets).map((t) => complianceSafe(t, 30)).filter(Boolean).slice(0, 4);
         // Owner rule: "per application", never "per visit".
         return `${name}${area ? ` applied to the ${area}` : ''}${targets.length ? ` for ${targets.join(', ')}` : ''}`;
       })

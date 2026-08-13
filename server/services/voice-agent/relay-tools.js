@@ -1078,11 +1078,17 @@ async function executeTool(name, input = {}, ctx = {}) {
       // is the sweep's obligation marker — scoped to relay calls only, closing
       // the crash gap between the lead commit and the alert claim. Fail-soft:
       // the lead is the durable artifact and must never be lost to this stamp.
-      if (capturedLeadId && ctx.callSid) {
+      // Written for ANY capture with provenance to record: a lifecycle customer
+      // deliberately gets NO lead (leadId null), but a HOT call from them still
+      // owes the owner a page — the obligation marker must not depend on a lead
+      // existing, or a crashed page for an existing customer never sweeps.
+      const wasHotCapture = String(input.lead_quality || '').toLowerCase() === 'hot';
+      if ((capturedLeadId || wasHotCapture) && ctx.callSid) {
         try {
           const db = require('../../models/db');
-          const linkage = { relay_lead_id: String(capturedLeadId) };
-          if (String(input.lead_quality || '').toLowerCase() === 'hot') linkage.relay_hot_alert_needed = 'true';
+          const linkage = {};
+          if (capturedLeadId) linkage.relay_lead_id = String(capturedLeadId);
+          if (wasHotCapture) linkage.relay_hot_alert_needed = 'true';
           await db('call_log')
             .where({ twilio_call_sid: ctx.callSid })
             .update({

@@ -461,14 +461,21 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
       } catch { /* fall through */ }
     }
     if (!lead) {
-      // No lead to page about — clear the obligation so the row leaves the
-      // sweep population instead of retrying hourly forever.
-       
-      await db('call_log')
-        .where({ twilio_call_sid: row.twilio_call_sid })
-        .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'relay_hot_alert_needed'") })
-        .catch(() => {});
-      continue;
+      // A HOT call from a LIFECYCLE customer has no lead BY DESIGN (capture
+      // records on the account instead) — the page is still owed, composed
+      // from the call row itself. Only a linkage that points at a DELETED
+      // lead has nothing left to page about; that row clears its obligation
+      // so it leaves the sweep population instead of retrying forever.
+      if (!leadId) {
+        lead = { phone: row.from_phone, transcript_summary: row.call_summary, first_name: null, last_name: null, city: null };
+      } else {
+         
+        await db('call_log')
+          .where({ twilio_call_sid: row.twilio_call_sid })
+          .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'relay_hot_alert_needed'") })
+          .catch(() => {});
+        continue;
+      }
     }
      
     const ok = await alertOwnerHotLead(

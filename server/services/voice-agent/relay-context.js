@@ -696,6 +696,9 @@ async function loadCompletedVisits(customerId, limit = 5) {
 async function loadOpenBalance(customerId, { amounts = true } = {}) {
   const { openBalanceSummary, openBalanceExists } = require('../open-balance');
   if (!amounts) {
+    // null from the probe = INDETERMINATE (a candidate dropped on a transient
+    // resolve failure) — surfaced as a null balance, which every renderer
+    // already speaks as "couldn't check", never as "no open balance".
     const hasOpen = await openBalanceExists(customerId).catch(() => null);
     return hasOpen == null ? null : { hasOpen };
   }
@@ -1145,7 +1148,13 @@ async function lookupCustomersText(input = {}, ctx = {}) {
   const phoneKey = aniDigitKey(input.phone);
 
   const criteria = [];
-  if (name.length >= LOOKUP_MIN_NAME_LEN) criteria.push('name');
+  // ⭐ A CRITERION MUST SURVIVE ITS OWN QUERY. "A J" passes a raw length check
+  // while every token dies at the per-token minimum below — the name then
+  // filters NOTHING, and a street fragment alone was passing the two-criteria
+  // gate as if it had a partner. A name counts only when at least one token
+  // will actually reach the SQL.
+  const usableNameTokens = name.split(/\s+/).filter((t) => t.length >= LOOKUP_MIN_NAME_LEN);
+  if (usableNameTokens.length > 0) criteria.push('name');
   if (street.length >= LOOKUP_MIN_STREET_LEN) criteria.push('street');
   if (phoneKey) criteria.push('phone');
   if (!criteria.length) {
