@@ -774,7 +774,11 @@ async function detectContradictions() {
               resolvedWikiEntryId = exact.id;
             } else {
               const { escapeLike } = require('./agronomic-wiki');
+              // Product namespace ONLY — an unrestricted slug scan could
+              // "uniquely" match a condition/track/seasonal page and gate
+              // the wrong page permanently.
               const candidates = await db('knowledge_entries')
+                .where('slug', 'like', 'product/%')
                 .whereRaw("slug ILIKE ? ESCAPE '\\'", [`%${escapeLike(productSlug)}%`])
                 .select('id')
                 .limit(2);
