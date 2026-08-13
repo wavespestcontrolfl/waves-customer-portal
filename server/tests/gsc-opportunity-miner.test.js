@@ -2756,7 +2756,7 @@ describe('local_gap lifecycle guards (round-4 cloud P1s)', () => {
     expect(updates[0].patch.status).toBe('expired');
     expect(updates[0].patch.skip_reason).toBe('local_gap_signal_gone');
     // Wired in mineAll under the canonical-window + no-error guards.
-    expect(src).toMatch(/if \(localGapSweepWillRun\) \{[\s\S]{0,120}_sweepStaleLocalGapRows\(/);
+    expect(src).toMatch(/if \(localGapSweepWillRun\) \{[\s\S]{0,700}_sweepStaleLocalGapRows\(/);
   });
 
   test('an UNLANDABLE candidate cannot supersede a pending local_gap twin', async () => {
@@ -2822,13 +2822,13 @@ describe('in-lock frozen re-read + untrusted-snapshot sweep guard (round-5 cloud
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
     expect(src).toMatch(/runState\.cityServiceFrozenLookupFailed = true;/);
-    expect(src).toMatch(/const localGapSweepWillRun = !errors\.local_gap\n\s*&& !runState\.cityServiceFrozenLookupFailed/);
+    expect(src).toMatch(/const localGapSweepWillRun = !errors\.local_gap[\s\S]{0,80}!runState\.cityServiceFrozenLookupFailed/);
     // …and the sweep's advisory-lock guarantee survives an EMPTY batch:
     // the lock is taken whenever the sweep will run, not only when the
     // family sweep will (cloud P1 — an unlocked expiry races a concurrent
     // mine's insert/revive).
     expect(src).toMatch(/lockEvenIfEmpty: sweepWillRun \|\| localGapSweepWillRun/);
-    expect(src).toMatch(/if \(localGapSweepWillRun\) \{[\s\S]{0,120}_sweepStaleLocalGapRows\(/);
+    expect(src).toMatch(/if \(localGapSweepWillRun\) \{[\s\S]{0,700}_sweepStaleLocalGapRows\(/);
   });
 });
 
@@ -2881,5 +2881,31 @@ describe('pages-leg freshness + mappable winners (round-6 cloud P1s)', () => {
     const out = arbitrateCityServiceTargets([rawSd, rawAeo]);
     expect(out).toHaveLength(1);
     expect(out[0].dedupe_key).toBe('sd-raw');
+  });
+});
+
+describe('local_gap anchoring + sweep provenance + segment coverage (round-8 cloud P1s)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+
+  test('local_gap is PAGE-ANCHORED — the router cannot reroute it to an article', () => {
+    const dr = fs.readFileSync(require.resolve('../services/content/decision-router'), 'utf8');
+    expect(dr).toMatch(/PAGE_ANCHORED_BUCKETS = new Set\(\['answer_gap', 'listicle_family', 'local_gap'\]\)/);
+  });
+
+  test('the sweep consumes PRE-arbitration keys — an arbitration loss is not "signal gone"', () => {
+    expect(src).toMatch(/_sweepStaleLocalGapRows\(\n\s*\(buckets\.local_gap \|\| \[\]\),/);
+    expect(src).not.toMatch(/_sweepStaleLocalGapRows\(\n\s*revalidated\.filter/);
+  });
+
+  test('a multi-query pair carries contributing_queries and total impressions', () => {
+    const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+    expect(lg).toMatch(/contributing_queries: pair\.queries\.length > 1 \? \[\.\.\.pair\.queries\]\.sort\(\) : null/);
+    expect(lg).toMatch(/contributing_impressions: pair\.queries\.length > 1 \? pair\.impressions : null/);
+  });
+
+  test('the brief binds segment coverage for local_gap exactly as for no_content_yet', () => {
+    const bb = fs.readFileSync(require.resolve('../services/content/content-brief-builder'), 'utf8');
+    expect(bb).toMatch(/opportunity\.bucket === 'no_content_yet' \|\| opportunity\.bucket === 'local_gap'/);
   });
 });

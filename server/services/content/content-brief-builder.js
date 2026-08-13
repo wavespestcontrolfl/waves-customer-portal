@@ -732,7 +732,7 @@ class ContentBriefBuilder {
     // to this one target. Gating on the original action would silently
     // discard their demand exactly when the reroute makes the winner's
     // phrasing least representative (Codex P1).
-    if (opportunity.bucket === 'no_content_yet'
+    if ((opportunity.bucket === 'no_content_yet' || opportunity.bucket === 'local_gap')
       && contributingQueries.length > 1) {
       // The noun has to follow the REROUTED action, or a blog brief would be
       // told it is a city-service page.

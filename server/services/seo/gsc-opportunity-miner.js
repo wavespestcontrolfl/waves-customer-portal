@@ -1894,8 +1894,15 @@ class GscOpportunityMiner {
           // window + no bucket error (the fail-closed map guard throws
           // into errors.local_gap, which suppresses this).
           if (localGapSweepWillRun) {
+            // PRE-arbitration keys (cloud P1): the sweep's semantic is
+            // "signal gone", and arbitration/fence drops are not that — a
+            // pending local_gap row whose candidate lost the target to a
+            // deferred queryless sibling (e.g. a higher-scoring aeo_gap
+            // row) must survive the mine. Retirement-by-supersession is
+            // explicit in the fence; the sweep only retires pairs the
+            // MINE no longer emitted.
             await this._sweepStaleLocalGapRows(
-              revalidated.filter((o) => o.bucket === 'local_gap'),
+              (buckets.local_gap || []),
               trx
             );
           }
@@ -2697,6 +2704,14 @@ class GscOpportunityMiner {
           // every draft of this lane hard-fails (cloud P1). Kept OUT of
           // `query` itself so the dedupe key stays target-stable.
           representative_query: pair.representative || null,
+          // EVERY validated query that helped the pair clear admission,
+          // exactly as the no_content_yet collapse carries them (cloud
+          // P1): the brief-builder's segment-coverage section binds the
+          // draft to each phrasing, so the one target-stable page
+          // addresses the whole segment's demand, not just the
+          // representative's wording.
+          contributing_queries: pair.queries.length > 1 ? [...pair.queries].sort() : null,
+          contributing_impressions: pair.queries.length > 1 ? pair.impressions : null,
           // The specific topic behind specialty→pest canonicalization,
           // judged across EVERY contributing query, representative first —
           // same rule as the other emitting buckets: 'wasp'/'bed bug' are
