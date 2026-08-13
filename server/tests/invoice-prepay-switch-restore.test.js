@@ -35,19 +35,29 @@ const VOIDED_ROW = {
   ]),
 };
 
-// Conn stub: a superseded-row select, a restore-marker probe, nothing else.
+// Conn stub shaped like a knex TRANSACTION (isTransaction) so the helper
+// restores inside the caller's trx: a candidate-id select, a row-locked
+// re-read, and the restore-marker probe.
 function conn({ rows = [VOIDED_ROW], replacement = undefined } = {}) {
   const fn = jest.fn(() => {
     const q = {};
     let notesLike = false;
+    let whereId = null;
     q.where = jest.fn((...args) => {
       if (args[0] === 'notes') notesLike = true;
+      if (args[0] && typeof args[0] === 'object' && args[0].id !== undefined) whereId = args[0].id;
       return q;
     });
-    q.select = jest.fn(async () => rows);
-    q.first = jest.fn(async () => (notesLike ? replacement : undefined));
+    q.forUpdate = jest.fn(() => q);
+    q.select = jest.fn(async () => rows.map((r) => ({ id: r.id })));
+    q.first = jest.fn(async () => {
+      if (notesLike) return replacement;
+      if (whereId != null) return rows.find((r) => String(r.id) === String(whereId));
+      return undefined;
+    });
     return q;
   });
+  fn.isTransaction = true;
   return fn;
 }
 
@@ -71,8 +81,11 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
     expect(created.customerId).toBe('cust-1');
     expect(created.scheduledServiceId).toBe('svc-1');
     expect(created.notes).toContain('[prepay-switch-restore:inv-old]');
-    // Rides the caller's connection so it commits with the term-cancel sync.
+    // Rides the caller's transaction so the restore commits (or rolls back)
+    // with the term-cancel sync that triggered it.
     expect(created.database).toBe(c);
+    // ET calendar for the due date, never a UTC slice.
+    expect(created.dueDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
   test('idempotent: an existing restore-marker replacement means nothing is minted again', async () => {

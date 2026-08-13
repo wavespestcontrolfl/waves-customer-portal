@@ -4151,18 +4151,28 @@ const InvoiceService = {
   async restoreSwitchSupersededInvoicesForPrepay(prepayInvoiceId, conn = db) {
     if (!prepayInvoiceId) return [];
     const marker = prepaySwitchSupersededByMarker(prepayInvoiceId);
-    const rows = await conn("invoices")
+    const candidates = await conn("invoices")
       .where({ status: "void" })
       .where("notes", "like", `%${marker}%`)
-      .select("id", "invoice_number", "line_items", "notes", "title",
-        "scheduled_service_id", "customer_id");
-    const restored = [];
-    for (const row of rows) {
+      .select("id");
+    // Each restore runs with the SUPERSEDED ROW LOCKED and the marker check
+    // + re-mint in one transaction (Codex on-site-switch P0 r8): the undo
+    // endpoint locks the same row the same way, so the two restorers — an
+    // operator tapping Restore while another tab finishes voiding the
+    // prepay — serialize on the row instead of both observing "no marker"
+    // and each minting a collectible replacement.
+    const restoreOne = async (trx, id) => {
+      const row = await trx("invoices")
+        .where({ id })
+        .forUpdate()
+        .first("id", "invoice_number", "status", "line_items", "notes", "title",
+          "scheduled_service_id", "customer_id");
+      if (!row || String(row.status || "").toLowerCase() !== "void") return null;
       const restoreMarker = prepaySwitchRestoreMarker(row.id);
-      const existing = await conn("invoices")
+      const existing = await trx("invoices")
         .where("notes", "like", `%${restoreMarker}%`)
         .first("id");
-      if (existing) continue;
+      if (existing) return null;
       const lines = parseInvoiceLineItems(row.line_items)
         .map((li) => ({
           description: String(li?.description || ""),
@@ -4172,18 +4182,27 @@ const InvoiceService = {
         .filter((li) => li.description && Number.isFinite(li.unit_price));
       if (lines.length === 0) {
         logger.warn(`[invoice] switch-supersede restore skipped for ${row.invoice_number || row.id}: no readable line items`);
-        continue;
+        return null;
       }
       const recreated = await this.create({
-        ...(conn === db ? {} : { database: conn }),
+        database: trx,
         customerId: row.customer_id,
         scheduledServiceId: row.scheduled_service_id,
         title: row.title || "Service invoice",
         lineItems: lines,
         notes: `${row.notes || ""}\n${restoreMarker} Re-created after the annual prepay that superseded it was cancelled; replaces voided ${row.invoice_number || row.id}.`.trim(),
-        dueDate: new Date().toISOString().slice(0, 10),
+        // ET calendar, never UTC — after ~8PM Eastern a UTC slice dates the
+        // restored invoice tomorrow.
+        dueDate: etDateString(),
       });
-      restored.push({ replacedInvoiceId: row.id, invoiceId: recreated?.id || null, invoiceNumber: recreated?.invoice_number || null });
+      return { replacedInvoiceId: row.id, invoiceId: recreated?.id || null, invoiceNumber: recreated?.invoice_number || null };
+    };
+    const restored = [];
+    for (const candidate of candidates) {
+      const out = conn.isTransaction
+        ? await restoreOne(conn, candidate.id)
+        : await conn.transaction((trx) => restoreOne(trx, candidate.id));
+      if (out) restored.push(out);
     }
     return restored;
   },

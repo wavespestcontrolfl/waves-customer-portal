@@ -9755,11 +9755,14 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
     const InvoiceService = require('../services/invoice');
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
     const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
-    const mintPayload = p.mintPayload;
 
     let invoice = null;
     let voided = [];
     let mintedTerm = null;
+    // The AUTHORITATIVE payload is recomputed inside the transaction after
+    // the locks land (below); the pre-transaction preview above is only the
+    // fast-fail. Hoisted so the post-commit audit can reference it.
+    let mintPayload = p.mintPayload;
     try {
       await db.transaction(async (trx) => {
         // Advisory lock + overlap re-check: a concurrent Customer 360 mint,
@@ -9803,6 +9806,22 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           err.switchConflict = true;
           throw err;
         }
+
+        // Recompute eligibility + pricing UNDER the locks (Codex P0 r8):
+        // the pre-transaction preview priced from rows a concurrent editor
+        // could still change. With the visit and customer rows now locked,
+        // any in-flight edit to price, cadence, billing mode, or add-ons has
+        // either committed (and this recompute sees it) or is blocked behind
+        // these locks until commit — the stale-payload window is gone. The
+        // recompute reads on separate connections, which see the latest
+        // committed state; the locks guarantee that state cannot move.
+        const live = await computeAnnualPrepayPreview({ scheduledServiceId: req.params.id });
+        if (live.httpStatus || !live.eligible) {
+          const err = new Error(`This visit ${live.blockReason || 'is no longer eligible for the switch'}`);
+          err.switchConflict = true;
+          throw err;
+        }
+        mintPayload = live.mintPayload;
 
         // Lock EVERY invoice attached to the series before resolving (Codex
         // P0 r5): the resolver's read and the CAS below must see the same
