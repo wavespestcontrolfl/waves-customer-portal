@@ -34,6 +34,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 // keep it off the network.
 jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 27.4, lng: -82.5 },
+  haversine: jest.requireActual('../services/route-optimizer').haversine,
+  milesToDriveMinutes: jest.requireActual('../services/route-optimizer').milesToDriveMinutes,
   optimizeRoute: jest.fn(async (stops) => ({
     orderedStops: stops,
     totalDistanceMeters: 10000,
@@ -44,6 +46,18 @@ jest.mock('../services/route-optimizer', () => ({
 }));
 
 const TOOLS_DIR = path.join(__dirname, '..', 'services', 'intelligence-bar');
+
+// These assertions assume LEGACY drive times (see the mocked haversine above),
+// and the mock deliberately pulls the REAL gate-sensitive estimator. Pin the
+// gate off so the suite does not depend on the ambient environment; the
+// calibrated model is covered by drive-time-calibration.test.js.
+const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
+beforeAll(() => { delete process.env.GATE_DRIVE_TIME_CALIBRATION; });
+afterAll(() => {
+  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+  else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
+});
+
 
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —

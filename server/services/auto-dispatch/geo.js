@@ -1,18 +1,23 @@
 /**
- * Geo helpers for auto-dispatch — same drive-time approximation the find-time
- * scorer and route-optimizer fallback use (haversine × 1.4 road factor @ 30 mph).
- * HQ + haversine are reused from route-optimizer so the optimizer and the
- * autonomous driver agree on distances.
+ * Geo helpers for auto-dispatch.
+ *
+ * HQ, haversine and the drive-time estimator all come from route-optimizer so
+ * the optimizer, the find-time scorer and the autonomous driver share ONE
+ * model. That sharing is load-bearing rather than tidiness: auto-dispatch ranks
+ * a visit's CURRENT placement (scored here) against CANDIDATE placements
+ * (scored in scheduling/find-time.js). If the two sides used different
+ * estimators, the comparison would be on different scales and the driver could
+ * "improve" a route that did not improve. Do not reintroduce a local copy of
+ * the constants here — see route-optimizer.js for the model and its
+ * calibration.
  */
-const { HQ, haversine } = require('../route-optimizer');
+const { HQ, haversine, milesToDriveMinutes } = require('../route-optimizer');
 
-const ROAD_FACTOR = 1.4;
-const AVG_MPH = 30;
-
-function milesToDriveMinutes(miles) {
-  return Math.round((miles * ROAD_FACTOR / AVG_MPH) * 60);
-}
-
+/**
+ * Drive minutes between two {lat,lng} points. Coordinate glue only — the
+ * miles→minutes model itself is route-optimizer's and MUST NOT be re-derived
+ * here.
+ */
 function driveMin(a, b) {
   if (!a || !b || a.lat == null || a.lng == null || b.lat == null || b.lng == null) return 0;
   return milesToDriveMinutes(haversine(
@@ -38,4 +43,4 @@ function resolveGeo(row) {
   return { lat: la, lng: ln };
 }
 
-module.exports = { HQ, haversine, driveMin, resolveGeo };
+module.exports = { HQ, haversine, driveMin, resolveGeo, milesToDriveMinutes };
