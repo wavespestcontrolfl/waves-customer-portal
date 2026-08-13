@@ -755,7 +755,17 @@ function applyV2ToPropertyFacts(propertyFacts, v2) {
     // confidence — county high stays green, caller-stated low parks) is
     // untouched; V2 never required a private-lot measurement there.
   }
-  if (legacy.stories) propertyFacts.stories = legacy.stories;
+  if (legacy.stories) {
+    propertyFacts.stories = legacy.stories;
+  } else if (facts.serviceScope === 'residential_unit' || facts.serviceScope === 'commercial_suite') {
+    // A unit/suite prices its OWN stories, and V2's selection deliberately
+    // produced none (the county count is the BUILDING's). Leaving the V1
+    // building count in place let calculatePropertyProfile divide the
+    // suite's folio area by it — a 1,000 sqft suite in a five-story condo
+    // priced from a 200 sqft footprint with no review marker (codex GH r59
+    // P1). Wrong scope is not competing evidence; clear it.
+    propertyFacts.stories = null;
+  }
   return propertyFacts;
 }
 

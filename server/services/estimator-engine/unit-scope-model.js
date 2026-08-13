@@ -167,10 +167,14 @@ const COMMERCIAL_TEXT_RE = new RegExp(
     // The premises noun must sit DIRECTLY after the optional article, so
     // "…for the home office" (a residential room) still does not match
     // while "…for an office" (codex r23 P1) does.
-    '(?:pest|lawn|mosquito|rodent|termite|spray\\w*|treat\\w*|exterminat\\w*|service)\\w*\\s+(?:control\\s+)?(?:at|for|in)\\s+(?:a\\s+|an\\s+|the\\s+)?(?:warehouse|restaurant|clinic|storefront|plaza|office|shop|store|hotel|motel|resort|daycare|day\\s?care|preschool|childcare|school|church)\\b',
+    '(?:pest|lawn|mosquito|rodent|termite|spray\\w*|treat\\w*|exterminat\\w*|service)\\w*\\s+(?:control\\s+)?(?:at|for|in)\\s+(?:a\\s+|an\\s+|the\\s+|our\\s+)?(?:warehouse|restaurant|clinic|storefront|plaza|office|shop|store|hotel|motel|resort|daycare|day\\s?care|preschool|childcare|school|church|municipal\\s+(?:building|office|facility)|government\\s+(?:building|office|facility)|city\\s+hall|courthouse)\\b',
     // "service our daycare" / "treat our hotel" — the possessive form with
     // a service verb in front (codex r33 P1).
-    '(?:service|treat|spray|exterminat\\w*)\\w*\\s+(?:my|our|the)\\s+(?:hotel|motel|resort|daycare|day\\s?care|preschool|childcare|school|church|warehouse|restaurant|clinic|office|shop|store)\\b',
+    // Government/municipal premises join both service-qualified lists —
+    // the type-family matcher covers property_type only, so "pest control
+    // for our municipal building" in PROSE still auto-priced residential
+    // (codex GH r59 P1).
+    '(?:service|treat|spray|exterminat\\w*)\\w*\\s+(?:my|our|the)\\s+(?:hotel|motel|resort|daycare|day\\s?care|preschool|childcare|school|church|warehouse|restaurant|clinic|office|shop|store|municipal\\s+(?:building|office|facility)|government\\s+(?:building|office|facility)|city\\s+hall|courthouse)\\b',
   ].join('|'),
   'i',
 );

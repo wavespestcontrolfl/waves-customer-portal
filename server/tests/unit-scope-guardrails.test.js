@@ -1641,3 +1641,43 @@ describe('GH r58 — municipal premises conflict; commercial-condo folio reaches
     });
   });
 });
+
+describe('GH r59 — government prose conflicts; building stories never divide a suite', () => {
+  test('municipal/government premises in PROSE trip the commercial scan', () => {
+    expect(commercialTextSignal('pest control for our municipal building')).toBe(true);
+    expect(commercialTextSignal('service our government office')).toBe(true);
+    expect(commercialTextSignal('quarterly spraying at city hall')).toBe(true);
+    // Working for the city is still residential prose.
+    expect(commercialTextSignal('I work for the city, ants are at my house')).toBe(false);
+  });
+
+  test('a unit/suite scope clears the V1 building story count when V2 resolves none', () => {
+    const { applyV2ToPropertyFacts } = require('../services/estimator-engine/property-facts-shadow');
+    const propertyFacts = { stories: 5, home: { value: 1000, source: 'county_assessed' } };
+    applyV2ToPropertyFacts(propertyFacts, {
+      legacyDerived: { squareFootage: 1000, stories: null },
+      facts: {
+        serviceScope: 'commercial_suite',
+        confidenceLevel: 'high',
+        structureArea: { selectedEvidenceIds: [] },
+        lot: { applicability: 'unknown' },
+        evidence: [],
+      },
+    });
+    // The five-story BUILDING count must not divide the suite's area.
+    expect(propertyFacts.stories).toBeNull();
+    // A whole-building scope keeps its count untouched.
+    const whole = { stories: 5 };
+    applyV2ToPropertyFacts(whole, {
+      legacyDerived: { squareFootage: 40000, stories: null },
+      facts: {
+        serviceScope: 'entire_commercial_building',
+        confidenceLevel: 'high',
+        structureArea: { selectedEvidenceIds: [] },
+        lot: { applicability: 'unknown' },
+        evidence: [],
+      },
+    });
+    expect(whole.stories).toBe(5);
+  });
+});
