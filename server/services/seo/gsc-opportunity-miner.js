@@ -1222,18 +1222,17 @@ function isPersistable(o) {
 // compose to one claimable row per target. In-flight (claimed /
 // pending_review) predecessors are handled under the persist transaction —
 // see _revalidateCityServiceBatch.
-// A skipped row that represents a HUMAN decision, not a runner outcome.
-// autonomous-review-queue records explicit dismissals as
-// `manual_dismiss[:note]` and the PR poller records a human closing the
-// PR unmerged as `astro_pr_closed_unmerged` — both are standing "no" for
-// the TARGET, unlike gate failures / router refusals / protected-page
-// bounces, which are query-specific and freeze only their own key
-// (cloud P1 on #3378, correcting the round-7 assumption that no human
-// writer of `skipped` existed).
+// A skipped row that represents an explicit HUMAN dismissal of the
+// target's draft — autonomous-review-queue's `manual_dismiss[:note]` — a
+// standing "no" for the TARGET (cloud P1 on #3378, correcting the round-7
+// assumption that no human writer of `skipped` existed). Deliberately
+// EXCLUDED: `astro_pr_closed_unmerged` — closing one generated PR rejects
+// THAT draft, not every future page for the pair, so it stays key-level
+// via the upsert guard like every runner outcome (cloud P1, next round).
 function isHumanTerminalSkip(status, skipReason) {
   if (status !== 'skipped') return false;
   const r = String(skipReason || '');
-  return r === 'astro_pr_closed_unmerged' || r === 'manual_dismiss' || r.startsWith('manual_dismiss:');
+  return r === 'manual_dismiss' || r.startsWith('manual_dismiss:');
 }
 
 // The CANONICAL identity of a city-service target, shared by the
@@ -2531,6 +2530,13 @@ class GscOpportunityMiner {
     const queries = await db('gsc_queries')
       .where('date', '>=', since)
       .where('is_branded', false)
+      // HUB-ONLY, exactly as mineNoContentYet and for the same reason:
+      // city-service pages publish to the hub only (see the module
+      // invariant at HUB_DOMAIN), so spoke-observed demand would justify
+      // a hub page the hub has no demand for (cloud P1). Cross-domain
+      // aggregation is right for judging whether a page RANKS; it is
+      // wrong for deciding where to PUBLISH.
+      .where('domain', HUB_DOMAIN)
       .whereNotNull('city_target')
       .whereNot('city_target', 'local_intent')
       .whereNotNull('service_category')
@@ -2569,7 +2575,12 @@ class GscOpportunityMiner {
       // the RIGHT granularity here (unlike per-query no_content_yet): the
       // bucket asks "does a page exist for this city+service pair", so
       // any page classified to the pair genuinely answers it.
-      if (ownPagesByServiceCity.get(ownPageKey(service, city))) continue;
+      // Coverage is judged on HUB pages only, mirroring the demand scope:
+      // the map is cross-property, and a SPOKE page serving the pair must
+      // not suppress a genuinely missing HUB page (cloud P1) — the output
+      // of this bucket is a hub page, so only a hub page answers it.
+      const mapped = ownPagesByServiceCity.get(ownPageKey(service, city));
+      if (mapped && String(routeIdentity(mapped) || '').split('::')[0] === HUB_DOMAIN) continue;
       const key = ownPageKey(service, city);
       const imp = parseInt(q.impressions, 10) || 0;
       const prev = byPair.get(key);
@@ -3693,14 +3704,14 @@ class GscOpportunityMiner {
         .orWhere((qq) => qq
           .where({ status: 'done' })
           .where('updated_at', '>=', trx.raw(`now() - interval '${GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS} days'`)))
-        // Human-terminal skips (manual dismiss / PR closed unmerged) are
-        // standing target vetoes, unbounded — see isHumanTerminalSkip.
-        // Runner skips are deliberately NOT selected: key-only.
+        // Human-terminal skips (manual dismissals only — see
+        // isHumanTerminalSkip for why closed-unmerged PRs stay key-level)
+        // are standing target vetoes, unbounded. Runner skips are
+        // deliberately NOT selected: key-only.
         .orWhere((qq) => qq
           .where({ status: 'skipped' })
           .where((r) => r
-            .where('skip_reason', 'astro_pr_closed_unmerged')
-            .orWhere('skip_reason', 'manual_dismiss')
+            .where('skip_reason', 'manual_dismiss')
             .orWhere('skip_reason', 'like', 'manual_dismiss:%'))))
       .forUpdate()
       .select('dedupe_key', 'service', 'city', 'status', 'skip_reason', 'bucket', 'query');

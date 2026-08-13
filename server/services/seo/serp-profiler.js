@@ -15,6 +15,7 @@
  * scraping (would violate Google's automated-queries policy).
  */
 
+const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
@@ -309,7 +310,11 @@ class SerpProfiler {
     const raw = await dataforseo.serpOrganic(query, locationUsed, device);
     const result = raw?.tasks?.[0]?.result?.[0];
     if (!result) {
-      logger.warn(`[serp-profiler] no SERP data for "${query}" in ${locationUsed}`);
+      // Digest, never the raw query: GSC/brief keywords are arbitrary
+      // external text and non-card PII must not reach the logs (same
+      // sha256-12 convention as the miner's queryDigest).
+      const qDigest = crypto.createHash('sha256').update(String(query)).digest('hex').slice(0, 12);
+      logger.warn(`[serp-profiler] no SERP data for query#${qDigest} in ${locationUsed}`);
       return null;
     }
 

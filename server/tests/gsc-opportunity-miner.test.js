@@ -2508,7 +2508,7 @@ describe('RECENT done rows fence the whole TARGET; skipped never does (rounds 5-
     // …and the in-lock fence consults skipped rows ONLY for the
     // human-terminal reasons — runner skips stay key-only.
     const fenceSrc = src.slice(src.indexOf('async _revalidateCityServiceBatch'), src.indexOf('async _sweepStaleFamilyRows'));
-    expect(fenceSrc).toMatch(/'astro_pr_closed_unmerged'/);
+    expect(fenceSrc).not.toMatch(/'astro_pr_closed_unmerged'/);
     expect(fenceSrc).toMatch(/'manual_dismiss:%'/);
     expect(fenceSrc).toMatch(/CANONICAL_MINE_PERIOD_DAYS/);
   });
@@ -2543,7 +2543,9 @@ describe('RECENT done rows fence the whole TARGET; skipped never does (rounds 5-
     // writes astro_pr_closed_unmerged when a human closes the PR unmerged.
     expect(isHumanTerminalSkip('skipped', 'manual_dismiss')).toBe(true);
     expect(isHumanTerminalSkip('skipped', 'manual_dismiss:not this market')).toBe(true);
-    expect(isHumanTerminalSkip('skipped', 'astro_pr_closed_unmerged')).toBe(true);
+    // Closing ONE generated PR rejects that draft, not every future page
+    // for the pair — key-level via the upsert guard, never a target veto.
+    expect(isHumanTerminalSkip('skipped', 'astro_pr_closed_unmerged')).toBe(false);
     // Runner outcomes — query-specific, key-only.
     expect(isHumanTerminalSkip('skipped', 'gate_fail')).toBe(false);
     expect(isHumanTerminalSkip('skipped', 'protected_page:money_page')).toBe(false);
@@ -2674,5 +2676,29 @@ describe('local_gap specialty topic + log hygiene (round-2 cloud P1s)', () => {
     expect(bb).toMatch(/sha256'\)\.update\(String\(serpKeyword\)\)/);
     expect(bb).not.toMatch(/SERP profile failed for "\$\{serpKeyword\}"/);
     expect(bb).not.toMatch(/SERP profile failed for "\$\{opportunity\.query\}"/);
+  });
+});
+
+describe('local_gap is HUB-scoped on both legs (round-3 cloud P1)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+  const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+
+  test('demand counts HUB impressions only', () => {
+    // Spoke-observed demand must not justify a hub page the hub has no
+    // demand for — same invariant as mineNoContentYet.
+    expect(lg).toMatch(/\.where\('domain', HUB_DOMAIN\)/);
+  });
+
+  test('coverage is satisfied only by a HUB page', () => {
+    // A spoke page serving the pair must not suppress a genuinely
+    // missing hub page — the bucket's output is a hub page.
+    expect(lg).toMatch(/routeIdentity\(mapped\)[\s\S]{0,60}HUB_DOMAIN\) continue;/);
+  });
+
+  test('the serp-profiler no-data log carries a digest, never the raw query', () => {
+    const sp = fs.readFileSync(require.resolve('../services/seo/serp-profiler'), 'utf8');
+    expect(sp).not.toMatch(/no SERP data for "\$\{query\}"/);
+    expect(sp).toMatch(/no SERP data for query#\$\{qDigest\}/);
   });
 });
