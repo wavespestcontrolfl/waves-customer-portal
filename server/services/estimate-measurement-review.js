@@ -222,6 +222,10 @@ async function sendOfficeNotification(database, { subject, description, customer
   // crash window between claim and clear degrades to the loud FAILED-TWICE
   // log + the office sweep, never to a double bell (one-request/one-bell
   // contract).
+  // Ownership fence (codex #3376 P1): a sender that outlives its own lease
+  // must not complete or clear a SUCCESSOR's lease — every claim carries a
+  // unique token, and both completion updates are conditioned on it.
+  const leaseToken = require('crypto').randomUUID();
   let claimed = 0;
   try {
     claimed = await database('service_requests')
@@ -232,7 +236,8 @@ async function sendOfficeNotification(database, { subject, description, customer
       )
       .update({
         pricing_revision: database.raw(
-          "jsonb_set(COALESCE(pricing_revision, '{}'::jsonb), '{notifyLeaseAt}', to_jsonb(NOW()::text))"
+          "jsonb_set(jsonb_set(COALESCE(pricing_revision, '{}'::jsonb), '{notifyLeaseAt}', to_jsonb(NOW()::text)), '{notifyLeaseToken}', to_jsonb(?::text))",
+          [leaseToken]
         ),
       });
   } catch (err) {
@@ -245,9 +250,10 @@ async function sendOfficeNotification(database, { subject, description, customer
     try {
       await database('service_requests')
         .where({ id: requestId })
+        .whereRaw("pricing_revision->>'notifyLeaseToken' = ?", [leaseToken])
         .update({
           pricing_revision: database.raw(
-            "jsonb_set(COALESCE(pricing_revision, '{}'::jsonb) - 'notifyLeaseAt', '{notifiedAt}', to_jsonb(NOW()::text))"
+            "jsonb_set(COALESCE(pricing_revision, '{}'::jsonb) - 'notifyLeaseAt' - 'notifyLeaseToken', '{notifiedAt}', to_jsonb(NOW()::text))"
           ),
         });
     } catch (err) {
@@ -260,8 +266,9 @@ async function sendOfficeNotification(database, { subject, description, customer
     try {
       await database('service_requests')
         .where({ id: requestId })
+        .whereRaw("pricing_revision->>'notifyLeaseToken' = ?", [leaseToken])
         .update({
-          pricing_revision: database.raw("COALESCE(pricing_revision, '{}'::jsonb) - 'notifyLeaseAt'"),
+          pricing_revision: database.raw("COALESCE(pricing_revision, '{}'::jsonb) - 'notifyLeaseAt' - 'notifyLeaseToken'"),
         });
     } catch (err) {
       logger.warn(`[estimate-measurement-review] notify lease release failed for request ${requestId}: ${err.message}`);
