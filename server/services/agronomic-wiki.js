@@ -1142,6 +1142,58 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
   },
 
   // ────────────────────────────────────────────────────────────
+  // markOutcomePagesStale — flag the wiki pages fed by an outcome as
+  // regenerate-eligible WITHOUT firing generation. Resolves the same page
+  // set linkTreatmentOutcome's fan-out updates: product pages via
+  // products_applied (canonical-resolved), the grass-track page, and the
+  // treatment month's seasonal page. weeklyRefresh selects purely on
+  // stale_flag=true (its 60-day rule only ADDS flags), so a flagged page is
+  // picked up on the next weekly run regardless of age. Used by the
+  // vision-delta scorer so a newly photo-verified outcome doesn't wait out
+  // the 60-day staleness window. Never throws.
+  // ────────────────────────────────────────────────────────────
+  async markOutcomePagesStale(outcome) {
+    try {
+      if (!outcome) return 0;
+      const slugs = new Set();
+
+      let products = outcome.products_applied;
+      if (typeof products === 'string') {
+        try { products = JSON.parse(products); } catch { products = []; }
+      }
+      for (const p of Array.isArray(products) ? products : []) {
+        if (p?.name) {
+          const { canonicalName } = await resolveCanonicalProduct(p.name);
+          slugs.add(`product/${slugify(canonicalName)}`);
+        }
+      }
+
+      if (outcome.grass_track) slugs.add(`track/${slugify(String(outcome.grass_track))}`);
+
+      if (outcome.treatment_date) {
+        // Same month derivation as linkTreatmentOutcome's fan-out.
+        const month = new Date(outcome.treatment_date).getMonth() + 1;
+        const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
+          'july', 'august', 'september', 'october', 'november', 'december'];
+        if (monthNames[month - 1]) slugs.add(`seasonal/${monthNames[month - 1]}`);
+      }
+
+      if (!slugs.size) return 0;
+      const flagged = await db('knowledge_entries')
+        .whereIn('slug', [...slugs])
+        .where({ stale_flag: false })
+        .update({ stale_flag: true, updated_at: new Date() });
+      if (flagged) {
+        logger.info(`[agronomic-wiki] Marked ${flagged} page(s) stale for outcome ${outcome.id}`);
+      }
+      return flagged;
+    } catch (err) {
+      logger.error(`[agronomic-wiki] markOutcomePagesStale failed for outcome ${outcome?.id}: ${err.message}`);
+      return 0;
+    }
+  },
+
+  // ────────────────────────────────────────────────────────────
   // weeklyRefresh — cron job: update stale pages, generate seasonal page
   // ────────────────────────────────────────────────────────────
   async weeklyRefresh() {

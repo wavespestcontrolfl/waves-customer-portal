@@ -53,10 +53,35 @@ Return ONLY JSON, no markdown:
   "notes": "<short factual description of visible differences only>"
 }`;
 
+// Clamp a GENUINE number into [-100, 100]. Callers must have validated
+// typeof === 'number' already — this never coerces strings/null/''.
 function clampScore(value) {
-  const n = Math.round(Number(value));
-  if (!Number.isFinite(n)) return null;
-  return Math.max(-100, Math.min(100, n));
+  return Math.max(-100, Math.min(100, Math.round(value)));
+}
+
+// Strict verdict validation — runs BEFORE anything is stamped. A malformed
+// verdict (coercible junk like overall_change:"42", comparable:"true",
+// confidence out of [0,1]) must be a FAILED attempt, never a trusted zero:
+// throw so the caller takes the attempt-increment path without stamping
+// vision_scored_at.
+function validateVerdict(verdict) {
+  if (!verdict || typeof verdict !== 'object' || Array.isArray(verdict)) {
+    throw new Error('vision verdict is not a JSON object');
+  }
+  if (typeof verdict.overall_change !== 'number' || !Number.isFinite(verdict.overall_change)) {
+    throw new Error('vision verdict overall_change is not a finite number');
+  }
+  if (typeof verdict.comparable !== 'boolean') {
+    throw new Error('vision verdict comparable is not a boolean');
+  }
+  if (typeof verdict.confidence !== 'number' || !Number.isFinite(verdict.confidence)
+    || verdict.confidence < 0 || verdict.confidence > 1) {
+    throw new Error('vision verdict confidence is not a finite number in [0,1]');
+  }
+  if (verdict.notes !== undefined && verdict.notes !== null && typeof verdict.notes !== 'string') {
+    throw new Error('vision verdict notes is not a string');
+  }
+  return verdict;
 }
 
 async function callVisionModel(prePhoto, postPhoto) {
@@ -88,13 +113,7 @@ async function callVisionModel(prePhoto, postPhoto) {
   const text = textBlock?.text;
   if (!text) throw new Error('empty vision response');
   const verdict = JSON.parse(String(text).replace(/```json|```/g, '').trim());
-  if (!verdict || typeof verdict !== 'object' || Array.isArray(verdict)) {
-    throw new Error('vision verdict is not a JSON object');
-  }
-  if (clampScore(verdict.overall_change) === null) {
-    throw new Error('vision verdict missing numeric overall_change');
-  }
-  return verdict;
+  return validateVerdict(verdict);
 }
 
 const VisionDelta = {
@@ -120,10 +139,10 @@ const VisionDelta = {
 
       const verdict = await callVisionModel(prePhoto, postPhoto);
 
-      const confidence = Number(verdict.confidence);
+      // Verdict fields are strictly validated (validateVerdict) — comparable
+      // is a real boolean and confidence a finite number in [0,1] here.
       const scoreEligible = verdict.comparable === true
-        && Number.isFinite(confidence)
-        && confidence >= MIN_CONFIDENCE_FOR_SCORE;
+        && verdict.confidence >= MIN_CONFIDENCE_FOR_SCORE;
       const score = scoreEligible ? clampScore(verdict.overall_change) : null;
 
       // Always stamp vision_scored_at with the stored verdict — a
@@ -136,7 +155,23 @@ const VisionDelta = {
         vision_score_attempts: priorAttempts + 1,
       });
 
-      logger.info(`[vision-delta] Scored outcome ${outcomeId}: score=${score === null ? 'null' : score} comparable=${verdict.comparable === true} confidence=${Number.isFinite(confidence) ? confidence : 'n/a'}`);
+      logger.info(`[vision-delta] Scored outcome ${outcomeId}: score=${score === null ? 'null' : score} comparable=${verdict.comparable} confidence=${verdict.confidence}`);
+
+      // A persisted score changes the wiki prompt input, but weeklyRefresh
+      // only self-marks pages stale after 60 days — flag the outcome's pages
+      // (product/track/seasonal, same set as linkTreatmentOutcome's fan-out)
+      // so the next weekly run regenerates them. Flag only — NEVER fire LLM
+      // generation from the scoring path. Best-effort: the score is already
+      // persisted, so a failure here must not fail the scoring result
+      // (markOutcomePagesStale never throws, catch is belt-and-braces).
+      if (score !== null) {
+        try {
+          await require('./agronomic-wiki').markOutcomePagesStale(outcome);
+        } catch (staleErr) {
+          logger.error(`[vision-delta] markOutcomePagesStale failed for outcome ${outcomeId}: ${staleErr.message}`);
+        }
+      }
+
       return { ok: true, score, verdict };
 
     } catch (err) {

@@ -20,6 +20,9 @@ jest.mock('../config/models', () => ({
 jest.mock('../services/photos', () => ({
   getPhotoBase64: jest.fn(),
 }));
+jest.mock('../services/agronomic-wiki', () => ({
+  markOutcomePagesStale: jest.fn(async () => 1),
+}));
 jest.mock('@anthropic-ai/sdk', () => {
   return class MockAnthropic {
     constructor() {
@@ -30,6 +33,7 @@ jest.mock('@anthropic-ai/sdk', () => {
 
 const VisionDelta = require('../services/vision-delta');
 const PhotoService = require('../services/photos');
+const AgronomicWiki = require('../services/agronomic-wiki');
 
 function makeDb(responses = {}) {
   const state = { responses, calls: {}, updates: {} };
@@ -102,6 +106,7 @@ beforeEach(() => {
   delete process.env.GATE_VISION_DELTA;
   PhotoService.getPhotoBase64.mockReset();
   PhotoService.getPhotoBase64.mockResolvedValue({ data: 'aGk=', mimeType: 'image/jpeg' });
+  AgronomicWiki.markOutcomePagesStale.mockClear();
   global.__anthropicCreate = jest.fn(async () => verdictResponse(GOOD_VERDICT));
 });
 
@@ -153,6 +158,21 @@ describe('scoreOutcome', () => {
     expect(request.model).toBe('test-model');
     const content = request.messages[0].content;
     expect(content.filter((c) => c.type === 'image')).toHaveLength(2);
+
+    // A persisted score marks the outcome's wiki pages regenerate-eligible
+    expect(AgronomicWiki.markOutcomePagesStale).toHaveBeenCalledTimes(1);
+    expect(AgronomicWiki.markOutcomePagesStale).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'o1' }),
+    );
+  });
+
+  test('a genuine out-of-range number is clamped, not rejected', async () => {
+    const state = useDb({ treatment_outcomes: [OUTCOME] });
+    global.__anthropicCreate = jest.fn(async () => verdictResponse({ ...GOOD_VERDICT, overall_change: 250 }));
+    const res = await VisionDelta.scoreOutcome('o1');
+    expect(res.ok).toBe(true);
+    expect(res.score).toBe(100);
+    expect(state.updates.treatment_outcomes[0].vision_delta_score).toBe(100);
   });
 
   test('non-comparable verdict stores jsonb with NULL score and still stamps scored_at', async () => {
@@ -249,6 +269,38 @@ describe('scoreOutcome', () => {
     const res = await VisionDelta.scoreOutcome('o1');
     expect(res.ok).toBe(false);
     expect(state.updates.treatment_outcomes).toEqual([{ vision_score_attempts: 1 }]);
+  });
+
+  test.each([
+    ['overall_change is a numeric string', { ...GOOD_VERDICT, overall_change: '42' }],
+    ['overall_change is null', { ...GOOD_VERDICT, overall_change: null }],
+    ['overall_change is NaN', { ...GOOD_VERDICT, overall_change: NaN }],
+    ['comparable is a string', { ...GOOD_VERDICT, comparable: 'true' }],
+    ['comparable is missing', (() => { const v = { ...GOOD_VERDICT }; delete v.comparable; return v; })()],
+    ['confidence is a string', { ...GOOD_VERDICT, confidence: '0.9' }],
+    ['confidence above 1', { ...GOOD_VERDICT, confidence: 1.5 }],
+    ['confidence below 0', { ...GOOD_VERDICT, confidence: -0.1 }],
+    ['notes is a number', { ...GOOD_VERDICT, notes: 42 }],
+  ])('invalid verdict (%s) is a failed attempt — no stamp, no trusted zero, no stale-flagging', async (_label, verdict) => {
+    const state = useDb({ treatment_outcomes: [OUTCOME] });
+    global.__anthropicCreate = jest.fn(async () => verdictResponse(verdict));
+
+    const res = await VisionDelta.scoreOutcome('o1');
+    expect(res.ok).toBe(false);
+    expect(state.updates.treatment_outcomes).toEqual([{ vision_score_attempts: 1 }]);
+    expect(AgronomicWiki.markOutcomePagesStale).not.toHaveBeenCalled();
+  });
+
+  test('null-score verdicts and failures never stale-flag wiki pages', async () => {
+    useDb({ treatment_outcomes: [OUTCOME] });
+    global.__anthropicCreate = jest.fn(async () => verdictResponse({ ...GOOD_VERDICT, comparable: false }));
+    await VisionDelta.scoreOutcome('o1');
+    expect(AgronomicWiki.markOutcomePagesStale).not.toHaveBeenCalled();
+
+    useDb({ treatment_outcomes: [OUTCOME] });
+    global.__anthropicCreate = jest.fn(async () => { throw new Error('overloaded'); });
+    await VisionDelta.scoreOutcome('o1');
+    expect(AgronomicWiki.markOutcomePagesStale).not.toHaveBeenCalled();
   });
 });
 

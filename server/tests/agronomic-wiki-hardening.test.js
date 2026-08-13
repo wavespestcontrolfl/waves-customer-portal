@@ -305,6 +305,42 @@ describe('generatePage', () => {
     expect(global.__anthropicCreate).toHaveBeenCalled();
   });
 
+  test('markOutcomePagesStale flags the fan-out page set without firing generation', async () => {
+    const state = useDb({ knowledge_entries: [], products_catalog: [], product_aliases: [] });
+
+    const flagged = await wiki.markOutcomePagesStale({
+      id: 'out-1',
+      products_applied: JSON.stringify([{ name: 'Talstar P' }]),
+      grass_track: 'A',
+      treatment_date: '2026-08-05T12:00:00Z',
+    });
+
+    expect(flagged).toBe(1);
+    expect(global.__anthropicCreate).not.toHaveBeenCalled(); // flag only, never generate
+    expect(state.updates.knowledge_entries).toEqual([
+      expect.objectContaining({ stale_flag: true }),
+    ]);
+    const rec = state.calls.knowledge_entries[0];
+    const whereIn = rec.ops.find(([m]) => m === 'whereIn');
+    expect(whereIn[1][0]).toBe('slug');
+    expect([...whereIn[1][1]].sort()).toEqual(['product/talstar-p', 'seasonal/august', 'track/a']);
+    // only pages not already stale get touched
+    expect(rec.ops).toContainEqual(['where', [{ stale_flag: false }]]);
+  });
+
+  test('markOutcomePagesStale tolerates junk input and never throws', async () => {
+    const state = useDb({ knowledge_entries: [] });
+    const flagged = await wiki.markOutcomePagesStale({
+      id: 'out-2',
+      products_applied: 'not-json',
+      grass_track: null,
+      treatment_date: null,
+    });
+    expect(flagged).toBe(0);
+    expect(state.updates.knowledge_entries).toBeUndefined();
+    await expect(wiki.markOutcomePagesStale(null)).resolves.toBe(0);
+  });
+
   test('placeholder stubs are always retried, never treated as unchanged', async () => {
     const existing = {
       id: 'ke-1',
