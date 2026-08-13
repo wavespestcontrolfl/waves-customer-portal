@@ -5175,9 +5175,22 @@ function initScheduledJobs() {
     let refreshFailed = false;
     try {
       const wiki = require('./agronomic-wiki');
-      const result = await wiki.weeklyRefreshIfDue();
-      if (result?.error) refreshFailed = true;
-      else if (!result.skipped) {
+      // runExclusive: the 6-day update-log guard inside weeklyRefreshIfDue is
+      // check-then-act, not atomic — during a rolling deploy two instances can
+      // both pass it and double-run the refresh. Same hazard the digest leg
+      // already locks against; a lease_held skip means another instance owns
+      // this tick's whole chain, so bail out of legs 2-3 too.
+      // weeklyRefreshIfDue swallows failures into { error } — rethrow inside
+      // the lock so job_health records the failure instead of a false success.
+      const result = await runExclusive('wiki-weekly-refresh', async () => {
+        const r = await wiki.weeklyRefreshIfDue();
+        if (r?.error) {
+          throw Object.assign(new Error(`wiki refresh failed: ${r.error}`), { result: r });
+        }
+        return r;
+      });
+      if (result?.reason === 'lease_held' || result?.reason === 'no_connection') return;
+      if (!result.skipped) {
         logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
       }
     } catch (err) {
@@ -5202,7 +5215,16 @@ function initScheduledJobs() {
     }
     try {
       const KnowledgeBridge = require('./knowledge-bridge');
-      const result = await KnowledgeBridge.syncToClaudeopediaIfDue();
+      // A sync that finished with per-entry errors must not record a healthy
+      // job_health row — rethrow inside the lock (partial progress is already
+      // persisted; the weekly marker semantics are unchanged by the throw).
+      const result = await runExclusive('wiki-kb-sync', async () => {
+        const r = await KnowledgeBridge.syncToClaudeopediaIfDue();
+        if (r?.errors > 0) {
+          throw Object.assign(new Error(`wiki→KB sync completed with ${r.errors} error(s): ${r.created} created, ${r.updated} updated`), { result: r });
+        }
+        return r;
+      });
       if (!result.skipped) {
         logger.info(`Wiki→KB trusted sync done: ${result.created} created, ${result.updated} updated, ${result.errors} errors`);
       }
@@ -5225,6 +5247,39 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Wiki yellow digest failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // HOURLY :40 — Treatment-outcome weather enrichment retry sweep. The
+  // confirm-time enrichment (linkTreatmentOutcome → backfillOutcomeWeather)
+  // is fire-and-forget and each service record links exactly once, so a
+  // transient FAWN/update failure on the first attempt would otherwise leave
+  // the outcome's weather columns null forever. The sweep re-runs the
+  // backfill for same-day all-null rows; its same-day/≤6h freshness gates
+  // fail closed, so late rows age out rather than getting wrong-day
+  // conditions stamped. Hourly because the window is the treatment day
+  // itself — a daily fire would miss most of it.
+  // =========================================================================
+  cron.schedule('40 * * * *', async () => {
+    try {
+      const wiki = require('./agronomic-wiki');
+      // runExclusive: overlapping deploy instances must not double-fetch
+      // FAWN; a sweep that itself errored must reach job_health, not log a
+      // healthy run — rethrow inside the lock (same idiom as the wiki legs).
+      const result = await runExclusive('wiki-weather-backfill-sweep', async () => {
+        const r = await wiki.sweepMissingOutcomeWeather();
+        if (r?.error) {
+          throw Object.assign(new Error(`weather backfill sweep failed: ${r.error}`), { result: r });
+        }
+        return r;
+      });
+      if (result?.reason === 'lease_held' || result?.reason === 'no_connection') return;
+      if (result?.enriched > 0) {
+        logger.info(`Treatment-outcome weather sweep: ${result.enriched}/${result.checked} enriched`);
+      }
+    } catch (err) {
+      logger.error(`Treatment-outcome weather sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

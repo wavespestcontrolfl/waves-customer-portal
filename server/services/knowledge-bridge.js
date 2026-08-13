@@ -552,11 +552,15 @@ const KnowledgeBridge = {
   // ────────────────────────────────────────────────────────────
   async createLink({ kbEntryId, wikiEntryId, linkType, relevanceScore, linkReason, createdBy }) {
     try {
-      // Look up slugs
-      const kb = kbEntryId ? await db('knowledge_base').where({ id: kbEntryId }).select('slug').first() : null;
-      const wiki = wikiEntryId ? await db('knowledge_entries').where({ id: wikiEntryId }).select('slug').first() : null;
+      return await db.transaction(async (trx) => {
+      // Row-locked lookups serialize concurrent createLink calls per entry
+      // (manual /link racing autoLink): unserialised, one call's stale
+      // target scan could overwrite another call's later ambiguity-clearing
+      // pointer update. Consistent kb→wiki lock order avoids deadlocks.
+      const kb = kbEntryId ? await trx('knowledge_base').where({ id: kbEntryId }).forUpdate().select('slug', 'source').first() : null;
+      const wiki = wikiEntryId ? await trx('knowledge_entries').where({ id: wikiEntryId }).forUpdate().select('slug').first() : null;
 
-      const [link] = await db('knowledge_bridge').insert({
+      const [link] = await trx('knowledge_bridge').insert({
         kb_entry_id: kbEntryId || null,
         kb_slug: kb?.slug || null,
         wiki_entry_id: wikiEntryId || null,
@@ -567,16 +571,48 @@ const KnowledgeBridge = {
         created_by: createdBy || 'system',
       }).onConflict(['kb_entry_id', 'wiki_entry_id', 'link_type']).ignore().returning('*');
 
-      // Also set direct FK pointers for fast joins
+      // Also maintain the direct FK pointers for fast joins. autoLink's
+      // substring matching can bridge a broad KB entry ("Bifen") to several
+      // wiki pages; a singular pointer is only meaningful while the link set
+      // is unambiguous. Exactly one distinct target → point at it; several →
+      // CLEAR the pointer (a stale arbitrary association is worse than null
+      // for direct-pointer consumers). Atomic with the insert via the
+      // enclosing transaction + row locks (codex P1: a manual /link racing
+      // autoLink could otherwise persist a stale scan).
       if (kbEntryId && wikiEntryId) {
-        await db('knowledge_base').where({ id: kbEntryId }).update({ wiki_entry_id: wikiEntryId });
-        await db('knowledge_entries').where({ id: wikiEntryId }).update({ kb_entry_id: kbEntryId });
+        // EXCEPT on wiki-sync mirror rows: there `wiki_entry_id` is the
+        // mirror's PROVENANCE pointer, written authoritatively by
+        // syncToClaudeopedia — syncKbCopyTrust deactivates mirrors through it
+        // and applyKbTrustGate gates agent-facing reads on it. Clearing it on
+        // an ambiguous link set would leave a newly red/blocked source page's
+        // stale mirror active and agent-visible forever, so autoLink's
+        // shortcut maintenance never touches mirror rows (codex P1 r4).
+        if (kb?.source !== 'wiki-sync') {
+          const kbSide = await trx('knowledge_bridge')
+            .where({ kb_entry_id: kbEntryId }).whereNotNull('wiki_entry_id')
+            .select('wiki_entry_id');
+          const kbTargets = [...new Set(kbSide.map((r) => r.wiki_entry_id))];
+          await trx('knowledge_base').where({ id: kbEntryId })
+            .update({ wiki_entry_id: kbTargets.length === 1 ? kbTargets[0] : (kbSide.length === 0 ? wikiEntryId : null) });
+        }
+        const wikiSide = await trx('knowledge_bridge')
+          .where({ wiki_entry_id: wikiEntryId }).whereNotNull('kb_entry_id')
+          .select('kb_entry_id');
+        const wikiTargets = [...new Set(wikiSide.map((r) => r.kb_entry_id))];
+        await trx('knowledge_entries').where({ id: wikiEntryId })
+          .update({ kb_entry_id: wikiTargets.length === 1 ? wikiTargets[0] : (wikiSide.length === 0 ? kbEntryId : null) });
       }
 
       return link || null;
+      });
     } catch (err) {
       logger.error(`[knowledge-bridge] createLink failed: ${err.message}`);
-      return null;
+      // Distinguishable failure: an onConflict-ignored upsert legitimately
+      // returns null, so a bare null here would let autoLink record a
+      // partially failed bridge population as healthy — the weekly job's
+      // health check examines linkStats.errors only (codex P2 r5). Callers
+      // check `failed` and count it in their error stats.
+      return { failed: true, error: err.message };
     }
   },
 
@@ -610,7 +646,8 @@ const KnowledgeBridge = {
               linkReason: `Product name match: "${kbProd.title}" ↔ "${wikiProd.title}"`,
               createdBy: 'auto_link',
             });
-            if (link) stats.productLinks++;
+            if (link?.failed) stats.errors++;
+            else if (link) stats.productLinks++;
           }
         }
       }
@@ -638,7 +675,8 @@ const KnowledgeBridge = {
               linkReason: `Condition name match: "${kbCond.title}" ↔ "${wikiCond.title}"`,
               createdBy: 'auto_link',
             });
-            if (link) stats.conditionLinks++;
+            if (link?.failed) stats.errors++;
+            else if (link) stats.conditionLinks++;
           }
         }
       }
@@ -668,7 +706,8 @@ const KnowledgeBridge = {
               linkReason: `Seasonal match: "${kbEntry.title}" ↔ "${wikiEntry.title}"`,
               createdBy: 'auto_link',
             });
-            if (link) stats.seasonalLinks++;
+            if (link?.failed) stats.errors++;
+            else if (link) stats.seasonalLinks++;
           }
         }
       }
@@ -1321,8 +1360,10 @@ Return a JSON object with:
             await db('knowledge_base').where({ id: existing.id }).update({ ...kbData, updated_at: new Date() });
             stats.updated++;
 
-            // Ensure bridge link exists
-            await KnowledgeBridge.createLink({
+            // Ensure bridge link exists — a failed link write counts as a
+            // run error so the health check doesn't record a partial sync
+            // as healthy (createLink returns { failed } instead of throwing).
+            const link = await KnowledgeBridge.createLink({
               kbEntryId: existing.id,
               wikiEntryId: wiki.id,
               linkType: 'data_enrichment',
@@ -1330,6 +1371,7 @@ Return a JSON object with:
               linkReason: 'Wiki-to-Claudeopedia sync',
               createdBy: 'wiki_sync',
             });
+            if (link?.failed) stats.errors++;
           } else {
             const [newEntry] = await db('knowledge_base').insert({
               ...kbData,
@@ -1341,7 +1383,7 @@ Return a JSON object with:
 
             if (newEntry) {
               stats.created++;
-              await KnowledgeBridge.createLink({
+              const link = await KnowledgeBridge.createLink({
                 kbEntryId: newEntry.id,
                 wikiEntryId: wiki.id,
                 linkType: 'data_enrichment',
@@ -1349,6 +1391,7 @@ Return a JSON object with:
                 linkReason: 'Wiki-to-Claudeopedia initial sync',
                 createdBy: 'wiki_sync',
               });
+              if (link?.failed) stats.errors++;
             }
           }
         } catch (entryErr) {

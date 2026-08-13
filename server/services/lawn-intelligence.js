@@ -1,23 +1,19 @@
 /**
  * Lawn Intelligence Service
  *
- * Centralized intelligence engine powering 16 lawn assessment features:
+ * Assessment-time helpers for the lawn intelligence pipeline:
  * - FAWN weather context on every assessment
- * - Product efficacy leaderboard
- * - Protocol performance scoring
- * - Contradiction detection across knowledge systems
- * - Tech field knowledge surfacing
- * - Assessment notification dispatch
- * - Neighborhood benchmarks (anonymized)
+ * - Photo quality gating
+ * - Assessment notification dispatch (manual re-send/backfill only)
  * - Lawn health → customer health bridge
  * - Assessment completion rate tracking
- * - ROI metrics
  * - Tech calibration scoring
- * - Satisfaction → outcome validation
  * - Baseline photo re-capture protocol
  * - Auto-generate service reports
- * - Photo quality gating
- * - Seasonal expectation data
+ *
+ * The efficacy/protocol/benchmark/contradiction aggregations live in
+ * assessment-analytics.js (weekly Sunday 4AM cron) — the duplicate copies
+ * that used to sit here were unreachable and were removed 2026-08-13.
  */
 
 const db = require('../models/db');
@@ -32,10 +28,6 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 function assessmentAnalytics() {
   return require('./assessment-analytics');
-}
-
-function agronomicWiki() {
-  return require('./agronomic-wiki');
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -58,6 +50,11 @@ async function fetchFawnWeather() {
     soil_temp_f: snapshot.soil_temp_f,
     station: snapshot.station,
     timestamp: snapshot.timestamp,
+    // The STATION's authoritative reading time — without it the persisted
+    // snapshot can only be aged by fetch time, and an old last-observation
+    // row (stale station) would stamp stale measurements into a treatment
+    // outcome as if fresh.
+    observation_time: snapshot.observation_time ?? null,
   };
 }
 
@@ -127,259 +124,6 @@ const LawnIntelligence = {
       fawn_snapshot: JSON.stringify(weather),
     });
     return weather;
-  },
-
-  // ── 3. Product efficacy leaderboard ─────────────────────────
-  async computeProductEfficacy() {
-    const stats = { computed: 0, errors: 0 };
-    try {
-      const outcomes = await db('treatment_outcomes')
-        .whereNotNull('products_applied')
-        .whereNotNull('delta_turf_density');
-
-      // Group by product × season × track
-      const buckets = {};
-      for (const o of outcomes) {
-        let products = [];
-        try { products = typeof o.products_applied === 'string' ? JSON.parse(o.products_applied) : o.products_applied || []; } catch { continue; }
-
-        for (const p of products) {
-          const name = (p.name || '').trim();
-          if (!name) continue;
-          const key = `${name}||${o.season || 'all'}||${o.grass_track || 'all'}`;
-          if (!buckets[key]) {
-            buckets[key] = { product_name: name, season: o.season || 'all', grass_track: o.grass_track || 'all', grass_type: o.grass_type, deltas: [], days: [], sats: [], temps: [], rains: [] };
-          }
-          const b = buckets[key];
-          const overall = Math.round(((o.delta_turf_density || 0) + (o.delta_weed_suppression || 0) + (o.delta_color_health || 0) + (o.delta_fungus_control || 0) + (o.delta_thatch_level || 0)) / 5);
-          b.deltas.push({ turf: o.delta_turf_density, weed: o.delta_weed_suppression, color: o.delta_color_health, fungus: o.delta_fungus_control, thatch: o.delta_thatch_level, overall });
-          if (o.days_between_assessments) b.days.push(o.days_between_assessments);
-          if (o.satisfaction_rating) b.sats.push(o.satisfaction_rating);
-          if (o.fawn_temp_f) b.temps.push(parseFloat(o.fawn_temp_f));
-          if (o.fawn_rainfall_7d) b.rains.push(parseFloat(o.fawn_rainfall_7d));
-        }
-      }
-
-      const avg = arr => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length * 10) / 10 : null;
-
-      for (const [, b] of Object.entries(buckets)) {
-        if (b.deltas.length < 2) continue; // need minimum data
-        const row = {
-          product_name: b.product_name,
-          season: b.season,
-          grass_track: b.grass_track,
-          grass_type: b.grass_type,
-          application_count: b.deltas.length,
-          avg_delta_turf: avg(b.deltas.map(d => d.turf).filter(v => v != null)),
-          avg_delta_weed: avg(b.deltas.map(d => d.weed).filter(v => v != null)),
-          avg_delta_color: avg(b.deltas.map(d => d.color).filter(v => v != null)),
-          avg_delta_fungus: avg(b.deltas.map(d => d.fungus).filter(v => v != null)),
-          avg_delta_thatch: avg(b.deltas.map(d => d.thatch).filter(v => v != null)),
-          avg_overall_delta: avg(b.deltas.map(d => d.overall)),
-          success_rate: b.deltas.length ? Math.round(b.deltas.filter(d => d.overall > 0).length / b.deltas.length * 100) / 100 : null,
-          avg_days_to_result: avg(b.days),
-          avg_satisfaction: avg(b.sats),
-          best_temp_range_low: b.temps.length >= 3 ? Math.min(...b.temps) : null,
-          best_temp_range_high: b.temps.length >= 3 ? Math.max(...b.temps) : null,
-          best_rainfall_range: avg(b.rains),
-          last_computed: new Date(),
-        };
-
-        await db('product_efficacy')
-          .insert(row)
-          .onConflict(['product_name', 'season', 'grass_track'])
-          .merge({ ...row, updated_at: new Date() });
-        stats.computed++;
-      }
-      logger.info(`[lawn-intel] Product efficacy computed: ${stats.computed} entries`);
-    } catch (err) {
-      logger.error(`[lawn-intel] computeProductEfficacy failed: ${err.message}`);
-      stats.errors++;
-    }
-    return stats;
-  },
-
-  // ── 4. Protocol performance scoring ─────────────────────────
-  async computeProtocolPerformance() {
-    const stats = { computed: 0 };
-    try {
-      const outcomes = await db('treatment_outcomes')
-        .whereNotNull('grass_track')
-        .whereNotNull('delta_turf_density');
-
-      const buckets = {};
-      for (const o of outcomes) {
-        const key = `${o.grass_track}||${o.visit_number || 'all'}||${o.season || 'all'}`;
-        if (!buckets[key]) {
-          buckets[key] = { grass_track: o.grass_track, visit_number: o.visit_number, season: o.season || 'all', customers: new Set(), deltas: [], sats: [], products: {} };
-        }
-        const b = buckets[key];
-        b.customers.add(o.customer_id);
-        const overall = Math.round(((o.delta_turf_density || 0) + (o.delta_weed_suppression || 0) + (o.delta_color_health || 0) + (o.delta_fungus_control || 0) + (o.delta_thatch_level || 0)) / 5);
-        b.deltas.push({ turf: o.delta_turf_density, weed: o.delta_weed_suppression, color: o.delta_color_health, fungus: o.delta_fungus_control, thatch: o.delta_thatch_level, overall });
-        if (o.satisfaction_rating) b.sats.push(o.satisfaction_rating);
-        try {
-          const prods = typeof o.products_applied === 'string' ? JSON.parse(o.products_applied) : o.products_applied || [];
-          for (const p of prods) {
-            if (p.name) b.products[p.name] = (b.products[p.name] || 0) + 1;
-          }
-        } catch {}
-      }
-
-      const avg = arr => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length * 10) / 10 : null;
-
-      for (const [, b] of Object.entries(buckets)) {
-        if (b.deltas.length < 2) continue;
-        const topProducts = Object.entries(b.products).sort((a, c) => c[1] - a[1]).slice(0, 5).map(([name, count]) => ({ name, count }));
-
-        const row = {
-          grass_track: b.grass_track,
-          visit_number: b.visit_number,
-          season: b.season,
-          customer_count: b.customers.size,
-          outcome_count: b.deltas.length,
-          avg_delta_turf: avg(b.deltas.map(d => d.turf).filter(v => v != null)),
-          avg_delta_weed: avg(b.deltas.map(d => d.weed).filter(v => v != null)),
-          avg_delta_color: avg(b.deltas.map(d => d.color).filter(v => v != null)),
-          avg_delta_fungus: avg(b.deltas.map(d => d.fungus).filter(v => v != null)),
-          avg_delta_thatch: avg(b.deltas.map(d => d.thatch).filter(v => v != null)),
-          avg_overall_delta: avg(b.deltas.map(d => d.overall)),
-          avg_satisfaction: avg(b.sats),
-          top_products: JSON.stringify(topProducts),
-          last_computed: new Date(),
-        };
-
-        await db('protocol_performance')
-          .insert(row)
-          .onConflict(['grass_track', 'visit_number', 'season'])
-          .merge({ ...row, updated_at: new Date() });
-        stats.computed++;
-      }
-      logger.info(`[lawn-intel] Protocol performance computed: ${stats.computed} entries`);
-    } catch (err) {
-      logger.error(`[lawn-intel] computeProtocolPerformance failed: ${err.message}`);
-    }
-    return stats;
-  },
-
-  // ── 5. Contradiction detection ──────────────────────────────
-  async detectContradictions() {
-    const stats = { found: 0 };
-    try {
-      // Get linked pairs from the bridge
-      const bridges = await db('knowledge_bridge').whereNotNull('kb_entry_id').whereNotNull('wiki_entry_id');
-
-      for (const bridge of bridges) {
-        const kb = await db('knowledge_base').where({ id: bridge.kb_entry_id }).select('id', 'title', 'content').first();
-        const wiki = await db('knowledge_entries').where({ id: bridge.wiki_entry_id }).select('id', 'title', 'content', 'summary', 'data_point_count').first();
-        if (!kb || !wiki || !wiki.data_point_count || wiki.data_point_count < 5) continue;
-
-        // Use AI to detect contradictions
-        if (!Anthropic) continue;
-        try {
-          const client = new Anthropic();
-          const response = await anthropicCreateWithSamplingRetry(client, {
-            model: MODELS.FLAGSHIP,
-            max_tokens: 500,
-            messages: [{
-              role: 'user',
-              content: `Compare these two knowledge sources and identify any contradictions. Return ONLY JSON, no markdown:
-
-Claudeopedia entry: "${kb.title}"
-${(kb.content || '').substring(0, 1500)}
-
-Agronomic Wiki (based on ${wiki.data_point_count} real treatment outcomes): "${wiki.title}"
-${(wiki.content || '').substring(0, 1500)}
-
-Return: { "contradictions": [{ "kb_claim": "<what Claudeopedia says>", "wiki_evidence": "<what outcome data shows>", "type": "<efficacy|timing|dosage|condition>", "severity": "<low|moderate|high>" }] }
-If no contradictions, return: { "contradictions": [] }`
-            }],
-          });
-
-          const text = response.content[0].text;
-          const result = JSON.parse(text.replace(/```json|```/g, '').trim());
-
-          for (const c of (result.contradictions || [])) {
-            const existing = await db('knowledge_contradictions')
-              .where({ kb_entry_id: kb.id, wiki_entry_id: wiki.id, contradiction_type: c.type, resolved: false })
-              .first();
-            if (!existing) {
-              const [inserted] = await db('knowledge_contradictions').insert({
-                kb_entry_id: kb.id,
-                wiki_entry_id: wiki.id,
-                kb_claim: (c.kb_claim || '').substring(0, 500),
-                wiki_evidence: (c.wiki_evidence || '').substring(0, 500),
-                contradiction_type: c.type || 'efficacy',
-                severity: c.severity || 'moderate',
-              }).returning('id');
-              const insertedId = inserted?.id ?? inserted;
-              // Trusted reads gate on the page's cached review_status — flip
-              // the page and its KB mirror now, not at the next regeneration.
-              // Passing the just-inserted id keeps the gate closed even if
-              // the recompute's own contradiction lookup transiently fails.
-              try {
-                await agronomicWiki().recomputeEntryReviewGate(wiki.id, {
-                  assumeOpenIds: [insertedId],
-                });
-              } catch (gateErr) {
-                // Roll the insert back: the existing-row dedupe would
-                // otherwise skip this contradiction on every later run,
-                // leaving the page trusted with no retry path.
-                try { await db('knowledge_contradictions').where({ id: insertedId }).del(); } catch { /* rollback best-effort */ }
-                throw gateErr;
-              }
-              stats.found++;
-            }
-          }
-        } catch (aiErr) {
-          logger.error(`[lawn-intel] Contradiction AI check failed for bridge ${bridge.id}: ${aiErr.message}`);
-        }
-      }
-      logger.info(`[lawn-intel] Contradictions detected: ${stats.found}`);
-    } catch (err) {
-      logger.error(`[lawn-intel] detectContradictions failed: ${err.message}`);
-    }
-    return stats;
-  },
-
-  // ── 6. Tech field knowledge surfacing ───────────────────────
-  async getTechContext(customerId, assessmentContext = {}) {
-    const context = { recentAssessments: [], protocolInsight: null, productInsight: null, weatherContext: null };
-    try {
-      // Last 3 assessments
-      context.recentAssessments = await db('lawn_assessments')
-        .where({ customer_id: customerId, confirmed_by_tech: true })
-        .orderBy('service_date', 'desc')
-        .limit(3)
-        .select('service_date', 'turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'overall_score', 'observations', 'season');
-
-      // Protocol insight
-      const customer = await db('customers').where({ id: customerId }).first();
-      const track = customer?.grass_track || assessmentContext.grass_track;
-      const visitNum = assessmentContext.visit_number;
-      if (track) {
-        context.protocolInsight = await db('protocol_performance')
-          .where({ grass_track: track })
-          .where(function () { if (visitNum) this.where({ visit_number: visitNum }); else this.whereNull('visit_number'); })
-          .first();
-      }
-
-      // Product insight for products being applied today
-      if (assessmentContext.products?.length) {
-        const productNames = assessmentContext.products.map(p => p.name || p).filter(Boolean);
-        context.productInsight = await db('product_efficacy')
-          .whereIn('product_name', productNames)
-          .orderBy('application_count', 'desc')
-          .limit(5);
-      }
-
-      // Current weather
-      context.weatherContext = await fetchFawnWeather();
-
-    } catch (err) {
-      logger.error(`[lawn-intel] getTechContext failed: ${err.message}`);
-    }
-    return context;
   },
 
   // ── 7. Assessment score parts (shared) ──────────────────────
@@ -470,36 +214,6 @@ If no contradictions, return: { "contradictions": [] }`
     } catch (err) {
       logger.error(`[lawn-intel] sendAssessmentNotification failed: ${err.message}`);
       return null;
-    }
-  },
-
-  // ── 8. Seasonal expectation data ────────────────────────────
-  getSeasonalExpectation(month, grassType = 'St. Augustine') {
-    const m = month || (new Date().getMonth() + 1);
-    const expectations = {
-      'St. Augustine': {
-        peak: { months: [5,6,7,8,9], label: 'Summer peak growth', expected: '75-95', note: 'Fastest growth period. Green, dense turf. Watch for chinch bugs and fungus from afternoon rains.' },
-        shoulder: { months: [3,4,10,11], label: 'Spring/fall transition', expected: '55-80', note: 'Color greening up (spring) or slowing (fall). Normal to see some thinning. Pre-emergent and fertilization windows.' },
-        dormant: { months: [12,1,2], label: 'Winter dormancy', expected: '35-60', note: 'St. Augustine naturally yellows/browns below 60°F. Lower scores are normal — your lawn is resting, not dying. Avoid overwatering.' },
-      },
-    };
-    const grass = expectations[grassType] || expectations['St. Augustine'];
-    for (const [season, data] of Object.entries(grass)) {
-      if (data.months.includes(m)) {
-        return { season, ...data, month: m, grassType, adjustmentApplied: season !== 'peak' };
-      }
-    }
-    return { season: 'peak', label: 'Growing season', expected: '70-90', note: '', month: m, grassType, adjustmentApplied: false };
-  },
-
-  // ── 9. Neighborhood benchmarks ──────────────────────────────
-  async computeNeighborhoodBenchmarks() {
-    try {
-      const result = await assessmentAnalytics().computeNeighborhoodBenchmarks();
-      return { computed: result?.segments || 0, ...result };
-    } catch (err) {
-      logger.error(`[lawn-intel] computeNeighborhoodBenchmarks failed: ${err.message}`);
-      return { computed: 0, error: err.message };
     }
   },
 
@@ -634,41 +348,6 @@ If no contradictions, return: { "contradictions": [] }`
     }
   },
 
-  // ── 13. Satisfaction → outcome validation ───────────────────
-  async linkSatisfactionToOutcome(customerId, serviceRecordId, rating, source = 'review') {
-    try {
-      const outcome = await db('treatment_outcomes')
-        .where({ customer_id: customerId })
-        .where(function () {
-          if (serviceRecordId) this.where({ service_record_id: serviceRecordId });
-        })
-        .orderBy('treatment_date', 'desc')
-        .first();
-
-      if (outcome) {
-        await db('treatment_outcomes').where({ id: outcome.id }).update({
-          satisfaction_rating: rating,
-          satisfaction_source: source,
-        });
-        return outcome.id;
-      }
-      return null;
-    } catch (err) {
-      logger.error(`[lawn-intel] linkSatisfactionToOutcome failed: ${err.message}`);
-      return null;
-    }
-  },
-
-  // ── 14. ROI metrics ─────────────────────────────────────────
-  async computeROIMetrics() {
-    try {
-      return await assessmentAnalytics().computeROI();
-    } catch (err) {
-      logger.error(`[lawn-intel] computeROIMetrics failed: ${err.message}`);
-      return { error: err.message };
-    }
-  },
-
   // ── 15. Auto-generate service report ────────────────────────
   async generateServiceReport(assessmentId) {
     try {
@@ -755,19 +434,6 @@ If no contradictions, return: { "contradictions": [] }`
     }
   },
 
-  // ── Master computation (runs all aggregations) ──────────────
-  async runFullComputation() {
-    logger.info('[lawn-intel] Starting full computation...');
-    const results = {};
-    results.productEfficacy = await LawnIntelligence.computeProductEfficacy();
-    results.protocolPerformance = await LawnIntelligence.computeProtocolPerformance();
-    results.neighborhoodBenchmarks = await LawnIntelligence.computeNeighborhoodBenchmarks();
-    results.roiMetrics = await LawnIntelligence.computeROIMetrics();
-    results.contradictions = await LawnIntelligence.detectContradictions();
-    results.assessmentTracking = await LawnIntelligence.trackAssessmentCompletion();
-    logger.info(`[lawn-intel] Full computation complete: ${JSON.stringify(results)}`);
-    return results;
-  },
 };
 
 module.exports = LawnIntelligence;

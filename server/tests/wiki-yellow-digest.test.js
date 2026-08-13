@@ -180,7 +180,10 @@ describe('sendYellowDigestIfDue — send path', () => {
     expect(msg.subject).toContain('1 blocked');
     expect(msg.subject).toContain('2 yellow');
     expect(msg.html).toContain('Dollar Spot');
-    expect(msg.html).toContain('/admin/kb');
+    // Full deep link to the Field Intelligence queue — area=base mounts
+    // KnowledgeBasePage inside the hub, kbTab=field opens the review tab.
+    // (Interpolated raw into the template, so the & is unescaped.)
+    expect(msg.html).toContain('/admin/knowledge?area=base&kbTab=field');
     const markers = state.inserts.knowledge_update_log;
     expect(markers).toHaveLength(1);
     expect(markers[0].trigger_type).toBe('yellow_digest');
