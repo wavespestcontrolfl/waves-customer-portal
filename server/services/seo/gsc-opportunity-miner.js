@@ -1903,6 +1903,7 @@ class GscOpportunityMiner {
             // MINE no longer emitted.
             await this._sweepStaleLocalGapRows(
               (buckets.local_gap || []),
+              cityServiceFrozenTargets,
               trx
             );
           }
@@ -3900,16 +3901,40 @@ class GscOpportunityMiner {
   // batch here means "mine ran, signals gone" — expire everything pending.
   // 'expired' is revivable: the next mine re-emits any pair that still
   // qualifies and the upsert revives the row.
-  async _sweepStaleLocalGapRows(localGapOpps = [], trx = null) {
+  async _sweepStaleLocalGapRows(localGapOpps = [], frozenTargets = new Set(), trx = null) {
     const runner = trx || db;
-    const liveKeys = localGapOpps.filter((o) => isPersistable(o)).map((o) => o.dedupe_key);
-    let q = runner('opportunity_queue')
-      .where({ bucket: 'local_gap', status: 'pending' });
-    if (liveKeys.length) q = q.whereNotIn('dedupe_key', liveKeys);
-    const swept = await q.update({
-      status: 'expired', skip_reason: 'local_gap_signal_gone', updated_at: new Date(),
-    });
-    if (swept) logger.info(`[gsc-opp-miner] local_gap sweep: ${swept} stale pending row(s) expired`);
+    // A pre-arbitration key only DEFENDS its row when the target is not
+    // frozen (cloud P1): a candidate dropped by the frozen-target fence
+    // never reaches _revalidateCityServiceBatch, so nothing else fences
+    // or expires its pending twin — leaving it claimable would draft the
+    // page again inside the done-lag window or bypass a human dismissal.
+    // SELECT FOR UPDATE then update by locked key (the #3372 sweep-lock
+    // shape) so claimNext cannot grab a row mid-classification.
+    const liveKeys = new Set(localGapOpps
+      .filter((o) => isPersistable(o)
+        && o.service && o.city
+        && !frozenTargets.has(cityServiceTargetKey(o.service, o.city)))
+      .map((o) => o.dedupe_key));
+    const rows = await runner('opportunity_queue')
+      .where({ bucket: 'local_gap', status: 'pending' })
+      .forUpdate()
+      .select('dedupe_key', 'service', 'city');
+    const gone = [];
+    const frozen = [];
+    for (const r of rows) {
+      if (liveKeys.has(r.dedupe_key)) continue;
+      const frozenTarget = r.service && r.city
+        && frozenTargets.has(cityServiceTargetKey(r.service, r.city));
+      (frozenTarget ? frozen : gone).push(r.dedupe_key);
+    }
+    for (const [keys, reason] of [[gone, 'local_gap_signal_gone'], [frozen, 'city_service_target_frozen']]) {
+      if (!keys.length) continue;
+      await runner('opportunity_queue')
+        .whereIn('dedupe_key', keys)
+        .where({ status: 'pending' })
+        .update({ status: 'expired', skip_reason: reason, updated_at: new Date() });
+      logger.info(`[gsc-opp-miner] local_gap sweep: ${keys.length} pending row(s) expired (${reason})`);
+    }
   }
 
   async _sweepStaleFamilyRows(familyOpps = [], batch = [], trx = null, exemptions = { pages: new Set(), blogKeys: new Set(), familyKeys: new Set() }) {

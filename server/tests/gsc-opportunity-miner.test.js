@@ -2736,25 +2736,37 @@ describe('local_gap lifecycle guards (round-4 cloud P1s)', () => {
 
   test('stale pending local_gap rows are swept key-exactly after a clean canonical mine', async () => {
     const updates = [];
+    const pending = [
+      { dedupe_key: 'local_gap::pest::venice::_', service: 'pest', city: 'venice' },
+      { dedupe_key: 'local_gap::pest::parrish::_', service: 'pest', city: 'parrish' },
+      { dedupe_key: 'local_gap::termite::venice::_', service: 'termite', city: 'venice' },
+    ];
     const runner = jest.fn(() => {
       const chain = {
         where: jest.fn().mockReturnThis(),
-        whereNotIn: jest.fn((col, vals) => { chain._not = vals; return chain; }),
-        update: jest.fn((patch) => { updates.push({ not: chain._not, patch }); return Promise.resolve(2); }),
+        whereIn: jest.fn((col, vals) => { chain._in = vals; return chain; }),
+        forUpdate: jest.fn().mockReturnThis(),
+        select: jest.fn().mockResolvedValue(pending),
+        update: jest.fn((patch) => { updates.push({ keys: chain._in, patch }); return Promise.resolve(chain._in.length); }),
       };
       return chain;
     });
     const miner = new GscOpportunityMiner();
     await miner._sweepStaleLocalGapRows([
-      { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::pest::venice::_', score: 56, signal_metadata: {} },
-      { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::pest::parrish::_', score: 30, signal_metadata: {} },
-    ], runner);
-    expect(updates).toHaveLength(1);
-    // Only the PERSISTABLE row defends its key — the below-floor one is
-    // not live work and its old pending row must expire.
-    expect(updates[0].not).toEqual(['local_gap::pest::venice::_']);
-    expect(updates[0].patch.status).toBe('expired');
-    expect(updates[0].patch.skip_reason).toBe('local_gap_signal_gone');
+      { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::pest::venice::_', service: 'pest', city: 'venice', score: 56, signal_metadata: {} },
+      { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::pest::parrish::_', service: 'pest', city: 'parrish', score: 30, signal_metadata: {} },
+      { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::termite::venice::_', service: 'termite', city: 'venice', score: 60, signal_metadata: {} },
+    ], new Set([require('../services/seo/gsc-opportunity-miner')._internals.cityServiceTargetKey('termite', 'venice')]), runner);
+    // pest/venice (persistable, unfrozen) survives; pest/parrish
+    // (below-floor) expires as signal-gone; termite/venice (persistable
+    // but target FROZEN — recent done or human dismissal) expires under
+    // its own reason so a claimable twin cannot bypass the freeze.
+    expect(updates).toHaveLength(2);
+    const gone = updates.find((u) => u.patch.skip_reason === 'local_gap_signal_gone');
+    const froz = updates.find((u) => u.patch.skip_reason === 'city_service_target_frozen');
+    expect(gone.keys).toEqual(['local_gap::pest::parrish::_']);
+    expect(froz.keys).toEqual(['local_gap::termite::venice::_']);
+    expect(gone.patch.status).toBe('expired');
     // Wired in mineAll under the canonical-window + no-error guards.
     expect(src).toMatch(/if \(localGapSweepWillRun\) \{[\s\S]{0,700}_sweepStaleLocalGapRows\(/);
   });
