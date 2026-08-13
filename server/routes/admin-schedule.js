@@ -9724,6 +9724,22 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       });
       if (!resolved.ok) return blocked(resolved.blockReason);
       supersedes = resolved.supersedes;
+    } else if (switchLane && input.mode === 'committed' && scheduledServiceId) {
+      // NON-ESTIMATE committed series under the switch gate: run the SAME
+      // resolver the write path runs (estimateId null ⇒ live-attached-
+      // invoice refusal), so the sheet never renders a collectible offer the
+      // POST then 409s (Codex P1: preview/write parity). Scoped to the
+      // switch gate so the prepay-on-book modal lane stays byte-identical
+      // while only ITS gate is lit.
+      const target = await resolveAcceptedSwitchTarget(scheduledServiceId, conn);
+      if (!target.ok) return blocked(target.blockReason);
+      const resolved = await resolveSupersededInvoices({
+        visitIds: target.visitIds,
+        estimateId: null,
+        customerId: target.customerId || customerId,
+        conn,
+      });
+      if (!resolved.ok) return blocked(resolved.blockReason);
     }
 
     const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass });

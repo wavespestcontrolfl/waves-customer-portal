@@ -577,6 +577,16 @@ describe('on-site prepay switch — the NON-ESTIMATE lane (prepay-on-book twin)'
     termSpy.mockRestore();
   });
 
+  test('the PREVIEW refuses the same live-invoice case — never an offer the POST 409s', async () => {
+    stubTables({
+      visit: { ...ACCEPTED_SERIES_VISIT, source_estimate_id: null },
+      invoices: [{ id: 'inv-premint', invoice_number: 'WPC-2026-0430', status: 'draft', notes: 'Checkout pre-mint' }],
+    });
+    const { body } = await preview();
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/already carries WPC-2026-0430/i);
+  });
+
   test('with NO attached invoices the non-estimate switch mints with supersedes: []', async () => {
     const termSpy = jest.spyOn(AnnualPrepayRenewals, 'createTermForAnnualPrepay').mockResolvedValue({ id: 'term-1' });
     stubTables({
