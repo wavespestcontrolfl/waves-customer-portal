@@ -64,6 +64,17 @@ function isMeasurementReviewEligible(estimate) {
   return !INACTIVE_ESTIMATE_STATUSES.includes(status);
 }
 
+// The FULL customer-viewability contract (publication, expiry, archive,
+// linkage-invalidation) — codex #3376 r2: a leaked draft/archived/past-
+// expiry token must not be able to park a request, resolve a customer, or
+// ring the office for an estimate every customer-facing read already
+// refuses. Lazy require: estimate-public itself requires this service only
+// inside its route handler, so the cycle never bites at load time.
+function defaultViewabilityCheck(estimate) {
+  const { isEstimateCustomerViewable } = require('../routes/estimate-public');
+  return isEstimateCustomerViewable(estimate);
+}
+
 async function createEstimateMeasurementReview({
   estimateToken,
   reasons,
@@ -71,6 +82,7 @@ async function createEstimateMeasurementReview({
   shownSqFt,
   shownSource,
   database = db,
+  viewabilityCheck = defaultViewabilityCheck,
 } = {}) {
   const token = String(estimateToken || '').trim();
   if (!token) {
@@ -90,7 +102,11 @@ async function createEstimateMeasurementReview({
   }
 
   const estimate = await database('estimates').where({ token }).first();
-  if (!isMeasurementReviewEligible(estimate)) {
+  // Both gates, both 404 (indistinguishable): the full customer-viewability
+  // contract, AND this flow's own accepted/declined exclusion (a customer
+  // who accepted the price challenges through the office, not the sheet —
+  // viewability alone still renders accepted estimates).
+  if (!estimate || !viewabilityCheck(estimate) || !isMeasurementReviewEligible(estimate)) {
     const err = new Error('Estimate not found');
     err.status = 404;
     throw err;

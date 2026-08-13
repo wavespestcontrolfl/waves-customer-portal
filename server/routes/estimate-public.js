@@ -12168,12 +12168,27 @@ router.post('/:token/bundle-inquiry', addServiceRequestLimiter, async (req, res,
 // post-estimate-versions token uses. Malformed tokens 404 before any DB read.
 const EXTENSION_REQUEST_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 
+// Mirrors extensionRequestLimiter exactly (codex #3376 r2): the shared
+// add-service limiter runs BEFORE the handler's gate check, so a dark gate
+// would leak a distinctive 429 on the ninth probe instead of the promised
+// generic 404. Skip while dark; IPv6-safe shared key generator.
+const measurementReviewLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.isEnabled('estimateMeasurementReview'),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
 // POST /api/estimates/:token/measurement-review — "Does the lawn size look
 // off?" (owner GO 2026-08-12). Parks a lawn_area_review service_requests row
 // + admin notification; NEVER touches the estimate or messages the customer.
 // Contract mirrors extension-request: gate + token-format gate + generic 404
-// (unknown/malformed/ineligible/gate-off indistinguishable) + rate limit.
-router.post('/:token/measurement-review', addServiceRequestLimiter, async (req, res, next) => {
+// (unknown/malformed/ineligible/gate-off indistinguishable) + gate-aware
+// rate limit.
+router.post('/:token/measurement-review', measurementReviewLimiter, async (req, res, next) => {
   try {
     if (!featureGates.isEnabled('estimateMeasurementReview')) {
       return res.status(404).json({ error: 'Estimate not found' });
@@ -17551,11 +17566,13 @@ function measuredBasisForSection(sectionKey, estResult = {}) {
   let basis = String(meta?.turfBasis || '').trim();
   if (!(Number.isFinite(sqft) && sqft > 0)) {
     // Engine-backed shape ({engineInputs, engineResult}): the priced area
-    // lives on the lawn line item (codex #3376 r1). Wizard drafts persist a
-    // slimmed line without these fields and correctly fall through to null.
+    // lives on the lawn line item (codex #3376 r1). Residential lines carry
+    // lawnSqFt; priceCommercialLawn stores turfSf (codex r2) — read both.
+    // Wizard drafts persisted before the mirror carried these fields fall
+    // through to null.
     const line = (Array.isArray(estResult?.lineItems) ? estResult.lineItems : [])
       .find((l) => l && (l.service === 'lawn_care' || l.service === 'commercial_lawn'));
-    sqft = Number(line?.lawnSqFt);
+    sqft = Number(line?.lawnSqFt ?? line?.turfSf);
     basis = String(line?.turfBasis || '').trim();
   }
   if (!(Number.isFinite(sqft) && sqft > 0)) return null;

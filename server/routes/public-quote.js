@@ -310,7 +310,9 @@ function deriveLawnArea(estimate) {
     (l) => l && (l.service === 'lawn_care' || l.service === 'commercial_lawn')
   );
   if (!lawnLine) return null;
-  const turfSqFt = Number(lawnLine.lawnSqFt);
+  // Residential lines carry lawnSqFt; priceCommercialLawn stores its priced
+  // area as turfSf (codex #3376 r2) — read both, residential name first.
+  const turfSqFt = Number(lawnLine.lawnSqFt ?? lawnLine.turfSf);
   if (!Number.isFinite(turfSqFt) || turfSqFt <= 0) return null;
   const basis = String(lawnLine.turfBasis || '').trim();
   // A parcel-capped vision figure RETAINS turfBasis 'estimatedTurfSf' — the
@@ -1353,6 +1355,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         manualQuoteLines,
         engineResult: {
           summary: estimate?.summary || {},
+          // Turf provenance flags (TURF_CAPPED_TO_PARCEL) — the estimate
+          // view's measured-basis line demotes the satellite claim off these
+          // when a staff-sent wizard draft renders (codex #3376 r2).
+          ...(Array.isArray(estimate?.property?.turfFlags) && estimate.property.turfFlags.length
+            ? { property: { turfFlags: estimate.property.turfFlags } }
+            : {}),
           lineItems: (estimate?.lineItems || []).map(item => ({
             service: item.service,
             name: item.name || item.label || item.displayName,
@@ -1391,6 +1399,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // never applies a WaveGuard/% discount to it.
             discountable: item.discountable === false ? false : undefined,
             excludeFromPctDiscount: item.excludeFromPctDiscount === true ? true : undefined,
+            // The priced treatable area + provenance (lawn/commercial lawn
+            // lines): the estimate view's measured-basis line reads these off
+            // the mirrored draft when staff later sends it (codex #3376 r2 —
+            // without them the slim mirror can never render the area line).
+            lawnSqFt: item.lawnSqFt ?? undefined,
+            turfSf: item.turfSf ?? undefined,
+            turfBasis: item.turfBasis ?? undefined,
           })),
           waveGuard: estimate?.waveGuard || null,
         },

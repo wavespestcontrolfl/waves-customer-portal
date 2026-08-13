@@ -103,9 +103,20 @@ describe('deriveLawnArea', () => {
     expect(deriveLawnArea({})).toBeNull();
   });
 
-  test('a commercial lawn line carries the basis too (codex #3376 r1)', () => {
-    const fake = { lineItems: [{ service: 'commercial_lawn', lawnSqFt: 22000, turfBasis: 'measuredTurfSf' }] };
-    expect(deriveLawnArea(fake)).toEqual({ turf_sqft: 22000, source: 'measured' });
+  test('a commercial lawn line carries the basis too (codex #3376 r1+r2)', () => {
+    // priceCommercialLawn stores the priced area as turfSf, NOT lawnSqFt
+    // (codex r2: an earlier fake used the residential field name and masked
+    // the regression) — assert against the REAL commercial field shape.
+    const commercialShape = { lineItems: [{ service: 'commercial_lawn', turfSf: 22000, turfBasis: 'measuredTurfSf' }] };
+    expect(deriveLawnArea(commercialShape)).toEqual({ turf_sqft: 22000, source: 'measured' });
+    // And through the real commercial pricer end-to-end.
+    const { priceCommercialLawn } = require('../services/pricing-engine/service-pricing');
+    if (typeof priceCommercialLawn === 'function') {
+      const line = priceCommercialLawn({ measuredTurfSf: 22000, lotSqFt: 40000, homeSqFt: 5000 }, {});
+      if (line && line.service === 'commercial_lawn') {
+        expect(deriveLawnArea({ lineItems: [line] })).not.toBeNull();
+      }
+    }
   });
 
   test('a parcel-capped vision figure is demoted from the satellite claim (codex #3376 r1)', () => {
