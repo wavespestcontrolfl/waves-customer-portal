@@ -1978,6 +1978,19 @@ class GscOpportunityMiner {
         const canonKey = ownPageKey(canon, city);
         if (!map.has(canonKey)) map.set(canonKey, r.page_url);
       }
+      // AND under a hub-scoped namespace, first-wins among HUB pages only.
+      // The plain keys are first-wins ACROSS domains, so a spoke page that
+      // outranks the hub page hides the hub page's existence — a consumer
+      // asking "does a HUB page exist for this pair" (local_gap coverage)
+      // would read the pair as uncovered and queue a duplicate hub draft
+      // (cloud P1). Additive like the canonical keys: nothing else changes.
+      const host = String(routeIdentity(r.page_url) || '').split('::')[0];
+      if (host === HUB_DOMAIN) {
+        for (const svc of new Set([service, canon].filter(Boolean))) {
+          const hubKey = `hub::${ownPageKey(svc, city)}`;
+          if (!map.has(hubKey)) map.set(hubKey, r.page_url);
+        }
+      }
     }
     return map;
   }
@@ -2576,11 +2589,12 @@ class GscOpportunityMiner {
       // bucket asks "does a page exist for this city+service pair", so
       // any page classified to the pair genuinely answers it.
       // Coverage is judged on HUB pages only, mirroring the demand scope:
-      // the map is cross-property, and a SPOKE page serving the pair must
-      // not suppress a genuinely missing HUB page (cloud P1) — the output
-      // of this bucket is a hub page, so only a hub page answers it.
-      const mapped = ownPagesByServiceCity.get(ownPageKey(service, city));
-      if (mapped && String(routeIdentity(mapped) || '').split('::')[0] === HUB_DOMAIN) continue;
+      // a SPOKE page serving the pair must not suppress a genuinely
+      // missing HUB page — the output of this bucket is a hub page, so
+      // only a hub page answers it. The hub:: namespace is first-wins
+      // among hub pages alone, so a spoke page outranking the hub page
+      // cannot hide it (cloud P1 ×2).
+      if (ownPagesByServiceCity.get(`hub::${ownPageKey(service, city)}`)) continue;
       const key = ownPageKey(service, city);
       const imp = parseInt(q.impressions, 10) || 0;
       const prev = byPair.get(key);

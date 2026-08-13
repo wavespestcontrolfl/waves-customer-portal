@@ -2690,10 +2690,15 @@ describe('local_gap is HUB-scoped on both legs (round-3 cloud P1)', () => {
     expect(lg).toMatch(/\.where\('domain', HUB_DOMAIN\)/);
   });
 
-  test('coverage is satisfied only by a HUB page', () => {
-    // A spoke page serving the pair must not suppress a genuinely
-    // missing hub page — the bucket's output is a hub page.
-    expect(lg).toMatch(/routeIdentity\(mapped\)[\s\S]{0,60}HUB_DOMAIN\) continue;/);
+  test('coverage is satisfied only by a HUB page, via the hub:: namespace', () => {
+    // A spoke page serving — or OUTRANKING — the pair must not suppress a
+    // genuinely missing hub page: the plain map keys are first-wins across
+    // domains, so a host check on the winning URL is not enough; the hub::
+    // namespace is first-wins among hub pages alone.
+    expect(lg).toMatch(/ownPagesByServiceCity\.get\(`hub::\$\{ownPageKey\(service, city\)\}`\)/);
+    const loader = src.slice(src.indexOf('async _loadOwnPagesByServiceCity'), src.indexOf('QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS'));
+    expect(loader).toMatch(/host === HUB_DOMAIN/);
+    expect(loader).toMatch(/`hub::\$\{ownPageKey\(svc, city\)\}`/);
   });
 
   test('the serp-profiler no-data log carries a digest, never the raw query', () => {
