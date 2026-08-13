@@ -5520,6 +5520,34 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         : null;
 
       if (assignmentShouldRun) {
+        // COMPLETE tech-day lock set, ONCE, sorted (uncapped audit r20 P1):
+        // the assignment path locks each target row's day in its own
+        // lockTechDays call and the date-move fence below locks old+new day
+        // in another — sequential sorted-within-call acquisitions break the
+        // global sort order that keeps single-call lockers (bulk board move,
+        // nightly reorder) deadlock-free, so a backward date move could hold
+        // tech:newer while waiting on tech:older. Advisory xact locks are
+        // reentrant: the inner per-step calls re-acquire already-held keys
+        // without blocking, so this up-front union is the only acquisition
+        // that can ever wait. Keys are provisional (unlocked reads) — the
+        // locked reads/CAS guards downstream still decide correctness; a row
+        // that moves concurrently aborts there, it is never mis-fenced.
+        const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+        const { targetIds: fenceTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
+        const fenceRows = await trx('scheduled_services')
+          .whereIn('id', fenceTargetIds)
+          .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+        const fencePairs = [];
+        for (const row of fenceRows) {
+          fencePairs.push({ techId: row.technician_id, date: row.day });
+          fencePairs.push({ techId: requestedTechnicianId, date: row.day });
+          if (String(row.id) === String(req.params.id) && updates.scheduled_date !== undefined) {
+            fencePairs.push({ techId: row.technician_id, date: dateOnly(updates.scheduled_date) });
+            fencePairs.push({ techId: requestedTechnicianId, date: dateOnly(updates.scheduled_date) });
+          }
+        }
+        await lockTechDays(trx, fencePairs);
+
         const assignment = await assignScheduleJobs({
           jobId: req.params.id,
           technicianId: requestedTechnicianId,

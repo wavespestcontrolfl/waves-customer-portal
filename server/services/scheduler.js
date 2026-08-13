@@ -958,7 +958,13 @@ function initScheduledJobs() {
           if (tickId == null) {
             throw new Error(`route-reorder skipped tick (${inner.reason}) could not be ledgered`);
           }
-          return;
+          // Ledgered — but the night still had NO reorder pass. Returning
+          // normally would let the outer runExclusive stamp
+          // 'route-tiers-nightly' as a fresh SUCCESS, hiding the missed run
+          // from job health (uncapped audit r20 P1). Fail loud like every
+          // other not-fully-successful night; the ledger row keeps the
+          // dispatch card accurate either way.
+          throw new Error(`route-reorder tick skipped (${inner.reason}) — no reorder ran (ledger ${tickId})`);
         }
         const result = inner || {};
         logger.info(`[route-reorder] cron run ${result.status}: applied=${result.applied ?? 0} skipped=${result.skipped ?? 0} failed=${result.failed ?? 0} ledger=${result.ledgerId ?? 'none'}`);
