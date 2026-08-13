@@ -849,6 +849,15 @@ const gates = {
   // the ledger dual-writes advisorily (data accumulates pre-flip). Kill
   // switch = unset; owner flips after the ops backfill seeds components.
   planRateLedger: process.env.GATE_PLAN_RATE_LEDGER === 'true',
+  // Nightly Σ(components) == scalar reconciler for the plan-rate ledger:
+  // parks a scalar-over-components shortfall as 'unattributed' (the ops
+  // backfill's pre-seeded-audit semantics — the billed scalar is never
+  // changed) and rings the owner once per distinct divergence; an overshoot
+  // (components > scalar) only alerts, never deletes. Inert unless
+  // planRateLedger is ALSO on — while the ledger is advisory, divergence is
+  // expected pre-flip accumulation, not a defect.
+  // Off → cron ticks are no-ops.
+  planRateLedgerReconcile: process.env.GATE_PLAN_RATE_LEDGER_RECONCILE === 'true',
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
   // past-dated visits stuck in on_site/en_route (performed but never
   // completed → no service record, invoice, report, or post-service SMS;

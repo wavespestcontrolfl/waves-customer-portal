@@ -5658,6 +5658,34 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:10 AM ET — Plan-rate ledger invariant reconcile. While
+  // GATE_PLAN_RATE_LEDGER has scalar authority, detects live customers whose
+  // Σ(customer_plan_rates) no longer equals customers.monthly_rate: parks a
+  // scalar-over-components shortfall as 'unattributed' (backfill semantics —
+  // the billed scalar is never changed) and rings the owner; an overshoot
+  // alerts only. 6:10, BEFORE the 8:00 billing sweep, so the attribution a
+  // divergent customer bills under today is already reconciled and paged.
+  // Dark behind GATE_PLAN_RATE_LEDGER_RECONCILE. See
+  // server/services/plan-rate-ledger-reconcile.js.
+  // =========================================================================
+  cron.schedule('10 6 * * *', async () => {
+    try {
+      // runExclusive: the parking upsert is idempotent per divergence, but
+      // the alreadyAlerted read-then-notify has no unique constraint — a
+      // deploy overlap must not double-ring.
+      await runExclusive('plan-rate-ledger-reconcile', async () => {
+        const { runPlanRateLedgerReconcile } = require('./plan-rate-ledger-reconcile');
+        const result = await runPlanRateLedgerReconcile();
+        if (!result.skipped && result.checked > 0) {
+          logger.warn(`[plan-rate-reconcile] checked=${result.checked} repaired=${result.repaired} overshoots=${result.overshoots} alerted=${result.alerted}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Plan-rate ledger reconcile tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // HOURLY :46 — Retroactive call_log→customer linking. Heals calls that
   // arrived before their customer record existed (unambiguous primary-phone
   // match only, same rule as webhook intake; idempotent). Dark behind
