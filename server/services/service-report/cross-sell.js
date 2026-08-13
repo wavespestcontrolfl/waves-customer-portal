@@ -789,7 +789,7 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     try {
       propertySeed = await loadEstimateSeed(database, customerId, primaryStreet);
     } catch (err) {
-      logger.warn(`[report-cross-sell] estimate seed skipped (${err.message})`);
+      logger.warn(`[report-cross-sell] estimate seed skipped (code=${err?.code || 'none'})`);
     }
 
     // Without a lookup RESULT the price falls back to the accepted-estimate
@@ -845,7 +845,7 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
         correctionsUnapplied = await hasVerifiedOverrides(addressForCustomer(customer));
       } catch (err) {
         correctionsUnapplied = true;
-        logger.warn(`[report-cross-sell] verified-override probe failed, demoting to CTA (${err.message})`);
+        logger.warn(`[report-cross-sell] verified-override probe failed, demoting to CTA (code=${err?.code || 'none'})`);
       }
     }
 
@@ -925,7 +925,10 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // drift 409s and the card prompts a refresh.
     return { ...payload, fingerprint: offerFingerprint(payload) };
   } catch (err) {
-    logger.warn(`[report-cross-sell] suppressed (${err.message})`);
+    // err.code only (codex #3381-lane pre-push r4): the composer's errors
+    // can be PG errors quoting bound values (addresses, payload fields) —
+    // same PII-in-logs posture as the referral-link route and the prewarm.
+    logger.warn(`[report-cross-sell] suppressed (code=${err?.code || 'none'})`);
     return null;
   }
 }
