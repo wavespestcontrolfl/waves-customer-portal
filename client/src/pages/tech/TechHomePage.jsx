@@ -573,13 +573,18 @@ export default function TechHomePage() {
                 const text = typeof a === 'string' ? a : a?.text;
                 if (!text) return null;
                 const isChemical = a?.type === 'chemical';
+                // Money flag: nothing chargeable behind this customer, so
+                // payment must be collected before leaving the property.
+                const isNoCard = a?.type === 'no_card_on_file';
+                const accent = isChemical ? '#ef4444' : isNoCard ? '#f59e0b' : null;
                 return (
                   <div key={i} style={{
                     fontSize: 12,
-                    color: isChemical ? '#ef4444' : DARK.text,
+                    color: accent || DARK.text,
+                    fontWeight: isNoCard ? 600 : undefined,
                     marginBottom: 3,
                     paddingLeft: 8,
-                    borderLeft: `2px solid ${isChemical ? '#ef4444' : DARK.teal}`,
+                    borderLeft: `2px solid ${accent || DARK.teal}`,
                   }}>
                     {text}
                   </div>

@@ -1870,6 +1870,19 @@ function compactCheckoutInvoiceLines(rawLines) {
     .slice(0, 8);
 }
 
+// "No card on file — collect on site" alert for the day-view propertyAlerts
+// feed (tech Next Stop card + dispatch chips). Fires only when on-site
+// collection is actually plausible: nothing saved in payment_methods, the
+// visit bills the homeowner (not a third-party payer), it isn't prepaid,
+// and its checkout invoice isn't already paid. Deliberately NOT the
+// customerOnAutopay predicate — a customer with a saved card but autopay
+// off can still be charged on file; only a truly empty wallet needs the
+// tech to collect before leaving.
+function noCardOnFileAlert({ hasMethodOnFile, billedToPayerId, prepaidMethod, checkoutInvoicePaid }) {
+  if (hasMethodOnFile || billedToPayerId || prepaidMethod || checkoutInvoicePaid) return null;
+  return { type: 'no_card_on_file', text: 'NO CARD ON FILE — collect payment on site' };
+}
+
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
   try {
@@ -2091,6 +2104,25 @@ router.get('/', async (req, res, next) => {
         if (svcPrefs.interior_spray === false) alerts.push({ type: 'service_pref', text: 'EXTERIOR ONLY — no interior treatment' });
         if (svcPrefs.exterior_sweep === false) alerts.push({ type: 'service_pref', text: 'Skip eave/cobweb sweep' });
       }
+      // Payment-capture flag — the tech needs to know at the doorstep that
+      // nothing chargeable exists behind this customer (autopay_enabled can
+      // be true with no saved method, so the autopay flag alone lies).
+      // Fail toward NOT flagging, like the reads above: a wrong badge on a
+      // covered customer teaches the tech to ignore it.
+      let hasMethodOnFile = true;
+      try {
+        hasMethodOnFile = !!(await db('payment_methods')
+          .where({ customer_id: s.customer_id, processor: 'stripe' })
+          .whereNotNull('stripe_payment_method_id')
+          .first('id'));
+      } catch { hasMethodOnFile = true; }
+      const noCardAlert = noCardOnFileAlert({
+        hasMethodOnFile,
+        billedToPayerId: s.billed_to_payer_id,
+        prepaidMethod: s.prepaid_method,
+        checkoutInvoicePaid: checkoutInvoice?.status === 'paid',
+      });
+      if (noCardAlert) alerts.push(noCardAlert);
 
       const zone = s.zone || getZone(s.city, s.zip);
       const autopayActive = await customerOnAutopay({
@@ -12214,6 +12246,7 @@ function flushEstimateSlotCaches() {
 }
 
 router._test = {
+  noCardOnFileAlert,
   isTechnicianRequest,
   scopeToAssignedTech,
   technicianOwnsScheduledService,
