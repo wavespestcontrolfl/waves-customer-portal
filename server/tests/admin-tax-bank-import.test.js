@@ -18,6 +18,7 @@ const state = {
   bankRow: null,
   expenseRow: null,
   payoutRow: null,
+  accountTypeRow: null,
   bankUpdateError: null,
   bankUpdateResult: 1,
   insertedBank: [],
@@ -36,7 +37,12 @@ function bankBuilder() {
     where: jest.fn((c) => { wheres.push(c); return b; }),
     whereIn: jest.fn((c, v) => { wheres.push([c, v]); return b; }),
     whereRaw: jest.fn((sql, binds) => { wheres.push([sql, binds]); return b; }),
-    first: jest.fn(() => Promise.resolve(state.bankRow)),
+    first: jest.fn((...cols) => {
+      // the label→type binding check selects account_type; everything else
+      // (row lookups, force replay check) resolves the staged bankRow
+      if (cols.includes('account_type') && !cols.includes('id')) return Promise.resolve(state.accountTypeRow);
+      return Promise.resolve(state.bankRow);
+    }),
     update: jest.fn((patch) => {
       if (state.bankUpdateError) return Promise.reject(state.bankUpdateError);
       state.bankUpdates.push({ wheres: wheres.slice(), patch });
@@ -161,6 +167,7 @@ beforeEach(() => {
   state.bankUpdates = [];
   state.category = null;
   state.payoutRow = null;
+  state.accountTypeRow = null;
   state.insertReturningQueue = null;
   reconcilePayout.mockReset();
   reconcilePayout.mockImplementation(async () => ({}));
@@ -198,6 +205,23 @@ describe('upload (gate on)', () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.skipped[0].reason).toBe('unparseable date');
+  });
+
+  test('a label already imported under the OTHER account type is refused before any write', async () => {
+    state.accountTypeRow = { account_type: 'bank' };
+    const csv = 'Date,Description,Amount\n08/10/2026,HD SUPPLY,-204.87';
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'card', csv });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('already imported as a bank account');
+    expect(state.insertedBank).toHaveLength(0);
+  });
+
+  test('the bulk insert runs inside ONE transaction — an error can never leave a partial import', async () => {
+    const csv = 'Date,Description,Amount\n08/10/2026,HD SUPPLY,-204.87';
+    const before = mockDb.transaction.mock.calls.length;
+    await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv });
+    expect(mockDb.transaction.mock.calls.length).toBe(before + 1);
   });
 
   test('a matching-pass failure after committed inserts still reports the import as succeeded', async () => {

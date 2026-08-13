@@ -1666,6 +1666,16 @@ router.post('/bank-import/upload', async (req, res, next) => {
         || typeof forceToken !== 'string' || forceToken.length < 8 || forceToken.length > 64)) {
       return res.status(400).json({ error: 'forceDuplicates requires forceRowHashes + forceToken from the original upload response' });
     }
+    // One account_type per canonical label: row_hash excludes account_type,
+    // so re-using a label under the other type would silently dedupe against
+    // the existing rows (and book expenses with the wrong payment_method).
+    const existingType = await db('bank_transactions')
+      .whereRaw('upper(trim(account_label)) = upper(?)', [accountLabel.trim()])
+      .first('account_type');
+    if (existingType && existingType.account_type !== accountType) {
+      const asWhat = existingType.account_type === 'bank' ? 'a bank account' : 'a credit card';
+      return res.status(400).json({ error: `"${accountLabel.trim()}" is already imported as ${asWhat} — keep that type, or use a different label if this is a different account` });
+    }
     const { rows, skipped } = bankImport.parseStatementCsv(csv);
     if (rows.length === 0) {
       return res.status(400).json({ error: 'no usable rows in that CSV', skipped });
@@ -1684,15 +1694,22 @@ router.post('/bank-import/upload', async (req, res, next) => {
     }));
     // Chunked: 9 binds/row × 8k+ rows in one statement would blow past
     // PostgreSQL's 65,535 bind-parameter ceiling and fail the whole upload.
+    // One transaction across all chunks: a mid-upload failure rolls the
+    // whole import back, so an error response always means "nothing
+    // imported" — never a partial commit that a retry then misreports as
+    // duplicates. (Force inserts below stay outside: their retry is already
+    // idempotent via the confirmation token.)
     const inserted = [];
-    for (let i = 0; i < toInsert.length; i += 500) {
-      const batch = await db('bank_transactions')
-        .insert(toInsert.slice(i, i + 500))
-        .onConflict('row_hash')
-        .ignore()
-        .returning(['id', 'row_hash']);
-      inserted.push(...batch);
-    }
+    await db.transaction(async (trx) => {
+      for (let i = 0; i < toInsert.length; i += 500) {
+        const batch = await trx('bank_transactions')
+          .insert(toInsert.slice(i, i + 500))
+          .onConflict('row_hash')
+          .ignore()
+          .returning(['id', 'row_hash']);
+        inserted.push(...batch);
+      }
+    });
     // Duplicates are SURFACED, not silently swallowed: identical rows carry
     // no bank-side ID in a CSV, so a skipped row is *probably* a re-upload
     // but could be a genuinely distinct identical purchase from a partial
