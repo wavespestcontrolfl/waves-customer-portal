@@ -1149,6 +1149,17 @@ const gates = {
   // run endpoints are unaffected by this gate (they're requireAdmin-only).
   autoDispatch: isProd ? process.env.GATE_AUTO_DISPATCH === 'true' : true,
 
+  // Drive-Time Calibration — swaps the straight-line drive-time approximation
+  // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
+  // real trips: a fixed per-leg overhead plus a per-mile rate. Purely an
+  // estimator change — no external calls, no new data, no customer-facing
+  // surface of its own; it moves the numbers auto-dispatch and the find-time
+  // scorer rank slots with. Opt-in everywhere so the shift in slot ordering is
+  // a deliberate flip. Off → the legacy constants apply unchanged.
+  // NOTE: consumers read this through gateEnvValue() at CALL time rather than
+  // this baked value, so a flip takes effect without a redeploy.
+  driveTimeCalibration: process.env.GATE_DRIVE_TIME_CALIBRATION === 'true',
+
   // Weekly autonomous vendor price scan -> stages a price-match draft for the
   // SiteOne rep (never auto-sends; a human reviews + sends from /admin/price-match).
   // Explicit opt-in in ALL envs (it hits external vendor sites via a headless
