@@ -1,14 +1,20 @@
 // ROUTE-TIERS nightly reorder pass: band day selection (tomorrow .. today+6),
 // the 72h clock + reminder-sent day freezes (incl. fail-closed), the >25-stop
-// Google-cap skip (logged, never truncated), the min-savings floor, the
-// transactional route_order write, and the planner-runs ledger row shape.
+// Google-cap skip (logged, never truncated), same-model savings vs the
+// min-savings floor, the window-chronology guard, commit-time revalidation
+// (membership/windows/freeze under the transaction), and the planner-runs
+// ledger row shape.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/scheduling/day-stops', () => ({
   dayStopsQuery: jest.fn(),
   guardedCoordSelects: jest.fn(() => []),
 }));
+// Deterministic geometry: HQ at the origin, manhattan-degree "miles", and a
+// 1000 m/mile leg model — so model distances are exact integers in tests.
 jest.mock('../services/route-optimizer', () => ({
-  HQ: { lat: 27.39, lng: -82.39 },
+  HQ: { lat: 0, lng: 0 },
+  haversine: (lat1, lng1, lat2, lng2) => Math.abs(lat1 - lat2) + Math.abs(lng1 - lng2),
+  fallbackLegMetrics: (miles) => ({ meters: Math.round(miles * 1000), minutes: 0 }),
   optimizeRoute: jest.fn(),
 }));
 jest.mock('../services/auto-dispatch/route-tiers', () => ({
@@ -33,13 +39,24 @@ const NOW = new Date('2026-08-13T08:10:00Z');
 const BAND = ['2026-08-14', '2026-08-15', '2026-08-16', '2026-08-17', '2026-08-18', '2026-08-19'];
 
 function stop(id, over = {}) {
-  return { id, technician_id: 't1', route_order: null, window_start: '09:00', time_window: null, service_type: 'pest', zone: null, lat: 27.4, lng: -82.5, ...over };
+  return { id, technician_id: 't1', route_order: null, window_start: '09:00', time_window: null, service_type: 'pest', zone: null, lat: 1, lng: 1, ...over };
+}
+
+// A tech-day whose CURRENT order backtracks (B@lng3 first, then A@lng1, C@lng2
+// → model 8000 m); sorting by lng (A,C,B → 6000 m) saves 2000 m ≥ the 805 m
+// floor. optimizeRoute's default mock returns the lng-sorted order.
+function backtrackDay(prefix = '', over = {}) {
+  return [
+    stop(`${prefix}A`, { lng: 1, route_order: 2, ...over }),
+    stop(`${prefix}B`, { lng: 3, route_order: 1, ...over }),
+    stop(`${prefix}C`, { lng: 2, route_order: 3, ...over }),
+  ];
 }
 
 let stopsByDate;
 let ledgerInserts;
 let trxUpdates;
-let staleIds;
+let liveRowsOverride; // null ⇒ derive live rows from stopsByDate (unchanged day)
 
 function tableChain(table) {
   const c = { _table: table };
@@ -59,10 +76,10 @@ beforeEach(() => {
   stopsByDate = {};
   ledgerInserts = [];
   trxUpdates = [];
+  liveRowsOverride = null;
   dayStopsQuery.mockImplementation(async (_db, { dateStr }) => stopsByDate[dateStr] || []);
   routeTiers.loadReminderFreeze.mockResolvedValue({ failed: false, frozen: new Set() });
   db.mockImplementation((table) => tableChain(table));
-  staleIds = new Set();
   db.transaction.mockImplementation(async (cb) => {
     const attempted = [];
     const trx = () => {
@@ -70,11 +87,15 @@ beforeEach(() => {
       const c = {
         where: (a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[a] = b; return c; },
         whereNotIn: () => c,
-        update: async (u) => {
-          if (staleIds.has(filters.id)) return 0; // stale row — placement re-assert fails
-          attempted.push({ id: filters.id, ...u });
-          return 1;
+        forUpdate: () => c,
+        select: async () => {
+          if (liveRowsOverride) return liveRowsOverride;
+          // Unchanged tech-day: mirror the loaded stops for this date+tech.
+          return (stopsByDate[filters.scheduled_date] || [])
+            .filter((s) => s.technician_id === filters.technician_id)
+            .map((s) => ({ id: s.id, window_start: s.window_start }));
         },
+        update: async (u) => { attempted.push({ id: filters.id, ...u }); return 1; },
       };
       return c;
     };
@@ -83,9 +104,14 @@ beforeEach(() => {
     trxUpdates.push(...attempted);
     return out;
   });
-  RouteOptimizer.optimizeRoute.mockResolvedValue({
-    orderedStops: [], totalDistanceMeters: 0, totalDurationSeconds: 0, unoptimizedDistanceMeters: 0, source: 'nearest_neighbor_fallback',
-  });
+  // Default optimizer: order stops by lng ascending (the "good" route).
+  RouteOptimizer.optimizeRoute.mockImplementation(async (stops) => ({
+    orderedStops: [...stops].sort((p, q) => p.lng - q.lng),
+    totalDistanceMeters: 12345, // deliberately NOT what savings are computed from
+    totalDurationSeconds: 600,
+    unoptimizedDistanceMeters: 99999,
+    source: 'google_routes_api',
+  }));
 });
 
 test('band day selection: exactly tomorrow through today+6 — never today, never day 7', async () => {
@@ -100,10 +126,7 @@ test('days whose visits start within 72h are skipped whole (clock freeze)', asyn
   // 08-14 09:00 ET ≈ 29h out, 08-15 ≈ 53h — both frozen; 08-16 ≈ 77h — free.
   stopsByDate['2026-08-14'] = [stop('a')];
   stopsByDate['2026-08-15'] = [stop('b')];
-  stopsByDate['2026-08-16'] = [stop('c'), stop('d')];
-  RouteOptimizer.optimizeRoute.mockResolvedValue({
-    orderedStops: [{ id: 'd' }, { id: 'c' }], totalDistanceMeters: 1000, totalDurationSeconds: 600, unoptimizedDistanceMeters: 5000, source: 'x',
-  });
+  stopsByDate['2026-08-16'] = backtrackDay();
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(1);
   const ledger = JSON.parse(ledgerInserts[0].result);
@@ -114,8 +137,8 @@ test('days whose visits start within 72h are skipped whole (clock freeze)', asyn
 });
 
 test('a reminder-sent visit freezes its whole day', async () => {
-  stopsByDate['2026-08-16'] = [stop('c'), stop('d')];
-  routeTiers.loadReminderFreeze.mockResolvedValue({ failed: false, frozen: new Set(['d']) });
+  stopsByDate['2026-08-16'] = backtrackDay();
+  routeTiers.loadReminderFreeze.mockResolvedValue({ failed: false, frozen: new Set(['C']) });
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);
   expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
@@ -124,7 +147,7 @@ test('a reminder-sent visit freezes its whole day', async () => {
 });
 
 test('FAIL CLOSED: unreadable reminder status skips the day', async () => {
-  stopsByDate['2026-08-17'] = [stop('e'), stop('f')];
+  stopsByDate['2026-08-17'] = backtrackDay();
   routeTiers.loadReminderFreeze.mockResolvedValue({ failed: true, frozen: new Set() });
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);
@@ -133,7 +156,7 @@ test('FAIL CLOSED: unreadable reminder status skips the day', async () => {
 });
 
 test('>25 geocoded stops for one tech-day is SKIPPED and LOGGED, never truncated', async () => {
-  stopsByDate['2026-08-18'] = Array.from({ length: 26 }, (_, i) => stop(`s${i}`));
+  stopsByDate['2026-08-18'] = Array.from({ length: 26 }, (_, i) => stop(`s${i}`, { lng: i + 1 }));
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);
   expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
@@ -142,44 +165,42 @@ test('>25 geocoded stops for one tech-day is SKIPPED and LOGGED, never truncated
   expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'OVER_WAYPOINT_CAP', geocoded: 26 }));
 });
 
-test('savings below the floor apply nothing', async () => {
+test('savings are computed under ONE model — an order no shorter than the current one applies nothing', async () => {
+  // Two stops at the same point: any order has equal model distance, so even
+  // though the optimizer "reports" huge unoptimized-vs-optimized numbers,
+  // model savings are 0 and nothing is written.
   stopsByDate['2026-08-18'] = [stop('g'), stop('h')];
-  RouteOptimizer.optimizeRoute.mockResolvedValue({
-    orderedStops: [{ id: 'h' }, { id: 'g' }], totalDistanceMeters: 9600, totalDurationSeconds: 600, unoptimizedDistanceMeters: 10000, source: 'x',
-  });
-  const res = await runRouteReorder({ now: NOW }); // saved 400m < default 805m
+  const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);
   expect(db.transaction).not.toHaveBeenCalled();
   const ledger = JSON.parse(ledgerInserts[0].result);
-  expect(ledger.skips).toContainEqual(expect.objectContaining({ reason: 'BELOW_MIN_SAVINGS', saved_meters: 400 }));
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ reason: 'BELOW_MIN_SAVINGS', saved_meters: 0 }));
 });
 
 test('savings above the floor rewrite route_order transactionally in optimized order', async () => {
-  stopsByDate['2026-08-18'] = [stop('g', { route_order: 2 }), stop('h', { route_order: 1 }), stop('i')];
-  RouteOptimizer.optimizeRoute.mockResolvedValue({
-    orderedStops: [{ id: 'i' }, { id: 'g' }, { id: 'h' }], totalDistanceMeters: 4000, totalDurationSeconds: 900, unoptimizedDistanceMeters: 9000, source: 'google_routes_api',
-  });
+  stopsByDate['2026-08-18'] = backtrackDay();
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(1);
   expect(db.transaction).toHaveBeenCalledTimes(1);
   expect(trxUpdates).toEqual([
-    { id: 'i', route_order: 1 },
-    { id: 'g', route_order: 2 },
-    { id: 'h', route_order: 3 },
+    { id: 'A', route_order: 1 },
+    { id: 'C', route_order: 2 },
+    { id: 'B', route_order: 3 },
   ]);
   // Baseline order fed to the optimizer is the CURRENT running order
-  // (route_order asc, nulls last): h(1), g(2), i(null).
+  // (route_order asc): B(1), A(2), C(3).
   const fed = RouteOptimizer.optimizeRoute.mock.calls[0][0].map((s) => s.id);
-  expect(fed).toEqual(['h', 'g', 'i']);
+  expect(fed).toEqual(['B', 'A', 'C']);
 });
 
 test('an order violating window chronology is SKIPPED, never written', async () => {
-  // g holds a 09:00 window, h holds 13:00 — distance says h first, the
-  // promised windows say no. The tech-day must be skipped.
-  stopsByDate['2026-08-18'] = [stop('g', { window_start: '09:00' }), stop('h', { window_start: '13:00' })];
-  RouteOptimizer.optimizeRoute.mockResolvedValue({
-    orderedStops: [{ id: 'h' }, { id: 'g' }], totalDistanceMeters: 4000, totalDurationSeconds: 900, unoptimizedDistanceMeters: 9000, source: 'x',
-  });
+  // The lng-sorted route puts C (13:00 window) before B (09:00 window) —
+  // distance says yes, the promised windows say no.
+  stopsByDate['2026-08-18'] = [
+    stop('A', { lng: 1, route_order: 2, window_start: '09:00' }),
+    stop('B', { lng: 3, route_order: 1, window_start: '09:00' }),
+    stop('C', { lng: 2, route_order: 3, window_start: '13:00' }),
+  ];
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);
   expect(db.transaction).not.toHaveBeenCalled();
@@ -188,20 +209,18 @@ test('an order violating window chronology is SKIPPED, never written', async () 
 });
 
 test('window-respecting order (ties + null windows) still applies', async () => {
-  stopsByDate['2026-08-18'] = [stop('g', { window_start: '09:00' }), stop('h', { window_start: '09:00' }), stop('i', { window_start: null })];
-  RouteOptimizer.optimizeRoute.mockResolvedValue({
-    orderedStops: [{ id: 'h' }, { id: 'i' }, { id: 'g' }], totalDistanceMeters: 4000, totalDurationSeconds: 900, unoptimizedDistanceMeters: 9000, source: 'x',
-  });
+  stopsByDate['2026-08-18'] = backtrackDay('', {}).map((s, i) => ({ ...s, window_start: i === 2 ? null : '09:00' }));
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(1);
 });
 
-test('a stop superseded mid-run rolls the whole tech-day back (STALE_TECH_DAY)', async () => {
-  stopsByDate['2026-08-18'] = [stop('g'), stop('h')];
-  staleIds = new Set(['h']); // staff moved/cancelled h while the optimizer ran
-  RouteOptimizer.optimizeRoute.mockResolvedValue({
-    orderedStops: [{ id: 'g' }, { id: 'h' }], totalDistanceMeters: 4000, totalDurationSeconds: 900, unoptimizedDistanceMeters: 9000, source: 'x',
-  });
+test('commit-time revalidation: a changed tech-day rolls back untouched (STALE_TECH_DAY)', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  // Staff moved stop B off the day while the optimizer ran.
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00' },
+    { id: 'C', window_start: '09:00' },
+  ];
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);
   expect(res.failed).toBe(0); // a superseded day is a skip, not a failure
@@ -210,21 +229,42 @@ test('a stop superseded mid-run rolls the whole tech-day back (STALE_TECH_DAY)',
   expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
 });
 
+test('commit-time revalidation: a changed window_start rolls back untouched', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00' },
+    { id: 'B', window_start: '14:00' }, // staff changed the window mid-run
+    { id: 'C', window_start: '09:00' },
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
+test('commit-time revalidation: a reminder sent DURING the run rolls back untouched', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  // First read (day pre-check) clean; second read (inside the trx) frozen.
+  routeTiers.loadReminderFreeze
+    .mockResolvedValueOnce({ failed: false, frozen: new Set() })
+    .mockResolvedValueOnce({ failed: false, frozen: new Set(['A']) });
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
 test('per-tech grouping: two techs on one day are reordered independently', async () => {
-  stopsByDate['2026-08-19'] = [stop('a1'), stop('a2'), stop('b1', { technician_id: 't2' }), stop('b2', { technician_id: 't2' })];
-  RouteOptimizer.optimizeRoute.mockImplementation(async (stops) => ({
-    orderedStops: [...stops].reverse(), totalDistanceMeters: 1000, totalDurationSeconds: 300, unoptimizedDistanceMeters: 3000, source: 'x',
-  }));
+  stopsByDate['2026-08-19'] = [...backtrackDay('x'), ...backtrackDay('y', { technician_id: 't2' })];
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(2);
   expect(RouteOptimizer.optimizeRoute).toHaveBeenCalledTimes(2);
 });
 
 test('ledger row shape: one route_optimization_planner_runs row per run', async () => {
-  stopsByDate['2026-08-18'] = [stop('g'), stop('h')];
-  RouteOptimizer.optimizeRoute.mockResolvedValue({
-    orderedStops: [{ id: 'h' }, { id: 'g' }], totalDistanceMeters: 4000, totalDurationSeconds: 900, unoptimizedDistanceMeters: 9000, source: 'google_routes_api',
-  });
+  stopsByDate['2026-08-18'] = backtrackDay();
   await runRouteReorder({ now: NOW });
   expect(ledgerInserts).toHaveLength(1);
   const row = ledgerInserts[0];
@@ -243,10 +283,10 @@ test('ledger row shape: one route_optimization_planner_runs row per run', async 
   expect(result.reorders[0]).toMatchObject({
     date: '2026-08-18',
     technician_id: 't1',
-    stops: 2,
-    before_distance_meters: 9000,
-    after_distance_meters: 4000,
-    saved_meters: 5000,
+    stops: 3,
+    before_distance_meters: 10000, // model distance of the current order B,A,C
+    after_distance_meters: 8000,   // model distance of the optimized order A,C,B
+    saved_meters: 2000,
     source: 'google_routes_api',
   });
   expect(result).toHaveProperty('auto_dispatch');

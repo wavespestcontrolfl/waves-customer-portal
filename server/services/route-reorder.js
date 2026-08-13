@@ -86,6 +86,31 @@ function currentOrder(stops) {
 }
 
 /**
+ * Distance of an ordered stop sequence (HQ → stops → HQ) under the ONE shared
+ * in-house model (route-optimizer's haversine legs through fallbackLegMetrics,
+ * which is gate-consistent for meters). Savings decisions must compare BEFORE
+ * and AFTER under the SAME model: optimizeRoute's own reported numbers mix
+ * models (unoptimized = raw straight-line, optimized = Google road meters or
+ * the road-factored fallback), so subtracting them is not a like-for-like
+ * saving (codex round-2 P1). Google/fallback still choose the ORDER; this
+ * model decides whether that order is worth writing. Coordless stops
+ * contribute nothing on either side.
+ */
+function modelDistanceMeters(RouteOptimizer, orderedStops) {
+  let prev = RouteOptimizer.HQ;
+  let total = 0;
+  for (const s of orderedStops) {
+    const lat = parseFloat(s.lat);
+    const lng = parseFloat(s.lng);
+    if (!lat || !lng) continue;
+    total += RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng)).meters;
+    prev = { lat, lng };
+  }
+  total += RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, RouteOptimizer.HQ.lat, RouteOptimizer.HQ.lng)).meters;
+  return total;
+}
+
+/**
  * True when the proposed stop order contradicts the stops' window_start
  * chronology: any stop with a fixed window placed AFTER a stop whose window
  * starts later. Stops without a window_start are unconstrained. Ties are fine
@@ -213,10 +238,15 @@ async function runRouteReorder(opts = {}) {
             ordered.map((s) => ({ id: s.id, lat: parseFloat(s.lat) || null, lng: parseFloat(s.lng) || null, serviceType: s.service_type })),
             { startLat: RouteOptimizer.HQ.lat, startLng: RouteOptimizer.HQ.lng, endAtStart: true, techId },
           );
-          const savedMeters = Math.max(0, (result.unoptimizedDistanceMeters || 0) - (result.totalDistanceMeters || 0));
+          // SAME-MODEL before/after — never subtract Google road meters from a
+          // straight-line baseline (codex round-2 P1).
+          const beforeMeters = modelDistanceMeters(RouteOptimizer, ordered);
+          const afterMeters = modelDistanceMeters(RouteOptimizer, result.orderedStops);
+          const savedMeters = Math.max(0, beforeMeters - afterMeters);
           const metrics = {
-            before_distance_meters: result.unoptimizedDistanceMeters || 0,
-            after_distance_meters: result.totalDistanceMeters || 0,
+            before_distance_meters: beforeMeters,
+            after_distance_meters: afterMeters,
+            optimizer_distance_meters: result.totalDistanceMeters || 0,
             after_duration_seconds: result.totalDurationSeconds || 0,
             saved_meters: savedMeters,
             source: result.source,
@@ -237,13 +267,38 @@ async function runRouteReorder(opts = {}) {
           }
 
           // Same write as the trusted /optimize path (route_order = position),
-          // but transactional AND re-asserting the loaded placement (date,
-          // tech, live status) on every row — if staff rescheduled, cancelled,
-          // or reassigned any stop while the optimizer ran, the whole tech-day
-          // rolls back untouched instead of stamping route_order onto a
-          // different day's route.
+          // but transactional AND revalidated at COMMIT time: the optimizer
+          // call can take seconds, so inside the transaction the tech-day is
+          // row-locked and re-read, and the write only proceeds when it still
+          // matches the optimized snapshot — same membership (nothing added,
+          // moved, cancelled, reassigned), same window_starts (the chronology
+          // guard's inputs), and still unfrozen (the 15-min reminder cron may
+          // have sent during the gap; freeze state is re-read on the trx).
+          // Any drift rolls the whole tech-day back untouched.
+          const stale = (msg) => Object.assign(new Error(msg), { code: 'STALE_TECH_DAY' });
           try {
             await db.transaction(async (trx) => {
+              const live = await trx('scheduled_services')
+                .where('scheduled_date', dateStr)
+                .where('technician_id', techId)
+                .whereNotIn('status', EXCLUDE_STATUSES)
+                .forUpdate()
+                .select('id', 'window_start');
+              const snapshot = new Map(techStops.map((s) => [s.id, s.window_start ? String(s.window_start).slice(0, 5) : null]));
+              if (live.length !== techStops.length) throw stale('tech-day membership changed during the run');
+              for (const row of live) {
+                if (!snapshot.has(row.id)) throw stale(`stop ${row.id} joined the tech-day during the run`);
+                const win = row.window_start ? String(row.window_start).slice(0, 5) : null;
+                if (win !== snapshot.get(row.id)) throw stale(`stop ${row.id} window changed during the run`);
+              }
+              // Freeze re-check at commit time (fail closed on unreadable).
+              const commitFreeze = await loadReminderFreeze(trx, techStops.map((s) => s.id));
+              if (commitFreeze.failed) throw stale('reminder status unreadable at commit');
+              if (techStops.some((s) => commitFreeze.frozen.has(s.id))) throw stale('a 72h reminder was sent during the run');
+              const commitNow = opts.now || new Date();
+              if (techStops.some((s) => withinFreezeClock(dateStr, s.window_start, commitNow))) {
+                throw stale('day entered the 72h freeze window during the run');
+              }
               for (let i = 0; i < result.orderedStops.length; i++) {
                 const updated = await trx('scheduled_services')
                   .where({ id: result.orderedStops[i].id })
@@ -251,11 +306,7 @@ async function runRouteReorder(opts = {}) {
                   .where('technician_id', techId)
                   .whereNotIn('status', EXCLUDE_STATUSES)
                   .update({ route_order: i + 1 });
-                if (updated !== 1) {
-                  const stale = new Error(`stop ${result.orderedStops[i].id} changed during the run`);
-                  stale.code = 'STALE_TECH_DAY';
-                  throw stale; // rolls the whole tech-day back
-                }
+                if (updated !== 1) throw stale(`stop ${result.orderedStops[i].id} changed during the run`);
               }
             });
           } catch (writeErr) {
@@ -370,5 +421,5 @@ module.exports = {
   runRouteReorder,
   runRouteReorderIfEnabled,
   getRouteReorderConfig,
-  _internals: { currentOrder, withinFreezeClock, violatesWindowChronology, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
+  _internals: { currentOrder, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
 };
