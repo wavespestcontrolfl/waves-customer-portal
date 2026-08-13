@@ -223,7 +223,56 @@ function isUniqueViolation(err) {
 // suggestion.reconcilePending and are retried at the top of every matching
 // pass — scoped to the flag so a reconciliation a HUMAN later rejected is
 // never re-confirmed by the sweep.
+// Durable sync for the OTHER direction: a payout link whose reconciliation
+// disappeared AFTER the echo (a human rejected it on the Banking page, or a
+// lost marker). Pending-flagged rows are the retry sweep's job; this heals
+// the rows with NO marker: a human rejection reverts the claim (their
+// ruling outranks the link), anything else gets its pending marker restored
+// so the normal retry path repairs it.
+async function healUnreconciledLinks() {
+  const rows = await db('bank_transactions as bt')
+    .join('stripe_payouts as sp', 'sp.id', 'bt.matched_payout_id')
+    .where('bt.status', 'matched_payout')
+    .where('sp.reconciled', false)
+    .whereRaw("coalesce(bt.suggestion->>'reconcilePending','') <> 'true'")
+    .select('bt.id as id', 'bt.amount as amount', 'bt.matched_payout_id as matched_payout_id', 'bt.suggestion as suggestion');
+  let reverted = 0;
+  let remarked = 0;
+  for (const row of rows) {
+    const latest = await db('bank_reconciliation')
+      .where('payout_id', row.matched_payout_id)
+      .orderBy('reconciled_at', 'desc')
+      .orderBy('created_at', 'desc')
+      .first('status', 'reconciled_by');
+    if (latest && latest.status === 'rejected' && !String(latest.reconciled_by || '').startsWith('bank-import')) {
+      const { reconcilePending, ...rest } = row.suggestion || {};
+      const changed = await db('bank_transactions')
+        .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+        .update({
+          status: 'unmatched',
+          matched_payout_id: null,
+          match_method: null,
+          matched_at: null,
+          suggestion: {
+            ...rest,
+            rejectedPayoutIds: [...new Set([...(rest.rejectedPayoutIds || []), row.matched_payout_id])],
+            autoRevert: { at: new Date().toISOString(), payoutId: row.matched_payout_id, reason: 'reconciliation rejected by a human on the Banking page' },
+          },
+          updated_at: new Date(),
+        });
+      if (changed) reverted++;
+    } else {
+      const changed = await db('bank_transactions')
+        .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+        .update({ suggestion: { ...(row.suggestion || {}), reconcilePending: true }, updated_at: new Date() });
+      if (changed) remarked++;
+    }
+  }
+  return { reverted, remarked };
+}
+
 async function retryPendingReconciliations() {
+  const healLinks = await healUnreconciledLinks();
   const pending = await db('bank_transactions')
     .where({ status: 'matched_payout' })
     .whereNotNull('matched_payout_id')
@@ -259,7 +308,7 @@ async function retryPendingReconciliations() {
   // (Reversals need no sweep: the unlink route runs its unlink CAS inside
   // the reversal's own transaction, so a failed reversal rolls the unlink
   // back — there is never a committed unlink awaiting reversal.)
-  return { pending: pending.length, retried, humanRejected };
+  return { pending: pending.length, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked };
 }
 
 // A deleted expense/payout SET-NULLs the FK but leaves the status behind —
@@ -387,7 +436,18 @@ async function runDeterministicMatching({ limit } = {}) {
   // moreRemaining stays true. noMatch only demotes it to the examined pool
   // — leftover budget still rescans it, so a later expense can resolve it.
   const markScanned = async (row) => {
-    if (row.suggestion && row.suggestion.noMatch) return;
+    if (row.suggestion && row.suggestion.noMatch) {
+      // Already demoted: in bounded mode, BUMP updated_at anyway — the
+      // examined pool is served oldest-updated first, so this rescan sends
+      // the row to the back of the rotation instead of it hogging the
+      // leftover budget forever while newer examined rows never get a turn.
+      if (bounded) {
+        await db('bank_transactions')
+          .where({ id: row.id, status: 'unmatched' })
+          .update({ updated_at: new Date() });
+      }
+      return;
+    }
     await db('bank_transactions')
       .where({ id: row.id, status: 'unmatched' })
       .update({ suggestion: { ...(row.suggestion || {}), noMatch: true }, updated_at: new Date() });
@@ -408,15 +468,22 @@ async function runDeterministicMatching({ limit } = {}) {
     let moreExamined = false;
     if (!moreFresh && unmatched.length < limit) {
       const fill = limit - unmatched.length;
-      const examined = await baseSelect()
+      // ROTATION: the examined pool is served oldest-UPDATED first, and
+      // every rescan (re-park, transfer re-check, or the markScanned bump)
+      // touches updated_at — round-robin, so no examined row is starved
+      // out of the leftover budget by an older sibling.
+      const examined = await db('bank_transactions')
+        .where({ status: 'unmatched' })
         .whereRaw(`suggestion is not null and ${EXAMINED_SQL}`)
-        .limit(fill + 1);
+        .orderBy('updated_at', 'asc')
+        .limit(fill + 1)
+        .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'suggestion');
       moreExamined = examined.length > fill;
       unmatched = unmatched.concat(examined.slice(0, fill));
     }
     moreRemaining = moreFresh || moreExamined;
   }
-  const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending };
+  const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked };
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);
@@ -431,6 +498,10 @@ async function runDeterministicMatching({ limit } = {}) {
         // records (forceToken/forcedFor, lastUnlink) that must survive
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({ suggestion: { ...(row.suggestion || {}), ...transfer }, updated_at: new Date() });
         summary.transferFlagged++;
+      } else if (bounded) {
+        // rotation bump — an already-flagged row rescanned by a bounded
+        // pass goes to the back of the examined queue (see markScanned)
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({ updated_at: new Date() });
       }
       continue; // transfer-looking rows never auto-match anything
     }

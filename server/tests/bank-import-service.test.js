@@ -16,6 +16,7 @@ const state = {
   bankRows: [],
   payouts: [],
   expenses: [],
+  reconRows: [],
   updates: [],
   queried: [],
   builders: [],
@@ -24,7 +25,7 @@ const state = {
 function makeBuilder(table) {
   const b = {};
   const chain = (name) => { b[name] = jest.fn(() => b); };
-  ['where', 'andWhere', 'whereNot', 'whereNotIn', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
+  ['join', 'where', 'andWhere', 'whereNot', 'whereNotIn', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
     'orderBy', 'limit', 'groupBy', 'groupByRaw', 'select', 'first'].forEach(chain);
   b.update = jest.fn((patch) => {
     // Only row-scoped updates (where({id,...})) are the matcher's claims and
@@ -39,7 +40,15 @@ function makeBuilder(table) {
     state.queried.push(table);
     let rows = table === 'bank_transactions' ? state.bankRows
       : table === 'stripe_payouts' ? state.payouts
-        : table === 'expenses' ? state.expenses : [];
+        : table === 'expenses' ? state.expenses
+          : table === 'bank_reconciliation' ? state.reconRows : [];
+    // the heal query joins payouts and filters to unreconciled, unmarked links
+    if (table === 'bank_transactions as bt') {
+      rows = state.bankRows.filter(r => r.status === 'matched_payout'
+        && r.matched_payout_id
+        && !(r.suggestion && r.suggestion.reconcilePending)
+        && state.payouts.some(p => p.id === r.matched_payout_id && p.reconciled === false));
+    }
     // mirror the status + pending-flag filters so the unmatched loop and the
     // reconciliation sweep each see only their own rows (a row with no
     // status set counts as 'unmatched')
@@ -80,6 +89,7 @@ beforeEach(() => {
   state.bankRows = [];
   state.payouts = [];
   state.expenses = [];
+  state.reconRows = [];
   state.updates = [];
   state.queried = [];
   state.builders = [];
@@ -501,6 +511,41 @@ describe('runDeterministicMatching', () => {
     expect(revert.patch.suggestion.rejectedPayoutIds).toEqual(['po-1']);
     expect(revert.patch.suggestion.autoRevert.payoutId).toBe('po-1');
     expect(revert.patch.suggestion.reconcilePending).toBeUndefined();
+  });
+
+  test('a LATER human rejection heals: the still-matched row is reverted next pass', async () => {
+    // echo long done (no pending flag), then a human rejected the payout on Banking
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
+    state.payouts = [{ id: 'po-1', reconciled: false }];
+    state.reconRows = [{ status: 'rejected', reconciled_by: 'adam' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.linksReverted).toBe(1);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
+    expect(revert.patch.suggestion.rejectedPayoutIds).toEqual(['po-1']);
+    expect(revert.patch.suggestion.autoRevert.payoutId).toBe('po-1');
+  });
+
+  test('a linked-but-unreconciled row with NO human rejection gets its pending marker restored', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
+    state.payouts = [{ id: 'po-1', reconciled: false }];
+    state.reconRows = []; // no rejection on record — this is a lost marker
+    const summary = await runDeterministicMatching();
+    expect(summary.linksRemarked).toBe(1);
+    const remark = state.updates.find(u => u.patch.suggestion && u.patch.suggestion.reconcilePending === true && !u.patch.status);
+    expect(remark).toBeDefined();
+  });
+
+  test('bounded passes ROTATE the examined pool — rescanned noMatch rows go to the back of the queue', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-01', description: 'A', amount: 1, direction: 'debit', suggestion: { noMatch: true } },
+      { id: 'bt-2', txn_date: '2026-08-02', description: 'B', amount: 2, direction: 'debit', suggestion: { noMatch: true } },
+    ];
+    state.expenses = [];
+    await runDeterministicMatching({ limit: 5 });
+    // each rescan writes an updated_at-only bump (rotation), never re-marks
+    const bumps = state.updates.filter(u => u.patch.updated_at && !u.patch.suggestion && !u.patch.status);
+    expect(bumps).toHaveLength(2);
   });
 
   test('a bounded pass reports moreRemaining instead of scanning everything', async () => {
