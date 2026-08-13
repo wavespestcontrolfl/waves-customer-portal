@@ -636,6 +636,30 @@ describe('runDeterministicMatching', () => {
     expect(bumps).toHaveLength(2);
   });
 
+  test('a pending link whose payout was reconciled DISCREPANTLY while waiting is reverted by the sweep', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: true }];
+    state.reconRows = [{ status: 'confirmed', actual_amount: '2400.00' }];
+    reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-1', skipped: true, reason: 'guard' });
+    const summary = await runDeterministicMatching();
+    expect(summary.reconcileRetried).toBe(0);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert).toBeDefined();
+    expect(sugOf(revert).autoRevert.reason).toContain('different banked amount');
+  });
+
+  test('moreRemaining stays true when the fresh pool fills the limit but examined rows still exist', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-09', description: 'A', amount: 1, direction: 'debit', suggestion: null },
+      { id: 'bt-2', txn_date: '2026-08-10', description: 'B', amount: 2, direction: 'debit', suggestion: null },
+      { id: 'bt-3', txn_date: '2026-08-01', description: 'OLD', amount: 3, direction: 'debit', suggestion: { noMatch: true } },
+    ];
+    state.expenses = [];
+    const summary = await runDeterministicMatching({ limit: 2 });
+    expect(summary.scanned).toBe(2); // fresh pool exactly fills the limit
+    expect(summary.moreRemaining).toBe(true); // …but the examined row is not forgotten
+  });
+
   test('a bounded pass reports moreRemaining instead of scanning everything', async () => {
     state.bankRows = [
       { id: 'bt-1', txn_date: '2026-08-09', description: 'A', amount: 1, direction: 'debit', suggestion: null },

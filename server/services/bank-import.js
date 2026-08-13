@@ -339,13 +339,13 @@ async function retryPendingReconciliations() {
   let humanRejected = 0;
   for (const row of pending) {
     const payout = await db('stripe_payouts').where({ id: row.matched_payout_id }).first('id', 'reconciled');
-    if (payout && !payout.reconciled) {
+    if (payout) {
       try {
-        // The shared helper handles the whole outcome ladder: echo when
-        // unreconciled, atomic skip when someone else reconciled or the
-        // link changed, and a full claim REVERT when a human rejected this
-        // payout's reconciliation (their ruling outranks the link). It also
-        // clears the pending flag scoped to this exact link.
+        // The shared helper handles the whole outcome ladder — INCLUDING an
+        // already-reconciled payout: its guard skip revalidates the
+        // confirmed amount and reverts the link if a human reconciled a
+        // DIFFERENT banked amount while our echo was pending. Never clear
+        // the flag for a reconciled payout without that check.
         const result = await echoPayoutReconciliation(row.id, row.matched_payout_id, Number(row.amount), `Auto-matched to bank import row ${row.id} (retry)`);
         if (!(result && result.skipped)) retried++;
         else if (result.reason === 'human_rejected') humanRejected++;
@@ -353,9 +353,8 @@ async function retryPendingReconciliations() {
         logger.warn(`[bank-import] reconciliation retry for payout ${payout.id} failed again: ${err.message}`);
       }
     } else {
-      // payout reconciled meanwhile (intent satisfied) or deleted (nothing
-      // to echo) — clear the flag, scoped to the exact link processed so a
-      // re-matched row's newer flag survives
+      // payout deleted — nothing to echo; clear the flag, scoped to the
+      // exact link processed so a re-matched row's newer flag survives
       await db('bank_transactions')
         .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
         .update({ suggestion: db.raw("suggestion - 'reconcilePending'"), updated_at: new Date() });
@@ -548,8 +547,11 @@ async function runDeterministicMatching({ limit } = {}) {
     const moreFresh = fresh.length > limit;
     unmatched = fresh.slice(0, limit);
     let moreExamined = false;
-    if (!moreFresh && unmatched.length < limit) {
-      const fill = limit - unmatched.length;
+    if (!moreFresh) {
+      // Even with NO leftover capacity (fresh pool exactly == limit), the
+      // examined pool must still be probed — otherwise moreRemaining lies
+      // "done" while parked/noMatch rows still await a rescan.
+      const fill = Math.max(0, limit - unmatched.length);
       // ROTATION: the examined pool is served oldest-UPDATED first, and
       // every rescan (re-park, transfer re-check, or the markScanned bump)
       // touches updated_at — round-robin, so no examined row is starved
