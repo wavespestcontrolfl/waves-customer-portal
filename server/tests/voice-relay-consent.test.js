@@ -426,6 +426,54 @@ describe('existing-customer contact instructions still reach a human', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  // ⭐ THE CALLBACK NUMBER IS NOT AN IDENTITY. On a relay call with no
+  // handed-in identity (unverified / redacted tier), a model-controlled
+  // callback_phone must never resolve an ACCOUNT — identity may come only
+  // from the caller's own ANI.
+  test('an unverified caller\'s callback number never resolves account identity', async () => {
+    const ANI = '+19415550142';
+    const VICTIM_NUMBER = '+19415559999';
+    await createLeadFromExtraction(
+      { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
+      { phone: VICTIM_NUMBER, aniPhone: ANI, callSid: 'CA-cb-identity' },
+    );
+    // The customers lookup ran against the ANI's digits, never the callback's.
+    const lookups = tables.customers.whereRaw.mock.calls.map(([, bindings]) => JSON.stringify(bindings || []));
+    expect(lookups.length).toBeGreaterThan(0);
+    expect(lookups.some((b) => b.includes('5550142'))).toBe(true);
+    expect(lookups.some((b) => b.includes('5559999'))).toBe(false);
+  });
+
+  // ⭐ A CARD NUMBER IN THE INSTRUCTION NEVER PERSISTS. contact_preference is
+  // caller free text that fans out to the lead JSON, the admin notification,
+  // and the recovery marker — scrubbed once, at the source.
+  test('a PAN inside contact_preference is scrubbed from the notification and every durable copy', async () => {
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    await createLeadFromExtraction(
+      { call_summary: 'DNC request.', do_not_contact_request: true, contact_preference: 'do not contact me, my card 4111 1111 1111 1111 was charged' },
+      { phone: CALLER, callSid: 'CA-dnc-pan' },
+    );
+    const [, , body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(body).not.toContain('4111 1111 1111 1111');
+    expect(JSON.stringify(opts.metadata)).not.toContain('4111 1111 1111 1111');
+    for (const w of writes) {
+      expect(JSON.stringify(w.payload || {})).not.toContain('4111 1111 1111 1111');
+    }
+  });
+
+  test('a PAN inside contact_preference never reaches recordSuppression.capturedBody', async () => {
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+    await executeTool('capture_lead', {
+      call_summary: 'DNC request.',
+      contact_preference: 'do not contact me at all, my card 4111 1111 1111 1111 was charged',
+      do_not_contact_request: true,
+    }, { callSid: 'CA-pan-body', from: CALLER, callerVerified: true });
+    expect(recordSuppression).toHaveBeenCalled();
+    const { capturedBody } = recordSuppression.mock.calls[0][0];
+    expect(capturedBody).not.toContain('4111 1111 1111 1111');
+    expect(capturedBody).toContain('[card ending');
+  });
+
   // ⭐ A FAILED COMPLIANCE ARTIFACT GETS A RETRY RAIL. The feed row is the ONLY
   // structured artifact on this no-lead path — when it fails to persist, a
   // durable obligation marker lands on the call's own call_log row so the

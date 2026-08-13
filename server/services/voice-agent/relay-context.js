@@ -653,9 +653,18 @@ async function loadCompletedVisits(customerId, limit = 5) {
     // anything that is not the reviewed two-section draft simply isn't spoken.
     const { technicianReportCustomerCopy } = require('../service-report/technician-report-copy');
     const reportCopy = suppressed ? null : technicianReportCustomerCopy(svc.technician_notes);
-    const notes = reportCopy && reportCopy.body
-      ? customerSafeServiceNotes(reportCopy.body, structured)
-      : null;
+    // ⭐ PARSER-APPROVED IS NOT CODE-FREE (mirror of relay-visit's report
+    // path): the reviewed parse validates shape and compliance language, but a
+    // valid section can still carry a gate or lockbox code — the canonical
+    // redactor runs on top, failing CLOSED: no scrub, no spoken note.
+    const notes = (() => {
+      if (!(reportCopy && reportCopy.body)) return null;
+      try {
+        const { redactAccessCodes } = require('../context-aggregator');
+        if (typeof redactAccessCodes !== 'function') return null;
+        return redactAccessCodes(customerSafeServiceNotes(reportCopy.body, structured));
+      } catch { return null; }
+    })();
     // The ISO day rides beside the spoken one: get_service_report's contract
     // is exact YYYY-MM-DD (spoken forms are rejected), so history must hand
     // the model a value the report tool actually accepts. Same DATE-trap

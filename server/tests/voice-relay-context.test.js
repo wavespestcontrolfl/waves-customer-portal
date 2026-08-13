@@ -695,6 +695,21 @@ describe('GATE ON — account tools', () => {
     technicianReportCustomerCopy.mockImplementation((notes) => (notes ? { body: String(notes) } : null));
   });
 
+  // ⭐ PARSER-APPROVED IS NOT CODE-FREE: a valid reviewed section can still
+  // carry a gate/lockbox code — the canonical redactor runs over the approved
+  // copy too.
+  test('a gate code inside PARSER-APPROVED copy is still redacted before speech', async () => {
+    primeDb({
+      records: [{
+        service_date: '2026-07-31', service_type: 'Pest Control',
+        technician_notes: 'Treated the perimeter. Gate code 4482 for the side entrance.', structured_notes: null, status: 'completed',
+      }],
+    });
+    const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'full', callerAttested: true });
+    expect(out).toContain('Friday July 31');
+    expect(out).not.toContain('4482');
+  });
+
   test('balance of zero reads as none', async () => {
     openBalanceSummary.mockResolvedValue({ total: 0, count: 0, moreCount: 0, invoices: [] });
   openBalanceExists.mockResolvedValue(false);

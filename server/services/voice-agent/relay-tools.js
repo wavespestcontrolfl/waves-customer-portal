@@ -1081,11 +1081,21 @@ async function executeTool(name, input = {}, ctx = {}) {
           // texts running — the exact inversion of what they asked for. The
           // withdrawal belongs to the number on the call.
           const optOutPhone = toE164(ctx.from || '') || callerPhone;
+          // ⭐ capturedBody is caller free text headed for durable storage —
+          // PAN-scrubbed like every other copy of it, failing closed to the
+          // generic line (the suppression itself must still land).
+          let capturedBody = 'Caller asked not to be contacted (voice agent).';
+          if (input.contact_preference) {
+            try {
+              const { scrubPans } = require('../../utils/pan-scrub');
+              capturedBody = scrubPans(String(input.contact_preference));
+            } catch { /* keep the generic line */ }
+          }
           const suppression = await recordSuppression({
             phone: optOutPhone,
             reason: 'opt_out_natural_language',
             source: 'voice_agent',
-            capturedBody: String(input.contact_preference || 'Caller asked not to be contacted (voice agent).').slice(0, 300),
+            capturedBody: capturedBody.slice(0, 300),
           });
           smsSuppressionApplied = !!(suppression && suppression.ok);
           if (suppression && suppression.ok) {

@@ -380,9 +380,19 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
   const { technicianReportCustomerCopy } = require('../service-report/technician-report-copy');
   const { customerSafeServiceNotes } = require('../project-types');
   const reportCopy = technicianReportCustomerCopy(record.technician_notes);
-  const noteText = reportCopy && reportCopy.body
-    ? promptSafeUntrusted(customerSafeServiceNotes(reportCopy.body, structured), 240)
-    : null;
+  // ⭐ PARSER-APPROVED IS NOT CODE-FREE. The reviewed parse validates shape and
+  // compliance language, but a valid one-line section can still carry "gate
+  // code 4417" — the canonical redactor runs over the approved copy too, and
+  // FAILS CLOSED: no scrub, no spoken note.
+  const redactedBody = (() => {
+    if (!(reportCopy && reportCopy.body)) return null;
+    try {
+      const { redactAccessCodes } = require('../context-aggregator');
+      if (typeof redactAccessCodes !== 'function') return null;
+      return redactAccessCodes(customerSafeServiceNotes(reportCopy.body, structured));
+    } catch { return null; }
+  })();
+  const noteText = redactedBody ? promptSafeUntrusted(redactedBody, 240) : null;
 
   const lines = [`Visit on ${speakDate(record.service_date) || 'an unrecorded date'}`
     + `${record.service_type ? ` — ${promptSafeUntrusted(record.service_type, 60)}` : ''}.`];
@@ -411,11 +421,13 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
     // area is technician free text too, and "lockbox 4417 at the side gate"
     // in a recommendation would be spoken verbatim. Same canonical redactor
     // the transcript and history paths use.
+    // FAIL CLOSED: a redactor that cannot run drops the line — an unredacted
+    // lockbox code spoken down the phone is the harm this exists to prevent.
     try {
       const { redactAccessCodes } = require('../context-aggregator');
-      return typeof redactAccessCodes === 'function' ? redactAccessCodes(text) : text;
+      return typeof redactAccessCodes === 'function' ? redactAccessCodes(text) : null;
     } catch {
-      return text;
+      return null;
     }
   };
   // ⭐ PROVENANCE, NOT CATEGORY — the customer report's own rule

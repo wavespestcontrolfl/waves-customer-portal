@@ -69,7 +69,22 @@ const CONTACT_METHODS = new Set(['phone', 'sms', 'email', 'unspecified']);
  * no preference can never blank one already recorded.
  */
 function contactPreferenceFields(extracted = {}) {
-  const note = extracted.contact_preference == null ? '' : String(extracted.contact_preference).trim().slice(0, 300);
+  // ⭐ THE PAN SCRUB RUNS AT THE SOURCE, before the verbatim note fans out to
+  // every durable copy (lead JSON, activity metadata, the admin notification,
+  // the call-log recovery marker, recordSuppression's capturedBody). A caller
+  // who volunteers a card number mid-instruction must not leave it in any of
+  // them. Fail CLOSED: if the scrub cannot run, the note is dropped — the
+  // structured method/DNC flags still carry the instruction.
+  let rawNote = extracted.contact_preference == null ? '' : String(extracted.contact_preference);
+  if (rawNote) {
+    try {
+      const { scrubPans } = require('../utils/pan-scrub');
+      rawNote = scrubPans(rawNote);
+    } catch {
+      rawNote = '';
+    }
+  }
+  const note = rawNote.trim().slice(0, 300);
   const method = String(extracted.preferred_contact_method || '').trim().toLowerCase();
   const dnc = extracted.do_not_contact_request === true;
   if (!note && !CONTACT_METHODS.has(method) && !dnc) return null;
@@ -310,9 +325,23 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   // lead for a customer we already recognised. `identityCustomerId` keeps the
   // two apart: the matched account is the identity, the phone is only where to
   // call back.
+  // ⭐ AND WHEN NO IDENTITY WAS HANDED IN, THE CALLBACK NUMBER STILL ISN'T ONE.
+  // On a relay call (opts.aniPhone present) with no identityCustomerId — an
+  // unverified or redacted-tier caller — the model-controlled callback_phone
+  // must never resolve an ACCOUNT: any declared number would attach this
+  // call's contact instruction, language hint, and lifecycle notification to
+  // whoever owns it. Identity may come only from the caller's own ANI; the
+  // callback number stays what it is — where to call back. Non-relay callers
+  // (no aniPhone) keep the legacy phone lookup unchanged.
+  let identityPhone = phone;
+  if (!opts.identityCustomerId && opts.aniPhone) {
+    const ownAni = phoneDigits(opts.aniPhone).slice(-10);
+    const lookupNumber = phoneDigits(phone).slice(-10);
+    identityPhone = ownAni && ownAni === lookupNumber ? phone : opts.aniPhone;
+  }
   let customer = opts.identityCustomerId
     ? await db('customers').where({ id: opts.identityCustomerId }).whereNull('deleted_at').first()
-    : await findCustomerByPhone(phone);
+    : await findCustomerByPhone(identityPhone);
   // Name-aware guard: on a shared line the phone-only match can resolve the
   // wrong household member. If the agent captured a name that conflicts with the
   // matched customer's, don't link (treat as a new, unlinked caller) rather than

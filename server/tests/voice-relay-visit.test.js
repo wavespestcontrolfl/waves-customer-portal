@@ -344,6 +344,21 @@ describe('get_service_report', () => {
     );
   });
 
+  // ⭐ PARSER-APPROVED IS NOT CODE-FREE: a valid reviewed section can still
+  // carry a gate code — the canonical redactor runs over the approved copy.
+  test('a gate code inside the REVIEWED draft is redacted before speech', async () => {
+    const notesWithCode = [
+      'WHAT WE DID',
+      'We treated the exterior perimeter. Gate code 4417 for the side entrance.',
+      'WHAT WE FOUND',
+      'Light ant activity along the kitchen slab.',
+    ].join('\n');
+    primeDb({ service_records: [{ ...RECORD, technician_notes: notesWithCode }] });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).toContain('kitchen slab'); // the reviewed note still speaks
+    expect(out).not.toContain('4417');     // the code does not
+  });
+
   test('an internal note APPENDED to the reviewed draft rejects the whole parse — nothing is spoken', async () => {
     primeDb({
       service_records: [{
