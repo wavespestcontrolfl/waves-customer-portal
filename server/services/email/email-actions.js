@@ -51,6 +51,15 @@ function parseExtractedAddress(raw) {
   if (!text) return { line1: null, city: null, state: null, zip: null };
   const zip = (text.match(/\b\d{5}\b/) || [null])[0];
   const parts = text.split(',').map((p) => p.trim()).filter(Boolean);
+  // A unit-FIRST classifier address ("Unit 7, 123 Main St, Bradenton…")
+  // put the designator in parts[0] — line1 became "Unit 7", the street was
+  // misread as the city, and readiness asked for an address the customer
+  // had already supplied (codex GH r57 P2). Swap so the street leads;
+  // the designator folds back into line1 exactly like a trailing one.
+  if (parts.length > 1 && ADDRESS_UNIT_RE.test(parts[0]) && /^\d/.test(parts[1])) {
+    const unit = parts.shift();
+    parts[0] = `${parts[0]}, ${unit}`;
+  }
   const line1Parts = [parts[0] || text];
   const rest = parts.slice(1);
   while (rest.length && (ADDRESS_UNIT_RE.test(rest[0]) || /^#?\d+[A-Za-z]?$/.test(rest[0]))) {
@@ -75,6 +84,144 @@ function parseExtractedAddress(raw) {
  * service interest are required by the readiness gate — an email without
  * them stays a plain lead exactly as today. Never sends anything.
  */
+// The sender's OWN request text: quoted-history lines dropped, body cut at
+// the first reply/signature marker. Conservative — an unrecognized
+// signature style just means extra text reaches the scan, which the
+// commercial patterns already require strong premises wording to match.
+// A `From:` line is a reply header in a reply and a PAYLOAD FIELD in an
+// automated form notification ("From: Jane Doe" / "Phone: …" / "Message: our
+// warehouse needs quarterly service"). Breaking at every `From:` discarded
+// the entire request and left a residential-priced draft eligible for
+// auto-send (codex r48 P1). Preceding content does NOT settle it either — a
+// form notification routinely opens with a preamble line ("New website
+// inquiry") before its fields, and gating on that still dropped the request
+// (codex r50 P1). So `From:` ends the sender's text only inside a
+// recognizable QUOTED BLOCK: after a forwarded/original-message separator,
+// or when the following lines form an RFC header block (`To:` plus
+// `Sent:`/`Date:`/`Subject:`), which a form payload does not carry.
+// Leaking a same-thread quoted original into the scan is the benign
+// direction — r43/r47 deliberately feed prior-thread prose to it — while a
+// forward of a DIFFERENT property is caught by the separator above.
+const FORWARD_SEPARATOR_RE = /^\s*(?:[-_]{2,}\s*)?(?:begin\s+)?(?:forwarded message|original message)/i;
+function looksLikeQuotedHeaderBlock(lines, index) {
+  const window = lines.slice(index + 1, index + 6);
+  // `To:` is the tell — a form notification is addressed TO us and does not
+  // echo a recipient field; a quoted header block always carries one, plus a
+  // timestamp (Gmail `Date:`, Outlook `Sent:`) or the original `Subject:`.
+  const hasTo = window.some((l) => /^\s*to:\s/i.test(l));
+  const hasHeaderMate = window.some((l) => /^\s*(?:sent|date|subject|cc):\s/i.test(l));
+  return hasTo && hasHeaderMate;
+}
+
+function emailProseForScan(body) {
+  const lines = String(body || '').split('\n');
+  const out = [];
+  const hasContent = () => out.some((l) => l.trim());
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (/^\s*>/.test(line)) continue; // quoted history
+    // A forwarded/original-message separator ends the sender's own text
+    // wherever it appears (its `From:`/`To:` header block follows).
+    if (FORWARD_SEPARATOR_RE.test(line)) break;
+    if (/^\s*From:\s/i.test(line)) {
+      if (looksLikeQuotedHeaderBlock(lines, i)) break;
+      // Form-payload field: keep scanning for the request text below it, but
+      // never scan the FIELD itself — a sender line carrying an employer
+      // ("Sarasota Warehouse Supply") is not a statement about the premises
+      // being treated (same rule as the work-signature strip, codex r9 P2).
+      continue;
+    }
+    // An underscore divider is Outlook's reply separator AND a common form
+    // decoration — the line itself doesn't say which; what FOLLOWS does.
+    // Breaking at every `__` cut a form's payload before its Message: field
+    // (codex r51 P1), so the divider ends the scan only when a quoted
+    // header block follows; otherwise it's decoration and the scan skips it
+    // (the From:-field rule above then judges the payload normally).
+    if (/^\s*_{2,}\s*$/.test(line)) {
+      let j = i + 1;
+      while (j < lines.length && !lines[j].trim()) j += 1;
+      if (j < lines.length && /^\s*From:\s/i.test(lines[j]) && looksLikeQuotedHeaderBlock(lines, j)) break;
+      continue;
+    }
+    // Structural markers (separator, reply header, forwarded header) end
+    // the sender's own text wherever they appear. "Sent from" counts only
+    // in its DEVICE-signature form — "Sent from our warehouse, where we
+    // need pest control" is request prose (codex r29 P1); any other
+    // "Sent from …" is handled by the content-gated group below.
+    if (/^\s*(?:--\s*$|__|On .{5,120} wrote:\s*$)/i.test(line)) break;
+    if (/^\s*Sent from (?:my |an |the )?(?:iphone|ipad|ipod|android|samsung|galaxy|pixel|blackberry|windows|outlook|gmail|yahoo|mail|mobile|phone|tablet|device)\b/i.test(line)) break;
+    // Courtesy signoffs count only as WHOLE lines AND only once request
+    // content precedes them — "Thanks!" can OPEN a reply ("Thanks!\nWe
+    // need pest control for our warehouse…"), and breaking there discarded
+    // the entire request (codex r18 P1; whole-line rule from r10 P1).
+    if (hasContent()
+      && (/^\s*(?:best regards|kind regards|sincerely|regards|thanks|thank you|thx)[,.!]?\s*$/i.test(line)
+        || /^\s*Sent from /i.test(line))) break;
+    out.push(line);
+  }
+  return out.join('\n').slice(0, 2000);
+}
+
+// The EARLIEST messages carry the ask; a later reply usually only supplies
+// the missing contact detail. Bounded so a long thread can't unbound the
+// scan text.
+const PRIOR_THREAD_SCAN_MESSAGES = 5;
+
+// Scope evidence routinely lives in an EARLIER message of the thread: an
+// initial "pest control for our warehouse" email that lacks a phone becomes
+// a plain lead, and the reply that supplies the phone carries no premises
+// wording at all. The LEAD ROW cannot carry that prose forward — `leads` has
+// no `description` column, and the email lead insert writes neither it nor
+// `transcript_summary` (the subject goes to lead_activities.description) —
+// so read the thread's earlier messages directly (codex r47 P1).
+// Only CLASSIFIED inbound rows count: Waves' own drafts and sent replies
+// land in `emails` with a null classification (email-sync 'outbound_skipped'),
+// and our own reply prose is not the customer's ask; blocked-sender spam is
+// excluded for the same reason.
+async function priorThreadProseForScan(email, lead) {
+  const threadId = String(email?.gmail_thread_id || '').trim();
+  // Same LEAD only: automated form mailers thread every notification
+  // together, so an unrelated prior submission's commercial wording could
+  // block another prospect's valid residential draft (codex r58 P2). The
+  // lead is how email-sync identifies the prospect — an earlier message of
+  // the SAME inquiry carries this lead's id (the r47 case), a different
+  // prospect's never does. No lead id ⇒ nothing to scope to ⇒ scan this
+  // message alone.
+  if (!threadId || !lead?.id) return '';
+  try {
+    let query = db('emails')
+      .where('gmail_thread_id', threadId)
+      .where('lead_id', lead.id)
+      .whereNot('id', email.id)
+      .whereNotNull('classification')
+      .whereNot('classification', 'spam');
+    // PRIOR means received BEFORE this email — a reclassify/retry of an
+    // older message must not scan the thread's LATER mail as its history:
+    // a later commercial request would contaminate an earlier residential
+    // inquiry's readiness scan (codex r53 P1). An email with no
+    // received_at keeps the whole-thread read — losing genuine earlier
+    // evidence is the costlier direction.
+    if (email?.received_at) query = query.where('received_at', '<', email.received_at);
+    const priors = await query
+      .orderBy('received_at', 'asc')
+      .limit(PRIOR_THREAD_SCAN_MESSAGES)
+      .select('subject', 'body_text', 'snippet');
+    return (Array.isArray(priors) ? priors : [])
+      .map((prior) => [
+        String(prior?.subject || '').trim(),
+        emailProseForScan(prior?.body_text || prior?.snippet || ''),
+      ].filter(Boolean).join('\n'))
+      .filter((text) => text.trim())
+      .join('\n');
+  } catch (e) {
+    // Fail-soft: the scan degrades to THIS message's own prose — the
+    // behavior before the carry-forward existed. A DB hiccup reading old
+    // thread mail must never cost the lead in hand.
+    logger.warn(`[email-actions] prior-thread scope scan unavailable: ${e.message}`);
+    return '';
+  }
+}
+
 async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
   const {
     buildAutomatedLeadDraftEstimate,
@@ -94,10 +241,33 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
     return { created: false, skipped: 'no_usable_phone' };
   }
   const addr = parseExtractedAddress(extracted.address);
+  const priorThreadProse = await priorThreadProseForScan(email, lead);
   const intake = {
     email: lead.email || null,
     rawPhone: phone,
     serviceInterest: extracted.service_interest || null,
+    // The sender's own prose — the readiness gate's commercial-signal scan
+    // reads intake.message; without it an email describing an industrial/
+    // office property with a generic "Pest Control" interest bypassed the
+    // category guard entirely (codex pre-push P1). Signature/quoted-history
+    // stripped first: a residential inquiry sent under a work signature
+    // ("Suite 200") must not read as a commercial premises (codex r9 P2).
+    // The SUBJECT carries the ask as often as the body ("Pest control for
+    // our warehouse" + a generic body), and the classifier already reads
+    // it — excluding it here let that inquiry pass readiness as residential
+    // (codex r40 P1).
+    // The commercial-scope evidence can live in an EARLIER message of the
+    // thread (codex r43 P1) — read from the thread's own stored mail rather
+    // than from the lead row, which never persists that prose (see
+    // priorThreadProseForScan, codex r47 P1). transcript_summary stays in
+    // the scan for a lead that ORIGINATED on a call and is being completed
+    // by email — that column is populated on the call path.
+    message: [
+      String(email?.subject || '').trim(),
+      emailProseForScan(email?.body_text || email?.snippet || ''),
+      priorThreadProse,
+      String(lead?.transcript_summary || '').trim(),
+    ].filter(Boolean).join('\n'),
     normalizedAddress: {
       line1: addr.line1,
       city: addr.city,

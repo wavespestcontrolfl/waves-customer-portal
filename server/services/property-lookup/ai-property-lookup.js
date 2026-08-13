@@ -1985,7 +1985,13 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
   return sawDisagreement;
 }
 
-async function lookupPropertyFromAITrio(address, geoContext = null) {
+// Optional `diag` out-param: when supplied, the trio records which AI legs
+// LOOK timed out — each leg consumes its own timeout internally and
+// resolves null, so a null that took (about) the leg's full configured
+// timeout is the only externally observable signal. Purely observational
+// (feeds the property_lookups attempt-status segmentation); never alters
+// the returned record.
+async function lookupPropertyFromAITrio(address, geoContext = null, diag = null) {
   // County street-string matching and AI search prompts both get the
   // geocoder's canonical address (typo/postal-city fixes); falls back to the
   // typed address on geocode miss or partial match.
@@ -1999,21 +2005,35 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   let parcel = null;
   let parkParcelSignal = null;
   const gisPrecision = parcelGisPrecision(geoContext);
+  // Diag helper shared by county and AI legs (see the function comment):
+  // a null result after ~the leg's whole configured timeout is the only
+  // externally observable timeout signal — every leg consumes its own
+  // timeout errors internally (codex r4 P2: county GIS/PAO outages were
+  // invisible to the provider_timeout segment).
+  const diagTimedLeg = (name, timeoutMs, promise) => {
+    const legT0 = Date.now();
+    return promise.then((value) => {
+      if (diag && value === null && Number(timeoutMs) > 0 && Date.now() - legT0 >= Number(timeoutMs) - 250) {
+        (diag.providerTimeouts = diag.providerTimeouts || []).push(name);
+      }
+      return value;
+    });
+  };
   if (gisPrecision) {
     const gisTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyLookupMs(t0, countyTimeoutMs));
     // County roll layer first: fresher than the annual FDOR statewide roll (new
     // plats appear sooner) and it carries the land-use description that splits
     // paired villas / condos from detached homes. FDOR statewide is the
     // fallback, within whatever county budget remains.
-    parcel = await lookupCountyParcelByPoint(geoContext.lat, geoContext.lng, {
+    parcel = await diagTimedLeg('county_gis', gisTimeoutMs, lookupCountyParcelByPoint(geoContext.lat, geoContext.lng, {
       county: geoContext.county,
       timeoutMs: gisTimeoutMs,
-    }).catch(() => null);
+    }).catch(() => null));
     if (!parcel) {
       const fdorTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyLookupMs(t0, countyTimeoutMs));
       if (fdorTimeoutMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
-        parcel = await lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: fdorTimeoutMs })
-          .catch(() => null);
+        parcel = await diagTimedLeg('fdor_gis', fdorTimeoutMs, lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: fdorTimeoutMs })
+          .catch(() => null));
       }
     }
     if (parcel && isMobileHomeParkParcel(parcel)) {
@@ -2074,24 +2094,26 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
       remainingMs - COUNTY_LOOKUP_MIN_REMAINING_MS,
     );
     if (byParcelTimeoutMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
-      countyRecord = await lookupPropertyFromCountyByParcel(parcel, searchAddress, {
-        timeoutMs: byParcelTimeoutMs,
-        geoContext,
-      }).catch(() => null);
+      countyRecord = await diagTimedLeg('county_pao_parcel', byParcelTimeoutMs,
+        lookupPropertyFromCountyByParcel(parcel, searchAddress, {
+          timeoutMs: byParcelTimeoutMs,
+          geoContext,
+        }).catch(() => null));
     }
   }
   if (!countyRecord) {
     const remainingMs = remainingCountyLookupMs(t0, countyTimeoutMs);
     if (remainingMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
-      countyRecord = await lookupPropertyFromCountyRecords(searchAddress, {
-        timeoutMs: remainingMs,
-        geoContext,
-      }).catch((err) => {
-        logger.warn('[county-property] lookup failed before AI fallback', {
-          error: summarizeProviderError(err),
-        });
-        return null;
-      });
+      countyRecord = await diagTimedLeg('county_pao_address', remainingMs,
+        lookupPropertyFromCountyRecords(searchAddress, {
+          timeoutMs: remainingMs,
+          geoContext,
+        }).catch((err) => {
+          logger.warn('[county-property] lookup failed before AI fallback', {
+            error: summarizeProviderError(err),
+          });
+          return null;
+        }));
     }
   }
 
@@ -2105,10 +2127,17 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
     return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
   }
 
+  // Same diag wrapper as the county legs above: a leg resolving null after
+  // ~its full configured timeout is a suspected provider timeout.
+  const aiLegTimeoutMs = {
+    claude: positiveInt(process.env.AI_PROPERTY_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+    openai: positiveInt(process.env.AI_PROPERTY_TIMEOUT_MS, 60000),
+    gemini: positiveInt(process.env.AI_PROPERTY_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+  };
   const results = await Promise.allSettled([
-    lookupPropertyFromAI(searchAddress),
-    lookupPropertyFromOpenAI(searchAddress),
-    lookupPropertyFromGemini(searchAddress),
+    diagTimedLeg('claude', aiLegTimeoutMs.claude, lookupPropertyFromAI(searchAddress)),
+    diagTimedLeg('openai', aiLegTimeoutMs.openai, lookupPropertyFromOpenAI(searchAddress)),
+    diagTimedLeg('gemini', aiLegTimeoutMs.gemini, lookupPropertyFromGemini(searchAddress)),
   ]);
   const aiRecords = results
     .filter((r) => r.status === 'fulfilled' && r.value)

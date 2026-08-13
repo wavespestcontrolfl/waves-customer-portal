@@ -33,6 +33,10 @@ const {
 } = require('../estimate-automation-duplicates');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
 const { sameStreetAddress } = require('./address-compare');
+const {
+  unitScopeGuardrailsEnabled,
+  hasPrimaryStreetNumber,
+} = require('./unit-scope-model');
 
 const LANES = { GREEN: 'green', YELLOW: 'yellow', RED: 'red' };
 
@@ -99,6 +103,35 @@ const HEURISTIC_TURF_BASES = new Set([
 function lineHasHeuristicTurf(line = {}) {
   return String(line.turfConfidence || '').toLowerCase() === 'low'
     || (line.turfBasis != null && HEURISTIC_TURF_BASES.has(line.turfBasis));
+}
+
+// Bases that describe a REAL treated area for the priced property (an
+// operator/profile measurement, a supplied lawn area, or a confident
+// lookup estimate) — the complement of HEURISTIC_TURF_BASES above.
+const MEASURED_TURF_BASES = new Set(['measuredTurfSf', 'lawnSqFt', 'estimatedTurfSf']);
+
+// True when every turf-bearing line priced from a measured/supplied area.
+// A unit quote with such a measurement needs no lot: its treated area is
+// already known, so the missing-lot review reason would be false (codex
+// r18 P2).
+function turfAreaFullyMeasured(lines = [], engineInput = null) {
+  // The engine INPUT is authoritative: priceOneTimeLawn consumes the
+  // measured area through its recurring calculation but omits turfBasis/
+  // turfSf from the returned line, so a line-metadata-only test parked
+  // every measured one-time lawn unit quote (codex r35 P1).
+  // ...but a PROFILE-sourced area whose unit could not be verified is not a
+  // measurement of the quoted unit — Apt A's saved turf must not silence the
+  // no-lot review on Apt B (codex pre-push r19 P1). Only an explicit false
+  // refuses: a measured area from any other source carries no such flag and
+  // keeps the shortcut.
+  if (positive(engineInput?.measuredTurfSf)) {
+    return engineInput?.measuredTurfUnitVerified !== false;
+  }
+  const turfLines = lines.filter((l) => l.turfBasis != null
+    || l.turfSf || l.turfSqFt || l.treatableArea);
+  return turfLines.length > 0
+    && turfLines.every((l) => MEASURED_TURF_BASES.has(String(l.turfBasis || ''))
+      && !lineHasHeuristicTurf(l));
 }
 
 // ── Engine input ──────────────────────────────────────────────
@@ -171,7 +204,11 @@ function storiesSourceForPricing(propertyFacts) {
   return 'lookup';
 }
 
-function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices = [], profileDescribesQuotedProperty = false, lookupEnriched = null }) {
+function buildEngineInput({
+  intent, propertyFacts, context, priorQualifyingServices = [],
+  profileDescribesQuotedProperty = false, profileMeasurementUnitExact = false,
+  lookupEnriched = null,
+}) {
   // profileDescribesQuotedProperty is POSITIVELY established by the caller
   // (the trusted profile's saved address street-matches the final quoted
   // address) — an extraction-supplied different address never re-gathers,
@@ -209,11 +246,26 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
       ? 'commercial'
       : (propertyFacts?.propertyType
         || (profileDescribesQuotedProperty ? pricingSafePropertyType(context?.customer?.property_type) : null)
-        || 'Single Family'),
+        // Gate ON: an unresolved classification stays visibly 'unknown'
+        // (the pest normalizer prices it at the neutral default, same
+        // dollars as before, and classifyLane parks the draft with an
+        // explicit property_type_unresolved reason) — it must never
+        // silently become single_family, because a plausible-but-wrong
+        // type prices confidently wrong where a missing one is observable
+        // and recoverable (owner ruling 2026-08-11).
+        || (unitScopeGuardrailsEnabled() ? 'unknown' : 'Single Family')),
     // customers.property_sqft is TREATED LAWN AREA by schema — the correct
     // plumbing is the engine's measured-turf input, never home sqft.
     ...((!isCommercial && profileDescribesQuotedProperty && positive(context?.customer?.property_sqft))
-      ? { measuredTurfSf: Number(context.customer.property_sqft) }
+      ? {
+        measuredTurfSf: Number(context.customer.property_sqft),
+        // Provenance, not pricing: this number is the PROFILE's, admitted by
+        // a match that tolerates a missing/absent unit. It still prices
+        // exactly as before — but it may not stand in for a measurement OF
+        // THIS UNIT when a unit-scoped draft asks whether review can be
+        // suppressed (codex pre-push r19 P1).
+        measuredTurfUnitVerified: profileMeasurementUnitExact === true,
+      }
       : {}),
     // Existing-customer WaveGuard context: qualifying recurring services the
     // caller already has, so an add-on quote gets the combined tier discount
@@ -509,7 +561,7 @@ function verifyEvidenceQuotes(intent, context) {
 }
 
 // ── Lane classification ───────────────────────────────────────
-function classifyLane({ intent, propertyFacts, engineResult, totals, comps, calibration, context }) {
+function classifyLane({ intent, propertyFacts, engineResult, engineInput = null, totals, comps, calibration, context }) {
   const reasons = [];
 
   if (!intent || intent.decision !== 'draft') {
@@ -520,6 +572,34 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   }
   if (!intent.address) {
     return { lane: LANES.RED, reasons: ['no service address established on the call or profile'] };
+  }
+  if (unitScopeGuardrailsEnabled()) {
+    // An address without a primary street NUMBER cannot be geocoded or
+    // parcel-matched with confidence — every downstream property fact would
+    // be a guess. Red, never a silent no-data draft (owner ruling
+    // 2026-08-11: fail loud on incomplete addresses).
+    if (!hasPrimaryStreetNumber(intent.address)) {
+      return {
+        lane: LANES.RED,
+        reasons: [`service address "${intent.address}" has no primary street number — get the full address before quoting`],
+        causes: ['incomplete_address'],
+      };
+    }
+    // The call positively typed the premises commercial while the draft
+    // stayed residential: reclassifying is the composer's job, so a
+    // conflict here means one of them is wrong — no automated price until
+    // an operator resolves which (owner ruling: category conflicts red).
+    // Read from the stamp index.js resolved with the re-gather in view —
+    // the raw primary-property extraction must not judge a re-gathered
+    // secondary property (codex r3 P1).
+    const conflictType = propertyFacts?.categoryConflict || null;
+    if (conflictType) {
+      return {
+        lane: LANES.RED,
+        reasons: [`call describes a commercial premises (${conflictType}) but the draft is residential — resolve the category before quoting`],
+        causes: ['category_conflict'],
+      };
+    }
   }
 
   const lines = engineResult?.lineItems || [];
@@ -567,8 +647,25 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   const LOT_DRIVEN_SERVICES = ['lawn', 'oneTimeLawn', 'lawnPestControl', 'mosquito', 'oneTimeMosquito', 'treeShrub'];
   const usesLot = LOT_DRIVEN_SERVICES.some((s) => intent.services?.[s])
     || lines.some((l) => l.turfSf || l.turfSqFt || l.treatableArea);
+  // A measured TURF area validates only the services that price from turf
+  // (the lawn family). Mosquito and tree & shrub derive their treatable
+  // area from the LOT, so a unit with measured lawn turf plus a mosquito
+  // request still has nothing real behind the mosquito line — the measured
+  // turf must not silence the no-lot review for it (codex r54 P1).
+  const TURF_PRICED_SERVICES = new Set(['lawn', 'oneTimeLawn', 'lawnPestControl']);
+  const requestsNonTurfLotService = LOT_DRIVEN_SERVICES
+    .some((s) => !TURF_PRICED_SERVICES.has(s) && intent.services?.[s]);
   if (usesLot && FALLBACK_SQFT_SOURCES.has(propertyFacts?.lot?.source)) {
     reasons.push(`lot sqft from fallback source (${propertyFacts.lot.source})`);
+  } else if (usesLot && String(propertyFacts?.lot?.source || '').startsWith('not_applicable:')
+    && (requestsNonTurfLotService || !turfAreaFullyMeasured(lines, engineInput))) {
+    // A unit/suite scope has NO individual lot by design — but a
+    // lot-driven service (lawn/mosquito/T&S) on that scope has nothing to
+    // price from: the engine's zero-area fallback returns a minimum-priced
+    // line that would otherwise green-lane (codex r5 P1). The resolved
+    // not_applicable lot is correct for pest; for lot-driven work only a
+    // unit-scoped treatable-area measurement can make the draft real.
+    reasons.push('lot-driven service on a unit/suite scope — no individual lot exists; measure the treatable area before send');
   } else if (usesLot && String(propertyFacts?.lot?.confidence || '').toLowerCase() === 'low') {
     // A retained V1 lot can be caller-stated at LOW confidence (the V2
     // gate-on apply keeps real parcels instead of stamping a false "no
@@ -579,6 +676,14 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if (propertyFacts?.home?.disputed) reasons.push('caller-stated sqft disagrees with the county roll');
   if (propertyFacts?.lot?.disputed) reasons.push('caller-stated lot size disagrees with the county parcel');
   if (propertyFacts?.newConstruction) reasons.push('new construction — county roll not yet assessed');
+  // Gate ON: the type that reached the pricer was 'unknown', outside the
+  // pest pricer's vocabulary, or a multifamily family collapsed to
+  // single_family (propertyTypeUnresolved is stamped off the ACTUAL engine
+  // input in index.js, so this can never drift from what priced) —
+  // observable and recoverable, but never a green one-click send.
+  if (propertyFacts?.propertyTypeUnresolved) {
+    reasons.push('property type unresolved or not in the pricing vocabulary — classify the property before send (priced at the neutral single-family default)');
+  }
   if (manualLines.length) {
     const pricedManual = manualLines.filter((l) => Number(l.monthlyAfterDiscount ?? l.monthly) || Number(l.priceAfterDiscount ?? l.price));
     reasons.push(`partial draft: ${manualLines.map((l) => l.service).join(', ')} still need${manualLines.length === 1 ? 's' : ''} manual scoping${pricedManual.length ? ' — their PROVISIONAL amounts are included in the totals; verify before send' : ''}`);
@@ -677,6 +782,9 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
     factLine('Home/building sqft', propertyFacts?.home),
     factLine('Lot sqft', propertyFacts?.lot),
     `- New construction: ${propertyFacts?.newConstruction ? 'YES (county roll unassessed)' : 'no'} · Tenant: ${propertyFacts?.tenant ? 'YES' : 'no'}`,
+    propertyFacts?.unitScope
+      ? `- Scope: ${propertyFacts.unitScope.serviceScope} · Use: ${propertyFacts.unitScope.propertyUse} · Relationship: ${propertyFacts.unitScope.customerRelationship} · Size basis: ${propertyFacts.unitScope.sizeBasis}`
+      : null,
     '',
     `Totals: $${totals.monthly}/mo · $${totals.annual}/yr · $${totals.oneTime} one-time`,
     comps && !comps.insufficient

@@ -9,6 +9,11 @@ const DEFAULT_HOME_SQFT = 2000;
 const DEFAULT_LOT_SQFT = 8000;
 
 const { generateEstimate } = require('./pricing-engine');
+const {
+  unitScopeGuardrailsEnabled,
+  hasPrimaryStreetNumber,
+  commercialTextSignal,
+} = require('./estimator-engine/unit-scope-model');
 
 function firstNonEmpty(...values) {
   for (const value of values) {
@@ -262,6 +267,28 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   );
   const review = [];
   if (!homeSqFt || !lotSqFt) review.push('property_measurements_defaulted');
+  // Gate ON: an unresolved type stays literal 'unknown' — the pricing
+  // engine's own normalizer prices it at the neutral default AND stamps
+  // propertyTypeWasDefaulted/invalid_property_type warnings, so the default
+  // is observable instead of masquerading as a classified single-family
+  // (owner ruling 2026-08-11). A SUPPLIED type gets the same vocabulary
+  // check as the engine path (codex r2 P1): 'Condo'/'Apartment'/arbitrary
+  // strings are truthy but the pest normalizer silently defaults them —
+  // without the marker such a draft stayed 'generated' with no review
+  // reason at default single-family pricing.
+  const resolvedPropertyType = body.propertyType || body.property_type || customer.property_type || null;
+  if (unitScopeGuardrailsEnabled()) {
+    if (!resolvedPropertyType) {
+      review.push('property_type_unresolved');
+    } else {
+      try {
+        const { normalizePestPropertyType } = require('./pricing-engine/service-pricing');
+        if (normalizePestPropertyType(resolvedPropertyType).propertyTypeWasDefaulted) {
+          review.push('property_type_unresolved');
+        }
+      } catch { /* fail-open: normalizer unavailable keeps today's behavior */ }
+    }
+  }
 
   return {
     input: {
@@ -273,7 +300,7 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
       // (harmless for residential, which ignores it).
       lotSizeMeasured: !!lotSqFt,
       stories: numberOrNull(body.stories, customer.stories) || 1,
-      propertyType: body.propertyType || body.property_type || customer.property_type || 'Single Family',
+      propertyType: resolvedPropertyType || (unitScopeGuardrailsEnabled() ? 'unknown' : 'Single Family'),
       category: body.category || null,
       isCommercial: false,
       features: {
@@ -365,10 +392,19 @@ function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}
       Number(estimate?.summary?.specialtyTotal || 0)
     );
 
-    automation.status = quoteRequired ? 'manual_review_required' : 'generated';
-    automation.generated = !quoteRequired;
+    // Gate ON: an unresolved/defaulted property type PARKS the draft
+    // (manual_review_required, never auto-sendable 'generated') — the
+    // review marker alone changed nothing about the status, so a draft
+    // priced on the silent single-family default could still auto-send
+    // (codex r2 P1). Totals stay visible as provisional amounts; only the
+    // status/generated flags park.
+    const typeUnresolved = unitScopeGuardrailsEnabled()
+      && automation.review.includes('property_type_unresolved');
+    automation.status = (quoteRequired || typeUnresolved) ? 'manual_review_required' : 'generated';
+    automation.generated = !quoteRequired && !typeUnresolved;
     automation.quoteRequired = quoteRequired;
-    automation.quoteRequiredReason = manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0] || null;
+    automation.quoteRequiredReason = manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0]
+      || (typeUnresolved ? 'property_type_unresolved' : null);
 
     return {
       automation,
@@ -430,9 +466,29 @@ function normalizeAddressPieces({ intake = {}, customer = {} } = {}) {
   return { line1, fullAddress, city, state, zip };
 }
 
+// STRUCTURED commercial signals on the submission itself — a form can say
+// so outright (isCommercial / category / commercial subtype) while its
+// service label and prose stay generic, and buildLeadEngineInput hardcodes
+// isCommercial:false, so the draft stayed generated and auto-sendable at
+// residential pricing (codex r44 P1).
+// The repo's accepted truthy vocabulary for form booleans — 'true'/'1'/'on'
+// arrive as often as 'yes', and missing them let such a submission continue
+// through residential automation (codex r45 P1).
+const TRUTHY_FORM_VALUES = new Set(['true', 'yes', '1', 'on', 'y', 'commercial']);
+
+function structuredCommercialSignal(source = {}) {
+  if (source.isCommercial === true) return true;
+  if (TRUTHY_FORM_VALUES.has(String(source.isCommercial ?? '').trim().toLowerCase())) return true;
+  if (TRUTHY_FORM_VALUES.has(String(source.is_commercial ?? '').trim().toLowerCase())) return true;
+  if (String(source.category || '').trim().toUpperCase() === 'COMMERCIAL') return true;
+  const subtype = String(source.commercialSubtype || source.commercial_subtype || '').trim().toLowerCase();
+  return !!subtype && subtype !== 'none' && subtype !== 'null';
+}
+
 function evaluateLeadEstimateAutomationReadiness({
   intake = {},
   customer = {},
+  body = {},
   phone,
   serviceInterest,
   minimumConfidence = MIN_AUTOMATION_CONFIDENCE,
@@ -446,6 +502,40 @@ function evaluateLeadEstimateAutomationReadiness({
   if (!resolvedPhone) missing.push('phone');
   if (!address.line1 || !/\d/.test(address.line1)) missing.push('street_address');
   if (!hasConcreteServiceInterest(resolvedServiceInterest)) missing.push('specific_service');
+  if (unitScopeGuardrailsEnabled()) {
+    // Any-digit passes ordinal street NAMES ("62nd Avenue East, Unit 7" —
+    // the shape that silently produced no lookup and a wrong-category
+    // draft on a live lead). A quotable address needs a PRIMARY street
+    // number; without one the automation blocks instead of pricing a
+    // property it can't ground (owner ruling 2026-08-11). Reported as
+    // 'street_address' — the clarify-ask allowlist (ASKABLE_MISSING in
+    // estimate-clarify-asks.js) only asks for that vocabulary, and the
+    // right recovery IS an address ask; a bespoke 'street_number' item
+    // blocked pricing but never asked (codex r2 P1). The review marker
+    // keeps the failure segmentable.
+    if (address.line1 && /\d/.test(address.line1) && !hasPrimaryStreetNumber(address.line1)) {
+      missing.push('street_address');
+      review.push('street_number_missing');
+    }
+    // A residential-intake lead whose own words describe a commercial
+    // premises ("brand-new industrial building… office and warehouse") is a
+    // category conflict: reclassifying + scoping the suite is operator
+    // work, never an auto-priced residential draft. An EXPLICIT commercial
+    // service selection ("Commercial Pest Control") is the same conflict
+    // stated outright — checked independently of the premises-phrase regex,
+    // which deliberately doesn't match bare service labels (codex r2 P1).
+    const prose = [intake.message, intake.notes, resolvedServiceInterest]
+      .filter(Boolean).join(' ');
+    if (commercialTextSignal(prose)
+      || /\bcommercial\b/i.test(resolvedServiceInterest || '')
+      // A form that states it outright — checked on the raw body AND the
+      // intake, since callers pass one or the other (codex r44 P1).
+      || structuredCommercialSignal(body)
+      || structuredCommercialSignal(intake)) {
+      missing.push('commercial_category_conflict');
+      review.push('commercial_signal_on_residential_intake');
+    }
+  }
 
   if (!address.city && !address.zip) review.push('city_or_zip_missing');
   if (!firstNonEmpty(intake.email, customer.email)) review.push('email_missing_sms_only');

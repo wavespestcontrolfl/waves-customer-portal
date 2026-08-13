@@ -274,8 +274,21 @@ function hasWrongPremiseFlag(enriched) {
 // the evidence, and the flag builder emits field='propertyType'). Property
 // type carries its own pricing adjustment, so a flagged type must not move
 // a price — the caller keeps its stored classification instead.
+// 'Unknown' is a NON-classification, not a classification of "unknown", and
+// it is TRUTHY: property records normalize a missing type to the literal
+// 'UNKNOWN', and the unit-scope guard now surfaces 'Unknown' rather than a
+// plausible-but-wrong 'Single Family' (property-lookup-v2 residentialDisplay
+// Type). Trusting either lets a lookup that resolved NOTHING overwrite a
+// customer's SAVED Condo/Townhome, after which the pest normalizer prices
+// the unit as single-family with no verify flag to catch it (codex r47 P1).
+// Absent beats a placeholder — the record leg, then the stored type, stand.
+function lookupPropertyTypeIsUnresolved(value) {
+  return String(value || '').trim().toUpperCase() === 'UNKNOWN';
+}
+
 function lookupPropertyTypeIsTrustworthy(enriched) {
   if (!enriched?.propertyType) return false;
+  if (lookupPropertyTypeIsUnresolved(enriched.propertyType)) return false;
   return !hasVerifyFlagMatching(enriched, (field) => (
     field.includes('propertytype') || field.includes('property_type')
   ));

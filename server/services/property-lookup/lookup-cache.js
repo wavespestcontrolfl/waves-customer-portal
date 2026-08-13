@@ -361,6 +361,69 @@ async function attachAddressAuditToCachedLookup(address, addressAudit) {
   return attachEvidenceToCachedLookup(address, '_addressAudit', addressAudit);
 }
 
+// ── Attempt lifecycle (owner ruling 2026-08-11) ─────────────────
+// "No property_lookups row at all" was an observability hole: a lookup
+// that failed before saveLookup (incomplete address, geocode failure, no
+// providers) left NOTHING behind, so the unresolved population could not
+// even be counted, let alone segmented by failure reason. Every attempt
+// now stamps the row — status 'pending' at start, a failure-reason status
+// at the end. The stamps live BESIDE the cached data (attempt columns
+// only) and never touch property_record/expires_at, so cache semantics are
+// unchanged: a stub row with no property_record is still a cache miss.
+// Both writers are fail-open — a stamp failure must never sink a lookup —
+// and tolerate the columns not existing yet (pre-migration deploys).
+// Only statuses a live code path can emit today — the condo unit-matching
+// classifier (PR3 of this lane) adds its own outcomes when it ships;
+// advertising empty segments ahead of that would misread as coverage.
+const LOOKUP_ATTEMPT_STATUSES = new Set([
+  'pending', 'resolved', 'no_parcel', 'no_record', 'geocode_failed',
+  'incomplete_address', 'vacant_or_unassessed', 'provider_timeout',
+  // A cache HIT is an attempt too — the contract is "every attempt stamps
+  // the row", and counting only live lookups undercounts served traffic
+  // (codex r36 P1).
+  'cache_hit',
+  // Terminal stamp for a lookup that THREW after the pending stamp — a
+  // pending row must mean "running", never "died mid-pipeline".
+  'error',
+]);
+
+async function markLookupAttempt(address, status, reason = null) {
+  if (isCacheDisabled()) return;
+  if (!LOOKUP_ATTEMPT_STATUSES.has(status)) return;
+  try {
+    const { hash, normalizedAddress } = addressKey(address);
+    // Attempt timing lives in last_attempt_at ONLY — updated_at is the
+    // DATA freshness the route reports as meta.cachedAt, and stamping it
+    // on every cache hit made months-old property data read as newly
+    // cached (codex r58 P2). saveLookup keeps writing updated_at on real
+    // data mutations.
+    const stamp = {
+      last_attempt_at: db.fn.now(),
+      last_attempt_status: status,
+      last_attempt_reason: reason ? String(reason).slice(0, 250) : null,
+    };
+    await db('property_lookups')
+      .insert({
+        address_hash: hash,
+        normalized_address: normalizedAddress,
+        attempt_count: 1,
+        ...stamp,
+      })
+      .onConflict('address_hash')
+      .merge({
+        ...stamp,
+        // Only the attempt START increments the counter; the finalize stamp
+        // for the same attempt re-uses it. A cache hit is a complete
+        // attempt in one write, so it increments too.
+        ...(status === 'pending' || status === 'cache_hit'
+          ? { attempt_count: db.raw('COALESCE(property_lookups.attempt_count, 0) + 1') }
+          : {}),
+      });
+  } catch (err) {
+    logger.warn('[lookup-cache] attempt stamp failed', { status, error: err.message });
+  }
+}
+
 async function saveLookup(address, result) {
   if (isCacheDisabled()) return;
   // Never cache a failed lookup — a transient outage must not become a
@@ -534,6 +597,7 @@ module.exports = {
   attachPoolPermitsToCachedLookup,
   attachAddressAuditToCachedLookup,
   saveLookup,
+  markLookupAttempt,
   saveVerifiedOverride,
   sanitizeVerifiedValue,
   VERIFIABLE_FIELDS,
