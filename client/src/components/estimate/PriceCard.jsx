@@ -207,7 +207,7 @@ export function perApplicationNetForFrequency(frequency) {
 // "$X/mo" it showed instead was a plan total the estimate surface must not
 // carry. With the flag the headline names the billing unit and the itemized
 // rows below carry the actual per-application prices.
-export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null }) {
+export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null, onMeasurementChallenge = null }) {
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -504,8 +504,34 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
       {measuredBasis?.label && measuredBasis?.value ? (
         <div style={{ fontSize: 13.5, color: CUSTOMER_SURFACE.muted, marginTop: 6, lineHeight: 1.5 }}>
           {measuredBasis.label}: <strong style={{ color: CUSTOMER_SURFACE.text }}>{measuredBasis.value}</strong>
-          {measuredBasis.source ? (
-            <span style={{ whiteSpace: 'nowrap' }}> · {measuredBasis.source}</span>
+          {/* Source must WRAP on narrow phones (~230px content width) — a
+              nowrap span overflows the card (codex #3376 r1). */}
+          {measuredBasis.source ? <> · {measuredBasis.source}</> : null}
+          {/* "Does this look off?" — deliberately quiet: it's a relief valve
+              for the customer who disagrees with the number, not an invite
+              to renegotiate. Renders only when the parent wires the sheet
+              (gate-on, non-preview). */}
+          {onMeasurementChallenge ? (
+            <>
+              {' '}
+              <button
+                type="button"
+                onClick={onMeasurementChallenge}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  font: 'inherit',
+                  fontSize: 13,
+                  color: CUSTOMER_SURFACE.muted,
+                  textDecoration: 'underline',
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Does this look off?
+              </button>
+            </>
           ) : null}
         </div>
       ) : null}

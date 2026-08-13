@@ -770,4 +770,8 @@ module.exports = {
   serializePricingRevisionSummary,
   buildEstimateServiceRevisionDraft,
   createEstimateAddServiceRequest,
+  // Shared with estimate-measurement-review (the lawn-area challenge flow):
+  // both park service_requests rows off a public estimate token and need the
+  // same attach-or-create customer resolution.
+  resolveEstimateCustomer,
 };

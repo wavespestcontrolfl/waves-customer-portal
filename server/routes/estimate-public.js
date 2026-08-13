@@ -12168,6 +12168,43 @@ router.post('/:token/bundle-inquiry', addServiceRequestLimiter, async (req, res,
 // post-estimate-versions token uses. Malformed tokens 404 before any DB read.
 const EXTENSION_REQUEST_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 
+// POST /api/estimates/:token/measurement-review — "Does the lawn size look
+// off?" (owner GO 2026-08-12). Parks a lawn_area_review service_requests row
+// + admin notification; NEVER touches the estimate or messages the customer.
+// Contract mirrors extension-request: gate + token-format gate + generic 404
+// (unknown/malformed/ineligible/gate-off indistinguishable) + rate limit.
+router.post('/:token/measurement-review', addServiceRequestLimiter, async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('estimateMeasurementReview')) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!req.params.token || !EXTENSION_REQUEST_TOKEN_RE.test(req.params.token)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const estimateRow = await db('estimates').where({ token: req.params.token }).first();
+    // Durable call-side block: same fail-closed check every bearer-token
+    // surface applies (codex P0, PR #3304 GH r9b).
+    if (estimateRow && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimateRow))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const { createEstimateMeasurementReview } = require('../services/estimate-measurement-review');
+    const result = await createEstimateMeasurementReview({
+      estimateToken: req.params.token,
+      reasons: req.body?.reasons,
+      note: req.body?.note,
+      shownSqFt: req.body?.shownSqFt,
+      shownSource: req.body?.shownSource,
+    });
+    res.status(result.deduped ? 200 : 201).json(result);
+  } catch (err) {
+    const status = Number(err.status || err.statusCode || 0);
+    if (status >= 400 && status < 500) {
+      return res.status(status).json({ error: err.message || 'Request could not be processed' });
+    }
+    next(err);
+  }
+});
+
 // POST /api/estimates/:token/extension-request — one-click "my link expired
 // but I still want this" from the React expired/not-found screen.
 // Contract (AGENTS.md public-by-token allowlist): estimate token format gate,
@@ -17467,43 +17504,92 @@ function attachTermiteBondSelector(services = [], estData = {}) {
 //
 // Provenance labels mirror buildShowYourWork: a county seed is a ratio guess
 // off county records, NOT a measurement, so it must never read as satellite.
-// An unrecognized basis falls to the verify wording rather than inheriting a
-// definite claim.
+// Labels honor two owner rulings (2026-08-12):
+// - No verify-on-first-visit wording anywhere — it writes a work order for
+//   the field tech. Estimated/capped/unknown bases read as an estimate from
+//   property records; the challenge sheet is the customer's relief valve.
+// - measuredTurfSf is NOT necessarily a technician's tape measure (the agent
+//   estimate input binds there too — codex #3376 r1), so it claims an
+//   on-file measurement, not "measured on site".
 const TURF_BASIS_DISPLAY_SOURCE = {
-  measuredTurfSf: 'Measured on site',
+  measuredTurfSf: 'On-file measurement',
   lawnSqFt: 'Confirmed with you',
   estimatedTurfSf: 'AI satellite measurement',
   countyPrior: 'County records (estimated)',
 };
+const TURF_ESTIMATED_DISPLAY_SOURCE = 'Estimated from your property records';
 
-function measuredBasisForSection(sectionKey, estData = {}) {
-  if (sectionKey !== 'lawn_care') return null;
-  // v1 saves nest the selected-lawn provenance one level deeper.
-  const meta = estData?.lawnMeta || estData?.results?.lawnMeta
-    || estData?.result?.lawnMeta || estData?.result?.results?.lawnMeta || null;
-  const sqft = Number(meta?.lsf);
-  if (!Number.isFinite(sqft) || sqft <= 0) return null;
-  const basis = String(meta?.turfBasis || '').trim();
+// A parcel-capped vision figure RETAINS turfBasis 'estimatedTurfSf'
+// (computeTurfArea keeps the basis and carries the clamp as a flag — codex
+// #3376 r1), so the satellite claim must also check the flag. The flag rides
+// on fieldVerify / property.turfFlags in the v1 shape and property.turfFlags
+// in the engine shape.
+function turfCapFlagged(estResult = {}) {
+  const flags = [
+    ...(Array.isArray(estResult.fieldVerify) ? estResult.fieldVerify : []),
+    ...(Array.isArray(estResult.property?.turfFlags) ? estResult.property.turfFlags : []),
+  ];
+  return flags.includes('TURF_CAPPED_TO_PARCEL');
+}
+
+// The lawn sections this line attaches to. commercial_lawn auto-prices from
+// measured turf the same way (codex #3376 r1) — same explanation, same line.
+const MEASURED_BASIS_SECTION_KEYS = new Set(['lawn_care', 'commercial_lawn']);
+
+// IMPORTANT: takes the RESOLVED estResult — the very object the caller built
+// the price ladder from — never raw estData. ui-verify 2026-08-12 caught the
+// price card showing 3,410 sq ft beside a price computed from 4,793: the
+// basis had been read from stored estData while a view-time reprice rebuilt
+// pricing from a recomputed result. Binding both reads to one object makes
+// that disagreement impossible by construction.
+function measuredBasisForSection(sectionKey, estResult = {}) {
+  if (!MEASURED_BASIS_SECTION_KEYS.has(sectionKey)) return null;
+  // v1 saves carry the selected-lawn provenance at results.lawnMeta (some
+  // legacy rows flatten it to lawnMeta).
+  const meta = estResult?.results?.lawnMeta || estResult?.lawnMeta || null;
+  let sqft = Number(meta?.lsf);
+  let basis = String(meta?.turfBasis || '').trim();
+  if (!(Number.isFinite(sqft) && sqft > 0)) {
+    // Engine-backed shape ({engineInputs, engineResult}): the priced area
+    // lives on the lawn line item (codex #3376 r1). Wizard drafts persist a
+    // slimmed line without these fields and correctly fall through to null.
+    const line = (Array.isArray(estResult?.lineItems) ? estResult.lineItems : [])
+      .find((l) => l && (l.service === 'lawn_care' || l.service === 'commercial_lawn'));
+    sqft = Number(line?.lawnSqFt);
+    basis = String(line?.turfBasis || '').trim();
+  }
+  if (!(Number.isFinite(sqft) && sqft > 0)) return null;
+  const source = basis === 'estimatedTurfSf' && turfCapFlagged(estResult)
+    ? TURF_ESTIMATED_DISPLAY_SOURCE
+    : (TURF_BASIS_DISPLAY_SOURCE[basis] || TURF_ESTIMATED_DISPLAY_SOURCE);
   return {
     label: 'Treatable lawn',
     value: `${Math.round(sqft).toLocaleString()} sq ft`,
-    source: TURF_BASIS_DISPLAY_SOURCE[basis] || "Estimated — we'll verify on your first visit",
+    source,
   };
 }
 
 // Mutates in place, mirroring attachTermiteBondSelector. Never touches the
 // synthetic 'bundle' section: it carries a combined total, so one member
 // service's area hung off it would read as the basis for the whole plan.
-function attachMeasuredBasis(services = [], estData = {}) {
-  for (const section of services) {
+// Takes the resolved estResult (see measuredBasisForSection).
+function attachMeasuredBasis(services = [], estResult = {}) {
+  for (const section of (Array.isArray(services) ? services : [])) {
     if (!section || !section.intelligence || section.key === 'bundle') continue;
-    const basis = measuredBasisForSection(section.key, estData);
+    const basis = measuredBasisForSection(section.key, estResult);
     if (basis) section.intelligence.measuredBasis = basis;
   }
 }
 
+// The one resolver both the section builder and the measured-basis stamp use
+// — they MUST agree on which result object is authoritative (see
+// measuredBasisForSection).
+function resolvePricingEstResult(estData = {}) {
+  return estData?.result || estData?.engineResult || estData || {};
+}
+
 function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
-  const estResult = estData?.result || estData?.engineResult || estData || {};
+  const estResult = resolvePricingEstResult(estData);
   const recurringServices = recurringServicesWithSupplements(estResult);
   const oneTimeBreakdown = payload.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
   const oneTimeItems = Array.isArray(oneTimeBreakdown?.items) ? oneTimeBreakdown.items : [];
@@ -18325,7 +18411,9 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     lowConfidenceLines,
   );
   attachTermiteBondSelector(services, estData);
-  attachMeasuredBasis(services, estData);
+  // Same resolver as buildPricingServices — basis and price ladder must come
+  // from ONE result object (ui-verify caught them diverging; see helper).
+  attachMeasuredBasis(services, resolvePricingEstResult(estData));
   const combinedRecurring = withCombinedLowConfidenceRange(
     buildCombinedRecurring(contractPayload, estimate, estData, services),
     lowConfidenceRange,
@@ -21029,6 +21117,13 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
+      // "Does the lawn size look off?" challenge sheet — the link renders
+      // only when this is true, so gate-off responses stay byte-identical
+      // (absent, not false). Draft previews never offer it: the request row
+      // would attach a real service_requests row to an unsent draft.
+      ...(featureGates.isEnabled('estimateMeasurementReview') && !adminDraftPreview
+        ? { measurementReviewEnabled: true }
+        : {}),
       // Estimate glass COPY release — category-scoped (owner call 2026-07-05:
       // pest + lawn first; other categories keep the old copy until their glass
       // copy packs are approved). NOTE: the glass THEME is unconditional on

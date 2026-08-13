@@ -102,4 +102,31 @@ describe('deriveLawnArea', () => {
     expect(deriveLawnArea({ lineItems: [] })).toBeNull();
     expect(deriveLawnArea({})).toBeNull();
   });
+
+  test('a commercial lawn line carries the basis too (codex #3376 r1)', () => {
+    const fake = { lineItems: [{ service: 'commercial_lawn', lawnSqFt: 22000, turfBasis: 'measuredTurfSf' }] };
+    expect(deriveLawnArea(fake)).toEqual({ turf_sqft: 22000, source: 'measured' });
+  });
+
+  test('a parcel-capped vision figure is demoted from the satellite claim (codex #3376 r1)', () => {
+    // computeTurfArea keeps turfBasis 'estimatedTurfSf' on a parcel clamp —
+    // the flag rides on property.turfFlags. Verified against the real engine:
+    // estimatedTurfSf + turfCappedToParcel:true → basis 'estimatedTurfSf',
+    // property.turfFlags ['TURF_CAPPED_TO_PARCEL'].
+    const capped = {
+      lineItems: [{ service: 'lawn_care', lawnSqFt: 4200, turfBasis: 'estimatedTurfSf' }],
+      property: { turfFlags: ['TURF_CAPPED_TO_PARCEL'] },
+    };
+    expect(deriveLawnArea(capped)).toEqual({ turf_sqft: 4200, source: 'lot_estimate' });
+    // Same shape through the real engine end-to-end.
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      estimatedTurfSf: 4200,
+      turfSource: 'vision',
+      turfCappedToParcel: true,
+      services: LAWN_SERVICE,
+    });
+    const result = deriveLawnArea(estimate);
+    expect(result.source).not.toBe('ai_satellite');
+  });
 });

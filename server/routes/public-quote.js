@@ -304,16 +304,30 @@ const TURF_BASIS_TO_PUBLIC_SOURCE = {
 };
 
 function deriveLawnArea(estimate) {
-  const lawnLine = (estimate?.lineItems || []).find((l) => l && l.service === 'lawn_care');
+  // commercial_lawn auto-prices from measured turf the same way (codex #3376
+  // r1) — the commercial customer deserves the same basis line.
+  const lawnLine = (estimate?.lineItems || []).find(
+    (l) => l && (l.service === 'lawn_care' || l.service === 'commercial_lawn')
+  );
   if (!lawnLine) return null;
   const turfSqFt = Number(lawnLine.lawnSqFt);
   if (!Number.isFinite(turfSqFt) || turfSqFt <= 0) return null;
   const basis = String(lawnLine.turfBasis || '').trim();
+  // A parcel-capped vision figure RETAINS turfBasis 'estimatedTurfSf' — the
+  // clamp rides on property.turfFlags (codex #3376 r1). A capped number is
+  // not a satellite measurement; demote it to the estimate family.
+  const capped = Array.isArray(estimate?.property?.turfFlags)
+    && estimate.property.turfFlags.includes('TURF_CAPPED_TO_PARCEL');
   return {
     turf_sqft: Math.round(turfSqFt),
     // Unknown/new bases fall to the verify family rather than defaulting to a
     // satellite claim — a basis added later must not silently inherit one.
-    source: TURF_BASIS_TO_PUBLIC_SOURCE[basis] || 'lot_estimate',
+    // NOTE: emit ONLY keys the widget's TURF_SOURCE_LABELS knows — its
+    // fallback for unknown keys is the satellite label, so a novel key here
+    // would resurface the exact over-claim this map exists to prevent.
+    source: capped && basis === 'estimatedTurfSf'
+      ? 'lot_estimate'
+      : (TURF_BASIS_TO_PUBLIC_SOURCE[basis] || 'lot_estimate'),
   };
 }
 
