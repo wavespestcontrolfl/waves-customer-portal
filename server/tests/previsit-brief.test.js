@@ -27,10 +27,11 @@ jest.mock('../services/context-aggregator', () => {
   // The REAL redactor (not a mock): the payload-boundary redaction tests
   // must exercise the production masking behavior (jest.requireActual per
   // the mock-is-not-a-production-export rule).
-  const { redactAccessCodes } = jest.requireActual('../services/context-aggregator');
+  const { redactAccessCodes, customerSafeVisitNotes } = jest.requireActual('../services/context-aggregator');
   return {
     getContextForCustomer: (...args) => mockGetContext(...args),
     redactAccessCodes,
+    customerSafeVisitNotes,
   };
 });
 jest.mock('../services/appointment-tagger', () => ({
@@ -406,6 +407,48 @@ describe('grounded allowlist validation of LLM output', () => {
     expect(verdict.reason).toMatch(/^ungrounded_novel_(product|target):/);
   });
 
+  test('an all-common-word instruction the grounding never states is rejected (codex P1)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    // "interior" is a reference STOPWORD and "treat" is common prose — the
+    // old all-common skip accepted this instruction unvalidated even on an
+    // exterior-only visit whose grounding never mentions the interior.
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Treat interior'] },
+      grounding,
+    );
+    expect(verdict.reason).toBe('ungrounded_instruction:interior');
+  });
+
+  test('the same common-word instruction passes when the grounding states it', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer asked for interior attention this visit' }] },
+    };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Treat interior'] },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('descriptive fields keep the all-common skip (no over-rejection of prose)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    // 'ants' grounded for CLEAN's fixed priority; the summary's verb-object
+    // ("front walk") is all-common prose the grounding never states — the
+    // strict instructional check must NOT apply to descriptive fields.
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { recentCalls: ['Asked about ants in garage'] },
+    };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], last_visit_summary: 'Treated front walk during the last visit.' },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
   test('extraction finds mixed-cap, cap-run, verb-object and for-target references', () => {
     const { extractOutputReferences } = PrevisitBrief._test;
     const refs = extractOutputReferences('Apply PhantomGuard X for emerald ash borer. Re-check the ants treated with Bifen IT.');
@@ -419,12 +462,19 @@ describe('grounded allowlist validation of LLM output', () => {
   });
 });
 
-describe('aggregator serviceHistory is line-scoped', () => {
-  test('a pest brief never summarizes lawn/termite work from context history', async () => {
+describe('serviceHistory is line-scoped from the paged walk', () => {
+  // The aggregator's serviceHistory is CROSS-LINE and capped to the newest
+  // visits — building the section from it (post-cap filter) both leaked
+  // other lines' work and, for a multi-line customer whose newest visits
+  // are all other lines, silently EMPTIED the section (codex P2). The
+  // section now comes from loadRecentLineServices' same-line walk, with
+  // notes through the reviewed customer-safe parse.
+  test('a pest brief never summarizes lawn work, and same-line notes survive newer other-line visits', async () => {
     mockGetContext.mockResolvedValue({
+      // Aggregator history: the newest visits are ALL other-line — under
+      // the old post-cap filter this emptied the pest section entirely.
       serviceHistory: [
         { type: 'Lawn Care Service', date: '2026-08-05', notes: 'Applied pre-emergent to turf.' },
-        { type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter.' },
         { type: 'Termite Monitoring', date: '2026-06-01', notes: 'Checked bait stations.' },
       ],
       propertyProfile: null,
@@ -433,16 +483,70 @@ describe('aggregator serviceHistory is line-scoped', () => {
       recentInteractions: [],
       pendingEstimate: null,
     });
-    useDb(baseResponses());
+    useDb(baseResponses({
+      service_records: [
+        { id: 'rec-lawn-new', customer_id: 'cust-1', service_type: 'Lawn Care Service', service_line: 'lawn', service_date: '2026-08-05', started_at: null, pressure_index: null },
+        {
+          ...SERVICE_RECORD,
+          technician_notes: 'WHAT WE DID\n\nTreated exterior perimeter.\n\nWHAT WE FOUND\n\nActivity limited to the garage corner.',
+        },
+      ],
+    }));
     const out = await PrevisitBrief.generateVisitBrief('svc-1');
     expect(out.generated).toBe(true);
     const text = global.__dispatch.mock.calls[0][1].text;
     const facts = JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
     expect(facts.serviceHistory).toEqual([
-      { type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter.' },
+      { type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter. Activity limited to the garage corner.' },
     ]);
     expect(text).not.toContain('pre-emergent');
     expect(text).not.toContain('bait stations');
+  });
+
+  test('raw internal notes (unparseable shape) render as null, never raw text', async () => {
+    mockGetContext.mockResolvedValue({
+      serviceHistory: [],
+      propertyProfile: null,
+      flags: [],
+      recentCalls: [],
+      recentInteractions: [],
+      pendingEstimate: null,
+    });
+    useDb(baseResponses({
+      service_records: [{ ...SERVICE_RECORD, technician_notes: 'gate code 4482, invoice unpaid — chase office' }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const text = global.__dispatch.mock.calls[0][1].text;
+    const facts = JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
+    expect(facts.serviceHistory).toEqual([
+      { type: 'Pest Control Service', date: '2026-07-15', notes: null },
+    ]);
+    expect(text).not.toContain('4482');
+  });
+});
+
+describe('briefClearOnReclassification (update-details service switch)', () => {
+  const { briefClearOnReclassification } = PrevisitBrief;
+  const CLEAR = {
+    pre_service_brief: null,
+    pre_service_brief_type: null,
+    pre_service_brief_generated_at: null,
+  };
+
+  test('WDO→non-WDO switch clears the stored WDO brief (was stranded: WDO regen branch + overwrite refusal)', () => {
+    expect(briefClearOnReclassification('pest_general', 'wdo_inspection')).toEqual(CLEAR);
+  });
+
+  test('non-WDO→WDO switch clears the stored visit brief', () => {
+    expect(briefClearOnReclassification('wdo_inspection', 'visit_brief_v1')).toEqual(CLEAR);
+  });
+
+  test('same-boundary switches and briefless rows keep the stored state', () => {
+    expect(briefClearOnReclassification('pest_general', 'visit_brief_v1')).toBeNull();
+    expect(briefClearOnReclassification('wdo_inspection', 'wdo_inspection')).toBeNull();
+    expect(briefClearOnReclassification('pest_general', null)).toBeNull();
+    expect(briefClearOnReclassification('pest_general', undefined)).toBeNull();
   });
 });
 

@@ -5583,6 +5583,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             }
           }
         }
+        // A service switch across the WDO boundary must not strand the
+        // stored brief (rationale on briefClearOnReclassification): clear
+        // it in the same row update so the next sweep or an admin
+        // regenerate rebuilds the correct-type brief.
+        if (updates.service_type !== undefined && preTupleRow) {
+          const { briefClearOnReclassification } = require('../services/previsit-brief');
+          const clear = briefClearOnReclassification(
+            classifyAppointmentTag(updates.service_type),
+            preTupleRow.pre_service_brief_type,
+          );
+          if (clear) Object.assign(updates, clear);
+        }
         // A date move through this edit modal was the one mover with NO
         // tracker-lifecycle rewind: an en_route/on_site visit (or one
         // carrying stale stamps from an aborted attempt) kept

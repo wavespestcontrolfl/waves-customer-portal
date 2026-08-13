@@ -1,7 +1,8 @@
 /**
  * Pre-visit "pocket reference" brief — generalization of the WDO
  * pre-inspection brief to EVERY scheduled visit (owner GO 2026-08-06;
- * coverage = all scheduled visits, cadence = 5:15am ET morning-of sweep).
+ * coverage = all scheduled visits, cadence = 5:19am ET morning-of sweep
+ * plus half-hourly :19/:49 backstops through 19:49).
  *
  * DARK BY DEFAULT: inert unless GATE_PREVISIT_BRIEF is set to exactly
  * 'true' (same convention as GATE_COMPLIANCE / payerStatements). The gate
@@ -54,7 +55,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { compilePropertyAlerts } = require('./nextstop-alerts');
 // The shared deterministic access-code redactor (context-aggregator's own
 // layer) — re-applied here to EVERY free-text slice at the LLM boundary.
-const { redactAccessCodes } = require('./context-aggregator');
+const { redactAccessCodes, customerSafeVisitNotes } = require('./context-aggregator');
 const { normalizeServiceType, detectServiceCategory } = require('../utils/service-normalizer');
 const { etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
 
@@ -186,18 +187,6 @@ async function loadRecentServiceRecords(dbh, customerId, serviceType) {
   } catch (err) {
     logger.warn(`[previsit-brief] service history unreadable for customer ${customerId}: ${err.message}`);
     return { available: false, last: null, lineRecords: [], visitLine: null };
-  }
-}
-
-// The visit's service-line verdict — the SAME classifier the line-scoped
-// history walk uses. null when the classifier is unavailable, and callers
-// fail closed (drop the section) rather than leak cross-line rows.
-function visitLineOf(serviceType) {
-  try {
-    const { detectServiceLine } = require('./service-report/service-line-configs');
-    return detectServiceLine(serviceType) || null;
-  } catch {
-    return null;
   }
 }
 
@@ -528,7 +517,6 @@ async function assembleGrounding(svc, dbh = db) {
   if (!history.available) {
     throw new Error('service history unreadable — refusing to regenerate over the cached brief');
   }
-  const visitLine = history.visitLine ?? visitLineOf(svc.service_type);
   // Same-line ONLY — no any-line fallback: a cross-line "last visit" would
   // drag another line's products and notes into this visit's brief.
   const lastVisitRecord = history.lineRecords[0] || null;
@@ -609,16 +597,20 @@ async function assembleGrounding(svc, dbh = db) {
         actionLine: sinceLastVisit.actionLine || null,
       } : null,
     } : null,
-    // Same-line ONLY, same verdict as loadRecentLineServices — the
-    // aggregator's history is cross-line, and a pest brief must not
-    // summarize lawn/termite/tree work. Classifier unavailable ⇒ the
-    // section is dropped (fail closed), never passed unfiltered.
-    serviceHistory: visitLine == null ? [] : (context?.serviceHistory || [])
-      .filter((s) => visitLineOf(s.type) === visitLine)
-      .map((s) => ({
-        type: cleanText(s.type, 120),
-        date: calendarDay(s.date),
-        notes: cleanText(s.notes, 500),
+    // Same-line ONLY, from the paged line walk itself — filtering the
+    // aggregator's newest-5-any-line list instead silently EMPTIES this
+    // section for a multi-line customer whose newest visits are other
+    // lines, even though older same-line records exist. lineRecords are
+    // already line-classified (classifier unavailable ⇒ the walk threw ⇒
+    // available:false and an empty list — fail closed, never cross-line);
+    // notes go through the same reviewed customer-safe parse the
+    // aggregator uses (raw technician notes never reach the LLM).
+    serviceHistory: (history.lineRecords || [])
+      .slice(0, 3)
+      .map((r) => ({
+        type: cleanText(r.service_type, 120),
+        date: calendarDay(r.service_date),
+        notes: cleanText(customerSafeVisitNotes(r.technician_notes), 500),
       })),
     propertyProfile: context?.propertyProfile || null,
     flags: (context?.flags || []).map((f) => ({
@@ -953,6 +945,20 @@ function findUngroundedClaim(body, grounding) {
     const phrase = String(term || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
     return !phrase || fixedNames.includes(phrase);
   };
+  // Strict grounding for instructional verb-object claims: unlike
+  // isGroundedReference, stop/common words stay significant — they carry
+  // the DIRECTION of an instruction ("interior", "attic"). The whole
+  // normalized phrase, or every 4+-letter word of it (light-stemmed),
+  // must appear in the grounding; a claim the grounding never mentions is
+  // invented guidance regardless of how ordinary its vocabulary is.
+  const instructedClaimGrounded = (term) => {
+    const phrase = String(term || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
+    if (!phrase) return true;
+    if (groundedText.includes(phrase)) return true;
+    const words = phrase.split(' ').filter((w) => w.length >= 4);
+    if (!words.length) return true;
+    return words.every((w) => wordVariants(w).some((v) => groundedText.includes(v)));
+  };
   const labeledFields = [
     ...(body.priorities || []).map((text) => ({ text, instructional: true })),
     ...(body.watch_items || []).map((text) => ({ text, instructional: true })),
@@ -992,7 +998,19 @@ function findUngroundedClaim(body, grounding) {
       }
     }
     for (const term of refs.instructed) {
-      if (allWordsCommon(term)) continue;
+      if (allWordsCommon(term)) {
+        // Common vocabulary proves prose-shape, not evidence: an
+        // application-verb object made only of common/scope words still
+        // directs the technician ("Treat interior" on an exterior-only
+        // visit), and the fuzzy tier can't see it — scope words like
+        // interior/exterior are reference STOPWORDS there. In instruction
+        // fields the claim must appear in the grounding with its scope
+        // words kept significant; descriptive prose keeps the skip.
+        if (field.instructional && !instructedClaimGrounded(term)) {
+          return { kind: 'instruction', term };
+        }
+        continue;
+      }
       if (field.instructional) {
         if (!onFixedList(term)) return { kind: 'novel_product', term };
       } else if (!groundedExact(term)) {
@@ -1337,9 +1355,32 @@ async function runSweep(dbh = db) {
   return result;
 }
 
+// Decision for update-details on a service_type edit: a switch across the
+// WDO boundary must clear the stored brief in the SAME row update, or it
+// strands — regenerate-brief routes by pre_service_brief_type (a stale
+// 'wdo_inspection' forces the WDO branch, where the tagger, now
+// classifying the new service as non-WDO, leaves the old brief untouched)
+// while generateVisitBrief refuses to overwrite WDO-typed rows. Returns
+// the clearing column updates, or null when the stored brief still
+// matches the new classification (or none is stored). Same-boundary
+// switches keep the brief: the next sweep's grounding hash regenerates
+// content-stale briefs on its own.
+function briefClearOnReclassification(newTag, storedBriefType) {
+  if (!storedBriefType) return null;
+  const newIsWdo = newTag === 'wdo_inspection';
+  const storedIsWdo = String(storedBriefType) === WDO_BRIEF_TYPE;
+  if (newIsWdo === storedIsWdo) return null;
+  return {
+    pre_service_brief: null,
+    pre_service_brief_type: null,
+    pre_service_brief_generated_at: null,
+  };
+}
+
 module.exports = {
   briefGateEnabled,
   generateVisitBrief,
+  briefClearOnReclassification,
   runSweep,
   VISIT_BRIEF_TYPE,
   WDO_BRIEF_TYPE,

@@ -42,10 +42,10 @@ async function loadLastServices(db, customerId, serviceType) {
   return { lastService, lastLineService, visitLine };
 }
 
-// Same paged same-line walk, but returns the matching RECORDS (with ids)
-// rather than notes-preview fields — the pre-visit brief loads product
-// history strictly line-scoped (a pest visit must never surface lawn or
-// termite products). Also returns the any-line newest record (`last`) so
+// Same paged same-line walk, but returns the matching RECORDS (with ids
+// and raw technician_notes — callers own the customer-safe parse) — the
+// pre-visit brief loads product and note history strictly line-scoped (a
+// pest visit must never surface lawn or termite products). Also returns the any-line newest record (`last`) so
 // callers can answer "has this customer had ANY completed visit" (the
 // new-customer check) without a second query. Collects up to `limit`
 // same-line records within the MAX_ROWS walk; past that depth the caller
@@ -63,7 +63,7 @@ async function loadRecentLineServices(db, customerId, serviceType, { limit = 5 }
       .orderBy('id', 'desc')
       .offset(offset)
       .limit(PAGE_SIZE)
-      .select('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'started_at', 'pressure_index');
+      .select('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'started_at', 'pressure_index', 'technician_notes');
     if (offset === 0) last = rows[0] || null;
     for (const r of rows) {
       if ((String(r.service_line || '').trim() || detectServiceLine(r.service_type)) === visitLine) {
