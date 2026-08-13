@@ -9523,11 +9523,25 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
       return res.status(409).json({ error: 'Pre-visit briefs are turned off (GATE_PREVISIT_BRIEF). Nothing was changed.' });
     }
     const outcome = await PrevisitBrief.generateVisitBrief(req.params.id);
+    // A skip is not a success: only 'unchanged' (the hash-cache no-op) is a
+    // legitimate 200. The row vanishing mid-request reads as 404 (matching
+    // the ownership probe's answer); everything else — terminal status, a
+    // concurrently-written WDO brief, gate off inside the service — is a
+    // 409 carrying the reason, never success:true over a stale/null brief.
+    if (outcome.skipped && outcome.reason !== 'unchanged') {
+      if (outcome.reason === 'not_found' || outcome.reason === 'no_customer') {
+        return res.status(404).json({ error: 'Scheduled service not found', reason: outcome.reason });
+      }
+      return res.status(409).json({
+        error: `Visit brief not regenerated (${outcome.reason}). Nothing was changed.`,
+        reason: outcome.reason,
+      });
+    }
     const svc = await db('scheduled_services').where({ id: req.params.id }).first();
     res.json({
       success: true,
       unchanged: outcome.reason === 'unchanged',
-      brief: briefValue(svc.pre_service_brief),
+      brief: briefValue(svc?.pre_service_brief),
     });
   } catch (err) { next(err); }
 });

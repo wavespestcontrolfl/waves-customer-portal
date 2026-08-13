@@ -49,7 +49,11 @@ jest.mock('../services/service-report/since-last-visit', () => ({
 jest.mock('../services/service-report/service-line-configs', () => ({
   // Line-aware (the real classifier's shape matters now): the brief's
   // history must be scoped to the visit's service line.
-  detectServiceLine: (serviceType) => (/lawn|turf/i.test(String(serviceType || '')) ? 'lawn' : 'pest'),
+  detectServiceLine: (serviceType) => {
+    const s = String(serviceType || '');
+    if (/tree|shrub|palm/i.test(s)) return 'tree_shrub';
+    return /lawn|turf/i.test(s) ? 'lawn' : 'pest';
+  },
 }));
 const mockGrassContext = jest.fn(async () => ({ trackKey: 'st_augustine' }));
 jest.mock('../services/lawn-grass-context', () => ({
@@ -679,6 +683,54 @@ describe('line-scoped product history', () => {
     expect(facts.history).toEqual({ available: true });
     expect(facts.visit.newCustomer).toBe(false);
     expect(facts.lastVisit).toBeNull();
+  });
+});
+
+describe('tree & shrub visits are never lawn', () => {
+  test('a Tree & Shrub Fertilization visit gets NO lawn window guidance — line-scoped history only', async () => {
+    // normalizeServiceType maps this to "Lawn Fertilization"; category must
+    // come from the RAW type or the visit gets turf protocol products.
+    const TS_RECORD = {
+      id: 'rec-ts',
+      customer_id: 'cust-1',
+      service_type: 'Tree & Shrub Care',
+      service_line: 'tree_shrub',
+      service_date: '2026-06-20',
+      started_at: null,
+      pressure_index: null,
+    };
+    const TS_PRODUCT_ROW = {
+      service_record_id: 'rec-ts',
+      product_name: 'Bio-Neem',
+      active_ingredient: 'Azadirachtin',
+      moa_group: 'UN',
+      application_rate: 1,
+      rate_unit: 'oz/gal',
+      targets: ['scale'],
+      catalog_name: 'Bio-Neem',
+      catalog_active_ingredient: 'Azadirachtin',
+      epa_reg_number: '70051-2',
+    };
+    const state = useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'Tree & Shrub Fertilization' }],
+      service_records: [SERVICE_RECORD, TS_RECORD],
+      service_products: (rec) => {
+        const whereIn = rec.ops.find(([m, args]) => m === 'whereIn' && args[0] === 'sp.service_record_id');
+        const ids = whereIn ? whereIn[1][1] : [];
+        return [TS_PRODUCT_ROW, PRODUCT_ROW].filter((r) => ids.includes(r.service_record_id));
+      },
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    // The turf protocol machinery is never consulted.
+    expect(mockGrassContext).not.toHaveBeenCalled();
+    expect(mockWindowContext).not.toHaveBeenCalled();
+    const { brief } = storedBrief(state);
+    expect(brief.product_guidance.source).toBe('service_history');
+    // Only the tree/shrub line's own history.
+    expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Bio-Neem']);
+    expect(brief.last_visit.date).toBe('2026-06-20');
+    expect(JSON.stringify(brief)).not.toContain('Bifen IT');
   });
 });
 

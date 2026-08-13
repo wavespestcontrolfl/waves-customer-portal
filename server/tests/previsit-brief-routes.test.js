@@ -200,6 +200,35 @@ describe('POST /:id/regenerate-brief', () => {
     });
   });
 
+  test('skip reasons are not success: terminal/WDO-conflict -> 409 with reason', async () => {
+    mockGateEnabled.mockReturnValue(true);
+    stubTables({ scheduled_services: VISIT_BRIEF_ROW });
+    for (const reason of ['terminal_status', 'wdo_brief_present']) {
+      mockGenerateVisitBrief.mockResolvedValueOnce({ skipped: true, reason });
+      await withServer(async (base) => {
+        const res = await fetch(`${base}/admin/schedule/svc-1/regenerate-brief`, { method: 'POST' });
+        expect(res.status).toBe(409);
+        const body = await res.json();
+        expect(body.reason).toBe(reason);
+        expect(body.success).toBeUndefined();
+        expect(body.error).toContain(reason);
+      });
+    }
+  });
+
+  test('skip reasons are not success: not_found/no_customer -> 404', async () => {
+    mockGateEnabled.mockReturnValue(true);
+    stubTables({ scheduled_services: VISIT_BRIEF_ROW });
+    for (const reason of ['not_found', 'no_customer']) {
+      mockGenerateVisitBrief.mockResolvedValueOnce({ skipped: true, reason });
+      await withServer(async (base) => {
+        const res = await fetch(`${base}/admin/schedule/svc-1/regenerate-brief`, { method: 'POST' });
+        expect(res.status).toBe(404);
+        expect((await res.json()).reason).toBe(reason);
+      });
+    }
+  });
+
   test('unchanged-hash regeneration reports unchanged: true', async () => {
     mockGateEnabled.mockReturnValue(true);
     mockGenerateVisitBrief.mockResolvedValue({ skipped: true, reason: 'unchanged' });

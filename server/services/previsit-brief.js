@@ -425,7 +425,12 @@ async function assembleGrounding(svc, dbh = db) {
   if (!customer) return { error: 'no_customer', svc };
 
   const normalizedType = normalizeServiceType(svc.service_type);
-  const category = detectServiceCategory(normalizedType);
+  // Category classifies on the RAW service_type: normalizeServiceType maps
+  // "Tree & Shrub Fertilization" / "Palm Fertilization" → "Lawn
+  // Fertilization", which would route tree/shrub visits into the TURF
+  // protocol window. detectServiceCategory handles the tree/shrub-vs-lawn
+  // precedence itself on the raw string; normalization stays display-only.
+  const category = detectServiceCategory(svc.service_type);
 
   // Redacted customer context (context-aggregator owns the access-code
   // redaction layer). Fail-soft — a context miss degrades the brief, never
