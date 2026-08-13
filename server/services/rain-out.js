@@ -26,7 +26,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isRealProviderSend } = require('./sms-auto-send');
 const { buildRescheduleLink } = require('./reschedule-link');
 const { getDailyRainOutlook, getHourlyRainOutlook, forecastLinkForZip } = require('./weather-forecast');
-const { etParts, etDateString } = require('../utils/datetime-et');
+const { etParts, etDateString, deriveWindowEnd } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange, ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
 const WEATHER_PHRASES = {
@@ -785,22 +785,29 @@ function routeScopeConflicts({ occupancy, serviceId, service, route, target }) {
         : target.window;
     }
     const start = toHHMM(job.window_start);
+    if (!start) return null;
     const end = toHHMM(job.window_end);
-    // A day-move row with a start but NO stored end lands with a null end,
-    // and commit runs no conflict gate for it at all: rebooker.reschedule
-    // computes `windowEnd = win.end || service.window_end` (both null here)
-    // and both occupancy checks sit behind `if (updates.window_start &&
-    // windowEnd)`. So there is nothing for this advisory to pre-warn — it
-    // cannot SLOT_TAKEN, and telling the dispatcher "the schedule will
-    // block this move" would be a false positive. Modeled as no landing
-    // deliberately; do NOT "fix" this into a derived span without first
-    // fixing the gate it is mirroring. That gate skip is a real latent
-    // double-booking hole, but it is PRE-EXISTING on main and reaches every
-    // reschedule caller (customer links, dispatch board, series shifts) —
-    // out of scope for a warn-only advisory, tracked for its own lane.
-    // (Same-day is different: commit's windowless-mover fallback hands the
-    // row `target.window`, a real span, which the branch above returns.)
-    return (start && end) ? { start, end } : null;
+    if (end) return { start, end };
+    // A day-move row with a start but NO stored end now lands behind a
+    // REAL commit gate: rebooker.reschedule derives its occupancy span via
+    // the canonical deriveWindowEnd (duration-or-60, the read predicate's
+    // own COALESCE) and probes it, so the advisory projects the SAME
+    // helper's output. Keyed on the gate's kill switch: with
+    // REBOOKER_NULL_END_OCCUPANCY=off commit skips the check again and a
+    // warning here would be a false "the schedule will block this move" —
+    // the advisory must never disagree with what commit enforces, in
+    // either direction.
+    if (process.env.REBOOKER_NULL_END_OCCUPANCY === 'off') return null;
+    const duration = Number(job.estimated_duration_minutes) > 0
+      ? Number(job.estimated_duration_minutes)
+      : 60;
+    const derived = deriveWindowEnd(start, duration);
+    // null = the span would cross midnight. Commit REJECTS that move
+    // outright (INVALID_WINDOW — deriveWindowEnd's null-means-validation-
+    // failure contract), so there is no landing to overlap-check; the
+    // dispatcher gets the clear rejection at the tap instead of an
+    // occupancy warning.
+    return derived ? { start, end: derived } : null;
   });
   // Member-vs-member collisions: simulate commit()'s own sweep. commit
   // probes each member's target against every OTHER member's row — it

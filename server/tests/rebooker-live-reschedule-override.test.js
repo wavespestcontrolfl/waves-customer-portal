@@ -633,6 +633,103 @@ describe('live-status reschedule override (allowLive)', () => {
     // row commits; the whole trx rolls back.
     expect(sibUpdate.update).not.toHaveBeenCalled();
   });
+
+  // Codex #3377 P1 r2: the anchor's tech-scoped guard keyed on the RAW
+  // window_end, so a null-end anchor skipped the slot-reserve tech lock AND
+  // the tech overlap query entirely — and the later tech-blind probe holds
+  // only the date lock, which slot-reservation writers never take, so both
+  // could commit an overlap under READ COMMITTED. The gate span is now
+  // derived BEFORE the guard (stored end wins, else duration-or-60).
+  function wireNullEndAnchorSeries({ techGuardRuns = true } = {}) {
+    const anchorFull = {
+      ...liveService('confirmed'),
+      window_end: null,
+      estimated_duration_minutes: 90,
+      recurring_parent_id: null,
+      is_recurring: true,
+      recurring_pattern: 'weekly',
+      recurring_nth: null,
+      recurring_weekday: null,
+      recurring_interval_days: null,
+    };
+    const siblings = [{
+      id: 'svc-1', status: 'confirmed', scheduled_date: BASE,
+      window_start: '09:00:00', window_end: null, estimated_duration_minutes: 90,
+      technician_id: 'tech-1',
+    }];
+    const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchorFull) });
+    const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchorFull) });
+    const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
+    const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
+    const techOverlapProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
+    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const historyInsert = chain();
+    const logInsert = chain();
+    // Under the kill switch the tech guard skips, so its probe query never
+    // consumes a slot in the trx queue.
+    const scheduledQueue = techGuardRuns
+      ? [siblingsQuery, seriesClashProbe, techOverlapProbe, anchorUpdate]
+      : [siblingsQuery, seriesClashProbe, anchorUpdate];
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledQueue.shift();
+      if (table === 'job_status_history') return historyInsert;
+      if (table === 'reschedule_log') return logInsert;
+      throw new Error(`Unexpected trx table ${table}`);
+    });
+    trx.raw = rawFactory('trx.raw');
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    const dbQueries = [anchorLookup, parentLookup];
+    const escalationCount = chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return dbQueries.shift();
+      if (table === 'reschedule_log') return escalationCount;
+      throw new Error(`Unexpected db table ${table}`);
+    });
+    return { trx, techOverlapProbe, anchorUpdate };
+  }
+
+  test('a null-end series anchor with a caller-chosen tech takes the tech lock and probes the derived span', async () => {
+    const { trx, techOverlapProbe } = wireNullEndAnchorSeries();
+
+    await SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, { start: '09:00', end: null }, 'customer_request', 'customer_self_serve',
+      { technicianId: 'tech-5' },
+    );
+
+    // The slot-reserve tech lock is held (this is the ONLY lock
+    // slot-reservation writers share)...
+    const slotLocks = trx.raw.mock.calls
+      .filter((c) => Array.isArray(c[1]) && c[1][0] === 'slot-reserve')
+      .map((c) => c[1][1]);
+    expect(slotLocks).toContain(`tech-5:${TARGET}`);
+    // ...and the tech overlap query probes the duration-derived span
+    // (90 min → 10:30), not a skipped/flat one.
+    expect(techOverlapProbe.whereRaw).toHaveBeenCalledWith(
+      expect.stringContaining('window_start < ?::time'),
+      ['10:30', '09:00'],
+    );
+  });
+
+  test('REBOOKER_NULL_END_OCCUPANCY=off keeps the legacy tech-guard skip for a null-end anchor', async () => {
+    process.env.REBOOKER_NULL_END_OCCUPANCY = 'off';
+    try {
+      const { trx, anchorUpdate } = wireNullEndAnchorSeries({ techGuardRuns: false });
+
+      await SmartRebooker.rescheduleSeries(
+        'svc-1', TARGET, { start: '09:00', end: null }, 'customer_request', 'customer_self_serve',
+        { technicianId: 'tech-5' },
+      );
+
+      const slotLocks = trx.raw.mock.calls
+        .filter((c) => Array.isArray(c[1]) && c[1][0] === 'slot-reserve')
+        .map((c) => c[1][1]);
+      expect(slotLocks).toEqual([]);
+      expect(anchorUpdate.update).toHaveBeenCalled();
+    } finally {
+      delete process.env.REBOOKER_NULL_END_OCCUPANCY;
+    }
+  });
 });
 
 describe('applyLiveMoveSideEffects (shared with the raw movers)', () => {
