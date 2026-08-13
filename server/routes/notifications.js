@@ -693,12 +693,14 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       if (optinClaims.length) pendingOptinDispatch = { claims: optinClaims, customer: beforeRow };
       // Contact change events for the 360 timeline — post-commit, best-effort
       // (the recorder never throws; a logging failure must not fail the save).
-      void recordServiceContactChanges({
+      recordServiceContactChanges({
         customerId: req.params.customerId,
         before: beforeRow,
         after: { ...beforeRow, ...slotUpdates, ...consentUpdates },
         source: 'portal',
         actorCustomerId: req.customerId,
+      }).catch((err) => {
+        logger.warn(`[notifications] service-contact event recording failed for customer ${req.params.customerId}: ${err.message}`);
       });
     } else if (updates.serviceContact !== undefined) {
       // Legacy single-contact save: writes slot 1 only. Role handling
@@ -761,12 +763,14 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       if (legacyClaims.length) pendingOptinDispatch = { claims: legacyClaims, customer: beforeRow };
       // Same events as the list save — the legacy shape must not be a
       // logging loophole either. Post-commit, best-effort.
-      void recordServiceContactChanges({
+      recordServiceContactChanges({
         customerId: req.params.customerId,
         before: beforeRow,
         after: { ...beforeRow, ...legacySlot1Updates, ...legacyConsentUpdates },
         source: 'portal',
         actorCustomerId: req.customerId,
+      }).catch((err) => {
+        logger.warn(`[notifications] service-contact event recording failed for customer ${req.params.customerId}: ${err.message}`);
       });
     }
 
