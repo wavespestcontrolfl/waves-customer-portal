@@ -239,6 +239,24 @@ describe('authenticated caller + alternate callback number — lead reuse bounda
     expect(writes.find((w) => w.table === 'leads' && w.verb === 'insert')).toBeTruthy(); // the lead still exists — unlinked
   });
 
+  // ⭐ AND AN UNVERIFIED SESSION REUSES NOTHING. Leads resolve by phone, so
+  // without this an unverified caller claiming a victim's number would land on
+  // the victim's customer-linked lead and overwrite its rolling fields.
+  test('an UNVERIFIED session never reuses an existing lead — a fresh unlinked one is created', async () => {
+    existingLead = { id: 'lead-victim', phone: ANI, customer_id: 'c-777', first_name: 'Pat' };
+    primeDb();
+    await createLeadFromExtraction(
+      { call_summary: 'Caller on an unverified frame claiming this number.' },
+      { phone: ANI, aniPhone: ANI, aniVerified: false, callSid: 'CA-unverified-2' },
+    );
+    const inserted = writes.find((w) => w.table === 'leads' && w.verb === 'insert');
+    expect(inserted).toBeTruthy(); // fresh lead, not the victim's
+    expect(inserted.payload.customer_id || null).toBeNull(); // …and unlinked
+    const logger = require('../services/logger');
+    expect(logger.info).toHaveBeenCalledWith(expect.stringMatching(/never reusing the existing lead/i));
+    existingLead = null;
+  });
+
   test('a VERIFIED relay session still resolves its own ANI to the account', async () => {
     primeDb();
     tables.customers = makeBuilder('customers', [{ id: 'c-777', pipeline_stage: 'new_lead', first_name: 'Pat' }]);

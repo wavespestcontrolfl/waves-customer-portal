@@ -410,6 +410,19 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   let existingLead = phone
     ? await db('leads').where('phone', phone).whereNull('deleted_at').orderBy('created_at', 'desc').first()
     : null;
+  // ⭐ AN UNVERIFIED SESSION REUSES NOTHING. Nulling identity resolution above
+  // is not enough: leads resolve BY PHONE, so an unverified relay caller
+  // claiming a victim's number would still land on — and overwrite the rolling
+  // fields (transcript_summary, extracted_data) of — the lead already linked
+  // to that customer. A session whose ANI is unproven gets a FRESH, UNLINKED
+  // lead every time; a duplicate row for a legitimate caller whose
+  // verification blipped is the cheap side of that trade.
+  // (A handed-in identityCustomerId only exists on a verified full-tier match
+  // — those sessions keep the nuanced reuse rules below.)
+  if (existingLead && opts.aniPhone && !opts.identityCustomerId && opts.aniVerified !== true) {
+    logger.info(`[voice-agent-lead] unverified relay session ${maskPhone(opts.aniPhone)} — never reusing the existing lead on ${maskPhone(phone)}`);
+    existingLead = null;
+  }
   // ⭐ THE IDENTITY FIX HAS TO REACH THE LEAD LOOKUP TOO. Leads resolve BY
   // PHONE, and when the caller gave an ALTERNATE callback number that number
   // can already belong to somebody else's lead — so reusing it would rewrite
