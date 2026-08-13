@@ -744,7 +744,7 @@ function isEmptyValue(v) {
  *                 BOTH rows carry a Stripe customer (that must be resolved in
  *                 Stripe first — two payment profiles cannot be repointed).
  */
-async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', evidence = {} }) {
+async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {} }) {
   if (!winnerId || !loserId || winnerId === loserId) {
     throw new Error('executeMerge: winnerId and loserId must be distinct');
   }
@@ -1510,6 +1510,7 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       before: winnerBeforeMerge,
       after: { ...winnerBeforeMerge, ...result.backfills },
       source: 'dedupe',
+      adminUserId: performedById,
       occurredAt: mergeLockedAt,
     });
   }
@@ -3758,6 +3759,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       before: winnerBeforeUndo,
       after: { ...winnerBeforeUndo, ...winnerPatchApplied },
       source: 'dedupe_undo',
+      adminUserId: performedById || null,
       occurredAt: undoLockedAt,
     });
   }

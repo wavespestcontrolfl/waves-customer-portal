@@ -91,6 +91,7 @@ async function handleMerge(req, res, { linkAsProperty }) {
       loserId,
       mode: 'manual',
       performedBy: performedBy(req),
+      performedById: performedById(req),
       evidence: { via: linkAsProperty ? 'admin_link_as_property' : 'admin_review_queue' },
     });
     let propertyLinked = false;

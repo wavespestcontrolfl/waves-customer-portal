@@ -212,6 +212,43 @@ describe('diffServiceContacts', () => {
     ]);
   });
 
+  test('a simultaneous two-contact edit assigns identities globally, not greedily', () => {
+    // Jane and Bob share an email; in ONE save Jane takes Bob's phone and
+    // Bob drops the shared email. Greedy matching pairs Jane with Bob
+    // (email+phone beats email+name on the tie-break); the global
+    // assignment keeps each person with their own entry: two updates.
+    const before = {
+      service_contact_name: 'Jane Smith',
+      service_contact_phone: '+15551231234',
+      service_contact_email: 'family@example.com',
+      service_contact2_name: 'Bob Smith',
+      service_contact2_phone: '+15557775555',
+      service_contact2_email: 'family@example.com',
+    };
+    const after = {
+      service_contact_name: 'Jane Smith',
+      service_contact_phone: '+15557775555',
+      service_contact_email: 'family@example.com',
+      service_contact2_name: 'Bob Smith',
+      service_contact2_phone: '+15557775555',
+      service_contact2_email: '',
+    };
+    const events = diffServiceContacts(before, after);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: 'service_contact_updated',
+        person: expect.objectContaining({ name: 'Jane Smith' }),
+        changed: ['phone'],
+      }),
+      expect.objectContaining({
+        action: 'service_contact_updated',
+        person: expect.objectContaining({ name: 'Bob Smith' }),
+        changed: ['email'],
+      }),
+    ]));
+    expect(events).toHaveLength(2);
+  });
+
   test('a role-only change is an update flagged on role', () => {
     const events = diffServiceContacts(jane, {
       ...jane,

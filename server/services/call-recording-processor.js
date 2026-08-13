@@ -1677,7 +1677,6 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       || (contact.email && lowerEmail(customer[s.email]) && lowerEmail(customer[s.email]) === lowerEmail(contact.email))
     ));
     if (!matched || String(customer[matched.roleCol] || '').trim()) return false;
-    const roleWriteAt = new Date();
     const wrote = await db('customers')
       .where({ id: customerId })
       .where((q) => q.whereNull(matched.roleCol).orWhere(matched.roleCol, ''))
@@ -1689,10 +1688,13 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       .whereRaw('?? IS NOT DISTINCT FROM ?', [matched.phone, customer[matched.phone] ?? null])
       .whereRaw('?? IS NOT DISTINCT FROM ?', [matched.email, customer[matched.email] ?? null])
       .update({ [matched.roleCol]: roleToRecord.slice(0, 30) });
+    // Stamp taken AFTER the UPDATE resolves: if the statement blocked behind
+    // a concurrent locked save, the stamp still lands after that save's
+    // lock-held timestamp, keeping timeline order.
+    const roleWriteAt = new Date();
     if (wrote) {
       // 360 timeline event — post-write, best-effort, awaited (the recorder
       // never throws; a failure only warns and never fails the pipeline).
-      // The write-time stamp orders it against later locked saves.
       await require('./service-contact-events').recordServiceContactChanges({
         customerId,
         before: customer,
@@ -1813,13 +1815,16 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       service_contacts_consent_text_version: null,
     } : {}),
   };
-  const slotWriteAt = new Date();
   const updated = await write.update(slotWrite);
+  // Stamp taken AFTER the UPDATE resolves: if it blocked behind a concurrent
+  // locked save, the stamp still lands after that save's lock-held
+  // timestamp, keeping timeline order.
+  const slotWriteAt = new Date();
   if (!updated) return 'skipped_slot_race';
   // 360 timeline event — post-write, best-effort, awaited (the recorder
   // never throws). The conditional WHERE proved the slot was still empty at
   // write time, so merging slotWrite over the read snapshot diffs to exactly
-  // this one addition; the write-time stamp orders it against later saves.
+  // this one addition.
   await require('./service-contact-events').recordServiceContactChanges({
     customerId,
     before: customer,

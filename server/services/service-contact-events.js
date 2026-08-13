@@ -75,26 +75,47 @@ function slotPeople(customerRow) {
     .filter((p) => p.name || p.phone || p.email);
 }
 
-function matchPerson(person, candidates) {
-  // Score every candidate by how many identifiers agree. Households share
-  // email addresses and phone lines, and an identifier can move between
-  // listed people (Jane adopting Bob's email or number must not pair Jane
-  // with Bob) — so a single shared identifier never outranks
-  // multi-identifier agreement: the person's own prior entry still agrees
-  // on name + the unchanged identifier. Identifier precedence
-  // (email > phone > name) only breaks equal-score ties; a tie that
-  // precedence can't break keeps the earliest slot, deterministically.
-  let best = null;
-  for (const c of candidates) {
-    const emailHit = norm(person.email) && norm(person.email) === norm(c.email) ? 1 : 0;
-    const phoneHit = phoneKey(person.phone) && phoneKey(person.phone) === phoneKey(c.phone) ? 1 : 0;
-    const nameHit = norm(person.name) && norm(person.name) === norm(c.name) ? 1 : 0;
-    const score = emailHit + phoneHit + nameHit;
-    if (!score) continue;
-    const rank = score * 8 + emailHit * 4 + phoneHit * 2 + nameHit;
-    if (!best || rank > best.rank) best = { candidate: c, rank };
-  }
-  return best ? best.candidate : null;
+// How strongly an after-person and a before-person look like the same
+// human: count of agreeing identifiers, with email > phone > name breaking
+// equal-count ties. 0 = no shared identifier (never a match).
+function pairRank(person, candidate) {
+  const emailHit = norm(person.email) && norm(person.email) === norm(candidate.email) ? 1 : 0;
+  const phoneHit = phoneKey(person.phone) && phoneKey(person.phone) === phoneKey(candidate.phone) ? 1 : 0;
+  const nameHit = norm(person.name) && norm(person.name) === norm(candidate.name) ? 1 : 0;
+  const score = emailHit + phoneHit + nameHit;
+  return score ? score * 8 + emailHit * 4 + phoneHit * 2 + nameHit : 0;
+}
+
+// Choose the identity pairing that maximizes TOTAL rank across all people
+// at once, not greedily per person — a greedy pass can hand one person's
+// strongest candidate to somebody else when identifiers move between
+// household members in a single save (e.g. Jane taking Bob's phone while
+// Bob drops a shared email). At most 3 slots per side, so brute force is
+// exact and cheap. First assignment found with the max total wins, which is
+// deterministic (earlier after-slots try earlier before-slots first).
+function bestAssignment(afterPeople, beforePeople) {
+  let best = { total: 0, pairs: [] };
+  const used = new Array(beforePeople.length).fill(false);
+  const pairs = [];
+  const walk = (i, total) => {
+    if (i === afterPeople.length) {
+      if (total > best.total) best = { total, pairs: pairs.slice() };
+      return;
+    }
+    walk(i + 1, total); // afterPeople[i] left unmatched
+    for (let j = 0; j < beforePeople.length; j += 1) {
+      if (used[j]) continue;
+      const rank = pairRank(afterPeople[i], beforePeople[j]);
+      if (!rank) continue;
+      used[j] = true;
+      pairs.push([i, j]);
+      walk(i + 1, total + rank);
+      pairs.pop();
+      used[j] = false;
+    }
+  };
+  walk(0, 0);
+  return best.pairs;
 }
 
 function changedFields(beforePerson, afterPerson) {
@@ -112,19 +133,15 @@ function diffServiceContacts(beforeRow = {}, afterRow = {}) {
   const beforePeople = slotPeople(beforeRow);
   const afterPeople = slotPeople(afterRow);
   const events = [];
-  const matched = new Set();
-  const unmatchedAfter = [];
+  const matchedAfter = new Set();
+  const matchedBefore = new Set();
 
-  for (const person of afterPeople) {
-    const prior = matchPerson(person, beforePeople.filter((p) => !matched.has(p)));
-    if (!prior) {
-      unmatchedAfter.push(person);
-      continue;
-    }
-    matched.add(prior);
-    const changed = changedFields(prior, person);
+  for (const [i, j] of bestAssignment(afterPeople, beforePeople)) {
+    matchedAfter.add(i);
+    matchedBefore.add(j);
+    const changed = changedFields(beforePeople[j], afterPeople[i]);
     if (changed.length) {
-      events.push({ action: 'service_contact_updated', person, changed });
+      events.push({ action: 'service_contact_updated', person: afterPeople[i], changed });
     }
   }
 
@@ -135,19 +152,21 @@ function diffServiceContacts(beforeRow = {}, afterRow = {}) {
   // only identity evidence — treat it as an update. A person with a phone or
   // email that stopped matching really is a different person: no fallback.
   const hasStableId = (p) => !!(phoneKey(p.phone) || norm(p.email));
-  for (const person of unmatchedAfter) {
-    const samePriorSlot = beforePeople.find((p) => !matched.has(p) && p.slot === person.slot);
-    if (samePriorSlot && !hasStableId(person) && !hasStableId(samePriorSlot)) {
-      matched.add(samePriorSlot);
-      events.push({ action: 'service_contact_updated', person, changed: changedFields(samePriorSlot, person) });
+  for (let i = 0; i < afterPeople.length; i += 1) {
+    if (matchedAfter.has(i)) continue;
+    const person = afterPeople[i];
+    const j = beforePeople.findIndex((p, idx) => !matchedBefore.has(idx) && p.slot === person.slot);
+    if (j !== -1 && !hasStableId(person) && !hasStableId(beforePeople[j])) {
+      matchedBefore.add(j);
+      events.push({ action: 'service_contact_updated', person, changed: changedFields(beforePeople[j], person) });
       continue;
     }
     events.push({ action: 'service_contact_added', person, changed: [] });
   }
 
-  for (const prior of beforePeople) {
-    if (!matched.has(prior)) {
-      events.push({ action: 'service_contact_removed', person: prior, changed: [] });
+  for (let j = 0; j < beforePeople.length; j += 1) {
+    if (!matchedBefore.has(j)) {
+      events.push({ action: 'service_contact_removed', person: beforePeople[j], changed: [] });
     }
   }
 
@@ -203,15 +222,17 @@ async function recordServiceContactChanges({
     const events = diffServiceContacts(before, after);
     if (!events.length) return [];
     let sourceLabel = SOURCE_LABELS[source] || source;
-    // Admin saves name the acting staff member in the visible description —
-    // the timeline renders only descriptions, and "who made the change" is
-    // the point of the audit trail. Staff names are not customer PII (the
-    // dashboard already shows technician names). Best-effort: a failed
-    // lookup keeps the generic label rather than losing the event.
-    if (source === 'admin' && adminUserId) {
+    // Staff-initiated events name the acting staff member in the visible
+    // description — the timeline renders only descriptions, and "who made
+    // the change" is the point of the audit trail. Applies to any source
+    // with an acting admin (admin edits, manual merges/undos); automated
+    // paths pass no adminUserId and keep the generic label. Staff names are
+    // not customer PII (the dashboard already shows technician names).
+    // Best-effort: a failed lookup keeps the generic label.
+    if (adminUserId) {
       try {
         const tech = await db('technicians').where({ id: adminUserId }).first('name');
-        if (tech && tech.name) sourceLabel = `admin: ${tech.name}`;
+        if (tech && tech.name) sourceLabel = `${sourceLabel}: ${tech.name}`;
       } catch (err) {
         // keep the generic label
       }
