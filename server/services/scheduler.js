@@ -935,7 +935,10 @@ function initScheduledJobs() {
       // (advisory lock is non-blocking) and picked up tomorrow.
       await runExclusive('route-tiers-nightly', async () => {
         const { runRouteReorderIfEnabled, recordSkippedTick } = require('./route-reorder');
-        const inner = await runExclusive('auto-dispatch-recurring', async () => runRouteReorderIfEnabled());
+        // recordHealth:false — this invocation only BORROWS the writer lock;
+        // recording it would stamp a fresh 4:20 success under the 4:10 job's
+        // name, clearing real failures and falsifying last_success_at.
+        const inner = await runExclusive('auto-dispatch-recurring', async () => runRouteReorderIfEnabled(), { recordHealth: false });
         if (inner && inner.skipped) {
           // The 4:10 job still held the writer lock — the tick did NOT run.
           // Ledger it as skipped so job health / the dispatch card never show
@@ -946,6 +949,12 @@ function initScheduledJobs() {
         }
         const result = inner || {};
         logger.info(`[route-reorder] cron run ${result.status}: applied=${result.applied ?? 0} skipped=${result.skipped ?? 0} failed=${result.failed ?? 0} ledger=${result.ledgerId ?? 'none'}`);
+        // Anything short of a fully-successful, ledgered run must FAIL job
+        // health — a guard outage (completed_with_errors) or a lost ledger
+        // otherwise reads as a healthy night with no visible output.
+        if (result.status !== 'gate_off' && (result.status !== 'completed' || result.ledgerId == null)) {
+          throw new Error(`route-reorder run unhealthy: status=${result.status ?? 'unknown'} ledger=${result.ledgerId ?? 'none'}`);
+        }
       });
     } catch (err) {
       logger.error(`Route-Tiers reorder run failed: ${err.message}`);
