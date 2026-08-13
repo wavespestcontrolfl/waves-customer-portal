@@ -55,6 +55,19 @@ test('a qualifying self-pay row → true; a payer-billed row is DROPPED', async 
 // ⭐ A DROPPED ROW IS NOT A "NO". This boolean gets SPOKEN as "no open balance"
 // — a candidate lost to a transient resolve failure makes the answer
 // INDETERMINATE, which the voice layer speaks as "couldn't check".
+// ⭐ A FULL PAGE OF NON-QUALIFIERS IS NOT A "NO". With the candidate cap hit
+// and every fetched row payer-billed, a self-pay invoice can still exist
+// beyond the cap — the probe must degrade to indeterminate, not say "no open
+// balance" to a customer who owes money.
+test('a FULL candidate page of payer-billed rows is INDETERMINATE (null), never false', async () => {
+  const fullPage = Array.from({ length: 200 }, (_, i) => (
+    { id: `i${i}`, invoice_number: `WPC-${i}`, scheduled_service_id: null }
+  ));
+  const { database } = makeDb(fullPage);
+  PayerService.resolveForInvoice.mockResolvedValue({ payerId: 'payer-9' }); // all third-party
+  expect(await openBalanceExists('c-1', { database })).toBe(null);
+});
+
 test('a payer-resolve OUTAGE returns INDETERMINATE (null), never a confident false', async () => {
   const { database } = makeDb([{ id: 'i1', invoice_number: 'WPC-1', scheduled_service_id: null }]);
   PayerService.resolveForInvoice.mockRejectedValue(new Error('payer service down'));

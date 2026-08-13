@@ -155,6 +155,12 @@ async function openBalanceExists(customerId, { excludeInvoiceId = null, database
     }
     return true; // short-circuit at the first qualifying self-pay row
   }
+  // ⭐ A FULL PAGE OF NON-QUALIFIERS IS NOT A "NO" EITHER. If the candidate
+  // query hit its cap and every fetched row resolved to a payer, a self-pay
+  // invoice can still exist beyond the cap — a confident false here would be
+  // SPOKEN as "no open balance" to a customer who owes money. Off-the-end of
+  // a full page is indeterminate, same degradation as a failed resolve.
+  if (rows.length >= MAX_OPEN_INVOICES) return null;
   return anyResolveFailed ? null : false;
 }
 

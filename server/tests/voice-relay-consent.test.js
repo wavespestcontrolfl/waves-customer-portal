@@ -859,6 +859,34 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
   });
 
+  // ⭐ WHOSE TEXTS? The suppression is keyed to the CALLER's ANI — a stop
+  // about somebody else must never silence the caller's own reminders.
+  test('a third-party stop ("stop texting my tenant") records but never suppresses the caller', async () => {
+    for (const words of [
+      'stop texting my tenant',
+      "please don't message her",
+      'take my tenant off your list',
+      "stop texting my husband's number",
+    ]) {
+      jest.clearAllMocks();
+      await executeTool('capture_lead', {
+        call_summary: 'Instruction about another recipient.',
+        contact_preference: words,
+        do_not_contact_request: true,
+      }, CTX);
+      expect(recordSuppression).not.toHaveBeenCalled();
+    }
+  });
+
+  test('…but a stop that includes the caller ("stop texting me and my husband") still suppresses', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Asked us to stop texting them both.',
+      contact_preference: 'stop texting me and my husband',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+  });
+
   test('…while a lone "don\'t text me" is still a real stop', async () => {
     await executeTool('capture_lead', {
       call_summary: 'Asked us to stop texting.',

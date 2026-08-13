@@ -936,7 +936,19 @@ async function executeTool(name, input = {}, ctx = {}) {
       const bareNoTexts = preferenceText
         .split(/[,;.!?—–]/)
         .some((clause) => BARE_NO_TEXTS_CLAUSE_RE.test(clause.trim()));
-      const statedSmsStop = actionableStopClauses.some((c) => TEXTY.test(c.stopped) && !TEXTY.test(c.kept))
+      // ⭐ WHOSE TEXTS? The suppression write is keyed to the CALLER's ANI, so
+      // a stop clause about somebody ELSE — "stop texting my tenant", "don't
+      // message her" — must never take it: it would silence the caller's own
+      // reminders while the tenant's kept sending. A clause is third-party
+      // scoped when it names another recipient and no first-person one; "stop
+      // texting me and my husband" still includes the caller and suppresses,
+      // and an unqualified "stop texting" stays the caller's own. Third-party
+      // requests land on the lead for a human, like every instruction the
+      // agent can't safely apply to the number it actually holds.
+      const FIRST_PERSON_RE = /\b(?:me|us)\b|\b(?:my|our)\s+(?:number|phone|cell)\b/i;
+      const THIRD_PARTY_RE = /\b(?:him|her|them)\b|\b(?:his|her|their)\s+(?:number|phone|cell)\b|\b(?:my|our|the)\s+(?:tenants?|husband|wife|spouse|partner|sons?|daughters?|kids?|child(?:ren)?|mother|father|mom|dad|parents?|brothers?|sisters?|roommates?|neighbou?rs?|landlords?|boyfriend|girlfriend|employees?|ex)\b/i;
+      const thirdPartyScoped = (clause) => THIRD_PARTY_RE.test(clause) && !FIRST_PERSON_RE.test(clause);
+      const statedSmsStop = actionableStopClauses.some((c) => TEXTY.test(c.stopped) && !TEXTY.test(c.kept) && !thirdPartyScoped(c.stopped))
         || bareNoTexts;
       // A total stop is any "stop <reaching me at all>" phrasing — and the
       // common ones do not say "contact": "remove my number", "don't bother me
@@ -966,6 +978,9 @@ async function executeTool(name, input = {}, ctx = {}) {
           || /\b(?:leave (?:me|us) alone|take (?:me|us) off (?:your |the )?list|do not contact)\b/i.test(c.stopped))
         && !NON_SMS_CHANNEL.test(c.stopped)
         && !TEXTY.test(c.kept)
+        // A total stop about somebody else ("take my tenant off your list")
+        // is not the caller's withdrawal either.
+        && !thirdPartyScoped(c.stopped)
       ));
       // ⭐ AND A BARE FLAG IS NOT EVIDENCE OF A CHANNEL. `contact_preference` is
       // optional, so `do_not_contact_request: true` with no words at all can be
