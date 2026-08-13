@@ -1045,13 +1045,18 @@ function RecommendationsCard({ data }) {
                   <ShellIconTile icon={icon} size={34} />
                   <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{card.title}</div>
                 </div>
-                <div style={{
-                  flexShrink: 0, padding: '3px 10px', borderRadius: 999,
-                  background: chip.background, border: `1px solid ${chip.border}`, color: chip.color,
-                  fontSize: 14, fontWeight: 850, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
-                }}>
-                  {chip.text}
-                </div>
+                {/* Owner ruling 08-13: offer cards carry no priority chip —
+                    the section header already says "Recommended for your
+                    property". Advice cards keep theirs. */}
+                {card.kind !== 'offer' && (
+                  <div style={{
+                    flexShrink: 0, padding: '3px 10px', borderRadius: 999,
+                    background: chip.background, border: `1px solid ${chip.border}`, color: chip.color,
+                    fontSize: 14, fontWeight: 850, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
+                  }}>
+                    {chip.text}
+                  </div>
+                )}
               </div>
               <div style={{ marginTop: 8, fontSize: 14, color: muted, lineHeight: 1.5 }}>{card.body}</div>
               {priced && (
@@ -1073,25 +1078,18 @@ function RecommendationsCard({ data }) {
                       Offer updated — refresh to see the latest
                     </button>
                   ) : data?.oneTap && card.kind === 'offer' && card.mode === 'priced' && priced ? (
-                    // One-tap purchase (bet 3): buy is primary, the existing
-                    // request path stays reachable as the secondary ask.
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                      <button
-                        type="button"
-                        onClick={() => setPurchaseCard(card)}
-                        style={PORTAL_PRIMARY_ACTION}
-                      >
-                        Add now — {fmtMoney(card.option.perVisit)} per application
-                      </button>
-                      <button
-                        type="button"
-                        disabled={state === 'sending'}
-                        onClick={() => handleRequest(card)}
-                        style={PORTAL_SECONDARY_ACTION}
-                      >
-                        {state === 'sending' ? 'Sending…' : 'Ask a question instead'}
-                      </button>
-                    </div>
+                    // One-tap purchase (bet 3): the buy action is the card's
+                    // ONLY CTA (owner ruling 08-13 — no secondary ask), and it
+                    // carries the yellow glass accent, same treatment as the
+                    // Waves AI Ask button (data-glass-accent, navy text).
+                    <button
+                      type="button"
+                      onClick={() => setPurchaseCard(card)}
+                      data-glass-accent=""
+                      style={PORTAL_PRIMARY_ACTION}
+                    >
+                      Add now — {fmtMoney(card.option.perVisit)} per application
+                    </button>
                   ) : (
                     <button
                       type="button"
@@ -1378,7 +1376,11 @@ function OneTapPurchaseOverlay({ open, card, onClose }) {
     </div>
   );
 
-  return (
+  // Portaled to <body>: the launch button lives inside a data-glass card
+  // whose backdrop-filter makes it the fixed-position containing block —
+  // rendered in place, the overlay pins to the card instead of the viewport
+  // (on mobile the tab bar painted over the sheet).
+  return createPortal(
     <div data-glass-scrim={compact ? undefined : ''} style={{
       position: 'fixed', inset: 0, zIndex: 1000,
       background: compact ? PORTAL_SHELL.page : 'rgba(15,23,42,0.48)',
@@ -1392,7 +1394,7 @@ function OneTapPurchaseOverlay({ open, card, onClose }) {
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label={`Add ${card?.title || 'service'}`}
+        aria-label={`Add ${init?.label || String(card?.title || 'service').replace(/^Add\s+/i, '')}`}
         data-glass="modal"
         style={{
           position: 'relative',
@@ -1412,6 +1414,7 @@ function OneTapPurchaseOverlay({ open, card, onClose }) {
         <header style={{
           flexShrink: 0,
           background: 'rgba(255,255,255,0.96)',
+          backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           padding: compact ? '12px 14px' : '14px 18px',
           display: 'flex',
@@ -1423,7 +1426,7 @@ function OneTapPurchaseOverlay({ open, card, onClose }) {
             <ShellIconTile icon="sparkles" size={34} />
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 18, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.2 }}>
-                {step === 'done' ? 'You are booked' : `Add ${init?.label || card?.title || 'service'}`}
+                {step === 'done' ? 'You are booked' : `Add ${init?.label || String(card?.title || 'service').replace(/^Add\s+/i, '')}`}
               </div>
               {step !== 'done' && init && (
                 <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
@@ -1468,7 +1471,7 @@ function OneTapPurchaseOverlay({ open, card, onClose }) {
                   {init.terms?.text}
                 </div>
               </div>
-              <button type="button" style={PORTAL_PRIMARY_ACTION} onClick={() => setStep('time')}>
+              <button type="button" data-glass-accent="" style={PORTAL_PRIMARY_ACTION} onClick={() => setStep('time')}>
                 Agree and choose a time
               </button>
             </>
@@ -1573,11 +1576,12 @@ function OneTapPurchaseOverlay({ open, card, onClose }) {
               {stepError && <div style={{ fontSize: 14, color: '#9A3412' }}>{stepError}</div>}
               <button
                 type="button"
+                data-glass-accent=""
                 style={{ ...PORTAL_PRIMARY_ACTION, opacity: mustCollectCard || confirming ? 0.55 : 1 }}
                 disabled={mustCollectCard || confirming}
                 onClick={handleConfirm}
               >
-                {confirming ? 'Confirming…' : `Confirm — ${fmtMoney(init.perVisit)} per application`}
+                {confirming ? 'Confirming…' : 'Confirm'}
               </button>
             </>
           ) : (
@@ -1606,14 +1610,15 @@ function OneTapPurchaseOverlay({ open, card, onClose }) {
               <div style={{ fontSize: 14, color: muted, lineHeight: 1.5, textAlign: 'center' }}>
                 A confirmation email and an app notification are on the way.
               </div>
-              <button type="button" style={PORTAL_PRIMARY_ACTION} onClick={onClose}>
+              <button type="button" data-glass-accent="" style={PORTAL_PRIMARY_ACTION} onClick={onClose}>
                 Done
               </button>
             </>
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

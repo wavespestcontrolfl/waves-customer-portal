@@ -84,11 +84,16 @@ const renderDashboard = () => render(
 );
 
 describe('one-tap purchase CTA gating', () => {
-  it('oneTap:true + priced offer → Add-now buy CTA with the ask kept as secondary', async () => {
+  it('oneTap:true + priced offer → Add-now is the ONLY CTA (owner ruling: no secondary ask, no priority chip)', async () => {
     api.getPropertyRecommendations.mockResolvedValue(recommendations());
     renderDashboard();
-    expect(await screen.findByText('Add now — $84.00 per application')).toBeInTheDocument();
-    expect(screen.getByText('Ask a question instead')).toBeInTheDocument();
+    const buy = await screen.findByText('Add now — $84.00 per application');
+    expect(buy).toBeInTheDocument();
+    // Owner ruling 08-13: yellow glass accent, same as the Waves AI Ask button.
+    expect(buy.closest('button')).toHaveAttribute('data-glass-accent');
+    expect(screen.queryByText('Ask a question instead')).not.toBeInTheDocument();
+    // Offer cards carry no priority chip — the section header already says it.
+    expect(screen.queryByText('Recommended')).not.toBeInTheDocument();
     // The plain request CTA is replaced, not duplicated.
     expect(screen.queryByText('Add Lawn Care')).not.toBeInTheDocument();
   });
@@ -168,7 +173,7 @@ describe('one-tap purchase CTA gating', () => {
     expect(api.oneTapReserve).toHaveBeenCalledWith('p-1', 'slot-1');
 
     // CONFIRM: card already on file → no capture form; confirm purchases.
-    fireEvent.click(screen.getByText('Confirm — $84.00 per application'));
+    fireEvent.click(screen.getByText('Confirm'));
     expect(await screen.findByText('Lawn Care is confirmed')).toBeInTheDocument();
     expect(api.oneTapConfirm).toHaveBeenCalledWith('p-1', { termsAccepted: true });
     expect(screen.getByText(/confirmation email and an app notification/)).toBeInTheDocument();
