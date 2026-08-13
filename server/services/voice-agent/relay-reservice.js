@@ -183,7 +183,7 @@ async function requestReserviceText(input = {}, ctx = {}) {
     logger.error(`[voice-relay-reservice] open-callback dedupe FAILED for ${customerId} — refusing to file (fail closed): ${err.message}`);
     return 'I could not check whether a re-service is already on the schedule for this account, so nothing was '
       + 'filed — filing a second one would double-book them. Tell the caller a Waves team member will follow up '
-      + 'about it shortly, and do NOT state a date, a time, a link, or a code.';
+      + 'about it as soon as possible, and do NOT state a date, a time, a link, or a code.';
   }
   if (booked) {
     // ⭐ THE DATE AND WINDOW ARE FULL-TIER ONLY. This branch answers with a
@@ -308,7 +308,7 @@ async function requestReserviceText(input = {}, ctx = {}) {
   if (filedTicket.status === 'dedupe_failed') {
     return 'I could not check whether a re-service is already on the schedule for this account, so nothing was '
       + 'filed — filing a second one would double-book them. Tell the caller a Waves team member will follow up '
-      + 'about it shortly, and do NOT state a date, a time, a link, or a code.';
+      + 'about it as soon as possible, and do NOT state a date, a time, a link, or a code.';
   }
   if (filedTicket.status === 'already_open') {
     logger.warn(

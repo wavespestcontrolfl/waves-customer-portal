@@ -519,7 +519,8 @@ function availabilityResultToText(res, ctx = {}) {
   return (
     `${res.summary ? res.summary + ' ' : ''}Open times: ${list}. ` +
     'NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. ' +
-    'After they choose, tell them a Waves team member will call shortly to confirm and lock it in, ' +
+    'After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN ' +
+    'from the latest CLOCK DATA — never "shortly" while the office is closed), ' +
     'then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. ' +
     'If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.'
   );
@@ -1276,8 +1277,9 @@ async function executeTool(name, input = {}, ctx = {}) {
           + 'a Waves team member will follow up, and do not say a new request or appointment was created.'
           + suppressionNote + pageCaveat;
       }
-      return 'Lead saved successfully. Let the caller know a Waves team member will follow up shortly to confirm '
-        + 'details and scheduling.' + suppressionNote + pageCaveat;
+      return 'Lead saved successfully. Let the caller know a Waves team member will follow up to confirm '
+        + 'details and scheduling — set WHEN from the latest CLOCK DATA (never "shortly" while the office '
+        + 'is closed).' + suppressionNote + pageCaveat;
     }
 
     if (name === 'get_availability') {

@@ -199,6 +199,28 @@ describe('prompt wiring', () => {
     expect(p).toMatch(/do not state hours at all/);
   });
 
+  // ⭐ NO UNCONDITIONAL "SHORTLY" ANYWHERE IN THE LANE. The clock rule above is
+  // only as good as the copy around it: tool results and prompt blocks that
+  // said a team member "will follow up shortly" contradicted it after hours
+  // (a false promise at 2 AM). Every remaining "shortly" in the voice-agent
+  // sources must be part of the rule itself — either the negative form
+  // (never "shortly") or the office-OPEN example inside the clock rule.
+  test('no voice-agent source carries an unconditional "shortly" promise', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const dir = path.join(__dirname, '../services/voice-agent');
+    const offenders = [];
+    for (const f of fs.readdirSync(dir).filter((name) => name.endsWith('.js'))) {
+      fs.readFileSync(path.join(dir, f), 'utf8').split('\n').forEach((line, i) => {
+        if (!/shortly/i.test(line)) return;
+        const allowed = /never ["']?shortly/i.test(line) // the rule / clock-conditioned copy
+          || /call you back shortly" is fine/.test(line); // the office-OPEN example in the rule
+        if (!allowed) offenders.push(`${f}:${i + 1} ${line.trim()}`);
+      });
+    }
+    expect(offenders).toEqual([]);
+  });
+
   test('GATE ON → the never-before-8am rule is restated in the prompt AND enforced in code', async () => {
     expect(buildBasePrompt(true)).toContain('never starts an appointment before 8:00 AM Eastern');
     // Prompt language is the reminder; relay-booking is the enforcement.

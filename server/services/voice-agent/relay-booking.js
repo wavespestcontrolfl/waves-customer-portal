@@ -854,7 +854,8 @@ async function requestBookingText(input = {}, ctx = {}) {
   });
   if (commit.status === 'duplicate') {
     return 'A booking request for this caller and day is already in — do not create another. '
-      + 'Tell the caller a Waves team member will text or call shortly to confirm the time.';
+      + 'Tell the caller a Waves team member will text or call to confirm the time — set WHEN '
+      + 'from the latest CLOCK DATA (never "shortly" while the office is closed).';
   }
   if (commit.status === 'already_requested') {
     // The DB-side half of the one-booking-per-call rule (the session latch
@@ -915,7 +916,8 @@ async function requestBookingText(input = {}, ctx = {}) {
   } catch { /* the bare start remains the fallback */ }
   return `Booking REQUEST submitted for ${catalogRow.name} on ${dateStr} with an arrival window of ${spokenTime}. `
     + 'This is NOT a confirmed appointment: tell the caller a Waves team member will text or call '
-    + 'shortly to confirm the final time. Do NOT say the time is locked in, booked, or guaranteed. '
+    + 'to confirm the final time — set WHEN from the latest CLOCK DATA (never "shortly" while the '
+    + 'office is closed). Do NOT say the time is locked in, booked, or guaranteed. '
     + 'Then call capture_lead as usual before ending the call.';
 }
 

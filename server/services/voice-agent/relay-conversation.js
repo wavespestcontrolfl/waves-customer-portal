@@ -122,8 +122,11 @@ const SYSTEM_PROMPT = [
   '',
   'Before you end the call, you MUST call the capture_lead tool with everything you gathered',
   '(a brief call_summary is required; include any time they picked in preferred_date_time).',
-  'After it succeeds, tell the caller a Waves team member will follow up shortly to confirm,',
-  'then say goodbye.',
+  // Neutral copy ON PURPOSE — this is the BASE (gate-off) prompt: gate-off
+  // calls carry no CLOCK DATA blocks, so the promise must be true at 2 AM
+  // unaided. The gate-on prompt layers the clock-aware callback rules on top.
+  'After it succeeds, tell the caller a Waves team member will follow up as soon as possible',
+  'to confirm, then say goodbye.',
 ].join('\n');
 
 // ── Phase 2 "context" prompt (VOICE_RELAY_CONTEXT_ENABLED) ────────────────
@@ -253,8 +256,9 @@ function bookingPromptAddendum() {
     '  the office reviews — it does NOT confirm an appointment.',
     '- ONE booking request per call. If they want a different time afterwards, say the Waves',
     '  team member who calls to confirm can move it; do not place a second request.',
-    '- Tell the caller a Waves team member will text or call shortly to confirm the final',
-    '  time. NEVER say the time is locked in, booked, confirmed, or guaranteed.',
+    '- Tell the caller a Waves team member will text or call to confirm the final time — set',
+    '  WHEN from the latest CLOCK DATA (never "shortly" while the office is closed).',
+    '  NEVER say the time is locked in, booked, confirmed, or guaranteed.',
     '- If the tool says the time is gone, run find_slots again and offer fresh options.',
     '- Booking needs an account: the matched caller\'s own, or a customer_ref from',
     '  lookup_customer. For a brand-new caller, capture the lead with their preferred time',
@@ -534,7 +538,9 @@ class RelayConversation {
     if (this._userTurns.length >= MAX_CALL_TURNS) {
       if (!this._ending) {
         logger.warn(`[voice-relay] call turn cap (${MAX_CALL_TURNS}) reached callSid=${this.callSid} — ending`);
-        this.say('A Waves team member will follow up with you shortly to take care of this. Thanks for calling!');
+        // Neutral copy ON PURPOSE — this line is spoken directly (no model in
+        // the loop to consult CLOCK DATA), so it must be true at 2 AM too.
+        this.say('A Waves team member will follow up with you as soon as possible to take care of this. Thanks for calling!');
         this._ending = true;
         try {
           if (this._endSession) this._endSession({ reason: 'turn_cap', captured: this.leadCaptured });
