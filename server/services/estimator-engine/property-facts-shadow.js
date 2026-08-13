@@ -181,6 +181,12 @@ function associationCallerSignal({ extraction, intent }) {
   const rel = String(extraction?.caller?.relationship_to_property || '').toLowerCase();
   if (/property.?manager|manager|management|association|hoa|board/.test(rel)) return true;
   if (extraction?.property?.hoa_common_area_service === true) return true;
+  // The schema's own hoa_common_area PROPERTY TYPE counts too — the
+  // underscored form evaded ASSOCIATION_TYPES (space-form only), so a
+  // commercial intent with that type and a null risk read as a whole
+  // building on a private parcel (codex r55 P1). `.?` tolerates the
+  // underscore/space/joined variants in both fields.
+  if (/hoa|common.?area|association/i.test(String(extraction?.property?.property_type || ''))) return true;
   return /hoa|common.?area|association/i.test(String(intent?.commercial_risk_type || ''));
 }
 

@@ -1481,6 +1481,24 @@ describe('association callers keep association scope on condo records (r51)', ()
     expect(model.serviceScope).not.toBe('commercial_suite');
   });
 
+  test('the underscored hoa_common_area property type is an association job (r55)', () => {
+    // Schema-valid extraction type, null risk: the space-form-only
+    // ASSOCIATION_TYPES regex missed it and the job read as a whole
+    // building on a private parcel.
+    const model = resolveUnitScopeModel({
+      propertyRecord: null,
+      extraction: {
+        caller: { relationship_to_property: 'owner' },
+        property: { property_type: 'hoa_common_area' },
+      },
+      intent: { is_commercial: true, address: '3400 Cattlemen Rd, Sarasota, FL 34232' },
+      propertyFacts: { tenant: false, home: { source: 'unresolved' } },
+      address: '3400 Cattlemen Rd, Sarasota, FL 34232',
+    });
+    expect(model.serviceScope).toBe('association_common_area');
+    expect(model.lotApplicability).not.toBe('private_parcel');
+  });
+
   test('an hoa/common-area risk type carries the same rule', () => {
     expect(shadowPrivate.condoRecordOccupancy({
       condoRecord: true,
