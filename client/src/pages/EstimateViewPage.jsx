@@ -2620,7 +2620,10 @@ function RecurringCardModal({ intent, onSuccess, onCancel }) {
 // 2026-08-12, mockup-approved). Chips + optional note → POST measurement-
 // review → the office re-measures. Copy rules: NO tech-visit promise (owner
 // ruling — it writes a work order for the field tech) and the estimate
-// explicitly stays valid while we re-check. Photo upload from the mockup is
+// explicitly stays AS-IS while we re-check (qualified by its normal
+// expiration date — a challenge does NOT extend the estimate; codex #3376
+// P2: an unqualified validity promise could mislead near expiry). Photo
+// upload from the mockup is
 // deferred — no public upload path exists on this surface yet.
 const MEASUREMENT_REVIEW_CHIPS = [
   { key: 'less_lawn', label: 'We have less lawn than that' },
@@ -2685,7 +2688,7 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
           <>
             <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.glassNavy }}>Got it — we&rsquo;ll re-check the lawn size</div>
             <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
-              We&rsquo;ll re-measure and send an updated estimate — usually same day. Your current estimate stays valid in the meantime.
+              We&rsquo;ll re-measure and send an updated estimate — usually same day. Your current estimate stays as-is in the meantime (through its normal expiration date).
             </div>
             {/* data-glass-accent: the gold glass CTA (owner 2026-08-12 —
                 primary sheet actions match the estimate's gold CTAs); the
@@ -2754,7 +2757,7 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
               </button>
             </div>
             <div style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5, marginTop: 12, textAlign: 'center' }}>
-              Your current estimate stays valid while we re-check — nothing changes until you see the updated number.
+              Your current estimate stays as-is while we re-check — nothing changes until you see the updated number, and its normal expiration date still applies.
             </div>
           </>
         )}

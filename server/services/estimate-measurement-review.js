@@ -275,18 +275,47 @@ async function sendOfficeNotification(database, { subject, description, customer
     }
   };
 
-  const first = await attempt();
-  // suppressed:true is POLICY (internal/demo accounts must not ring the
-  // bell), not an outage — terminal success, no retry, no loud error
-  // (codex #3376 final head P3). The claim stays: suppression IS delivery.
-  if (first?.suppressed) {
-    logger.info(`[estimate-measurement-review] admin notification suppressed by policy for request ${requestId}`);
-    await markDelivered();
-    return;
+  // Crash-idempotent send (codex #3376 P2): the bell INSERT itself must not
+  // duplicate. Two windows exist around the lease alone — a crash between
+  // insert and the notifiedAt stamp (lease expires, retry re-inserts), and a
+  // send outliving its lease (successor + zombie both insert). Both senders
+  // therefore serialize on a per-request advisory xact lock held ACROSS the
+  // existence check AND the send: a successor waits out a live zombie, then
+  // sees its bell and stamps without inserting; a crashed sender's lock
+  // releases automatically and its bell (if inserted) is found by the check.
+  // suppressed:true stays POLICY (terminal success, no retry, no loud error).
+  const deliver = async () => {
+    const first = await attempt();
+    if (first?.suppressed) {
+      logger.info(`[estimate-measurement-review] admin notification suppressed by policy for request ${requestId}`);
+      return true;
+    }
+    if (first?.id) return true;
+    const second = await attempt();
+    return !!(second?.suppressed || second?.id);
+  };
+
+  let delivered = false;
+  if (typeof database.transaction === 'function') {
+    delivered = await database.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`measurement-review-notify:${requestId}`]);
+      const existingBell = await trx('notifications')
+        .where({ recipient_type: 'admin', category: 'estimate_measurement_review' })
+        .whereRaw("metadata->>'requestId' = ?", [String(requestId)])
+        .first()
+        .catch(() => null);
+      if (existingBell) return true; // crash-after-insert recovery: bell exists
+      return deliver();
+    }).catch((err) => {
+      logger.error(`[estimate-measurement-review] notify lock/send failed for request ${requestId}: ${err.message}`);
+      return false;
+    });
+  } else {
+    // Unit-test mocks without transaction support — best-effort path.
+    delivered = await deliver();
   }
-  if (first?.id) { await markDelivered(); return; }
-  const second = await attempt();
-  if (second?.suppressed || second?.id) { await markDelivered(); return; }
+
+  if (delivered) { await markDelivered(); return; }
   await releaseLease();
   logger.error(`[estimate-measurement-review] admin notification FAILED TWICE for request ${requestId} — request row stands, office unnotified; customer retries will re-arm the send`);
 }
