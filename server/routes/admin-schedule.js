@@ -8,6 +8,7 @@ const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
+const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { previewText, stripSchedulerAuditText } = require('../utils/visit-notes');
 const { mowingAlertText } = require('../utils/mowing-schedule');
@@ -8697,28 +8698,23 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     const { date, technicianId } = req.body;
     const dateStr = date || etDateString();
 
-    const services = await db('scheduled_services')
-      .where({ scheduled_date: dateStr })
-      .where(function () {
-        if (technicianId) this.where({ technician_id: technicianId });
-      })
-      .whereNotIn('status', ['cancelled', 'completed'])
-      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .select(
+    // Shared day-stops scaffold (services/scheduling/day-stops) — same rows as
+    // the inline query it replaced: same status exclusions, same select list,
+    // same stamped-address divergence guard on the coordinate fallback.
+    const services = await dayStopsQuery(db, {
+      dateStr,
+      technicianId: technicianId || null,
+      excludeStatuses: ['cancelled', 'completed'],
+      select: [
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        // Primary-home coords are only a valid fallback when the visit's
-        // stamped address doesn't DIVERGE from the primary — a divergent
-        // stamp with no coords must degrade to "no pin" (optimizer appends
-        // coordless stops), never route to the wrong house. City/zip follow
-        // the stamp so zone grouping reflects the booked property.
-        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
-        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
+        ...guardedCoordSelects(db),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
-        db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
-      );
+        db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name"),
+      ],
+    });
 
     if (!services.length) {
       return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
@@ -8797,25 +8793,21 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
 
     const dateStr = date || etDateString();
 
-    const services = await db('scheduled_services')
-      .where({ scheduled_date: dateStr, technician_id: technicianId })
-      .whereNotIn('status', ['cancelled', 'completed'])
-      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .select(
+    // Shared day-stops scaffold — same rows as the inline query it replaced.
+    const services = await dayStopsQuery(db, {
+      dateStr,
+      technicianId,
+      excludeStatuses: ['cancelled', 'completed'],
+      select: [
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        // Primary-home coords are only a valid fallback when the visit's
-        // stamped address doesn't DIVERGE from the primary — a divergent
-        // stamp with no coords must degrade to "no pin" (optimizer appends
-        // coordless stops), never route to the wrong house. City/zip follow
-        // the stamp so zone grouping reflects the booked property.
-        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
-        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
+        ...guardedCoordSelects(db),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
-        db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
-      );
+        db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name"),
+      ],
+    });
 
     if (!services.length) {
       return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });

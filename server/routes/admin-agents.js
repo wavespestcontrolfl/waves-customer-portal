@@ -788,32 +788,41 @@ async function loadReviewTasks() {
   };
 }
 
-async function loadRouteProposalTasks() {
-  if (!(await tableExists('route_optimization_proposals'))) return { missing: true, tasks: [] };
-  const rows = await db('route_optimization_proposals')
-    .whereIn('status', ['draft', 'ready'])
-    .select('id', 'scheduled_date', 'status', 'service_count', 'tech_count', 'saved_distance_meters', 'warnings', 'created_at')
+// ROUTE-TIERS is fully autonomous — there is NO approval flow, so the dispatch
+// card reads the nightly planner-run LEDGER (route_optimization_planner_runs)
+// as READ-ONLY informational entries: what ran, what it applied/skipped, and
+// where to look (the dispatch board). No mutation actions on purpose.
+async function loadPlannerRunTasks() {
+  if (!(await tableExists('route_optimization_planner_runs'))) return { missing: true, tasks: [] };
+  const rows = await db('route_optimization_planner_runs')
+    .where('created_at', '>=', addETDays(new Date(), -7))
+    .select('id', 'run_type', 'status', 'start_date', 'end_date', 'applied_count', 'skipped_count', 'failed_count', 'result', 'created_at')
     .orderBy('created_at', 'desc')
     .limit(10);
 
   return {
     count: rows.length,
     tasks: rows.map((row) => {
-      const warnings = parseJson(row.warnings, []);
-      const savedMiles = asNumber(row.saved_distance_meters) / 1609.344;
+      const result = parseJson(row.result, {});
+      const savedMeters = Array.isArray(result.reorders)
+        ? result.reorders.reduce((sum, r) => sum + asNumber(r.saved_meters), 0)
+        : 0;
+      const savedMiles = savedMeters / 1609.344;
+      const dayMoves = asNumber(result?.auto_dispatch?.run?.changed);
+      const dateLabel = String(row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at || '').slice(0, 10);
       return task({
-        id: `route_proposal:${row.id}`,
+        id: `planner_run:${row.id}`,
         agentId: 'dispatch',
-        title: `Route proposal for ${row.scheduled_date}`,
-        summary: `${row.service_count || 0} stops · ${row.tech_count || 0} techs · ${savedMiles.toFixed(1)} mi saved`,
-        priority: warnings.some((w) => w?.severity === 'critical') ? 'high' : row.status === 'ready' ? 'medium' : 'low',
-        source: 'route_optimization_proposals',
+        title: `Route run ${dateLabel}${row.run_type === 'route_tiers_nightly' ? ' (route tiers)' : ''}`,
+        summary: `${row.applied_count || 0} reorders applied · ${row.skipped_count || 0} skipped · ${dayMoves} day-moves · ${savedMiles.toFixed(1)} mi saved`,
+        priority: asNumber(row.failed_count) > 0 || row.status === 'failed' ? 'high' : 'low',
+        source: 'route_optimization_planner_runs',
         sourceLabel: 'Route Planner',
         sourceId: row.id,
         createdAt: row.created_at,
         actionUrl: '/admin/dispatch',
         actionLabel: 'Open Dispatch',
-        impact: warnings.length ? `${warnings.length} warning${warnings.length === 1 ? '' : 's'}` : 'Route savings',
+        impact: row.status === 'failed' ? 'Run failed' : savedMiles > 0 ? `${savedMiles.toFixed(1)} mi saved` : 'Informational',
       });
     }),
   };
@@ -884,7 +893,7 @@ function sourceAgentHint(sourceId) {
   if (['opportunity_queue', 'seo_actions'].includes(sourceId)) return 'seo_geo';
   if (sourceId === 'ad_campaigns') return 'ads';
   if (sourceId === 'google_reviews') return 'reviews';
-  if (sourceId === 'route_optimization_proposals') return 'dispatch';
+  if (sourceId === 'route_optimization_planner_runs') return 'dispatch';
   if (sourceId === 'pricing_engine_proposals') return 'pricing';
   return null;
 }
@@ -906,7 +915,7 @@ async function loadOverviewSources() {
     loadSource('seo_actions', 'SEO Actions', loadSeoActionTasks),
     loadSource('ad_campaigns', 'PPC', loadAdTasks),
     loadSource('google_reviews', 'Google Reviews', loadReviewTasks),
-    loadSource('route_optimization_proposals', 'Route Planner', loadRouteProposalTasks),
+    loadSource('route_optimization_planner_runs', 'Route Planner', loadPlannerRunTasks),
     loadSource('pricing_engine_proposals', 'Pricing Proposals', loadPricingProposalTasks),
   ]);
 }

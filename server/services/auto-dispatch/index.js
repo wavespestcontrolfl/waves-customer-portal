@@ -23,6 +23,7 @@ const { applyAutoDispatchMove, revalidatePlacement } = require('./apply');
 const { toDateStr } = require('./dates');
 const { ensureCustomerGeocoded } = require('../geocoder');
 const audit = require('./audit');
+const routeTiers = require('./route-tiers');
 
 // Self-heal MISSING_GEO: geocode the customer (fills customers.latitude/longitude
 // from their address) and re-check eligibility, so a not-yet-geocoded recurring
@@ -133,7 +134,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       reason_description: prefDropped
         ? 'No candidate slot honored the customer\'s explicit day/time preference'
         : 'No valid candidate slot found',
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}) } },
     };
   }
 
@@ -173,6 +174,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
     capability_level: best.capability_level,
     preferred_days: prefs.preferred_days,
     effective_time_window: prefs.effective_time_window && prefs.effective_time_window.key,
+    ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}),
   };
   const auditCtx = { newPlacement, scores, prefsSnapshot, routeMetrics, constraints };
 
@@ -206,11 +208,36 @@ async function runAutoDispatch(opts = {}) {
   try {
     const capMap = await loadCapabilityMap();
     const capabilityFor = makeCapabilityFn(capMap);
-    const services = await loadEligibleServices(lockBoundary, lookaheadEnd);
+    // ROUTE-TIERS (GATE_ROUTE_TIERS): tier 2 starts at 7 days out, so the load
+    // floor moves in from today+lockWindowDays to today+6 (query is strict >).
+    // Gate off ⇒ the legacy lockBoundary loads exactly the same set as before.
+    const tiersOn = config.routeTiersEnabled === true;
+    const loadBoundary = tiersOn
+      ? etDateString(addETDays(nowDate, routeTiers.TIER2_MIN_DAYS_OUT - 1))
+      : lockBoundary;
+    const services = await loadEligibleServices(loadBoundary, lookaheadEnd);
+
+    // Tier-mode bulk context: reminder-freeze + drift anchors, one query each.
+    // Both FAIL CLOSED — a failed read freezes/anchors-unknowns every visit
+    // rather than moving without the guard.
+    let reminderFreeze = null;
+    let anchorMap = null;
+    if (tiersOn) {
+      reminderFreeze = await routeTiers.loadReminderFreeze(db, services.map((s) => s.id));
+      anchorMap = await routeTiers.loadAnchorMap(
+        db,
+        services.filter((s) => (s.auto_dispatch_change_count || 0) > 0).map((s) => s.id),
+      );
+    }
 
     for (const service of services) {
       try {
-        const eligCtx = { today, lockBoundary, lockWindowDays: config.lockWindowDays };
+        const eligCtx = {
+          today,
+          lockBoundary,
+          lockWindowDays: config.lockWindowDays,
+          ...(tiersOn ? { routeTiers: { enabled: true, today } } : {}),
+        };
         let elig = isEligibleForAutoDispatch(service, eligCtx);
         let planCheck = null;
 
@@ -248,6 +275,41 @@ async function runAutoDispatch(opts = {}) {
           continue;
         }
 
+        // ── ROUTE-TIERS guards (only when GATE_ROUTE_TIERS is on) ──
+        let tierWindow = null;
+        let tierMeta = null;
+        if (tiersOn) {
+          // Reminder freeze — the 72h reminder is the HARD gate. Unreadable
+          // status freezes everything (fail closed).
+          if (!reminderFreeze || reminderFreeze.failed) {
+            totals.skipped++;
+            await audit.logDecision(runId, { action: 'skipped', service, reason_code: 'REMINDER_STATUS_UNKNOWN', reason_description: 'Reminder-sent status unreadable — frozen (fail closed)' });
+            continue;
+          }
+          if (reminderFreeze.frozen.has(service.id)) {
+            totals.skipped++;
+            await audit.logDecision(runId, { action: 'skipped', service, reason_code: 'REMINDER_SENT_FROZEN', reason_description: '72-hour reminder already sent — visit is frozen' });
+            continue;
+          }
+          const anchor = routeTiers.resolveAnchor(service, anchorMap);
+          if (!anchor) {
+            totals.skipped++;
+            await audit.logDecision(runId, { action: 'skipped', service, reason_code: 'DRIFT_ANCHOR_UNKNOWN', reason_description: 'Recurrence anchor could not be derived — no move (fail closed)' });
+            continue;
+          }
+          const daysOut = routeTiers.daysBetween(today, toDateStr(service.scheduled_date));
+          const radius = routeTiers.tierRadiusForDaysOut(daysOut);
+          tierWindow = routeTiers.tierMoveWindow({
+            origDate: service.scheduled_date, anchorDate: anchor, today, radius,
+          });
+          if (!tierWindow) {
+            totals.skipped++;
+            await audit.logDecision(runId, { action: 'skipped', service, reason_code: 'DRIFT_BUDGET_EXHAUSTED', reason_description: `No legal candidate dates left within tier radius ±${radius} and drift budget ±${routeTiers.DRIFT_BUDGET_DAYS} of anchor ${anchor}` });
+            continue;
+          }
+          tierMeta = { days_out: daysOut, radius, anchor, drift_budget_days: routeTiers.DRIFT_BUDGET_DAYS, window: tierWindow };
+        }
+
         // Plan-active gate (reuse the result if the geo self-heal already computed it).
         if (!planCheck) planCheck = await isRecurringPlanActive(service, db);
         if (!planCheck.active) {
@@ -271,6 +333,9 @@ async function runAutoDispatch(opts = {}) {
           dateToleranceDays: config.dateToleranceDays,
           capabilityFor,
           topN: 60,
+          // ROUTE-TIERS: pre-intersected candidate window (null/absent when the
+          // gate is off — candidate-slots then runs its legacy window math).
+          ...(tierWindow ? { tierWindow, tierMeta } : {}),
         };
         const evalResult = await evaluatePlacement(service, prefs, ctx, config, lockBoundary);
         totals.evaluated++;

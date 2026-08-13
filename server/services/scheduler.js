@@ -909,6 +909,32 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 4:20AM — ROUTE-TIERS nightly intra-day reorder (tier 3: 72h–7d
+  // band). Rewrites route_order per tech-day via the shared optimizer when
+  // savings clear the floor; NEVER moves a visit's date/window/tech, skips any
+  // day containing a frozen visit (<72h or 72h reminder sent), never touches
+  // >25-stop tech-days (Google cap — logged, not truncated). Double-gated
+  // (cronJobs AND routeReorder); the tier day-moves themselves ride the 4:10
+  // auto-dispatch run above (its eligibility is tier-aware when
+  // GATE_ROUTE_TIERS is on). Zero customer comms by construction.
+  // =========================================================================
+  cron.schedule('20 4 * * *', async () => {
+    if (!isEnabled('routeReorder')) return;
+    logger.info('Running: Route-Tiers nightly reorder');
+    try {
+      // runExclusive: read-then-act — a deploy overlap must not double-run and
+      // bypass the per-run apply cap.
+      await runExclusive('route-tiers-nightly', async () => {
+        const { runRouteReorderIfEnabled } = require('./route-reorder');
+        const result = await runRouteReorderIfEnabled();
+        logger.info(`[route-reorder] cron run ${result.status}: applied=${result.applied ?? 0} skipped=${result.skipped ?? 0} failed=${result.failed ?? 0} ledger=${result.ledgerId ?? 'none'}`);
+      });
+    } catch (err) {
+      logger.error(`Route-Tiers reorder run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Customer duplicate auto-merge — 4:40 AM daily. Green-tier only (shell
   // rows: same phone, compatible identity, zero billing/portal artifacts);
   // everything ambiguous stays in the /admin/customers/duplicates review

@@ -14,6 +14,7 @@
  */
 const { resolveGeo } = require('./geo');
 const { toDateStr } = require('./dates');
+const { daysBetween, tierRadiusForDaysOut, TIER2_MIN_DAYS_OUT } = require('./route-tiers');
 
 // Only live, staff-owned visits. 'rescheduled' is deliberately excluded: the
 // customer route sets that status as a pending reschedule REQUEST with a stale
@@ -57,8 +58,17 @@ function isEligibleForAutoDispatch(service, ctx = {}) {
 
   const dateStr = toDateStr(service.scheduled_date) || '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return deny('INVALID_DATE', 'Missing/invalid scheduled_date');
-  // Lock window is inclusive: anything on or before today+N days is locked.
-  if (ctx.lockBoundary && dateStr <= ctx.lockBoundary) {
+  if (ctx.routeTiers && ctx.routeTiers.enabled === true) {
+    // ROUTE-TIERS (GATE_ROUTE_TIERS on): the flat lock is replaced by the tier
+    // ladder — day-moves need a non-zero tier radius (>= 7 days out). Tier 3 /
+    // frozen visits belong to the intra-day reorder pass (route-reorder.js) or
+    // to nobody. Anything unparseable fails closed into the lock.
+    const daysOut = daysBetween(ctx.routeTiers.today || ctx.today, dateStr);
+    if (daysOut == null || tierRadiusForDaysOut(daysOut) === 0) {
+      return deny('TIER_LOCKED', `Inside route-tier day-move lock (under ${TIER2_MIN_DAYS_OUT} days out)`);
+    }
+  } else if (ctx.lockBoundary && dateStr <= ctx.lockBoundary) {
+    // Legacy flat lock (gate off): inclusive — anything on or before today+N days is locked.
     return deny('INSIDE_LOCK_WINDOW', `Within ${ctx.lockWindowDays ?? 14}-day lock window (on/before ${ctx.lockBoundary})`);
   }
 

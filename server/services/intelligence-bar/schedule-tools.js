@@ -11,7 +11,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
-const { stampedDivergesSql } = require('../stamped-address');
+const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
 
 const SCHEDULE_TOOLS = [
   {
@@ -190,21 +190,19 @@ async function optimizeAllRoutes(input) {
     return { error: 'Route optimizer not available' };
   }
 
-  const services = await db('scheduled_services')
-    .where({ scheduled_date: date })
-    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
-    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-    .select(
+  // Shared day-stops scaffold (services/scheduling/day-stops) — same rows as
+  // the inline query it replaced, including the stamped-address divergence
+  // guard on the coordinate fallback (codex round-9 P1).
+  const services = await dayStopsQuery(db, {
+    dateStr: date,
+    excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
+    select: [
       'scheduled_services.*',
       'customers.first_name', 'customers.last_name',
       'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
-      // Primary-home coords only stand in when the visit's stamped address
-      // doesn't DIVERGE from the primary — a divergent stamped rental with
-      // no coords drops from the optimize set (stopsWithCoords filter)
-      // instead of being modeled at the wrong house (codex round-9 P1).
-      db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
-      db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
-    );
+      ...guardedCoordSelects(db),
+    ],
+  });
 
   if (!services.length) return { message: 'No services found for this date', date };
 
@@ -271,18 +269,18 @@ async function optimizeTechRoute(input) {
     return { error: 'Route optimizer not available' };
   }
 
-  const services = await db('scheduled_services')
-    .where({ scheduled_date: date, technician_id: tech.id })
-    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
-    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-    .select(
+  // Shared day-stops scaffold — same rows/divergence guard as before (codex round-9 P1).
+  const services = await dayStopsQuery(db, {
+    dateStr: date,
+    technicianId: tech.id,
+    excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
+    select: [
       'scheduled_services.*',
       'customers.first_name', 'customers.last_name',
       'customers.city',
-      // Same divergence guard as optimize_all_routes (codex round-9 P1).
-      db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
-      db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
-    );
+      ...guardedCoordSelects(db),
+    ],
+  });
 
   if (services.length < 2) return { message: `${tech.name} has ${services.length} stop(s) — nothing to optimize`, tech: tech.name };
 

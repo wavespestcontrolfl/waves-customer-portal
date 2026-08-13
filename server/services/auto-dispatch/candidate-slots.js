@@ -164,14 +164,27 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   // Search within ± tolerance days of the visit's CURRENT date (clamped to the
   // lock floor and lookahead horizon) so optimization tightens the route without
   // collapsing the recurring cadence by pulling the visit far from its date.
-  const lockFloor = etDateString(addETDays(ctx.nowDate, ctx.lockWindowDays + 1));
   const horizonCap = etDateString(addETDays(ctx.nowDate, ctx.lookaheadDays));
   const origDate = toDateStr(service.scheduled_date);
-  const tol = ctx.dateToleranceDays || 7;
-  let dateFrom = shiftDateStr(origDate, -tol);
-  if (!dateFrom || dateFrom < lockFloor) dateFrom = lockFloor;
-  let dateTo = shiftDateStr(origDate, tol);
-  if (!dateTo || dateTo > horizonCap) dateTo = horizonCap;
+  let dateFrom;
+  let dateTo;
+  if (ctx.tierWindow) {
+    // ROUTE-TIERS (GATE_ROUTE_TIERS on): the orchestrator already intersected
+    // tier radius + drift budget + the >=5-days-out destination floor into one
+    // window (route-tiers.tierMoveWindow); only the lookahead horizon still
+    // caps it here. Absent tierWindow (gate off) the legacy math below runs
+    // untouched — byte-for-byte the old candidate window.
+    dateFrom = ctx.tierWindow.dateFrom;
+    dateTo = ctx.tierWindow.dateTo;
+    if (!dateTo || dateTo > horizonCap) dateTo = horizonCap;
+  } else {
+    const lockFloor = etDateString(addETDays(ctx.nowDate, ctx.lockWindowDays + 1));
+    const tol = ctx.dateToleranceDays || 7;
+    dateFrom = shiftDateStr(origDate, -tol);
+    if (!dateFrom || dateFrom < lockFloor) dateFrom = lockFloor;
+    dateTo = shiftDateStr(origDate, tol);
+    if (!dateTo || dateTo > horizonCap) dateTo = horizonCap;
+  }
   if (dateFrom > dateTo) {
     // Window collapsed (visit sits at the very edge of the horizon) — nothing to do.
     const current = await computeCurrentPlacement(service, prefs, ctx);
