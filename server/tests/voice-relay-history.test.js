@@ -365,20 +365,41 @@ describe('Session RECENT TEXTS block', () => {
     }
   });
 
-  // ⭐ A KNOWN CUSTOMER'S THREAD HAS NO contact_phone (promotion clears it) —
-  // the full tier's customer arm is what finds their real history, and ONLY
-  // the full tier gets it (ANI == customers.phone makes the thread this
-  // number's by definition; a contact-slot caller unlocks nothing more).
-  test('the thread predicate carries the customer arm at FULL tier only', async () => {
-    primeDb({ customers: [CUSTOMER], messages: MSG_ROWS });
+  // ⭐ THE ACCOUNT THREAD IS NOT THIS NUMBER'S THREAD. Promotion merges every
+  // number that ever wrote in (spouse, tenant, prior occupant) into the
+  // customer thread and clears contact_phone — attestation proves control of
+  // THIS number, not of every number merged in. Until messages carry per-row
+  // counterparty provenance the read stays ANI-keyed at EVERY tier, and the
+  // empty result is honest: "none WITH THIS NUMBER", never "none exist".
+  test('no customer_id arm at ANY tier, and the empty copy never claims no messages exist', async () => {
+    primeDb({ customers: [CUSTOMER], messages: [] });
     const relayHistory = require('../services/voice-agent/relay-history');
-    await relayHistory.messageHistoryText(FROM, { customerId: 'c-1111', tier: 'full' });
-    const fullCalls = builders.messages.orWhere ? builders.messages.orWhere.mock.calls.length : 0;
-    expect(fullCalls).toBeGreaterThan(0); // customer arm present
-    jest.clearAllMocks();
-    primeDb({ customers: [CUSTOMER], messages: MSG_ROWS });
-    await relayHistory.messageHistoryText(FROM, { customerId: 'c-1111', tier: 'redacted' });
-    expect(builders.messages.orWhere).not.toHaveBeenCalled(); // …and absent otherwise
+    for (const tier of ['full', 'redacted']) {
+      const out = await relayHistory.messageHistoryText(FROM, { customerId: 'c-1111', tier });
+      expect(builders.messages.orWhere).not.toHaveBeenCalled();
+      expect(out).toMatch(/WITH THIS NUMBER/);
+      expect(out).toMatch(/Do not tell the caller no messages exist/i);
+    }
+  });
+
+  // ⭐ SANDY'S OWN CALLS ARE HISTORY. Relay rows leave ai_extraction NULL by
+  // design (a synthesized one would pollute the eval cohorts), so an
+  // extraction-only predicate hid every AI-handled call — from the office and
+  // from Sandy on the caller's next ring. Processed conversation_relay rows
+  // with their own call_summary are admitted.
+  test('conversation_relay rows appear in call history despite NULL ai_extraction', async () => {
+    primeDb({
+      call_log: [
+        VERIFIED_CALL_ROW,
+        {
+          created_at: '2026-08-11T15:00:00Z', direction: 'inbound',
+          call_summary: 'AI assistant booked a pest visit request', lead_synopsis: null,
+          ai_extraction: null, transcription_provider: 'conversation_relay', processing_status: 'processed',
+        },
+      ],
+    });
+    const out = await executeTool('get_call_history', {}, { customerId: CUSTOMER_ID, from: FROM, callerAttested: true });
+    expect(out).toContain('AI assistant booked a pest visit request');
   });
 
   test('speakDate treats a DATE-shaped midnight as its own calendar day (never a day early)', () => {

@@ -105,7 +105,18 @@ async function callHistoryText(fromPhone) {
       "(right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ? OR right(regexp_replace(coalesce(to_phone,''),'\\D','','g'),10) = ?)",
       [key, key],
     )
-    .whereNotNull('ai_extraction')
+    // ⭐ THE RELAY'S OWN CALLS ARE HISTORY TOO. Relay transcripts deliberately
+    // leave ai_extraction NULL (synthesizing one would pollute the extraction
+    // eval cohorts), so an extraction-only predicate made every AI-handled call
+    // invisible — to the office reading history, and to Sandy herself on the
+    // caller's next ring. A processed conversation_relay row with its own
+    // call_summary is admitted alongside extracted calls; the spam/voicemail
+    // exclusions below apply to both.
+    .where((qb) => qb
+      .whereNotNull('ai_extraction')
+      .orWhere((relay) => relay
+        .where('transcription_provider', 'conversation_relay')
+        .whereNotNull('call_summary')))
     // ⭐ NULL-SAFE. `processing_status NOT IN (...)` is NULL — never true — for
     // a row whose status was never set, so a bare NOT IN silently dropped every
     // legacy processed call from the caller's history (the same SQL trap the
@@ -172,30 +183,24 @@ async function loadRecentMessages(fromPhone, { customerId = null, tier = 'redact
   const key = aniDigitKey(fromPhone);
   if (!key) return [];
   const db = require('../../models/db');
-  // ⭐ A KNOWN CUSTOMER'S THREAD HAS NO contact_phone TO MATCH. The unified
-  // writer keys a known customer's SMS thread by customer_id and CLEARS
-  // contact_phone on promotion — so a predicate that requires contact_phone
-  // only ever finds UNKNOWN-contact threads, and every established customer
-  // was told "no messages on file" over a thread full of them. The ANI-only
-  // rule survives intact: the FULL tier means the calling number IS
-  // customers.phone, which makes the customer's thread definitionally this
-  // number's thread — so the customer arm exists ONLY at that tier. A
-  // contact-slot (redacted) caller still matches nothing but an
-  // unknown-contact thread keyed to their own number, exactly as before.
-  const fullTierCustomerId = tier === 'full' && customerId ? customerId : null;
+  // ⭐ ANI-ONLY, AND HONEST ABOUT WHAT THAT MEANS. A known customer's thread is
+  // keyed by customer_id with contact_phone CLEARED on promotion — and it
+  // MERGES texts from every number that ever wrote in on the account (a
+  // spouse's line, a tenant's, a prior occupant's). Attestation proves the
+  // caller controls THIS number, not every number merged into the account
+  // thread, so a customer_id arm disclosed other people's messages under the
+  // tool's "this number's thread" promise. Until messages carry per-row
+  // counterparty provenance to filter by, the read stays ANI-keyed and FAILS
+  // CLOSED — and the empty-result copy says "none on file WITH THIS NUMBER",
+  // never "no messages exist" (the account thread usually does).
   const rows = await db('messages')
     .join('conversations', 'messages.conversation_id', 'conversations.id')
     .where('messages.channel', 'sms')
     .whereIn('messages.direction', ['inbound', 'outbound'])
-    .where(function threadIdentity() {
-      this.whereRaw(
-        "RIGHT(regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
-        [key],
-      );
-      if (fullTierCustomerId) {
-        this.orWhere('conversations.customer_id', fullTierCustomerId);
-      }
-    })
+    .whereRaw(
+      "RIGHT(regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
+      [key],
+    )
     .orderBy('messages.created_at', 'desc')
     .limit(limit)
     .select('messages.direction', 'messages.body', 'messages.created_at');
@@ -213,7 +218,9 @@ async function loadRecentMessages(fromPhone, { customerId = null, tier = 'redact
 async function messageHistoryText(fromPhone, identity = {}) {
   const messages = await loadRecentMessages(fromPhone, identity, MESSAGE_HISTORY_LIMIT);
   if (!messages.length) {
-    return 'No text messages on file with this number.';
+    return 'No text messages on file WITH THIS NUMBER. That does not mean the account has no message '
+      + 'history — texts from other numbers on the account are not readable over the phone. Do not tell the '
+      + 'caller no messages exist; say the office can look up the account\'s full history.';
   }
   const lines = messages
     .slice()
