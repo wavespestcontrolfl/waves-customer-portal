@@ -9119,14 +9119,27 @@ const {
   stripPrepaySwitchSupersededMarkers: stripSupersededMarkers,
 } = require('../services/invoice');
 
-async function resolveSupersededInvoices({ visitIds, estimateId, conn = db }) {
-  if (!Array.isArray(visitIds) || visitIds.length === 0 || !estimateId) {
+async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db }) {
+  if (!Array.isArray(visitIds) || visitIds.length === 0 || !estimateId || !customerId) {
     return { ok: true, supersedes: [] };
   }
   let rows;
   try {
+    // TWO nets, unioned (Codex P0 r12): invoices ATTACHED to the series, and
+    // the customer's invoices carrying this estimate's accept-provenance
+    // stamp — a SETUP-ONLY accept draft (first-application $0) is
+    // deliberately left unattached by the converter
+    // (shouldAttachScheduledServiceToStandardDraftInvoice), so a visit-scoped
+    // query alone would miss it and the promised waiver would leave the $99
+    // draft payable beside the prepaid year.
     rows = await conn('invoices')
-      .whereIn('scheduled_service_id', visitIds)
+      .where(function supersedeNets() {
+        this.whereIn('scheduled_service_id', visitIds)
+          .orWhere(function customerProvenance() {
+            this.where({ customer_id: customerId })
+              .where('notes', 'like', `%Auto-generated from accepted estimate #${String(estimateId)}%`);
+          });
+      })
       .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'paid_at',
         'payer_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
         'notes');
@@ -9222,6 +9235,7 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
       ok: true,
       visit,
       anchor,
+      customerId: String(anchor.customer_id || visit.customer_id || ''),
       estimateId: null,
       visitIds: [...new Set([visit.id, anchor.id].filter(Boolean).map(String))],
     };
@@ -9242,6 +9256,7 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
     ok: true,
     visit,
     anchor,
+    customerId: String(anchor.customer_id || visit.customer_id || ''),
     estimateId: String(anchor.source_estimate_id),
     visitIds: [...new Set([visit.id, anchor.id].filter(Boolean).map(String))],
   };
@@ -9631,6 +9646,7 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       const resolved = await resolveSupersededInvoices({
         visitIds: supersedeVisitIds,
         estimateId: anchorEstimateId,
+        customerId,
         conn,
       });
       if (!resolved.ok) return blocked(resolved.blockReason);
@@ -9867,7 +9883,15 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
         // current state until commit; the CAS conditions stay as
         // defense-in-depth.
         await trx('invoices')
-          .whereIn('scheduled_service_id', target.visitIds)
+          .where(function supersedeNets() {
+            this.whereIn('scheduled_service_id', target.visitIds);
+            if (target.estimateId) {
+              this.orWhere(function customerProvenance() {
+                this.where({ customer_id: target.customerId })
+                  .where('notes', 'like', `%Auto-generated from accepted estimate #${String(target.estimateId)}%`);
+              });
+            }
+          })
           .forUpdate()
           .select('id');
         // Re-resolve the supersede set UNDER the locks, then retire it with
@@ -9878,6 +9902,7 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
         const resolved = await resolveSupersededInvoices({
           visitIds: target.visitIds,
           estimateId: target.estimateId,
+          customerId: target.customerId,
           conn: trx,
         });
         if (!resolved.ok) {
@@ -10070,16 +10095,30 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
       // bill. A lost response is safe to retry.
       try {
         const outcome = await db.transaction(async (trx) => {
+          // Keyed by CUSTOMER, not the series: a setup-only accept draft is
+          // deliberately unattached (Codex P0 r12), so a visitIds filter
+          // would make it unrestorable.
           const row = await trx('invoices')
-            .where({ id })
-            .whereIn('scheduled_service_id', target.visitIds)
+            .where({ id, customer_id: undoCustomerId })
             .forUpdate()
             .first('id', 'invoice_number', 'status', 'line_items', 'notes', 'title',
               'scheduled_service_id', 'customer_id');
-          // Only a row this lane could have retired: void, on this series,
-          // carrying THIS estimate's accept stamp.
+          // Only a row THIS LANE retired: void, carrying this estimate's
+          // accept stamp AND the durable superseded-by marker the switch
+          // stamped at retirement (Codex P0 r12 — without the marker, a
+          // crafted id could resurrect an invoice someone voided on purpose
+          // outside the switch), and the prepay that superseded it must be
+          // DEAD — otherwise this is a stale abort racing a live year.
           if (!row || String(row.status || '').toLowerCase() !== 'void') return { skipped: true };
           if (!provenance || !provenance.test(String(row.notes || ''))) return { skipped: true };
+          const supersededBy = /\[prepay-switch-superseded-by:([^\]]+)\]/.exec(String(row.notes || ''));
+          if (!supersededBy) return { skipped: true };
+          const prepayRow = await trx('invoices')
+            .where({ id: supersededBy[1] })
+            .first('id', 'status');
+          const prepayDead = !!prepayRow
+            && ['void', 'cancelled', 'canceled', 'refunded'].includes(String(prepayRow.status || '').toLowerCase());
+          if (!prepayDead) return { skipped: true };
           // NEVER restore beside coverage of the RESTORED VISIT, checked
           // INSIDE the transaction under the SAME per-customer advisory lock
           // every prepay mint takes (Codex P0 r5): a concurrent mint

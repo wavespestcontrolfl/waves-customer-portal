@@ -586,8 +586,10 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     notes: `${ACCEPT_INVOICE.notes}\n[prepay-switch-superseded-by:inv-prepay]`,
   };
 
+  const DEAD_PREPAY = { 'inv-prepay': { id: 'inv-prepay', status: 'void' } };
+
   test("re-mints from the VOIDED ROW's own amounts, never the request body", async () => {
-    stubTables({ invoices: [VOIDED_ROW] });
+    stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY });
     const { status, body } = await post('/svc-1/prepay-switch/undo', {
       voidedInvoiceIds: ['inv-1'],
       // A hostile/stale client amount must have no effect.
@@ -616,6 +618,7 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
   test('a duplicated undo reports the EXISTING replacement instead of minting a second bill', async () => {
     stubTables({
       invoices: [VOIDED_ROW],
+      invoicesById: DEAD_PREPAY,
       replacementRow: { id: 'inv-new', invoice_number: 'WPC-2026-0401' },
     });
     const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
@@ -624,7 +627,7 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
   });
 
   test('REFUSES while a live prepay term stands — the shared advisory lock + assert, inside the trx', async () => {
-    stubTables({ invoices: [VOIDED_ROW] });
+    stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY });
     const overlapErr = new Error('This customer has a live annual prepay through 2027-08-11.');
     overlapErr.annualPrepayOverlap = { error: overlapErr.message };
     mockLockOverlap.mockRejectedValue(overlapErr);
@@ -638,14 +641,14 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
   });
 
   test("a void row WITHOUT this estimate's accept stamp restores nothing (crafted ids are inert)", async () => {
-    stubTables({ invoices: [{ ...VOIDED_ROW, notes: 'Some unrelated historical invoice' }] });
+    stubTables({ invoices: [{ ...VOIDED_ROW, notes: 'Some unrelated historical invoice' }], invoicesById: DEAD_PREPAY });
     const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
     expect(body.restored).toEqual([]);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 
   test('skips the restore when the visit already carries a LIVE invoice (completion re-billed)', async () => {
-    stubTables({ invoices: [VOIDED_ROW], liveOnVisit: { id: 'inv-completion', invoice_number: 'WPC-2026-0410' } });
+    stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY, liveOnVisit: { id: 'inv-completion', invoice_number: 'WPC-2026-0410' } });
     const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
     expect(body.restored).toEqual([]);
     expect(body.failed).toEqual([]);
@@ -653,22 +656,56 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
   });
 
   test('skips a row that is not void — no duplicate bill on a repeated undo', async () => {
-    stubTables({ invoices: [{ ...VOIDED_ROW, status: 'draft' }] });
+    stubTables({ invoices: [{ ...VOIDED_ROW, status: 'draft' }], invoicesById: DEAD_PREPAY });
     const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
     expect(body.restored).toEqual([]);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 
   test('reports a failed re-mint instead of claiming the invoice is back', async () => {
-    stubTables({ invoices: [VOIDED_ROW] });
+    stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY });
     mockCreateInvoice.mockRejectedValueOnce(new Error('insert failed'));
     const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
     expect(body.restored).toEqual([]);
     expect(body.failed[0]).toMatchObject({ id: 'inv-1', invoiceNumber: 'WPC-2026-0345' });
   });
 
+  test('a void row WITHOUT the superseded-by marker restores nothing — voided outside the switch', async () => {
+    stubTables({
+      invoices: [{ ...VOIDED_ROW, notes: ACCEPT_INVOICE.notes }],
+      invoicesById: DEAD_PREPAY,
+    });
+    const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(body.restored).toEqual([]);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
+
+  test('a superseding prepay that is still LIVE blocks the restore — stale abort vs a live year', async () => {
+    stubTables({
+      invoices: [VOIDED_ROW],
+      invoicesById: { 'inv-prepay': { id: 'inv-prepay', status: 'paid' } },
+    });
+    const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(body.restored).toEqual([]);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
+
+  test('a SETUP-ONLY (unattached) accept draft is superseded by provenance, not attachment', async () => {
+    // The converter leaves setup-only drafts with NO scheduled_service_id —
+    // the resolver must still find them through the customer+provenance net.
+    stubTables({
+      invoices: [{ ...ACCEPT_INVOICE, scheduled_service_id: null, total: '99.00',
+        line_items: [{ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }] }],
+    });
+    const { body } = await preview();
+    expect(body.eligible).toBe(true);
+    expect(body.supersedes).toHaveLength(1);
+    expect(body.supersedes[0].total).toBe(99);
+    expect(body.setupFee).toEqual({ amount: 99, waivedWithPrepay: true });
+  });
+
   test('no ids ⇒ nothing restored', async () => {
-    stubTables({ invoices: [VOIDED_ROW] });
+    stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY });
     const { body } = await post('/svc-1/prepay-switch/undo', {});
     expect(body.restored).toEqual([]);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
