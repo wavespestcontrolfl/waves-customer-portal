@@ -9116,6 +9116,7 @@ function acceptProvenanceRe(estimateId) {
 const {
   prepaySwitchRestoreMarker: restoreMarker,
   prepaySwitchSupersededByMarker: supersededByMarker,
+  stripPrepaySwitchSupersededMarkers: stripSupersededMarkers,
 } = require('../services/invoice');
 
 async function resolveSupersededInvoices({ visitIds, estimateId, conn = db }) {
@@ -10069,19 +10070,6 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
       // bill. A lost response is safe to retry.
       try {
         const outcome = await db.transaction(async (trx) => {
-          // NEVER restore beside a live prepay, checked INSIDE the restore
-          // transaction under the SAME per-customer advisory lock every
-          // prepay mint takes (Codex P0 r5): a concurrent Customer 360 or
-          // on-site mint serializes against this restore instead of slipping
-          // a live term in between the check and the re-mint. A stale or
-          // replayed abort after a successful collection therefore cannot
-          // park a per-application invoice beside the paid year — the
-          // assert throws (caught below as a 409) whenever a binding term
-          // covers today.
-          await lockAndAssertNoAnnualPrepayOverlap(
-            trx, undoCustomerId, etDateString(), false,
-            'This customer has a live annual prepay through',
-          );
           const row = await trx('invoices')
             .where({ id })
             .whereIn('scheduled_service_id', target.visitIds)
@@ -10092,6 +10080,30 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
           // carrying THIS estimate's accept stamp.
           if (!row || String(row.status || '').toLowerCase() !== 'void') return { skipped: true };
           if (!provenance || !provenance.test(String(row.notes || ''))) return { skipped: true };
+          // NEVER restore beside coverage of the RESTORED VISIT, checked
+          // INSIDE the transaction under the SAME per-customer advisory lock
+          // every prepay mint takes (Codex P0 r5): a concurrent mint
+          // serializes behind this instead of slipping a term between check
+          // and re-mint. Asserted against the VISIT's date, not today (Codex
+          // P0 r11): an aborted FUTURE-start renewal switch must restore
+          // even while the current year still runs — the double-bill risk is
+          // coverage spanning the visit being re-billed.
+          let assertDate = etDateString();
+          if (row.scheduled_service_id) {
+            const visitRow = await trx('scheduled_services')
+              .where({ id: row.scheduled_service_id })
+              .first('scheduled_date');
+            const m = visitRow && visitRow.scheduled_date
+              ? /^\d{4}-\d{2}-\d{2}/.exec(visitRow.scheduled_date instanceof Date
+                ? visitRow.scheduled_date.toISOString()
+                : String(visitRow.scheduled_date))
+              : null;
+            if (m) assertDate = m[0];
+          }
+          await lockAndAssertNoAnnualPrepayOverlap(
+            trx, undoCustomerId, assertDate, false,
+            'This customer has a live annual prepay through',
+          );
           // Already restored (this call raced a duplicate, or an earlier
           // response was lost) — report the existing replacement, mint nothing.
           const existing = await trx('invoices')
@@ -10131,7 +10143,10 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
               scheduledServiceId: row.scheduled_service_id,
               title: row.title || 'Service invoice',
               lineItems: lines,
-              notes: `${row.notes || ''}\n${restoreMarker(row.id)} Re-created after an annual-prepay switch was cancelled; replaces voided ${row.invoice_number || id}.`.trim(),
+              // Superseded-by markers stripped (Codex P0 r11): the
+              // replacement must never read as superseded itself, or a later
+              // void of IT would let the old prepay's sync mint fresh AR.
+              notes: `${stripSupersededMarkers(row.notes)}\n${restoreMarker(row.id)} Re-created after an annual-prepay switch was cancelled; replaces voided ${row.invoice_number || id}.`.trim(),
               dueDate: etDateString(),
             });
           } catch (createErr) {

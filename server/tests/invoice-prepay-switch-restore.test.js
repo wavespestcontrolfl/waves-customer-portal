@@ -96,6 +96,10 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
     expect(created.customerId).toBe('cust-1');
     expect(created.scheduledServiceId).toBe('svc-1');
     expect(created.notes).toContain('[prepay-switch-restore:inv-old]');
+    // The replacement must NOT inherit the superseded-by marker — a later
+    // void of the replacement would otherwise re-trigger the old prepay's
+    // restore and mint fresh AR (Codex P0 r11).
+    expect(created.notes).not.toContain('[prepay-switch-superseded-by:');
     // Rides the caller's transaction so the restore commits (or rolls back)
     // with the term-cancel sync that triggered it.
     expect(created.database).toBe(c);

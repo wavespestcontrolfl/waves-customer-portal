@@ -41,6 +41,7 @@ jest.mock('../services/invoice', () => ({
   sendViaSMSAndEmail: (...args) => mockSendInvoice(...args),
   prepaySwitchRestoreMarker: (id) => '[prepay-switch-restore:' + id + ']',
   prepaySwitchSupersededByMarker: (id) => '[prepay-switch-superseded-by:' + id + ']',
+  stripPrepaySwitchSupersededMarkers: (notes) => String(notes || '').replace(/\n?\[prepay-switch-superseded-by:[^\]]+\]/g, ''),
 }));
 // The atomic switch borrows the Customer 360 advisory-lock + overlap assert;
 // the real admin-customers module is far too heavy for this harness.
@@ -582,6 +583,7 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     customer_id: 'cust-1',
     scheduled_service_id: 'svc-1',
     title: 'WaveGuard Membership Setup + First Application',
+    notes: `${ACCEPT_INVOICE.notes}\n[prepay-switch-superseded-by:inv-prepay]`,
   };
 
   test("re-mints from the VOIDED ROW's own amounts, never the request body", async () => {
@@ -602,6 +604,13 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     // The idempotency anchor: a marker keyed by the voided row rides the
     // replacement's notes so a duplicated undo can never mint a second bill.
     expect(created.notes).toContain('[prepay-switch-restore:inv-1]');
+    // …and it must NOT inherit the superseded-by marker (Codex P0 r11).
+    expect(created.notes).not.toContain('[prepay-switch-superseded-by:');
+    // Overlap asserted against the VISIT's date, not today — an aborted
+    // FUTURE-start renewal restores while the current year still runs.
+    expect(mockLockOverlap).toHaveBeenCalledWith(
+      expect.anything(), 'cust-1', FUTURE_DATE, false, expect.any(String),
+    );
   });
 
   test('a duplicated undo reports the EXISTING replacement instead of minting a second bill', async () => {

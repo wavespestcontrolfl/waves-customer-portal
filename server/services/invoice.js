@@ -150,6 +150,13 @@ function prepaySwitchSupersededByMarker(prepayInvoiceId) {
 function prepaySwitchRestoreMarker(voidedInvoiceId) {
   return `[prepay-switch-restore:${voidedInvoiceId}]`;
 }
+// A REPLACEMENT must never inherit the superseded-by marker (Codex
+// on-site-switch P0 r11): if the replacement is itself voided later, a
+// subsequent sync for the old prepay would read it as ANOTHER superseded
+// invoice and mint fresh collectible AR.
+function stripPrepaySwitchSupersededMarkers(notes) {
+  return String(notes || "").replace(/\n?\[prepay-switch-superseded-by:[^\]]+\]/g, "");
+}
 
 function invoiceHasDepositCreditLine(invoice) {
   return parseInvoiceLineItems(invoice.line_items).some(
@@ -4176,10 +4183,25 @@ const InvoiceService = {
       // to the new coverage), never throw the caller's sync over. Lazy
       // require: admin-customers requires this module at load, so a
       // top-level import would be a cycle.
+      // The double-bill question is whether coverage spans the RESTORED
+      // VISIT, not today (Codex P0 r11): an aborted FUTURE-start renewal
+      // switch must still restore even while the current year runs.
+      let assertDate = etDateString();
+      if (row.scheduled_service_id) {
+        const visitRow = await trx("scheduled_services")
+          .where({ id: row.scheduled_service_id })
+          .first("scheduled_date");
+        const m = visitRow && visitRow.scheduled_date
+          ? /^\d{4}-\d{2}-\d{2}/.exec(visitRow.scheduled_date instanceof Date
+            ? visitRow.scheduled_date.toISOString()
+            : String(visitRow.scheduled_date))
+          : null;
+        if (m) assertDate = m[0];
+      }
       try {
         const { lockAndAssertNoAnnualPrepayOverlap } = require("../routes/admin-customers")._private;
         await lockAndAssertNoAnnualPrepayOverlap(
-          trx, row.customer_id, etDateString(), false,
+          trx, row.customer_id, assertDate, false,
           "Customer already has an annual prepay term through",
         );
       } catch (lockErr) {
@@ -4228,7 +4250,7 @@ const InvoiceService = {
         scheduledServiceId: row.scheduled_service_id,
         title: row.title || "Service invoice",
         lineItems: lines,
-        notes: `${row.notes || ""}\n${restoreMarker} Re-created after the annual prepay that superseded it was cancelled; replaces voided ${row.invoice_number || row.id}.`.trim(),
+        notes: `${stripPrepaySwitchSupersededMarkers(row.notes)}\n${restoreMarker} Re-created after the annual prepay that superseded it was cancelled; replaces voided ${row.invoice_number || row.id}.`.trim(),
         // ET calendar, never UTC — after ~8PM Eastern a UTC slice dates the
         // restored invoice tomorrow.
         dueDate: etDateString(),
@@ -4614,6 +4636,7 @@ InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'cance
 module.exports = InvoiceService;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
 module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;
+module.exports.stripPrepaySwitchSupersededMarkers = stripPrepaySwitchSupersededMarkers;
 // Exposed for unit tests (pure helpers).
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
