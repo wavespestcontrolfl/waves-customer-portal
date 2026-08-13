@@ -95,18 +95,17 @@ async function surfaceContactInstructionForCustomer(customer, extracted = {}, op
   const instruction = contactPreferenceFields(extracted);
   if (!customer || !customer.id || !instruction) return false;
   const dnc = instruction.do_not_contact_request === true;
-  const result = await fileContactInstructionNotification(customer, instruction, opts, dnc);
-  const surfaced = result.persisted;
-  // ⭐ A FAILED COMPLIANCE ARTIFACT GETS A RETRY RAIL. This feed row is the
-  // ONLY structured artifact for a lifecycle customer's stated instruction —
-  // a notifyAdmin hiccup here silently lost a "stop texting me" with nothing
-  // left to find it. Same rail as the hot-alert page: a durable obligation
-  // marker on the call's own call_log row, recovered by the hourly sweep.
-  // The sweep's own retries never re-stamp (the marker is already there), and
-  // a SUPPRESSED result stamps nothing: suppression is the internal-test
-  // customer gate's deliberate zero-artifact decision, not a delivery failure
-  // — an obligation for it would just be cleared by the sweep's first pass.
-  if (!surfaced && !result.suppressed && !opts.sweepRetry && opts.callSid) {
+  // ⭐ THE OBLIGATION IS ESTABLISHED BEFORE THE DELIVERY ATTEMPT — the
+  // hot-alert doctrine. This feed row is the ONLY structured artifact for a
+  // lifecycle customer's stated instruction; stamping the recovery marker
+  // only AFTER a failed notifyAdmin left a gap where a stall or process exit
+  // mid-attempt lost the instruction with neither a notification nor a marker
+  // for the hourly sweep to find. The marker lands first (fail-soft) and is
+  // cleared only on a PROVEN outcome: persisted, or the internal-test
+  // suppression gate's deliberate zero-artifact decision. The sweep's own
+  // retries never re-stamp (the marker is already there).
+  let stamped = false;
+  if (!opts.sweepRetry && opts.callSid) {
     try {
       await db('call_log')
         .where({ twilio_call_sid: opts.callSid })
@@ -123,9 +122,20 @@ async function surfaceContactInstructionForCustomer(customer, extracted = {}, op
             })],
           ),
         });
+      stamped = true;
     } catch (stampErr) {
-      logger.error(`[voice-agent-lead] contact-instruction obligation stamp ALSO failed callSid=${opts.callSid}: ${stampErr.message}`);
+      logger.error(`[voice-agent-lead] contact-instruction obligation pre-stamp failed callSid=${opts.callSid}: ${stampErr.message}`);
     }
+  }
+  const result = await fileContactInstructionNotification(customer, instruction, opts, dnc);
+  const surfaced = result.persisted;
+  if (stamped && (surfaced || result.suppressed)) {
+    await db('call_log')
+      .where({ twilio_call_sid: opts.callSid })
+      .update({
+        metadata: db.raw("metadata - 'relay_contact_instruction_needed' - 'relay_contact_instruction' - 'relay_contact_instruction_attempts'"),
+      })
+      .catch((e) => logger.warn(`[voice-agent-lead] contact-instruction marker clear failed callSid=${opts.callSid}: ${e.message}`));
   }
   return surfaced;
 }

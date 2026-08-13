@@ -396,6 +396,25 @@ describe('GATE ON — the alert', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/ADAM_PHONE is unset/i));
   });
 
+  // ⭐ THE PAN SCRUB COVERS EVERY DURABLE SURFACE THE MODEL CAN WRITE. A card
+  // number read aloud can land in urgency_reason / call_summary and would ride
+  // the alert into the notification feed and push delivery.
+  test('a card number in the model-authored alert fields never reaches the alert body', async () => {
+    await relayAlert.alertOwnerHotLead({
+      ...HOT_LEAD,
+      urgency_reason: 'card 4111 1111 1111 1111 was read aloud',
+      call_summary: 'Caller gave card 4111111111111111 mid-call.',
+    }, { callSid: 'CA-pan' });
+    expect(TwilioService.sendSMS).toHaveBeenCalled();
+    const body = TwilioService.sendSMS.mock.calls[0][1];
+    // The shared scrub keeps only the last four ("[card ending 1111]"), same
+    // as the transcript path — the full PAN must be gone in both spellings.
+    expect(body).not.toContain('4111 1111 1111 1111');
+    expect(body).not.toContain('4111111111111111');
+    expect(body).not.toContain('4111');
+    expect(body).toContain('[card ending');
+  });
+
   test('the alert body never leaks the caller phone into LOGS (masked there only)', async () => {
     await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-mask' });
     const logged = [...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls].flat().join(' ');

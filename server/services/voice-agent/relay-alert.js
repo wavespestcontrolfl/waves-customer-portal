@@ -62,7 +62,17 @@ function ownerAlertPhone() {
 
 /** One flat, quote-free line for the alert body. */
 function alertSafe(value, max = 80) {
-  return String(value == null ? '' : value)
+  // ⭐ THE PAN SCRUB APPLIES TO EVERY DURABLE SURFACE THE MODEL CAN WRITE.
+  // urgency_reason / call_summary are model-authored from the caller's words —
+  // a card number read aloud would ride them into the notification feed and
+  // push delivery, bypassing the same scrub the transcript deliberately takes.
+  // Scrub BEFORE the truncation so a cut cannot split a number past detection.
+  let text = String(value == null ? '' : value);
+  try {
+    const { scrubPans } = require('../../utils/pan-scrub');
+    text = scrubPans(text);
+  } catch { /* scrub unavailable — fall through to the flattened raw text */ }
+  return text
     .replace(/[\r\n]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()

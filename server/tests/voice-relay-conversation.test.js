@@ -438,4 +438,22 @@ describe('RelayConversation — explicit end after capture', () => {
     convo._callerContext = { customer: { id: 'c-1' }, tier: 'full' };
     expect(convo._buildToolCtx().customerTier).toBe('full');
   });
+
+  // ⭐ A LIVE GETTER, NOT A SNAPSHOT. Verification (and the context upgrade it
+  // brings) has its own bounded race and can publish AFTER the turn's ctx was
+  // built — a first-turn "stop texting me" must not read a stale false.
+  test('late-landing verification is visible to the ALREADY-BUILT tool ctx', () => {
+    const convo = new RelayConversation({ callSid: 'CA-late', from: '+19415551234', send: jest.fn() });
+    const ctx = convo._buildToolCtx();
+    expect(ctx.callerVerified).toBe(false);
+    expect(ctx.customerTier).toBe('redacted');
+    expect(ctx.customerId).toBe(null);
+    // The late publish (relay-context's verification race settling).
+    convo._callerVerified = true;
+    convo._callerContext = { customer: { id: 'c-9' }, tier: 'full', attested: true };
+    expect(ctx.callerVerified).toBe(true);
+    expect(ctx.customerTier).toBe('full');
+    expect(ctx.customerId).toBe('c-9');
+    expect(ctx.callerAttested).toBe(true);
+  });
 });

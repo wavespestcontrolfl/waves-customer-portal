@@ -433,13 +433,24 @@ describe('existing-customer contact instructions still reach a human', () => {
   const stampWrites = () => writes.filter((w) => w.table === 'call_log' && w.verb === 'update'
     && JSON.stringify((w.payload && w.payload.metadata && w.payload.metadata.bindings) || '').includes('relay_contact_instruction_needed'));
 
-  test('a failed feed write stamps the durable obligation marker on the call row', async () => {
+  const clearWrites = () => writes.filter((w) => w.table === 'call_log' && w.verb === 'update'
+    && String((w.payload && w.payload.metadata && w.payload.metadata.sql) || '').includes("- 'relay_contact_instruction_needed'"));
+
+  // ⭐ OBLIGATIONS BEFORE COMMITS (the hot-alert doctrine): the marker lands
+  // BEFORE the fallible notifyAdmin attempt, so a stall or process exit
+  // mid-attempt still leaves the sweep something to find.
+  test('the obligation marker is stamped BEFORE the delivery attempt and retained on failure', async () => {
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
-    NotificationService.notifyAdmin.mockRejectedValue(new Error('bell down'));
+    let stampsAtNotifyTime = -1;
+    NotificationService.notifyAdmin.mockImplementation(async () => {
+      stampsAtNotifyTime = stampWrites().length;
+      throw new Error('bell down');
+    });
     await createLeadFromExtraction(
       { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
       { phone: CALLER, callSid: 'CA-dnc-stamp', smsSuppressionApplied: true },
     );
+    expect(stampsAtNotifyTime).toBe(1); // already durable when delivery ran
     const stamps = stampWrites();
     expect(stamps).toHaveLength(1);
     const payload = JSON.parse(stamps[0].payload.metadata.bindings[0]);
@@ -447,25 +458,28 @@ describe('existing-customer contact instructions still reach a human', () => {
     expect(payload.relay_contact_instruction).toMatchObject({
       customerId: 'c-777', do_not_contact_request: true, smsSuppressionApplied: true,
     });
+    expect(clearWrites()).toHaveLength(0); // failure keeps the marker
   });
 
-  test('the suppressed sentinel stamps NO marker — deliberate zero-artifact, not a failure', async () => {
+  test('the suppressed sentinel clears the pre-stamped marker — deliberate zero-artifact', async () => {
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true, reason: 'internal_test' });
     await createLeadFromExtraction(
       { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
       { phone: CALLER, callSid: 'CA-dnc-stamp2' },
     );
-    expect(stampWrites()).toHaveLength(0);
+    expect(stampWrites()).toHaveLength(1);
+    expect(clearWrites()).toHaveLength(1);
   });
 
-  test('a SUCCESSFUL feed write stamps nothing', async () => {
+  test('a SUCCESSFUL feed write clears its pre-stamped marker', async () => {
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     await createLeadFromExtraction(
       { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
       { phone: CALLER, callSid: 'CA-dnc-ok' },
     );
-    expect(stampWrites()).toHaveLength(0);
+    expect(stampWrites()).toHaveLength(1);
+    expect(clearWrites()).toHaveLength(1);
   });
 
   test('the hourly sweep re-files the instruction and clears the marker on success', async () => {

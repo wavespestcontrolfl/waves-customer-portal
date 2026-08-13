@@ -623,6 +623,7 @@ class RelayConversation {
    * turn, or across turns, share the same state.
    */
   _buildToolCtx() {
+    const convo = this;
     return {
       from: this.from,
       // The number the caller DIALLED. capture_lead stamps it as the lead's
@@ -633,21 +634,29 @@ class RelayConversation {
       to: this.to,
       callSid: this.callSid,
       language: this.language,
-      customerId: (this._callerContext && this._callerContext.customer && this._callerContext.customer.id) || null,
+      // Live getters like callerVerified below: a late-landing verification
+      // UPGRADES the session context after this turn's ctx was built, and a
+      // snapshot would run this turn's tools as the pre-upgrade caller.
+      get customerId() { return (convo._callerContext && convo._callerContext.customer && convo._callerContext.customer.id) || null; },
       // 'full' only when the ANI is the account's OWN customers.phone; a
       // contact-slot recognition caps at 'redacted' (relay-context
       // findUniqueCustomerByAni). Fail closed when absent.
-      customerTier: (this._callerContext && this._callerContext.tier === 'full') ? 'full' : 'redacted',
+      get customerTier() { return (convo._callerContext && convo._callerContext.tier === 'full') ? 'full' : 'redacted'; },
       // The carrier's word on top of the ANI match (STIR/SHAKEN attestation A),
       // decided in relay-context after every recognition rule has run. Gates the
       // spoof-attractive reads only — see ATTESTATION_ONLY_TOOLS. Fail closed.
-      callerAttested: !!(this._callerContext && this._callerContext.attested === true),
+      get callerAttested() { return !!(convo._callerContext && convo._callerContext.attested === true); },
       // The signature-verified-call flag. Account tools already need a matched
       // customerId (only set after verification), but lookup_customer is
       // reachable by an UNMATCHED caller by design — so it is the one tool that
       // must check this itself, or a WS client holding the shared key could
       // declare any ANI and go fishing.
-      callerVerified: this._callerVerified === true,
+      // ⭐ A LIVE GETTER, NOT A SNAPSHOT. Verification has its own bounded race
+      // and can publish AFTER this turn's ctx was built — a first-turn "stop
+      // texting me" would read the stale false and skip the suppression even
+      // though the call verified moments later. The getter reads the session's
+      // CURRENT value at tool-execution time.
+      get callerVerified() { return convo._callerVerified === true; },
       // Per-call lookup budget: true while the caller still has lookups left.
       consumeLookup: () => {
         const { LOOKUP_SESSION_BUDGET } = require('./relay-context');
