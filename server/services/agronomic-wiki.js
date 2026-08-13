@@ -599,6 +599,7 @@ const AgronomicWiki = {
         stats,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
+        visionScoredCount: countVisionScored(outcomes),
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
@@ -689,6 +690,7 @@ const AgronomicWiki = {
         assessmentCount: assessments.length,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
+        visionScoredCount: countVisionScored(outcomes),
         // Assessment-only condition pages (no outcomes yet) fingerprint on
         // the matching assessment ids — an empty id set would make the skip
         // guard blind to a changed assessment set with an equal count.
@@ -728,6 +730,7 @@ const AgronomicWiki = {
         customerCount,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
+        visionScoredCount: countVisionScored(outcomes),
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
@@ -784,6 +787,7 @@ const AgronomicWiki = {
         stats,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
+        visionScoredCount: countVisionScored(outcomes),
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
@@ -820,6 +824,19 @@ const AgronomicWiki = {
       // past the cap while count stays equal (delete+backfill, alias remap).
       const sourceIds = data.allOutcomeIds || (data.outcomes || []).map((o) => o.id);
 
+      // Vision scores (photo_verified_visual_change) land AFTER outcomes
+      // exist, so count + id-set alone would freeze existing pages before
+      // their outcomes get scored — the weekly refresh would keep advancing
+      // last_data_update while skipping. Fold the scored-outcome count into
+      // the fingerprint as a synthetic token (the column already carries
+      // assessment ids for condition pages — it is a change-detection
+      // fingerprint, not strict provenance). Zero scored outcomes = no token,
+      // so pre-vision rows stay byte-identical and don't mass-regenerate.
+      const visionScoredCount = Number(data.visionScoredCount) || 0;
+      const fingerprintIds = visionScoredCount
+        ? [...sourceIds, `vision-scored:${visionScoredCount}`]
+        : sourceIds;
+
       // Skip regeneration when the underlying data hasn't changed — the AI
       // pass would just rewrite the same page. Placeholder stubs are always
       // retried. last_data_update advances so the page doesn't get re-marked
@@ -831,7 +848,7 @@ const AgronomicWiki = {
         existing &&
         !existing.content.includes('*Pending AI generation') &&
         existing.data_point_count === dataPointCount &&
-        sameSourceIds(existing.source_treatment_ids, sourceIds)
+        sameSourceIds(existing.source_treatment_ids, fingerprintIds)
       ) {
         // Data unchanged, but the review state may not be: a contradiction
         // that appeared since the last write must re-gate the page here too.
@@ -979,7 +996,7 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         confidence,
         last_data_update: new Date(),
         stale_flag: false,
-        source_treatment_ids: JSON.stringify(sourceIds),
+        source_treatment_ids: JSON.stringify(fingerprintIds),
         review_tier: tier,
         review_status: reviewStatus,
         risk_flags: JSON.stringify(flags),
@@ -1466,6 +1483,15 @@ async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug)
       logger.error(`[agronomic-wiki] Failed to merge duplicate page ${variantSlug}: ${err.message}`);
     }
   }
+}
+
+// Count outcomes carrying a photo-verified visual-change score, over the FULL
+// (unsliced) outcome set — feeds generatePage's skip fingerprint so a newly
+// scored outcome makes the page regenerate-eligible. Null scores
+// (non-comparable / low-confidence pairs) don't change the prompt input, so
+// they don't count.
+function countVisionScored(outcomes) {
+  return (outcomes || []).filter((o) => o.vision_delta_score !== null && o.vision_delta_score !== undefined).length;
 }
 
 function aggregateOutcomes(outcomes) {

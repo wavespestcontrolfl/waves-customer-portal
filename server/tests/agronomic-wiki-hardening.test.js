@@ -256,6 +256,55 @@ describe('generatePage', () => {
     expect(global.__anthropicCreate).toHaveBeenCalled();
   });
 
+  test('a newly vision-scored outcome invalidates the skip fingerprint and lands in the stored one', async () => {
+    const existing = {
+      id: 'ke-1',
+      slug: 'product/talstar-p',
+      content: '# Talstar P\n\nExisting analysis.',
+      data_point_count: 2,
+      source_treatment_ids: ['o1', 'o2'], // written before any vision scoring
+      stale_flag: false,
+    };
+    const state = useDb({ knowledge_entries: [existing] });
+
+    // Same outcomes, same count/ids — but one outcome now carries a score
+    await wiki.generatePage('product/talstar-p', 'product', {
+      outcomes: [{ id: 'o1', vision_delta_score: 35 }, { id: 'o2' }],
+      visionScoredCount: 1,
+    }, 'Product: Talstar P');
+
+    expect(global.__anthropicCreate).toHaveBeenCalled();
+    const written = (state.updates.knowledge_entries || []).find((u) => 'source_treatment_ids' in u);
+    expect(JSON.parse(written.source_treatment_ids)).toEqual(['o1', 'o2', 'vision-scored:1']);
+  });
+
+  test('vision fingerprint token: unchanged scored count still skips; a new score regenerates', async () => {
+    const existing = {
+      id: 'ke-1',
+      slug: 'product/talstar-p',
+      content: '# Talstar P\n\nExisting analysis.',
+      data_point_count: 2,
+      source_treatment_ids: ['o1', 'o2', 'vision-scored:1'],
+      stale_flag: false,
+    };
+    useDb({ knowledge_entries: [existing] });
+
+    const skipped = await wiki.generatePage('product/talstar-p', 'product', {
+      outcomes: [{ id: 'o1', vision_delta_score: 35 }, { id: 'o2' }],
+      visionScoredCount: 1,
+    }, 'Product: Talstar P');
+    expect(skipped.writeState).toBe('skipped');
+    expect(global.__anthropicCreate).not.toHaveBeenCalled();
+
+    useDb({ knowledge_entries: [existing] });
+    const regenerated = await wiki.generatePage('product/talstar-p', 'product', {
+      outcomes: [{ id: 'o1', vision_delta_score: 35 }, { id: 'o2', vision_delta_score: -10 }],
+      visionScoredCount: 2,
+    }, 'Product: Talstar P');
+    expect(regenerated.writeState).toBe('generated');
+    expect(global.__anthropicCreate).toHaveBeenCalled();
+  });
+
   test('placeholder stubs are always retried, never treated as unchanged', async () => {
     const existing = {
       id: 'ke-1',

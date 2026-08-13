@@ -26,6 +26,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicCreateWithSamplingRetry } = require('./llm/call');
+const { stripThinkingBlocks } = require('./llm/deep');
 const PhotoService = require('./photos');
 
 let Anthropic;
@@ -76,7 +77,15 @@ async function callVisionModel(prePhoto, postPhoto) {
       ],
     }],
   });
-  const text = response?.content?.[0]?.text;
+  // Reasoning-capable VISION models can emit thinking / redacted_thinking
+  // blocks ahead of the text block — a blind content[0].text read would turn
+  // every valid response into a "failure" and terminally abandon the row.
+  // Strip them, then take the FIRST text block wherever it lands.
+  const stripped = stripThinkingBlocks(response);
+  // First text-bearing block (typeless blocks pass stripThinkingBlocks —
+  // tolerate them like deep.js does; tool_use blocks have no .text).
+  const textBlock = (stripped?.content || []).find((b) => b && typeof b.text === 'string' && b.text);
+  const text = textBlock?.text;
   if (!text) throw new Error('empty vision response');
   const verdict = JSON.parse(String(text).replace(/```json|```/g, '').trim());
   if (!verdict || typeof verdict !== 'object' || Array.isArray(verdict)) {

@@ -224,6 +224,25 @@ describe('scoreOutcome', () => {
     expect(state.updates.treatment_outcomes).toBeUndefined();
   });
 
+  test('thinking blocks ahead of the text block do not break extraction', async () => {
+    const state = useDb({ treatment_outcomes: [OUTCOME] });
+    global.__anthropicCreate = jest.fn(async () => ({
+      content: [
+        { type: 'thinking', thinking: 'comparing turf density...' },
+        { type: 'redacted_thinking', data: 'xxx' },
+        { type: 'text', text: JSON.stringify(GOOD_VERDICT) },
+      ],
+      model: 'test-model',
+    }));
+
+    const res = await VisionDelta.scoreOutcome('o1');
+    expect(res.ok).toBe(true);
+    expect(res.score).toBe(42);
+    const [patch] = state.updates.treatment_outcomes;
+    expect(patch.vision_delta_score).toBe(42);
+    expect(patch.vision_scored_at).toBeInstanceOf(Date);
+  });
+
   test('unparseable model output counts as a failed attempt', async () => {
     const state = useDb({ treatment_outcomes: [OUTCOME] });
     global.__anthropicCreate = jest.fn(async () => ({ content: [{ text: 'not json' }] }));
