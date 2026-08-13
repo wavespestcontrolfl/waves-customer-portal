@@ -665,7 +665,7 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     // Overlap asserted against the VISIT's date, not today — an aborted
     // FUTURE-start renewal restores while the current year still runs.
     expect(mockLockOverlap).toHaveBeenCalledWith(
-      expect.anything(), 'cust-1', FUTURE_DATE, false, expect.any(String),
+      expect.anything(), 'cust-1', FUTURE_DATE, true,
     );
   });
 
@@ -680,18 +680,23 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 
-  test('REFUSES while a live prepay term stands — the shared advisory lock + assert, inside the trx', async () => {
-    stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY });
-    const overlapErr = new Error('This customer has a live annual prepay through 2027-08-11.');
-    overlapErr.annualPrepayOverlap = { error: overlapErr.message };
-    mockLockOverlap.mockRejectedValue(overlapErr);
-    const { status, body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
-    expect(status).toBe(409);
-    expect(body.error).toMatch(/would bill them twice/i);
+  test('REFUSES while a term COVERS the visit date — surfaced as a failure, under the shared lock', async () => {
+    stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY, term: { id: 'term-live' } });
+    const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(body.restored).toEqual([]);
+    expect(body.failed[0].error).toMatch(/would bill them twice/i);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
-    // Same serialization every prepay mint uses — a concurrent mint can't
-    // slip a term in between the check and the re-mint.
-    expect(mockLockOverlap).toHaveBeenCalled();
+    // Lock-only acquisition (allowOverlap=true) — containment is checked
+    // against the visit date, so a FUTURE term can't park the restore
+    // (Codex P0 r23).
+    expect(mockLockOverlap).toHaveBeenCalledWith(expect.anything(), 'cust-1', FUTURE_DATE, true);
+  });
+
+  test('a FUTURE term that does not cover the visit date does NOT block the restore', async () => {
+    // stub `term` = undefined → the containment first() finds nothing.
+    stubTables({ invoices: [VOIDED_ROW], invoicesById: DEAD_PREPAY });
+    const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(body.restored).toHaveLength(1);
   });
 
   test("a void row WITHOUT this estimate's accept stamp restores nothing (crafted ids are inert)", async () => {

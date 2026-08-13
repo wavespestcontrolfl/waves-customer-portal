@@ -10222,16 +10222,27 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
           // dates; every guard re-runs on the LOCKED re-read.
           const preRow = await trx('invoices')
             .where({ id, customer_id: undoCustomerId })
-            .first('id', 'customer_id', 'scheduled_service_id', 'notes', 'status');
+            .first('id', 'customer_id', 'scheduled_service_id', 'notes', 'status', 'invoice_number');
           if (!preRow || String(preRow.status || '').toLowerCase() !== 'void') return { skipped: true };
           // Shared with the term-cancel restore (invoice.js) so the two can
           // never disagree; falls back to the accept series' first upcoming
           // visit for an UNATTACHED setup-only row (Codex P0 r13).
           const assertDate = await InvoiceService.prepaySwitchRestoreAssertDate(trx, preRow);
-          await lockAndAssertNoAnnualPrepayOverlap(
-            trx, undoCustomerId, assertDate, false,
-            'This customer has a live annual prepay through',
-          );
+          // Advisory lock ONLY, then a CONTAINMENT check (Codex P0 r23): the
+          // shared assert is start-agnostic and would read a FUTURE term as
+          // a conflict, parking this restore forever. Double-bill means a
+          // binding term whose window spans the restored visit's date.
+          await lockAndAssertNoAnnualPrepayOverlap(trx, undoCustomerId, assertDate, true);
+          const { annualPrepayOverlapStatusClause } = require('../services/secure-appointment-plans');
+          const coveringTerm = await trx('annual_prepay_terms')
+            .where({ customer_id: undoCustomerId })
+            .where(annualPrepayOverlapStatusClause())
+            .where('term_start', '<=', assertDate)
+            .where('term_end', '>=', assertDate)
+            .first('id');
+          if (coveringTerm) {
+            return { failed: { id, invoiceNumber: preRow.invoice_number || null, error: `a prepaid year covers ${assertDate} — restoring the per-application invoice would bill them twice. Void the prepay from Invoices first if the switch really is being unwound` } };
+          }
           if (preRow.scheduled_service_id) {
             const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
             await acquireScheduledInvoiceMintLock(trx, preRow.scheduled_service_id);

@@ -190,16 +190,17 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
     expect(createSpy).not.toHaveBeenCalled();
   });
 
-  test('takes the shared prepay advisory lock, and SKIPS when a live term stands', async () => {
+  test('takes the advisory lock LOCK-ONLY, and SKIPS only on a term CONTAINING the visit date', async () => {
     const c = conn();
     await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
-    expect(mockLockOverlap).toHaveBeenCalledWith(c, 'cust-1', expect.any(String), false, expect.any(String));
+    // allowOverlap=true: the shared assert's start-agnostic overlap test
+    // would read a FUTURE term as a conflict and park the restore forever
+    // (Codex P0 r23) — the lock is taken, the containment check is ours.
+    expect(mockLockOverlap).toHaveBeenCalledWith(c, 'cust-1', expect.any(String), true);
 
-    const overlapErr = new Error('live term');
-    overlapErr.annualPrepayOverlap = { error: 'live term' };
-    mockLockOverlap.mockRejectedValue(overlapErr);
     createSpy.mockClear();
-    const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', conn());
+    const covered = conn({ termRow: { id: 'term-live' } });
+    const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', covered);
     expect(restored).toEqual([]);
     expect(createSpy).not.toHaveBeenCalled();
   });
@@ -225,7 +226,7 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
   test('the overlap assert runs against the RESTORED VISIT date, not today', async () => {
     const c = conn({ visitDate: '2027-02-10' });
     await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
-    expect(mockLockOverlap).toHaveBeenCalledWith(c, 'cust-1', '2027-02-10', false, expect.any(String));
+    expect(mockLockOverlap).toHaveBeenCalledWith(c, 'cust-1', '2027-02-10', true);
   });
 
   test('an UNATTACHED setup-only row derives the date from the accept series (Codex P0 r13)', async () => {
@@ -236,7 +237,7 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
     await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
     // First UPCOMING visit of the accept's own series — today would wrongly
     // block a future-start renewal restore while the current year runs.
-    expect(mockLockOverlap).toHaveBeenCalledWith(c, 'cust-1', '2099-05-12', false, expect.any(String));
+    expect(mockLockOverlap).toHaveBeenCalledWith(c, 'cust-1', '2099-05-12', true);
   });
 
   test('a null prepayInvoiceId is a no-op', async () => {

@@ -4216,18 +4216,24 @@ const InvoiceService = {
       // VISIT, not today (Codex P0 r11): an aborted FUTURE-start renewal
       // switch must still restore even while the current year runs.
       const assertDate = await prepaySwitchRestoreAssertDate(trx, preRow);
-      try {
-        const { lockAndAssertNoAnnualPrepayOverlap } = require("../routes/admin-customers")._private;
-        await lockAndAssertNoAnnualPrepayOverlap(
-          trx, preRow.customer_id, assertDate, false,
-          "Customer already has an annual prepay term through",
-        );
-      } catch (lockErr) {
-        if (lockErr && lockErr.annualPrepayOverlap) {
-          logger.warn(`[invoice] switch-supersede restore skipped for ${preRow.id}: a live annual prepay term stands — restoring would double-bill`);
-          return null;
-        }
-        throw lockErr;
+      // Advisory lock ONLY (allowOverlap=true): the shared assert's overlap
+      // test is start-agnostic — built for "new term starting at X", it
+      // reads ANY term ending after assertDate as a conflict, so a future
+      // term starting after this visit would park the restore forever
+      // (Codex P0 r23). The double-bill question is CONTAINMENT: a binding
+      // term whose window actually spans the restored visit's date.
+      const { lockAndAssertNoAnnualPrepayOverlap } = require("../routes/admin-customers")._private;
+      await lockAndAssertNoAnnualPrepayOverlap(trx, preRow.customer_id, assertDate, true);
+      const { annualPrepayOverlapStatusClause } = require("../services/secure-appointment-plans");
+      const covering = await trx("annual_prepay_terms")
+        .where({ customer_id: preRow.customer_id })
+        .where(annualPrepayOverlapStatusClause())
+        .where("term_start", "<=", assertDate)
+        .where("term_end", ">=", assertDate)
+        .first("id");
+      if (covering) {
+        logger.warn(`[invoice] switch-supersede restore skipped for ${preRow.id}: a prepaid year covers ${assertDate} — restoring would double-bill`);
+        return null;
       }
       if (preRow.scheduled_service_id) {
         const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
