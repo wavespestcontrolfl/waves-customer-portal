@@ -46,6 +46,15 @@ const GOOGLE_WAYPOINT_CAP = 25;
 // the candidate-slots neighbor exclusion).
 const EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', 'rescheduled', 'en_route', 'on_site'];
 
+// Live-hold predicate — the occupancy convention (scheduling/occupancy.js):
+// an estimate-slot hold with reservation_expires_at in the past is dead
+// weight awaiting the */15 cleanup DELETE and must not count as a stop.
+// Between expiry and cleanup (worst case ~15 min) the nightly pass would
+// otherwise route around a visit that will never happen (codex GitHub round
+// P2). Applied to BOTH the membership load and the commit-time re-read so
+// the two reads agree on membership.
+const LIVE_HOLD_SQL = '(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())';
+
 function intEnv(name, def, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   const raw = process.env[name];
   if (raw == null || raw === '') return def;
@@ -78,11 +87,32 @@ function currentOrder(stops) {
     const ra = a.route_order == null ? Infinity : Number(a.route_order);
     const rb = b.route_order == null ? Infinity : Number(b.route_order);
     if (ra !== rb) return ra - rb;
-    const wa = String(a.window_start || a.time_window || '');
-    const wb = String(b.window_start || b.time_window || '');
+    const wa = effectiveWindowStart(a) || '';
+    const wb = effectiveWindowStart(b) || '';
     if (wa !== wb) return wa < wb ? -1 : 1;
     return String(a.id) < String(b.id) ? -1 : 1;
   });
+}
+
+/**
+ * Effective chronology anchor for a stop: window_start when set, else the
+ * legacy `time_window` band mapped to its start ('morning' → 08:00,
+ * 'afternoon' → 12:00 — same mapping the IB parseTimeWindowStart uses), else
+ * a literal HH:MM stored in time_window. Null = genuinely unconstrained.
+ * Legacy-band stops carry a real customer promise (the reminder says the
+ * band), so they MUST participate in the chronology guard — window_start-only
+ * left them unconstrained and a distance-optimal order could run an
+ * afternoon-promised stop first (codex GitHub round P1).
+ */
+function effectiveWindowStart(stop) {
+  if (stop.window_start) return String(stop.window_start).slice(0, 5);
+  const raw = String(stop.time_window || '').trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === 'morning') return '08:00';
+  if (raw === 'afternoon') return '12:00';
+  const m = raw.match(/^(\d{1,2}):(\d{2})/);
+  if (m) return `${m[1].padStart(2, '0')}:${m[2]}`;
+  return null; // 'any' / free text — no chronology promise to enforce
 }
 
 /**
@@ -111,13 +141,16 @@ function modelDistanceMeters(RouteOptimizer, orderedStops) {
 }
 
 /**
- * True when the proposed stop order contradicts the stops' window_start
- * chronology: any stop with a fixed window placed AFTER a stop whose window
- * starts later. Stops without a window_start are unconstrained. Ties are fine
- * (same window = same band, any order works).
+ * True when the proposed stop order contradicts the stops' window chronology:
+ * any stop with a fixed effective start (window_start OR legacy time_window
+ * band) placed AFTER a stop whose effective start is later. Stops with no
+ * effective start are unconstrained. Ties are fine (same window = same band,
+ * any order works). Band starts vs exact starts compare coarsely — a false
+ * positive only skips the day's reorder (safe direction), never writes an
+ * order the tech cannot drive.
  */
 function violatesWindowChronology(orderedStops, sourceStops) {
-  const windowById = new Map(sourceStops.map((s) => [s.id, s.window_start ? String(s.window_start).slice(0, 5) : null]));
+  const windowById = new Map(sourceStops.map((s) => [s.id, effectiveWindowStart(s)]));
   let lastWindow = null;
   for (const stop of orderedStops) {
     const win = windowById.get(stop.id);
@@ -168,7 +201,7 @@ async function runRouteReorder(opts = {}) {
             'scheduled_services.zone',
             ...guardedCoordSelects(db),
           ],
-        });
+        }).whereRaw(LIVE_HOLD_SQL);
       } catch (loadErr) {
         status = 'completed_with_errors';
         summary.failed.push({ date: dateStr, reason: 'LOAD_FAILED', error: loadErr.message });
@@ -336,15 +369,17 @@ async function runRouteReorder(opts = {}) {
                 .where('scheduled_services.scheduled_date', dateStr)
                 .where('scheduled_services.technician_id', techId)
                 .whereNotIn('scheduled_services.status', EXCLUDE_STATUSES)
+                .whereRaw(LIVE_HOLD_SQL)
                 // Lock the scheduled_services rows only — FOR UPDATE cannot
                 // target the nullable side of the customers left join.
                 .forUpdate('scheduled_services')
                 .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
                 .select('scheduled_services.id', 'scheduled_services.window_start',
+                  'scheduled_services.time_window',
                   'scheduled_services.route_order', ...guardedCoordSelects(trx));
               const num = (v) => (v == null || v === '' ? null : parseFloat(v));
               const snapshot = new Map(techStops.map((s) => [s.id, {
-                window: s.window_start ? String(s.window_start).slice(0, 5) : null,
+                window: effectiveWindowStart(s),
                 routeOrder: s.route_order == null ? null : Number(s.route_order),
                 lat: num(s.lat),
                 lng: num(s.lng),
@@ -353,7 +388,7 @@ async function runRouteReorder(opts = {}) {
               for (const row of live) {
                 const snap = snapshot.get(row.id);
                 if (!snap) throw stale(`stop ${row.id} joined the tech-day during the run`);
-                const win = row.window_start ? String(row.window_start).slice(0, 5) : null;
+                const win = effectiveWindowStart(row);
                 if (win !== snap.window) throw stale(`stop ${row.id} window changed during the run`);
                 // route_order too: a dispatcher's manual reorder landing while
                 // the optimizer ran must WIN — never overwrite the operator's
@@ -563,5 +598,5 @@ module.exports = {
   runRouteReorderIfEnabled,
   recordSkippedTick,
   getRouteReorderConfig,
-  _internals: { currentOrder, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
+  _internals: { currentOrder, effectiveWindowStart, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
 };

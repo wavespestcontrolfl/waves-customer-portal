@@ -57,6 +57,8 @@ let stopsByDate;
 let ledgerInserts;
 let trxUpdates;
 let trxRawCalls;
+let loadWhereRaws; // whereRaw sql chained onto the day-load builder
+let commitWhereRaws; // whereRaw sql on the commit-time re-read
 let liveRowsOverride; // null ⇒ derive live rows from stopsByDate (unchanged day)
 let adRunRow; // auto_dispatch_runs .first() result
 let dbCalls; // captured where/whereIn/orderBy calls per table
@@ -85,7 +87,18 @@ beforeEach(() => {
   liveRowsOverride = null;
   adRunRow = null;
   dbCalls = [];
-  dayStopsQuery.mockImplementation(async (_db, { dateStr }) => stopsByDate[dateStr] || []);
+  loadWhereRaws = [];
+  commitWhereRaws = [];
+  // Real dayStopsQuery returns a knex builder (chainable thenable) — the
+  // caller chains .whereRaw(live-hold predicate) onto it, so the mock must
+  // expose that surface too (mock ≠ prod export rule).
+  dayStopsQuery.mockImplementation((_db, { dateStr }) => {
+    const builder = {
+      whereRaw: (sql) => { loadWhereRaws.push({ dateStr, sql }); return builder; },
+      then: (resolve, reject) => Promise.resolve(stopsByDate[dateStr] || []).then(resolve, reject),
+    };
+    return builder;
+  });
   routeTiers.loadReminderFreeze.mockResolvedValue({ failed: false, frozen: new Set() });
   db.mockImplementation((table) => tableChain(table));
   db.transaction.mockImplementation(async (cb) => {
@@ -96,6 +109,7 @@ beforeEach(() => {
       const c = {
         where: (a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[String(a).replace('scheduled_services.', '')] = b; return c; },
         whereNotIn: () => c,
+        whereRaw: (sql) => { commitWhereRaws.push(sql); return c; },
         forUpdate: () => c,
         leftJoin: () => c,
         select: async () => {
@@ -104,7 +118,7 @@ beforeEach(() => {
           // Unchanged tech-day: mirror the loaded stops for this date+tech.
           return (stopsByDate[filters.scheduled_date] || [])
             .filter((s) => s.technician_id === filters.technician_id)
-            .map((s) => ({ id: s.id, window_start: s.window_start, route_order: s.route_order, lat: s.lat, lng: s.lng }));
+            .map((s) => ({ id: s.id, window_start: s.window_start, time_window: s.time_window, route_order: s.route_order, lat: s.lat, lng: s.lng }));
         },
         update: async (u) => { attempted.push({ id: filters.id, ...u }); return 1; },
       };
@@ -232,6 +246,44 @@ test('window-respecting order (ties + null windows) still applies', async () => 
   stopsByDate['2026-08-18'] = backtrackDay('', {}).map((s, i) => ({ ...s, window_start: i === 2 ? null : '09:00' }));
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(1);
+});
+
+test('legacy time_window bands participate in the chronology guard (afternoon never before morning)', async () => {
+  // No window_start anywhere — only legacy bands. The lng-sorted route puts
+  // A (afternoon) before M (morning); the band promise says no.
+  stopsByDate['2026-08-18'] = [
+    stop('M', { lng: 3, route_order: 1, window_start: null, time_window: 'morning' }),
+    stop('A', { lng: 1, route_order: 2, window_start: null, time_window: 'afternoon' }),
+    stop('N', { lng: 2, route_order: 3, window_start: null, time_window: null }),
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(db.transaction).not.toHaveBeenCalled();
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'WINDOW_ORDER_CONFLICT' }));
+});
+
+test('effectiveWindowStart: window_start wins, legacy bands map, free text is unconstrained', () => {
+  const { effectiveWindowStart } = require('../services/route-reorder')._internals;
+  expect(effectiveWindowStart({ window_start: '09:00:00', time_window: 'afternoon' })).toBe('09:00');
+  expect(effectiveWindowStart({ window_start: null, time_window: 'morning' })).toBe('08:00');
+  expect(effectiveWindowStart({ window_start: null, time_window: 'Afternoon' })).toBe('12:00');
+  expect(effectiveWindowStart({ window_start: null, time_window: '9:30' })).toBe('09:30');
+  expect(effectiveWindowStart({ window_start: null, time_window: 'any' })).toBeNull();
+  expect(effectiveWindowStart({ window_start: null, time_window: null })).toBeNull();
+});
+
+test('expired estimate holds are excluded: live-hold predicate on the day load AND the commit re-read', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(1);
+  // Every day-load carries the occupancy live-hold predicate…
+  expect(loadWhereRaws.length).toBe(BAND.length);
+  for (const { sql } of loadWhereRaws) expect(sql).toContain('reservation_expires_at');
+  // …and the commit-time membership re-read uses the SAME predicate, so the
+  // two reads agree on membership (an expired-at-load hold must not resurface
+  // as a phantom "joined the tech-day" stale abort).
+  expect(commitWhereRaws.some((sql) => String(sql).includes('reservation_expires_at'))).toBe(true);
 });
 
 test('commit-time revalidation: a changed tech-day rolls back untouched (STALE_TECH_DAY)', async () => {

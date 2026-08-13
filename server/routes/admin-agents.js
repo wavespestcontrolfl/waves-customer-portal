@@ -817,23 +817,30 @@ async function loadPlannerRunTasks() {
       // ET calendar day, not UTC — an evening ET run must not label tomorrow.
       const dateLabel = row.created_at ? etDateString(new Date(row.created_at)) : '';
       const failedRun = asNumber(row.failed_count) > 0 || row.status === 'failed';
+      // A 'skipped' row is a TICK that never ran (writer lock still held at
+      // 4:20 — see recordSkippedTick). Its zero counts are not "0 problems";
+      // the night had NO reorder pass at all, which must read as an
+      // exception, not as a quiet healthy run (codex GitHub round P2).
+      const skippedTick = row.run_type === 'route_tiers_nightly' && row.status === 'skipped';
       return task({
         id: `planner_run:${row.id}`,
         agentId: 'dispatch',
         title: `Route run ${dateLabel}${row.run_type === 'route_tiers_nightly' ? ' (route tiers)' : ''}`,
-        summary: `${row.applied_count || 0} reorders applied · ${row.skipped_count || 0} skipped · ${dayMoves} day-moves · ${savedMiles.toFixed(1)} mi saved`,
-        priority: failedRun ? 'high' : 'low',
+        summary: skippedTick
+          ? `Nightly reorder did not run (${result.skip_reason || 'tick skipped'}) — no routes touched`
+          : `${row.applied_count || 0} reorders applied · ${row.skipped_count || 0} skipped · ${dayMoves} day-moves · ${savedMiles.toFixed(1)} mi saved`,
+        priority: failedRun || skippedTick ? 'high' : 'low',
         // Informational, not review work: a healthy autonomous run is nobody's
-        // task. Failed runs surface as exceptions (needs_review) — hands-off,
-        // exception-based.
-        status: failedRun ? 'needs_review' : 'info',
+        // task. Failed runs and never-ran ticks surface as exceptions
+        // (needs_review) — hands-off, exception-based.
+        status: failedRun || skippedTick ? 'needs_review' : 'info',
         source: 'route_optimization_planner_runs',
         sourceLabel: 'Route Planner',
         sourceId: row.id,
         createdAt: row.created_at,
         actionUrl: '/admin/dispatch',
         actionLabel: 'Open Dispatch',
-        impact: row.status === 'failed' ? 'Run failed' : savedMiles > 0 ? `${savedMiles.toFixed(1)} mi saved` : 'Informational',
+        impact: row.status === 'failed' ? 'Run failed' : skippedTick ? 'Reorder tick skipped' : savedMiles > 0 ? `${savedMiles.toFixed(1)} mi saved` : 'Informational',
       });
     }),
   };
