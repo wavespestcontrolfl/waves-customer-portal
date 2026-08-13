@@ -432,13 +432,22 @@ async function assignTechnician(input) {
       { techId: s.current_tech_id, date: s.scheduled_date_str },
       { techId: tech.id, date: s.scheduled_date_str },
     ]));
-    return trx('scheduled_services')
+    // route_order: null ONLY for rows whose technician actually CHANGES —
+    // the old sequence number is meaningless in the day the stop joins
+    // (NULL appends after the ordered run; every consumer sorts
+    // COALESCE(route_order, 999)) until an optimizer places it. Rows
+    // already on tech.id are a no-op reassignment: clearing them would
+    // erase a valid manual/optimized position (uncapped audit r25 P1) —
+    // the predicate is on the row value the UPDATE itself observes.
+    const [{ count: alreadyOn }] = await trx('scheduled_services')
       .whereIn('id', serviceIds)
-      // route_order: null — the stop's old sequence number is meaningless in
-      // the day it joins; NULL appends it after the ordered run (every
-      // consumer sorts COALESCE(route_order, 999)) until an optimizer places
-      // it. Carrying the stale number in would interleave it wrongly.
+      .where('technician_id', tech.id)
+      .count('id as count');
+    const changed = await trx('scheduled_services')
+      .whereIn('id', serviceIds)
+      .whereRaw('technician_id IS DISTINCT FROM ?', [tech.id])
       .update({ technician_id: tech.id, route_order: null, updated_at: new Date() });
+    return changed + Number(alreadyOn);
   });
 
   logger.info(`[intelligence-bar:schedule] Assigned ${count} services to ${tech.name}`);
