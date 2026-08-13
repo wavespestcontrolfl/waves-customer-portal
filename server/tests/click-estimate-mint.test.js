@@ -15,7 +15,13 @@ const {
   priorMintStillLive,
 } = require('../services/service-report/click-estimate-mint');
 
-function fakeTrx({ priorEstimateRow = null } = {}) {
+const CUSTOMER = {
+  id: 'cust-9', first_name: 'Testa', last_name: 'Fixture',
+  phone: '+15550100200', email: 'testa@example.com',
+  address_line1: '12 Invented Way', city: 'Parrish', zip: '34219',
+};
+
+function fakeTrx({ priorEstimateRow = null, customerRow = CUSTOMER } = {}) {
   const ops = { inserts: [], updates: [], selects: [] };
   const trx = (table) => {
     const q = {
@@ -24,7 +30,11 @@ function fakeTrx({ priorEstimateRow = null } = {}) {
       whereNull() { return q; },
       whereNot() { return q; },
       forUpdate() { return q; },
-      first: async () => (table === 'estimates' ? priorEstimateRow : null),
+      first: async () => {
+        if (table === 'estimates') return priorEstimateRow;
+        if (table === 'customers') return customerRow;
+        return null;
+      },
       update: async (patch) => { ops.updates.push({ table, criteria: q._criteria, patch }); return 1; },
       insert: (row) => ({
         returning: async () => {
@@ -71,11 +81,7 @@ function baseArgs(overrides = {}) {
     ...(overrides.deps || {}),
   };
   return {
-    customer: {
-      id: 'cust-9', first_name: 'Testa', last_name: 'Fixture',
-      phone: '+15550100200', email: 'testa@example.com',
-      address_line1: '12 Invented Way', city: 'Parrish', zip: '34219',
-    },
+    customer: { ...CUSTOMER },
     service: { id: 'sr-7' },
     crossSell: {
       serviceKey: 'pest_control',
@@ -119,6 +125,9 @@ describe('mintReportClickEstimate', () => {
     expect(insert.row.monthly_total).toBe(38);
     expect(insert.row.annual_total).toBe(456);
     const data = JSON.parse(insert.row.estimate_data);
+    // Durable engagement opt-out (#3391 audit r2 P1): the engagement
+    // engine's view/quiet rules would otherwise email a zero-comms estimate.
+    expect(data.noEngagementAutomation).toBe(true);
     expect(data.engineInputs.services).toEqual({ pest: { frequency: 'quarterly', version: 'PEST_V2' } });
     expect(data.priorQualifyingServices).toEqual(['lawn']);
     expect(data.result).toBeTruthy();
@@ -253,6 +262,29 @@ describe('mintReportClickEstimate', () => {
     const args = baseArgs();
     args.deps.bundleUtils = { pricingBundleMatchesEstimateTotals: () => false };
     await expect(mintReportClickEstimate(trx, args)).rejects.toThrow(/does not match the minted totals/);
+  });
+
+  test('identity persists from the row re-read UNDER the lock — a profile edit between pricing and tap reaches the estimate', async () => {
+    const { trx, ops } = fakeTrx({
+      customerRow: { ...CUSTOMER, email: 'renamed@example.com', first_name: 'Renamed' },
+    });
+    await mintReportClickEstimate(trx, baseArgs());
+    const insert = ops.inserts.find((i) => i.table === 'estimates');
+    expect(insert.row.customer_email).toBe('renamed@example.com');
+    expect(insert.row.customer_name).toBe('Renamed Fixture');
+  });
+
+  test('a premises change between pricing and tap is offer drift — refuse, never price the old property', async () => {
+    const { trx, ops } = fakeTrx({
+      customerRow: { ...CUSTOMER, address_line1: '99 Moved Ave' },
+    });
+    await expect(mintReportClickEstimate(trx, baseArgs())).rejects.toThrow(ClickEstimateDriftError);
+    expect(ops.inserts).toHaveLength(0);
+  });
+
+  test('a vanished/deactivated customer row refuses the mint', async () => {
+    const { trx } = fakeTrx({ customerRow: { ...CUSTOMER, active: false } });
+    await expect(mintReportClickEstimate(trx, baseArgs())).rejects.toThrow(/customer row vanished/);
   });
 
   test('a failed recompute refuses the mint', async () => {

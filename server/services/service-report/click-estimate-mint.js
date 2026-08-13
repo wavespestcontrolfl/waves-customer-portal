@@ -115,12 +115,35 @@ async function mintReportClickEstimate(trx, {
   // and the public page re-injects estimate_data.priorQualifyingServices on
   // every replay (extractEngineInputs), so display and accept keep pricing at
   // the combined tier without a forgeable input field.
+  // The composed customer row was read BEFORE this transaction's lock
+  // (#3391 audit r2 P1): a profile edit committing in between would have
+  // its fanout run before this estimate exists, then the mint would write
+  // the stale email/address into a new live row. Re-read under the lock
+  // writeOrRefreshCtaRequest already holds on this customer row; identity
+  // fields persist from the FRESH row, and a change to the fields the
+  // pricing frames were anchored on (primary address, property type) is
+  // offer drift — refuse, the card refreshes.
+  const freshCustomer = await trx('customers').where({ id: customer.id }).first();
+  if (!freshCustomer || freshCustomer.active === false || freshCustomer.deleted_at) {
+    throw new Error('customer row vanished before click-to-estimate mint');
+  }
+  if (addressForCustomer(freshCustomer) !== addressForCustomer(customer)
+    || String(freshCustomer.property_type || '') !== String(customer.property_type || '')) {
+    throw new ClickEstimateDriftError('customer premises changed between pricing and mint');
+  }
+
   const estimateData = {
     engineInputs: {
       ...context.propertyInput,
       services: context.targetOnlyServices,
     },
     ...(priorQualifyingServices.length ? { priorQualifyingServices } : {}),
+    // Durable opt-out from estimate engagement automation (#3391 audit P1):
+    // the four followup_* flags only cover the follow-up engine — the
+    // engagement engine's view-event and quiet-sweep rules key on
+    // status/sent_at and would email a customer this exception promises
+    // ZERO comms. Enforced centrally in estimate-engagement-engine.
+    noEngagementAutomation: true,
     reportCtaMint: {
       serviceRecordId: service.id,
       requestId: requestRow.id,
@@ -206,11 +229,14 @@ async function mintReportClickEstimate(trx, {
     // The same address string the pricing lookup was keyed on — the offer is
     // anchored to the customer's PRIMARY property (proven upstream by the
     // card's locality frames), and estimate linkage parsers read this column.
-    address: addressForCustomer(customer) || null,
-    customer_id: customer.id,
-    customer_name: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || null,
-    customer_phone: customer.phone || null,
-    customer_email: customer.email || null,
+    // Identity fields come from the row re-read UNDER the transaction lock
+    // (equal on the premises fields by the drift check above): a profile
+    // edit that landed between pricing and this tap reaches the estimate.
+    address: addressForCustomer(freshCustomer) || null,
+    customer_id: freshCustomer.id,
+    customer_name: `${freshCustomer.first_name || ''} ${freshCustomer.last_name || ''}`.trim() || null,
+    customer_phone: freshCustomer.phone || null,
+    customer_email: freshCustomer.email || null,
     monthly_total: monthlyTotal,
     annual_total: annualTotal,
     onetime_total: onetimeTotal,
