@@ -41,6 +41,9 @@ function bankBuilder() {
     whereIn: jest.fn((c, v) => { wheres.push([c, v]); return b; }),
     whereRaw: jest.fn((sql, binds) => { wheres.push([sql, binds]); return b; }),
     first: jest.fn((...cols) => {
+      // appliedRefundTotal aggregates refund credits (raw select with the
+      // refundAmount sum) — resolve the staged total
+      if (cols.some(c => typeof c === 'string' && c.includes('refundAmount'))) return Promise.resolve({ total: state.refundTotal || 0 });
       // the label→type binding check selects account_type; everything else
       // (row lookups, force replay check) resolves the staged bankRow
       if (cols.includes('account_type') && !cols.includes('id')) return Promise.resolve(state.accountTypeRow);
@@ -202,6 +205,7 @@ beforeEach(() => {
   state.listRows = null;
   state.latestRecon = null;
   state.insertReturningQueue = null;
+  state.refundTotal = 0;
   reconcilePayout.mockReset();
   reconcilePayout.mockImplementation(async () => ({}));
   delete process.env.GATE_BANK_IMPORT;
@@ -367,6 +371,21 @@ describe('link-expense (gate on)', () => {
     state.expenseRow = { id: 'exp-9', amount: '999.00', expense_date: '2026-08-10' };
     expect((await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'exp-9' })).status).toBe(400);
     state.expenseRow = { id: 'exp-9', amount: '58.12', expense_date: '2026-07-01' };
+    expect((await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'exp-9' })).status).toBe(400);
+    expect(state.bankUpdates).toHaveLength(0);
+  });
+
+  test('a refund-reduced expense still accepts its full-price debit (GROSS plausibility)', async () => {
+    // $58.12 purchase, $20 refund already applied → expense now $38.12; the
+    // original statement debit still carries the gross $58.12
+    state.expenseRow = { id: 'exp-9', amount: '38.12', expense_date: '2026-08-10' };
+    state.refundTotal = 20;
+    const res = await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'exp-9' });
+    expect(res.status).toBe(200);
+    expect(state.bankUpdates[0].patch).toMatchObject({ status: 'matched_expense', matched_expense_id: 'exp-9' });
+    // without the applied refund the same net amount is still refused
+    state.bankUpdates = [];
+    state.refundTotal = 0;
     expect((await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'exp-9' })).status).toBe(400);
     expect(state.bankUpdates).toHaveLength(0);
   });

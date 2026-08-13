@@ -250,6 +250,19 @@ function isPlausiblePayoutLink(row, payout) {
     && arrival >= addDays(txnDate, -PAYOUT_DATE_WINDOW_DAYS)
     && arrival <= addDays(txnDate, PAYOUT_DATE_WINDOW_DAYS);
 }
+// Refunds already applied to an expense (the association lives in the
+// refund credits' suggestion JSON — there is no FK). The expense's CURRENT
+// amount plus this sum is the GROSS its original statement debit carries,
+// which matters when the refund was applied BEFORE that debit was imported:
+// the reduced net amount would otherwise never match the full-price debit.
+async function appliedRefundTotal(expenseId, dbOrTrx = db) {
+  const r = await dbOrTrx('bank_transactions')
+    .where({ status: 'refund_applied' })
+    .whereRaw("suggestion->>'refundAppliedTo' = ?", [String(expenseId)])
+    .first(dbOrTrx.raw("coalesce(sum((suggestion->>'refundAmount')::numeric), 0) as total"));
+  return Number(r && r.total) || 0;
+}
+
 // Server-side plausibility for a refund target — the SAME rules the matcher
 // uses to park refundCandidates, so any valid original purchase is
 // applicable even when it fell outside the bounded parked slice (a fuel or
@@ -938,13 +951,43 @@ async function runDeterministicMatching({ limit } = {}) {
       .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
     if (rejected.expenseIds.length) expenseQuery = expenseQuery.whereNotIn('id', rejected.expenseIds);
     const candidates = await expenseQuery;
+    // GROSS-amount candidates: an applied refund already REDUCED the ledger
+    // expense, so a later-imported full-price debit no longer matches its
+    // net amount and the row would stay unexplained (or bait a duplicate
+    // create). The refund credit's suggestion carries the association —
+    // join it back and match against amount + applied refunds. Coverage is
+    // already refund-aware: covered caps at the CURRENT amount and the
+    // refund credit nets the difference in the purchase month.
+    let grossQuery = db('expenses as e')
+      .join('bank_transactions as rbt', function refundLink() {
+        this.on(db.raw("rbt.status = 'refund_applied'"))
+          .andOn(db.raw("rbt.suggestion->>'refundAppliedTo' = e.id::text"));
+      })
+      .whereBetween('e.expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
+      .whereNotExists(function claimed() {
+        this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = e.id');
+      })
+      .groupBy('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method')
+      .havingRaw("abs(e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) - ?) <= ?", [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
+      .select('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method',
+        db.raw("e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) as gross_amount"));
+    if (rejected.expenseIds.length) grossQuery = grossQuery.whereNotIn('e.id', rejected.expenseIds);
+    const netIds = new Set(candidates.map(c => c.id));
+    for (const g of await grossQuery) {
+      // a net match wins over its own gross reading — uniqueness is judged
+      // over expense IDENTITIES, never the same expense twice
+      if (!netIds.has(g.id)) candidates.push({ ...g, gross_amount: Number(g.gross_amount) });
+    }
+    // The amount a candidate matches AT: its gross when refunds already
+    // reduced it, its current amount otherwise.
+    const matchAmount = (c) => (c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount));
     // Auto-link needs exact cents + vendor evidence + a compatible payment
     // method + a UNIQUE candidate set: one strong candidate among other
     // same-amount-window expenses still parks — the hands-off rule is that
     // any plurality goes to the operator, evidence or not. Incompatible-
     // method expenses PARK too — the operator may know the books are
     // mislabeled.
-    const strong = candidates.filter(c => centsEqual(c.amount, row.amount) && vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
+    const strong = candidates.filter(c => centsEqual(matchAmount(c), row.amount) && vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
     if (candidates.length === 1 && strong.length === 1) {
       try {
         // Claim with the candidate expense LOCKED and every matching
@@ -958,7 +1001,13 @@ async function runDeterministicMatching({ limit } = {}) {
             .first('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
           if (!fresh) return;
           const freshDate = toDateStr(fresh.expense_date);
-          const stillValid = centsEqual(fresh.amount, row.amount)
+          // a gross candidate revalidates at amount + CURRENT applied
+          // refunds (re-summed under the lock — an undo since the read
+          // changes the gross and must void the match)
+          const freshMatchAmount = strong[0].gross_amount != null
+            ? Number(fresh.amount) + await appliedRefundTotal(fresh.id, trx)
+            : Number(fresh.amount);
+          const stillValid = centsEqual(freshMatchAmount, row.amount)
             && vendorEvidence(row.description, fresh)
             && !methodIncompatible(row.account_type, fresh.payment_method)
             && freshDate >= addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS)
@@ -1055,6 +1104,7 @@ module.exports = {
   isPlausibleExpenseLink,
   isPlausiblePayoutLink,
   isPlausibleRefundTarget,
+  appliedRefundTotal,
   methodIncompatible,
   effectivePayoutAmount,
   suggestionMerge,

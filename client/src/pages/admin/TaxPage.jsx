@@ -47,8 +47,18 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      // the intentional 400/409s carry actionable operator guidance in
+      // {error} — surface it instead of a bare status code
+      let detail = "";
+      try {
+        detail = (await r.json())?.error || "";
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new Error(detail || `HTTP ${r.status}`);
+    }
     return r.json();
   });
 }
@@ -4107,6 +4117,14 @@ function BankImportTab() {
         setNotice({
           text:
             `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skipped.length} skipped)` +
+            // skipped rows never reach staging or coverage — name each line
+            // and reason so the operator can fix the statement and re-import
+            (r.skipped.length
+              ? ` — skipped: ${r.skipped
+                  .slice(0, 5)
+                  .map((s) => `line ${s.line} (${s.reason})`)
+                  .join("; ")}${r.skipped.length > 5 ? ` and ${r.skipped.length - 5} more` : ""}`
+              : "") +
             (r.matching
               ? ` · matching linked ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses${r.matching.moreRemaining ? " (more rows pending — click Run matching)" : ""}`
               : ` · ${r.matchingError || "matching not run"}`) +
@@ -4148,7 +4166,6 @@ function BankImportTab() {
     });
   };
 
-  const currentMonth = coverage[coverage.length - 1];
 
   return (
     <div>
@@ -4299,7 +4316,9 @@ function BankImportTab() {
         </div>
       )}
 
-      {currentMonth && (
+      {/* every month the API returned for the selected year — showing only
+          the latest would hide earlier months' unexplained outflow */}
+      {coverage.length > 0 && (
         <div
           style={{
             background: D.card,
@@ -4309,22 +4328,26 @@ function BankImportTab() {
             marginBottom: 16,
           }}
         >
-          <div style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}>
-            {currentMonth.month} ledger coverage —{" "}
-            <span style={{ color: D.heading, fontWeight: 700 }}>
-              {currentMonth.pct == null ? "—" : `${currentMonth.pct}%`}
-            </span>{" "}
-            of bank outflow is in the expenses ledger · {fmtM(currentMonth.unexplained)} unexplained
-          </div>
-          <div style={{ height: 6, background: D.border, borderRadius: 3, overflow: "hidden" }}>
-            <div
-              style={{
-                height: "100%",
-                width: `${currentMonth.pct || 0}%`,
-                background: (currentMonth.pct || 0) >= 90 ? D.green : D.amber,
-              }}
-            />
-          </div>
+          {coverage.map((m, i) => (
+            <div key={m.month} style={{ marginBottom: i < coverage.length - 1 ? 10 : 0 }}>
+              <div style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}>
+                {m.month} ledger coverage —{" "}
+                <span style={{ color: D.heading, fontWeight: 700 }}>
+                  {m.pct == null ? "—" : `${m.pct}%`}
+                </span>{" "}
+                of bank outflow is in the expenses ledger · {fmtM(m.unexplained)} unexplained
+              </div>
+              <div style={{ height: 6, background: D.border, borderRadius: 3, overflow: "hidden" }}>
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${m.pct || 0}%`,
+                    background: (m.pct || 0) >= 90 ? D.green : D.amber,
+                  }}
+                />
+              </div>
+            </div>
+          ))}
         </div>
       )}
 

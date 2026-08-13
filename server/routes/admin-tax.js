@@ -1982,8 +1982,13 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
     const expense = await db('expenses').where({ id: expenseId }).first('id', 'amount', 'expense_date');
     if (!expense) return res.status(404).json({ error: 'expense not found' });
     // same amount tolerance + date window the matcher's candidates satisfy —
-    // a stale/crafted id outside them would falsify coverage
-    if (!bankImport.isPlausibleExpenseLink(row, expense)) {
+    // a stale/crafted id outside them would falsify coverage. An expense a
+    // refund already REDUCED also matches at its GROSS (amount + applied
+    // refunds): the original full-price debit is still its statement row.
+    const refundTotal = await bankImport.appliedRefundTotal(expenseId);
+    const plausible = bankImport.isPlausibleExpenseLink(row, expense)
+      || (refundTotal > 0 && bankImport.isPlausibleExpenseLink(row, { ...expense, amount: Number(expense.amount) + refundTotal }));
+    if (!plausible) {
       return res.status(400).json({ error: 'that expense does not plausibly match this bank row (amount/date outside the matching window)' });
     }
     let claimed;
@@ -2111,12 +2116,19 @@ router.post('/bank-import/:id/apply-refund', async (req, res, next) => {
     }
     // job_costs and the service_records financial fields are persisted
     // rollups — a job expense's amount change must re-derive them (same
-    // pattern as the expense update route in admin-job-expenses.js)
+    // pattern as the expense update route in admin-job-expenses.js).
+    // Fire-and-forget BY DESIGN (the refund itself is committed), but a
+    // failure leaves the rollups at pre-refund values, so it is LOGGED —
+    // never swallowed — until a later expense edit or recalc heals them.
     if (adjustedServiceId) {
       try {
         const JobCosting = require('../services/job-costing');
-        JobCosting.calculateJobCost(adjustedServiceId).catch(() => {});
-      } catch { /* non-critical */ }
+        JobCosting.calculateJobCost(adjustedServiceId).catch((err) => {
+          logger.warn(`[bank-import] job-cost recalculation for service ${adjustedServiceId} failed after refund adjustment — job_costs/service_records remain pre-refund: ${err.message}`);
+        });
+      } catch (err) {
+        logger.warn(`[bank-import] job-cost recalculation unavailable for service ${adjustedServiceId}: ${err.message}`);
+      }
     }
     res.json({ success: true, expense: adjusted });
   } catch (err) { next(err); }
@@ -2299,12 +2311,17 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
         throw err;
       }
       // same persisted-rollup rule as apply-refund: restoring a job
-      // expense's amount must re-derive job_costs / service_records
+      // expense's amount must re-derive job_costs / service_records —
+      // fire-and-forget, but failures are logged, never swallowed
       if (restoredServiceId) {
         try {
           const JobCosting = require('../services/job-costing');
-          JobCosting.calculateJobCost(restoredServiceId).catch(() => {});
-        } catch { /* non-critical */ }
+          JobCosting.calculateJobCost(restoredServiceId).catch((err) => {
+            logger.warn(`[bank-import] job-cost recalculation for service ${restoredServiceId} failed after refund undo — job_costs/service_records remain stale: ${err.message}`);
+          });
+        } catch (err) {
+          logger.warn(`[bank-import] job-cost recalculation unavailable for service ${restoredServiceId}: ${err.message}`);
+        }
       }
       return res.json({ success: true, reconciliation: null });
     }

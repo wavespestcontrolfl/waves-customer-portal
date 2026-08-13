@@ -26,7 +26,7 @@ function makeBuilder(table) {
   const b = {};
   const chain = (name) => { b[name] = jest.fn(() => b); };
   ['join', 'forUpdate', 'where', 'andWhere', 'whereNot', 'whereNotIn', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
-    'orderBy', 'limit', 'groupBy', 'groupByRaw', 'select', 'first'].forEach(chain);
+    'orderBy', 'limit', 'groupBy', 'groupByRaw', 'havingRaw', 'select', 'first'].forEach(chain);
   b.update = jest.fn((patch) => {
     // Only row-scoped updates (where({id,...})) are the matcher's claims and
     // parks; the dangling-link heal sweep uses whereIn/whereNull and is
@@ -51,10 +51,41 @@ function makeBuilder(table) {
         && !(r.suggestion && r.suggestion.reconcilePending)
         && state.payouts.some(p => p.id === r.matched_payout_id && p.reconciled === wantReconciled));
     }
+    // the gross-candidate scan joins applied refunds back onto expenses —
+    // mirror the join + having filter (gross within tolerance of the bound
+    // amount) so gross matching is testable
+    if (table === 'expenses as e') {
+      const having = b.havingRaw.mock.calls[0];
+      const target = having && Array.isArray(having[1]) ? Number(having[1][0]) : null;
+      rows = state.expenses.map(e => {
+        const refunds = state.bankRows.filter(r => r.status === 'refund_applied' && r.suggestion?.refundAppliedTo === e.id);
+        if (!refunds.length) return null;
+        const gross = Number(e.amount) + refunds.reduce((s, r) => s + Number(r.suggestion.refundAmount || 0), 0);
+        return { ...e, gross_amount: gross };
+      }).filter(Boolean).filter(e => target == null || Math.abs(e.gross_amount - target) <= 0.011);
+    }
+    // the debit matcher's NET query filters by amount in SQL — mirror it so
+    // a refund-reduced expense is correctly absent from the net candidates
+    if (table === 'expenses') {
+      const absCall = b.whereRaw.mock.calls.find(c => String(c[0]).includes('abs(amount'));
+      if (absCall && Array.isArray(absCall[1])) {
+        rows = rows.filter(e => Math.abs(Number(e.amount) - Number(absCall[1][0])) <= Number(absCall[1][1]) + 0.001);
+      }
+    }
     // mirror the status + pending-flag filters so the unmatched loop and the
     // reconciliation sweep each see only their own rows (a row with no
     // status set counts as 'unmatched')
     if (table === 'bank_transactions') {
+      // appliedRefundTotal aggregates refund credits for one expense — the
+      // locked gross revalidation depends on it
+      const refundSumCall = b.whereRaw.mock.calls.find(c => String(c[0]).includes('refundAppliedTo'));
+      if (refundSumCall) {
+        const expId = Array.isArray(refundSumCall[1]) ? refundSumCall[1][0] : refundSumCall[1];
+        const total = state.bankRows
+          .filter(r => r.status === 'refund_applied' && r.suggestion?.refundAppliedTo === expId)
+          .reduce((s, r) => s + Number(r.suggestion.refundAmount || 0), 0);
+        return Promise.resolve([{ total }]).then(resolve, reject);
+      }
       const statusWhere = b.where.mock.calls.map(c => c[0]).find(a => a && typeof a === 'object' && 'status' in a);
       if (statusWhere) rows = rows.filter(r => (r.status || 'unmatched') === statusWhere.status);
       if (b.whereRaw.mock.calls.some(c => String(c[0]).includes('reconcilePending'))) {
@@ -585,6 +616,22 @@ describe('runDeterministicMatching', () => {
     state.bankRows = [{ id: 'bt-2', txn_date: '2026-08-11', description: 'STRIPE TRANSFER ST-78', amount: 100, direction: 'debit', account_type: 'bank', suggestion: null }];
     const second = await runDeterministicMatching();
     expect(second.transferFlagged).toBe(1);
+  });
+
+  test('a full-price debit still matches its expense after a refund reduced it (GROSS matching)', async () => {
+    // refund applied BEFORE the original debit was imported: expense is now
+    // $38.12 net, but the statement debit carries the gross $58.12
+    state.bankRows = [
+      { id: 'bt-credit', txn_date: '2026-08-05', description: 'WAWA 5211 REFUND', amount: 20, direction: 'credit', account_type: 'card', status: 'refund_applied', suggestion: { refundAppliedTo: 'exp-1', refundAmount: 20 } },
+      { id: 'bt-debit', txn_date: '2026-08-02', description: 'WAWA 5211', amount: 58.12, direction: 'debit', account_type: 'card', suggestion: null },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '38.12', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-01', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(1);
+    const claim = state.updates.find(u => u.patch.status === 'matched_expense');
+    expect(claim.patch.matched_expense_id).toBe('exp-1');
+    // the refund credit row itself is never disturbed by the pass
+    expect(state.updates.find(u => u.where.some(w => w && w.id === 'bt-credit'))).toBeUndefined();
   });
 
   test('an amount+date-only match WITHOUT provenance parks instead of auto-linking', async () => {
