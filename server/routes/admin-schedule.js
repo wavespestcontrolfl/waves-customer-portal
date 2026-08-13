@@ -8967,13 +8967,22 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // Everything this lane did not write — the legacy WDO brief and any
     // other/untyped legacy brief — serves exactly as it always has.
     const PrevisitBrief = require('../services/previsit-brief');
-    if (
-      String(svc.pre_service_brief_type || '') === PrevisitBrief.VISIT_BRIEF_TYPE
-      && !PrevisitBrief.briefGateEnabled()
-    ) {
-      return res.json({ brief: null });
+    const parsedBrief = typeof svc.pre_service_brief === 'string' ? JSON.parse(svc.pre_service_brief) : svc.pre_service_brief;
+    if (String(svc.pre_service_brief_type || '') === PrevisitBrief.VISIT_BRIEF_TYPE) {
+      if (!PrevisitBrief.briefGateEnabled()) {
+        return res.json({ brief: null });
+      }
+      // A rescheduled visit keeps its stored brief while the sweep's
+      // today-only filter won't reconsider it until the new day — the
+      // old day's guidance (protocol-window products included) is
+      // WITHDRAWN on read rather than served for days
+      // (briefServableForDate; the new day's sweep regenerates via the
+      // grounding-hash mismatch, scheduledDate being part of the hash).
+      if (!PrevisitBrief.briefServableForDate(parsedBrief, svc.scheduled_date)) {
+        return res.json({ brief: null, stale: 'date_moved' });
+      }
     }
-    res.json({ brief: typeof svc.pre_service_brief === 'string' ? JSON.parse(svc.pre_service_brief) : svc.pre_service_brief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at });
+    res.json({ brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at });
   } catch (err) { next(err); }
 });
 

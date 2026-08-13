@@ -542,6 +542,16 @@ describe('briefClearOnReclassification (update-details service switch)', () => {
     expect(briefClearOnReclassification('wdo_inspection', 'visit_brief_v1')).toEqual(CLEAR);
   });
 
+  test('briefServableForDate matches ET calendar day incl. the UTC-midnight DATE shape, fails closed on a move or missing stamp', () => {
+    const { briefServableForDate } = PrevisitBrief;
+    expect(briefServableForDate({ for_date: '2026-08-13' }, '2026-08-13')).toBe(true);
+    // node-postgres materializes DATE columns as UTC-midnight Dates.
+    expect(briefServableForDate({ for_date: '2026-08-13' }, new Date('2026-08-13T00:00:00Z'))).toBe(true);
+    expect(briefServableForDate({ for_date: '2026-08-13' }, '2026-08-15')).toBe(false);
+    expect(briefServableForDate({ priorities: [] }, '2026-08-13')).toBe(false);
+    expect(briefServableForDate(null, '2026-08-13')).toBe(false);
+  });
+
   test('same-boundary switches and briefless rows keep the stored state', () => {
     expect(briefClearOnReclassification('pest_general', 'visit_brief_v1')).toBeNull();
     expect(briefClearOnReclassification('wdo_inspection', 'wdo_inspection')).toBeNull();
