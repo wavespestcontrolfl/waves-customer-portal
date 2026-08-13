@@ -859,6 +859,25 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
   });
 
+  // ⭐ "DON'T FORGET TO TEXT ME" IS A REQUEST FOR TEXTS, and "I don't receive
+  // texts" is a delivery complaint — neither withdraws anything.
+  test('positive-intent and complaint "don\'t" phrases never suppress', async () => {
+    for (const words of [
+      "don't forget to text me",
+      "please don't hesitate to text me",
+      "I don't receive texts",
+      "I don't get your texts anymore",
+    ]) {
+      jest.clearAllMocks();
+      await executeTool('capture_lead', {
+        call_summary: 'Wants or is missing texts.',
+        contact_preference: words,
+        do_not_contact_request: false,
+      }, CTX);
+      expect(recordSuppression).not.toHaveBeenCalled();
+    }
+  });
+
   // ⭐ WHOSE TEXTS? The suppression is keyed to the CALLER's ANI — a stop
   // about somebody else must never silence the caller's own reminders.
   test('a third-party stop ("stop texting my tenant") records but never suppresses the caller', async () => {

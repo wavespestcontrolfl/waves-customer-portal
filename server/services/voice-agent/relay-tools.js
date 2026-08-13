@@ -916,8 +916,18 @@ async function executeTool(name, input = {}, ctx = {}) {
       // "I no longer receive texts" produced text-bearing stop clauses and
       // silenced reminders for the caller REPORTING they miss them. A stop
       // clause whose verb phrase is receipt-shaped is discarded.
-      const RECEIPT_COMPLAINT_RE = /^(?:never|no\s+longer|no\s+more)\s+(?:receiv\w*|got|get\b|gets|getting|hear\w*|heard|see|seen|saw|had)\b/i;
-      const actionableStopClauses = stopClauses.filter((c) => !RECEIPT_COMPLAINT_RE.test(String(c.stopped || '').trim()));
+      // …and "don't"/"do not" head the same complaints: "I don't receive
+      // texts" reports missing texts, it doesn't withdraw them.
+      const RECEIPT_COMPLAINT_RE = /^(?:never|no\s+longer|no\s+more|don'?t|do\s+not|doesn'?t|didn'?t|wo?n'?t|can'?t|cannot)\s+(?:receiv\w*|got|get\b|gets|getting|hear\w*|heard|see|seen|saw|had)\b/i;
+      // ⭐ "DON'T FORGET TO TEXT ME" IS A REQUEST FOR TEXTS. The idioms that
+      // pair a negator with forget/fail/hesitate invert it — the clause asks
+      // FOR the channel it names, and reading it as a stop suppressed exactly
+      // what the caller just requested.
+      const POSITIVE_INTENT_DONT_RE = /^(?:don'?t|do\s+not|never)\s+(?:ever\s+)?(?:forget|fail|hesitate|be\s+(?:afraid|shy))\b/i;
+      const actionableStopClauses = stopClauses.filter((c) => {
+        const head = String(c.stopped || '').trim();
+        return !RECEIPT_COMPLAINT_RE.test(head) && !POSITIVE_INTENT_DONT_RE.test(head);
+      });
       const TEXTY = /\b(?:text|texts|texting|sms|message|messages|messaging)\b/i;
       // ⭐ "NO TEXTS" IS A STOP WITH NO STOP VERB. The bare channel negation —
       // "no texts", "no SMS", "no text messages please" — carries no word from
