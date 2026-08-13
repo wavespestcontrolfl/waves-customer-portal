@@ -463,7 +463,11 @@ describe('POST /reports/:token/referral-link (owner ruling 2026-08-13: share mod
 
   test('the tap shares the 5/min token-keyed action limiter (pre-push P1: no eventName body must not exempt it)', async () => {
     isEnabled.mockReturnValue(true);
-    mockDbWithService();
+    const serviceRead = chain({ first: jest.fn().mockResolvedValue(serviceRow) });
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return serviceRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
     await withServer(async (baseUrl) => {
       const statuses = [];
       for (let i = 0; i < 6; i++) {
@@ -472,6 +476,10 @@ describe('POST /reports/:token/referral-link (owner ruling 2026-08-13: share mod
       }
       expect(statuses.slice(0, 5).every((code) => code === 200)).toBe(true);
       expect(statuses[5]).toBe(429);
+      // Pre-DB bypass (round-2 P1): the over-limit 6th request must be
+      // rejected BEFORE any service_records read — 5 in-route reads for the
+      // 5 allowed requests, none from the param gate, none for the 429.
+      expect(serviceRead.first).toHaveBeenCalledTimes(5);
     });
   });
 

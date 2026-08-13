@@ -105,10 +105,15 @@ function getPromoterReferralLink(promoter, settings = {}) {
   return referralLinkForCode(code, settings.base_url);
 }
 
-async function generateUniqueCode() {
+// conn: callers inside a transaction MUST pass their trx (pre-push P1
+// round 2) — collision-checking through the global pool while holding a
+// transaction connection needs a SECOND connection per enrollment, and
+// enough concurrent enrollments occupy the pool with transactions all
+// waiting on one another (acquisition-timeout starvation).
+async function generateUniqueCode(conn = db) {
   for (let attempt = 0; attempt < 5; attempt++) {
     const code = `WAVES-${generateCode(8)}`;
-    const exists = await db('referral_promoters').where({ referral_code: code }).first();
+    const exists = await conn('referral_promoters').where({ referral_code: code }).first();
     if (!exists) return code;
   }
   // Fall through with a longer code if (extremely unlikely) we collided 5x
@@ -213,13 +218,13 @@ async function enrollPromoter(customerId) {
     if (existing) {
       let code = String(existing.referral_code || customer.referral_code || referralCodeFromLink(existing.referral_link) || '').trim();
       if (!code) {
-        code = await generateUniqueCode();
+        code = await generateUniqueCode(trx);
       } else {
         const conflict = await trx('referral_promoters')
           .where({ referral_code: code })
           .where('id', '!=', existing.id)
           .first();
-        if (conflict) code = await generateUniqueCode();
+        if (conflict) code = await generateUniqueCode(trx);
       }
 
       const referralLink = getPromoterReferralLink({ ...existing, referral_code: code }, settings);
@@ -237,7 +242,7 @@ async function enrollPromoter(customerId) {
       return { promoter: { ...existing, ...updates, referral_code: code, referral_link: referralLink }, alreadyEnrolled: true };
     }
 
-    const code = customer.referral_code || (await generateUniqueCode());
+    const code = customer.referral_code || (await generateUniqueCode(trx));
     const link = referralLinkForCode(code, settings.base_url);
 
     // Ensure customer has a referral_code — inside the same transaction as

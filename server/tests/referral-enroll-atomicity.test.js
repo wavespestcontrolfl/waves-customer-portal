@@ -106,6 +106,26 @@ test('first enrollment runs entirely inside one transaction with the customer ro
   expect(state.customer.referral_code).toBe(promoter.referral_code);
 });
 
+test('code collision checks run on the TRANSACTION connection, never the global pool (round-2 P1)', async () => {
+  // A trx holding one pool connection while generateUniqueCode queries via
+  // the global db needs a SECOND connection per enrollment — concurrent
+  // enrollments then starve the pool. The bare-db fake here throws on any
+  // referral_promoters read to prove the collision check rides the trx.
+  const state = freshState();
+  primeDb(state);
+  db.mockImplementation((table) => ({
+    where: jest.fn().mockReturnThis(),
+    first: jest.fn(async () => {
+      if (table === 'referral_program_settings') {
+        return { id: 1, program_active: true, base_url: 'https://portal.wavespestcontrol.com/r/' };
+      }
+      throw new Error(`global-pool query during enrollment: ${table}`);
+    }),
+  }));
+  const { promoter } = await engine.enrollPromoter('cust-1');
+  expect(promoter.referral_code).toMatch(/^WAVES-/);
+});
+
 test('a serialized second caller takes the already-enrolled path with the winner\'s code — no second insert', async () => {
   const state = freshState();
   primeDb(state);

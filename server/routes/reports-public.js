@@ -115,7 +115,11 @@ async function staffCanViewSuppressed(req) {
 // be added and forgotten. Project-report tokens and unknown tokens pass
 // through — each route resolves/404s on its own; this gate owns exactly one
 // concern: suppressed service reports are staff-READ-only.
-const RATE_LIMITED_WRITE_RE = /^\/[a-f0-9]{32}\/(events|pest-pressure\/client-rating)$/i;
+// referral-link included (pre-push P1 round 2): its handler carries the same
+// token-keyed 5/min action limiter as /events and enforces suppression
+// itself, post-limiter — without the bypass, this param gate's DB read runs
+// on every over-limit request and defeats the limiter's purpose.
+const RATE_LIMITED_WRITE_RE = /^\/[a-f0-9]{32}\/(events|referral-link|pest-pressure\/client-rating)$/i;
 router.param('token', async (req, res, next, token) => {
   try {
     if (!FULL_TOKEN_RE.test(String(token || ''))) return next();
