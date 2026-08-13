@@ -140,10 +140,13 @@ describe('recordServiceContactChanges', () => {
       customer_id: 'cust-1',
       admin_user_id: null,
       action: 'service_contact_added',
-      description: 'Jane Smith (…1234) added as on-location contact — customer portal',
+      description: 'Jane S. (…1234) added as on-location contact — customer portal',
     }));
-    // Full phone never appears in the visible description…
+    // Neither the full phone nor the full name/email ever appears in the
+    // visible description — it rides the global recent-activity feed…
     expect(rows[0].description).not.toContain('5551231234');
+    expect(rows[0].description).not.toContain('Smith');
+    expect(rows[0].description).not.toContain('jane@example.com');
     // …but metadata carries the complete contact for the People panel.
     expect(JSON.parse(rows[0].metadata)).toEqual(expect.objectContaining({
       slot: 1,
@@ -171,7 +174,7 @@ describe('recordServiceContactChanges', () => {
     expect(rows[0]).toEqual(expect.objectContaining({
       admin_user_id: 'tech-1',
       action: 'service_contact_removed',
-      description: 'Jane Smith removed as on-location contact — admin',
+      description: 'Jane S. removed as on-location contact — admin',
     }));
     expect(JSON.parse(rows[0].metadata)).toEqual(expect.objectContaining({
       source: 'admin',

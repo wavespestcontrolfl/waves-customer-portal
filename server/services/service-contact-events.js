@@ -19,12 +19,15 @@
  * any failure only warns — a logging failure must never fail the customer's
  * save (same posture as the account.updated email dispatch).
  *
- * Descriptions mask phones to last-4; the full contact detail lives in
- * metadata — the People panel (Phase 2) needs it for removed-contact
- * history, which no other table retains. Both the timeline endpoint and the
- * raw table are admin-only, and the global dashboard recentActivity feed
- * strips metadata from service_contact_* rows (routes/admin-dashboard.js)
- * so full contact detail stays scoped to the customer's own timeline.
+ * Descriptions carry only masked identifiers (first name + last initial,
+ * first-letter-masked email, last-4 phone) because they ride global
+ * surfaces — the dashboard recentActivity feed and the IB briefing. The
+ * full contact detail lives in metadata — the People panel (Phase 2) needs
+ * it for removed-contact history, which no other table retains. Both the
+ * timeline endpoint and the raw table are admin-only, and the dashboard
+ * feed strips metadata from service_contact_* rows
+ * (routes/admin-dashboard.js) so full detail stays scoped to the
+ * customer's own timeline.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -35,6 +38,21 @@ const phoneKey = (v) => String(v == null ? '' : v).replace(/\D/g, '').slice(-10)
 const maskPhone = (v) => {
   const key = phoneKey(v);
   return key ? `…${key.slice(-4)}` : '';
+};
+// Descriptions ride the GLOBAL recent-activity feed and the IB briefing, so
+// they carry no full identifiers (matching the rest of activity_log): first
+// name + last initial, first-letter-masked email, last-4 phone. The full
+// contact lives in metadata, which global consumers strip.
+const maskName = (v) => {
+  const parts = String(v == null ? '' : v).trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '';
+  return parts.length > 1 ? `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.` : parts[0];
+};
+const maskEmail = (v) => {
+  const s = String(v == null ? '' : v).trim();
+  const at = s.indexOf('@');
+  if (at < 1) return s ? '…' : '';
+  return `${s[0]}…${s.slice(at)}`;
 };
 
 const SOURCE_LABELS = {
@@ -103,7 +121,7 @@ function diffServiceContacts(beforeRow = {}, afterRow = {}) {
 }
 
 function displayName(person) {
-  return person.name || person.email || (person.phone ? maskPhone(person.phone) : 'Contact');
+  return maskName(person.name) || maskEmail(person.email) || (person.phone ? maskPhone(person.phone) : 'Contact');
 }
 
 function describeEvent(event, sourceLabel) {
