@@ -67,6 +67,27 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // backstop). Existing callers that ignore the return value are
   // unaffected.
   let coreLegsOk = true;
+  // ⭐ 0a. THE ROW'S CURRENT STATUS, NOT THE CALLER'S SNAPSHOT. `svc` was read
+  // when the confirmation committed — on the sweep path that can be an hour
+  // ago — and a cancellation that landed since must stand: activating a
+  // cancelled visit arms reminders that TEXT the customer about a visit nobody
+  // is making. The terminal-status guard on the stamp (below, and in both
+  // legacy stampers) only stopped the RECEIPT; the legs had already run. So
+  // the legs themselves stand down on a terminal row — not a failure, the
+  // call's own answer: nothing stamps, and the sweep excludes cancel/skip
+  // rejections, so there is no retry churn.
+  try {
+    const fresh = await db('scheduled_services').where({ id: svc.id }).first('status');
+    if (!fresh || ['cancelled', 'skipped'].includes(String(fresh.status))) {
+      logger.info(`[${routeTag}] activation stood down for ${svc.id} — row is ${fresh ? fresh.status : 'gone'}`);
+      return false;
+    }
+  } catch (freshErr) {
+    // Unknown is not safe: refusing to activate leaves the row unstamped,
+    // which is exactly the retry rail.
+    logger.error(`[${routeTag}] could not read current status for ${svc.id} — reporting retryable: ${freshErr.message}`);
+    return false;
+  }
   // 0. Office-confirm clearance stamp — FIRST, before every best-effort leg
   // (Codex #3361 r28 P1): the calling route already committed the
   // confirmation, so a process exit inside any leg below leaves the row
@@ -388,6 +409,28 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       }
       await requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'outbound_review_confirm', ...cardCallOpts });
     } catch (e) { logger.warn(`[${routeTag}] card-request funnel failed for ${svc.id}: ${e.message}`); }
+  }
+
+  // ⭐ 0a's MIRROR: a cancellation that landed DURING the legs. The entry check
+  // closes the wide window (sweep-path minutes); this closes the narrow one.
+  // The cancel path's own cleanup ran before the reminder existed and found
+  // nothing to close, so the just-armed reminder is the one artifact that
+  // would go on to TEXT the customer about a cancelled visit — close it here.
+  // handleCancellation is internally guarded (no-ops unless the visit is
+  // still cancelled at write time) and sends nothing. Lead conversion and the
+  // resolved review card keep normal confirm-then-cancel semantics — cancel
+  // after activation is the everyday sequence and its paths own that cleanup.
+  // Reporting FALSE keeps the row unstamped, same as the entry check.
+  try {
+    const post = await db('scheduled_services').where({ id: svc.id }).first('status');
+    if (post && ['cancelled', 'skipped'].includes(String(post.status))) {
+      const AppointmentReminders = require('./appointment-reminders');
+      await AppointmentReminders.handleCancellation(svc.id, { sendNotification: false }).catch(() => {});
+      logger.info(`[${routeTag}] visit ${svc.id} went ${post.status} during the confirm hook — reminder closed, activation stood down`);
+      return false;
+    }
+  } catch (postErr) {
+    logger.warn(`[${routeTag}] post-hook status re-read failed for ${svc.id}: ${postErr.message}`);
   }
 
   return coreLegsOk;

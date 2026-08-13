@@ -778,7 +778,14 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null } 
   // (including the attestation requirement) has had its say, and never from a
   // loser: exactly one of {result, timeout} resolves the race, and only that
   // one publishes.
+  let lastPublished = null;
   const publishVerified = (ok) => {
+    // Idempotent per VERDICT: the fast path publishes through the race AND
+    // resolves verifyWork, so without this the same true would land twice.
+    // The one transition that matters — a late genuine success upgrading a
+    // timeout's false — is a CHANGED verdict and always goes through.
+    if (lastPublished === (ok === true)) return;
+    lastPublished = ok === true;
     if (typeof onVerified === 'function') {
       try { onVerified(ok === true); } catch { /* the flag is the caller's */ }
     }
@@ -852,7 +859,21 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null } 
       publishVerified(v.verified === true);
       return v;
     });
-  verifyWork.catch(() => {}); // a late loser must never surface as unhandled
+  // ⭐ A LATE SUCCESS IS STILL THE SESSION'S IDENTITY. The deadline exists so a
+  // stalled call_log read never blocks the caller's first turn — it does NOT
+  // cancel the work, and by the time a slow verification finally succeeds it
+  // has ALREADY BURNED the one-per-CallSid claim. Discarding that verdict left
+  // the worst of both worlds: this session unverified (an explicit "stop
+  // texting me" demoted to a note) AND the claim consumed, so no retry could
+  // ever verify this call either. A verification that truly succeeded — the
+  // signature-verified row matched and the claim was won by THIS session —
+  // publishes whenever it lands; the session it upgrades is the claimant. A
+  // late FAILURE changes nothing (false was already published), and the
+  // context hydration keeps the race verdict: a slow verify costs the KNOWN
+  // CALLER block, never the identity.
+  verifyWork
+    .then((v) => { if (v && v.verified === true) publishVerified(true); })
+    .catch(() => {}); // a late loser must never surface as unhandled
 
   const work = (async () => {
     const v = await verified;

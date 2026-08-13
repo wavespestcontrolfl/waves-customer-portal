@@ -422,6 +422,56 @@ describe('GATE ON — caller recognition', () => {
       }
     });
 
+    // ⭐ A LATE SUCCESS IS STILL THE SESSION'S IDENTITY. The deadline unblocks
+    // the first turn; it does not cancel the work — and a verification that
+    // finally succeeds has already BURNED the one-per-CallSid claim. Discarding
+    // that verdict left this session unverified AND the claim consumed, so no
+    // retry could ever verify the call. The late true upgrades the session.
+    test('a verification that lands AFTER its deadline still upgrades the session', async () => {
+      delete process.env.VOICE_RELAY_REQUIRE_ATTESTATION;
+      jest.useFakeTimers();
+      try {
+        primeDb({ customers: [CUSTOMER] });
+        // The call_log read stalls past the verify deadline, then succeeds.
+        builders.call_log.first = jest.fn(() => new Promise((resolve) => {
+          setTimeout(() => resolve(VERIFIED_CALL_ROW), 6000);
+        }));
+        const seen = [];
+        const pending = relayContext.resolveCallerContext(FROM, {
+          callSid: CALL_SID,
+          onVerified: (ok) => seen.push(ok),
+        });
+        await jest.advanceTimersByTimeAsync(4500); // deadline fires first
+        expect(seen).toEqual([false]); // fail-closed at the deadline
+        await jest.advanceTimersByTimeAsync(3000); // the slow read completes
+        await pending;
+        expect(seen).toEqual([false, true]); // …and the real verdict lands
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('a late FAILURE changes nothing — false stays published once', async () => {
+      delete process.env.VOICE_RELAY_REQUIRE_ATTESTATION;
+      jest.useFakeTimers();
+      try {
+        primeDb({ customers: [CUSTOMER] });
+        builders.call_log.first = jest.fn(() => new Promise((resolve) => {
+          setTimeout(() => resolve(null), 6000); // no row — verification fails late
+        }));
+        const seen = [];
+        const pending = relayContext.resolveCallerContext(FROM, {
+          callSid: CALL_SID,
+          onVerified: (ok) => seen.push(ok),
+        });
+        await jest.advanceTimersByTimeAsync(10000);
+        await pending;
+        expect(seen).toEqual([false]); // published once, never flapped
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     test('only a PASSED-A counts — a passed B or C does not', () => {
       expect(relayContext.isFullAttestation('TN-Validation-Passed-A')).toBe(true);
       expect(relayContext.isFullAttestation('A')).toBe(true);

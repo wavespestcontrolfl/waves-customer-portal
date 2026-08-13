@@ -583,7 +583,7 @@ describe('voice-agent bookings share the office-review activation path', () => {
 // A hand-built knex-ish db mock for the confirm hook: table-aware first()/
 // select()/update() so the triage-payload path and the fallback lead lookup
 // can be exercised independently.
-function confirmHookDb({ cardPayload = null, fallbackLeads = [], leadRow = null, callRow = null } = {}) {
+function confirmHookDb({ cardPayload = null, fallbackLeads = [], leadRow = null, callRow = null, svcRow = { status: 'confirmed', scheduled_date: '2026-07-14', window_start: '09:00' } } = {}) {
   const state = { triageResolved: false, updates: [] };
   const fn = (table) => {
     const q = {};
@@ -593,6 +593,19 @@ function confirmHookDb({ cardPayload = null, fallbackLeads = [], leadRow = null,
       if (table === 'triage_items') return cardPayload ? { payload: JSON.stringify(cardPayload) } : null;
       if (table === 'call_log') return callRow;
       if (table === 'leads') return leadRow;
+      // The hook re-reads the row's CURRENT status at entry and after the
+      // legs (cancellation-race guard) — a non-terminal row by default.
+      if (table === 'scheduled_services') return svcRow;
+      // The post-registration slot verify compares the PERSISTED reminder row
+      // against the service's current slot — armed at exactly that instant.
+      if (table === 'appointment_reminders' && svcRow && svcRow.window_start) {
+        const { parseETDateTime } = require('../utils/datetime-et');
+        return {
+          id: 'ar-verify-1',
+          appointment_time: parseETDateTime(`${svcRow.scheduled_date}T${svcRow.window_start}`),
+          windows_preclosed: false,
+        };
+      }
       return null;
     });
     q.update = jest.fn(async (vals) => {
@@ -707,6 +720,29 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
     });
     await runOutboundReviewConfirmHook(db, svc, 'test');
     expect(convertCallLeadOnPhoneBooking).toHaveBeenCalledWith(db, expect.objectContaining({ leadId: 'lead-v9' }));
+  });
+
+  // ⭐ THE ROW'S CURRENT STATUS, NOT THE CALLER'S SNAPSHOT. On the sweep path
+  // the snapshot can be an hour old; a cancellation that landed since must
+  // stand — activating it would arm reminders that TEXT the customer about a
+  // visit nobody is making. The stamp guard alone only stopped the receipt.
+  test('a row cancelled since the snapshot stands the whole activation down', async () => {
+    const db = confirmHookDb({
+      fallbackLeads: [{ id: 'lead-1', status: 'new' }],
+      svcRow: { status: 'cancelled', scheduled_date: '2026-07-14', window_start: '09:00' },
+    });
+    const ok = await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(ok).toBe(false); // unstamped — and the sweep excludes rejections
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+    expect(convertCallLeadOnPhoneBooking).not.toHaveBeenCalled();
+    expect(db._state.triageResolved).toBe(false);
+  });
+
+  test('an unreadable current status refuses to activate (retryable), never guesses', async () => {
+    const db = confirmHookDb({ fallbackLeads: [], svcRow: null });
+    const ok = await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(ok).toBe(false);
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
   });
 
   test('skipCardRequest:true (field confirm) skips the card-on-file leg; default keeps it', async () => {
