@@ -209,12 +209,22 @@ async function enrollPromoter(customerId) {
   // FOR UPDATE serializes per customer: the second request waits, then
   // takes the already-enrolled path against the winner's row. All callers
   // (portal Refer tab included) inherit the same atomicity.
-  return db.transaction(async (trx) => {
+  const runEnroll = () => db.transaction(async (trx) => {
     const customer = await trx('customers').where({ id: customerId }).forUpdate().first();
     if (!customer) throw new Error('Customer not found');
 
-    // Check if already enrolled
-    const existing = await trx('referral_promoters').where({ customer_id: customerId }).first();
+    // Check if already enrolled — by profile id first, then by the shared
+    // phone (codex #3379 r2 P2): multi-property accounts keep one phone
+    // across sibling customer_ids (20260504000008 dropped the customers
+    // phone-uniqueness), but referral_promoters.customer_phone REMAINS
+    // unique — one promoter identity per household by design. Without the
+    // phone fallback, a sibling profile's report tap tried to insert the
+    // shared phone, lost to the constraint, and answered 503 forever
+    // instead of the household's existing link.
+    let existing = await trx('referral_promoters').where({ customer_id: customerId }).first();
+    if (!existing && customer.phone) {
+      existing = await trx('referral_promoters').where({ customer_phone: customer.phone }).first();
+    }
     if (existing) {
       let code = String(existing.referral_code || customer.referral_code || referralCodeFromLink(existing.referral_link) || '').trim();
       if (!code) {
@@ -267,6 +277,17 @@ async function enrollPromoter(customerId) {
     logger.info(`[ReferralEngine] Enrolled promoter ${promoter.id} for customer ${customerId}`);
     return { promoter, alreadyEnrolled: false };
   });
+  try {
+    return await runEnroll();
+  } catch (err) {
+    // Sibling-profile race (multi-property accounts share a phone): two
+    // profiles enrolling concurrently hold DIFFERENT customer-row locks,
+    // both miss the lookups, and the loser's insert aborts its transaction
+    // on the unique customer_phone constraint. One retry in a fresh
+    // transaction finds the winner's row through the phone fallback.
+    if (err && err.code === '23505') return runEnroll();
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------

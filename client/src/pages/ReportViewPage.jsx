@@ -2876,16 +2876,14 @@ function CompanionSectionHeader({ companion }) {
   );
 }
 
+// Owner ruling 2026-08-13: the ask names the technician and the customer
+// ("How did Adam do today, Casey?"), and the CTA names the specific
+// low-commitment action instead of the generic "Share feedback". BOTH
+// placements carry it (codex #3379 r2 P2): top and bottom are mutually
+// exclusive mounts — pest/V2 reports place the card high, legacy non-pest
+// reports low — so legacy reports were silently keeping the old copy.
+// placement survives for layout classes only.
 export function reviewRequestCopy(placement = 'top', firstName = '', techName = '') {
-  if (placement === 'bottom') {
-    return {
-      title: 'Help the next neighbor choose faster',
-      cta: 'Share feedback',
-    };
-  }
-  // Owner ruling 2026-08-13: the ask names the technician and the customer
-  // ("How did Adam do today, Casey?"), and the CTA names the specific
-  // low-commitment action instead of the generic "Share feedback".
   const name = String(firstName || '').trim();
   const tech = String(techName || '').trim().split(/\s+/)[0];
   const who = tech || 'we';

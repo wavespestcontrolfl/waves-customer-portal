@@ -26,11 +26,13 @@ function makeTrx(state) {
       table,
       _forUpdate: false,
       _excludesId: false,
+      _where: null,
       where: jest.fn(function where(...args) {
         // The already-enrolled conflict probe excludes the promoter's own
         // id — the fake must honor that or it reports the row as its own
         // "conflict" and the engine regenerates a code that isn't there.
         if (args[0] === 'id' && args[1] === '!=') chain._excludesId = true;
+        else if (args.length === 1 && args[0] && typeof args[0] === 'object') chain._where = args[0];
         return chain;
       }),
       forUpdate: jest.fn(function forUpdate() { chain._forUpdate = true; return chain; }),
@@ -39,7 +41,19 @@ function makeTrx(state) {
           state.customerReadLocked = chain._forUpdate;
           return state.customer;
         }
-        if (table === 'referral_promoters') return chain._excludesId ? null : (state.promoter || null);
+        if (table === 'referral_promoters') {
+          if (chain._excludesId) return null;
+          // Honor whichever key the engine queried by: profile id first,
+          // then the shared household phone (multi-property fallback).
+          const wanted = chain._where || {};
+          if (wanted.customer_id) {
+            return state.promoter && state.promoter.customer_id === wanted.customer_id ? state.promoter : null;
+          }
+          if (wanted.customer_phone) {
+            return state.promoter && state.promoter.customer_phone === wanted.customer_phone ? state.promoter : null;
+          }
+          return state.promoter || null;
+        }
         return null;
       }),
       update: jest.fn(async (values) => {
@@ -136,4 +150,59 @@ test('a serialized second caller takes the already-enrolled path with the winner
   expect(second.alreadyEnrolled).toBe(true);
   expect(second.promoter.referral_code).toBe(first.promoter.referral_code);
   expect(state.inserts).toHaveLength(1);
+});
+
+test('a sibling profile sharing the phone reuses the household promoter — no insert, no 503 (r2 P2)', async () => {
+  const state = freshState();
+  primeDb(state);
+  const first = await engine.enrollPromoter('cust-1');
+  // Second property profile: different customer_id, same phone.
+  state.customer = { id: 'cust-2', phone: '+15555550100', email: 'x@example.com', first_name: 'Casey', last_name: 'Placeholder', referral_code: null };
+  const sibling = await engine.enrollPromoter('cust-2');
+  expect(sibling.alreadyEnrolled).toBe(true);
+  expect(sibling.promoter.referral_code).toBe(first.promoter.referral_code);
+  expect(state.inserts).toHaveLength(1);
+  // The sibling profile's own customer row aligns to the household code.
+  expect(state.customer.referral_code).toBe(first.promoter.referral_code);
+});
+
+test('a sibling losing the insert race retries once and lands on the winner (23505)', async () => {
+  const state = freshState();
+  primeDb(state);
+  // First attempt: lookups miss (the winner commits between this caller's
+  // lookups and its insert) and the insert hits the unique phone constraint.
+  let raced = false;
+  const trxRacing = makeTrx(state);
+  const trxAfter = makeTrx(state);
+  db.transaction.mockImplementation(async (cb) => {
+    if (!raced) {
+      raced = true;
+      // Simulate the winner's committed row appearing only AFTER this
+      // attempt's lookups: hide it during the callback, then fail the insert.
+      const winner = { id: 'promo-w', customer_id: 'cust-0', customer_phone: '+15555550100', referral_code: 'WAVES-WINNER01', referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-WINNER01' };
+      const hidden = { ...state, promoter: null };
+      const trx = makeTrx(hidden);
+      const result = cb(new Proxy(trx, {
+        apply(target, thisArg, args) {
+          const chain = Reflect.apply(target, thisArg, args);
+          if (args[0] === 'referral_promoters') {
+            chain.insert = jest.fn(() => ({
+              returning: jest.fn(async () => {
+                state.promoter = winner; // winner is now visible to the retry
+                const err = new Error('duplicate key value violates unique constraint');
+                err.code = '23505';
+                throw err;
+              }),
+            }));
+          }
+          return chain;
+        },
+      }));
+      return result;
+    }
+    return cb(trxAfter);
+  });
+  const { promoter, alreadyEnrolled } = await engine.enrollPromoter('cust-1');
+  expect(alreadyEnrolled).toBe(true);
+  expect(promoter.referral_code).toBe('WAVES-WINNER01');
 });
