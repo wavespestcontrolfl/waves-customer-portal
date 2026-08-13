@@ -285,7 +285,10 @@ async function getCachedLookup(address) {
     }
     return row;
   } catch (err) {
-    logger.warn('[lookup-cache] read failed', { error: err.message });
+    // err.code only across this module (codex #3382 r1 P1): PG errors can
+    // quote the failing row, and cache rows carry normalized_address — a
+    // customer street address in the logs (AGENTS.md PII-in-logs rule).
+    logger.warn('[lookup-cache] read failed', { code: err?.code || 'none' });
     return null;
   }
 }
@@ -301,7 +304,7 @@ async function getVerifiedOverrides(address) {
     const overrides = row?.verified_overrides || {};
     return Object.keys(overrides).length ? overrides : null;
   } catch (err) {
-    logger.warn('[lookup-cache] override read failed', { error: err.message });
+    logger.warn('[lookup-cache] override read failed', { code: err?.code || 'none' });
     return null;
   }
 }
@@ -342,7 +345,7 @@ async function attachEvidenceToCachedLookup(address, key, value) {
         updated_at: db.fn.now(),
       });
   } catch (err) {
-    logger.warn('[lookup-cache] evidence backfill failed', { key, error: err.message });
+    logger.warn('[lookup-cache] evidence backfill failed', { key, code: err?.code || 'none' });
   }
 }
 
@@ -418,7 +421,7 @@ async function saveLookup(address, result) {
       staleImageryConflict: staleImagery || undefined,
     });
   } catch (err) {
-    logger.warn('[lookup-cache] write failed', { error: err.message });
+    logger.warn('[lookup-cache] write failed', { code: err?.code || 'none' });
   }
 }
 
