@@ -1,4 +1,11 @@
 jest.mock('../models/db', () => jest.fn());
+// The follow-up shift is a separate fenced+transactional unit with its own
+// suite (call-booking-catalog.test.js) — here we only verify the rebooker
+// invokes it with the right args and swallows its failures.
+jest.mock('../services/call-booking-catalog', () => ({
+  ...jest.requireActual('../services/call-booking-catalog'),
+  shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -100,8 +107,6 @@ function wireRescheduleMocks(service) {
   const updateQuery = chain({ update: jest.fn().mockResolvedValue(1) });
   const historyInsert = chain();
   const logInsert = chain();
-  // Post-commit best-effort shift of a call-created follow-up child.
-  const followupShift = chain({ update: jest.fn().mockResolvedValue(0) });
   const logCount = chain({ first: jest.fn().mockResolvedValue({ count: '1' }) });
 
   const trx = jest.fn((table) => {
@@ -114,14 +119,14 @@ function wireRescheduleMocks(service) {
   db.transaction = jest.fn(async (callback) => callback(trx));
   db.fn = { now: jest.fn(() => 'NOW()') };
 
-  const dbQueries = [serviceLookup, followupShift, logCount];
+  const dbQueries = [serviceLookup, logCount];
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') return dbQueries.shift();
     if (table === 'reschedule_log') return dbQueries.shift();
     throw new Error(`Unexpected db table ${table}`);
   });
 
-  return { updateQuery, historyInsert, followupShift };
+  return { updateQuery, historyInsert };
 }
 
 describe('live-status reschedule override (allowLive)', () => {
@@ -267,31 +272,29 @@ describe('live-status reschedule override (allowLive)', () => {
   });
 
   test('a successful reschedule delta-shifts the pending call-created follow-up child', async () => {
-    const { followupShift } = wireRescheduleMocks(liveService('confirmed'));
+    const { shiftCallFollowUpsForParentMove } = require('../services/call-booking-catalog');
+    wireRescheduleMocks(liveService('confirmed'));
 
     await expect(SmartRebooker.reschedule(
       'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin',
       { allowLive: true },
     )).resolves.toMatchObject({ success: true });
 
-    // Narrow filter: only the call pipeline's pending, never-confirmed child.
-    expect(followupShift.where).toHaveBeenCalledWith({
-      parent_service_id: 'svc-1',
-      source_action: 'ai_call_pipeline_followup',
-      status: 'pending',
-      customer_confirmed: false,
-    });
-    // Delta math runs in SQL off the normalized original/new date strings.
-    const payload = followupShift.update.mock.calls[0][0];
-    expect(payload.scheduled_date).toMatchObject({
-      label: 'db.raw',
-      bindings: [TARGET, BASE],
+    // The shared shift unit (fenced + transactional — its own suite covers
+    // the filter, fence, and route_order clear) is invoked with the parent
+    // id and the normalized original/new dates.
+    expect(shiftCallFollowUpsForParentMove).toHaveBeenCalledWith({
+      conn: db,
+      parentServiceId: 'svc-1',
+      fromDate: BASE,
+      toDate: TARGET,
     });
   });
 
   test('a failed follow-up shift is swallowed — the reschedule still succeeds', async () => {
-    const { followupShift } = wireRescheduleMocks(liveService('confirmed'));
-    followupShift.update.mockRejectedValue(new Error('boom'));
+    const { shiftCallFollowUpsForParentMove } = require('../services/call-booking-catalog');
+    shiftCallFollowUpsForParentMove.mockRejectedValueOnce(new Error('boom'));
+    wireRescheduleMocks(liveService('confirmed'));
 
     await expect(SmartRebooker.reschedule(
       'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin',

@@ -1200,6 +1200,26 @@ const gates = {
   // run endpoints are unaffected by this gate (they're requireAdmin-only).
   autoDispatch: isProd ? process.env.GATE_AUTO_DISPATCH === 'true' : true,
 
+  // ROUTE-TIERS — tiered day-move radius for recurring maintenance visits
+  // inside the auto-dispatch run (≥14d: ±5 days; 7–13d: ±3; <7d: no day-moves;
+  // <72h or 72h-reminder-sent: frozen), plus the ±5-day cumulative drift
+  // budget, the ≥5-days-out destination floor, and the reminder-sent freeze.
+  // OFF = auto-dispatch's legacy flat 14-day lock, byte for byte. Read at CALL
+  // time via gateEnvValue (same pattern and rationale as
+  // GATE_DRIVE_TIME_CALIBRATION: it moves the numbers/windows scheduling
+  // decisions are made with, so the flip is a deliberate act in EVERY
+  // environment — never an ambient dev default — and needs no redeploy).
+  // Kill switch: unset GATE_ROUTE_TIERS.
+  routeTiers: gateEnvValue('GATE_ROUTE_TIERS'),
+
+  // ROUTE-TIERS nightly intra-day reorder pass (tier 3 band, 72h–7d): 4:20am
+  // cron that rewrites route_order per tech-day when savings clear the floor.
+  // Separate kill switch from routeTiers — either half can run alone. Explicit
+  // opt-in in every environment (it writes scheduled_services.route_order and
+  // can call the Google Routes API, so it must never auto-run in dev).
+  // Double-gated behind cronJobs. Kill switch: unset GATE_ROUTE_REORDER.
+  routeReorder: gateEnvValue('GATE_ROUTE_REORDER'),
+
   // Drive-Time Calibration — swaps the straight-line drive-time approximation
   // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
   // real trips: a fixed per-leg overhead plus a per-mile rate. Purely an

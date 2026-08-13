@@ -11108,9 +11108,25 @@ const CallRecordingProcessor = {
                   const isAttachedManualBooking = String(existing.booking_source || '') !== 'phone_call';
                   let primaryRow = existing;
                   if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId) {
+                    // Tech-day membership fence + route_order clear (uncapped
+                    // audit r26 P1): unassigned → tech is a tech-day ENTRY,
+                    // so it must hold the same 'slot-reserve' fence every
+                    // other membership writer holds, and any unassigned-pool
+                    // sequence number is meaningless in the tech's run. Day
+                    // key from PG itself (to_char) like the other holders.
+                    const dayRow = await trx('scheduled_services')
+                      .where({ id: existing.id })
+                      .first(trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+                    if (dayRow?.day) {
+                      const { lockTechDays } = require('./scheduling/tech-day-lock');
+                      await lockTechDays(trx, [
+                        { techId: null, date: dayRow.day },
+                        { techId: defaultTechnicianId, date: dayRow.day },
+                      ]);
+                    }
                     const [updatedExisting] = await trx('scheduled_services')
                       .where({ id: existing.id })
-                      .update({ technician_id: defaultTechnicianId, updated_at: new Date() })
+                      .update({ technician_id: defaultTechnicianId, route_order: null, updated_at: new Date() })
                       .returning('*');
                     primaryRow = updatedExisting || existing;
                   }
