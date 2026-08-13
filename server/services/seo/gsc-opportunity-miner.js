@@ -1175,7 +1175,18 @@ function persistFloorFor(o) {
   // 75 floor, could never persist (audit P1). Same exception, same
   // reasoning as listicle_family above: identical demand must not be
   // discarded for taking the SAFER page route instead of a blog post.
-  if (o.bucket === 'no_content_yet' && o.action_type === 'create_or_refresh_city_service_page') {
+  //
+  // local_gap is the same unreachability one bucket over: its ceiling is
+  // 69 — gscOpportunity round(35 × 0.8 × 1.0) = 28 at max impressionsBoost,
+  // + localRevenue 20 (termite 1.0 tops REVENUE_PRIORITY), + conversionIntent
+  // 6 (query is null for this bucket by construction), + contentGap 15 —
+  // against the same 75 floor. Verified in prod 2026-08-12: 2 rows ALL-TIME,
+  // both add_internal_links from an older routing, zero city-service rows
+  // ever. A city+service pair with impression demand and NO OWN PAGE is the
+  // most revenue-direct content gap the miner detects, and the bucket was
+  // structurally silent (owner ruling 2026-08-13: fix lane).
+  if ((o.bucket === 'no_content_yet' || o.bucket === 'local_gap')
+    && o.action_type === 'create_or_refresh_city_service_page') {
     return minScoreToActFor('new_supporting_blog');
   }
   if (o.bucket === 'link_boost' && o.signal_metadata?.source_bucket === 'ctr_rewrite') {
@@ -1186,6 +1197,54 @@ function persistFloorFor(o) {
 
 function isPersistable(o) {
   return (o?.score ?? 0) >= persistFloorFor(o || {});
+}
+
+// ONE city-service row per (service, city) target ACROSS buckets. Four
+// buckets can route to create_or_refresh_city_service_page (local_gap
+// always; no_content_yet / striking_distance / aeo_gap when city+service
+// resolve without a page), and their dedupe keys differ by construction —
+// bucket is the first key segment and local_gap carries no query at all —
+// so persistAll's per-key collapse cannot see the collision and the runner
+// would draft one page once per bucket. This was a documented residual on
+// PR #3372, deferred until a lane decision activated a second producer;
+// reviving local_gap (owner ruling 2026-08-13) is that activation.
+//
+// Winner rule: a QUERY-BEARING candidate beats query-less local_gap even at
+// a lower score — the query drives the brief's target_keyword, coverage
+// section, and specialty-topic derivation, so a leaner local_gap brief must
+// not shadow a richer one. Among query-bearing candidates the highest score
+// wins (same rule as every other collapse). A dropped local_gap twin's
+// segment impressions ride the winner as signal_metadata.segment_impressions
+// so the whole-segment demand evidence isn't lost with the row.
+//
+// The loser's PENDING row from an earlier mine is retired by the recovered-
+// query sweep (its query stops being emitted), so arbitration and sweep
+// compose to one claimable row per target. In-flight (claimed /
+// pending_review) predecessors are handled under the persist transaction —
+// see _revalidateCityServiceBatch.
+function arbitrateCityServiceTargets(opportunities = []) {
+  const CS = 'create_or_refresh_city_service_page';
+  const byTarget = new Map();
+  const out = [];
+  for (const o of opportunities) {
+    if (o.action_type !== CS || !o.service || !o.city) { out.push(o); continue; }
+    const key = ownPageKey(o.service, o.city);
+    if (!byTarget.has(key)) byTarget.set(key, []);
+    byTarget.get(key).push(o);
+  }
+  for (const group of byTarget.values()) {
+    if (group.length === 1) { out.push(group[0]); continue; }
+    const queryBearing = group.filter((o) => o.query);
+    const pool = queryBearing.length ? queryBearing : group;
+    const winner = pool.reduce((best, o) => (o.score > best.score ? o : best), pool[0]);
+    const localTwin = group.find((o) => o !== winner && o.bucket === 'local_gap');
+    if (localTwin) {
+      winner.signal_metadata = winner.signal_metadata || {};
+      winner.signal_metadata.segment_impressions = localTwin.signal_metadata?.impressions ?? null;
+    }
+    out.push(winner);
+  }
+  return out;
 }
 
 // Companion dedupe keys the CURRENT batch still stands behind. A link_boost
@@ -1626,7 +1685,12 @@ class GscOpportunityMiner {
       buckets.link_boost = [];
     }
 
-    const allOpportunities = [...minedOpportunities, ...buckets.link_boost];
+    // Cross-bucket city-service arbitration BEFORE assembly — see
+    // arbitrateCityServiceTargets. link_boost companions never carry the
+    // city-service action, so deriving them first is order-safe.
+    const allOpportunities = arbitrateCityServiceTargets(
+      [...minedOpportunities, ...buckets.link_boost]
+    );
 
     const counts = Object.fromEntries(
       Object.entries(buckets).map(([k, v]) => [k, v.length])
@@ -1650,7 +1714,11 @@ class GscOpportunityMiner {
         // this transaction defers the transition instead of racing it).
         // The lock is taken even for an empty family batch when the sweep
         // will run.
-        const revalidated = await this._revalidateFamilyBatch(trx, allOpportunities, { lockEvenIfEmpty: sweepWillRun });
+        const familyChecked = await this._revalidateFamilyBatch(trx, allOpportunities, { lockEvenIfEmpty: sweepWillRun });
+        // City-service targets recheck under the SAME advisory lock (held
+        // for the rest of the transaction) — one in-flight row per
+        // (service, city) target across buckets and across mines.
+        const revalidated = await this._revalidateCityServiceBatch(trx, familyChecked);
         persisted = await this.persistAll(revalidated, trx);
         // Family-lane sweep ONLY after the upserts land, only when the
         // lane actually ran (gates on, no miner error — an empty bucket
@@ -2319,6 +2387,24 @@ class GscOpportunityMiner {
   async mineLocalGap(since, ownPagesByServiceCity = new Map()) {
     // {city, service} pairs with impression demand but no own page in
     // gsc_pages matching that pair.
+    //
+    // KEY SEMANTICS: the dedupe key is TARGET-STABLE (no query, no page —
+    // `local_gap::svc::city::_`), and the upsert's frozen-row guard makes a
+    // done/skipped row permanent. That is CORRECT for this bucket, unlike
+    // the query buckets: once the page exists the own-page check above
+    // excludes the pair from ever mining again (done stays meaningful),
+    // and a skipped row is an operator's standing "no page for this pair"
+    // (a new query cannot re-justify what the operator declined). The known
+    // residue — page created then later DELETED reopens the pair but the
+    // frozen done row blocks re-emission — is accepted: page deletions are
+    // operator acts, and the operator can revive the row alongside.
+    //
+    // FLOOR: rows ride the blog floor via persistFloorFor's city-service
+    // exception — the bucket's ceiling is 69 against the global 75 (see
+    // persistFloorFor), which kept it at zero city-service rows for its
+    // entire life. Cross-bucket target collisions are arbitrated at mine
+    // time (arbitrateCityServiceTargets) and in-flight twins deferred
+    // under the persist lock (_revalidateCityServiceBatch).
     const queries = await db('gsc_queries')
       .where('date', '>=', since)
       .where('is_branded', false)
@@ -3318,7 +3404,16 @@ class GscOpportunityMiner {
     // and its insert — so every page-edit persist serializes here, gated
     // or not.
     const hasPageEdit = opportunities.some((o) => GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type));
-    if (!hasFamily && !hasPageEdit && !lockEvenIfEmpty) return opportunities;
+    // City-service rows serialize here too: _revalidateCityServiceBatch's
+    // recheck-under-lock (one in-flight row per target) is only sound if a
+    // concurrent miner persist of city-service rows cannot commit between
+    // that recheck and this transaction's inserts — same reasoning as the
+    // r34 page-edit extension above. Deliberately NOT added to
+    // PAGE_EDITING_ACTIONS: that set is shared with refresh-audit's
+    // conflict predicate, where a city-service creation is not an edit of
+    // an existing page.
+    const hasCityService = opportunities.some((o) => o.action_type === 'create_or_refresh_city_service_page');
+    if (!hasFamily && !hasPageEdit && !hasCityService && !lockEvenIfEmpty) return opportunities;
     // Advisory transaction lock FIRST (Codex r27): FOR UPDATE only locks
     // rows that exist, so two overlapping mines could both see no row for
     // a fresh page and insert competing first refreshes. Every family
@@ -3392,6 +3487,51 @@ class GscOpportunityMiner {
       }
       return true;
     });
+  }
+
+  // TOCTOU guard for city-service targets, mirroring _revalidateFamilyBatch:
+  // mine-time arbitration (arbitrateCityServiceTargets) sees only the BATCH,
+  // and the queue can already hold an in-flight row for the same (service,
+  // city) under a DIFFERENT dedupe key — the winning query changed between
+  // mines, or another bucket owned the target last time. Persisting the new
+  // winner beside it would give the runner two drafts of one page (the
+  // residual documented on PR #3372). Under the advisory lock taken by
+  // _revalidateFamilyBatch, re-read every in-flight city-service row FOR
+  // UPDATE (claimNext's FOR UPDATE SKIP LOCKED then cannot grab one
+  // mid-decision) and DEFER any candidate whose target is occupied by a
+  // different key. Deferral self-heals: a superseded PENDING twin is
+  // retired by the recovered-query sweep, freeing the target for the next
+  // mine; claimed/pending_review twins free it when their run completes.
+  async _revalidateCityServiceBatch(trx, opportunities = []) {
+    const CS = 'create_or_refresh_city_service_page';
+    if (!opportunities.some((o) => o.action_type === CS)) return opportunities;
+    const inflight = await trx('opportunity_queue')
+      .where({ action_type: CS })
+      .whereIn('status', ['pending', 'claimed', 'pending_review'])
+      .forUpdate()
+      .select('dedupe_key', 'service', 'city');
+    if (!inflight.length) return opportunities;
+    const occupied = new Map();
+    for (const r of inflight) {
+      if (!r.service || !r.city) continue;
+      const key = ownPageKey(r.service, r.city);
+      if (!occupied.has(key)) occupied.set(key, new Set());
+      occupied.get(key).add(r.dedupe_key);
+    }
+    let deferred = 0;
+    const out = opportunities.filter((o) => {
+      if (o.action_type !== CS || !o.service || !o.city) return true;
+      const keys = occupied.get(ownPageKey(o.service, o.city));
+      // The candidate's OWN row does not occupy its target — that is the
+      // ordinary upsert-refresh path.
+      if (!keys || (keys.size === 1 && keys.has(o.dedupe_key))) return true;
+      deferred += 1;
+      return false;
+    });
+    if (deferred) {
+      logger.info(`[gsc-opp-miner] city-service revalidation: ${deferred} candidate(s) deferred — target already in flight under a different key`);
+    }
+    return out;
   }
 
   async _sweepStaleFamilyRows(familyOpps = [], batch = [], trx = null, exemptions = { pages: new Set(), blogKeys: new Set(), familyKeys: new Set() }) {
@@ -4104,6 +4244,9 @@ module.exports = new GscOpportunityMiner();
 module.exports.GscOpportunityMiner = GscOpportunityMiner;
 // Exposed for unit tests — pure functions, no DB.
 module.exports._internals = {
+  arbitrateCityServiceTargets,
+  persistFloorFor,
+  isPersistable,
   normalizeCity,
   inferServiceFromQuery,
   inferServiceFromUrl,
