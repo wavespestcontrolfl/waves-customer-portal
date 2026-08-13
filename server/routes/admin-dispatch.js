@@ -1714,22 +1714,22 @@ function completionFindingSeverity(text) {
 async function attachLawnAssessmentOutcomePhotoRefs(outcome, assessmentId) {
   if (!outcome || !assessmentId) return;
   try {
+    // setOutcomeBestPhotoKey: a re-elected best photo on an already-scored
+    // outcome atomically clears the vision-delta fields so the stored verdict
+    // can never describe a photo pair the row no longer points at.
+    const VisionDelta = require('../services/vision-delta');
     const bestPhoto = await db('lawn_assessment_photos')
       .where({ assessment_id: assessmentId, is_best_photo: true })
       .first();
     if (bestPhoto) {
-      await db('treatment_outcomes')
-        .where({ id: outcome.id })
-        .update({ post_best_photo_key: bestPhoto.s3_key });
+      await VisionDelta.setOutcomeBestPhotoKey(outcome.id, 'post_best_photo_key', bestPhoto.s3_key);
     }
     if (outcome.pre_assessment_id) {
       const preBestPhoto = await db('lawn_assessment_photos')
         .where({ assessment_id: outcome.pre_assessment_id, is_best_photo: true })
         .first();
       if (preBestPhoto) {
-        await db('treatment_outcomes')
-          .where({ id: outcome.id })
-          .update({ pre_best_photo_key: preBestPhoto.s3_key });
+        await VisionDelta.setOutcomeBestPhotoKey(outcome.id, 'pre_best_photo_key', preBestPhoto.s3_key);
       }
     }
   } catch (err) {

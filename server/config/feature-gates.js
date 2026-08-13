@@ -1214,6 +1214,20 @@ const gates = {
   // would calibrate the estimator while logGateStatus reported it disabled.
   driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
 
+  // Vision Delta Scoring — one VISION-tier call per treatment outcome's best
+  // before/after photo pair (server/services/vision-delta.js); the verdict
+  // feeds the agronomic wiki as photo-verified visual change. Paid vision
+  // per pair, so explicit opt-in in EVERY environment. Off → the sweep
+  // returns {skipped:'gated'} before any DB read and the whole lane is
+  // inert (the 3:40 ET cron leg adds no gate of its own — the check inside
+  // sweepUnscoredOutcomes is the single source of truth). Kill switch:
+  // unset or any non-truthy value.
+  // NOTE: the sweep parses this at CALL time via gateEnvValue() (tests flip
+  // the env at runtime, and a flip must not depend on this module's load
+  // moment) — registered with the SAME parser so this registry entry,
+  // logGateStatus, and the sweep can never disagree.
+  visionDelta: gateEnvValue('GATE_VISION_DELTA'),
+
   // Weekly autonomous vendor price scan -> stages a price-match draft for the
   // SiteOne rep (never auto-sends; a human reviews + sends from /admin/price-match).
   // Explicit opt-in in ALL envs (it hits external vendor sites via a headless
