@@ -27,7 +27,12 @@ jest.mock('../middleware/admin-auth', () => ({
     req.techRole = req.headers['x-test-role'] || 'admin';
     return next();
   },
-  requireAdmin: (_req, _res, next) => next(),
+  // Mirrors production: technician tokens are refused outright.
+  requireAdmin: (req, res, next) => (
+    req.headers['x-test-role'] === 'technician'
+      ? res.status(403).json({ error: 'Admin access required' })
+      : next()
+  ),
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 const mockOnServiceScheduled = jest.fn(async () => {});
@@ -334,14 +339,17 @@ describe('POST /:id/regenerate-brief', () => {
     });
   });
 
-  test('tech who does not own the visit gets 404', async () => {
-    stubTables({ scheduled_services: VISIT_BRIEF_ROW }, { ownsVisit: false });
+  test('technician tokens cannot regenerate at all (admin-only mutation)', async () => {
+    // Ownership races are moot for techs: regeneration triggers side
+    // effects that outlive any assignment check, so the endpoint is
+    // requireAdmin — even the visit's own tech gets 403.
+    stubTables({ scheduled_services: VISIT_BRIEF_ROW }, { ownsVisit: true });
     await withServer(async (base) => {
       const res = await fetch(`${base}/admin/schedule/svc-1/regenerate-brief`, {
         method: 'POST',
         headers: { 'x-test-role': 'technician' },
       });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(403);
       expect(mockOnServiceScheduled).not.toHaveBeenCalled();
       expect(mockGenerateVisitBrief).not.toHaveBeenCalled();
     });

@@ -10563,16 +10563,13 @@ router.post('/:id/card-request', requireAdmin, async (req, res, next) => {
 // run) and then regenerates the generic visit brief, which requires
 // GATE_PREVISIT_BRIEF. Gate off → 409 with nothing changed (same
 // convention as the edit-appt visit-count gate).
-router.post('/:id/regenerate-brief', async (req, res, next) => {
+// requireAdmin: regeneration triggers prep-flow side effects, LLM spend,
+// and a brief write. Restricting it to admins removes the tech-token
+// reassignment race outright (an assignment check is only valid at the
+// instant it runs; the work spans minutes) — techs never had a UI for
+// this endpoint, and the brief READ route stays technician-scoped.
+router.post('/:id/regenerate-brief', requireAdmin, async (req, res, next) => {
   try {
-    // MUTATION-grade ownership (live visit only): this endpoint triggers
-    // tagger side effects, LLM spend, and a brief write — a tech token
-    // must hold a live assignment, not merely a recent one. The response
-    // read below is additionally ownership-scoped in the same query, so a
-    // mid-flight reassignment can neither leak the brief nor 200.
-    if (!(await technicianOwnsScheduledService(req, req.params.id, { forMutation: true }))) {
-      return res.status(404).json({ error: 'Scheduled service not found' });
-    }
     const AppointmentTagger = require('../services/appointment-tagger');
     const target = await db('scheduled_services').where({ id: req.params.id }).first('id', 'service_type', 'pre_service_brief_type');
     if (!target) return res.status(404).json({ error: 'Scheduled service not found' });
