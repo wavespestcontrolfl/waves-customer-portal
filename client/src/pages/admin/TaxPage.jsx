@@ -4090,7 +4090,10 @@ function BankImportTab() {
         setDupUpload(r.duplicates > 0 ? { ...payload, forceRowHashes: r.duplicateHashes || [] } : null);
         setNotice({
           text:
-            `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skipped.length} skipped) · matching linked ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses` +
+            `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skipped.length} skipped)` +
+            (r.matching
+              ? ` · matching linked ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses`
+              : ` · ${r.matchingError || "matching not run"}`) +
             (r.duplicates > 0 && r.duplicateSamples?.length
               ? ` — skipped as re-uploads: ${r.duplicateSamples
                   .slice(0, 3)

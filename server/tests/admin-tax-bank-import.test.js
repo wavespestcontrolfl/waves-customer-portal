@@ -197,6 +197,18 @@ describe('upload (gate on)', () => {
     expect(body.skipped[0].reason).toBe('unparseable date');
   });
 
+  test('a matching-pass failure after committed inserts still reports the import as succeeded', async () => {
+    const bankImportSvc = require('../services/bank-import');
+    bankImportSvc.runDeterministicMatching.mockRejectedValueOnce(new Error('matcher exploded'));
+    const csv = 'Date,Description,Amount\n08/10/2026,HD SUPPLY,-204.87';
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.imported).toBe(1);
+    expect(body.matching).toBeNull();
+    expect(body.matchingError).toContain('Run matching');
+  });
+
   test('imports rows and reports duplicates from the conflict-ignoring insert', async () => {
     const csv = 'Date,Description,Amount\n08/10/2026,HD SUPPLY,-204.87\n08/11/2026,REFUND,15.00';
     const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', filename: 'aug.csv', csv });

@@ -1740,7 +1740,18 @@ router.post('/bank-import/upload', async (req, res, next) => {
         if (ins) forced++; else forceAlreadyPresent++;
       }
     }
-    const matching = await bankImport.runDeterministicMatching();
+    // The inserts above are already committed — a matching failure must NOT
+    // turn the response into an error, or a retry re-reports every committed
+    // row as a duplicate and dangles the force-import footgun. Imports are
+    // reported as what they are; matching is retryable via "Run matching".
+    let matching = null;
+    let matchingError = null;
+    try {
+      matching = await bankImport.runDeterministicMatching();
+    } catch (err) {
+      logger.warn(`[bank-import] upload imported rows but the matching pass failed: ${err.message}`);
+      matchingError = 'rows imported, but the matching pass failed — use "Run matching" to retry';
+    }
     res.json({
       success: true,
       parsed: rows.length,
@@ -1752,6 +1763,7 @@ router.post('/bank-import/upload', async (req, res, next) => {
       duplicateSamples: duplicateRows.slice(0, 10).map(r => ({ txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
       skipped,
       matching,
+      matchingError,
     });
   } catch (err) {
     if (err.status === 400) return res.status(400).json({ error: err.message });
