@@ -68,15 +68,40 @@ const WS_MAX_SESSION_MS = 15 * 60 * 1000; // hard cap on a single call
 // Fails CLOSED: any error means the claim is unproven, which is treated as
 // already-burned. A DB outage therefore drops relay calls to the <Connect
 // action> voicemail fallback — the same place a relay outage sends them.
+// The burn's own deadline. A stalled pool otherwise leaves the upgrade PENDING
+// until Knex's own timeout — the caller stuck in silence, neither accepted nor
+// rejected, and the <Connect action> voicemail fallback unable to fire. Short
+// and fail-closed: past the deadline the socket is destroyed, Twilio takes the
+// call to the fallback, and nobody waits on a database that is not answering.
+const TOKEN_BURN_DEADLINE_MS = 2500;
+
 async function burnCallToken(token, callSid) {
   const tokenHash = require('crypto').createHash('sha256').update(String(token)).digest('hex');
   try {
     const db = require('../../models/db');
-    const rows = await db('voice_relay_token_burns')
+    const burnWrite = db('voice_relay_token_burns')
       .insert({ token_hash: tokenHash, call_sid: String(callSid).slice(0, 64), burned_at: new Date() })
       .onConflict('token_hash')
       .ignore()
       .returning('token_hash');
+    let deadlineTimer;
+    const deadline = new Promise((_, reject) => {
+      deadlineTimer = setTimeout(
+        () => reject(new Error(`token burn exceeded ${TOKEN_BURN_DEADLINE_MS}ms`)),
+        TOKEN_BURN_DEADLINE_MS,
+      );
+      deadlineTimer.unref?.();
+    });
+    let rows;
+    try {
+      rows = await Promise.race([burnWrite, deadline]);
+    } finally {
+      clearTimeout(deadlineTimer);
+      // A late loser must never surface as unhandled (the write may still
+      // land after the deadline — the burn row is then simply present for
+      // the retry, which is correct).
+      Promise.resolve(burnWrite).catch(() => {});
+    }
     if (!rows || rows.length === 0) return false; // replay — somebody already has it
     // Opportunistic sweep of rows no token can still be valid for. Detached:
     // the caller is already through the door and must never wait on cleanup.

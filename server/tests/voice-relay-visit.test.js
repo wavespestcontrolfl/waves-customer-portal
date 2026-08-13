@@ -420,6 +420,55 @@ describe('get_service_report', () => {
     expect(out).toMatch(/No completed visit on file for that date/i);
   });
 
+  // ⭐ PROVENANCE, NOT CATEGORY (the customer report's own rule): a raw-note
+  // synthesized finding is title-only, and a raw-note title can carry a gate
+  // code. Structured findings still speak; bare titles never do.
+  test('title-only raw-note findings are never spoken; structured ones still are', async () => {
+    primeDb({
+      scheduled_services: [],
+      service_records: [{ id: 'sr-9', service_date: '2026-08-01', service_type: 'Pest Control', technician_notes: null, structured_notes: null, status: 'completed' }],
+      service_findings: [
+        { category: 'other', severity: 'info', title: '[found] Gate code 4417', detail: '', recommendation: '' },
+        { category: 'pest_activity', severity: 'info', title: 'Ant trail at kitchen slab', detail: 'Trail along the south wall', recommendation: 'Monitor at next visit' },
+      ],
+    });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).not.toContain('4417');
+    expect(out).not.toContain('Gate code');
+    expect(out).toContain('Ant trail at kitchen slab');
+  });
+
+  // ⭐ PAPER-COMPLIANCE ARTIFACTS ARE NOT VOICE MATERIAL. A WDO inspection or a
+  // pre-treat certificate is a regulated, signed document; an AI paraphrase of
+  // it over the phone is a new compliance surface nothing reviews.
+  test('WDO / pre-treat certificate reports are never narrated — office delivers the document', async () => {
+    for (const projectType of ['wdo_inspection', 'pre_treatment_termite_certificate']) {
+      primeDb({
+        scheduled_services: [],
+        service_records: [{
+          id: 'sr-w', service_date: '2026-08-01', service_type: 'WDO Inspection', technician_notes: 'live subterranean evidence at the sill',
+          structured_notes: JSON.stringify({ projectType, typedReportDelivery: 'auto_send' }), status: 'completed',
+        }],
+        service_findings: [{ category: 'wdo', severity: 'info', title: 'Evidence', detail: 'live evidence', recommendation: 'treat' }],
+      });
+      const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+      expect(out).toMatch(/official/i);
+      expect(out).toMatch(/Do NOT summarize/i);
+      expect(out).not.toContain('live evidence');
+      expect(out).not.toContain('sill');
+    }
+  });
+
+  // ⭐ A MALFORMED DATE IS AN ERROR, NOT A SILENT OMISSION — dropping the
+  // predicate described the MOST RECENT visit as if it were the asked-for one.
+  test('a malformed visit_date is rejected before any query runs', async () => {
+    primeDb({ scheduled_services: [], service_records: [{ id: 'sr-1', service_date: '2026-08-01', service_type: 'Pest', technician_notes: null, structured_notes: null, status: 'completed' }] });
+    const out = await executeTool('get_service_report', { visit_date: 'August 1' }, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).toMatch(/not in YYYY-MM-DD form/i);
+    expect(out).not.toContain('Pest');
+    expect(builders.service_records ? builders.service_records.first : jest.fn()).not.toHaveBeenCalled();
+  });
+
   test('looked-up ref → refused (more detail than the redacted tier allows)', async () => {
     const ctx = { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true, resolveLookupRef: () => 'c-9001' };
     const out = await executeTool('get_service_report', { customer_ref: 'C1' }, ctx);

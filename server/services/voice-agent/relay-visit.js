@@ -272,7 +272,15 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
     .orderBy('service_date', 'desc')
     .orderBy('id', 'desc');
   const wanted = String(visitDate || '').trim().slice(0, 10);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(wanted)) query.where('service_date', wanted);
+  // ⭐ A MALFORMED DATE IS AN ANSWERABLE ERROR, NOT A SILENT OMISSION. Dropping
+  // the predicate on "August 1" returned the MOST RECENT report instead — the
+  // tool then confidently described the wrong visit. A nonempty date that is
+  // not exact ISO is rejected before any query runs.
+  if (wanted && !/^\d{4}-\d{2}-\d{2}$/.test(wanted)) {
+    return 'That visit date is not in YYYY-MM-DD form, so no report was read. Call get_service_history first '
+      + 'and pass the date exactly as it reports it — do NOT describe any visit until then.';
+  }
+  if (wanted) query.where('service_date', wanted);
   const record = await query.first('id', 'service_date', 'service_type', 'technician_notes',
     'structured_notes', 'status', 'started_at', 'ended_at', 'advisory');
   if (!record) {
@@ -285,6 +293,18 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
   // THE predicate, imported from routes/services.js rather than re-implemented:
   // any typed delivery posture other than auto_send keeps the report detail off
   // customer surfaces — and the phone is a customer surface.
+  // ⭐ PAPER-COMPLIANCE ARTIFACTS ARE NOT VOICE MATERIAL. A WDO inspection or a
+  // pre-treatment termite certificate is a regulated DOCUMENT — its language is
+  // reviewed, signed, and deliberately conservative, and an AI paraphrase of it
+  // over the phone is a new compliance surface nothing here reviews. Those
+  // project types stand down before any findings/products/re-entry narrative:
+  // the report exists, the office delivers it, nothing gets re-spoken.
+  const PAPER_ONLY_PROJECT_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
+  if (structured && PAPER_ONLY_PROJECT_TYPES.has(String(structured.projectType || ''))) {
+    return `A visit is on file for ${speakDate(record.service_date) || 'that date'}, and its report is an official `
+      + 'inspection document. Do NOT summarize, read from, or characterize it — tell the caller the office will '
+      + 'provide the document itself and can answer questions about it.';
+  }
   const { suppressesCustomerArtifacts } = require('../../routes/services');
   if (suppressesCustomerArtifacts(structured)) {
     return `A visit is on file for ${speakDate(record.service_date) || 'that date'}, but its detailed report is not `
@@ -356,8 +376,18 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
     }
     return text;
   };
-  if (findings.length) {
-    const rendered = findings
+  // ⭐ PROVENANCE, NOT CATEGORY — the customer report's own rule
+  // (ServiceReportDocument.jsx): findings synthesized from RAW technician
+  // notes are inserted title-only (detail/recommendation null), and a raw-note
+  // title can carry a gate or lockbox code. A finding with structured content
+  // came from the findings pipeline; a bare title did not, and it is never
+  // spoken. The compliance screen below handles banned copy — this handles
+  // where the text CAME FROM.
+  const structuredFindings = findings.filter(
+    (f) => String((f && f.detail) || '').trim() || String((f && f.recommendation) || '').trim(),
+  );
+  if (structuredFindings.length) {
+    const rendered = structuredFindings
       .map((f) => {
         const head = complianceSafe(f.title, 80);
         const detail = complianceSafe(f.detail, 140);
@@ -365,7 +395,7 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
       })
       .filter(Boolean);
     if (rendered.length) lines.push(`What the technician found: ${rendered.join(' | ')}.`);
-    const recs = findings.map((f) => complianceSafe(f.recommendation, 120)).filter(Boolean);
+    const recs = structuredFindings.map((f) => complianceSafe(f.recommendation, 120)).filter(Boolean);
     if (recs.length) lines.push(`Recommended next steps: ${recs.join(' | ')}.`);
   }
 

@@ -157,6 +157,47 @@ describe('ws upgrade — per-call token, never a reusable secret', () => {
     expect(handleUpgrade).toHaveBeenCalledTimes(1);
   });
 
+  // ⭐ THE BURN HAS ITS OWN DEADLINE. A stalled pool used to leave the upgrade
+  // PENDING until Knex's timeout — the caller in silence, neither accepted nor
+  // rejected, the voicemail fallback unable to fire. Past ~2.5s the socket is
+  // destroyed fail-closed and Twilio takes the call to the fallback.
+  test('a STALLED burn write refuses the upgrade within the deadline (fail closed)', async () => {
+    jest.useFakeTimers();
+    try {
+      const db = require('../models/db');
+      db.mockImplementation(() => ({
+        insert: () => ({ onConflict: () => ({ ignore: () => ({ returning: () => new Promise(() => {}) }) }) }),
+        where: () => ({ del: () => Promise.resolve(0) }),
+      }));
+      const t = mintCallToken('CA-stall');
+      const socket = { destroy: jest.fn() };
+      httpServer.emit('upgrade', { url: `/ws/voice-agent?callSid=CA-stall&t=${t}` }, socket, Buffer.alloc(0));
+      await jest.advanceTimersByTimeAsync(3000); // past the burn deadline
+      expect(socket.destroy).toHaveBeenCalled();
+      expect(handleUpgrade).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+      // Restore the suite's shared burn-fake (mockImplementation survives
+      // clearAllMocks, so the stall shim would otherwise leak into later tests).
+      const db = require('../models/db');
+      db.mockImplementation(() => ({
+        insert: (row) => ({
+          onConflict: () => ({
+            ignore: () => ({
+              returning: () => {
+                if (mockBurnFails) return Promise.reject(new Error('db down'));
+                if (mockBurned.has(row.token_hash)) return Promise.resolve([]);
+                mockBurned.add(row.token_hash);
+                return Promise.resolve([{ token_hash: row.token_hash }]);
+              },
+            }),
+          }),
+        }),
+        where: () => ({ del: () => Promise.resolve(0) }),
+      }));
+    }
+  });
+
   test('an unprovable claim fails CLOSED — a DB error refuses the upgrade', async () => {
     mockBurnFails = true;
     const t = mintCallToken('CA-db-down');
