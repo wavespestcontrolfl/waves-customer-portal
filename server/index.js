@@ -1153,16 +1153,26 @@ httpServer.listen(PORT, () => {
               // detector processes an empty set forever. Deterministic name
               // matching, idempotent (createLink upserts with onConflict
               // ignore), no LLM calls. A failure never blocks analytics.
+              let autoLinkError = null;
               try {
                 const KnowledgeBridge = require('./services/knowledge-bridge');
                 const linkStats = await KnowledgeBridge.autoLink();
                 logger.info(`[cron] Knowledge bridge auto-link: ${JSON.stringify(linkStats)}`);
+                if (linkStats?.errors > 0) autoLinkError = `auto-link completed with ${linkStats.errors} error(s)`;
               } catch (err) {
+                autoLinkError = err.message;
                 logger.error(`[cron] Knowledge bridge auto-link failed: ${err.message}`);
               }
               const analytics = require('./services/assessment-analytics');
               const results = await analytics.runAll();
               logger.info(`[cron] Weekly assessment analytics complete: ${JSON.stringify(results)}`);
+              // Analytics ran either way, but a failed bridge population must
+              // not record a healthy job_health row — contradiction
+              // attribution is degraded until autoLink succeeds. Throw AFTER
+              // runAll so the failure is recorded without blocking analytics.
+              if (autoLinkError) {
+                throw new Error(`knowledge bridge auto-link failed: ${autoLinkError}`);
+              }
             });
           } catch (err) {
             logger.error(`[cron] Weekly assessment analytics failed: ${err.message}`);

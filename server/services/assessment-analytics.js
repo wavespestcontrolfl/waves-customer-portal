@@ -665,9 +665,23 @@ async function backfillContradictionAttribution(existing, wikiEntryId) {
   // attribution not yet persisted — self-heals: the row is still
   // unattributed, so the next weekly run re-gates and persists.
   await recomputeEntryReviewGate(wikiEntryId, { assumeOpenIds: [existing.id] });
-  await db('knowledge_contradictions')
-    .where({ id: existing.id })
+  // Conditional persist: an admin may have resolved/dismissed the row between
+  // the detector's read and this write. If the claim misses, the row is no
+  // longer open — recompute WITHOUT assumeOpenIds so the gate this function
+  // just forced doesn't linger on a page whose contradiction was resolved
+  // (later detector runs select status:'open' only and would never clear it).
+  const claimed = await db('knowledge_contradictions')
+    .where({ id: existing.id, status: 'open' })
+    .whereNull('wiki_entry_id')
     .update({ wiki_entry_id: wikiEntryId });
+  if (!claimed) {
+    try {
+      await recomputeEntryReviewGate(wikiEntryId);
+    } catch (err) {
+      logger.error(`[assessment-analytics] corrective gate recompute failed for ${wikiEntryId}: ${err.message}`);
+    }
+    return false;
+  }
   return true;
 }
 

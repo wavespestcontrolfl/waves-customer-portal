@@ -287,6 +287,36 @@ test('an existing open row with null attribution is backfilled and gated when th
   }));
 });
 
+test('backfill claim race: a row resolved mid-flight gets a corrective un-gate recompute', async () => {
+  const updates = [];
+  const dbMock = makeDb({
+    product_efficacy: [NEGATIVE_EFFICACY],
+    knowledge_base: [KB_PRODUCT],
+    knowledge_bridge: [{ kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bridged', wiki_slug: 'product/celsius-wg', relevance_score: 0.95 }],
+    knowledge_entries: [],
+    knowledge_contradictions: [{ id: 'contra-legacy', wiki_entry_id: null, status: 'open' }],
+  });
+  global.__analyticsDbMock = (table) => {
+    const b = dbMock(table);
+    if (table === 'knowledge_contradictions') {
+      // The conditional claim misses — an admin resolved the row mid-flight
+      b.update = (patch) => { updates.push(patch); return { then: (res, rej) => Promise.resolve(0).then(res, rej) }; };
+    }
+    return b;
+  };
+
+  const result = await analytics.detectContradictions();
+
+  expect(result.contradictions).toBe(0);
+  expect(updates).toEqual([{ wiki_entry_id: 'wiki-bridged' }]); // attempted, missed
+  // First call forced the gate (assumeOpenIds); the corrective second call
+  // re-resolves WITHOUT it so the resolved row can't leave a lingering gate.
+  expect(recomputeEntryReviewGate).toHaveBeenNthCalledWith(1, 'wiki-bridged', expect.objectContaining({
+    assumeOpenIds: ['contra-legacy'],
+  }));
+  expect(recomputeEntryReviewGate).toHaveBeenNthCalledWith(2, 'wiki-bridged');
+});
+
 test('backfill gates FIRST — a failed gate persists no attribution at all', async () => {
   recomputeEntryReviewGate.mockRejectedValueOnce(new Error('gate write failed'));
   const updates = [];

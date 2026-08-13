@@ -562,20 +562,29 @@ const AgronomicWiki = {
           // moment (observation_time when present, else fetch timestamp)
           // must ALSO land on the treatment day; missing or unparseable
           // snapshot metadata fails closed.
+          // Shared freshness bound (≤6h): both the persisted snapshot and the
+          // getCurrent() fallback can carry fawn-weather's age-unlimited
+          // cached _lastSnapshot, and even a same-ET-day snapshot from just
+          // after midnight can be 20+ hours from the application.
+          const FRESH_MS = 6 * 60 * 60 * 1000;
+          const parseMoment = (value) => {
+            if (value == null) return null;
+            const parsed = parseETDateTime(String(value));
+            const ms = parsed?.getTime?.();
+            return Number.isFinite(ms) ? parsed : null;
+          };
           const postIsTreatmentDay = etCalendarDayOf(post.service_date) === etCalendarDayOf(treatmentDate);
-          let snapshotOnTreatmentDay = false;
+          let snapshotUsable = false;
           if (postIsTreatmentDay && post.fawn_snapshot) {
             try {
               const snap = typeof post.fawn_snapshot === 'string' ? JSON.parse(post.fawn_snapshot) : post.fawn_snapshot;
-              const moment = snap?.observation_time ?? snap?.timestamp;
-              if (moment != null) {
-                const parsed = parseETDateTime(String(moment));
-                snapshotOnTreatmentDay = Number.isFinite(parsed?.getTime?.())
-                  && etDateString(parsed) === etCalendarDayOf(treatmentDate);
-              }
+              const parsed = parseMoment(snap?.observation_time ?? snap?.timestamp);
+              snapshotUsable = parsed !== null
+                && etDateString(parsed) === etCalendarDayOf(treatmentDate)
+                && Date.now() - parsed.getTime() < FRESH_MS;
             } catch { /* unparseable snapshot fails closed */ }
           }
-          let weather = snapshotOnTreatmentDay
+          let weather = snapshotUsable
             && (post.fawn_temp_f != null || post.fawn_humidity_pct != null || post.fawn_rainfall_7d != null)
             ? { temp_f: post.fawn_temp_f, humidity_pct: post.fawn_humidity_pct, rainfall_in: post.fawn_rainfall_7d }
             : null;
@@ -588,18 +597,15 @@ const AgronomicWiki = {
           // to the previous day and the same-day check would never pass.
           if (!weather && etCalendarDayOf(treatmentDate) === etDateString()) {
             const fawn = await require('./fawn-weather').getCurrent();
-            // Require a fresh reading (≤6h) before persisting: getCurrent()
-            // serves its unexpired cached _lastSnapshot on fetch failure, and
-            // even a successful fetch can carry a stale station payload. The
+            // Same ≤6h bound as the persisted-snapshot path above. The
             // STATION's observation_time is authoritative when present
             // (naive strings are ET wall-clock — parseETDateTime handles
             // that); fetch-time `timestamp` is only a cache-age fallback.
             // Present-but-unparseable observation_time fails closed.
-            const FRESH_MS = 6 * 60 * 60 * 1000;
             const freshMoment = (value) => {
               if (value == null) return null;
-              const ms = parseETDateTime(String(value))?.getTime?.();
-              return Number.isFinite(ms) ? Date.now() - ms < FRESH_MS : false;
+              const parsed = parseMoment(value);
+              return parsed !== null ? Date.now() - parsed.getTime() < FRESH_MS : false;
             };
             const obsFresh = freshMoment(fawn?.observation_time);
             const fresh = obsFresh !== null ? obsFresh : freshMoment(fawn?.timestamp) === true;
