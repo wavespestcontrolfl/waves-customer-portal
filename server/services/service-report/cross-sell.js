@@ -1102,7 +1102,9 @@ async function buildPortalOffer(customerId, database, opts = {}) {
     const basis = await composePortalOffer(customerId, database, opts);
     return basis ? basis.payload : null;
   } catch (err) {
-    logger.warn(`[portal-offer] suppressed (${err.message})`);
+    // Redacted (AGENTS PII rule): a DB/property error message can carry a
+    // bound street address — log only the code, same as the report path.
+    logger.warn(`[portal-offer] suppressed (code=${err?.code || 'none'})`);
     return null;
   }
 }
@@ -1119,7 +1121,8 @@ async function buildPortalPurchaseBasis(customerId, database, opts = {}) {
     if (!basis || basis.payload.mode !== 'priced' || !basis.option) return null;
     return basis;
   } catch (err) {
-    logger.warn(`[one-tap-purchase] offer basis suppressed (${err.message})`);
+    // Redacted (AGENTS PII rule): same posture as the report/portal paths.
+    logger.warn(`[one-tap-purchase] offer basis suppressed (code=${err?.code || 'none'})`);
     return null;
   }
 }

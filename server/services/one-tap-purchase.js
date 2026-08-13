@@ -410,44 +410,44 @@ async function reserve({ customerId, purchaseId, slotId }) {
     throw httpError(409, OFFER_CHANGED);
   }
   try {
-    // The whole hold-replace + ledger-pointer write is serialized per
-    // purchase by an advisory lock (P1): two concurrent reserves otherwise
-    // interleave — B replaces A's hold inside reserveSlot's own txn, then
-    // A's later pointer write lands a DELETED hold id and orphans B's hold.
-    // reserveSlot keeps its own internal transaction; the outer lock just
-    // guarantees one reserve fully finishes (pointer committed) before the
-    // next starts.
-    return await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`one_tap_reserve:${purchase.id}`]);
-      // Re-reserving the same estimate deletes the prior hold in-txn
-      // (slot-reservation's own semantics) — re-picks need no explicit release.
-      const { scheduledServiceId, expiresAt } = await slotReservation.reserveSlot({
-        estimateId: estimate.id,
-        slotId,
-      });
-      // CAS on the still-open states (P1): a concurrent re-init can void
-      // this purchase — a blind id-keyed update would revive the voided row
-      // as reserved/confirmable. When the CAS loses, release the hold we
-      // just created and bounce the client.
-      const reserved = await trx('one_tap_purchases')
-        .where({ id: purchase.id })
-        .whereIn('status', ['initiated', 'reserved'])
-        .update({
-          scheduled_service_id: scheduledServiceId,
-          slot_id: String(slotId),
-          status: 'reserved',
-          updated_at: trx.fn.now(),
-        });
-      if (!reserved) {
-        try {
-          await slotReservation.releaseReservation({ scheduledServiceId, estimateId: estimate.id });
-        } catch (releaseErr) {
-          logger.warn(`[one-tap-purchase] lost-CAS hold release failed (code=${releaseErr?.code || 'none'})`);
-        }
-        throw httpError(409, OFFER_CHANGED);
-      }
-      return { scheduledServiceId, expiresAt, holdMinutes: HOLD_MINUTES };
+    // Re-reserving the same estimate deletes the prior hold in-txn
+    // (slot-reservation's own semantics) — re-picks need no explicit release.
+    // NO outer transaction here (P1): reserveSlot opens its own
+    // db.transaction, and holding a pool connection while waiting for a
+    // second one starves the pool under a reservation wave. The concurrent-
+    // reserve interleave (B replaces A's hold, then A's later pointer write
+    // lands a DELETED hold id) is closed by the CAS below instead: the
+    // pointer only persists while its hold row is still a LIVE reservation.
+    const { scheduledServiceId, expiresAt } = await slotReservation.reserveSlot({
+      estimateId: estimate.id,
+      slotId,
     });
+    // CAS: still-open purchase (a concurrent re-init can void it — a blind
+    // update would revive the voided row) AND the just-created hold must
+    // still exist as a live reservation (a concurrent reserve may have
+    // replaced it). Either miss ⇒ release our hold (a no-op if already
+    // replaced) and bounce the client to re-pick.
+    const reserved = await db('one_tap_purchases')
+      .where({ id: purchase.id })
+      .whereIn('status', ['initiated', 'reserved'])
+      .whereExists((qb) => qb.select(1).from('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .whereNotNull('reservation_expires_at'))
+      .update({
+        scheduled_service_id: scheduledServiceId,
+        slot_id: String(slotId),
+        status: 'reserved',
+        updated_at: db.fn.now(),
+      });
+    if (!reserved) {
+      try {
+        await slotReservation.releaseReservation({ scheduledServiceId, estimateId: estimate.id });
+      } catch (releaseErr) {
+        logger.warn(`[one-tap-purchase] lost-CAS hold release failed (code=${releaseErr?.code || 'none'})`);
+      }
+      throw httpError(409, OFFER_CHANGED);
+    }
+    return { scheduledServiceId, expiresAt, holdMinutes: HOLD_MINUTES };
   } catch (err) {
     if (err.code === 'INVALID_SLOT_ID') throw httpError(400, 'invalid slotId format');
     if (err.code === 'SLOT_UNAVAILABLE') {
@@ -575,11 +575,16 @@ async function sweepStaleOneTapDrafts() {
     .whereIn('estimate_id', ids)
     .whereIn('status', ['initiated', 'reserved'])
     .update({ status: 'voided', scheduled_service_id: null, slot_id: null, updated_at: db.fn.now() });
-  await db('estimates')
+  // Re-assert draft status inside the UPDATE (P2): a confirm that started
+  // just before expiry can convert one of the selected drafts to accepted
+  // while this sweep runs — the status CAS keeps a successfully accepted
+  // estimate out of the archive.
+  const archived = await db('estimates')
     .whereIn('id', ids)
+    .where({ status: 'draft' })
     .whereNull('archived_at')
     .update({ archived_at: db.fn.now() });
-  logger.info(`[one-tap-purchase] stale-draft sweep archived ${ids.length} draft(s), voided ${voided} purchase(s)`);
+  logger.info(`[one-tap-purchase] stale-draft sweep archived ${archived} draft(s), voided ${voided} purchase(s)`);
   return { voided };
 }
 
@@ -682,6 +687,31 @@ function to12h(value) {
 async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent }) {
   if (termsAccepted !== true) throw httpError(400, 'You must agree to the terms to confirm.');
   const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
+  // Idempotent retry (P1): a conversion that committed but whose HTTP
+  // response was lost leaves the customer on the confirm button. Their
+  // retry must get the canonical success back — a generic 409 renders the
+  // client's "nothing was purchased" screen over a purchase that EXISTS.
+  // Rebuilt from stored rows; no notifications or emails are re-sent (all
+  // sends are dedupe-keyed/idempotent anyway).
+  if (purchase.status === 'completed') {
+    const visit = purchase.scheduled_service_id
+      ? await db('scheduled_services')
+        .where({ id: purchase.scheduled_service_id })
+        .first('scheduled_date', 'window_start', 'service_type')
+      : null;
+    const retryCustomer = await db('customers').where({ id: customerId }).first('email');
+    return {
+      success: true,
+      firstVisit: visit ? {
+        date: dateOnly(visit.scheduled_date),
+        windowStart: hhmm(visit.window_start),
+        windowEnd: arrivalEndFor(visit.window_start),
+      } : null,
+      perVisit: Number(purchase.per_visit),
+      label: visit?.service_type || String(purchase.service_key || 'service').replace(/_/g, ' '),
+      emailQueued: !!(retryCustomer?.email && String(retryCustomer.email).includes('@')),
+    };
+  }
   if (purchase.status !== 'reserved' || !purchase.scheduled_service_id) {
     throw httpError(409, 'Pick a time before confirming.');
   }

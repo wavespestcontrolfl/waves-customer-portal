@@ -32,6 +32,19 @@ jest.mock('../models/db', () => {
         return q;
       },
       whereNull(col) { filters.push((r) => r[col] == null); return q; },
+      // Live-hold existence CAS (reserve): evaluate the subquery builder
+      // against the same in-memory state.
+      whereExists(subFn) {
+        filters.push(() => {
+          let captured = null;
+          const fake = { select: () => fake, from: (t) => { captured = builder(t); return captured; } };
+          try {
+            subFn.call(fake, fake);
+            return captured ? captured._rows().length > 0 : false;
+          } catch { return false; }
+        });
+        return q;
+      },
       whereNotNull(col) { filters.push((r) => r[col] != null); return q; },
       orderBy() { return q; },
       forUpdate() { return q; },
@@ -430,6 +443,10 @@ describe('reserve / release', () => {
       id: 'est-1', customer_id: 'cust-1', status: 'draft', expires_at: futureIso(),
       annual_total: 756, price_locked_at: null,
     });
+    // The live hold row the reserve CAS's whereExists checks.
+    db.__state.tables.scheduled_services = [{
+      id: 'ss-1', reservation_expires_at: futureIso(),
+    }];
   });
 
   test('reserve holds the slot and moves the purchase to reserved', async () => {
@@ -483,7 +500,9 @@ describe('confirm', () => {
       id: 'est-1', customer_id: 'cust-1', status: 'draft', expires_at: futureIso(),
       annual_total: 756, monthly_total: 63, price_locked_at: null,
     });
-    db.__state.tables.scheduled_services.push({ id: 'ss-1', scheduled_date: '2026-08-20' });
+    db.__state.tables.scheduled_services.push({
+      id: 'ss-1', scheduled_date: '2026-08-20', window_start: '08:00:00', service_type: 'Lawn Care',
+    });
   };
 
   const COMMITTED_ROW = {
@@ -603,10 +622,14 @@ describe('confirm', () => {
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 
-  test('a second confirm on a completed purchase cannot double-accept', async () => {
-    await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
-    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
-      .rejects.toMatchObject({ status: 409 });
+  test('a retry on a completed purchase is IDEMPOTENT: canonical success back, no second conversion', async () => {
+    const first = await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    const retry = await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    expect(retry.success).toBe(true);
+    expect(retry.perVisit).toBe(first.perVisit);
+    expect(retry.firstVisit).toEqual(first.firstVisit);
+    // The purchase happened exactly once — a lost HTTP response must never
+    // become a double-accept OR a "nothing was purchased" screen.
     expect(EstimateConverter.convertEstimate).toHaveBeenCalledTimes(1);
   });
 
