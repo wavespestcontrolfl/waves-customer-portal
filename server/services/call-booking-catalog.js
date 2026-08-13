@@ -580,17 +580,41 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
   const fromStr = callBookingDateOnly(fromDate);
   const toStr = callBookingDateOnly(toDate);
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return 0;
-  return conn('scheduled_services')
-    .where({
-      parent_service_id: parentServiceId,
-      source_action: 'ai_call_pipeline_followup',
-      status: 'pending',
-      customer_confirmed: false,
-    })
-    .update({
-      scheduled_date: conn.raw('scheduled_date + (?::date - ?::date)', [toStr, fromStr]),
-      updated_at: conn.fn.now(),
-    });
+  const filter = {
+    parent_service_id: parentServiceId,
+    source_action: 'ai_call_pipeline_followup',
+    status: 'pending',
+    customer_confirmed: false,
+  };
+  // Tech-day membership fence + route_order clear (uncapped audit r26 P1):
+  // a date shift moves the child between tech-days, so it must hold the
+  // same 'slot-reserve' fence every other date/tech writer holds — an
+  // unfenced shift can land a stop into a day AFTER the nightly reorder's
+  // membership read, and its carried sequence number would interleave into
+  // the new day's run. Every matched row changes day (delta is non-zero by
+  // the guard above), so clearing route_order is correct for all of them.
+  const run = async (trx) => {
+    const kids = await trx('scheduled_services')
+      .where(filter)
+      .select('id', 'technician_id',
+        trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"),
+        trx.raw("to_char(scheduled_date + (?::date - ?::date), 'YYYY-MM-DD') as new_day", [toStr, fromStr]));
+    if (!kids.length) return 0;
+    const { lockTechDays } = require('./scheduling/tech-day-lock');
+    await lockTechDays(trx, kids.flatMap((k) => [
+      { techId: k.technician_id, date: k.day },
+      { techId: k.technician_id, date: k.new_day },
+    ]));
+    return trx('scheduled_services')
+      .whereIn('id', kids.map((k) => k.id))
+      .where(filter)
+      .update({
+        scheduled_date: trx.raw('scheduled_date + (?::date - ?::date)', [toStr, fromStr]),
+        route_order: null,
+        updated_at: trx.fn.now(),
+      });
+  };
+  return conn.isTransaction ? run(conn) : conn.transaction(run);
 }
 
 // A call-created follow-up (visit 2) is part of the same package as its

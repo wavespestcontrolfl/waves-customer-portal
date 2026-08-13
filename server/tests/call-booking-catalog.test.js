@@ -1182,20 +1182,37 @@ describe('extraction plumbing for the new booking fields', () => {
 });
 
 describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () => {
-  // Chain-recording fake knex conn: captures the where filter and update
-  // payload; update() resolves to the canned row count.
-  function fakeConn({ updatedCount = 1 } = {}) {
-    const log = { table: null, where: null, update: null, raws: [] };
-    const conn = (table) => {
+  // Chain-recording fake knex conn: captures the where filter, whereIn ids,
+  // update payload, raw calls, and advisory-lock keys; the child SELECT
+  // resolves to canned kid rows and update() to the canned row count.
+  // Mirrors the real surface the fenced implementation uses (mock ≠ prod
+  // export rule): conn.transaction(cb) hands cb a trx.
+  function fakeConn({ updatedCount = 1, kids = [{ id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19' }] } = {}) {
+    const log = { table: null, where: null, whereIn: null, update: null, raws: [], lockKeys: [] };
+    const trx = (table) => {
       log.table = table;
       const chain = {
-        where: (arg) => { log.where = arg; return chain; },
+        where: (arg) => { if (!log.where) log.where = arg; return chain; },
+        whereIn: (_col, ids) => { log.whereIn = ids; return chain; },
+        select: () => Promise.resolve(kids),
         update: (arg) => { log.update = arg; return Promise.resolve(updatedCount); },
       };
       return chain;
     };
-    conn.raw = (sql, bindings) => { const raw = { sql, bindings }; log.raws.push(raw); return raw; };
-    conn.fn = { now: () => 'NOW()' };
+    trx.raw = (sql, bindings) => {
+      const raw = { sql, bindings };
+      log.raws.push(raw);
+      if (String(sql).includes('pg_advisory_xact_lock')) {
+        log.lockKeys.push(bindings && bindings[1]);
+        return Promise.resolve();
+      }
+      return raw;
+    };
+    trx.fn = { now: () => 'NOW()' };
+    const conn = (table) => trx(table);
+    conn.raw = trx.raw;
+    conn.fn = trx.fn;
+    conn.transaction = (cb) => cb(trx);
     return { conn, log };
   }
 
@@ -1217,7 +1234,12 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
       customer_confirmed: false,
     });
     // Delta applied in SQL: scheduled_date + (to - from).
-    expect(log.raws[0].bindings).toEqual(['2026-07-05', '2026-07-02']);
+    expect(log.raws.some((r) => Array.isArray(r.bindings) && r.bindings[0] === '2026-07-05' && r.bindings[1] === '2026-07-02')).toBe(true);
+    // Fenced: both the child's current and destination tech-days are locked
+    // BEFORE the write, and the day change clears the stale route_order.
+    expect(log.lockKeys).toEqual(expect.arrayContaining(['t1:2026-07-16', 't1:2026-07-19']));
+    expect(log.update).toMatchObject({ route_order: null });
+    expect(log.whereIn).toEqual(['kid-1']);
   });
 
   test('pg date hydration (JS Date at LOCAL midnight) recovers the calendar date', async () => {
@@ -1230,7 +1252,7 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
       fromDate: new Date(2026, 6, 2),
       toDate: '2026-07-09T00:00:00.000Z',
     });
-    expect(log.raws[0].bindings).toEqual(['2026-07-09', '2026-07-02']);
+    expect(log.raws.some((r) => Array.isArray(r.bindings) && r.bindings[0] === '2026-07-09' && r.bindings[1] === '2026-07-02')).toBe(true);
   });
 
   test('no-ops (0, no query) when the date did not change', async () => {
