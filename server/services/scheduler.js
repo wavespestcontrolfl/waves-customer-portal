@@ -2533,6 +2533,33 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // DAILY 5:15AM ET — Pre-visit pocket-reference briefs (owner GO
+  // 2026-08-06): generate the visit brief for every one of TODAY's
+  // scheduled visits, after overnight reschedules settle and before route
+  // start. DARK unless GATE_PREVISIT_BRIEF=true — the service guards the
+  // gate itself (single source of truth); checked here too so the dark
+  // path never takes the runExclusive advisory lock. 5:15 is an
+  // unoccupied minute in the 5am block (0/10/30/45 taken).
+  // =========================================================================
+  cron.schedule('15 5 * * *', async () => {
+    const PrevisitBrief = require('./previsit-brief');
+    if (!PrevisitBrief.briefGateEnabled()) return;
+    logger.info('Running: pre-visit brief sweep');
+    try {
+      await runExclusive('previsit-brief-sweep', async () => {
+        const result = await PrevisitBrief.runSweep();
+        if (result.skipped === true) {
+          logger.info(`Pre-visit brief sweep inert: ${result.reason}`);
+        } else {
+          logger.info(`Pre-visit brief sweep done: ${result.generated} generated, ${result.unchanged} unchanged, ${result.skipped} skipped, ${result.failed} failed of ${result.considered}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Pre-visit brief sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('5 10 * * *', async () => {
     logger.info('Running: pre-visit balance reminders');
     try {

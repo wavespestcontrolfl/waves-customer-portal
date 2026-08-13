@@ -1,0 +1,399 @@
+/**
+ * Pre-visit pocket-reference brief (services/previsit-brief.js):
+ *  - gate-off = bit-for-bit no-op (no reads, no writes, no LLM)
+ *  - a WDO brief is NEVER clobbered (stored type AND classifier guard,
+ *    plus the guard riding the UPDATE itself)
+ *  - access codes land in the stored brief's deterministic access block
+ *    and NEVER appear in the LLM prompt payload
+ *  - deterministic template fallback on LLM failure
+ *  - input-hash cache: unchanged grounding no-ops regeneration
+ *  - lawn visits: product guidance is the protocol window's products ONLY
+ *  - forbidden target genera are filtered from deterministic target lists
+ */
+
+jest.mock('../models/db', () => {
+  const fn = (table) => global.__briefDbMock(table);
+  return fn;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../config/models', () => ({
+  TEXT_POLICIES: { visitBrief: { name: 'visitBrief' } },
+}));
+jest.mock('../services/llm/call', () => ({
+  dispatchWithFallback: (...args) => global.__dispatch(...args),
+}));
+const mockGetContext = jest.fn();
+jest.mock('../services/context-aggregator', () => ({
+  getContextForCustomer: (...args) => mockGetContext(...args),
+}));
+jest.mock('../services/appointment-tagger', () => ({
+  classifyAppointmentType: (serviceType) => (
+    /wdo|wood destroying/i.test(String(serviceType || ''))
+      ? { tag: 'wdo_inspection', label: 'WDO Inspection' }
+      : { tag: 'pest_general', label: 'Pest Control' }
+  ),
+}));
+jest.mock('../services/service-report/since-last-visit', () => ({
+  buildSinceLastVisitContext: jest.fn(async () => ({
+    pressureLine: 'Pressure: 2.0 -> 1.0',
+    activityLine: 'Ant trail at garage corner',
+  })),
+}));
+jest.mock('../services/service-report/service-line-configs', () => ({
+  detectServiceLine: () => 'pest',
+}));
+const mockGrassContext = jest.fn(async () => ({ trackKey: 'st_augustine' }));
+jest.mock('../services/lawn-grass-context', () => ({
+  loadCustomerGrassContext: (...args) => mockGrassContext(...args),
+}));
+const mockWindowContext = jest.fn(async () => ({}));
+const mockSummarize = jest.fn(() => null);
+jest.mock('../services/lawn-protocol-operating-layer', () => ({
+  getProtocolWindowContext: (...args) => mockWindowContext(...args),
+  summarizeProtocolContext: (...args) => mockSummarize(...args),
+}));
+
+const PrevisitBrief = require('../services/previsit-brief');
+
+// ── mock-knex builder (agronomic-wiki-review-tiers pattern + join/update) ──
+function makeDb(responses = {}) {
+  const state = { responses, calls: {}, updates: {} };
+  const dbFn = (table) => {
+    // Alias-stripped table name so "scheduled_services as s" resolves.
+    const bare = String(table).split(/\s+as\s+/i)[0];
+    const rec = { table: bare, ops: [] };
+    (state.calls[bare] = state.calls[bare] || []).push(rec);
+    const callIdx = state.calls[bare].length - 1;
+    const resolveRows = () => {
+      const conf = state.responses[bare];
+      if (typeof conf === 'function') return conf(rec, callIdx) || [];
+      if (Array.isArray(conf)) return conf;
+      return [];
+    };
+    const b = {};
+    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'whereIn', 'whereNotIn', 'whereNull',
+      'whereNotNull', 'orWhereNot', 'orWhereNull', 'whereNot', 'whereBetween', 'join', 'leftJoin',
+      'orderBy', 'limit', 'offset', 'select', 'groupBy']) {
+      b[m] = (...args) => {
+        rec.ops.push([m, args]);
+        if (typeof args[0] === 'function') args[0].call(b);
+        return b;
+      };
+    }
+    b.first = async (...args) => { rec.ops.push(['first', args]); return resolveRows()[0] ?? null; };
+    b.update = (patch) => {
+      rec.ops.push(['update', [patch]]);
+      (state.updates[bare] = state.updates[bare] || []).push(patch);
+      return { then: (res, rej) => Promise.resolve(1).then(res, rej), catch: () => Promise.resolve(1) };
+    };
+    b.then = (res, rej) => {
+      let rows;
+      try { rows = resolveRows(); } catch (err) { return Promise.reject(err).then(res, rej); }
+      return Promise.resolve(rows).then(res, rej);
+    };
+    b.catch = (onRej) => {
+      try { return Promise.resolve(resolveRows()).catch(onRej); } catch (err) { return Promise.resolve(onRej(err)); }
+    };
+    return b;
+  };
+  dbFn.state = state;
+  return dbFn;
+}
+
+function useDb(responses) {
+  const dbFn = makeDb(responses);
+  global.__briefDbMock = dbFn;
+  return dbFn.state;
+}
+
+const SVC = {
+  id: 'svc-1',
+  customer_id: 'cust-1',
+  service_type: 'Pest Control Service',
+  scheduled_date: '2026-08-13',
+  status: 'confirmed',
+  is_recurring: true,
+  notes: '',
+  service_preferences: null,
+  source_estimate_id: null,
+  pre_service_brief: null,
+  pre_service_brief_type: null,
+};
+
+const PREFS = {
+  customer_id: 'cust-1',
+  property_gate_code: '4545',
+  garage_code: '9876',
+  pet_count: 1,
+  pet_details: 'One dog, friendly',
+  chemical_sensitivities: true,
+  chemical_sensitivity_details: 'Sensitive to pyrethroids',
+};
+
+const SERVICE_RECORD = {
+  id: 'rec-1',
+  customer_id: 'cust-1',
+  service_type: 'Pest Control Service',
+  service_line: 'pest',
+  service_date: '2026-07-15',
+  started_at: null,
+  pressure_index: 1.0,
+};
+
+const PRODUCT_ROW = {
+  service_record_id: 'rec-1',
+  product_name: 'Bifen IT',
+  active_ingredient: 'Bifenthrin',
+  moa_group: '3A',
+  application_rate: 1,
+  rate_unit: 'oz/gal',
+  targets: ['ants', 'Ganoderma'],
+  catalog_name: 'Bifen IT',
+  catalog_active_ingredient: 'Bifenthrin',
+  epa_reg_number: '53883-118',
+};
+
+function baseResponses(overrides = {}) {
+  return {
+    scheduled_services: [{ ...SVC }],
+    customers: [{ id: 'cust-1', first_name: 'Test', last_name: 'Fixture' }],
+    property_preferences: [PREFS],
+    service_records: [SERVICE_RECORD],
+    service_products: [PRODUCT_ROW],
+    estimates: [],
+    ...overrides,
+  };
+}
+
+const CLEAN_LLM_JSON = {
+  priorities: ['Check garage corner ant trail'],
+  watch_items: ['Chemical-sensitivity note on file'],
+  last_visit_summary: 'Routine pest service on July 15.',
+  open_scope: '',
+  customer_context: 'Prefers a text before arrival.',
+};
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  process.env.GATE_PREVISIT_BRIEF = 'true';
+  process.env.ANTHROPIC_API_KEY = 'test-key';
+  global.__dispatch = jest.fn(async () => ({ ok: true, json: { ...CLEAN_LLM_JSON } }));
+  mockGetContext.mockResolvedValue({
+    serviceHistory: [{ type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter.' }],
+    propertyProfile: { accessNotes: 'gate code [redacted]', pets: 'One dog, friendly' },
+    flags: [{ type: 'sensitivity', severity: 'medium', detail: 'Sensitive to pyrethroids' }],
+    recentCalls: [{ summary: 'Asked about ants in garage', direction: 'inbound', date: '2026-08-01' }],
+    recentInteractions: [],
+    pendingEstimate: null,
+  });
+});
+
+afterEach(() => {
+  delete process.env.GATE_PREVISIT_BRIEF;
+  delete process.env.ANTHROPIC_API_KEY;
+});
+
+function storedBrief(state) {
+  const patches = state.updates.scheduled_services || [];
+  expect(patches.length).toBeGreaterThan(0);
+  const patch = patches[patches.length - 1];
+  return { patch, brief: JSON.parse(patch.pre_service_brief) };
+}
+
+describe('gate off = bit-for-bit no-op', () => {
+  test('generateVisitBrief does nothing dark', async () => {
+    process.env.GATE_PREVISIT_BRIEF = 'false';
+    const state = useDb(baseResponses());
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out).toEqual({ skipped: true, reason: 'gate_off' });
+    expect(Object.keys(state.calls)).toHaveLength(0);
+    expect(global.__dispatch).not.toHaveBeenCalled();
+  });
+
+  test('runSweep does nothing dark (unset gate too)', async () => {
+    delete process.env.GATE_PREVISIT_BRIEF;
+    const state = useDb(baseResponses());
+    const out = await PrevisitBrief.runSweep();
+    expect(out).toEqual({ skipped: true, reason: 'gate_off' });
+    expect(Object.keys(state.calls)).toHaveLength(0);
+  });
+});
+
+describe('WDO precedence', () => {
+  test('a stored WDO brief is never overwritten', async () => {
+    const state = useDb(baseResponses({
+      scheduled_services: [{ ...SVC, pre_service_brief: '{"risk_score":"High"}', pre_service_brief_type: 'wdo_inspection' }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out).toEqual({ skipped: true, reason: 'wdo_brief_present' });
+    expect(state.updates.scheduled_services).toBeUndefined();
+    expect(global.__dispatch).not.toHaveBeenCalled();
+  });
+
+  test('a WDO-classified visit is skipped even without a stored brief', async () => {
+    const state = useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'WDO Inspection' }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out).toEqual({ skipped: true, reason: 'wdo_visit' });
+    expect(state.updates.scheduled_services).toBeUndefined();
+  });
+
+  test('the UPDATE itself carries the not-WDO guard (race window)', async () => {
+    const state = useDb(baseResponses());
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const updateRec = (state.calls.scheduled_services || []).find((rec) => rec.ops.some(([m]) => m === 'update'));
+    const guardOps = updateRec.ops.filter(([m]) => m === 'whereNull' || m === 'orWhereNot');
+    expect(guardOps.map(([m]) => m)).toEqual(expect.arrayContaining(['whereNull', 'orWhereNot']));
+    expect(guardOps.find(([m]) => m === 'orWhereNot')[1]).toEqual(['pre_service_brief_type', 'wdo_inspection']);
+  });
+});
+
+describe('access codes', () => {
+  test('present in the stored access block, absent from the LLM payload', async () => {
+    const state = useDb(baseResponses());
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+
+    // LLM saw NO code values.
+    expect(global.__dispatch).toHaveBeenCalledTimes(1);
+    const payload = JSON.stringify(global.__dispatch.mock.calls[0]);
+    expect(payload).not.toContain('4545');
+    expect(payload).not.toContain('9876');
+
+    // Stored brief carries them deterministically.
+    const { patch, brief } = storedBrief(state);
+    expect(patch.pre_service_brief_type).toBe('visit_brief_v1');
+    expect(patch.pre_service_brief_generated_at).toBeInstanceOf(Date);
+    expect(brief.access.codes.propertyGate).toBe('4545');
+    expect(brief.access.codes.garage).toBe('9876');
+    expect(brief.access.chemicalSensitivities).toBe('Sensitive to pyrethroids');
+    expect(brief.access.pets).toBe('One dog, friendly');
+    expect(brief.access.alerts).toEqual(expect.arrayContaining([
+      { type: 'gate', text: 'Yard: 4545' },
+      { type: 'gate', text: 'Garage: 9876' },
+    ]));
+  });
+});
+
+describe('LLM failure fallback', () => {
+  test('provider miss stores the deterministic template brief', async () => {
+    global.__dispatch = jest.fn(async () => ({ ok: false, reason: 'all_providers_down' }));
+    const state = useDb(baseResponses());
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    expect(out.via).toBe('template');
+    const { brief } = storedBrief(state);
+    expect(brief.generated_via).toBe('template');
+    expect(brief.version).toBe('visit_brief_v1');
+    // Deterministic sections still populated.
+    expect(brief.last_visit.date).toBe('2026-07-15');
+    expect(brief.last_visit.products[0].name).toBe('Bifen IT');
+    expect(brief.access.codes.propertyGate).toBe('4545');
+  });
+
+  test('a thrown dispatch also falls back to the template', async () => {
+    global.__dispatch = jest.fn(async () => { throw new Error('boom'); });
+    const state = useDb(baseResponses());
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    expect(out.via).toBe('template');
+    expect(storedBrief(state).brief.generated_via).toBe('template');
+  });
+});
+
+describe('input-hash cache', () => {
+  test('unchanged grounding no-ops regeneration', async () => {
+    const state1 = useDb(baseResponses());
+    const first = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(first.generated).toBe(true);
+    const stored = storedBrief(state1).patch;
+
+    const state2 = useDb(baseResponses({
+      scheduled_services: [{
+        ...SVC,
+        pre_service_brief: stored.pre_service_brief,
+        pre_service_brief_type: stored.pre_service_brief_type,
+      }],
+    }));
+    global.__dispatch.mockClear();
+    const second = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(second.skipped).toBe(true);
+    expect(second.reason).toBe('unchanged');
+    expect(state2.updates.scheduled_services).toBeUndefined();
+    expect(global.__dispatch).not.toHaveBeenCalled();
+  });
+
+  test('changed grounding regenerates', async () => {
+    const state1 = useDb(baseResponses());
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const stored = storedBrief(state1).patch;
+
+    const state2 = useDb(baseResponses({
+      property_preferences: [{ ...PREFS, property_gate_code: '1111' }],
+      scheduled_services: [{
+        ...SVC,
+        pre_service_brief: stored.pre_service_brief,
+        pre_service_brief_type: stored.pre_service_brief_type,
+      }],
+    }));
+    const second = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(second.generated).toBe(true);
+    expect(storedBrief(state2).brief.access.codes.propertyGate).toBe('1111');
+  });
+});
+
+describe('lawn bounded product section', () => {
+  test('lawn visits list ONLY the protocol window products', async () => {
+    mockSummarize.mockReturnValue({
+      window: { key: 'aug', month: 8, title: 'August window', visitType: 'granular', goal: 'Summer stress' },
+      products: [
+        { productName: 'Prodiamine 65 WDG', role: 'pre_emergent', applicationMode: 'spray', ratePer1000: 0.185, rateUnit: 'oz', defaultInPlan: true },
+        { productName: '0-0-7 Fert', role: 'fertility', applicationMode: 'granular', ratePer1000: 3, rateUnit: 'lb', defaultInPlan: true },
+      ],
+    });
+    const state = useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const { brief } = storedBrief(state);
+    expect(brief.product_guidance.source).toBe('lawn_protocol_window');
+    expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Prodiamine 65 WDG', '0-0-7 Fert']);
+    // The history product must NOT leak into the guidance list.
+    expect(JSON.stringify(brief.product_guidance)).not.toContain('Bifen IT');
+    expect(mockWindowContext).toHaveBeenCalled();
+  });
+
+  test('non-lawn visits: history products only, forbidden targets filtered', async () => {
+    const state = useDb(baseResponses());
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const { brief } = storedBrief(state);
+    expect(brief.product_guidance.source).toBe('service_history');
+    expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Bifen IT']);
+    // ⛔ Ganoderma never prefilled as a target; known targets survive.
+    expect(brief.product_guidance.products[0].targets).toEqual(['ants']);
+    expect(brief.last_visit.products[0].targets).toEqual(['ants']);
+  });
+});
+
+describe('sweep', () => {
+  test('iterates today, tallies outcomes, one failure never stops the rest', async () => {
+    let call = 0;
+    const state = useDb({
+      ...baseResponses(),
+      scheduled_services: (rec) => {
+        const isSweepSelect = rec.ops.some(([m, args]) => m === 'join');
+        if (isSweepSelect) return [{ id: 'svc-1' }, { id: 'svc-2' }];
+        call += 1;
+        if (call === 1) return [{ ...SVC }];
+        throw new Error('db down');
+      },
+    });
+    const out = await PrevisitBrief.runSweep();
+    expect(out.considered).toBe(2);
+    expect(out.generated).toBe(1);
+    expect(out.failed).toBe(1);
+    expect(state.updates.scheduled_services).toHaveLength(1);
+  });
+});
