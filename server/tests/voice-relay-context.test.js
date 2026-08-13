@@ -666,7 +666,7 @@ describe('GATE ON — account tools', () => {
       ],
     });
     const out = await executeTool('get_service_history', {}, { customerId: 'c-1111', customerTier: 'full' });
-    expect(out).toContain('Friday July 31 — Lawn Care'); // the receptionist half survives
+    expect(out).toContain('Friday July 31 (2026-07-31) — Lawn Care'); // the receptionist half survives
     expect(out).not.toContain('SAFE:note-1'); // the report half does not
     expect(out).toMatch(/do not describe what was found/i);
     assertNoWrites();
@@ -955,7 +955,7 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
       records: [{ service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'gate code 4482', structured_notes: null, status: 'completed' }],
     });
     const out = await executeTool('get_service_history', { customer_ref: 'C1' }, refCtx({ ani: null }));
-    expect(out).toContain('Friday July 31 — Lawn Care');
+    expect(out).toContain('Friday July 31 (2026-07-31) — Lawn Care');
     expect(out).not.toContain('SAFE:'); // the (already-scrubbed) summary itself is withheld on this tier
     expect(out).not.toContain('4482');
   });

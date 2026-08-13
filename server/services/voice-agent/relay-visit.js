@@ -254,7 +254,7 @@ function parseArray(value) {
  * sanctioned re-entry sentence. Suppressed entirely for typed reports whose
  * delivery posture is anything but auto_send.
  */
-async function serviceReportText(customerId, { visitDate = null, tier = 'redacted' } = {}) {
+async function serviceReportText(customerId, { visitDate = null, service = null, tier = 'redacted' } = {}) {
   // Per-visit detail is FULL-TIER ONLY (strictly more than the visit summary
   // the redacted tier already withholds), and the tier defaults to redacted so
   // this exported helper cannot fail open.
@@ -285,12 +285,24 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
   // silently picked the greatest id; a caller asking about the OTHER service
   // then heard the wrong visit's findings and re-entry guidance. When the date
   // is ambiguous the tool says so and names the services instead of choosing.
+  // The `service` discriminator resolves a shared date — without it the
+  // disambiguation loop had no exit (the schema only carried visit_date, so
+  // the re-call was identical and asked the same question forever).
+  const wantedService = String(service || '').trim().slice(0, 60);
   if (wanted) {
     const sameDay = await query.clone().limit(3).select('id', 'service_type');
     if (sameDay.length > 1) {
-      const names = sameDay.map((r) => promptSafe(r.service_type, 40)).filter(Boolean).join(' and ');
-      return `There is more than one completed visit on that date (${names}). Ask the caller WHICH service they `
-        + 'mean, then call get_service_report again — do not describe either visit until they say.';
+      const match = wantedService
+        ? sameDay.filter((r) => String(r.service_type || '').toLowerCase().includes(wantedService.toLowerCase()))
+        : [];
+      if (match.length === 1) {
+        query.where('id', match[0].id);
+      } else {
+        const names = sameDay.map((r) => promptSafe(r.service_type, 40)).filter(Boolean).join(' and ');
+        return `There is more than one completed visit on that date (${names}). Ask the caller WHICH service they `
+          + 'mean, then call get_service_report again with BOTH visit_date and that service name — do not '
+          + 'describe either visit until they say.';
+      }
     }
   }
   const record = await query.first('id', 'service_date', 'service_type', 'technician_notes',

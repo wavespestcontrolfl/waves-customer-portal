@@ -223,7 +223,8 @@ const CONTEXT_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        visit_date: { type: 'string', description: 'The visit date as YYYY-MM-DD, exactly as get_service_history reported it. Omit for the most recent completed visit.' },
+        visit_date: { type: 'string', description: 'The visit date as YYYY-MM-DD, exactly as shown in parentheses by get_service_history. Omit for the most recent completed visit.' },
+        service: { type: 'string', description: 'When more than one visit shares that date, the service name the caller means (as get_service_history listed it). Omit otherwise.' },
       },
       required: [],
     },
@@ -693,6 +694,7 @@ async function executeTool(name, input = {}, ctx = {}) {
         const { serviceReportText } = require('./relay-visit');
         return await serviceReportText(ctx.customerId, {
           visitDate: input.visit_date,
+          service: input.service,
           tier: matchedCallerTier(ctx),
         });
       }

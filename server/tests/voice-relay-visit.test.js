@@ -427,6 +427,21 @@ describe('get_service_report', () => {
     expect(out).toContain('Pest Control');
     expect(out).toContain('Lawn Care');
     expect(out).toMatch(/Ask the caller WHICH service/);
+    expect(out).toMatch(/with BOTH visit_date and that service name/); // the loop has an exit
+  });
+
+  test('…and the service discriminator resolves the shared date to ONE visit', async () => {
+    primeDb({
+      scheduled_services: [],
+      service_records: [
+        { id: 'sr-a', service_date: '2026-08-01', service_type: 'Pest Control', technician_notes: null, structured_notes: null, status: 'completed' },
+        { id: 'sr-b', service_date: '2026-08-01', service_type: 'Lawn Care', technician_notes: null, structured_notes: null, status: 'completed' },
+      ],
+    });
+    const out = await executeTool('get_service_report', { visit_date: '2026-08-01', service: 'lawn care' },
+      { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).not.toMatch(/more than one completed visit/i);
+    expect(builders.service_records.where).toHaveBeenCalledWith('id', 'sr-b');
   });
 
   test('a visit_date pins the record; an unknown date reports nothing on file', async () => {

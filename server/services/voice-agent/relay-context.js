@@ -656,8 +656,16 @@ async function loadCompletedVisits(customerId, limit = 5) {
     const notes = reportCopy && reportCopy.body
       ? customerSafeServiceNotes(reportCopy.body, structured)
       : null;
+    // The ISO day rides beside the spoken one: get_service_report's contract
+    // is exact YYYY-MM-DD (spoken forms are rejected), so history must hand
+    // the model a value the report tool actually accepts. Same DATE-trap
+    // handling as speakDate (etCalendarDayOf).
+    const { etCalendarDayOf } = require('../../utils/datetime-et');
     return {
       date: speakDate(svc.service_date),
+      isoDate: (typeof svc.service_date === 'string'
+        ? svc.service_date.slice(0, 10)
+        : (svc.service_date instanceof Date ? etCalendarDayOf(svc.service_date) : null)),
       service: promptSafeUntrusted(svc.service_type, 60) || null,
       // Technician notes are free text stored on a customer-visible surface —
       // treated as untrusted like every other DB-sourced string.
@@ -1071,7 +1079,10 @@ async function serviceHistoryText(customerId, { tier = 'redacted', attested = fa
   if (!visits.length) return 'No completed visits on file for this account.';
   const speakSummaries = !redacted && attested;
   const lines = visits.map((v) => {
-    const head = [v.date, v.service].filter(Boolean).join(' — ');
+    // "Friday August 1 (2026-08-01) — Lawn Care": the parenthesised ISO is what
+    // get_service_report's visit_date takes verbatim.
+    const spokenDate = v.date && v.isoDate ? `${v.date} (${v.isoDate})` : (v.date || v.isoDate);
+    const head = [spokenDate, v.service].filter(Boolean).join(' — ');
     // Redacted tier: dates + service names ONLY — no visit summaries (they can
     // carry property-specific detail that belongs to the account holder).
     return speakSummaries && v.summary ? `${head}: ${v.summary}` : head;
