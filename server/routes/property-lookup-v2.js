@@ -399,6 +399,24 @@ async function performPropertyLookupCore(address, options = {}) {
       }).catch(() => null);
       if (permits) result.propertyRecord._poolPermits = permits;
     }
+
+    // Synced construction-permit evidence (Manatee only — the ACA report
+    // sync). underConstruction/newBuild ride the record so the estimator
+    // can tell "county says active build here" from "vision saw a dirt
+    // lot". Fresh-path only (cached rows pick it up at TTL expiry);
+    // fail-open — an empty/missing table is just "no signal".
+    if (parcelMeta?.county === 'Manatee') {
+      try {
+        const { findConstructionActivity, looseKeyFromFreeform } = require('../services/property-lookup/manatee-permit-sync');
+        const construction = await findConstructionActivity({
+          parcelPin: parcelMeta.paoParcelId,
+          looseKey: looseKeyFromFreeform(address),
+        });
+        if (construction) result.propertyRecord._constructionActivity = construction;
+      } catch (err) {
+        result.errors.push({ source: 'construction-permits', message: err?.message || String(err) });
+      }
+    }
   }
 
   // ── STEP 1b: house-number audit ──
@@ -1881,6 +1899,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // coverage, unpermitted pools, and Sarasota has no permit service.
     poolPermit: rc?._poolPermits?.poolPermit || null,
     enclosurePermit: rc?._poolPermits?.enclosurePermit || null,
+    // Synced county construction evidence (Manatee ACA reports):
+    // underConstruction = permit issued, no CO yet — satellite imagery may
+    // predate the build; newBuild = CO within 18 months — brand-new home.
+    // Evidence-only: no pricing or vision behavior keys on it here.
+    constructionActivity: rc?._constructionActivity || null,
 
     // Per-field observation provenance (codex #3367 PR r7): this profile
     // synthesizes defaults for unobserved fields ('MODERATE' densities,

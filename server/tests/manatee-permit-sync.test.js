@@ -21,13 +21,13 @@ const {
   looseAddressKey,
   looseKeyFromFreeform,
   _private: { parsePoolPermitCsv, normalizeRow, parcelPinFromRaw, windowsSince, hiddenValue, mdy },
-} = require('../services/property-lookup/manatee-pool-permit-sync');
+} = require('../services/property-lookup/manatee-permit-sync');
 
 const savedFetch = global.fetch;
 
 afterEach(() => {
   global.fetch = savedFetch;
-  delete process.env.GATE_POOL_PERMIT_SYNC;
+  delete process.env.GATE_PERMIT_SYNC;
   jest.clearAllMocks();
 });
 
@@ -141,7 +141,7 @@ const PARAM_PAGE = '<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" val
 
 describe('syncPoolPermits fetch + upsert (refresh mode)', () => {
   test('forwards tokens + CSRF headers, upserts parsed rows', async () => {
-    process.env.GATE_POOL_PERMIT_SYNC = 'true';
+    process.env.GATE_PERMIT_SYNC = 'true';
     const countBuilder = builder({ n: '42' }); // non-empty table → refresh mode
     const insertBuilders = [];
     db.mockImplementation(() => {
@@ -177,7 +177,7 @@ describe('syncPoolPermits fetch + upsert (refresh mode)', () => {
   });
 
   test('non-CSV report output throws (report moved/renamed → loud failure, not junk rows)', async () => {
-    process.env.GATE_POOL_PERMIT_SYNC = 'true';
+    process.env.GATE_PERMIT_SYNC = 'true';
     db.mockImplementation(() => builder({ n: '42' }));
     db.fn = { now: () => 'NOW()' };
     global.fetch = jest.fn()
@@ -212,10 +212,115 @@ describe('findSyncedPoolPermit', () => {
   });
 });
 
+const UC_CSV = 'Permits Issued by Date Range\n\n<h1>Manatee County Building and Development Services</h1>\n\n"Permit","CurrentStatus","IssuedDate","Type","TypeofWork","Parcel","Owner","JobAddress","JobValue","Lic Number","LicType","BusContact","BusName","BusAddress","BusPhone"\n'
+  + '"BLD2508-1704","Permit Issued","8/13/2026 ","Residential","New Single Family","6085387090000-3441044235","EXAMPLE PROPCO LLC","10550 GRAIN SILO TRL  PARRISH 34219"," 330000","CBC1268025","Building Contractor","PAT EXAMPLE","EXAMPLE HOMES INC.","1 EXAMPLE WAY BRADENTON FL 34212","5555550100"\n';
+
+const CO_CSV = 'Certificates of Occupancy Issued by Date Range\n\n<h3>heading</h3>\n\n"Permit","Status","IssuedDate","CODate","Type","Parcel","Owner","JobAddress","JobValue","Lic Number","LicType","BusContact","BusName","BusAddress","BusPhone"\n'
+  + '"BLD2508-1704","Closed","8/13/2026 ","2/1/2027","Residential","6085387090000-3441044235","EXAMPLE PROPCO LLC","10550 GRAIN SILO TRL  PARRISH 34219","330000 ","CBC1268025","Building Contractor","PAT EXAMPLE","EXAMPLE HOMES INC.","1 EXAMPLE WAY BRADENTON FL 34212","5555550100"\n';
+
+describe('construction report parse', () => {
+  const { _private: cp } = require('../services/property-lookup/manatee-permit-sync');
+
+  test('under_construction: strips HTML preamble, trims padded dates, keys address', () => {
+    const rows = cp.parseConstructionCsv(UC_CSV, 'under_construction');
+    expect(rows).toHaveLength(1);
+    const r = rows[0];
+    expect(r.permit_no).toBe('BLD2508-1704');
+    expect(r.status).toBe('Permit Issued');
+    expect(r.type_of_work).toBe('New Single Family');
+    expect(r.issued_date).toBe('2026-08-13');
+    expect(r.co_date).toBeUndefined(); // absent key — the CO report owns it
+    expect(r.zip).toBe('34219');
+    expect(r.parcel_pin).toBe('6085387090');
+    expect(r.address_loose_key).toBe('10550grain34219');
+    expect(r.job_value).toBe(330000);
+  });
+
+  test('cos: carries co_date and omits type_of_work so the merge never nulls it', () => {
+    const rows = cp.parseConstructionCsv(CO_CSV, 'cos');
+    const r = rows[0];
+    expect(r.co_date).toBe('2027-02-01');
+    expect(r.status).toBe('Closed');
+    expect(r.type_of_work).toBeUndefined();
+  });
+
+  test('missing CSV header throws (report moved → loud failure)', () => {
+    expect(() => cp.stripReportPreamble('<html>login page</html>')).toThrow(/header not found/);
+  });
+});
+
+describe('findConstructionActivity', () => {
+  const { findConstructionActivity } = require('../services/property-lookup/manatee-permit-sync');
+
+  test('no identifiers → null without a DB call', async () => {
+    expect(await findConstructionActivity({})).toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('issued recently with no CO → underConstruction evidence', async () => {
+    const recentIso = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    db.mockImplementation(() => builder({
+      permit_no: 'BLD2508-1704', status: 'Permit Issued', permit_type: 'Residential',
+      type_of_work: 'New Single Family', issued_date: recentIso, co_date: null,
+    }));
+    const activity = await findConstructionActivity({ parcelPin: '6085387090' });
+    expect(activity.underConstruction).toBe(true);
+    expect(activity.newBuild).toBe(false);
+  });
+
+  test('recent CO → newBuild, not underConstruction', async () => {
+    const coIso = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    db.mockImplementation(() => builder({
+      permit_no: 'BLD2508-1704', status: 'Closed', permit_type: 'Residential',
+      type_of_work: 'New Single Family', issued_date: '2026-01-05', co_date: coIso,
+    }));
+    const activity = await findConstructionActivity({ looseKey: '10550grain34219' });
+    expect(activity.newBuild).toBe(true);
+    expect(activity.underConstruction).toBe(false);
+  });
+
+  test('stale issued permit with no CO is NOT underConstruction (24-month window)', async () => {
+    db.mockImplementation(() => builder({
+      permit_no: 'BLD2201-0001', status: 'Permit Issued', permit_type: 'Residential',
+      type_of_work: 'New Single Family', issued_date: '2022-01-05', co_date: null,
+    }));
+    const activity = await findConstructionActivity({ parcelPin: '6085387090' });
+    expect(activity.underConstruction).toBe(false);
+    expect(activity.newBuild).toBe(false);
+  });
+});
+
+describe('syncPermits', () => {
+  const { syncPermits } = require('../services/property-lookup/manatee-permit-sync');
+
+  test('gate off → skipped before any fetch or DB read', async () => {
+    global.fetch = jest.fn();
+    expect(await syncPermits()).toEqual({ skipped: 'gated' });
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a failing section is reported in errors and never sinks the other', async () => {
+    process.env.GATE_PERMIT_SYNC = 'true';
+    db.mockImplementation(() => builder({ n: '42' })); // both tables non-empty → refresh
+    db.fn = { now: () => 'NOW()' };
+    // Pool section: 3 good responses. Construction section: param page fetch throws.
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(acaResponse({ text: PARAM_PAGE }))
+      .mockResolvedValueOnce(acaResponse({ text: 'ShowReport.aspx' }))
+      .mockResolvedValueOnce(acaResponse({ text: CSV, contentType: 'APPLICATION/CSV' }))
+      .mockRejectedValue(new Error('ECONNRESET'));
+    const res = await syncPermits();
+    expect(res.pool.fetched).toBe(3);
+    expect(res.construction).toBeUndefined();
+    expect(res.errors).toEqual([expect.stringContaining('construction: ')]);
+  });
+});
+
 describe('county-permits merge', () => {
   test('synced closed permit surfaces when the open-permits GIS layer is empty', async () => {
     jest.resetModules();
-    jest.doMock('../services/property-lookup/manatee-pool-permit-sync', () => ({
+    jest.doMock('../services/property-lookup/manatee-permit-sync', () => ({
       findSyncedPoolPermit: jest.fn(async () => ({
         permitNo: 'BLD2603-3764', type: 'Pool_Spa', issuedAt: '2026-04-07', status: 'Closed',
       })),
@@ -230,12 +335,12 @@ describe('county-permits merge', () => {
     });
     expect(result.poolPermit).toMatchObject({ permitNo: 'BLD2603-3764', type: 'Pool_Spa' });
     expect(result.enclosurePermit).toBeNull();
-    jest.dontMock('../services/property-lookup/manatee-pool-permit-sync');
+    jest.dontMock('../services/property-lookup/manatee-permit-sync');
   });
 
   test('synced-table failure never sinks GIS evidence', async () => {
     jest.resetModules();
-    jest.doMock('../services/property-lookup/manatee-pool-permit-sync', () => ({
+    jest.doMock('../services/property-lookup/manatee-permit-sync', () => ({
       findSyncedPoolPermit: jest.fn(async () => { throw new Error('relation does not exist'); }),
       looseKeyFromFreeform: jest.fn(() => null),
     }));
@@ -248,6 +353,6 @@ describe('county-permits merge', () => {
     }));
     const result = await lookupPoolPermitsByParcel({ county: 'Manatee', parcelId: '1234567890' });
     expect(result.poolPermit).toMatchObject({ permitNo: 'BLD2601-0001' });
-    jest.dontMock('../services/property-lookup/manatee-pool-permit-sync');
+    jest.dontMock('../services/property-lookup/manatee-permit-sync');
   });
 });

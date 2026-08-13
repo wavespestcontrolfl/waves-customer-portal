@@ -1254,7 +1254,7 @@ const gates = {
   // returns {skipped:'gated'} before any fetch or DB read; the read path
   // (county-permits.js) is ungated — it just sees an empty table. Same
   // CALL-time gateEnvValue contract as visionDelta. Kill switch: unset.
-  poolPermitSync: gateEnvValue('GATE_POOL_PERMIT_SYNC'),
+  permitSync: gateEnvValue('GATE_PERMIT_SYNC'),
 
   // Weekly autonomous vendor price scan -> stages a price-match draft for the
   // SiteOne rep (never auto-sends; a human reviews + sends from /admin/price-match).

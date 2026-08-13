@@ -126,7 +126,7 @@ async function lookupManateePermits(pin, timeoutMs, address) {
   try {
     // Lazy require: keeps this module free of a load-time db dependency
     // (tests drive it with a mocked global.fetch only).
-    const { findSyncedPoolPermit, looseKeyFromFreeform } = require('./manatee-pool-permit-sync');
+    const { findSyncedPoolPermit, looseKeyFromFreeform } = require('./manatee-permit-sync');
     const synced = await findSyncedPoolPermit({
       parcelPin: pin,
       looseKey: looseKeyFromFreeform(address),

@@ -24,7 +24,7 @@
  * Sync cadence: weekly cron (scheduler.js), trailing REFRESH_DAYS window so
  * statuses keep moving (Permit Issued → Closed). First enabled run on an
  * empty table backfills from BACKFILL_START in 6-month chunks. Everything
- * is inert unless GATE_POOL_PERMIT_SYNC is set (gate checked inside
+ * is inert unless GATE_PERMIT_SYNC is set (gate checked inside
  * syncPoolPermits — single source of truth), and every failure is
  * fail-open: the lookup path treats a missing/stale table as "no signal".
  *
@@ -39,13 +39,34 @@ const { gateEnvValue } = require('../../config/feature-gates');
 const { addressKey } = require('../customer-properties');
 
 const ACA_BASE = 'https://aca-prod.accela.com/MANATEE/Report/';
-const REPORT_QS = 'module=&reportID=22615&reportType=LINK_REPORT_LIST';
-const PARAM_URL = `${ACA_BASE}ReportParameter.aspx?${REPORT_QS}`;
-const SHOW_URL = `${ACA_BASE}ShowReport.aspx?${REPORT_QS}`;
-// Field ids on the parameter form (Issued Date From / To). Live-probed;
-// overridable without a deploy if the county rebuilds the report.
-const DATE_FROM_FIELD = process.env.MANATEE_POOL_REPORT_DATE_FROM_FIELD || 'Date_26133';
-const DATE_TO_FIELD = process.env.MANATEE_POOL_REPORT_DATE_TO_FIELD || 'Date_26134';
+// Report registry (all live-probed 2026-08-13). Each report's parameter
+// form has its own date-field ids; overridable without a deploy if the
+// county rebuilds a report. The pool report is Pool-Spa records only; the
+// two construction reports carry building-type/type-of-work vocabulary
+// (no pool/enclosure/re-roof categories exist in any public report).
+const REPORTS = {
+  pool: {
+    reportId: 22615,
+    dateFromField: process.env.MANATEE_POOL_REPORT_DATE_FROM_FIELD || 'Date_26133',
+    dateToField: process.env.MANATEE_POOL_REPORT_DATE_TO_FIELD || 'Date_26134',
+  },
+  // "Permits Issued by Date Range" — issued building permits (construction
+  // start). Windowed by ISSUED date.
+  under_construction: {
+    reportId: 17907,
+    dateFromField: process.env.MANATEE_UC_REPORT_DATE_FROM_FIELD || 'Date_21665',
+    dateToField: process.env.MANATEE_UC_REPORT_DATE_TO_FIELD || 'Date_21666',
+  },
+  // "Certificates of Occupancy Issued by Date Range" — construction end /
+  // brand-new-home ground truth. Windowed by CO date.
+  cos: {
+    reportId: 17709,
+    dateFromField: process.env.MANATEE_CO_REPORT_DATE_FROM_FIELD || 'Date_21431',
+    dateToField: process.env.MANATEE_CO_REPORT_DATE_TO_FIELD || 'Date_21432',
+  },
+};
+const reportParamUrl = (reportId) => `${ACA_BASE}ReportParameter.aspx?module=&reportID=${reportId}&reportType=LINK_REPORT_LIST`;
+const reportShowUrl = (reportId) => `${ACA_BASE}ShowReport.aspx?module=&reportID=${reportId}&reportType=LINK_REPORT_LIST`;
 
 const DEFAULT_TIMEOUT_MS = 60000;
 const REFRESH_DAYS = 180;
@@ -72,10 +93,10 @@ function hiddenValue(html, name) {
   return m ? m[1] : '';
 }
 
-async function fetchWithSession(url, { cookies, body, timeoutMs }) {
+async function fetchWithSession(url, { cookies, body, timeoutMs, referer }) {
   const headers = {
     'User-Agent': USER_AGENT,
-    Referer: PARAM_URL,
+    Referer: referer,
     Origin: 'https://aca-prod.accela.com',
   };
   if (cookies.length) headers.Cookie = cookies.join('; ');
@@ -106,9 +127,11 @@ async function fetchWithSession(url, { cookies, body, timeoutMs }) {
  * One report window → raw CSV text. Throws on any failure (callers decide
  * whether a window failure aborts the sync).
  */
-async function fetchPoolPermitCsv(fromMdy, toMdy, timeoutMs = syncTimeoutMs()) {
+async function fetchAcaReportCsv({ reportId, dateFromField, dateToField }, fromMdy, toMdy, timeoutMs = syncTimeoutMs()) {
   const cookies = [];
-  const paramPage = await (await fetchWithSession(PARAM_URL, { cookies, timeoutMs })).text();
+  const paramUrl = reportParamUrl(reportId);
+  const referer = paramUrl;
+  const paramPage = await (await fetchWithSession(paramUrl, { cookies, timeoutMs, referer })).text();
   const form = new URLSearchParams({
     __EVENTTARGET: 'btnSave',
     __EVENTARGUMENT: '',
@@ -117,21 +140,26 @@ async function fetchPoolPermitCsv(fromMdy, toMdy, timeoutMs = syncTimeoutMs()) {
     __VIEWSTATEENCRYPTED: '',
     __EVENTVALIDATION: hiddenValue(paramPage, '__EVENTVALIDATION'),
     ACA_CS_FIELD: hiddenValue(paramPage, 'ACA_CS_FIELD'),
-    [DATE_FROM_FIELD]: fromMdy,
-    [`${DATE_FROM_FIELD}_ext_ClientState`]: '',
-    [DATE_TO_FIELD]: toMdy,
-    [`${DATE_TO_FIELD}_ext_ClientState`]: '',
+    [dateFromField]: fromMdy,
+    [`${dateFromField}_ext_ClientState`]: '',
+    [dateToField]: toMdy,
+    [`${dateToField}_ext_ClientState`]: '',
   });
-  const submit = await fetchWithSession(PARAM_URL, { cookies, body: form.toString(), timeoutMs });
+  const submit = await fetchWithSession(paramUrl, { cookies, body: form.toString(), timeoutMs, referer });
   const submitBody = await submit.text();
   if (!submitBody.includes('ShowReport.aspx')) {
     throw new Error('report submit did not yield a ShowReport redirect');
   }
-  const report = await fetchWithSession(SHOW_URL, { cookies, timeoutMs });
+  const report = await fetchWithSession(reportShowUrl(reportId), { cookies, timeoutMs, referer });
   const ctype = String(report.headers.get('content-type') || '');
   const text = await report.text();
   if (!/csv/i.test(ctype)) throw new Error(`report output is not CSV (${ctype || 'no content-type'})`);
   return text;
+}
+
+/** Pool-report window (kept as the named entry the tests and docs pin). */
+async function fetchPoolPermitCsv(fromMdy, toMdy, timeoutMs = syncTimeoutMs()) {
+  return fetchAcaReportCsv(REPORTS.pool, fromMdy, toMdy, timeoutMs);
 }
 
 /**
@@ -270,7 +298,7 @@ function windowsSince(startIso, chunkMonths) {
  * aborts the run (partial windows would look like "synced through today").
  */
 async function syncPoolPermits({ timeoutMs } = {}) {
-  if (!gateEnvValue('GATE_POOL_PERMIT_SYNC')) return { skipped: 'gated' };
+  if (!gateEnvValue('GATE_PERMIT_SYNC')) return { skipped: 'gated' };
   const t0 = Date.now();
   const existing = await db('pool_permit_records').count('id as n').first();
   const empty = !Number(existing?.n || 0);
@@ -335,18 +363,215 @@ async function findSyncedPoolPermit({ parcelPin, addrKey, looseKey } = {}) {
   };
 }
 
+// ── Construction reports (Under Construction + COs Issued) ──
+
+const CONSTRUCTION_BACKFILL_START = '2024-01-01';
+
+/**
+ * The construction reports prepend HTML heading lines before the CSV
+ * proper — the real header is the first line starting `"Permit"`.
+ */
+function stripReportPreamble(text) {
+  const lines = String(text || '').replace(/^﻿/, '').split(/\r?\n/);
+  const start = lines.findIndex((l) => l.startsWith('"Permit"'));
+  if (start === -1) throw new Error('construction report CSV header not found');
+  return lines.slice(start).join('\n');
+}
+
+const trimmed = (v) => String(v ?? '').trim() || null;
+
+function reportDateToIso(v) {
+  const s = String(v ?? '').trim();
+  if (!s) return null;
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+}
+
+/** Last 5-digit group in a one-line job address is the zip. */
+function zipFromJobAddress(address) {
+  const zips = String(address || '').match(/\b\d{5}\b/g);
+  return zips ? zips[zips.length - 1] : null;
+}
+
+/**
+ * One construction-report CSV row → a construction_permit_records row, or
+ * null. The two reports share most columns but differ on status/type-of-
+ * work: under_construction has CurrentStatus + TypeofWork; cos has Status +
+ * CODate. Keys absent from a report are OMITTED from the row so the upsert
+ * merge never nulls a value the other report wrote.
+ */
+function normalizeConstructionRow(row, reportKey) {
+  const permitNo = trimmed(row.Permit);
+  if (!permitNo) return null;
+  const address = trimmed(reportKey === 'under_construction' ? row.JobAddress : (row.JobAddress ?? row['Job Address']));
+  const jobValue = Number(String(row.JobValue ?? '').replace(/[^0-9.]/g, ''));
+  const out = {
+    county: 'Manatee',
+    permit_no: permitNo,
+    status: trimmed(reportKey === 'under_construction' ? row.CurrentStatus : row.Status),
+    permit_type: trimmed(row.Type),
+    issued_date: reportDateToIso(row.IssuedDate),
+    job_value: Number.isFinite(jobValue) && jobValue > 0 ? jobValue : null,
+    address_raw: address,
+    zip: zipFromJobAddress(address),
+    parcel_raw: trimmed(row.Parcel),
+    parcel_pin: parcelPinFromRaw(row.Parcel),
+    address_loose_key: looseKeyFromFreeform(address),
+    contractor_name: trimmed(row.BusName),
+    contractor_license: trimmed(row['Lic Number']),
+    owner_name: trimmed(row.Owner),
+  };
+  if (reportKey === 'under_construction') out.type_of_work = trimmed(row.TypeofWork);
+  if (reportKey === 'cos') out.co_date = reportDateToIso(row.CODate);
+  return out;
+}
+
+function parseConstructionCsv(csvText, reportKey) {
+  const records = parseCsv(stripReportPreamble(csvText), {
+    columns: true,
+    skip_empty_lines: true,
+    relax_column_count: true,
+  });
+  return records.map((r) => normalizeConstructionRow(r, reportKey)).filter(Boolean);
+}
+
+async function upsertConstructionRows(rows) {
+  let written = 0;
+  for (const row of rows) {
+    const merge = { ...row, last_seen_at: db.fn.now() };
+    delete merge.permit_no;
+    delete merge.county;
+    await db('construction_permit_records')
+      .insert({ ...row, last_seen_at: db.fn.now() })
+      .onConflict('permit_no')
+      .merge(merge);
+    written += 1;
+  }
+  return written;
+}
+
+/**
+ * Sync both construction reports. Same shape as syncPoolPermits: gated
+ * inside, empty table → chunked backfill, else trailing REFRESH_DAYS
+ * window; a window failure aborts (partial windows would read as synced).
+ */
+async function syncConstructionPermits({ timeoutMs } = {}) {
+  if (!gateEnvValue('GATE_PERMIT_SYNC')) return { skipped: 'gated' };
+  const t0 = Date.now();
+  const existing = await db('construction_permit_records').count('id as n').first();
+  const empty = !Number(existing?.n || 0);
+  const windows = empty
+    ? windowsSince(CONSTRUCTION_BACKFILL_START, BACKFILL_CHUNK_MONTHS)
+    : (() => {
+      const from = new Date(Date.now() - REFRESH_DAYS * 24 * 60 * 60 * 1000);
+      return [[mdy(from), mdy(new Date())]];
+    })();
+  let fetched = 0;
+  let written = 0;
+  for (const reportKey of ['under_construction', 'cos']) {
+    for (const [from, to] of windows) {
+      const csv = await fetchAcaReportCsv(REPORTS[reportKey], from, to, timeoutMs);
+      const rows = parseConstructionCsv(csv, reportKey);
+      fetched += rows.length;
+      written += await upsertConstructionRows(rows);
+    }
+  }
+  logger.info('[permit-sync] construction sync complete', {
+    mode: empty ? 'backfill' : 'refresh',
+    windows: windows.length,
+    fetched,
+    written,
+    elapsedMs: Date.now() - t0,
+  });
+  return { mode: empty ? 'backfill' : 'refresh', windows: windows.length, fetched, written };
+}
+
+/**
+ * Scheduler entry: both synced sources under one gate. Each section fails
+ * independently — a broken construction report must not stop the pool sync
+ * (and vice versa); failures surface in the returned errors array.
+ */
+async function syncPermits(options = {}) {
+  if (!gateEnvValue('GATE_PERMIT_SYNC')) return { skipped: 'gated' };
+  const out = { errors: [] };
+  try {
+    out.pool = await syncPoolPermits(options);
+  } catch (err) {
+    out.errors.push(`pool: ${err?.message || err}`);
+  }
+  try {
+    out.construction = await syncConstructionPermits(options);
+  } catch (err) {
+    out.errors.push(`construction: ${err?.message || err}`);
+  }
+  return out;
+}
+
+const CONSTRUCTION_ACTIVE_MONTHS = 24;
+const NEW_BUILD_CO_MONTHS = 18;
+
+function monthsAgoIso(months) {
+  const d = new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Newest synced construction permit for a parcel/address, shaped as
+ * evidence for the lookup:
+ *   underConstruction — permit issued within 24 months, no CO, status not
+ *     terminal → satellite imagery may predate the build (stale-imagery
+ *     signal for the vision pass and estimator surfaces).
+ *   newBuild — CO issued within 18 months → brand-new completed home.
+ * Cheap read path, fail-open at the caller. Null when nothing matches.
+ */
+async function findConstructionActivity({ parcelPin, looseKey } = {}) {
+  if (!parcelPin && !looseKey) return null;
+  const query = db('construction_permit_records')
+    .orderBy('issued_date', 'desc')
+    .first();
+  query.where((b) => {
+    if (parcelPin) b.where('parcel_pin', String(parcelPin));
+    if (parcelPin && looseKey) b.orWhere('address_loose_key', looseKey);
+    else if (looseKey) b.where('address_loose_key', looseKey);
+  });
+  const row = await query;
+  if (!row) return null;
+  const issuedAt = row.issued_date ? new Date(row.issued_date).toISOString().slice(0, 10) : null;
+  const coIssuedAt = row.co_date ? new Date(row.co_date).toISOString().slice(0, 10) : null;
+  const terminal = /^(closed|canceled|withdrawn)$/i.test(String(row.status || ''));
+  return {
+    permitNo: row.permit_no,
+    status: row.status || null,
+    permitType: row.permit_type || null,
+    typeOfWork: row.type_of_work || null,
+    issuedAt,
+    coIssuedAt,
+    underConstruction: Boolean(!coIssuedAt && !terminal && issuedAt && issuedAt >= monthsAgoIso(CONSTRUCTION_ACTIVE_MONTHS)),
+    newBuild: Boolean(coIssuedAt && coIssuedAt >= monthsAgoIso(NEW_BUILD_CO_MONTHS)),
+  };
+}
+
 module.exports = {
   syncPoolPermits,
+  syncConstructionPermits,
+  syncPermits,
   findSyncedPoolPermit,
+  findConstructionActivity,
   looseAddressKey,
   looseKeyFromFreeform,
   _private: {
     fetchPoolPermitCsv,
+    fetchAcaReportCsv,
     parsePoolPermitCsv,
+    parseConstructionCsv,
     normalizeRow,
+    normalizeConstructionRow,
+    stripReportPreamble,
+    zipFromJobAddress,
     parcelPinFromRaw,
     windowsSince,
     hiddenValue,
     mdy,
+    REPORTS,
   },
 };
