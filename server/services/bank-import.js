@@ -239,7 +239,7 @@ async function retryPendingReconciliations() {
         // onlyIfUnreconciled: if a human reconciled between our read and
         // this write, the guard skips atomically — their state stands, and
         // "someone reconciled" resolves the pending flag either way.
-        const result = await reconcilePayout(payout.id, Number(row.amount), `Auto-matched to bank import row ${row.id} (retry)`, 'bank-import', 'confirmed', { onlyIfUnreconciled: true });
+        const result = await reconcilePayout(payout.id, Number(row.amount), `Auto-matched to bank import row ${row.id} (retry)`, `bank-import:${row.id}`, 'confirmed', { onlyIfUnreconciled: true });
         done = true;
         if (!(result && result.skipped)) retried++;
       } catch (err) {
@@ -253,9 +253,10 @@ async function retryPendingReconciliations() {
   }
 
   // Reversal side: an unlink whose reconciliation reversal failed left
-  // suggestion.reconcileReversalPending = <payoutId>. Retry under the same
-  // onlyIfReconciledBy guard (atomic inside reconcilePayout) — a guard miss
-  // means a human owns the state now, which also resolves the flag.
+  // suggestion.reconcileReversalPending = <payoutId>. Retry under the
+  // ROW-SPECIFIC author guard (atomic inside reconcilePayout) — the reversal
+  // can only undo the reconciliation THIS row authored; a guard miss means a
+  // human or a newer claim owns the state now, which also resolves the flag.
   const reversals = await db('bank_transactions')
     .whereRaw("suggestion->>'reconcileReversalPending' is not null")
     .select('id', 'amount', 'suggestion');
@@ -265,7 +266,7 @@ async function retryPendingReconciliations() {
     if (!payoutId) continue;
     try {
       const { reconcilePayout } = require('./stripe-banking');
-      const result = await reconcilePayout(payoutId, Number(row.amount), `Unlinked from bank import row ${row.id} (retry)`, 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
+      const result = await reconcilePayout(payoutId, Number(row.amount), `Unlinked from bank import row ${row.id} (retry)`, `bank-import:${row.id}`, 'rejected', { onlyIfReconciledBy: `bank-import:${row.id}` });
       if (!(result && result.skipped)) reversed++;
       const { reconcileReversalPending, ...rest } = row.suggestion || {};
       await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
@@ -355,31 +356,43 @@ async function runDeterministicMatching() {
       const exact = candidates.filter(c => centsEqual(c.amount, row.amount));
       if (candidates.length === 1 && exact.length === 1) {
         try {
+          // Reconciliation intent is persisted ATOMICALLY with the claim:
+          // the reconcilePending flag rides in the same CAS update, so a
+          // crash anywhere before the echo lands still leaves a retryable
+          // marker for the sweep — never a linked-but-unreconciled payout
+          // that nothing ever revisits.
+          const needsEcho = !exact[0].reconciled;
+          const pendingSuggestion = { ...(row.suggestion || {}), reconcilePending: true };
           const changed = await db('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
-            .update({ status: 'matched_payout', matched_payout_id: exact[0].id, match_method: 'payout_amount_date', matched_at: new Date(), updated_at: new Date() });
+            .update({
+              status: 'matched_payout',
+              matched_payout_id: exact[0].id,
+              match_method: 'payout_amount_date',
+              matched_at: new Date(),
+              updated_at: new Date(),
+              ...(needsEcho ? { suggestion: pendingSuggestion } : {}),
+            });
           if (changed) {
             summary.payoutsLinked++;
             // Extend the EXISTING reconciliation mechanism (bank_reconciliation
             // + stripe_payouts.reconciled via stripe-banking) rather than
             // keeping a parallel Tax-only status — /admin/banking must see the
             // same truth. Failure here never un-links the row: the link is
-            // real, reconciliation is the ledger echo, and the error surfaces.
-            if (!exact[0].reconciled) {
+            // real, reconciliation is the ledger echo, and the flag retries.
+            if (needsEcho) {
               try {
                 const { reconcilePayout } = require('./stripe-banking');
                 // onlyIfUnreconciled (row-locked): a human who reconciled
                 // this payout since our candidate read is never overwritten.
-                await reconcilePayout(exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`, 'bank-import', 'confirmed', { onlyIfUnreconciled: true });
+                // Author is row-specific so a later reversal can only undo
+                // ITS OWN reconciliation, never a newer claim's.
+                await reconcilePayout(exact[0].id, row.amount, `Auto-matched to bank import row ${row.id}`, `bank-import:${row.id}`, 'confirmed', { onlyIfUnreconciled: true });
+                const { reconcilePending, ...rest } = pendingSuggestion;
+                await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
               } catch (reconErr) {
-                // The link is real; the echo failed. Flag the row so
-                // retryPendingReconciliations picks it up on every later
-                // pass instead of the inconsistency being logged and lost.
-                logger.warn(`[bank-import] payout ${exact[0].id} linked but reconciliation write failed: ${reconErr.message}`);
-                await db('bank_transactions').where({ id: row.id }).update({
-                  suggestion: { ...(row.suggestion || {}), reconcilePending: true },
-                  updated_at: new Date(),
-                });
+                // flag already persisted with the claim — the sweep retries
+                logger.warn(`[bank-import] payout ${exact[0].id} linked but reconciliation write failed (sweep will retry): ${reconErr.message}`);
               }
             }
           }

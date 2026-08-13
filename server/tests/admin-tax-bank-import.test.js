@@ -374,8 +374,9 @@ describe('unlink (gate on)', () => {
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.reconciliation).toBe('reversed');
-    // the guard rides INTO reconcilePayout, where it's checked under a row lock
-    expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('bt-1'), 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
+    // the guard rides INTO reconcilePayout (checked under a row lock) and is
+    // ROW-SPECIFIC: only the reconciliation this row authored can be undone
+    expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('bt-1'), 'bank-import:bt-1', 'rejected', { onlyIfReconciledBy: 'bank-import:bt-1' });
     // the unlink update itself carries the reversal-pending flag (crash-safe),
     // and a follow-up update clears it once the reversal lands
     expect(state.bankUpdates[0].patch.suggestion.reconcileReversalPending).toBe('po-1');

@@ -1743,7 +1743,10 @@ router.get('/bank-import/transactions', async (req, res, next) => {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     // limit+1 sentinel row answers hasMore without a second count query.
-    let q = db('bank_transactions').orderBy('txn_date', 'desc').orderBy('created_at', 'desc').limit(limit + 1).offset(offset);
+    // id tie-breaker makes the order TOTAL — bulk-inserted rows share
+    // txn_date+created_at, and an unstable order across offset pages would
+    // repeat some rows and silently drop others from review.
+    let q = db('bank_transactions').orderBy('txn_date', 'desc').orderBy('created_at', 'desc').orderBy('id', 'desc').limit(limit + 1).offset(offset);
     if (status) q = q.where('status', String(status));
     if (account) q = q.where('account_label', String(account));
     if (month && /^\d{4}-\d{2}$/.test(String(month))) {
@@ -1951,9 +1954,11 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       try {
         const { reconcilePayout } = require('../services/stripe-banking');
         // The onlyIfReconciledBy guard is checked under a row lock INSIDE
-        // reconcilePayout — a human's reconciliation (or none at all) is
-        // skipped atomically, never clobbered by this automated reversal.
-        const result = await reconcilePayout(row.matched_payout_id, Number(row.amount), `Unlinked from bank import row ${row.id}`, 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
+        // reconcilePayout, and the author is ROW-SPECIFIC: this reversal can
+        // only undo the reconciliation THIS row authored. A human's
+        // reconciliation — or a newer claim by another bank row after this
+        // unlink released the payout — is skipped atomically, never clobbered.
+        const result = await reconcilePayout(row.matched_payout_id, Number(row.amount), `Unlinked from bank import row ${row.id}`, `bank-import:${row.id}`, 'rejected', { onlyIfReconciledBy: `bank-import:${row.id}` });
         reconciliation = result && result.skipped ? 'kept' : 'reversed';
         const { reconcileReversalPending, ...rest } = suggestion;
         await db('bank_transactions').where({ id: row.id }).update({ suggestion: rest, updated_at: new Date() });
