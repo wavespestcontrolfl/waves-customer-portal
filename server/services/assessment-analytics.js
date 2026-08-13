@@ -658,17 +658,16 @@ async function getCustomerBenchmark(customerId) {
 // failure the attribution is reverted so the next weekly run retries.
 async function backfillContradictionAttribution(existing, wikiEntryId) {
   if (!existing || existing.wiki_entry_id || !wikiEntryId) return false;
+  // Gate FIRST, persist second: attribution written before a successful gate
+  // would make this function's null-check skip the row on every later run
+  // while the page stayed trusted (a crash between the two writes used to
+  // strand exactly that state). The reverse crash window — gated page,
+  // attribution not yet persisted — self-heals: the row is still
+  // unattributed, so the next weekly run re-gates and persists.
+  await recomputeEntryReviewGate(wikiEntryId, { assumeOpenIds: [existing.id] });
   await db('knowledge_contradictions')
     .where({ id: existing.id })
     .update({ wiki_entry_id: wikiEntryId });
-  try {
-    await recomputeEntryReviewGate(wikiEntryId, { assumeOpenIds: [existing.id] });
-  } catch (gateErr) {
-    try {
-      await db('knowledge_contradictions').where({ id: existing.id }).update({ wiki_entry_id: null });
-    } catch { /* revert best-effort */ }
-    throw gateErr;
-  }
   return true;
 }
 

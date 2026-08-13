@@ -287,7 +287,7 @@ test('an existing open row with null attribution is backfilled and gated when th
   }));
 });
 
-test('backfill reverts the attribution when the gate recompute fails', async () => {
+test('backfill gates FIRST — a failed gate persists no attribution at all', async () => {
   recomputeEntryReviewGate.mockRejectedValueOnce(new Error('gate write failed'));
   const updates = [];
   const dbMock = makeDb({
@@ -307,10 +307,11 @@ test('backfill reverts the attribution when the gate recompute fails', async () 
 
   const result = await analytics.detectContradictions();
 
-  // The thrown gate error is swallowed by the outer catch; attribution must
-  // have been reverted so the next weekly run retries the backfill.
+  // Gate-then-persist: a crash/failure between the writes must leave the row
+  // unattributed (so the next weekly run retries), never attributed-but-
+  // ungated (which the null-check would skip forever).
   expect(result.contradictions).toBe(0);
-  expect(updates).toEqual([{ wiki_entry_id: 'wiki-bridged' }, { wiki_entry_id: null }]);
+  expect(updates).toEqual([]);
 });
 
 test('peak-vs-shoulder rolls the insert back when the gate recompute fails', async () => {

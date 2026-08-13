@@ -555,9 +555,27 @@ const AgronomicWiki = {
           const { etCalendarDayOf, etDateString, parseETDateTime } = require('../utils/datetime-et');
           // The post-assessment's snapshot only represents application-day
           // conditions when the assessment happened ON the treatment day —
-          // the legacy pairing accepts assessments up to 60 days later.
+          // the legacy pairing accepts assessments up to 60 days later. And
+          // even a same-day assessment can carry a STALE snapshot:
+          // attachWeather persists fawn-weather's cached _lastSnapshot on
+          // fetch failure, with no age limit. So the snapshot's own recorded
+          // moment (observation_time when present, else fetch timestamp)
+          // must ALSO land on the treatment day; missing or unparseable
+          // snapshot metadata fails closed.
           const postIsTreatmentDay = etCalendarDayOf(post.service_date) === etCalendarDayOf(treatmentDate);
-          let weather = postIsTreatmentDay
+          let snapshotOnTreatmentDay = false;
+          if (postIsTreatmentDay && post.fawn_snapshot) {
+            try {
+              const snap = typeof post.fawn_snapshot === 'string' ? JSON.parse(post.fawn_snapshot) : post.fawn_snapshot;
+              const moment = snap?.observation_time ?? snap?.timestamp;
+              if (moment != null) {
+                const parsed = parseETDateTime(String(moment));
+                snapshotOnTreatmentDay = Number.isFinite(parsed?.getTime?.())
+                  && etDateString(parsed) === etCalendarDayOf(treatmentDate);
+              }
+            } catch { /* unparseable snapshot fails closed */ }
+          }
+          let weather = snapshotOnTreatmentDay
             && (post.fawn_temp_f != null || post.fawn_humidity_pct != null || post.fawn_rainfall_7d != null)
             ? { temp_f: post.fawn_temp_f, humidity_pct: post.fawn_humidity_pct, rainfall_in: post.fawn_rainfall_7d }
             : null;
@@ -1198,17 +1216,24 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         .orderBy('last_data_update', 'asc')
         .limit(10);
 
+      // The page updaters swallow their own exceptions and return null — an
+      // existing product/track/condition page coming back null IS a failure
+      // (a seasonal page's null is a legitimate zero-outcome skip). Any
+      // failure withholds the weekly success marker so the run retries
+      // tomorrow; already-refreshed pages skip cheaply via the unchanged-
+      // fingerprint guard.
       let refreshed = 0;
+      let failed = 0;
       for (const page of stalePages) {
         try {
           if (page.category === 'product') {
             const productName = page.title.replace(/^Product:\s*/i, '');
-            await AgronomicWiki.updateProductPage(productName);
-            refreshed++;
+            const entry = await AgronomicWiki.updateProductPage(productName);
+            if (entry) refreshed++; else failed++;
           } else if (page.category === 'track') {
             const trackId = page.slug.replace('track/', '');
-            await AgronomicWiki.updateTrackPage(trackId);
-            refreshed++;
+            const entry = await AgronomicWiki.updateTrackPage(trackId);
+            if (entry) refreshed++; else failed++;
           } else if (page.category === 'seasonal') {
             const monthSlug = page.slug.replace('seasonal/', '');
             const monthNames = ['january','february','march','april','may','june','july','august','september','october','november','december'];
@@ -1219,10 +1244,11 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
             }
           } else if (page.category === 'condition') {
             const conditionName = page.title.replace(/^Condition:\s*/i, '');
-            await AgronomicWiki.updateConditionPage(conditionName);
-            refreshed++;
+            const entry = await AgronomicWiki.updateConditionPage(conditionName);
+            if (entry) refreshed++; else failed++;
           }
         } catch (err) {
+          failed++;
           logger.error(`[agronomic-wiki] Failed to refresh page ${page.slug}: ${err.message}`);
         }
       }
@@ -1230,6 +1256,16 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       // 3. Generate seasonal page for current month
       const currentMonth = new Date().getMonth() + 1;
       await AgronomicWiki.updateSeasonalPage(currentMonth);
+
+      if (failed > 0) {
+        // Partial failure: no weekly_cron success marker — weeklyRefreshIfDue
+        // retries tomorrow, and the scheduler wrapper surfaces the error to
+        // job_health via the returned { error }.
+        await logUpdate('error', null, `Weekly refresh: ${failed} page refresh(es) failed (${refreshed} succeeded)`, {
+          triggerType: 'weekly_cron_error',
+        });
+        return { refreshed, failed, staleFound: stalePages.length, error: `${failed} page refresh(es) failed` };
+      }
 
       await logUpdate('lint', null, `Weekly refresh: ${refreshed} stale pages refreshed, seasonal page updated for month ${currentMonth}`, {
         triggerType: 'weekly_cron',
