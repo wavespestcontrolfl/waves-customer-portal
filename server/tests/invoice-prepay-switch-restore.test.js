@@ -18,6 +18,12 @@ jest.mock('../services/invoice-followups', () => ({
   scheduleForInvoice: jest.fn(async () => undefined),
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
+// The restore serializes on the SAME per-customer advisory lock every prepay
+// mint takes (lazily required to dodge the admin-customers ⇄ invoice cycle).
+const mockLockOverlap = jest.fn(async () => {});
+jest.mock('../routes/admin-customers', () => ({
+  _private: { lockAndAssertNoAnnualPrepayOverlap: (...args) => mockLockOverlap(...args) },
+}));
 
 const InvoiceService = require('../services/invoice');
 
@@ -71,6 +77,8 @@ function conn({ rows = [VOIDED_ROW], replacement = undefined, liveOnVisit = unde
 describe('restoreSwitchSupersededInvoicesForPrepay', () => {
   let createSpy;
   beforeEach(() => {
+    mockLockOverlap.mockReset();
+    mockLockOverlap.mockResolvedValue(undefined);
     createSpy = jest.spyOn(InvoiceService, 'create')
       .mockResolvedValue({ id: 'inv-new', invoice_number: 'WPC-2026-0402' });
   });
@@ -119,6 +127,20 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
   test('NEVER restores beside live AR on the same visit — a completed visit already re-billed', async () => {
     const c = conn({ liveOnVisit: { id: 'inv-completion', invoice_number: 'WPC-2026-0410' } });
     const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
+    expect(restored).toEqual([]);
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  test('takes the shared prepay advisory lock, and SKIPS when a live term stands', async () => {
+    const c = conn();
+    await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
+    expect(mockLockOverlap).toHaveBeenCalledWith(c, 'cust-1', expect.any(String), false, expect.any(String));
+
+    const overlapErr = new Error('live term');
+    overlapErr.annualPrepayOverlap = { error: 'live term' };
+    mockLockOverlap.mockRejectedValue(overlapErr);
+    createSpy.mockClear();
+    const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', conn());
     expect(restored).toEqual([]);
     expect(createSpy).not.toHaveBeenCalled();
   });

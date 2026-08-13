@@ -4168,6 +4168,27 @@ const InvoiceService = {
         .first("id", "invoice_number", "status", "line_items", "notes", "title",
           "scheduled_service_id", "customer_id");
       if (!row || String(row.status || "").toLowerCase() !== "void") return null;
+      // Serialize against EVERY prepay mint with the same per-customer
+      // advisory lock + overlap assert they all take (Codex on-site-switch
+      // P0 r9): without it, a new Customer 360 / on-site mint could commit a
+      // fresh term while this restore recreates the per-application invoice
+      // — both collectible. A live term ⇒ skip the restore (billing belongs
+      // to the new coverage), never throw the caller's sync over. Lazy
+      // require: admin-customers requires this module at load, so a
+      // top-level import would be a cycle.
+      try {
+        const { lockAndAssertNoAnnualPrepayOverlap } = require("../routes/admin-customers")._private;
+        await lockAndAssertNoAnnualPrepayOverlap(
+          trx, row.customer_id, etDateString(), false,
+          "Customer already has an annual prepay term through",
+        );
+      } catch (lockErr) {
+        if (lockErr && lockErr.annualPrepayOverlap) {
+          logger.warn(`[invoice] switch-supersede restore skipped for ${row.invoice_number || row.id}: a live annual prepay term stands — restoring would double-bill`);
+          return null;
+        }
+        throw lockErr;
+      }
       const restoreMarker = prepaySwitchRestoreMarker(row.id);
       const existing = await trx("invoices")
         .where("notes", "like", `%${restoreMarker}%`)

@@ -2596,7 +2596,12 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           try {
             await require('./invoice').restoreSwitchSupersededInvoicesForPrepay(updated.prepay_invoice_id, conn);
           } catch (err) {
-            logger.warn(`[annual-prepay] switch-superseded restore skipped for term ${updated.id}: ${err.message}`);
+            // The markers are durable, so this is recoverable — but only by a
+            // human who knows: the void succeeded and the superseded
+            // per-application AR is still missing. ERROR (Sentry-visible),
+            // with the fix spelled out (Codex on-site-switch P0 r9: a warn
+            // here was a permanent silent AR loss).
+            logger.error(`[annual-prepay] FIX: switch-superseded restore FAILED for term ${updated.id} (prepay invoice ${updated.prepay_invoice_id}): ${err.message}. The customer's per-application invoice is still void — re-run POST /admin/schedule/<visitId>/prepay-switch/undo or rebuild it from Invoices.`);
           }
         }
       }

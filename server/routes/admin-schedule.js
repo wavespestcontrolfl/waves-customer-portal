@@ -9295,7 +9295,7 @@ router.get('/annual-prepay-availability', requireAdmin, async (_req, res, next) 
 //               and persists its own estimated_price, so a draft-shaped
 //               payload replayed after save could invoice a per-visit amount
 //               the committed series never carried.
-async function computeAnnualPrepayPreview(query) {
+async function computeAnnualPrepayPreview(query, conn = db) {
     // Dark by default (GATE_PREPAY_ON_BOOK): 404 rather than a blockReason —
     // while the lane is off the endpoint is unobservable, exactly like the
     // /secure select-plan route. GATE_ONSITE_PREPAY_SWITCH opens the SAME
@@ -9336,14 +9336,14 @@ async function computeAnnualPrepayPreview(query) {
     // replaced.
     let anchorEstimateId = null;
     if (scheduledServiceId) {
-      const visit = await db('scheduled_services')
+      const visit = await conn('scheduled_services')
         .where({ id: scheduledServiceId })
         .first('id', 'customer_id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
           'recurring_pattern', 'recurring_interval_days', 'recurring_parent_id', 'skip_weekends',
           'recurring_ongoing', 'booster_months', 'source_estimate_id');
       if (!visit) return { httpStatus: 404, httpBody: { error: 'Scheduled service not found' } };
       const parent = visit.recurring_parent_id
-        ? await db('scheduled_services')
+        ? await conn('scheduled_services')
           .where({ id: visit.recurring_parent_id })
           .first('id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
             'recurring_pattern', 'recurring_interval_days', 'skip_weekends', 'recurring_ongoing',
@@ -9368,7 +9368,7 @@ async function computeAnnualPrepayPreview(query) {
         }
         // Same provenance check the supersede WRITE runs, so the preview can
         // never offer a switch the write would refuse (and vice versa).
-        const target = await resolveAcceptedSwitchTarget(visit.id);
+        const target = await resolveAcceptedSwitchTarget(visit.id, conn);
         if (!target.ok) return blocked(target.blockReason);
         isAcceptedSwitch = true;
         anchorEstimateId = target.estimateId;
@@ -9380,7 +9380,7 @@ async function computeAnnualPrepayPreview(query) {
       // actually carries add-on lines billing outside its coverage.
       let addonCount;
       try {
-        addonCount = await db('scheduled_service_addons')
+        addonCount = await conn('scheduled_service_addons')
           .where({ scheduled_service_id: anchor.id })
           .count({ n: '*' })
           .first();
@@ -9399,7 +9399,7 @@ async function computeAnnualPrepayPreview(query) {
       let bookedVisitCount = null;
       if (anchor.recurring_ongoing === false) {
         try {
-          const seriesCount = await db('scheduled_services')
+          const seriesCount = await conn('scheduled_services')
             .where(function series() {
               this.where({ id: anchor.id }).orWhere({ recurring_parent_id: anchor.id });
             })
@@ -9521,7 +9521,7 @@ async function computeAnnualPrepayPreview(query) {
     }
     if (input.hasBoosters) return blocked('can’t be combined with booster months');
 
-    const customer = await db('customers')
+    const customer = await conn('customers')
       .where({ id: customerId })
       .whereNull('deleted_at')
       .first('id', 'property_type', 'billing_mode', 'waveguard_tier', 'monthly_rate');
@@ -9557,7 +9557,7 @@ async function computeAnnualPrepayPreview(query) {
     // funnel and the /secure lane).
     try {
       const PayerService = require('../services/payer');
-      const resolved = await PayerService.resolveForInvoice({ customerId, throwOnError: true });
+      const resolved = await PayerService.resolveForInvoice({ database: conn, customerId, throwOnError: true });
       if (resolved?.payerId) return blocked('isn’t available — this customer’s invoices bill to a third-party payer');
     } catch (payerErr) {
       logger.warn(`[schedule:prepay-preview] payer lookup failed for customer ${customerId}: ${payerErr.message} — refusing`);
@@ -9611,7 +9611,7 @@ async function computeAnnualPrepayPreview(query) {
     // term start, not today (Codex #3161 r3 P2) — the mint's own guard allows
     // termStart > activeTermEnd, so a renewal booked to begin after the
     // current term ends is a legitimate sale, not an overlap.
-    const overlapping = await db('annual_prepay_terms')
+    const overlapping = await conn('annual_prepay_terms')
       .where({ customer_id: customerId })
       .where(annualPrepayOverlapStatusClause())
       .orderBy('term_end', 'desc')
@@ -9630,6 +9630,7 @@ async function computeAnnualPrepayPreview(query) {
       const resolved = await resolveSupersededInvoices({
         visitIds: supersedeVisitIds,
         estimateId: anchorEstimateId,
+        conn,
       });
       if (!resolved.ok) return blocked(resolved.blockReason);
       supersedes = resolved.supersedes;
@@ -9732,16 +9733,15 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
 // the prepay existing, and none where both are payable.
 //
 // Every number is recomputed here via computeAnnualPrepayPreview — the
-// client sends only { chargeInPerson }. Delivery (send path) happens AFTER
-// commit; a failed send comes back as delivery.ok=false and the client runs
-// the void+restore compensation.
+// client sends NOTHING the server trusts. COLLECT-ONLY: the minted invoice
+// goes straight to the in-person tender; no pay link is ever sent from this
+// endpoint (send-later lives in Customer 360).
 //
 // Retry-safe: a lost response leaves a payment_pending term, so a retried
 // call fails the overlap assert (409) instead of minting a second year.
 router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
   try {
     if (!isEnabled('onsitePrepaySwitch')) return res.status(404).json({ error: 'Not found' });
-    const chargeInPerson = req.body?.chargeInPerson === true;
 
     // Server-derived eligibility + pricing — the same computation the sheet
     // previewed, re-run fresh so nothing stale or client-shaped is minted.
@@ -9817,15 +9817,31 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           throw err;
         }
 
+        // Lock the remaining PRICING INPUTS (Codex P0 r9): the recompute
+        // below prices from the series PARENT (a child visit inherits its
+        // rate/cadence), counts series children, and refuses on add-ons —
+        // all of which a concurrent editor could otherwise change mid-mint.
+        const anchorRowId = target.anchor.id || target.visit.id;
+        await trx('scheduled_services')
+          .where(function seriesRows() {
+            this.where({ id: anchorRowId }).orWhere({ recurring_parent_id: anchorRowId });
+          })
+          .forUpdate()
+          .select('id');
+        await trx('scheduled_service_addons')
+          .where({ scheduled_service_id: anchorRowId })
+          .forUpdate()
+          .select('id');
+
         // Recompute eligibility + pricing UNDER the locks (Codex P0 r8):
         // the pre-transaction preview priced from rows a concurrent editor
         // could still change. With the visit and customer rows now locked,
         // any in-flight edit to price, cadence, billing mode, or add-ons has
         // either committed (and this recompute sees it) or is blocked behind
         // these locks until commit — the stale-payload window is gone. The
-        // recompute reads on separate connections, which see the latest
-        // committed state; the locks guarantee that state cannot move.
-        const live = await computeAnnualPrepayPreview({ scheduledServiceId: req.params.id });
+        // recompute rides THIS transaction's connection, so its reads see
+        // the locked, settled state (Codex P0 r9).
+        const live = await computeAnnualPrepayPreview({ scheduledServiceId: req.params.id }, trx);
         if (live.httpStatus || !live.eligible) {
           const err = new Error(`This visit ${live.blockReason || 'is no longer eligible for the switch'}`);
           err.switchConflict = true;
@@ -9993,26 +10009,19 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
         annual_prepay_term_id: mintedTerm?.id || null,
         scheduled_service_id: target.visit.id,
         superseded_invoice_ids: voided.map((v) => v.id),
-        charge_in_person: chargeInPerson,
+        charge_in_person: true,
       }),
       created_at: new Date(),
     }).catch((err) => logger.warn(`[schedule:prepay-switch] activity_log insert failed: ${err.message}`));
 
-    // Delivery AFTER commit (send path only) — a failed send never rolls
-    // back the switch; it reports delivery.ok=false and the client runs the
-    // void+restore compensation.
-    let delivery = null;
-    if (!chargeInPerson) {
-      try {
-        delivery = await InvoiceService.sendViaSMSAndEmail(invoice.id, { operatorInitiated: true });
-      } catch (err) {
-        delivery = { ok: false, error: err.message };
-        logger.warn(`[schedule:prepay-switch] send failed for ${invoice.id}: ${err.message}`);
-      }
-    }
-
+    // COLLECT-ONLY by design (owner scope ruling 2026-08-12): the on-site
+    // switch means the card is in hand — the invoice is handed straight to
+    // the tender sheet and settles within minutes, so no pay link ever goes
+    // out from here and no days-long unpaid-prepay limbo exists for other
+    // flows to trip over. Send-the-invoice-later stays where it always was:
+    // Customer 360 → Annual prepay.
     logger.info(`[schedule:prepay-switch] switched visit ${req.params.id}: minted ${invoice.invoice_number}, superseded ${voided.map((v) => v.invoiceNumber || v.id).join(', ') || 'nothing'}`);
-    res.status(201).json({ invoice, voided, delivery });
+    res.status(201).json({ invoice, voided });
   } catch (err) { next(err); }
 });
 

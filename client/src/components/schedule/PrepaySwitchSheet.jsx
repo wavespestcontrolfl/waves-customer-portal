@@ -18,16 +18,16 @@
 // atomically, so there is no instant where the old invoice is void without
 // the prepay existing, and none where both are payable. This sheet only
 // decides what happens AROUND that commit:
-//   • collect path — hand the minted invoice to the tender sheet; backing
-//     out voids the prepay (cancelling its payment_pending term) and then
-//     POST …/prepay-switch/undo re-mints the per-application draft from the
-//     voided row's own line items (new number). The undo is idempotent and
-//     refuses while a live prepay term stands, so a stale abort can never
-//     double-bill.
-//   • send path — the server delivers after commit; delivery.ok=false runs
-//     the same void-then-restore compensation.
-// A failed restore is loud: the operator must know this visit currently has
-// no invoice behind it.
+// COLLECT-ONLY by owner ruling (2026-08-12): an on-site switch means the
+// card is in hand, so the minted invoice goes straight to the tender sheet
+// and settles in minutes — no pay link, no days-long unpaid-prepay limbo.
+// "Send them the invoice instead" lives where it always did: Customer 360 →
+// Annual prepay. Backing out of the tender voids the prepay (cancelling its
+// payment_pending term) and POST …/prepay-switch/undo re-mints the
+// per-application draft from the voided row's own line items (new number);
+// the undo is idempotent and refuses while a live prepay term stands, so a
+// stale abort can never double-bill. A failed restore is loud: the operator
+// must know this visit currently has no invoice behind it.
 
 import { useEffect, useState } from 'react';
 import MobilePaymentSheet from './MobilePaymentSheet';
@@ -157,23 +157,23 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
     }
   };
 
-  const finish = (invoice, { collected }) => {
+  const finish = (invoice) => {
     onSaved?.();
-    setDone({ invoice, collected });
+    setDone({ invoice });
   };
 
-  const mint = async ({ chargeInPerson }) => {
+  const mint = async () => {
     if (!preview?.eligible || !customerId) return;
-    setBusy(chargeInPerson ? 'charge' : 'send');
+    setBusy('charge');
     setActionError('');
     let result;
     try {
       // ONE atomic server operation: CAS-void the superseded draft + mint
-      // the prepay invoice and term, all recomputed server-side — the only
-      // thing this client decides is how the money gets collected.
+      // the prepay invoice and term, all recomputed server-side under the
+      // locks. Collect-only — the response goes straight to the tender.
       result = await adminFetch(`/admin/schedule/${visitId}/prepay-switch`, {
         method: 'POST',
-        body: JSON.stringify({ chargeInPerson }),
+        body: JSON.stringify({}),
       });
     } catch (e) {
       if (e.status) {
@@ -195,55 +195,14 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
       setBusy('');
       return;
     }
-    try {
-      const invoice = result?.invoice;
-      const voided = Array.isArray(result?.voided) ? result.voided : [];
-      if (!invoice?.id) {
-        setActionError('The prepay invoice did not come back in the response \u2014 check Invoices before retrying.');
-        return;
-      }
-      if (chargeInPerson) {
-        setCollecting({ invoice, voided });
-        return;
-      }
-      // Delivery ran after the commit. A prepay invoice the customer never
-      // received, with their per-application one already retired, would
-      // leave them with no bill at all. Order matters: void the undelivered
-      // prepay FIRST \u2014 restoring before that void would put two live
-      // invoices on the account (and the undo would refuse anyway while the
-      // prepay term stands).
-      if (result?.delivery && result.delivery.ok === false) {
-        try {
-          await adminFetch(`/admin/invoices/${invoice.id}/void`, { method: 'POST' });
-        } catch (voidErr) {
-          setRecovery({
-            title: 'Undelivered prepay invoice needs a hand',
-            message: `The ${money(preview.prepayTotal)} prepay invoice (${invoice.invoice_number || 'see Invoices'}) could not be delivered, and cancelling it also failed. Void it from Invoices FIRST, then tap Restore to put the per-application invoice back.`,
-            detail: voidErr.message,
-            voided,
-          });
-          return;
-        }
-        const undo = await undoSupersede(voided);
-        if (!undo.ok) {
-          setRecovery({
-            title: 'This visit has no invoice behind it',
-            message: `The undelivered prepay invoice was cancelled, but ${customerName}\u2019s per-application invoice could not be put back. Completing this visit would bill less than it should. Retry the restore, or rebuild it from Invoices.`,
-            detail: undo.failed[0]?.error,
-            voided,
-          });
-          return;
-        }
-        setActionError(
-          `The prepay invoice could NOT be delivered${result.delivery.error ? ` (${result.delivery.error})` : ''} and was cancelled. `
-          + 'The per-application invoice was restored \u2014 nothing changed. Try again, or send the prepay from Customer 360.',
-        );
-        return;
-      }
-      finish(invoice, { collected: false });
-    } finally {
-      setBusy('');
+    setBusy('');
+    const invoice = result?.invoice;
+    const voided = Array.isArray(result?.voided) ? result.voided : [];
+    if (!invoice?.id) {
+      setActionError('The prepay invoice did not come back in the response \u2014 check Invoices before retrying.');
+      return;
     }
+    setCollecting({ invoice, voided });
   };
 
   // ── In-person tender ────────────────────────────────────────────────────
@@ -264,7 +223,7 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
         // to restoring the per-application invoice.
         if (fresh && PREPAY_SETTLED_STATUSES.includes(status)) {
           setCollecting(null);
-          finish(invoice, { collected: true });
+          finish(invoice);
           return;
         }
         if (!(fresh && PREPAY_TERMINAL_UNPAID_STATUSES.includes(status))) {
@@ -299,7 +258,7 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
     };
     const collected = () => {
       setCollecting(null);
-      finish(invoice, { collected: true });
+      finish(invoice);
     };
     return (
       <MobilePaymentSheet
@@ -366,24 +325,20 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
     return (
       <Shell>
         <div className="text-zinc-900 font-medium" style={{ fontSize: 15, marginBottom: 8 }}>
-          {done.collected ? 'Annual prepay collected' : 'Annual prepay invoice sent'}
+          Annual prepay collected
         </div>
         <div className="text-ink-secondary" style={{ fontSize: 13, marginBottom: 14 }}>
-          {done.collected
-            ? `${customerName} is on annual prepay — the year's visits are marked prepaid as the payment settles.`
-            : `${customerName} keeps billing per application until the prepay invoice is paid — this visit will invoice ${money(preview?.perVisit)} on completion if it isn't paid by then. The prepaid year activates on payment.`}
+          {customerName} is on annual prepay — the year's visits are marked prepaid as the payment settles.
           {supersedes.length > 0 ? ' The per-application invoice for this visit was voided.' : ''}
         </div>
-        {done.collected && (
-          // The payment path stamps coverage before it returns, so completing
-          // next is what the operator should do — and it behaves differently
-          // now (no invoice, prepay-specific text). Say so rather than leaving
-          // them to discover it.
-          <div className="text-zinc-900" style={{ fontSize: 13, marginBottom: 14 }}>
-            Complete the visit next: it cuts no invoice and texts the service report as covered by the annual
-            prepaid plan.
-          </div>
-        )}
+        {/* The payment path stamps coverage before it returns, so completing
+            next is what the operator should do — and it behaves differently
+            now (no invoice, prepay-specific text). Say so rather than leaving
+            them to discover it. */}
+        <div className="text-zinc-900" style={{ fontSize: 13, marginBottom: 14 }}>
+          Complete the visit next: it cuts no invoice and texts the service report as covered by the annual
+          prepaid plan.
+        </div>
         <button
           type="button"
           onClick={onClose}
@@ -485,21 +440,15 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
       <button
         type="button"
         disabled={busyNow}
-        onClick={() => mint({ chargeInPerson: true })}
+        onClick={() => mint()}
         className="w-full rounded-full bg-zinc-900 text-white font-medium u-focus-ring disabled:opacity-60"
         style={{ padding: '13px 16px', fontSize: 15 }}
       >
         {busy === 'charge' ? 'Creating…' : `Collect ${money(preview.prepayTotal)} now`}
       </button>
-      <button
-        type="button"
-        disabled={busyNow}
-        onClick={() => mint({ chargeInPerson: false })}
-        className="w-full rounded-full border border-zinc-300 text-zinc-900 font-medium u-focus-ring disabled:opacity-60"
-        style={{ padding: '13px 16px', fontSize: 15, marginTop: 8 }}
-      >
-        {busy === 'send' ? 'Sending…' : 'Send the invoice instead'}
-      </button>
+      <div className="text-ink-secondary" style={{ fontSize: 12, marginTop: 8, textAlign: 'center' }}>
+        Collecting now is the only on-site path — to send a pay-by-link invoice instead, use Customer 360 → Annual prepay.
+      </div>
       <button
         type="button"
         disabled={busyNow}
