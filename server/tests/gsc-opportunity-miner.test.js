@@ -2034,7 +2034,7 @@ describe('listicle_family scoring + action mapping', () => {
     // race the transition nor observe it halfway.
     // …with the city-service target fence BETWEEN the family revalidation
     // and the upserts, under the same advisory lock (local_gap revival).
-    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,900}_revalidateFamilyBatch\(trx, allOpportunities, \{ lockEvenIfEmpty: sweepWillRun \}\)[\s\S]{0,400}_revalidateCityServiceBatch\(trx, familyChecked, \{ frozenKeys: cityServiceFrozenKeys \}\)[\s\S]{0,100}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1200}_sweepStaleFamilyRows\([\s\S]{0,300}familyExemptions[\s\S]{0,20}\)/);
+    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,1800}_revalidateFamilyBatch\(trx, allOpportunities, \{ lockEvenIfEmpty: sweepWillRun \|\| localGapSweepWillRun \}\)[\s\S]{0,400}_revalidateCityServiceBatch\(trx, familyChecked, \{ frozenKeys: cityServiceFrozenKeys \}\)[\s\S]{0,100}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1200}_sweepStaleFamilyRows\([\s\S]{0,300}familyExemptions[\s\S]{0,20}\)/);
     expect(src).toMatch(/\.forUpdate\(\)/);
     // Non-family conflicts re-read INSIDE the transaction (audit r24) —
     // the pre-mine fence query alone left a producer race window.
@@ -2756,7 +2756,7 @@ describe('local_gap lifecycle guards (round-4 cloud P1s)', () => {
     expect(updates[0].patch.status).toBe('expired');
     expect(updates[0].patch.skip_reason).toBe('local_gap_signal_gone');
     // Wired in mineAll under the canonical-window + no-error guards.
-    expect(src).toMatch(/if \(!errors\.local_gap && !runState\.cityServiceFrozenLookupFailed\) \{[\s\S]{0,120}_sweepStaleLocalGapRows\(/);
+    expect(src).toMatch(/if \(localGapSweepWillRun\) \{[\s\S]{0,120}_sweepStaleLocalGapRows\(/);
   });
 
   test('an UNLANDABLE candidate cannot supersede a pending local_gap twin', async () => {
@@ -2822,7 +2822,13 @@ describe('in-lock frozen re-read + untrusted-snapshot sweep guard (round-5 cloud
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
     expect(src).toMatch(/runState\.cityServiceFrozenLookupFailed = true;/);
-    expect(src).toMatch(/!errors\.local_gap && !runState\.cityServiceFrozenLookupFailed/);
+    expect(src).toMatch(/const localGapSweepWillRun = !errors\.local_gap\n\s*&& !runState\.cityServiceFrozenLookupFailed/);
+    // …and the sweep's advisory-lock guarantee survives an EMPTY batch:
+    // the lock is taken whenever the sweep will run, not only when the
+    // family sweep will (cloud P1 — an unlocked expiry races a concurrent
+    // mine's insert/revive).
+    expect(src).toMatch(/lockEvenIfEmpty: sweepWillRun \|\| localGapSweepWillRun/);
+    expect(src).toMatch(/if \(localGapSweepWillRun\) \{[\s\S]{0,120}_sweepStaleLocalGapRows\(/);
   });
 });
 

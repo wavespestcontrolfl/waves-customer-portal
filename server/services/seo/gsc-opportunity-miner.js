@@ -1819,12 +1819,20 @@ class GscOpportunityMiner {
           && !runState.familyRefreshStateFailed
           && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS
           && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs');
+        // The local_gap sweep needs the advisory lock for the same reason
+        // the family sweep does — expiring pending rows unlocked races a
+        // concurrent mine's insert/revive (cloud P1: with ZERO city-service
+        // candidates in the batch, neither revalidation takes the lock,
+        // yet the sweep still expires every pending local_gap row).
+        const localGapSweepWillRun = !errors.local_gap
+          && !runState.cityServiceFrozenLookupFailed
+          && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS;
         // Lock + revalidate family predecessors FIRST — see
         // _revalidateFamilyBatch (a claim between the mine's reads and
         // this transaction defers the transition instead of racing it).
         // The lock is taken even for an empty family batch when the sweep
         // will run.
-        const familyChecked = await this._revalidateFamilyBatch(trx, allOpportunities, { lockEvenIfEmpty: sweepWillRun });
+        const familyChecked = await this._revalidateFamilyBatch(trx, allOpportunities, { lockEvenIfEmpty: sweepWillRun || localGapSweepWillRun });
         // City-service targets recheck under the SAME advisory lock (held
         // for the rest of the transaction) — one in-flight row per
         // (service, city) target across buckets and across mines.
@@ -1885,7 +1893,7 @@ class GscOpportunityMiner {
           // because the keys are target-stable. Same guards: canonical
           // window + no bucket error (the fail-closed map guard throws
           // into errors.local_gap, which suppresses this).
-          if (!errors.local_gap && !runState.cityServiceFrozenLookupFailed) {
+          if (localGapSweepWillRun) {
             await this._sweepStaleLocalGapRows(
               revalidated.filter((o) => o.bucket === 'local_gap'),
               trx
