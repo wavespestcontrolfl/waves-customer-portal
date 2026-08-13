@@ -170,6 +170,32 @@ describe('drive-time estimator', () => {
       { lat: 27.3364, lng: -82.5307, customerName: 'B' },
     ]);
 
+    /**
+     * The original fallback computed minutes from the ALREADY-ROUNDED metre
+     * figure. Re-deriving from raw miles is the same number almost everywhere
+     * and a different one at a rounding boundary, which would make the kill
+     * switch approximate rather than exact. 0.178572 mi is such a boundary:
+     * metre-first lands on 0 minutes, mile-first on 1.
+     */
+    test('gate off preserves legacy meter-first rounding at the boundary', () => {
+      delete process.env[GATE];
+      const BOUNDARY_MILES = 0.178572;
+      const { meters, minutes } = routeOptimizer.fallbackLegMetrics(BOUNDARY_MILES);
+
+      expect(minutes).toBe(Math.round((meters / 1609.34 / 30) * 60));
+      expect(minutes).toBe(0);
+      // Deriving from raw miles instead would have rounded up — that is the bug.
+      expect(Math.round(BOUNDARY_MILES * 1.4 / 30 * 60)).toBe(1);
+    });
+
+    test('zero-length fallback legs cost nothing under either model', () => {
+      for (const val of [undefined, 'true']) {
+        if (val === undefined) delete process.env[GATE]; else process.env[GATE] = val;
+        expect(routeOptimizer.fallbackLegMetrics(0)).toEqual({ meters: 0, minutes: 0 });
+        expect(routeOptimizer.fallbackLegMetrics(NaN)).toEqual({ meters: 0, minutes: 0 });
+      }
+    });
+
     test('nearest-neighbour legs move with the gate', async () => {
       delete process.env[GATE];
       const legacy = routeOptimizer.nearestNeighborOptimize(stopsFor());

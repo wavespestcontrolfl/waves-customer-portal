@@ -125,6 +125,26 @@ function straightMilesToRoadMeters(miles) {
 }
 
 /**
+ * Metrics for one fallback leg, from straight-line miles.
+ *
+ * Used by the nearest-neighbour fallback and its return-to-HQ leg so both sit
+ * on the shared model when the gate is on. The legacy branch is NOT re-derived
+ * from raw miles: the original computed minutes from the ALREADY-ROUNDED metre
+ * figure, and near a rounding boundary that is a different answer. A 0.178572
+ * mile leg is the worked example — meter-first gives 0 minutes, mile-first
+ * gives 1. Reproducing the original arithmetic is what makes the gate a real
+ * kill switch rather than an approximate one.
+ */
+function fallbackLegMetrics(straightMiles) {
+  const meters = straightMilesToRoadMeters(straightMiles);
+  if (meters <= 0) return { meters: 0, minutes: 0 };
+  if (gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
+    return { meters, minutes: milesToDriveMinutes(straightMiles) };
+  }
+  return { meters, minutes: Math.round((meters / 1609.34 / 30) * 60) };
+}
+
+/**
  * Drive minutes between two {lat,lng} points.
  */
 function driveMin(a, b) {
@@ -316,8 +336,7 @@ function nearestNeighborOptimize(stops, options = {}) {
 
     const nearest = validStops.splice(nearestIdx, 1)[0];
     const legMiles = nearestDist < Infinity ? nearestDist : 0;
-    const distMeters = straightMilesToRoadMeters(legMiles);
-    const durationMin = distMeters > 0 ? milesToDriveMinutes(legMiles) : 0;
+    const { meters: distMeters, minutes: durationMin } = fallbackLegMetrics(legMiles);
 
     const fromName = ordered.length === 0
       ? 'HQ'
@@ -344,13 +363,13 @@ function nearestNeighborOptimize(stops, options = {}) {
   const lastStop = ordered[ordered.length - 1];
   if (lastStop) {
     const returnDist = haversine(current.lat, current.lng, origin.lat, origin.lng);
-    const returnMeters = straightMilesToRoadMeters(returnDist);
+    const { meters: returnMeters, minutes: returnMinutes } = fallbackLegMetrics(returnDist);
     totalDistanceMeters += returnMeters;
     legs.push({
       from: lastStop.customerName || lastStop.customer_name || `Stop ${ordered.length}`,
       to: 'HQ',
       distanceMeters: returnMeters,
-      durationMinutes: milesToDriveMinutes(returnDist),
+      durationMinutes: returnMinutes,
     });
   }
 
@@ -465,4 +484,5 @@ module.exports = {
   HQ,
   milesToDriveMinutes,
   driveMin,
+  fallbackLegMetrics,
 };
