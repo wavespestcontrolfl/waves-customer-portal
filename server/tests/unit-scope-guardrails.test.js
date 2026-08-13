@@ -1700,6 +1700,34 @@ describe('r61 — commercial adjectives between article and noun still name a pr
   test('residential modifier prose stays quiet', () => {
     // 'home' is not a commercial modifier — the r23 protection holds.
     expect(commercialTextSignal('ants in the home office again')).toBe(false);
-    expect(commercialTextSignal('I work in a medical office but the ants are at my house')).toBe(true);
+    // A workplace MENTION without ownership/service context stays quiet
+    // (codex r62 P1 — the unanchored a/an alternative wrongly fired here).
+    expect(commercialTextSignal('I work in a medical office but the ants are at my house')).toBe(false);
+  });
+});
+
+describe('r62 — only measured-grade folio evidence carries the suite scope', () => {
+  test('a listing value never poses as the condo suite area', () => {
+    const { computePropertyFactsV2Shadow } = require('../services/estimator-engine/property-facts-shadow');
+    withGate('true', () => {
+      const { facts } = computePropertyFactsV2Shadow({
+        propertyRecord: {
+          propertyType: 'Commercial Condo',
+          squareFootage: 24000,
+          _fieldEvidence: {
+            squareFootage: [{ value: 24000, sourceType: 'listing', provider: 'loopnet' }],
+          },
+        },
+        extraction: { caller: { relationship_to_property: 'owner' }, property: {} },
+        intent: { is_commercial: true },
+        propertyFacts: { tenant: false },
+        address: '3400 Cattlemen Rd, Sarasota, FL 34232',
+      });
+      expect(facts.serviceScope).toBe('commercial_suite');
+      // The whole-building listing figure stays building-scoped — the
+      // suite selection goes unresolved rather than adopting it.
+      expect(facts.structureArea.value).toBeNull();
+      expect(facts.requiresConfirmation).toBe(true);
+    });
   });
 });

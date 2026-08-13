@@ -113,10 +113,6 @@ const COMMERCIAL_TEXT_RE = new RegExp(
     // modifier: "the home office" stays residential prose.
     '(?:my|our)\\s+(?:(?:commercial|industrial|medical|business|retail)\\s+)?(?:office|shop|store)\\b',
     '(?:my|our|the)\\s+(?:(?:commercial|industrial|medical|business|retail)\\s+)?(?:warehouse|restaurant|clinic|storefront)\\b',
-    // An indefinite article works when the modifier itself is present —
-    // "a commercial office" is a premises, "an office" alone is covered by
-    // the service-qualified pattern below.
-    '(?:a|an)\\s+(?:commercial|industrial|medical)\\s+(?:office|shop|store|warehouse|building)\\b',
     'industrial\\s+(?:building|park|unit|space|suite|warehouse)',
     'office\\s+(?:and|&|\\+)\\s+warehouse',
     'warehouse\\s+(?:and|&|\\+)\\s+office',

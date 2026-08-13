@@ -351,8 +351,14 @@ function buildMeasurementEvidence({
   // sqft is the SUITE's own area, and emitting it building-scoped meant the
   // V2 suite selection could never use the one authoritative measurement
   // the county holds (codex r58 P1). Lane-gated via the caller-computed
-  // flag so the kill switch keeps prior V2 evidence exactly.
-  const suiteScoped = isCommercial && condoUnitFolio === true;
+  // flag so the kill switch keeps prior V2 evidence exactly. ONLY
+  // measured-grade items carry the suite scope — the folio justification
+  // is the county's per-unit record, and blanket-labeling let a
+  // whole-building LISTING value pose as the selected suite area (codex
+  // r62 P1); non-measured sources stay building-scoped.
+  const FOLIO_GRADE_SOURCES = new Set(['county', 'cadastral', 'verified']);
+  const suiteScopedFor = (sourceType) => isCommercial && condoUnitFolio === true
+    && FOLIO_GRADE_SOURCES.has(String(sourceType || ''));
   // The uncapped actual SUPERSEDES the pricing-capped legacy value IN PLACE:
   // both describe the same underlying record, so emitting them as separate
   // evidence would dedupe-collapse on the shared source URL and the stable
@@ -367,6 +373,7 @@ function buildMeasurementEvidence({
   let actualApplied = false;
   for (const item of fieldEvidenceItems(propertyRecord, 'squareFootage')) {
     if (!positive(item.value)) continue;
+    const suiteScoped = suiteScopedFor(item.sourceType);
     const scope = aggregated ? 'association'
       : (unitScoped ? 'unit' : (suiteScoped ? 'suite' : 'building'));
     let value = Number(item.value);
