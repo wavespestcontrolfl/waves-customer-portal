@@ -1815,7 +1815,7 @@ class GscOpportunityMiner {
         // City-service targets recheck under the SAME advisory lock (held
         // for the rest of the transaction) — one in-flight row per
         // (service, city) target across buckets and across mines.
-        const revalidated = await this._revalidateCityServiceBatch(trx, familyChecked);
+        const revalidated = await this._revalidateCityServiceBatch(trx, familyChecked, { frozenKeys: cityServiceFrozenKeys });
         persisted = await this.persistAll(revalidated, trx);
         // Family-lane sweep ONLY after the upserts land, only when the
         // lane actually ran (gates on, no miner error — an empty bucket
@@ -1862,6 +1862,20 @@ class GscOpportunityMiner {
               revalidated,
               sweepExemptQueries[bucket],
               since
+            );
+          }
+          // local_gap shares the disappearing-signal lifecycle but not the
+          // sweep: its rows are QUERYLESS, so the recovered-QUERY sweep
+          // cannot see them, and a pending row would stay claimable for
+          // the full 14 days after a hub page appeared or demand fell
+          // below the merged floor (cloud P1). Key-matching is exact here
+          // because the keys are target-stable. Same guards: canonical
+          // window + no bucket error (the fail-closed map guard throws
+          // into errors.local_gap, which suppresses this).
+          if (!errors.local_gap) {
+            await this._sweepStaleLocalGapRows(
+              revalidated.filter((o) => o.bucket === 'local_gap'),
+              trx
             );
           }
         }
@@ -2530,6 +2544,18 @@ class GscOpportunityMiner {
     // entire life. Cross-bucket target collisions are arbitrated at mine
     // time (arbitrateCityServiceTargets) and in-flight twins deferred
     // under the persist lock (_revalidateCityServiceBatch).
+    // FAIL CLOSED on a missing own-page map: mineAll degrades a loader
+    // failure to an empty Map (fine for the buckets where the map only
+    // upgrades a blog into a refresh), but for THIS bucket an empty map
+    // reads as "no pair has a page" and — now that rows clear the floor —
+    // would enqueue a city-service draft for EVERY qualifying pair,
+    // covered ones included (cloud P1). Throwing makes mineAll record
+    // errors.local_gap, which also suppresses this lane's sweep, per the
+    // degraded-bucket doctrine from #3372.
+    if (!ownPagesByServiceCity || !ownPagesByServiceCity.size) {
+      throw new Error('own-pages map unavailable or empty — refusing to treat every city-service pair as uncovered');
+    }
+
     // PER-QUERY rows, not pre-aggregated pairs: the classifier label must
     // be validated against each query's own text before its impressions
     // count toward a pair (cloud P1 — the sync's SERVICE_PATTERNS are
@@ -3701,7 +3727,7 @@ class GscOpportunityMiner {
   // different key. Deferral self-heals: a superseded PENDING twin is
   // retired by the recovered-query sweep, freeing the target for the next
   // mine; claimed/pending_review twins free it when their run completes.
-  async _revalidateCityServiceBatch(trx, opportunities = []) {
+  async _revalidateCityServiceBatch(trx, opportunities = [], { frozenKeys = new Set() } = {}) {
     const CS = 'create_or_refresh_city_service_page';
     if (!opportunities.some((o) => o.action_type === CS)) return opportunities;
     // RECENT done rows ride along as TARGET-level fences (rounds 6-7):
@@ -3749,15 +3775,16 @@ class GscOpportunityMiner {
       // that is the ordinary upsert-refresh path.
       if (!rows.length) return true;
       // A PENDING queryless local_gap twin is SUPERSEDED by a query-bearing
-      // winner, not deferred to: no sweep covers local_gap (its rows are
-      // queryless, and the recovered-query sweep only walks ctr_rewrite +
-      // no_content_yet), so deferring here would let the lean row block the
-      // preferred rich one until 14-day expiry while itself staying
-      // claimable — inverting the winner rule (pre-push P1). The rows are
-      // FOR UPDATE-locked, so claimNext cannot grab one mid-supersession;
-      // 'expired' is revivable per the retirement doctrine.
+      // winner — but ONLY by one that can actually LAND: the replacement
+      // must clear its own floor and its key must not be frozen, or the
+      // supersession expires viable work and then persists nothing
+      // (cloud P1). An unlandable candidate defers instead, leaving the
+      // twin claimable. The rows are FOR UPDATE-locked, so claimNext
+      // cannot grab one mid-supersession; 'expired' is revivable per the
+      // retirement doctrine.
+      const canSupersede = o.query && isPersistable(o) && !frozenKeys.has(o.dedupe_key);
       const blocking = rows.filter((r) => !(
-        r.status === 'pending' && r.bucket === 'local_gap' && !r.query && o.query
+        r.status === 'pending' && r.bucket === 'local_gap' && !r.query && canSupersede
       ));
       if (blocking.length) { deferred += 1; return false; }
       supersede.push(...rows.map((r) => r.dedupe_key));
@@ -3774,6 +3801,27 @@ class GscOpportunityMiner {
       logger.info(`[gsc-opp-miner] city-service revalidation: ${deferred} candidate(s) deferred — target already in flight under a different key`);
     }
     return out;
+  }
+
+  // Retire pending local_gap rows the mine no longer stands behind. The
+  // recovered-query sweep is query-keyed and cannot see this bucket's
+  // queryless rows; target-stable keys make key-matching exact instead. A
+  // single UPDATE with the status predicate is race-safe against claimNext
+  // (a concurrently-claimed row stops matching status='pending'), and the
+  // caller gates on the canonical window + no bucket error, so an empty
+  // batch here means "mine ran, signals gone" — expire everything pending.
+  // 'expired' is revivable: the next mine re-emits any pair that still
+  // qualifies and the upsert revives the row.
+  async _sweepStaleLocalGapRows(localGapOpps = [], trx = null) {
+    const runner = trx || db;
+    const liveKeys = localGapOpps.filter((o) => isPersistable(o)).map((o) => o.dedupe_key);
+    let q = runner('opportunity_queue')
+      .where({ bucket: 'local_gap', status: 'pending' });
+    if (liveKeys.length) q = q.whereNotIn('dedupe_key', liveKeys);
+    const swept = await q.update({
+      status: 'expired', skip_reason: 'local_gap_signal_gone', updated_at: new Date(),
+    });
+    if (swept) logger.info(`[gsc-opp-miner] local_gap sweep: ${swept} stale pending row(s) expired`);
   }
 
   async _sweepStaleFamilyRows(familyOpps = [], batch = [], trx = null, exemptions = { pages: new Set(), blogKeys: new Set(), familyKeys: new Set() }) {
