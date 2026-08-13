@@ -87,7 +87,11 @@ function hasPrimaryStreetNumber(address) {
 // list (property-lookup-v2) — the lookup types those COMMERCIAL, and the
 // guard missing them let a municipal-building extraction reach a
 // residential draft (codex r58 P1).
-const COMMERCIAL_TYPE_FAMILY_RE = /commercial|office|industrial|warehouse|retail|restaurant|storefront|plaza|clinic|medical|business|flex|government|municipal|school|daycare/;
+// hotel/motel/resort/church complete the set (codex GH r60 P1): the prose
+// scanner already treats them commercial and hotel_resort is a supported
+// risk type — a structured 'hotel' type with a mistaken residential intent
+// must red-lane, not price residential.
+const COMMERCIAL_TYPE_FAMILY_RE = /commercial|office|industrial|warehouse|retail|restaurant|storefront|plaza|clinic|medical|business|flex|government|municipal|school|daycare|hotel|motel|resort|church/;
 
 // Free-text commercial signal for intake paths that carry prose instead of
 // a structured type (lead webhook notes / call summaries). Conservative:

@@ -1651,6 +1651,15 @@ describe('GH r59 — government prose conflicts; building stories never divide a
     expect(commercialTextSignal('I work for the city, ants are at my house')).toBe(false);
   });
 
+  test('lodging/church structured types conflict with a residential intent (r60)', () => {
+    for (const type of ['hotel', 'motel', 'beach resort', 'church']) {
+      expect(commercialCategoryConflict({
+        extraction: { property: { property_type: type } },
+        intent: { is_commercial: false },
+      })).toBeTruthy();
+    }
+  });
+
   test('a unit/suite scope clears the V1 building story count when V2 resolves none', () => {
     const { applyV2ToPropertyFacts } = require('../services/estimator-engine/property-facts-shadow');
     const propertyFacts = { stories: 5, home: { value: 1000, source: 'county_assessed' } };
