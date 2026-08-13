@@ -2347,3 +2347,26 @@ describe('_revalidateCityServiceBatch — in-flight target fence under the persi
     expect(trx).not.toHaveBeenCalled();
   });
 });
+
+describe('local_gap canonical merge details (round-2 P1s)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+
+  test('the impressions floor applies to the MERGED canonical total, not raw groups', () => {
+    const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+    // 30 specialty + 30 pest in one city = an eligible 60-imp pest target;
+    // a per-raw-group HAVING would drop both halves before the merge.
+    expect(lg).not.toMatch(/havingRaw/);
+    expect(lg).toMatch(/pair\.impressions < THRESHOLDS\.minImpressionsToScore/);
+  });
+
+  test('the own-pages map is ALSO keyed under the canonical service, additively', () => {
+    const loader = src.slice(src.indexOf('async _loadOwnPagesByServiceCity'), src.indexOf('QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS'));
+    // A page classified 'tree_shrub' must be found by a canonical
+    // 'tree-shrub' lookup, or local_gap enqueues a duplicate draft for a
+    // pair that HAS a page. Raw keys stay for the raw-value consumers.
+    expect(loader).toMatch(/const canon = canonicalizeServiceCategory\(service\);/);
+    expect(loader).toMatch(/if \(canon && canon !== service\)/);
+    expect(loader).toMatch(/if \(!map\.has\(key\)\) map\.set\(key, r\.page_url\)/);
+  });
+});

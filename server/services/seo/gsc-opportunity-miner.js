@@ -1869,6 +1869,18 @@ class GscOpportunityMiner {
       if (!service && !city) continue; // can't classify — skip rather than pollute generic bucket
       const key = ownPageKey(service, city);
       if (!map.has(key)) map.set(key, r.page_url); // first wins (orderBy impressions desc)
+      // ALSO key under the CANONICAL service, additively. mineLocalGap now
+      // keys candidates canonically ('tree-shrub', specialty→'pest'), so a
+      // page classified with the sync's raw value ('tree_shrub',
+      // 'specialty') must still be found or the bucket enqueues a
+      // duplicate city-service draft for a pair that HAS a page (pre-push
+      // P1). Additive on purpose: consumers that look up with raw values
+      // (striking_distance, aeo_gap) keep hitting the raw key unchanged.
+      const canon = canonicalizeServiceCategory(service);
+      if (canon && canon !== service) {
+        const canonKey = ownPageKey(canon, city);
+        if (!map.has(canonKey)) map.set(canonKey, r.page_url);
+      }
     }
     return map;
   }
@@ -2413,8 +2425,12 @@ class GscOpportunityMiner {
       .whereNotNull('service_category')
       .select('city_target', 'service_category')
       .sum('impressions as impressions')
-      .groupBy('city_target', 'service_category')
-      .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore]);
+      .groupBy('city_target', 'service_category');
+    // NO per-raw-group HAVING here: the impressions floor applies to the
+    // MERGED canonical pair below. A raw-group floor would discard alias
+    // demand before the merge could sum it — 30 'specialty' + 30 'pest'
+    // impressions in one city is an eligible 60-impression pest target,
+    // and a per-group floor drops both halves (pre-push P1).
 
     // CANONICALIZE, then MERGE by canonical pair, BEFORE scoring. The sync
     // stores snake_case ('tree_shrub') and a 'specialty' bucket that
@@ -2449,6 +2465,8 @@ class GscOpportunityMiner {
 
     const out = [];
     for (const pair of byPair.values()) {
+      // The impressions floor, applied to the canonical MERGED total.
+      if (pair.impressions < THRESHOLDS.minImpressionsToScore) continue;
       const opp = {
         bucket: 'local_gap',
         query: null,
