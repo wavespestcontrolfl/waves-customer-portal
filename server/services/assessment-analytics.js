@@ -667,6 +667,16 @@ async function detectContradictions() {
       const kbName = kbEntry.title.replace(/^Product:\s*/i, '').toLowerCase();
       const content = (kbEntry.content || '').toLowerCase();
 
+      // Prefer the curated KB↔wiki pair (populated by KnowledgeBridge.autoLink
+      // in this same weekly run) for wiki attribution — the slug-ilike lookup
+      // below stays only as a fallback, since free-text product names make it
+      // fragmentation-prone (the alias-matching lesson).
+      const bridged = await db('knowledge_bridge')
+        .where({ kb_entry_id: kbEntry.id })
+        .whereNotNull('wiki_entry_id')
+        .orderBy('relevance_score', 'desc')
+        .first();
+
       for (const eff of efficacy) {
         if (!eff.product_name.toLowerCase().includes(kbName) && !kbName.includes(eff.product_name.toLowerCase())) continue;
 
@@ -682,12 +692,15 @@ async function detectContradictions() {
               severity: Math.min(1.0, Math.abs(eff.avg_delta_overall) / 20),
             };
 
-            // Find linked wiki entry
-            const wikiEntry = await db('knowledge_entries')
-              .where('slug', 'ilike', `%${slugify(eff.product_name)}%`)
-              .first();
-
-            if (wikiEntry) contradiction.wiki_entry_id = wikiEntry.id;
+            // Find linked wiki entry — bridge pair first, slug fallback
+            if (bridged) {
+              contradiction.wiki_entry_id = bridged.wiki_entry_id;
+            } else {
+              const wikiEntry = await db('knowledge_entries')
+                .where('slug', 'ilike', `%${slugify(eff.product_name)}%`)
+                .first();
+              if (wikiEntry) contradiction.wiki_entry_id = wikiEntry.id;
+            }
 
             // Check if already flagged
             const existing = await db('knowledge_contradictions')
@@ -730,7 +743,10 @@ async function detectContradictions() {
             if (shoulderStats?.avgDelta != null && shoulderStats.avgDelta > peakStats.avgDelta + 10) {
               const contradiction = {
                 kb_entry_id: kbEntry.id,
-                wiki_entry_id: null,
+                // Bridge attribution so the wiki page re-gates and the
+                // Field Intelligence queue surfaces it — a null wiki_entry_id
+                // row was invisible to the review-tier machinery.
+                wiki_entry_id: bridged?.wiki_entry_id || null,
                 contradiction_type: 'claim_vs_data',
                 kb_claim: `Claudeopedia associates ${eff.product_name} with summer/peak season`,
                 wiki_evidence: `Peak season avg delta: ${peakStats.avgDelta} (${peakStats.count} apps) vs shoulder: ${shoulderStats.avgDelta}`,
@@ -745,7 +761,21 @@ async function detectContradictions() {
                 .first();
 
               if (!existing) {
-                await db('knowledge_contradictions').insert(contradiction);
+                const [inserted] = await db('knowledge_contradictions').insert(contradiction).returning('id');
+                const insertedId = inserted?.id ?? inserted;
+                if (contradiction.wiki_entry_id) {
+                  // Same gate-now + roll-back-on-failure pattern as the
+                  // claim_vs_data insert above: the dedupe would otherwise
+                  // skip this row forever, leaving the page trusted.
+                  try {
+                    await recomputeEntryReviewGate(contradiction.wiki_entry_id, {
+                      assumeOpenIds: [insertedId],
+                    });
+                  } catch (gateErr) {
+                    try { await db('knowledge_contradictions').where({ id: insertedId }).del(); } catch { /* rollback best-effort */ }
+                    throw gateErr;
+                  }
+                }
                 found.push(contradiction);
               }
             }
