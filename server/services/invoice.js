@@ -4212,6 +4212,9 @@ const InvoiceService = {
         .where({ id })
         .first("id", "customer_id", "scheduled_service_id", "notes", "status");
       if (!preRow || String(preRow.status || "").toLowerCase() !== "void") return null;
+      // The superseding prepay's id rides the durable marker — used by the
+      // containment exclusion and the reconciliation guard below.
+      const sbForRecon = /\[prepay-switch-superseded-by:([^\]]+)\]/.exec(String(preRow.notes || ""));
       // The double-bill question is whether coverage spans the RESTORED
       // VISIT, not today (Codex P0 r11): an aborted FUTURE-start renewal
       // switch must still restore even while the current year runs.
@@ -4230,6 +4233,11 @@ const InvoiceService = {
         .where(annualPrepayOverlapStatusClause())
         .where("term_start", "<=", assertDate)
         .where("term_end", ">=", assertDate)
+        // The superseding prepay's OWN term never blocks its restore (Codex
+        // P0 r30): a decided renewed/switch_plan window whose invoice just
+        // refunded still reads as covering here, but that coverage is
+        // precisely what the refund removed.
+        .modify((q) => { if (sbForRecon) q.whereNot({ prepay_invoice_id: sbForRecon[1] }); })
         .first("id");
       if (covering) {
         logger.warn(`[invoice] switch-supersede restore skipped for ${preRow.id}: a prepaid year covers ${assertDate} — restoring would double-bill`);
@@ -4240,7 +4248,6 @@ const InvoiceService = {
       // money may be collected with nothing local — restoring the old
       // receivable beside it re-bills a paid customer. Fail toward manual
       // review on any refusal or unverifiable read.
-      const sbForRecon = /\[prepay-switch-superseded-by:([^\]]+)\]/.exec(String(preRow.notes || ""));
       if (sbForRecon) {
         try {
           await require("./stripe").assertNoInvoiceChargeReconciliationPending(sbForRecon[1], trx);

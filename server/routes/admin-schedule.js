@@ -10303,11 +10303,16 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
           // binding term whose window spans the restored visit's date.
           await lockAndAssertNoAnnualPrepayOverlap(trx, undoCustomerId, assertDate, true);
           const { annualPrepayOverlapStatusClause } = require('../services/secure-appointment-plans');
+          // The superseding prepay's own term is excluded (Codex P0 r30):
+          // its coverage is exactly what the abort/refund removed. Its id
+          // rides the durable marker in the row's notes.
+          const preSb = /\[prepay-switch-superseded-by:([^\]]+)\]/.exec(String(preRow.notes || ''));
           const coveringTerm = await trx('annual_prepay_terms')
             .where({ customer_id: undoCustomerId })
             .where(annualPrepayOverlapStatusClause())
             .where('term_start', '<=', assertDate)
             .where('term_end', '>=', assertDate)
+            .modify((q) => { if (preSb) q.whereNot({ prepay_invoice_id: preSb[1] }); })
             .first('id');
           if (coveringTerm) {
             return { failed: { id, invoiceNumber: preRow.invoice_number || null, error: `a prepaid year covers ${assertDate} — restoring the per-application invoice would bill them twice. Void the prepay from Invoices first if the switch really is being unwound` } };

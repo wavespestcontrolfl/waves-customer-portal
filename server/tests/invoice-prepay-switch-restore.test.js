@@ -69,11 +69,21 @@ function conn({
       }
       return q;
     });
-    q.whereNot = jest.fn(() => q);
+    q.whereNot = jest.fn((arg) => {
+      // Own-term exclusion in the containment query (Codex P0 r30): when the
+      // stubbed covering term IS the superseding prepay's own, exclude it.
+      if (arg && arg.prepay_invoice_id !== undefined) q._excludedPrepayId = arg.prepay_invoice_id;
+      return q;
+    });
     q.whereNotIn = jest.fn(() => q);
+    q.modify = jest.fn((cb) => { cb(q); return q; });
     q.forUpdate = jest.fn(() => q);
     if (table === 'annual_prepay_terms') {
-      q.first = jest.fn(async () => termRow);
+      q.first = jest.fn(async () => {
+        if (termRow && q._excludedPrepayId != null
+          && String(termRow.prepay_invoice_id || '') === String(q._excludedPrepayId)) return undefined;
+        return termRow;
+      });
     } else if (table === 'payments') {
       // The real lookup rides metadata->>'invoice_id' via whereRaw — a
       // column-shaped where({invoice_id}) would throw in prod (Codex P0
@@ -194,6 +204,14 @@ describe('restoreSwitchSupersededInvoicesForPrepay', () => {
     const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
     expect(restored).toEqual([]);
     expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  test('the superseding prepay\'s OWN term never blocks its restore (decided-refund case, Codex P0 r30)', async () => {
+    // A renewed/switch_plan window bound to the refunded prepay still reads
+    // as covering — but that coverage is exactly what the refund removed.
+    const c = conn({ termRow: { id: 'term-own', prepay_invoice_id: 'inv-prepay' } });
+    const restored = await InvoiceService.restoreSwitchSupersededInvoicesForPrepay('inv-prepay', c);
+    expect(restored).toHaveLength(1);
   });
 
   test('takes the advisory lock LOCK-ONLY, and SKIPS only on a term CONTAINING the visit date', async () => {

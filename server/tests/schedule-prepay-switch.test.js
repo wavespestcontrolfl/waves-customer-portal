@@ -176,7 +176,13 @@ function stubTables({
       }
       return q;
     });
-    q.whereNot = jest.fn(() => q);
+    q.whereNot = jest.fn((arg) => {
+      // Own-term exclusion (Codex P0 r30): stub `term` serves the containment
+      // probe; when it IS the excluded prepay's own term, answer nothing.
+      if (arg && arg.prepay_invoice_id !== undefined) q._excludedPrepayId = arg.prepay_invoice_id;
+      return q;
+    });
+    q.modify = jest.fn((cb) => { cb(q); return q; });
     let rootsProbe = false;
     q.whereRaw = jest.fn(() => q);
     q.whereNull = jest.fn((col) => {
@@ -238,6 +244,8 @@ function stubTables({
         if (isCount) return { n: rootsProbe ? rootsCount : seriesCount };
         return visit;
       }
+      if (table === 'annual_prepay_terms' && term && q._excludedPrepayId != null
+        && String(term.prepay_invoice_id || '') === String(q._excludedPrepayId)) return undefined;
       return term;
     });
     return q;
@@ -792,6 +800,16 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     // against the visit date, so a FUTURE term can't park the restore
     // (Codex P0 r23).
     expect(mockLockOverlap).toHaveBeenCalledWith(expect.anything(), 'cust-1', FUTURE_DATE, true);
+  });
+
+  test("the superseding prepay's OWN decided term never blocks its restore (Codex P0 r30)", async () => {
+    stubTables({
+      invoices: [VOIDED_ROW],
+      invoicesById: DEAD_PREPAY,
+      term: { id: 'term-own', prepay_invoice_id: 'inv-prepay' },
+    });
+    const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(body.restored).toHaveLength(1);
   });
 
   test('a FUTURE term that does not cover the visit date does NOT block the restore', async () => {
