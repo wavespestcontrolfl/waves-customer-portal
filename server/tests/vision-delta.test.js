@@ -389,6 +389,28 @@ describe('setOutcomeBestPhotoKey', () => {
     expect(patch.vision_score_attempts.__raw).toContain('THEN 0');
   });
 
+  test('a key change that clears an existing score stale-flags the outcome pages', async () => {
+    const scoredRow = { ...OUTCOME, vision_delta_score: 42, vision_scored_at: new Date('2026-08-10') };
+    useDb({ treatment_outcomes: [scoredRow] });
+    await VisionDelta.setOutcomeBestPhotoKey('o1', 'post_best_photo_key', 'new.jpg');
+    expect(AgronomicWiki.markOutcomePagesStale).toHaveBeenCalledTimes(1);
+    expect(AgronomicWiki.markOutcomePagesStale).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'o1' }),
+    );
+  });
+
+  test('same-key rewrite and never-scored rows do not stale-flag', async () => {
+    // Same key on a scored row — vision state survives, pages still accurate.
+    useDb({ treatment_outcomes: [{ ...OUTCOME, vision_delta_score: 42 }] });
+    await VisionDelta.setOutcomeBestPhotoKey('o1', 'post_best_photo_key', OUTCOME.post_best_photo_key);
+    expect(AgronomicWiki.markOutcomePagesStale).not.toHaveBeenCalled();
+
+    // Changed key on a never-scored row — nothing consumed a score.
+    useDb({ treatment_outcomes: [{ ...OUTCOME, vision_delta_score: null }] });
+    await VisionDelta.setOutcomeBestPhotoKey('o1', 'post_best_photo_key', 'new.jpg');
+    expect(AgronomicWiki.markOutcomePagesStale).not.toHaveBeenCalled();
+  });
+
   test('rejects columns outside the photo-key allowlist', async () => {
     useDb({ treatment_outcomes: [] });
     await expect(VisionDelta.setOutcomeBestPhotoKey('o1', 'customer_id', 'x'))

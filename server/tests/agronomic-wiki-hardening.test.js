@@ -704,6 +704,36 @@ describe('weeklyRefreshIfDue', () => {
     expect(errorLog).toBeTruthy();
   });
 
+  test('vision-score reconcile keyset-paginates the whole window instead of a blind cap', async () => {
+    const t0 = 1755000000000;
+    const fullPage = Array.from({ length: 100 }, (_, i) => ({
+      id: `o${i}`, vision_delta_score: 5, vision_scored_at: new Date(t0 + i * 1000),
+    }));
+    const lastPage = [{ id: 'o-final', vision_delta_score: 7, vision_scored_at: new Date(t0 + 999000) }];
+    let reconcileCalls = 0;
+    useDb({
+      knowledge_entries: [],
+      knowledge_update_log: [],
+      treatment_outcomes: (rec) => {
+        if (rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_delta_score')) {
+          reconcileCalls += 1;
+          return reconcileCalls === 1 ? fullPage : lastPage;
+        }
+        return [];
+      },
+    });
+    const spy = jest.spyOn(wiki, 'markOutcomePagesStale').mockResolvedValue(1);
+
+    await wiki.weeklyRefresh();
+
+    // Full first page → cursor advances past its newest row → second fetch;
+    // every row across both pages gets reconciled.
+    expect(reconcileCalls).toBe(2);
+    expect(spy).toHaveBeenCalledTimes(101);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'o-final' }));
+    spy.mockRestore();
+  });
+
   test('stale refresh only selects categories that have a refresh path', async () => {
     const state = useDb({
       knowledge_entries: [],

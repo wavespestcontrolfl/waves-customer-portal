@@ -145,13 +145,35 @@ const VisionDelta = {
     if (!PHOTO_KEY_COLUMNS.includes(column)) {
       throw new Error(`setOutcomeBestPhotoKey: invalid column ${column}`);
     }
-    return db('treatment_outcomes').where({ id: outcomeId }).update({
+    // Pre-read for the stale-marking decision below: if this key change is
+    // about to CLEAR an existing score, the wiki pages that consumed that
+    // score keep narrating it until regenerated — mark them stale now (the
+    // replacement pair may score null / fail terminally, in which case the
+    // scorer's own stale-marking never fires for this outcome again).
+    const before = await db('treatment_outcomes').where({ id: outcomeId }).first();
+    const willClearScore = Boolean(
+      before
+      && before.vision_delta_score !== null && before.vision_delta_score !== undefined
+      && (before[column] ?? null) !== (s3Key ?? null),
+    );
+    const result = await db('treatment_outcomes').where({ id: outcomeId }).update({
       [column]: s3Key,
       vision_delta: db.raw(`CASE WHEN ${column} IS DISTINCT FROM ? THEN NULL ELSE vision_delta END`, [s3Key]),
       vision_delta_score: db.raw(`CASE WHEN ${column} IS DISTINCT FROM ? THEN NULL ELSE vision_delta_score END`, [s3Key]),
       vision_scored_at: db.raw(`CASE WHEN ${column} IS DISTINCT FROM ? THEN NULL ELSE vision_scored_at END`, [s3Key]),
       vision_score_attempts: db.raw(`CASE WHEN ${column} IS DISTINCT FROM ? THEN 0 ELSE vision_score_attempts END`, [s3Key]),
     });
+    if (willClearScore) {
+      // Best-effort, same contract as the scorer's stale-marking: the key
+      // write above is already committed, so a flagging failure must never
+      // fail the attach path. Flag only — never fire generation from here.
+      try {
+        await require('./agronomic-wiki').markOutcomePagesStale(before);
+      } catch (staleErr) {
+        logger.error(`[vision-delta] markOutcomePagesStale on cleared score failed for outcome ${outcomeId}: ${staleErr.message}`);
+      }
+    }
+    return result;
   },
 
   // ── Score one outcome's before/after photo pair ─────────────────────────

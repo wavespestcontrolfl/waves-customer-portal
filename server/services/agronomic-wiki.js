@@ -1242,12 +1242,23 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       // margin; already-regenerated pages skip cheaply via the fingerprint
       // token and the skip branch clears the flag again.
       try {
-        const recentlyScored = await db('treatment_outcomes')
-          .whereNotNull('vision_delta_score')
-          .where('vision_scored_at', '>', new Date(Date.now() - 8 * 24 * 60 * 60 * 1000))
-          .limit(100);
-        for (const outcome of recentlyScored) {
-          await AgronomicWiki.markOutcomePagesStale(outcome);
+        // Keyset-paginate the whole window (oldest first) so a burst larger
+        // than one page can never silently age out of the 8-day window
+        // before the next weekly run. The gated sweep scores ≤25/day, so
+        // 20×100 is far past any legitimate volume; ties on vision_scored_at
+        // are sub-millisecond serial writes and practically unique.
+        let cursor = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+        for (let page = 0; page < 20; page++) {
+          const batch = await db('treatment_outcomes')
+            .whereNotNull('vision_delta_score')
+            .where('vision_scored_at', '>', cursor)
+            .orderBy('vision_scored_at', 'asc')
+            .limit(100);
+          for (const outcome of batch) {
+            await AgronomicWiki.markOutcomePagesStale(outcome);
+          }
+          if (batch.length < 100) break;
+          cursor = batch[batch.length - 1].vision_scored_at;
         }
       } catch (err) {
         logger.error(`[agronomic-wiki] Vision-score stale reconcile failed: ${err.message}`);
