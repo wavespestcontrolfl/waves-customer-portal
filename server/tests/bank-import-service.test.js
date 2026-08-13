@@ -481,8 +481,11 @@ describe('runDeterministicMatching', () => {
     await runDeterministicMatching();
     const payoutBuilder = state.builders.find(x => x.table === 'stripe_payouts');
     expect(payoutBuilder.b.whereNotIn).toHaveBeenCalledWith('id', expect.arrayContaining(['po-0', 'po-1']));
-    const expenseBuilder = state.builders.find(x => x.table === 'expenses');
-    expect(expenseBuilder.b.whereNotIn).toHaveBeenCalledWith('id', expect.arrayContaining(['exp-0', 'exp-1']));
+    // several expenses builders exist now (the refund-candidate scan is one)
+    // — the DEBIT matcher's builder is the one that must carry the exclusion
+    const expenseExcluded = state.builders.some(x => x.table === 'expenses'
+      && x.b.whereNotIn.mock.calls.some(c => c[0] === 'id' && c[1].includes('exp-0') && c[1].includes('exp-1')));
+    expect(expenseExcluded).toBe(true);
   });
 
   test('a card debit never auto-links to an expense the books say was paid by ACH/check/cash', async () => {
@@ -512,6 +515,76 @@ describe('runDeterministicMatching', () => {
     expect(sugOf(parked).refundCandidates).toHaveLength(1); // vendor-evidence filtered
     expect(sugOf(parked).refundCandidates[0].id).toBe('exp-1');
     expect(state.updates.find(u => u.patch.status)).toBeUndefined(); // nothing auto-applied
+  });
+
+  test('a BANK credit no payout explains parks refund candidates (purchase refunded into checking)', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA 5211 REFUND', amount: 20, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = []; // nothing to explain the credit
+    state.expenses = [{ id: 'exp-1', amount: '58.12', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-01', payment_method: 'ach' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).refundCandidates);
+    expect(parked).toBeDefined(); // the operator gets a refund path, not Ignore-only
+    expect(sugOf(parked).refundCandidates[0].id).toBe('exp-1');
+    // stale payout keys are subtracted in the same write — only one review
+    // action list may be present at a time (the UI dispatches on it)
+    expect(String(parked.patch.suggestion.sql)).toContain("'payoutCandidates'");
+  });
+
+  test('a bank credit with an eligible payout still prefers the payout path over refund parking', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE DEPOSIT WAWA', amount: 20, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '20.00', arrival_date: '2026-08-11', reconciled: false }];
+    state.expenses = [{ id: 'exp-1', amount: '58.12', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-01', payment_method: 'ach' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(1);
+    expect(state.updates.find(u => sugOf(u) && sugOf(u).refundCandidates)).toBeUndefined();
+  });
+
+  test('refund candidates park likeliest-first (nearest covering amount, newest) and cap at 20 with an honest total', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA 5211 REFUND', amount: 20, direction: 'credit', account_type: 'card', suggestion: null }];
+    state.expenses = [
+      { id: 'exp-big', amount: '99.00', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-05', payment_method: 'card' },
+      { id: 'exp-old', amount: '21.00', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-07-01', payment_method: 'card' },
+      { id: 'exp-new', amount: '21.00', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-05', payment_method: 'card' },
+      ...Array.from({ length: 20 }, (_, i) => ({ id: `exp-f${String(i).padStart(2, '0')}`, amount: '25.00', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-02', payment_method: 'card' })),
+    ];
+    await runDeterministicMatching();
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).refundCandidates);
+    const sug = sugOf(parked);
+    expect(sug.refundCandidates).toHaveLength(20); // bounded display slice
+    expect(sug.refundCandidatesTotal).toBe(23); // honest disclosure of the overflow
+    // nearest covering amount first; same amount → most recent purchase first
+    expect(sug.refundCandidates[0].id).toBe('exp-new');
+    expect(sug.refundCandidates[1].id).toBe('exp-old');
+    expect(sug.refundCandidates[sug.refundCandidates.length - 1].id).not.toBe('exp-big'); // 99.00 sorts last, off the slice
+  });
+
+  test('a bank debit never auto-links to a CASH expense — cash spend cannot be a bank transaction', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', account_type: 'bank', suggestion: null },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'cash' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(0);
+    expect(summary.ambiguous).toBe(1); // parks for the operator instead
+    // ach/check/card stay eligible for checking debits
+    state.updates = [];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'SiteOne order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'check' }];
+    const second = await runDeterministicMatching();
+    expect(second.expensesLinked).toBe(1);
+  });
+
+  test('a Stripe-shaped BANK credit is payout territory even when the description says TRANSFER', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE TRANSFER ST-77', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: false }];
+    const summary = await runDeterministicMatching();
+    expect(summary.transferFlagged).toBe(0); // the suppression would leave the deposit Ignore-only
+    expect(summary.payoutsLinked).toBe(1);
+    // debits keep the suppression — "STRIPE" money never leaves these accounts
+    state.updates = [];
+    state.bankRows = [{ id: 'bt-2', txn_date: '2026-08-11', description: 'STRIPE TRANSFER ST-78', amount: 100, direction: 'debit', account_type: 'bank', suggestion: null }];
+    const second = await runDeterministicMatching();
+    expect(second.transferFlagged).toBe(1);
   });
 
   test('an amount+date-only match WITHOUT provenance parks instead of auto-linking', async () => {
@@ -741,7 +814,7 @@ describe('runDeterministicMatching', () => {
   test('a RECONCILED link whose later human reconciliation carries a different amount is reverted', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
     state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: true }];
-    state.reconRows = [{ status: 'confirmed', actual_amount: '2000.00', reconciled_by: 'adam' }];
+    state.reconRows = [{ payout_id: 'po-1', status: 'confirmed', actual_amount: '2000.00', reconciled_by: 'adam' }];
     const summary = await runDeterministicMatching();
     expect(summary.linksReverted).toBe(1);
     const revert = state.updates.find(u => u.patch.status === 'unmatched');

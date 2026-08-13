@@ -148,6 +148,8 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 // The routes call the service's matching pass after upload; that policy has
 // its own test file — stub it here so upload tests stay about the route.
+// refund apply/undo must re-derive the persisted job-cost rollups
+jest.mock('../services/job-costing', () => ({ calculateJobCost: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/bank-import', () => ({
   ...jest.requireActual('../services/bank-import'),
   runDeterministicMatching: jest.fn(() => Promise.resolve({ scanned: 0, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0 })),
@@ -530,21 +532,59 @@ describe('apply-refund (gate on)', () => {
   beforeEach(() => {
     process.env.GATE_BANK_IMPORT = 'true';
     state.bankRow = { id: 'bt-1', amount: '20.00', txn_date: '2026-08-09', description: 'WAWA 5211 REFUND', direction: 'credit', account_type: 'card', account_label: 'capone-card-1234', status: 'unmatched', suggestion: { refundCandidates: [{ id: 'exp-9' }] } };
-    state.expenseRow = { id: 'exp-9', amount: '58.12', tax_deductible_amount: '29.06', notes: '[Bank import capone-card-1234]', vendor_name: 'Wawa', description: 'gas', payment_method: 'card' };
+    state.expenseRow = { id: 'exp-9', amount: '58.12', tax_deductible_amount: '29.06', notes: '[Bank import capone-card-1234]', vendor_name: 'Wawa', description: 'gas', payment_method: 'card', expense_date: '2026-08-01' };
   });
 
-  test('an expenseId outside the parked refundCandidates is refused — no arbitrary ledger reductions', async () => {
-    const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-other' });
-    expect(res.status).toBe(400);
+  test('an IMPLAUSIBLE target (outside the lookback window) is refused — no arbitrary ledger reductions', async () => {
+    // validation is by the matcher's plausibility RULES, not parked-list
+    // membership — so a crafted/stale id still can't reduce an arbitrary
+    // expense, while a valid off-slice original stays applicable
+    state.expenseRow = { ...state.expenseRow, expense_date: '2026-04-01' }; // > 90 days before the credit
+    const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });
+    expect(res.status).toBe(409);
     expect(state.expenseUpdates).toHaveLength(0);
     expect(state.bankUpdates).toHaveLength(0);
   });
 
+  test('a plausible original NOT in the parked slice still applies (high-frequency-vendor overflow)', async () => {
+    state.bankRow.suggestion = { refundCandidates: [{ id: 'exp-other' }] }; // the real original fell off the bounded list
+    const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });
+    expect(res.status).toBe(200);
+    expect(state.expenseUpdates[0].amount).toBe(38.12);
+  });
+
   test('vendor/method re-verification under the lock rejects a changed expense', async () => {
-    state.expenseRow = { id: 'exp-9', amount: '58.12', tax_deductible_amount: '29.06', vendor_name: 'Totally Different LLC', description: 'x', payment_method: 'ach' };
+    state.expenseRow = { id: 'exp-9', amount: '58.12', tax_deductible_amount: '29.06', vendor_name: 'Totally Different LLC', description: 'x', payment_method: 'ach', expense_date: '2026-08-01' };
     const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });
     expect(res.status).toBe(409);
     expect(state.bankUpdates).toHaveLength(0);
+  });
+
+  test('a CROSS-TAX-YEAR refund refuses to rewrite the filed year (tax benefit rule)', async () => {
+    state.bankRow.txn_date = '2026-01-15';
+    state.expenseRow = { ...state.expenseRow, expense_date: '2025-12-20' }; // inside the 90-day lookback, different tax year
+    const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain('income');
+    expect(state.expenseUpdates).toHaveLength(0);
+    expect(state.bankUpdates).toHaveLength(0);
+  });
+
+  test('a BANK-account credit (purchase refunded into checking) applies as a refund too', async () => {
+    state.bankRow.account_type = 'bank';
+    state.bankRow.account_label = 'capone-checking';
+    const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });
+    expect(res.status).toBe(200);
+    expect(state.expenseUpdates[0].amount).toBe(38.12);
+  });
+
+  test('a job expense refund re-derives the persisted job-cost rollups after commit', async () => {
+    const { calculateJobCost } = require('../services/job-costing');
+    calculateJobCost.mockClear();
+    state.expenseRow = { ...state.expenseRow, scheduled_service_id: 'svc-1' };
+    const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });
+    expect(res.status).toBe(200);
+    expect(calculateJobCost).toHaveBeenCalledWith('svc-1');
   });
 
   test('REDUCES the original expense (proportional deductible, floor 0) and claims the credit row', async () => {
@@ -567,14 +607,11 @@ describe('apply-refund (gate on)', () => {
     expect(state.bankUpdates).toHaveLength(0);
   });
 
-  test('validates inputs: missing expenseId, debit row, bank credit, non-unmatched, unknown expense', async () => {
+  test('validates inputs: missing expenseId, debit row, non-unmatched, unknown expense', async () => {
     expect((await post('/admin/tax/bank-import/bt-1/apply-refund', {})).status).toBe(400);
     state.bankRow.direction = 'debit';
     expect((await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' })).status).toBe(400);
     state.bankRow.direction = 'credit';
-    state.bankRow.account_type = 'bank';
-    expect((await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' })).status).toBe(400);
-    state.bankRow.account_type = 'card';
     state.bankRow.status = 'ignored';
     expect((await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' })).status).toBe(409);
     state.bankRow.status = 'unmatched';
@@ -610,6 +647,19 @@ describe('apply-refund (gate on)', () => {
     expect(claim.wheres).toContainEqual({ id: 'bt-1', status: 'refund_applied' });
     expect(claim.patch.status).toBe('unmatched');
     expect(sugOf(claim).refundUndone.expenseId).toBe('exp-9');
+  });
+
+  test('undoing a job expense refund re-derives the job-cost rollups too', async () => {
+    const { calculateJobCost } = require('../services/job-costing');
+    calculateJobCost.mockClear();
+    state.bankRow = {
+      id: 'bt-1', amount: '20.00', direction: 'credit', account_type: 'card', status: 'refund_applied',
+      suggestion: { refundAppliedTo: 'exp-9', refundAmount: 20, refundRestore: { prevAmount: 58.12, prevDeductible: 29.06, appliedDeductible: 19.06 } },
+    };
+    state.expenseRow = { id: 'exp-9', amount: '38.12', tax_deductible_amount: '19.06', notes: 'n', scheduled_service_id: 'svc-1' };
+    const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
+    expect(res.status).toBe(200);
+    expect(calculateJobCost).toHaveBeenCalledWith('svc-1');
   });
 
   test('undo refuses when the DEDUCTIBLE changed since the refund — later tax edits are never destroyed', async () => {

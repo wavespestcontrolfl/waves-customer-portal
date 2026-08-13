@@ -4392,7 +4392,7 @@ function BankImportTab() {
                       style={{ ...inputStyle, maxWidth: 240 }}
                       value={linkPick[r.id] || ""}
                       onChange={(e) => setLinkPick((p) => ({ ...p, [r.id]: e.target.value }))}
-                      title="Original purchases this card refund could offset — applying reduces that expense"
+                      title="Original purchases this refund could offset — applying reduces that expense"
                     >
                       <option value="">
                         {r.suggestion.refundCandidates.length} possible original purchase{r.suggestion.refundCandidates.length > 1 ? "s" : ""}…
@@ -4402,6 +4402,11 @@ function BankImportTab() {
                           {(c.vendor_name || c.description || "expense").slice(0, 34)} · {fmtM(c.amount)} · {fmtD(c.expense_date)}
                         </option>
                       ))}
+                      {(r.suggestion.refundCandidatesTotal || 0) > r.suggestion.refundCandidates.length && (
+                        <option value="" disabled>
+                          +{r.suggestion.refundCandidatesTotal - r.suggestion.refundCandidates.length} more — closest amounts shown; narrow via the Expenses tab
+                        </option>
+                      )}
                     </select>
                   ) : r.status === "unmatched" && r.direction === "credit" && r.suggestion?.payoutCandidates?.length ? (
                     <select
@@ -4449,12 +4454,16 @@ function BankImportTab() {
                       disabled={!!busy}
                       style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
                       onClick={() => {
-                        const isCardRefund = r.account_type === "card";
-                        const path = isCardRefund
+                        // dispatch on WHICH list the pick came from — a bank
+                        // credit parks refund candidates too (a purchase
+                        // refunded into checking), and only one list is ever
+                        // present (the matcher subtracts the other's keys)
+                        const isRefund = !!r.suggestion?.refundCandidates?.length;
+                        const path = isRefund
                           ? `/admin/tax/bank-import/${r.id}/apply-refund`
                           : `/admin/tax/bank-import/${r.id}/link-payout`;
-                        const body = isCardRefund ? { expenseId: linkPick[r.id] } : { payoutId: linkPick[r.id] };
-                        act(isCardRefund ? "apply-refund" : "link-payout", path, body).then((res) => {
+                        const body = isRefund ? { expenseId: linkPick[r.id] } : { payoutId: linkPick[r.id] };
+                        act(isRefund ? "apply-refund" : "link-payout", path, body).then((res) => {
                           if (res)
                             setLinkPick((p) => {
                               const next = { ...p };
@@ -4464,14 +4473,14 @@ function BankImportTab() {
                         });
                       }}
                     >
-                      {r.account_type === "card" ? "Apply refund" : "Link payout"}
+                      {r.suggestion?.refundCandidates?.length ? "Apply refund" : "Link payout"}
                     </button>
                   )}
                   {/* transfer-flagged rows keep Create too — the flag is only a
                       suggestion, and a legit vendor can trip the heuristic.
                       The category selector lives HERE so it stays reachable
                       in every review state (transfer warning, parked
-                      candidates). Card refunds go through Apply refund. */}
+                      candidates). Refund credits go through Apply refund. */}
                   {r.status === "unmatched" && r.direction === "debit" && !linkPick[r.id] && (
                     <>
                       <select

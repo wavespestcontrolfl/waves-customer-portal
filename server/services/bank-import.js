@@ -19,6 +19,7 @@ const logger = require('./logger');
 
 const PAYOUT_DATE_WINDOW_DAYS = 3;  // Stripe arrival vs bank posting drift
 const EXPENSE_DATE_WINDOW_DAYS = 5; // receipt date vs card posting drift
+const REFUND_LOOKBACK_DAYS = 90;    // refunds lag their purchase by weeks
 // Auto-links require EXACT cent equality; the tolerance only widens the
 // candidate list shown to the operator (a near-miss is a lead, not a match).
 const CANDIDATE_AMOUNT_TOLERANCE = 0.01;
@@ -249,6 +250,21 @@ function isPlausiblePayoutLink(row, payout) {
     && arrival >= addDays(txnDate, -PAYOUT_DATE_WINDOW_DAYS)
     && arrival <= addDays(txnDate, PAYOUT_DATE_WINDOW_DAYS);
 }
+// Server-side plausibility for a refund target — the SAME rules the matcher
+// uses to park refundCandidates, so any valid original purchase is
+// applicable even when it fell outside the bounded parked slice (a fuel or
+// supply vendor can have more same-window purchases than the list shows).
+// The original must predate the credit within the lookback, cover the
+// refund, share vendor evidence, and be method-compatible with the account.
+function isPlausibleRefundTarget(row, expense) {
+  const txnDate = toDateStr(row.txn_date);
+  const expDate = toDateStr(expense.expense_date);
+  return expDate >= addDays(txnDate, -REFUND_LOOKBACK_DAYS)
+    && expDate <= txnDate
+    && Number(expense.amount) >= Number(row.amount)
+    && vendorEvidence(row.description, expense)
+    && !methodIncompatible(row.account_type, expense.payment_method);
+}
 
 // Atomic suggestion patch: merge PATCH keys into the CURRENT jsonb value
 // (optionally subtracting keys first) so concurrent suggestion writers —
@@ -341,10 +357,35 @@ async function healUnreconciledLinks() {
     // pending-flagged rows belong to the echo/retry path, whose guard
     // revalidation handles this same case
     .whereRaw("coalesce(bt.suggestion->>'reconcilePending','') <> 'true'")
-    .select('bt.id as id', 'bt.amount as amount', 'bt.matched_payout_id as matched_payout_id');
+    .select('bt.id as id', 'bt.amount as amount', 'bt.matched_payout_id as matched_payout_id', 'sp.amount as payout_amount');
+  // ONE batched lookup for every linked payout's latest confirmed actual
+  // amount. This scan covers every reconciled link ever made (~one payout a
+  // business day), and the per-row effectivePayoutAmount() loop it replaces
+  // ran a serial query per link on EVERY upload/matching request — after a
+  // few years that was thousands of round trips before matching began. The
+  // scan itself stays two fixed queries regardless of history size; only
+  // actual mismatches (rare anomalies) pay a per-row transaction.
+  // Same latest-confirmed ordering as effectivePayoutAmount — keep in sync.
+  const confirmedAmounts = new Map();
+  const linkedIds = [...new Set(linkedReconciled.map(r => r.matched_payout_id))];
+  if (linkedIds.length) {
+    const latestRows = await db('bank_reconciliation')
+      .select(db.raw('distinct on (payout_id) payout_id, actual_amount'))
+      .whereIn('payout_id', linkedIds)
+      .where('status', 'confirmed')
+      .orderBy('payout_id')
+      .orderBy('reconciled_at', 'desc')
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc');
+    for (const r of latestRows) {
+      if (!confirmedAmounts.has(r.payout_id) && r.actual_amount != null) confirmedAmounts.set(r.payout_id, Number(r.actual_amount));
+    }
+  }
   let amountReverts = 0;
   for (const row of linkedReconciled) {
-    const effective = await effectivePayoutAmount({ id: row.matched_payout_id, reconciled: true });
+    const effective = confirmedAmounts.has(row.matched_payout_id)
+      ? confirmedAmounts.get(row.matched_payout_id)
+      : Number(row.payout_amount); // reconciled but no confirmed row — same fallback as effectivePayoutAmount
     if (withinCandidateTolerance(effective, row.amount)) continue;
     await db.transaction(async (trx) => {
       const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('id', 'amount', 'reconciled');
@@ -594,20 +635,33 @@ function rejectedTargets(suggestion) {
 // payout and hide the real deposit. Evidence = the statement description
 // looks like a Stripe deposit, or the imported account's label carries the
 // payout's destination last-4. Without it, the match PARKS for the operator.
+// The one description shape that identifies Stripe money — shared by the
+// payout-evidence check and the transfer-heuristic exemption in the
+// matching loop, so the two can never disagree about what "looks like
+// Stripe" means.
+function stripeShapedDescription(description) {
+  return /stripe/i.test(String(description || ''));
+}
+
 function payoutProvenance(row, payout) {
-  if (/stripe/i.test(String(row.description || ''))) return true;
+  if (stripeShapedDescription(row.description)) return true;
   const last4 = String(payout.bank_last_four || '').trim();
   return !!(last4 && String(row.account_label || '').includes(last4));
 }
 
 // A card-statement debit cannot be an expense the books already know was
 // paid by ACH, check, or cash — such an "exact" match is a coincidence and
-// auto-linking it would hide the real card purchase from review. Unknown
-// methods stay eligible (they park for the operator when not unique).
-// Bank-side debits are NOT restricted: checking outflow legitimately books
-// as ach, check, or card (debit-card-on-checking).
+// auto-linking it would hide the real card purchase from review. Bank-side
+// (checking) rows book more widely — outflow is legitimately ach, check, or
+// card (debit-card-on-checking) — but never CASH: cash spend cannot be a
+// bank transaction either, and a coincidental same-vendor cash expense
+// would consume the debit and hide the real one from review + coverage.
+// Unknown methods stay eligible (they park for the operator when not unique).
 function methodIncompatible(accountType, paymentMethod) {
-  return accountType === 'card' && ['ach', 'check', 'cash'].includes(String(paymentMethod || '').toLowerCase());
+  const method = String(paymentMethod || '').toLowerCase();
+  if (accountType === 'card') return ['ach', 'check', 'cash'].includes(method);
+  if (accountType === 'bank') return method === 'cash';
+  return false;
 }
 
 async function runDeterministicMatching({ limit } = {}) {
@@ -698,7 +752,16 @@ async function runDeterministicMatching({ limit } = {}) {
     // re-proposes ANY previously rejected target — including earlier
     // rejections, not just the latest. (Manual re-link stays possible.)
     const rejected = rejectedTargets(row.suggestion);
-    const transfer = transferSuggestion(row.description);
+    // A bank-account credit with a Stripe-shaped description is PAYOUT
+    // territory even when it also carries a transfer word (Capital One
+    // renders payouts as e.g. "STRIPE TRANSFER ST-…") — payoutProvenance
+    // treats that exact shape as payout EVIDENCE, so suppressing it here
+    // would contradict the payout branch and leave a legitimate deposit
+    // with only an Ignore action. Debits and card-account credits keep the
+    // suppression: Stripe money never moves through those rows, so
+    // "STRIPE" + transfer words there still reads as an internal move.
+    const stripeBankCredit = row.direction === 'credit' && row.account_type === 'bank' && stripeShapedDescription(row.description);
+    const transfer = stripeBankCredit ? null : transferSuggestion(row.description);
     if (transfer) {
       if (!row.suggestion || !row.suggestion.ignore) {
         // merged, not replaced — suggestion also carries durable identity
@@ -714,30 +777,45 @@ async function runDeterministicMatching({ limit } = {}) {
     }
 
     if (row.direction === 'credit') {
-      // Stripe pays out to the BANK account only — a card-statement credit
-      // is merchant-refund territory. Park candidate ORIGINAL expenses
+      // Merchant-refund review path: park candidate ORIGINAL expenses
       // (wide lookback — refunds lag purchases by weeks; vendor evidence +
-      // amount ≥ the credit + card-compatible method) for the operator's
+      // amount ≥ the credit + account-compatible method) for the operator's
       // apply-refund action. NEVER auto-applied: reducing a ledger expense
-      // is always a human call.
-      if (row.account_type !== 'bank') {
+      // is always a human call. Card credits are refund territory outright;
+      // bank credits reach here only AFTER payout matching comes up empty
+      // (a debit-card purchase refunded into checking).
+      const parkRefundCandidates = async () => {
         const originals = await db('expenses')
-          .whereBetween('expense_date', [addDays(txnDate, -90), txnDate])
+          .whereBetween('expense_date', [addDays(txnDate, -REFUND_LOOKBACK_DAYS), txnDate])
           .where('amount', '>=', row.amount)
           .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
         const refundCandidates = originals.filter(c => vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
-        if (refundCandidates.length) {
-          summary.ambiguous++;
-          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-            suggestion: suggestionMerge({
-              refundCandidates: refundCandidates.slice(0, 8).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: toDateStr(c.expense_date) })),
-              refundCandidatesTotal: refundCandidates.length,
-            }),
-            updated_at: new Date(),
-          });
-        } else {
-          await markScanned(row);
-        }
+        if (!refundCandidates.length) return false;
+        // Likeliest-first, deterministic: nearest covering amount, then the
+        // most recent purchase, then id — so the real original sits inside
+        // the bounded visible slice even for a high-frequency vendor. The
+        // apply route validates by the same plausibility RULES, not by
+        // membership in this display slice, so an off-slice original is
+        // still applicable.
+        refundCandidates.sort((a, b) => (Number(a.amount) - Number(b.amount))
+          || String(toDateStr(b.expense_date)).localeCompare(String(toDateStr(a.expense_date)))
+          || String(a.id).localeCompare(String(b.id)));
+        summary.ambiguous++;
+        // stale payout keys subtracted: whichever list is present is the
+        // row's ONE review action, and the UI dispatches on that
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+          suggestion: suggestionMerge({
+            refundCandidates: refundCandidates.slice(0, 20).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: toDateStr(c.expense_date) })),
+            refundCandidatesTotal: refundCandidates.length,
+          }, ['payoutCandidates', 'payoutCandidatesTotal']),
+          updated_at: new Date(),
+        });
+        return true;
+      };
+      // Stripe pays out to the BANK account only — card credits skip payout
+      // matching entirely.
+      if (row.account_type !== 'bank') {
+        if (!(await parkRefundCandidates())) await markScanned(row);
         continue;
       }
       let payoutQuery = db('stripe_payouts')
@@ -828,16 +906,21 @@ async function runDeterministicMatching({ limit } = {}) {
         // Ambiguous (or near-miss-only) payout credits park their candidates
         // so the operator has a manual link path — without this the credit
         // is permanently unmatched even when the right payout is obvious.
+        // Stale refund keys subtracted for the same reason as the inverse.
         summary.ambiguous++;
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
           suggestion: suggestionMerge({
             payoutCandidates: candidates.slice(0, 8).map(c => ({ id: c.id, amount: c.effective_amount, arrival_date: toDateStr(c.arrival_date) })),
             payoutCandidatesTotal: candidates.length,
-          }),
+          }, ['refundCandidates', 'refundCandidatesTotal']),
           updated_at: new Date(),
         });
       } else if (candidates.length === 0) {
-        await markScanned(row); // nothing to propose — leave the fresh pool
+        // No payout explains this bank credit — it can still be a merchant
+        // refund into checking (debit-card purchase refunded). Without this
+        // path the operator's only actions were Ignore or a wrong payout
+        // link, leaving the original expense overstated.
+        if (!(await parkRefundCandidates())) await markScanned(row); // nothing to propose — leave the fresh pool
       }
       continue;
     }
@@ -971,6 +1054,7 @@ module.exports = {
   echoPayoutReconciliation,
   isPlausibleExpenseLink,
   isPlausiblePayoutLink,
+  isPlausibleRefundTarget,
   methodIncompatible,
   effectivePayoutAmount,
   suggestionMerge,

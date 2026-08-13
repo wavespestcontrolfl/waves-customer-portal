@@ -1918,7 +1918,7 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
   try {
     const row = await db('bank_transactions').where({ id: req.params.id }).first();
     if (!row) return res.status(404).json({ error: 'row not found' });
-    if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits become expenses — card refunds use apply-refund' });
+    if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits become expenses — refund credits use apply-refund' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
 
     const suggested = row.suggestion?.categoryId || null;
@@ -2000,47 +2000,63 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Apply a card-statement credit (merchant refund) to the ORIGINAL expense:
-// the expense's amount is REDUCED and its deductible scaled proportionally
-// (floor 0) — never a negative ledger row, which would violate the
-// [0, amount] deductible invariant and the P&L clamps. Operator-picked from
-// the matcher's parked refundCandidates; the adjustment and the bank-row
-// claim commit in one transaction with the expense row locked.
+// Apply a statement credit (merchant refund — card credit, or a bank credit
+// no payout explains) to the ORIGINAL expense: the expense's amount is
+// REDUCED and its deductible scaled proportionally (floor 0) — never a
+// negative ledger row, which would violate the [0, amount] deductible
+// invariant and the P&L clamps. The target is validated under the expense
+// lock by the SAME plausibility rules the matcher parks candidates with
+// (lookback window, covering amount, vendor evidence, method compatibility)
+// — not by membership in the bounded parked slice, so a valid original a
+// high-frequency vendor pushed off the list is still applicable (mirrors
+// link-expense). The adjustment and the bank-row claim commit in one
+// transaction with the expense row locked.
 router.post('/bank-import/:id/apply-refund', async (req, res, next) => {
   try {
     const { expenseId } = req.body || {};
     if (!expenseId) return res.status(400).json({ error: 'expenseId is required' });
     const row = await db('bank_transactions').where({ id: req.params.id }).first();
     if (!row) return res.status(404).json({ error: 'row not found' });
-    if (row.direction !== 'credit' || row.account_type !== 'card') {
-      return res.status(400).json({ error: 'only card-statement credits apply as refunds' });
+    if (row.direction !== 'credit') {
+      return res.status(400).json({ error: 'only statement credits apply as refunds' });
     }
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
-    // Money-correctness: the target must be one of THIS credit's persisted
-    // refundCandidates — a stale or crafted id must never reduce an
-    // arbitrary ledger expense. The vendor/method checks re-run under the
-    // lock below (the expense can change between parking and applying).
-    const parkedIds = (row.suggestion?.refundCandidates || []).map(c => c.id);
-    if (!parkedIds.includes(expenseId)) {
-      return res.status(400).json({ error: 'that expense is not one of this credit\'s refund candidates — run matching to refresh them' });
-    }
     const refund = Number(row.amount);
     let adjusted;
+    let adjustedServiceId = null;
     try {
       adjusted = await db.transaction(async trx => {
-        const expense = await trx('expenses').where({ id: expenseId }).forUpdate().first('id', 'amount', 'tax_deductible_amount', 'notes', 'vendor_name', 'description', 'payment_method');
+        const expense = await trx('expenses').where({ id: expenseId }).forUpdate().first('id', 'amount', 'tax_deductible_amount', 'notes', 'vendor_name', 'description', 'payment_method', 'expense_date', 'scheduled_service_id');
         if (!expense) { const e = new Error('expense not found'); e.status = 404; throw e; }
-        if (!bankImport.vendorEvidence(row.description, expense) || bankImport.methodIncompatible(row.account_type, expense.payment_method)) {
-          const e = new Error('expense no longer matches this credit (vendor/payment-method) — run matching to refresh candidates');
-          e.status = 409;
-          throw e;
-        }
         const oldAmount = Number(expense.amount);
         if (!(refund <= oldAmount) || oldAmount <= 0) {
           const e = new Error(`refund ($${refund.toFixed(2)}) exceeds the expense's remaining amount ($${oldAmount.toFixed(2)})`);
           e.status = 400;
           throw e;
         }
+        // Money-correctness: full plausibility re-checked against the
+        // expense's CURRENT values under the lock — a stale or crafted id
+        // must never reduce an arbitrary ledger expense.
+        if (!bankImport.isPlausibleRefundTarget(row, expense)) {
+          const e = new Error('that expense is not a plausible original for this refund (amount/date/vendor/payment-method) — run matching to refresh candidates');
+          e.status = 409;
+          throw e;
+        }
+        // PERIOD INTEGRITY: reducing the original rewrites the P&L period
+        // the expense sits in (buildPnlReport selects by expense_date).
+        // Same-tax-year netting is standard cash-basis practice, but a
+        // PRIOR-year expense's books may already be filed — a recovered
+        // prior-year deduction is CURRENT-year income (tax benefit rule),
+        // a mechanism this expense ledger deliberately doesn't have.
+        // Refuse instead of silently rewriting a filed year.
+        const txnYear = dateCellStr(row.txn_date).slice(0, 4);
+        const expenseYear = dateCellStr(expense.expense_date).slice(0, 4);
+        if (txnYear !== expenseYear) {
+          const e = new Error(`this refund posted in ${txnYear} but the original expense is dated ${expenseYear} — reducing it would rewrite that year's books; record the recovery as ${txnYear} income manually, then Ignore this row`);
+          e.status = 409;
+          throw e;
+        }
+        adjustedServiceId = expense.scheduled_service_id || null;
         const newAmount = Math.round((oldAmount - refund) * 100) / 100;
         // proportional: preserves category policies AND operator-set custom
         // percentages, clamped to the ledger invariant [0, newAmount].
@@ -2092,6 +2108,15 @@ router.post('/bank-import/:id/apply-refund', async (req, res, next) => {
       if (err.code === 'CLAIM_LOST') return res.status(409).json({ error: err.message });
       if (err.status) return res.status(err.status).json({ error: err.message });
       throw err;
+    }
+    // job_costs and the service_records financial fields are persisted
+    // rollups — a job expense's amount change must re-derive them (same
+    // pattern as the expense update route in admin-job-expenses.js)
+    if (adjustedServiceId) {
+      try {
+        const JobCosting = require('../services/job-costing');
+        JobCosting.calculateJobCost(adjustedServiceId).catch(() => {});
+      } catch { /* non-critical */ }
     }
     res.json({ success: true, expense: adjusted });
   } catch (err) { next(err); }
@@ -2228,9 +2253,10 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       const target = row.suggestion?.refundAppliedTo;
       const restore = row.suggestion?.refundRestore;
       const refund = Number(row.amount);
+      let restoredServiceId = null;
       try {
         await db.transaction(async (trx) => {
-          const expense = target ? await trx('expenses').where({ id: target }).forUpdate().first('id', 'amount', 'tax_deductible_amount', 'notes') : null;
+          const expense = target ? await trx('expenses').where({ id: target }).forUpdate().first('id', 'amount', 'tax_deductible_amount', 'notes', 'scheduled_service_id') : null;
           if (expense && restore) {
             const expected = Math.round((Number(restore.prevAmount) - refund) * 100) / 100;
             const amountUntouched = Math.round(Number(expense.amount) * 100) === Math.round(expected * 100);
@@ -2251,6 +2277,7 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
               tax_deductible_amount: restore.prevDeductible,
               notes: `${expense.notes ? `${expense.notes} ` : ''}[Refund $${refund.toFixed(2)} UNDONE ${etDateString()}]`,
             });
+            restoredServiceId = expense.scheduled_service_id || null;
           }
           const changed = await trx('bank_transactions')
             .where({ id: row.id, status: 'refund_applied' })
@@ -2270,6 +2297,14 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       } catch (err) {
         if (err.status) return res.status(err.status).json({ error: err.message });
         throw err;
+      }
+      // same persisted-rollup rule as apply-refund: restoring a job
+      // expense's amount must re-derive job_costs / service_records
+      if (restoredServiceId) {
+        try {
+          const JobCosting = require('../services/job-costing');
+          JobCosting.calculateJobCost(restoredServiceId).catch(() => {});
+        } catch { /* non-critical */ }
       }
       return res.json({ success: true, reconciliation: null });
     }
