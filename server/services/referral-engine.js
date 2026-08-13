@@ -193,61 +193,75 @@ async function sendSMS(to, body, options = {}) {
 // 1. enrollPromoter
 // ---------------------------------------------------------------------------
 async function enrollPromoter(customerId) {
-  const customer = await db('customers').where({ id: customerId }).first();
-  if (!customer) throw new Error('Customer not found');
   const settings = await getSettings();
+  // The whole enroll runs in ONE transaction opened by a customer-row lock
+  // (codex #3379 r1 P1): the public report's referral tap made concurrent
+  // first-enrollments reachable (double-tap, two devices, 5/min limiter),
+  // and the unlocked path let both requests generate codes — one insert
+  // lost to the unique customer_phone constraint AFTER the loser had
+  // already written ITS code onto customers.referral_code, splitting the
+  // customer's card link from the surviving promoter's tracking code. The
+  // FOR UPDATE serializes per customer: the second request waits, then
+  // takes the already-enrolled path against the winner's row. All callers
+  // (portal Refer tab included) inherit the same atomicity.
+  return db.transaction(async (trx) => {
+    const customer = await trx('customers').where({ id: customerId }).forUpdate().first();
+    if (!customer) throw new Error('Customer not found');
 
-  // Check if already enrolled
-  const existing = await db('referral_promoters').where({ customer_id: customerId }).first();
-  if (existing) {
-    let code = String(existing.referral_code || customer.referral_code || referralCodeFromLink(existing.referral_link) || '').trim();
-    if (!code) {
-      code = await generateUniqueCode();
-    } else {
-      const conflict = await db('referral_promoters')
-        .where({ referral_code: code })
-        .where('id', '!=', existing.id)
-        .first();
-      if (conflict) code = await generateUniqueCode();
+    // Check if already enrolled
+    const existing = await trx('referral_promoters').where({ customer_id: customerId }).first();
+    if (existing) {
+      let code = String(existing.referral_code || customer.referral_code || referralCodeFromLink(existing.referral_link) || '').trim();
+      if (!code) {
+        code = await generateUniqueCode();
+      } else {
+        const conflict = await trx('referral_promoters')
+          .where({ referral_code: code })
+          .where('id', '!=', existing.id)
+          .first();
+        if (conflict) code = await generateUniqueCode();
+      }
+
+      const referralLink = getPromoterReferralLink({ ...existing, referral_code: code }, settings);
+      const updates = {};
+      if (!existing.referral_code || existing.referral_code !== code) updates.referral_code = code;
+      if (existing.referral_link !== referralLink) updates.referral_link = referralLink;
+      if (Object.keys(updates).length) {
+        updates.updated_at = new Date();
+        await trx('referral_promoters').where({ id: existing.id }).update(updates);
+      }
+      if (!customer.referral_code) {
+        await trx('customers').where({ id: customerId }).update({ referral_code: code });
+      }
+
+      return { promoter: { ...existing, ...updates, referral_code: code, referral_link: referralLink }, alreadyEnrolled: true };
     }
 
-    const referralLink = getPromoterReferralLink({ ...existing, referral_code: code }, settings);
-    const updates = {};
-    if (!existing.referral_code || existing.referral_code !== code) updates.referral_code = code;
-    if (existing.referral_link !== referralLink) updates.referral_link = referralLink;
-    if (Object.keys(updates).length) {
-      updates.updated_at = new Date();
-      await db('referral_promoters').where({ id: existing.id }).update(updates);
-    }
+    const code = customer.referral_code || (await generateUniqueCode());
+    const link = referralLinkForCode(code, settings.base_url);
+
+    // Ensure customer has a referral_code — inside the same transaction as
+    // the insert, so a failed enroll can no longer strand a code on the
+    // customer that no promoter row carries.
     if (!customer.referral_code) {
-      await db('customers').where({ id: customerId }).update({ referral_code: code });
+      await trx('customers').where({ id: customerId }).update({ referral_code: code });
     }
 
-    return { promoter: { ...existing, ...updates, referral_code: code, referral_link: referralLink }, alreadyEnrolled: true };
-  }
+    const [promoter] = await trx('referral_promoters').insert({
+      customer_phone: customer.phone || '',
+      customer_email: customer.email || '',
+      first_name: customer.first_name || '',
+      last_name: customer.last_name || '',
+      customer_id: customerId,
+      referral_code: code,
+      referral_link: link,
+      campaign: 'customer',
+      status: 'active',
+    }).returning('*');
 
-  const code = customer.referral_code || (await generateUniqueCode());
-  const link = referralLinkForCode(code, settings.base_url);
-
-  // Ensure customer has a referral_code
-  if (!customer.referral_code) {
-    await db('customers').where({ id: customerId }).update({ referral_code: code });
-  }
-
-  const [promoter] = await db('referral_promoters').insert({
-    customer_phone: customer.phone || '',
-    customer_email: customer.email || '',
-    first_name: customer.first_name || '',
-    last_name: customer.last_name || '',
-    customer_id: customerId,
-    referral_code: code,
-    referral_link: link,
-    campaign: 'customer',
-    status: 'active',
-  }).returning('*');
-
-  logger.info(`[ReferralEngine] Enrolled promoter ${promoter.id} for customer ${customerId}`);
-  return { promoter, alreadyEnrolled: false };
+    logger.info(`[ReferralEngine] Enrolled promoter ${promoter.id} for customer ${customerId}`);
+    return { promoter, alreadyEnrolled: false };
+  });
 }
 
 // ---------------------------------------------------------------------------

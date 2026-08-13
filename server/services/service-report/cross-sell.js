@@ -110,8 +110,11 @@ function startFamilyForIdentity(row = {}) {
   // palm-first ordering as waveguard-existing-services. A palm one-time
   // falls through to the default anchor like every other specialty.
   if (/\bpalms?\b/.test(s)) return 'pest_control';
-  if (/\b(tree|shrub|ornamental)\b/.test(s)) return 'tree_shrub';
-  if (/\b(lawn|turf)\b/.test(s)) return 'lawn_care';
+  // Plurals matched explicitly (codex #3379 r1 P2): "Trees & Shrubs" and
+  // "Ornamentals" are normal catalog wording, and \btree\b alone misses
+  // them — the ownership classifier handles the same variants.
+  if (/\b(trees?|shrubs?|ornamentals?)\b/.test(s)) return 'tree_shrub';
+  if (/\b(lawns?|turf)\b/.test(s)) return 'lawn_care';
   return 'pest_control';
 }
 
