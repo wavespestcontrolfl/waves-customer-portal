@@ -447,17 +447,22 @@ async function backfillOutcomeWeather(outcome, post, treatmentDate) {
       if (fawn && fawn.station !== 'unavailable' && fresh) weather = fawn;
     }
     if (weather) {
+      // COALESCE: a partial snapshot must never null out a field a prior
+      // enrichment already populated — only fill what is missing.
       await db('treatment_outcomes').where({ id: outcome.id }).update({
-        avg_temperature: weather.temp_f ?? null,
-        avg_humidity: weather.humidity_pct ?? null,
-        total_rainfall: weather.rainfall_in ?? null,
+        avg_temperature: db.raw('COALESCE(avg_temperature, ?)', [weather.temp_f ?? null]),
+        avg_humidity: db.raw('COALESCE(avg_humidity, ?)', [weather.humidity_pct ?? null]),
+        total_rainfall: db.raw('COALESCE(total_rainfall, ?)', [weather.rainfall_in ?? null]),
       });
       return true;
     }
     return false;
   } catch (err) {
+    // 'error' is distinguishable from an ordinary no-fresh-data false —
+    // the sweep aggregates these so a FAWN/update outage reaches
+    // job_health instead of recording a healthy run.
     logger.warn(`[agronomic-wiki] outcome ${outcome.id} weather backfill failed: ${err.message}`);
-    return false;
+    return 'error';
   }
 }
 
@@ -707,20 +712,32 @@ const AgronomicWiki = {
       // skip every current-day outcome after 8 PM ET. Over-selecting is
       // safe because the backfill's gates fail closed.
       const { etDateString: etDay, addETDays: addDays } = require('../utils/datetime-et');
+      // ANY missing field qualifies — an all-null predicate would never
+      // revisit a partially-enriched row, leaving a transiently missing
+      // humidity/rainfall reading absent forever. COALESCE in the
+      // backfill keeps already-populated values.
       const rows = await db('treatment_outcomes')
-        .whereNull('avg_temperature')
-        .whereNull('avg_humidity')
-        .whereNull('total_rainfall')
+        .where(function anyWeatherMissing() {
+          this.whereNull('avg_temperature')
+            .orWhereNull('avg_humidity')
+            .orWhereNull('total_rainfall');
+        })
         .whereNotNull('post_assessment_id')
         .where('treatment_date', '>=', etDay(addDays(new Date(), -1)))
         .orderBy('treatment_date', 'desc')
         .limit(limit);
+      let rowErrors = 0;
       for (const row of rows) {
         stats.checked++;
         const post = await db('lawn_assessments').where({ id: row.post_assessment_id }).first();
         if (!post) continue;
-        if (await backfillOutcomeWeather(row, post, row.treatment_date)) stats.enriched++;
+        const outcome = await backfillOutcomeWeather(row, post, row.treatment_date);
+        if (outcome === true) stats.enriched++;
+        else if (outcome === 'error') rowErrors++;
       }
+      // Per-row failures must reach job_health (the scheduler leg throws
+      // on stats.error) — ordinary freshness misses stay non-errors.
+      if (rowErrors) return { ...stats, error: `${rowErrors} row(s) failed enrichment` };
       return stats;
     } catch (err) {
       logger.error(`[agronomic-wiki] weather backfill sweep failed: ${err.message}`);
