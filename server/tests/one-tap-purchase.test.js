@@ -153,6 +153,20 @@ jest.mock('../services/notification-triggers', () => ({
 jest.mock('../services/new-recurring-welcome-sms', () => ({
   sendNewRecurringWelcome: jest.fn(),
 }));
+jest.mock('../services/autopay-enrollment', () => ({
+  enrollConsentedMethod: jest.fn(async () => ({ enrolled: true })),
+}));
+jest.mock('../services/appointment-tagger', () => ({
+  onServiceScheduled: jest.fn(async () => ({})),
+}));
+jest.mock('../services/termite-program-agreement', () => ({
+  maybeCreateTermiteProgramAgreement: jest.fn(async () => ({})),
+}));
+// Only the tier-stamp helper is consumed from the (huge) route module —
+// never load the real router in this suite.
+jest.mock('../routes/estimate-public', () => ({
+  treeShrubTierCatalogStamp: jest.fn(async () => null),
+}));
 
 const db = require('../models/db');
 const { buildPortalPurchaseBasis } = require('../services/service-report/cross-sell');
@@ -169,6 +183,12 @@ const { sendMembershipStarted } = require('../services/account-membership-email'
 const NotificationService = require('../services/notification-service');
 const { triggerNotification } = require('../services/notification-triggers');
 const { sendNewRecurringWelcome } = require('../services/new-recurring-welcome-sms');
+
+const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+const AppointmentTagger = require('../services/appointment-tagger');
+const { maybeCreateTermiteProgramAgreement } = require('../services/termite-program-agreement');
+const { treeShrubTierCatalogStamp } = require('../routes/estimate-public');
+const AppointmentReminders = require('../services/appointment-reminders');
 
 const oneTap = require('../services/one-tap-purchase');
 
@@ -433,6 +453,26 @@ describe('initPurchase', () => {
 });
 
 // ── reserve / release ────────────────────────────────────────────────────
+describe('initPurchase — GH r5 hardening', () => {
+  test('init records NO consent metadata — the customer has not agreed to anything yet', async () => {
+    await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+    const purchase = db.__state.tables.one_tap_purchases[0];
+    expect(purchase.consent_ip == null).toBe(true);
+    expect(purchase.consent_user_agent == null).toBe(true);
+  });
+
+  test('an engine run that produces a due-at-start/one-time component refuses (belt to the offer demotion)', async () => {
+    pricingEngine.generateEstimate.mockReturnValue({
+      ...ENGINE_RESULT,
+      lineItems: [{ ...LAWN_LINE, installation: { price: 300 } }],
+    });
+    await expect(oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(db.__state.tables.one_tap_purchases).toHaveLength(0);
+    expect(db.__state.tables.estimates).toHaveLength(0);
+  });
+});
+
 describe('reserve / release', () => {
   beforeEach(() => {
     db.__state.tables.one_tap_purchases.push({
@@ -490,6 +530,15 @@ describe('reserve / release', () => {
 
 // ── confirm ──────────────────────────────────────────────────────────────
 describe('confirm', () => {
+  // The frozen one-tap snapshot the confirm-time revalidation reasserts
+  // against the ledger row (fingerprint/option/per-visit + single recurring
+  // line + totals that divide back to the accepted per-application amount).
+  const SNAPSHOT_EST_DATA = () => JSON.stringify({
+    result: { recurring: { services: [{ ...LAWN_LINE, selected: true, isSelected: true }] } },
+    priorQualifyingServices: ['pest_control'],
+    oneTapPurchase: { fingerprint: 'fp-1', optionId: 'lawn-enhanced', perVisit: 84 },
+  });
+
   const seedReserved = () => {
     db.__state.tables.one_tap_purchases.push({
       id: 'p-1', customer_id: 'cust-1', estimate_id: 'est-1', status: 'reserved',
@@ -499,6 +548,7 @@ describe('confirm', () => {
     db.__state.tables.estimates.push({
       id: 'est-1', customer_id: 'cust-1', status: 'draft', expires_at: futureIso(),
       annual_total: 756, monthly_total: 63, price_locked_at: null,
+      estimate_data: SNAPSHOT_EST_DATA(),
     });
     db.__state.tables.scheduled_services.push({
       id: 'ss-1', scheduled_date: '2026-08-20', window_start: '08:00:00', service_type: 'Lawn Care',
@@ -509,6 +559,12 @@ describe('confirm', () => {
     id: 'ss-1', scheduled_date: '2026-08-20', window_start: '08:00:00',
     window_end: '10:00:00', service_type: 'Lawn Care',
   };
+  // A seeded follow-up — deferredFollowUpReminderRows carries ONLY these in
+  // production (the committed parent is excluded by the converter contract).
+  const FOLLOW_UP_ROW = {
+    id: 'ss-2', scheduled_date: '2026-10-01', window_start: '08:00:00',
+    window_end: '10:00:00', service_type: 'Lawn Care',
+  };
 
   beforeEach(() => {
     seedReserved();
@@ -516,7 +572,7 @@ describe('confirm', () => {
     EstimateConverter.convertEstimate.mockResolvedValue({
       membershipEmail: { customerId: 'cust-1' },
       recurringConversionSkipped: false,
-      deferredFollowUpReminderRows: [COMMITTED_ROW],
+      deferredFollowUpReminderRows: [FOLLOW_UP_ROW],
     });
   });
 
@@ -649,6 +705,119 @@ describe('confirm', () => {
     expect(out.emailQueued).toBe(false);
     const body = NotificationService.notifyCustomer.mock.calls[0][3];
     expect(body).not.toMatch(/confirmation email/i);
+  });
+
+  // ── Frozen-offer revalidation (GH r5 P1): the open draft is an ordinary
+  // editable draft — an operator PUT can rewrite totals/estimate_data while
+  // the ledger stays frozen at the original offer. Any divergence refuses.
+  test('an operator-revised draft (snapshot stripped by PUT) can never convert', async () => {
+    db.__state.tables.estimates[0].estimate_data = JSON.stringify({
+      result: { recurring: { services: [{ ...LAWN_LINE, name: 'Different Plan' }] } },
+    });
+    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(db.__state.tables.estimates[0].status).toBe('draft');
+  });
+
+  test('an operator-revised annual total that no longer divides to the accepted per-application amount refuses', async () => {
+    db.__state.tables.estimates[0].annual_total = 999;
+    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  // ── Auto Pay enrollment (GH r5 P1): consent-row presence alone is not
+  // charging protection — the accept-path enrollment semantics must run.
+  test('confirm enrolls the consented card into Auto Pay post-commit', async () => {
+    await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    expect(enrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1', paymentMethodId: 'pm-1', source: 'one_tap_purchase',
+    }));
+  });
+
+  test('a refused enrollment parks a billing office exception — the purchase stands', async () => {
+    enrollConsentedMethod.mockResolvedValueOnce({ enrolled: false, reason: 'method_removed' });
+    const out = await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    expect(out.success).toBe(true);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'billing', expect.stringMatching(/Auto Pay enrollment refused/),
+      expect.stringMatching(/method_removed/), expect.any(Object),
+    );
+  });
+
+  // ── Committed-visit automations (GH r5 P2 ×2): the parent row gets its
+  // own reminder registration and the standard appointment-type tagger —
+  // deferred rows carry only the seeded follow-ups.
+  test('the committed first visit is reminder-registered and tagged; follow-ups keep theirs', async () => {
+    await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    const registeredIds = AppointmentReminders.registerAppointment.mock.calls.map((c) => c[0]);
+    expect(registeredIds).toEqual(expect.arrayContaining(['ss-1', 'ss-2']));
+    expect(AppointmentTagger.onServiceScheduled).toHaveBeenCalledWith('ss-1', { suppressWelcome: true });
+  });
+
+  // ── T&S tier stamp (GH r5 P1): the committed row gets the purchased
+  // tier's catalog identity before the converter seeds follow-ups.
+  test('a tree & shrub purchase stamps the committed row with the tier catalog identity inside the trx', async () => {
+    db.__state.tables.one_tap_purchases[0].service_key = 'tree_shrub';
+    db.__state.tables.one_tap_purchases[0].option_id = 'tree-standard';
+    // Keep the frozen snapshot in lock-step with the ledger (the
+    // revalidation reasserts fingerprint/option/per-visit).
+    db.__state.tables.estimates[0].estimate_data = JSON.stringify({
+      result: { recurring: { services: [{ ...LAWN_LINE, name: 'Standard tree & shrub care' }] } },
+      oneTapPurchase: { fingerprint: 'fp-1', optionId: 'tree-standard', perVisit: 84 },
+    });
+    treeShrubTierCatalogStamp.mockResolvedValueOnce({
+      service_id: 'svc-ts', service_type: 'Bi-Monthly Tree & Shrub Care Service',
+    });
+    await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    // Standard variant → selectedFrequency source-1 key 'standard'.
+    expect(treeShrubTierCatalogStamp).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      selectedFrequency: { serviceCategory: 'tree_shrub', key: 'standard' },
+      rowServiceType: 'Lawn Care',
+    }));
+    expect(db.__state.tables.scheduled_services[0].service_id).toBe('svc-ts');
+    expect(db.__state.tables.scheduled_services[0].service_type).toBe('Bi-Monthly Tree & Shrub Care Service');
+  });
+
+  test('non-T&S purchases never call the tier stamp', async () => {
+    await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    expect(treeShrubTierCatalogStamp).not.toHaveBeenCalled();
+  });
+
+  // ── Termite agreement hook (GH r5 P2): same post-commit prep the public
+  // and manual acceptance paths run; non-termite skips entirely.
+  test('a termite purchase preps the program agreement from the ACCEPTED row', async () => {
+    db.__state.tables.one_tap_purchases[0].service_key = 'termite';
+    await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    expect(maybeCreateTermiteProgramAgreement).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1',
+      billingTerm: 'standard',
+      estimate: expect.objectContaining({ id: 'est-1', status: 'accepted' }),
+    }));
+  });
+
+  test('non-termite purchases never touch the agreement service', async () => {
+    await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    expect(maybeCreateTermiteProgramAgreement).not.toHaveBeenCalled();
+  });
+
+  // ── Re-pick recovery is hold-identity-aware (GH r5 P2): a concurrent
+  // re-reserve that already replaced the pointer must not be erased by the
+  // failed confirm's reset.
+  test('the expired-hold reset never clobbers a hold reserved after this confirm started', async () => {
+    const err = new Error('reservation expired');
+    err.code = 'RESERVATION_EXPIRED';
+    slotReservation.commitReservation.mockImplementation(async () => {
+      // Simulate the customer re-picking mid-confirm: the row now points at
+      // a NEW hold before the old one's failure surfaces.
+      db.__state.tables.one_tap_purchases[0].scheduled_service_id = 'ss-9';
+      throw err;
+    });
+    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
+      .rejects.toMatchObject({ status: 409, code: 'RESERVATION_EXPIRED' });
+    expect(db.__state.tables.one_tap_purchases[0].scheduled_service_id).toBe('ss-9');
+    expect(db.__state.tables.one_tap_purchases[0].status).toBe('reserved');
   });
 });
 

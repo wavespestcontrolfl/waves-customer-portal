@@ -3151,7 +3151,25 @@ router.delete('/:id', async (req, res, next) => {
     if (estimate.status !== 'draft') {
       return res.status(400).json({ error: 'Only draft estimates can be deleted. Archive closed estimates instead.' });
     }
+    // One-tap ledger rows FK this estimate (NO ACTION): without removing
+    // them first the delete below dies on 23503. A completed ledger row is
+    // a consent artifact and must never be deleted — it also implies the
+    // estimate is accepted, so the draft-only guard above already blocks it;
+    // belt-and-braces refuse anyway. Live holds are the 15-min sweeper's
+    // problem once the ledger row is gone.
+    const oneTapRows = await db('one_tap_purchases')
+      .where({ estimate_id: req.params.id })
+      .select('id', 'status');
+    if (oneTapRows.some((r) => r.status === 'completed')) {
+      return res.status(400).json({ error: 'This estimate carries a completed one-tap purchase and cannot be deleted.' });
+    }
     await db.transaction(async (trx) => {
+      if (oneTapRows.length) {
+        await trx('one_tap_purchases')
+          .whereIn('id', oneTapRows.map((r) => r.id))
+          .whereNot({ status: 'completed' })
+          .del();
+      }
       await trx('leads')
         .where({ estimate_id: req.params.id })
         .update({ estimate_id: null, updated_at: new Date() });

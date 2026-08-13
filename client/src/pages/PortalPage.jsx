@@ -1035,7 +1035,21 @@ function RecommendationsCard({ data }) {
       }
     })();
   }, []);
-  if (!data?.cards?.length) return null;
+  // A restored purchase must render even when the recommendations payload
+  // is empty or failed transiently — the resume fetch succeeding is the
+  // customer's only automatic path back to the held purchase (the return
+  // URL params are cleared once the state loads).
+  if (!data?.cards?.length) {
+    if (!purchaseResume) return null;
+    return (
+      <OneTapPurchaseOverlay
+        open
+        card={null}
+        resume={purchaseResume}
+        onClose={() => setPurchaseResume(null)}
+      />
+    );
+  }
   const muted = PORTAL_SHELL.muted;
   const setCardState = (id, value) => setRequestStates((prev) => ({ ...prev, [id]: value }));
 
@@ -1261,7 +1275,14 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       optionId: card.option?.id || null,
       perApplication: card.option?.perVisit ?? null,
     }).then((d) => {
-      if (stale) return;
+      if (stale) {
+        // The overlay closed while init was in flight: the unmount cleanup
+        // saw no purchase id, so this late success is the only holder of the
+        // new id — release it or its draft sits in the admin pipeline until
+        // the 24h expiry sweep.
+        if (d?.purchaseId) api.oneTapRelease(d.purchaseId).catch(() => {});
+        return;
+      }
       setInit(d);
       setSlots(d.slots || null);
     }).catch((err) => {
@@ -1630,10 +1651,13 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
               </div>
               <div style={{ fontSize: 14, color: muted }}>
                 Your time is held for {init.holdMinutes || 15} minutes.{' '}
+                {/* Locked while confirming: reserving a replacement slot
+                    mid-confirm races the in-flight confirmation's hold. */}
                 <button
                   type="button"
-                  onClick={() => { setStep('time'); setStepError(''); }}
-                  style={{ background: 'none', border: 'none', padding: 0, color: B.glassNavy, fontWeight: 800, fontSize: 14, cursor: 'pointer', textDecoration: 'underline' }}
+                  disabled={confirming}
+                  onClick={() => { if (confirming) return; setStep('time'); setStepError(''); }}
+                  style={{ background: 'none', border: 'none', padding: 0, color: B.glassNavy, fontWeight: 800, fontSize: 14, cursor: confirming ? 'default' : 'pointer', textDecoration: 'underline', opacity: confirming ? 0.55 : 1 }}
                 >
                   Change time
                 </button>

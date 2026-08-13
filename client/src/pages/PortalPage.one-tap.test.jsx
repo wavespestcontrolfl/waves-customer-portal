@@ -179,6 +179,68 @@ describe('one-tap purchase CTA gating', () => {
     expect(screen.getByText(/confirmation email and an app notification/)).toBeInTheDocument();
   });
 
+  it('a SetupIntent-return resume renders the held purchase even when no recommendation cards load (GH r5 P2)', async () => {
+    window.history.replaceState({}, '', '/?stripe_setup_flow=one_tap_card&setup_intent=si_1&redirect_status=succeeded&one_tap_resume=p-7');
+    try {
+      api.getPropertyRecommendations.mockResolvedValue(recommendations({ cards: [] }));
+      api.saveStripeCard.mockResolvedValue({});
+      api.oneTapGet.mockResolvedValue({
+        purchaseId: 'p-7', estimateId: 'est-1', status: 'reserved', open: true,
+        serviceKey: 'lawn_care', label: 'Lawn Care', perVisit: 84,
+        cadenceLabel: '9 applications/yr', visitsPerYear: 9,
+        terms: { version: 'v1', text: 'Server terms text.' },
+        hasCardOnFile: true, holdLive: true, holdMinutes: 15,
+        slot: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00', holdExpiresAt: new Date(Date.now() + 900000).toISOString() },
+      });
+      renderDashboard();
+      // The resumed overlay must render despite the empty card list — it is
+      // the only automatic path back to the held purchase.
+      expect(await screen.findByRole('dialog', { name: /Add Lawn Care/ })).toBeInTheDocument();
+      expect(api.oneTapGet).toHaveBeenCalledWith('p-7');
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
+  });
+
+  it('an init that resolves after the overlay closed releases the freshly created purchase (GH r5 P2)', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(recommendations());
+    let resolveInit;
+    api.oneTapInit.mockReturnValue(new Promise((resolve) => { resolveInit = resolve; }));
+    api.oneTapRelease.mockResolvedValue({ released: true });
+    const view = renderDashboard();
+    fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
+    expect(api.oneTapInit).toHaveBeenCalled();
+    // Overlay unmounts while /init is still in flight — cleanup sees no id.
+    view.unmount();
+    resolveInit({ purchaseId: 'p-9', slots: { primary: [], expander: [], nearby: false } });
+    // The stale success is the only holder of the new id — it must release.
+    await vi.waitFor(() => expect(api.oneTapRelease).toHaveBeenCalledWith('p-9'));
+  });
+
+  it('Change time is locked while a confirmation is in flight (GH r5 P2)', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(recommendations());
+    api.oneTapInit.mockResolvedValue({
+      purchaseId: 'p-1', estimateId: 'est-1', serviceKey: 'lawn_care', label: 'Lawn Care',
+      perVisit: 84, cadenceLabel: '9 applications/yr', visitsPerYear: 9,
+      terms: { version: 'v1', text: 'Server terms text.' }, hasCardOnFile: true, holdMinutes: 15,
+      slots: {
+        primary: [{ slotId: 'slot-1', date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00', techFirstName: 'Adam', routeOptimal: true }],
+        expander: [], nearby: true,
+      },
+    });
+    api.oneTapReserve.mockResolvedValue({ scheduledServiceId: 'ss-1', expiresAt: new Date(Date.now() + 900000).toISOString(), holdMinutes: 15 });
+    api.oneTapConfirm.mockReturnValue(new Promise(() => {})); // never settles
+    renderDashboard();
+    fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
+    fireEvent.click(await screen.findByText('Agree and choose a time'));
+    fireEvent.click(await screen.findByText(/Arrival 8:00 AM–10:00 AM/));
+    await screen.findByText(/held for 15 minutes/);
+    fireEvent.click(screen.getByText('Confirm'));
+    expect(await screen.findByText('Confirming…')).toBeInTheDocument();
+    // Reserving a replacement slot mid-confirm races the in-flight hold.
+    expect(screen.getByText('Change time').closest('button')).toBeDisabled();
+  });
+
   it('a 409 at init renders the offer-changed refresh state, never a dead retry', async () => {
     api.getPropertyRecommendations.mockResolvedValue(recommendations());
     const stale = Object.assign(new Error('offer changed'), { status: 409 });

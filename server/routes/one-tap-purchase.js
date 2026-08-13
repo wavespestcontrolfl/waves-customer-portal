@@ -75,8 +75,8 @@ router.post('/init', writeLimiter, async (req, res, next) => {
         optionId: req.body?.optionId,
         perApplication: req.body?.perApplication,
       },
-      ip: req.ip,
-      userAgent: req.get('user-agent') || null,
+      // No ip/userAgent here: consent metadata is recorded at CONFIRM only —
+      // init predates any agreement.
     });
     return res.json(result);
   } catch (err) {

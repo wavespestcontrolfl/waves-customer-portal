@@ -153,7 +153,7 @@ function estimateExpired(estimate) {
 // Recompute the offer server-side, reject on any drift from what the card
 // rendered, synthesize the NEW-SERVICE-ONLY draft estimate, ledger the
 // purchase, and return terms + slots.
-async function initPurchase({ customerId, clicked, ip, userAgent }) {
+async function initPurchase({ customerId, clicked }) {
   const basis = await buildPortalPurchaseBasis(customerId, db);
   if (!basis) throw httpError(409, OFFER_CHANGED);
   const offer = basis.payload;
@@ -218,6 +218,14 @@ async function initPurchase({ customerId, clicked, ip, userAgent }) {
     .map(Number).find((n) => Number.isFinite(n) && n > 0) || null;
   const annualAfter = Number(amount.annual);
   if (!(annualAfter > 0) || !visits) throw httpError(409, OFFER_CHANGED);
+  // Belt to optionIsPriceable's dueAtStart/oneTime demotion (the offer card
+  // never renders priced with a due-at-start component — e.g. termite
+  // station installation): if THIS engine run produced one anyway, the
+  // per-application-only draft below would silently drop a charge the
+  // customer owes. Refuse — never sell an undisclosed one-time component.
+  if (Number(amount.dueAtStart) > 0 || Number(amount.oneTime) > 0) {
+    throw httpError(409, OFFER_CHANGED);
+  }
   const perVisit = Math.round((annualAfter / visits) * 100) / 100;
 
   // PARITY ASSERT (P0): the synthesized price must equal the offer the
@@ -348,8 +356,10 @@ async function initPurchase({ customerId, clicked, ip, userAgent }) {
       status: 'initiated',
       terms_version: TERMS_VERSION,
       terms_snapshot: TERMS_TEXT,
-      consent_ip: ip || null,
-      consent_user_agent: userAgent || null,
+      // consent_ip / consent_user_agent stay NULL here deliberately: init
+      // fires on the first tap, BEFORE the customer has read or accepted
+      // anything — an abandoned attempt must not retain what looks like
+      // consent evidence. Confirm records them alongside accepted_at.
     }).returning('*');
 
     return { superseded: priorOpen, estimate: estimateRow, purchase: purchaseRow };
@@ -818,6 +828,39 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
         .first();
       if (!est || est.status !== 'draft' || estimateExpired(est)) throw httpError(409, OFFER_CHANGED);
 
+      // Frozen-offer revalidation (codex P1): while open, the synthesized
+      // draft is an ordinary editable draft — PUT /api/admin/estimates/:id
+      // can rewrite its totals/estimate_data while purchase.per_visit and
+      // the terms the customer accepted stay frozen at the original offer.
+      // Reassert the stored snapshot against the ledger before converting:
+      // fingerprint/option/per-visit must match the purchase row, the draft
+      // must still be the single-recurring-line one-tap shape, and the
+      // persisted annual total must still divide to the accepted
+      // per-application amount. Any divergence ⇒ 409, never a conversion of
+      // terms the customer never saw.
+      let estData = null;
+      try {
+        estData = typeof est.estimate_data === 'string'
+          ? JSON.parse(est.estimate_data)
+          : est.estimate_data;
+      } catch { estData = null; }
+      const frozen = estData?.oneTapPurchase || null;
+      const storedServices = estData?.result?.recurring?.services || [];
+      const storedLine = storedServices[0] || null;
+      const storedVisits = [storedLine?.visitsPerYear, storedLine?.visits, storedLine?.frequency]
+        .map(Number).find((n) => Number.isFinite(n) && n > 0) || null;
+      const ledgerPer = Number(purchase.per_visit);
+      const totalsPer = storedVisits
+        ? Math.round((Number(est.annual_total) / storedVisits) * 100) / 100
+        : null;
+      const snapshotIntact = !!frozen
+        && frozen.fingerprint === purchase.fingerprint
+        && String(frozen.optionId || '') === String(purchase.option_id || '')
+        && Math.abs(Number(frozen.perVisit) - ledgerPer) < 0.005
+        && storedServices.length === 1
+        && totalsPer !== null && Math.abs(totalsPer - ledgerPer) <= 0.005;
+      if (!snapshotIntact) throw httpError(409, OFFER_CHANGED);
+
       // CAS double-confirm guard: acceptance is where money commits.
       const locked = await trx('estimates')
         .where({ id: est.id, status: 'draft' })
@@ -855,6 +898,30 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
           throw httpError(409, 'That time is no longer available — pick a slot again.', { code: 'SLOT_UNAVAILABLE' });
         }
         throw commitErr;
+      }
+
+      // T&S accepts: stamp the committed row with the purchased tier's
+      // catalog identity — the same treeShrubTierCatalogStamp step every
+      // accept-path reservation branch runs (commitReservation canonicalizes
+      // the row to the generic label with no service_id, and the converter's
+      // seeded follow-ups copy service_id from this parent row, so the stamp
+      // must land BEFORE convertEstimate).
+      if (committed?.id && purchase.service_key === 'tree_shrub') {
+        const { treeShrubTierCatalogStamp } = require('../routes/estimate-public');
+        const tsVariant = require('./customer-pricing-ai')
+          .variantsForService('tree_shrub', '', false)
+          .find((v) => v.id === purchase.option_id);
+        const tierStamp = await treeShrubTierCatalogStamp(trx, {
+          selectedFrequency: tsVariant?.tier
+            ? { serviceCategory: 'tree_shrub', key: tsVariant.tier }
+            : null,
+          estData,
+          rowServiceType: committed.service_type,
+        });
+        if (tierStamp) {
+          await trx('scheduled_services').where({ id: committed.id }).update(tierStamp);
+          Object.assign(committed, tierStamp);
+        }
       }
 
       // The converter detects the committed reservation on this trx and
@@ -899,8 +966,12 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
     // Re-pick recovery: the hold died mid-confirm — everything rolled back;
     // put the purchase back in pick-a-time state (best-effort).
     if (err && (err.code === 'RESERVATION_EXPIRED' || err.code === 'SLOT_UNAVAILABLE')) {
+      // Hold-identity CAS: only reset the row if it still points at the hold
+      // THIS confirm ran with — a concurrent re-reserve (customer re-picked
+      // while this confirm was in flight) has already replaced the pointer,
+      // and a blind reset would erase their newly held slot.
       await db('one_tap_purchases')
-        .where({ id: purchase.id, status: 'reserved' })
+        .where({ id: purchase.id, status: 'reserved', scheduled_service_id: purchase.scheduled_service_id })
         .update({ status: 'initiated', scheduled_service_id: null, slot_id: null, updated_at: db.fn.now() })
         .catch(() => {});
     }
@@ -920,6 +991,41 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
     estimateId: purchase.estimate_id,
     customerId,
   });
+
+  // Auto Pay enrollment (codex P1): a qualifying consent row alone is not
+  // charging protection — completion charging requires ACTIVE Auto Pay with
+  // an in-charge method, and a consent whose earlier enrollment failed
+  // half-way satisfies the card check above without it. Run the same
+  // saved-method enrollment semantics the accept path's auto-satisfy branch
+  // uses (idempotent; defers to a healthy incumbent). A refusal parks an
+  // office exception — the committed purchase stands, but never silently
+  // unprotected. Ownership is inherent: the card row was looked up BY this
+  // customerId.
+  try {
+    const { enrollConsentedMethod } = require('./autopay-enrollment');
+    const enrollment = await enrollConsentedMethod({
+      customerId,
+      paymentMethodId: card.id,
+      source: 'one_tap_purchase',
+      details: { via: 'one_tap_confirm', estimate_id: purchase.estimate_id, purchase_id: purchase.id },
+    });
+    if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'One-tap purchase: Auto Pay enrollment refused',
+        `A one-tap purchase confirmed with a consented saved card but Auto Pay enrollment was refused (${enrollment.reason}) — re-add a payment method or the visits will invoice unprotected.`,
+        { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: purchase.estimate_id, purchaseId: purchase.id, reason: enrollment.reason } },
+      ).catch(() => {});
+    }
+  } catch (e) {
+    logger.error(`[one-tap-purchase] Auto Pay enrollment failed for customer ${customerId}: ${e.message}`);
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      'One-tap purchase: Auto Pay enrollment failed',
+      'A one-tap purchase confirmed but Auto Pay enrollment threw — review the account or the visits will invoice unprotected.',
+      { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: purchase.estimate_id, purchaseId: purchase.id } },
+    ).catch(() => {});
+  }
   const serviceLabel = committed?.service_type
     || String(purchase.service_key || 'service').replace(/_/g, ' ');
   const firstVisit = committed ? {
@@ -953,12 +1059,32 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
     }
   }
 
-  // Deferred follow-up reminder registration (same post-commit contract as
-  // the estimate-accept route; sendConfirmation false — no comms fire here).
-  const deferredRows = Array.isArray(conversion?.deferredFollowUpReminderRows)
-    ? conversion.deferredFollowUpReminderRows
-    : [];
-  for (const appointment of deferredRows) {
+  // Reminder + appointment-type automations for the COMMITTED first visit
+  // (codex P2 ×2): deferredFollowUpReminderRows carries only the seeded
+  // follow-ups — the standard accept route registers the committed parent
+  // separately, so this path must too, or the customer's selected first
+  // visit rides only the 15-min self-heal sweep. Same for the tagger: the
+  // parent row otherwise keeps a null appointment_type (children classify
+  // themselves in the seeder; nothing backfills the parent).
+  const committedAndDeferred = [
+    ...(committed?.id ? [committed] : []),
+    ...(Array.isArray(conversion?.deferredFollowUpReminderRows)
+      ? conversion.deferredFollowUpReminderRows
+      : []),
+  ];
+  if (committed?.id) {
+    try {
+      const AppointmentTagger = require('./appointment-tagger');
+      // suppressWelcome: same accept-path contract — the converter's
+      // candidacy gate owns any new-recurring welcome, and this flow is
+      // NO-SMS by ruling anyway.
+      void AppointmentTagger.onServiceScheduled(committed.id, { suppressWelcome: true })
+        .catch((e) => logger.error(`[one-tap-purchase] appointment automations failed for ${committed.id}: ${e.message}`));
+    } catch (e) {
+      logger.error(`[one-tap-purchase] appointment automations setup failed: ${e.message}`);
+    }
+  }
+  for (const appointment of committedAndDeferred) {
     try {
       const AppointmentReminders = require('./appointment-reminders');
       await AppointmentReminders.registerAppointment(
@@ -971,6 +1097,28 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       );
     } catch (e) {
       logger.error(`[one-tap-purchase] reminder registration failed for ${appointment.id}: ${e.message}`);
+    }
+  }
+
+  // Termite accepts prep the signable program agreement (codex P2 — same
+  // post-commit hook the public and manual acceptance paths run; the service
+  // never throws and skips silently for non-termite estimates). Re-read the
+  // row so the agreement prefills from the ACCEPTED figures, not the
+  // pre-accept snapshot in memory. billingTerm 'standard' matches the
+  // converter call above.
+  if (purchase.service_key === 'termite') {
+    try {
+      const { maybeCreateTermiteProgramAgreement } = require('./termite-program-agreement');
+      const acceptedRow = await db('estimates').where({ id: purchase.estimate_id }).first();
+      if (acceptedRow) {
+        void maybeCreateTermiteProgramAgreement({
+          estimate: acceptedRow,
+          customerId,
+          billingTerm: 'standard',
+        }).catch((e) => logger.error(`[one-tap-purchase] termite agreement prep failed for estimate ${purchase.estimate_id}: ${e.message}`));
+      }
+    } catch (e) {
+      logger.error(`[one-tap-purchase] termite agreement prep setup failed: ${e.message}`);
     }
   }
 
