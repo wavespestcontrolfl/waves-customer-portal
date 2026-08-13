@@ -252,31 +252,30 @@ async function performPropertyLookupCore(address, options = {}) {
           if (persist) await attachPoolPermitsToCachedLookup(address, permits);
         }
       }
-      // A cached EMPTY permit marker predates whatever the weekly permit
-      // sync has learned since — without this, a closed permit synced after
-      // the marker was cached stays invisible for the rest of the cache
-      // TTL. The synced-table read is a cheap local query (no GIS call, so
-      // it is allowed on cache hits), Manatee-only, fail-open, and only
-      // UPGRADES an empty marker — it never overwrites live GIS evidence.
-      if (
-        !cacheOnly
-        && cached.property_record?._poolPermits
-        && !cached.property_record._poolPermits.poolPermit
-        && cached.property_record._parcel?.county === 'Manatee'
-      ) {
+      // Synced-table evidence is recomputed IN MEMORY on every cache hit
+      // (Manatee only): both reads are cheap local indexed queries — no GIS
+      // call, so they are allowed here — and recomputing beats persisting
+      // because the weekly permit sync keeps learning things AFTER a marker
+      // was cached (a closed pool permit, a new construction start), and a
+      // persisted upgrade would itself go stale. The pool read only fills
+      // an EMPTY marker — it never overwrites live GIS evidence. Fail-open:
+      // a missing table or DB blip is just "no signal".
+      if (!cacheOnly && cached.property_record?._parcel?.county === 'Manatee') {
         try {
-          const { findSyncedPoolPermit, looseKeyFromFreeform } = require('../services/property-lookup/manatee-permit-sync');
-          const synced = await findSyncedPoolPermit({
-            parcelPin: cached.property_record._parcel.paoParcelId,
-            looseKey: looseKeyFromFreeform(address),
-          });
-          if (synced) {
-            cached.property_record._poolPermits = {
-              ...cached.property_record._poolPermits,
-              poolPermit: synced,
-            };
-            if (persist) await attachPoolPermitsToCachedLookup(address, cached.property_record._poolPermits);
+          const { findSyncedPoolPermit, findConstructionActivity, looseKeyFromFreeform } = require('../services/property-lookup/manatee-permit-sync');
+          const looseKey = looseKeyFromFreeform(address);
+          const parcelPin = cached.property_record._parcel.paoParcelId;
+          if (cached.property_record._poolPermits && !cached.property_record._poolPermits.poolPermit) {
+            const synced = await findSyncedPoolPermit({ parcelPin, looseKey });
+            if (synced) {
+              cached.property_record._poolPermits = {
+                ...cached.property_record._poolPermits,
+                poolPermit: synced,
+              };
+            }
           }
+          const construction = await findConstructionActivity({ parcelPin, looseKey });
+          if (construction) cached.property_record._constructionActivity = construction;
         } catch { /* fail-open: table missing or DB blip = no signal */ }
       }
       // House-number-audit backfill, same pattern: record-bearing rows cached

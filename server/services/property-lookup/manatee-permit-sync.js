@@ -69,9 +69,11 @@ const reportParamUrl = (reportId) => `${ACA_BASE}ReportParameter.aspx?module=&re
 const reportShowUrl = (reportId) => `${ACA_BASE}ShowReport.aspx?module=&reportID=${reportId}&reportType=LINK_REPORT_LIST`;
 
 const DEFAULT_TIMEOUT_MS = 60000;
-const REFRESH_DAYS = 180;
-const BACKFILL_START = '2023-01-01';
 const BACKFILL_CHUNK_MONTHS = 6;
+// Full-range sync starts (env-overridable — tests use a near date for a
+// single window; ops can trim history without a deploy).
+const poolSyncStartIso = () => process.env.POOL_PERMIT_SYNC_START || '2023-01-01';
+const constructionSyncStartIso = () => process.env.CONSTRUCTION_PERMIT_SYNC_START || '2024-01-01';
 const USER_AGENT = 'Mozilla/5.0 (WavesPortal pool-permit-sync)';
 
 function syncTimeoutMs() {
@@ -249,29 +251,21 @@ function parsePoolPermitCsv(csvText) {
   return records.map(normalizeRow).filter(Boolean);
 }
 
-async function upsertRows(rows) {
+const UPSERT_CHUNK = 500;
+
+/**
+ * Chunked array upserts inside the caller's transaction. Rows in one call
+ * MUST share the same key set (knex unions columns across an array insert
+ * and would write NULL for keys a row omits — exactly what the per-report
+ * construction rows rely on NOT happening).
+ */
+async function upsertChunked(trx, table, conflictCol, rows) {
   let written = 0;
-  for (const row of rows) {
-    await db('pool_permit_records')
-      .insert({ ...row, last_seen_at: db.fn.now() })
-      .onConflict('record_id')
-      .merge({
-        record_status: row.record_status,
-        job_value: row.job_value,
-        issued_date: row.issued_date,
-        address_line1: row.address_line1,
-        city: row.city,
-        zip: row.zip,
-        parcel_raw: row.parcel_raw,
-        parcel_pin: row.parcel_pin,
-        address_key: row.address_key,
-        address_loose_key: row.address_loose_key,
-        contractor_name: row.contractor_name,
-        contractor_license: row.contractor_license,
-        owner_name: row.owner_name,
-        last_seen_at: db.fn.now(),
-      });
-    written += 1;
+  for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
+    const chunk = rows.slice(i, i + UPSERT_CHUNK).map((row) => ({ ...row, last_seen_at: trx.fn.now() }));
+    const mergeCols = Object.keys(chunk[0]).filter((k) => k !== conflictCol && k !== 'county');
+    await trx(table).insert(chunk).onConflict(conflictCol).merge(mergeCols);
+    written += chunk.length;
   }
   return written;
 }
@@ -292,43 +286,36 @@ function windowsSince(startIso, chunkMonths) {
 
 /**
  * Weekly sync entry point (scheduler). Gated inside (single source of
- * truth): a disabled gate returns {skipped:'gated'} before any DB read.
- * Empty table → chunked backfill from BACKFILL_START; otherwise a trailing
- * REFRESH_DAYS window so statuses keep converging. A window fetch failure
- * aborts the run (partial windows would look like "synced through today").
+ * truth): a disabled gate returns {skipped:'gated'} before any fetch or DB
+ * read. EVERY run re-syncs the full range from BACKFILL_START — no
+ * refresh-mode inference: the tables are small (a few thousand rows/year),
+ * so a full pass is ~7 report requests, and it structurally removes both
+ * the partial-backfill trap (a half-written first load flipping later runs
+ * into a truncated window) and the stale-status window (a permit Canceled
+ * long after issuance is re-read every week). All windows are fetched
+ * before anything is written, and the writes run in ONE transaction —
+ * an aborted run leaves the previous sync intact.
  */
 async function syncPoolPermits({ timeoutMs } = {}) {
   if (!gateEnvValue('GATE_PERMIT_SYNC')) return { skipped: 'gated' };
   const t0 = Date.now();
-  const existing = await db('pool_permit_records').count('id as n').first();
-  const empty = !Number(existing?.n || 0);
-  const windows = empty
-    ? windowsSince(BACKFILL_START, BACKFILL_CHUNK_MONTHS)
-    : (() => {
-      const from = new Date(Date.now() - REFRESH_DAYS * 24 * 60 * 60 * 1000);
-      return [[mdy(from), mdy(new Date())]];
-    })();
-
-  // Fetch EVERY window before writing anything: backfill mode is inferred
-  // from table emptiness, so a partial initial load (early window written,
-  // later fetch failed) would flip the next run into refresh mode and
-  // permanently skip the unfetched history. All-or-nothing keeps the
-  // empty-table signal honest.
+  const windows = windowsSince(poolSyncStartIso(), BACKFILL_CHUNK_MONTHS);
   const allRows = [];
   for (const [from, to] of windows) {
     const csv = await fetchPoolPermitCsv(from, to, timeoutMs);
     allRows.push(...parsePoolPermitCsv(csv));
   }
   const fetched = allRows.length;
-  const written = await upsertRows(allRows);
-  logger.info('[pool-permit-sync] sync complete', {
-    mode: empty ? 'backfill' : 'refresh',
+  const written = allRows.length
+    ? await db.transaction((trx) => upsertChunked(trx, 'pool_permit_records', 'record_id', allRows))
+    : 0;
+  logger.info('[permit-sync] pool sync complete', {
     windows: windows.length,
     fetched,
     written,
     elapsedMs: Date.now() - t0,
   });
-  return { mode: empty ? 'backfill' : 'refresh', windows: windows.length, fetched, written };
+  return { windows: windows.length, fetched, written };
 }
 
 /**
@@ -369,8 +356,6 @@ async function findSyncedPoolPermit({ parcelPin, addrKey, looseKey } = {}) {
 }
 
 // ── Construction reports (Under Construction + COs Issued) ──
-
-const CONSTRUCTION_BACKFILL_START = '2024-01-01';
 
 /**
  * The construction reports prepend HTML heading lines before the CSV
@@ -440,59 +425,41 @@ function parseConstructionCsv(csvText, reportKey) {
   return records.map((r) => normalizeConstructionRow(r, reportKey)).filter(Boolean);
 }
 
-async function upsertConstructionRows(rows) {
-  let written = 0;
-  for (const row of rows) {
-    const merge = { ...row, last_seen_at: db.fn.now() };
-    delete merge.permit_no;
-    delete merge.county;
-    await db('construction_permit_records')
-      .insert({ ...row, last_seen_at: db.fn.now() })
-      .onConflict('permit_no')
-      .merge(merge);
-    written += 1;
-  }
-  return written;
-}
-
 /**
- * Sync both construction reports. Same shape as syncPoolPermits: gated
- * inside, empty table → chunked backfill, else trailing REFRESH_DAYS
- * window; a window failure aborts (partial windows would read as synced).
+ * Sync both construction reports. Same full-range-every-run contract as
+ * syncPoolPermits (all windows fetched first, ONE transaction, no
+ * refresh-mode inference — see that function's comment). Per report the
+ * rows share a uniform key set; the under_construction batch is written
+ * before the cos batch so the CO merge lands on rows carrying
+ * type_of_work, and separate per-report upsert calls keep knex's
+ * column-union from writing NULLs into the other report's fields.
  */
 async function syncConstructionPermits({ timeoutMs } = {}) {
   if (!gateEnvValue('GATE_PERMIT_SYNC')) return { skipped: 'gated' };
   const t0 = Date.now();
-  const existing = await db('construction_permit_records').count('id as n').first();
-  const empty = !Number(existing?.n || 0);
-  const windows = empty
-    ? windowsSince(CONSTRUCTION_BACKFILL_START, BACKFILL_CHUNK_MONTHS)
-    : (() => {
-      const from = new Date(Date.now() - REFRESH_DAYS * 24 * 60 * 60 * 1000);
-      return [[mdy(from), mdy(new Date())]];
-    })();
-  // All windows fetched before any write — same partial-backfill guard as
-  // the pool sync (a half-written initial load would permanently flip the
-  // next run into refresh mode). The under_construction rows are upserted
-  // before the cos rows so the CO merge lands on rows that carry
-  // type_of_work.
-  const staged = [];
+  const windows = windowsSince(constructionSyncStartIso(), BACKFILL_CHUNK_MONTHS);
+  const staged = { under_construction: [], cos: [] };
   for (const reportKey of ['under_construction', 'cos']) {
     for (const [from, to] of windows) {
       const csv = await fetchAcaReportCsv(REPORTS[reportKey], from, to, timeoutMs);
-      staged.push(...parseConstructionCsv(csv, reportKey));
+      staged[reportKey].push(...parseConstructionCsv(csv, reportKey));
     }
   }
-  const fetched = staged.length;
-  const written = await upsertConstructionRows(staged);
+  const fetched = staged.under_construction.length + staged.cos.length;
+  const written = fetched
+    ? await db.transaction(async (trx) => {
+      const a = await upsertChunked(trx, 'construction_permit_records', 'permit_no', staged.under_construction);
+      const b = await upsertChunked(trx, 'construction_permit_records', 'permit_no', staged.cos);
+      return a + b;
+    })
+    : 0;
   logger.info('[permit-sync] construction sync complete', {
-    mode: empty ? 'backfill' : 'refresh',
     windows: windows.length,
     fetched,
     written,
     elapsedMs: Date.now() - t0,
   });
-  return { mode: empty ? 'backfill' : 'refresh', windows: windows.length, fetched, written };
+  return { windows: windows.length, fetched, written };
 }
 
 /**
@@ -533,14 +500,31 @@ function monthsAgoIso(months) {
   return d.toISOString().slice(0, 10);
 }
 
+const toIso = (v) => (v ? new Date(v).toISOString().slice(0, 10) : null);
+const isTerminalStatus = (s) => /^(closed|canceled|withdrawn)$/i.test(String(s || ''));
+// A "New ..." type-of-work is new construction; a null one (CO-report-only
+// row) counts as a new build ONLY when the CO followed issuance within 30
+// months — an alteration's CO shouldn't read as a brand-new home.
+function isNewBuildRow(row, coIso) {
+  const tow = String(row.type_of_work || '');
+  if (tow) return /^new\b/i.test(tow.trim());
+  const issued = toIso(row.issued_date);
+  if (!issued || !coIso) return false;
+  const issuedPlus30mo = new Date(new Date(`${issued}T00:00:00Z`).getTime() + 30 * 30 * 24 * 60 * 60 * 1000);
+  return new Date(`${coIso}T00:00:00Z`) <= issuedPlus30mo;
+}
+
 /**
- * Newest synced construction permit for a parcel/address, shaped as
- * evidence for the lookup:
- *   underConstruction — permit issued within 24 months, no CO, status not
- *     terminal → satellite imagery may predate the build (stale-imagery
- *     signal for the vision pass and estimator surfaces).
- *   newBuild — CO issued within 18 months → brand-new completed home.
- * Cheap read path, fail-open at the caller. Null when nothing matches.
+ * Synced construction evidence for a parcel/address, AGGREGATED across the
+ * parcel's recent permits (newest-row-only let an unrelated later permit —
+ * a fence, an alteration — hide a valid signal):
+ *   underConstruction — ANY permit issued within 24 months, no CO, status
+ *     not terminal → satellite imagery may predate the build.
+ *   newBuild — ANY new-construction permit (type-of-work "New ...", or a
+ *     CO-only row whose CO tracked issuance) with a CO within 18 months.
+ * The surfaced permit fields describe the row that drove the strongest
+ * signal (underConstruction > newBuild > newest). Cheap read path,
+ * fail-open at the caller. Null when nothing matches.
  */
 async function findConstructionActivity({ parcelPin, looseKey } = {}) {
   // Same strict parcel-first precedence as findSyncedPoolPermit — an OR'd
@@ -550,27 +534,40 @@ async function findConstructionActivity({ parcelPin, looseKey } = {}) {
     looseKey ? ['address_loose_key', looseKey] : null,
   ].filter(Boolean);
   if (!tiers.length) return null;
-  let row = null;
+  let rows = [];
   for (const [col, val] of tiers) {
-    row = await db('construction_permit_records')
+    rows = await db('construction_permit_records')
       .where(col, val)
       .orderBy('issued_date', 'desc')
-      .first();
-    if (row) break;
+      .limit(10);
+    if (rows.length) break;
   }
-  if (!row) return null;
-  const issuedAt = row.issued_date ? new Date(row.issued_date).toISOString().slice(0, 10) : null;
-  const coIssuedAt = row.co_date ? new Date(row.co_date).toISOString().slice(0, 10) : null;
-  const terminal = /^(closed|canceled|withdrawn)$/i.test(String(row.status || ''));
+  if (!rows.length) return null;
+
+  const activeFloor = monthsAgoIso(CONSTRUCTION_ACTIVE_MONTHS);
+  const coFloor = monthsAgoIso(NEW_BUILD_CO_MONTHS);
+  let ucRow = null;
+  let nbRow = null;
+  for (const row of rows) {
+    const issuedAt = toIso(row.issued_date);
+    const coIssuedAt = toIso(row.co_date);
+    if (!ucRow && !coIssuedAt && !isTerminalStatus(row.status) && issuedAt && issuedAt >= activeFloor) {
+      ucRow = row;
+    }
+    if (!nbRow && coIssuedAt && coIssuedAt >= coFloor && isNewBuildRow(row, coIssuedAt)) {
+      nbRow = row;
+    }
+  }
+  const top = ucRow || nbRow || rows[0];
   return {
-    permitNo: row.permit_no,
-    status: row.status || null,
-    permitType: row.permit_type || null,
-    typeOfWork: row.type_of_work || null,
-    issuedAt,
-    coIssuedAt,
-    underConstruction: Boolean(!coIssuedAt && !terminal && issuedAt && issuedAt >= monthsAgoIso(CONSTRUCTION_ACTIVE_MONTHS)),
-    newBuild: Boolean(coIssuedAt && coIssuedAt >= monthsAgoIso(NEW_BUILD_CO_MONTHS)),
+    permitNo: top.permit_no,
+    status: top.status || null,
+    permitType: top.permit_type || null,
+    typeOfWork: top.type_of_work || null,
+    issuedAt: toIso(top.issued_date),
+    coIssuedAt: toIso(top.co_date),
+    underConstruction: Boolean(ucRow),
+    newBuild: Boolean(nbRow),
   };
 }
 

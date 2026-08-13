@@ -28,6 +28,9 @@ const savedFetch = global.fetch;
 afterEach(() => {
   global.fetch = savedFetch;
   delete process.env.GATE_PERMIT_SYNC;
+  delete process.env.POOL_PERMIT_SYNC_START;
+  delete process.env.CONSTRUCTION_PERMIT_SYNC_START;
+  delete db.transaction;
   jest.clearAllMocks();
 });
 
@@ -35,7 +38,7 @@ afterEach(() => {
 // awaiting it resolves to `result`.
 function builder(result) {
   const b = {};
-  for (const m of ['whereNot', 'orderBy', 'first', 'where', 'orWhere', 'insert', 'onConflict', 'merge', 'count']) {
+  for (const m of ['whereNot', 'orderBy', 'first', 'where', 'orWhere', 'insert', 'onConflict', 'merge', 'count', 'limit']) {
     b[m] = jest.fn(() => b);
   }
   b.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
@@ -139,18 +142,28 @@ const PARAM_PAGE = '<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" val
   + '<input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="EV456" />'
   + '<input type="hidden" name="ACA_CS_FIELD" id="ACA_CS_FIELD" value="CSRF789" />';
 
-describe('syncPoolPermits fetch + upsert (refresh mode)', () => {
-  test('forwards tokens + CSRF headers, upserts parsed rows', async () => {
+// db.transaction mock: runs the callback with a trx that mirrors the db
+// mock's chainable builders. Installed per-test alongside mockImplementation.
+function installTransactionMock() {
+  const trx = (table) => db(table);
+  trx.fn = { now: () => 'NOW()' };
+  db.transaction = jest.fn(async (cb) => cb(trx));
+}
+
+// One-window full-range sync: start "yesterday" via the env override.
+function useSingleWindowSync() {
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  process.env.POOL_PERMIT_SYNC_START = yesterday;
+  process.env.CONSTRUCTION_PERMIT_SYNC_START = yesterday;
+}
+
+describe('syncPoolPermits fetch + upsert', () => {
+  test('forwards tokens + CSRF headers, upserts parsed rows in a transaction', async () => {
     process.env.GATE_PERMIT_SYNC = 'true';
-    const countBuilder = builder({ n: '42' }); // non-empty table → refresh mode
-    const insertBuilders = [];
-    db.mockImplementation(() => {
-      if (!db.mock.calls.length || db.mock.calls.length === 1) return countBuilder;
-      const b = builder(1);
-      insertBuilders.push(b);
-      return b;
-    });
+    useSingleWindowSync();
+    db.mockImplementation(() => builder(1));
     db.fn = { now: () => 'NOW()' };
+    installTransactionMock();
 
     global.fetch = jest.fn()
       .mockResolvedValueOnce(acaResponse({ text: PARAM_PAGE, cookies: ['ASP.NET_SessionId=abc'] }))
@@ -158,10 +171,10 @@ describe('syncPoolPermits fetch + upsert (refresh mode)', () => {
       .mockResolvedValueOnce(acaResponse({ text: CSV, contentType: 'APPLICATION/CSV' }));
 
     const res = await syncPoolPermits();
-    expect(res.mode).toBe('refresh');
     expect(res.windows).toBe(1);
     expect(res.fetched).toBe(3);
     expect(res.written).toBe(3);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
 
     // POST carried the page tokens and the CSRF headers ACA requires.
     const [, postInit] = global.fetch.mock.calls[1];
@@ -178,8 +191,10 @@ describe('syncPoolPermits fetch + upsert (refresh mode)', () => {
 
   test('non-CSV report output throws (report moved/renamed → loud failure, not junk rows)', async () => {
     process.env.GATE_PERMIT_SYNC = 'true';
+    useSingleWindowSync();
     db.mockImplementation(() => builder({ n: '42' }));
     db.fn = { now: () => 'NOW()' };
+    installTransactionMock();
     global.fetch = jest.fn()
       .mockResolvedValueOnce(acaResponse({ text: PARAM_PAGE }))
       .mockResolvedValueOnce(acaResponse({ text: 'ShowReport.aspx' }))
@@ -259,10 +274,10 @@ describe('findConstructionActivity', () => {
 
   test('issued recently with no CO → underConstruction evidence', async () => {
     const recentIso = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    db.mockImplementation(() => builder({
+    db.mockImplementation(() => builder([{
       permit_no: 'BLD9902-0001', status: 'Permit Issued', permit_type: 'Residential',
       type_of_work: 'New Single Family', issued_date: recentIso, co_date: null,
-    }));
+    }]));
     const activity = await findConstructionActivity({ parcelPin: '4567890123' });
     expect(activity.underConstruction).toBe(true);
     expect(activity.newBuild).toBe(false);
@@ -270,20 +285,20 @@ describe('findConstructionActivity', () => {
 
   test('recent CO → newBuild, not underConstruction', async () => {
     const coIso = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    db.mockImplementation(() => builder({
+    db.mockImplementation(() => builder([{
       permit_no: 'BLD9902-0001', status: 'Closed', permit_type: 'Residential',
       type_of_work: 'New Single Family', issued_date: '2026-01-05', co_date: coIso,
-    }));
+    }]));
     const activity = await findConstructionActivity({ looseKey: '200sample34219' });
     expect(activity.newBuild).toBe(true);
     expect(activity.underConstruction).toBe(false);
   });
 
   test('stale issued permit with no CO is NOT underConstruction (24-month window)', async () => {
-    db.mockImplementation(() => builder({
+    db.mockImplementation(() => builder([{
       permit_no: 'BLD9902-0002', status: 'Permit Issued', permit_type: 'Residential',
       type_of_work: 'New Single Family', issued_date: '2022-01-05', co_date: null,
-    }));
+    }]));
     const activity = await findConstructionActivity({ parcelPin: '4567890123' });
     expect(activity.underConstruction).toBe(false);
     expect(activity.newBuild).toBe(false);
@@ -302,8 +317,10 @@ describe('syncPermits', () => {
 
   test('a failing section never sinks the other, but the run THROWS so cron health sees it', async () => {
     process.env.GATE_PERMIT_SYNC = 'true';
-    db.mockImplementation(() => builder({ n: '42' })); // both tables non-empty → refresh
+    useSingleWindowSync();
+    db.mockImplementation(() => builder(1));
     db.fn = { now: () => 'NOW()' };
+    installTransactionMock();
     // Pool section: 3 good responses. Construction section: param page fetch throws.
     global.fetch = jest.fn()
       .mockResolvedValueOnce(acaResponse({ text: PARAM_PAGE }))
