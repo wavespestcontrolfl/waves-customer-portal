@@ -494,6 +494,44 @@ describe('GATE ON', () => {
     expect(payloads.some((p) => p && 'owner_alert_claimed_at' in p && p.owner_alert_claimed_at === null)).toBe(true); // claim released
   });
 
+  // ⭐ THE CLAIM VALUE IS THE OWNERSHIP TOKEN. A stale claimant (its send ran
+  // past the lease while a retry reclaimed) clearing owner_alert_claimed_at
+  // unconditionally deleted the NEW claimant's live lease and let yet another
+  // retry page in parallel. The release is conditioned on THIS claimant's
+  // exact stamp still being on the row.
+  test('the release is guarded by THIS claimant\'s exact claim stamp', async () => {
+    relayAlert.alertOwnerReservice.mockResolvedValue(false);
+    builders.service_requests.update = jest.fn(() => {
+      const r = { returning: jest.fn(async () => [{ id: 'sr-1' }]) };
+      return Object.assign(Promise.resolve(1), r);
+    });
+    await executeTool('request_reservice', GOOD, CTX);
+    const claimPayload = builders.service_requests.update.mock.calls
+      .map(([p]) => p)
+      .find((p) => p && p.owner_alert_claimed_at instanceof Date);
+    expect(claimPayload).toBeTruthy();
+    const guard = builders.service_requests.where.mock.calls
+      .find(([col, val]) => col === 'owner_alert_claimed_at' && val instanceof Date);
+    expect(guard).toBeTruthy();
+    expect(guard[1]).toBe(claimPayload.owner_alert_claimed_at); // the SAME stamp we claimed with
+  });
+
+  // ⭐ A TIMED-OUT SEND IS AMBIGUOUS, NOT FAILED — it may still land after the
+  // deadline. Releasing the claim on that result invited an immediate retry to
+  // page in parallel with the late-landing send; the claim is kept and the
+  // lease expires on its own (the sweep retries then).
+  test('an AMBIGUOUS page keeps the claim — no stamp, no release', async () => {
+    relayAlert.alertOwnerReservice.mockResolvedValue('ambiguous');
+    builders.service_requests.update = jest.fn(() => {
+      const r = { returning: jest.fn(async () => [{ id: 'sr-1' }]) };
+      return Object.assign(Promise.resolve(1), r);
+    });
+    await executeTool('request_reservice', GOOD, CTX);
+    const payloads = builders.service_requests.update.mock.calls.map(([p]) => p);
+    expect(payloads.some((p) => p && p.owner_alerted_at)).toBe(false); // no receipt claimed
+    expect(payloads.some((p) => p && 'owner_alert_claimed_at' in p && p.owner_alert_claimed_at === null)).toBe(false); // claim KEPT
+  });
+
   test('the already-open guard RETRIES the alerts for a voice ticket with no receipt', async () => {
     primeDb({
       requests: [{

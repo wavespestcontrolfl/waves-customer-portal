@@ -399,15 +399,24 @@ async function fireReserviceAlertsAndStamp({ row, lane, covered, unverifiedReque
   // still be running. Fail-OPEN on a claim error — a duplicate page beats a
   // stranded ticket.
   let claimed = true;
+  // ⭐ THE CLAIM VALUE IS THE OWNERSHIP TOKEN. Release below is conditioned on
+  // this exact stamp still being on the row — a stale claimant (its send ran
+  // past the lease while a retry reclaimed) clearing the column unconditionally
+  // deleted the NEW claimant's live lease and let yet another retry page in
+  // parallel. Millisecond-precision Date + request id is unique enough per
+  // claimant; the value round-trips through Postgres intact.
+  let claimStamp = null;
   try {
     const db = require('../../models/db');
+    const stamp = new Date();
     const rows = await db('service_requests')
       .where({ id: row.id })
       .whereNull('owner_alerted_at')
       .whereRaw("(owner_alert_claimed_at IS NULL OR owner_alert_claimed_at < now() - interval '2 minutes')")
-      .update({ owner_alert_claimed_at: new Date() })
+      .update({ owner_alert_claimed_at: stamp })
       .returning('id');
     claimed = !!(rows && rows.length > 0);
+    if (claimed) claimStamp = stamp;
   } catch (err) {
     logger.warn(`[voice-relay-reservice] alert claim failed for request ${row.id} — paging anyway (fail-open): ${err.message}`);
   }
@@ -472,33 +481,50 @@ async function fireReserviceAlertsAndStamp({ row, lane, covered, unverifiedReque
       + `(customer ${customerId}); the service_requests row is durable but may be unsurfaced in the admin feed.`
     );
   }
-  let paged = false;
+  let pageResult = false;
   try {
     const { alertOwnerReservice } = require('./relay-alert');
-    paged = await alertOwnerReservice({
+    pageResult = await alertOwnerReservice({
       lane, category, urgency, issue, subject, covered, requestId: row.id, customerId,
       unverifiedRequester, unverifiedNote,
-    }, ctx) === true;
+    }, ctx);
   } catch (err) {
     // Fail-open: the ticket is already written and the caller (if any) is on
     // the line. The MISSING stamp is what keeps this retryable.
     logger.error(`[voice-relay-reservice] owner alert FAILED for request ${row.id}: ${err.message}`);
   }
+  const paged = pageResult === true;
   if (paged) {
     try {
       const db = require('../../models/db');
+      // Deliberately NOT claim-guarded: a delivered page must stamp even if
+      // this claimant's lease was lost mid-send — leaving a delivered ticket
+      // unstamped is what makes the sweep page AGAIN (the exact bug this
+      // receipt exists to prevent). The duplicate-page race is closed on the
+      // other side: release is claim-guarded and delivery is bounded inside
+      // the lease.
       await db('service_requests').where({ id: row.id }).update({ owner_alerted_at: new Date() });
     } catch (err) {
       // Unstamped-but-paged: the lease holds off retries for 2 minutes, then
       // the sweep may page once more. A duplicate page beats a stranded ticket.
       logger.warn(`[voice-relay-reservice] owner_alerted_at stamp failed for request ${row.id}: ${err.message}`);
     }
+  } else if (pageResult === 'ambiguous') {
+    // The send timed out inside the lease — it may still land. Keep the claim:
+    // releasing it here invited an immediate retry to page in parallel with a
+    // late-landing send. The lease expires on its own; the sweep retries then.
+    logger.warn(`[voice-relay-reservice] owner alert delivery ambiguous for request ${row.id} — keeping the claim until the lease expires`);
   } else {
     // Release the claim so the retry rails (guards + sweep) stay open — same
-    // rule as the hot-alert claim: a failed page must stay retryable.
+    // rule as the hot-alert claim: a failed page must stay retryable. Guarded
+    // by OUR claim stamp: if a later claimant already owns the lease, this
+    // touches nothing.
     try {
       const db = require('../../models/db');
-      await db('service_requests').where({ id: row.id }).update({ owner_alert_claimed_at: null });
+      const q = db('service_requests').where({ id: row.id });
+      if (claimStamp) q.where('owner_alert_claimed_at', claimStamp);
+      else q.whereNull('owner_alert_claimed_at'); // never held a claim — nothing to give back
+      await q.update({ owner_alert_claimed_at: null });
     } catch (err) {
       logger.warn(`[voice-relay-reservice] alert claim release failed for request ${row.id} — the lease expires on its own: ${err.message}`);
     }

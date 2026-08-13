@@ -215,6 +215,49 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     expect(updates.some((sql) => sql.includes("- 'relay_hot_alert_at'"))).toBe(true);
   });
 
+  // ⭐ THE LEASE HAS AN OWNER, NOT JUST AN AGE. A stale claimant (its send ran
+  // past the lease while a retry reclaimed) releasing or receipting
+  // unconditionally deleted the NEW claimant's live claim and let a third
+  // sender page in parallel. The claim mints a per-attempt token in the same
+  // atomic statement, and release/receipt writes only land while that exact
+  // token is still on the row.
+  test('the claim mints an owner token atomically; release removes both keys and is owner-guarded', async () => {
+    const builder = primeClaimDb({ claimWins: true });
+    TwilioService.sendSMS.mockResolvedValueOnce({ success: true, notificationUndelivered: true }); // force the release path
+    await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-owner-guard', markOwnerAlerted: jest.fn() });
+    const updates = builder.update.mock.calls.map(([payload]) => String((payload.metadata || {}).__raw || ''));
+    const claimSql = updates.find((sql) => sql.includes("'{relay_hot_alert_at}'"));
+    expect(claimSql).toContain("'{relay_hot_alert_owner}'"); // minted in the SAME statement as the claim
+    const releaseSql = updates.find((sql) => sql.includes("- 'relay_hot_alert_at'"));
+    expect(releaseSql).toContain("- 'relay_hot_alert_owner'"); // the token leaves with the claim
+    const guards = builder.whereRaw.mock.calls.map(([sql]) => String(sql));
+    expect(guards.some((sql) => sql.includes("relay_hot_alert_owner') = ?"))).toBe(true); // only while still owned
+  });
+
+  // ⭐ DELIVERY IS BOUNDED INSIDE THE LEASE. The reclaim math assumes no live
+  // send outlives a lease-old claim; a send that hits the deadline is
+  // AMBIGUOUS (it may still land) — no latch, no receipt, and crucially no
+  // release: the lease expires on its own and the next claimant's delivery
+  // probe settles the truth.
+  test('a send that outlives the delivery deadline is AMBIGUOUS — no latch, no receipt, no release', async () => {
+    jest.useFakeTimers();
+    try {
+      const builder = primeClaimDb({ claimWins: true });
+      TwilioService.sendSMS.mockReturnValueOnce(new Promise(() => {})); // never settles
+      const ctx = { callSid: 'CA-stalled-send', markOwnerAlerted: jest.fn() };
+      const pending = relayAlert.alertOwnerHotLead(HOT_LEAD, ctx);
+      await jest.advanceTimersByTimeAsync(91_000);
+      const out = await pending;
+      expect(out).toBe(false);
+      expect(ctx.markOwnerAlerted).not.toHaveBeenCalled(); // no false promise
+      const updates = builder.update.mock.calls.map(([payload]) => String((payload.metadata || {}).__raw || ''));
+      expect(updates.some((sql) => sql.includes("- 'relay_hot_alert_at'"))).toBe(false); // claim KEPT — the lease decides
+      expect(updates.some((sql) => sql.includes("'{relay_hot_alert_sent_at}'"))).toBe(false); // no receipt either
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   // ⭐ THE CLAIM IS A LEASE, NOT A TOMBSTONE. A process that dies between the
   // claim and the send leaves claimed-with-no-receipt forever — and every later
   // session would refuse to page for the rest of time. The claim UPDATE's own

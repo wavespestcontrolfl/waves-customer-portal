@@ -136,10 +136,41 @@ const HOT_ALERT_SENT_KEY = 'relay_hot_alert_sent_at';
 // RECLAIMABLE once it is old enough that no live send can still be running;
 // the reclaim is the same single-statement burn, so exactly one taker wins.
 const HOT_ALERT_CLAIM_LEASE = "interval '2 minutes'";
+// ⭐ THE LEASE HAS AN OWNER, NOT JUST AN AGE. A timestamp-only lease let a
+// STALE claimant (its send ran past the lease while another session reclaimed)
+// release or receipt a claim that now belongs to someone else — its
+// unconditional release opened the door for a THIRD sender while the second
+// was still mid-send. Every claim therefore mints a per-attempt token stored
+// beside the timestamp in the same atomic statement, and release/receipt
+// writes only land while that exact token is still on the row.
+const HOT_ALERT_OWNER_KEY = 'relay_hot_alert_owner';
+
+// ⭐ DELIVERY IS BOUNDED INSIDE THE LEASE. The reclaim math assumes no live
+// send can still be running once a claim is lease-old; an unbounded send made
+// that false (a stalled pool or provider could hold a send open past the lease
+// while a reclaimer paged again). 90s < the 2-minute lease keeps the invariant
+// honest. A timeout is AMBIGUOUS, not a failure: the page may still land, so
+// the caller must NOT release the claim — it expires on its own, and the next
+// claimant's delivery probe (or the owner-guarded receipt) settles the truth.
+const ALERT_SEND_DEADLINE_MS = 90 * 1000;
+const SEND_TIMED_OUT = Symbol('alert-send-timed-out');
+function sendWithDeadline(sendPromise) {
+  // Materialize ONCE — racing a bare thenable and touching it again re-runs it
+  // (the Knex-thenable lesson); sendSMS returns a real promise but the rule
+  // costs nothing to keep.
+  const send = Promise.resolve(sendPromise);
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(SEND_TIMED_OUT), ALERT_SEND_DEADLINE_MS);
+    timer.unref?.();
+  });
+  return Promise.race([send, deadline]).finally(() => clearTimeout(timer));
+}
 
 async function claimHotAlertForCall(callSid) {
   const key = String(callSid || '').trim();
-  if (!key) return { claimed: true, durable: false }; // no call row to claim on
+  if (!key) return { claimed: true, durable: false, owner: null }; // no call row to claim on
+  const owner = require('crypto').randomBytes(8).toString('hex');
   try {
     const db = require('../../models/db');
     const rows = await db('call_log')
@@ -151,34 +182,42 @@ async function claimHotAlertForCall(callSid) {
       )
       .update({
         metadata: db.raw(
-          `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${HOT_ALERT_KEY}}', to_jsonb(now()::text), true)`,
+          `jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${HOT_ALERT_KEY}}', to_jsonb(now()::text), true), `
+          + `'{${HOT_ALERT_OWNER_KEY}}', to_jsonb(?::text), true)`,
+          [owner],
         ),
       })
       .returning('id');
-    if (rows && rows.length > 0) return { claimed: true, durable: true };
+    if (rows && rows.length > 0) return { claimed: true, durable: true, owner };
     // No unclaimed row: either another session already claimed this call, or
     // there is no call_log row at all (nothing to dedupe against) — only the
     // former means "stand down".
     const exists = await db('call_log').where({ twilio_call_sid: key }).first('id');
-    return exists ? { claimed: false, durable: true } : { claimed: true, durable: false };
+    return exists
+      ? { claimed: false, durable: true, owner: null }
+      : { claimed: true, durable: false, owner: null };
   } catch (err) {
     logger.warn(`[voice-relay-alert] hot-alert claim failed for ${key} — paging anyway (fail-open): ${err.message}`);
-    return { claimed: true, durable: false };
+    return { claimed: true, durable: false, owner: null };
   }
 }
 
-async function markHotAlertSent(callSid) {
+async function markHotAlertSent(callSid, owner) {
   const key = String(callSid || '').trim();
   if (!key) return;
   try {
     const db = require('../../models/db');
-    await db('call_log')
-      .where({ twilio_call_sid: key })
-      .update({
-        metadata: db.raw(
-          `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${HOT_ALERT_SENT_KEY}}', to_jsonb(now()::text), true)`,
-        ),
-      });
+    // Owner-guarded: a claimant whose lease was reclaimed mid-send must not
+    // receipt someone else's claim. Its delivered page is not lost — the next
+    // claimant's hotAlertAlreadyDelivered probe finds the notification row and
+    // repairs the receipt under its OWN claim.
+    const q = db('call_log').where({ twilio_call_sid: key });
+    if (owner) q.whereRaw(`(metadata->>'${HOT_ALERT_OWNER_KEY}') = ?`, [owner]);
+    await q.update({
+      metadata: db.raw(
+        `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${HOT_ALERT_SENT_KEY}}', to_jsonb(now()::text), true)`,
+      ),
+    });
   } catch (err) {
     // The claim key still stands, so no duplicate page — a loser just cannot
     // confirm coverage and stays conservative about the promise.
@@ -202,14 +241,23 @@ async function hotAlertState(callSid) {
   }
 }
 
-async function releaseHotAlertClaim(callSid) {
+async function releaseHotAlertClaim(callSid, owner) {
   const key = String(callSid || '').trim();
   if (!key) return;
   try {
     const db = require('../../models/db');
-    await db('call_log')
-      .where({ twilio_call_sid: key })
-      .update({ metadata: db.raw(`COALESCE(metadata, '{}'::jsonb) - '${HOT_ALERT_KEY}'`) });
+    // Owner-guarded: only the claimant that still HOLDS the lease may release
+    // it. A stale claimant releasing unconditionally deleted a newer sender's
+    // live claim and let a third sender page in parallel. No owner token (a
+    // pre-owner row, or a non-durable claim) ⇒ leave the lease to expire.
+    const q = db('call_log').where({ twilio_call_sid: key });
+    if (owner) q.whereRaw(`(metadata->>'${HOT_ALERT_OWNER_KEY}') = ?`, [owner]);
+    else q.whereRaw(`(metadata->>'${HOT_ALERT_OWNER_KEY}') IS NULL`);
+    await q.update({
+      metadata: db.raw(
+        `(COALESCE(metadata, '{}'::jsonb) - '${HOT_ALERT_KEY}') - '${HOT_ALERT_OWNER_KEY}'`,
+      ),
+    });
   } catch (err) {
     logger.warn(`[voice-relay-alert] hot-alert claim release failed for ${key}: ${err.message}`);
   }
@@ -252,6 +300,9 @@ async function hotAlertAlreadyDelivered(callSid) {
 }
 
 async function alertOwnerHotLead(lead = {}, ctx = {}) {
+  // Hoisted so the catch block can give back OUR claim (owner-guarded) and
+  // never someone else's.
+  let claim = null;
   try {
     // ⭐ THE CREATION GATE DOES NOT GOVERN RECOVERY. A persisted
     // relay_hot_alert_needed obligation was minted while the lane was live;
@@ -278,7 +329,7 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     }
 
     // The durable one-per-CALL receipt (reconnects build a fresh session).
-    let claim = await claimHotAlertForCall(ctx.callSid);
+    claim = await claimHotAlertForCall(ctx.callSid);
     if (!claim.claimed) {
       // Somebody else holds the claim — but CLAIMED IS NOT DELIVERED. Wait
       // briefly for their SENT receipt: present ⇒ this call is covered (latch
@@ -326,7 +377,7 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     // probe for this call's distinctive title before sending, and a hit just
     // repairs the receipt instead of re-paging.
     if (await hotAlertAlreadyDelivered(ctx.callSid)) {
-      if (claim.durable) await markHotAlertSent(ctx.callSid);
+      if (claim.durable) await markHotAlertSent(ctx.callSid, claim.owner);
       if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
       logger.info(`[voice-relay-alert] hot-lead page already delivered for callSid=${ctx.callSid} — receipt repaired, not paging twice`);
       return true;
@@ -342,12 +393,23 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     const alertLink = lead.leadId
       ? `/admin/leads?leadId=${encodeURIComponent(lead.leadId)}`
       : (ctx.customerId ? `/admin/customers?customerId=${encodeURIComponent(ctx.customerId)}` : '/admin/leads');
-    const sent = await TwilioService.sendSMS(to, body, {
+    const sent = await sendWithDeadline(TwilioService.sendSMS(to, body, {
       messageType: 'internal_alert',
       // The dedupe key doubles as the bell title; the body carries the detail.
       notificationTitle: hotAlertNotificationTitle(ctx.callSid),
       link: alertLink,
-    });
+    }));
+    if (sent === SEND_TIMED_OUT) {
+      // AMBIGUOUS — the page may still land after this returns. No latch, no
+      // receipt, and crucially NO release: releasing would invite an immediate
+      // re-page racing a send that might yet deliver. The lease expires on its
+      // own and the next claimant's delivery probe settles it.
+      logger.error(
+        `[voice-relay-alert] hot-lead owner alert timed out after ${ALERT_SEND_DEADLINE_MS}ms `
+        + `callSid=${ctx.callSid || 'n/a'} — leaving the claim to expire (delivery is ambiguous)`
+      );
+      return false;
+    }
     // ⭐ `success: true` IS NOT DELIVERY ON THIS PATH. The internal-alert
     // redirect (services/twilio.js redirectInternalAdminSmsToNotification)
     // returns success:true with `notificationUndelivered` / `notificationError`
@@ -360,7 +422,7 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
         `[voice-relay-alert] hot-lead owner alert NOT delivered callSid=${ctx.callSid || 'n/a'} `
         + `(${sent && sent.notificationError ? 'notification error' : 'notification undelivered'}) — latch left open for a retry`
       );
-      if (claim.durable) await releaseHotAlertClaim(ctx.callSid); // the retry rail stays open
+      if (claim.durable) await releaseHotAlertClaim(ctx.callSid, claim.owner); // the retry rail stays open
       return false;
     }
     // ⭐ THE LATCH IS SET AFTER A SUCCESSFUL SEND, NOT BEFORE IT. Marking first
@@ -373,7 +435,7 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
     // The durable DELIVERY receipt — what a losing claimant on a reconnect
     // needs to see before telling its caller the team was notified.
-    if (claim.durable) await markHotAlertSent(ctx.callSid);
+    if (claim.durable) await markHotAlertSent(ctx.callSid, claim.owner);
     logger.info(`[voice-relay-alert] hot-lead owner alert sent callSid=${ctx.callSid || 'n/a'} caller=${maskPhone(lead.phone)}`);
     return true;
   } catch (err) {
@@ -383,8 +445,9 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     // this same call can still page the owner.
     logger.error(`[voice-relay-alert] hot-lead owner alert FAILED callSid=${ctx.callSid || 'n/a'}: ${err.message}`);
     // Give back the durable claim too — a failed page must stay retryable
-    // across sessions, not just within this one.
-    await releaseHotAlertClaim(ctx.callSid).catch(() => {});
+    // across sessions, not just within this one. Owner-guarded: if we never
+    // held a durable claim (or lost it), this touches nothing.
+    if (claim && claim.durable) await releaseHotAlertClaim(ctx.callSid, claim.owner).catch(() => {});
     return false;
   }
 }
@@ -428,7 +491,9 @@ function buildReserviceAlert({ lane, urgency, subject, issue, covered, requestId
  * like the hot-lead path: request_reservice already refuses to file a second
  * ticket in a lane, so one filed ticket is one alert by construction.
  *
- * Returns true when an alert was actually sent. Never throws.
+ * Returns true when an alert was actually sent, the string 'ambiguous' when
+ * the send timed out inside the lease (may still land — the caller must keep
+ * its claim), false otherwise. Never throws.
  */
 async function alertOwnerReservice(request = {}, ctx = {}) {
   try {
@@ -443,7 +508,19 @@ async function alertOwnerReservice(request = {}, ctx = {}) {
       return false;
     }
     const TwilioService = require('../twilio');
-    const sent = await TwilioService.sendSMS(to, buildReserviceAlert(request), { messageType: 'internal_alert' });
+    const sent = await sendWithDeadline(
+      TwilioService.sendSMS(to, buildReserviceAlert(request), { messageType: 'internal_alert' }),
+    );
+    if (sent === SEND_TIMED_OUT) {
+      // AMBIGUOUS, not failed — the page may still land. The caller must NOT
+      // release its claim on this result (the lease expires on its own);
+      // releasing here is what let a retry page in parallel with a late send.
+      logger.error(
+        `[voice-relay-alert] re-service owner alert timed out after ${ALERT_SEND_DEADLINE_MS}ms `
+        + `callSid=${ctx.callSid || 'n/a'} request=${request.requestId || 'n/a'} — delivery ambiguous`
+      );
+      return 'ambiguous';
+    }
     // Same success-is-not-delivery rule as the hot-lead path: the ticket is
     // durable either way, but an alert that never reached the bell must say so
     // (the whole point of this lane is reaching a human, not the queue).
