@@ -84,18 +84,21 @@ function emptyContext() {
 /**
  * Load a customer's grass context from the canonical source.
  * Falls back to `customers.lawn_type` / `customers.property_sqft` when no
- * active turf profile exists. Never throws — returns an all-null context
- * on any DB error so callers can degrade gracefully.
+ * active turf profile exists. By default never throws — returns an
+ * all-null context on any DB error so callers can degrade gracefully.
+ * strict: propagate DB errors instead — callers that persist state keyed
+ * on this context (pre-visit brief grounding hash) must not read a
+ * transient outage as "unknown track".
  */
-async function loadCustomerGrassContext(customerId, knex = db) {
+async function loadCustomerGrassContext(customerId, knex = db, { strict = false } = {}) {
   if (!customerId) return emptyContext();
 
+  const soft = (promise) => (strict ? promise : promise.catch(() => null));
   const [profile, customer] = await Promise.all([
-    knex('customer_turf_profiles')
+    soft(knex('customer_turf_profiles')
       .where({ customer_id: customerId, active: true })
-      .first()
-      .catch(() => null),
-    knex('customers').where({ id: customerId }).first().catch(() => null),
+      .first()),
+    soft(knex('customers').where({ id: customerId }).first()),
   ]);
 
   const grassType = profile?.grass_type || normalizeGrassType(customer?.lawn_type) || null;

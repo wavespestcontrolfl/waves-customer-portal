@@ -313,7 +313,9 @@ async function loadLawnWindowGuidance(dbh, svc) {
   try {
     const { loadCustomerGrassContext } = require('./lawn-grass-context');
     const { getProtocolWindowContext, summarizeProtocolContext } = require('./lawn-protocol-operating-layer');
-    const grass = await loadCustomerGrassContext(svc.customer_id, dbh);
+    // strict — an outage here read as unknown_grass_track would hash
+    // empty lawn guidance over a valid cached brief.
+    const grass = await loadCustomerGrassContext(svc.customer_id, dbh, { strict: true });
     const scheduledDay = calendarDay(svc.scheduled_date);
     const serviceDate = scheduledDay ? parseETDateTime(`${scheduledDay}T12:00`) : new Date();
 
