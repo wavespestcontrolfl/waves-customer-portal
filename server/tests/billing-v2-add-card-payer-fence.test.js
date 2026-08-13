@@ -144,13 +144,15 @@ describe('POST /cards payer fence', () => {
     });
   });
 
-  test('a failed payer check fails CLOSED: saved, not enrolled, office exception', async () => {
+  test('a failed payer check fails CLOSED but RETRYABLE: 409 (idempotent save re-enters), not enrolled, office exception', async () => {
     PayerService.resolveForInvoice.mockRejectedValue(new Error('payer lookup down'));
     await withServer(async (baseUrl) => {
       const res = await postCard(baseUrl);
-      expect(res.status).toBe(200);
+      // Non-2xx so the client shows a retry path — a 200 would read as a
+      // completed save and silently strand a self-pay account unenrolled.
+      expect(res.status).toBe(409);
       const body = await res.json();
-      expect(body).toMatchObject({ success: true, enrolled: false, enrollReason: 'payer_check_failed' });
+      expect(body).toMatchObject({ enrollReason: 'payer_check_failed' });
       expect(enrollConsentedMethod).not.toHaveBeenCalled();
       expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
         'billing', expect.stringMatching(/payer check failed/), expect.any(String), expect.any(Object),

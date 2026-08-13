@@ -239,6 +239,12 @@ describe('one-tap purchase CTA gating', () => {
     expect(await screen.findByText('Confirming…')).toBeInTheDocument();
     // Reserving a replacement slot mid-confirm races the in-flight hold.
     expect(screen.getByText('Change time').closest('button')).toBeDisabled();
+    // Closing mid-confirm would unmount before the success screen and race
+    // release against the committing confirm (GH r8 P2) — the close is a
+    // guarded no-op while confirming.
+    fireEvent.click(screen.getByLabelText('Close purchase'));
+    expect(screen.getByRole('dialog', { name: /Add Lawn Care/ })).toBeInTheDocument();
+    expect(api.oneTapRelease).not.toHaveBeenCalled();
   });
 
   it('a 409 at init renders the offer-changed refresh state, never a dead retry', async () => {

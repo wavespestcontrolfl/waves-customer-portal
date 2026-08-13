@@ -1204,7 +1204,15 @@ function oneTapDayLabel(date) {
 
 function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   useLockBodyScroll(open);
-  const dialogRef = useModalFocus(open, onClose);
+  // Close is LOCKED while a confirmation is in flight (same guard as
+  // "Change time"): unmounting races the in-flight /confirm — a commit
+  // that lands after the close books the customer with no success screen
+  // (release correctly refuses to undo a completed purchase, but the
+  // overlay is already gone). Ref so the modal-focus escape handler sees
+  // the live value without re-binding.
+  const confirmingRef = useRef(false);
+  const guardedClose = () => { if (confirmingRef.current) return; onClose(); };
+  const dialogRef = useModalFocus(open, guardedClose);
   const compact = useIsMobile(760);
   const muted = PORTAL_SHELL.muted;
 
@@ -1216,6 +1224,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   const [selectedSlot, setSelectedSlot] = useState(null);
   const [reserving, setReserving] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  confirmingRef.current = confirming;
   const [stepError, setStepError] = useState('');
   const [needsCard, setNeedsCard] = useState(false);
   const [cardSaved, setCardSaved] = useState(false);
@@ -1542,7 +1551,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
               )}
             </div>
           </div>
-          <ShellCloseButton onClick={onClose} label="Close purchase" />
+          <ShellCloseButton onClick={guardedClose} label="Close purchase" />
         </header>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: compact ? 16 : 20, display: 'grid', gap: 14, alignContent: 'start' }}>

@@ -659,21 +659,35 @@ router.post('/cards', async (req, res, next) => {
       payerCheckFailed = true;
       logger.warn(`[billing-v2] payer check failed before enrollment — skipping (fail closed): ${payerErr.message}`);
     }
+    if (payerCheckFailed) {
+      // Transient outage on an ORDINARY self-pay account must be
+      // RETRYABLE (Codex #3395 r8 P1): a 200 here reads as a completed
+      // save — the Billing tab closes the form and the customer gets no
+      // retry path while future visits sit unprotected. The save above is
+      // idempotent, so the retry re-enters and finishes enrollment once
+      // the resolver recovers. Enrollment stays skipped (fail closed).
+      await require('../services/notification-service').notifyAdmin(
+        'billing',
+        'Card saved without Auto Pay (payer check failed)',
+        'A portal card save skipped Auto Pay enrollment because the payer-routing check failed (fail closed) — the customer was asked to retry; enroll manually if this recurs.',
+        { link: `/admin/customers/${req.customerId}`, metadata: { customerId: req.customerId, paymentMethodId: card.id } },
+      ).catch(() => {});
+      return res.status(409).json({
+        error: 'Payment method saved, but Auto Pay could not be enabled — please try again.',
+        enrollReason: 'payer_check_failed',
+      });
+    }
     if (payerBlocked) {
       await require('../services/notification-service').notifyAdmin(
         'billing',
-        payerCheckFailed
-          ? 'Card saved without Auto Pay (payer check failed)'
-          : 'Card saved without Auto Pay (payer-billed)',
-        payerCheckFailed
-          ? 'A portal card save skipped Auto Pay enrollment because the payer-routing check failed (fail closed) — review the account and enroll manually if it is self-pay.'
-          : 'A portal card save skipped Auto Pay enrollment because this account’s invoices route to a third-party payer — enrolling the saved card would charge the wrong party on self-pay invoices.',
+        'Card saved without Auto Pay (payer-billed)',
+        'A portal card save skipped Auto Pay enrollment because this account’s invoices route to a third-party payer — enrolling the saved card would charge the wrong party on self-pay invoices.',
         { link: `/admin/customers/${req.customerId}`, metadata: { customerId: req.customerId, paymentMethodId: card.id } },
       ).catch(() => {});
       return res.json({
         success: true,
         enrolled: false,
-        enrollReason: payerCheckFailed ? 'payer_check_failed' : 'payer_billed',
+        enrollReason: 'payer_billed',
         card: {
           id: card.id,
           processor: 'stripe',
