@@ -414,10 +414,11 @@ async function loadLawnWindowGuidance(dbh, svc) {
 
 async function loadEstimateSource(dbh, sourceEstimateId) {
   if (!sourceEstimateId) return null;
+  // No .catch — a lookup outage collapsed to null would hash and store a
+  // brief missing the estimate scope over a valid cached one.
   const est = await dbh('estimates')
     .where({ id: sourceEstimateId })
-    .first('id', 'status', 'waveguard_tier', 'service_interest', 'monthly_total', 'onetime_total')
-    .catch(() => null);
+    .first('id', 'status', 'waveguard_tier', 'service_interest', 'monthly_total', 'onetime_total');
   if (!est) return null;
   return {
     status: est.status || null,
@@ -472,15 +473,13 @@ async function assembleGrounding(svc, dbh = db) {
   const category = detectServiceCategory(svc.service_type);
 
   // Redacted customer context (context-aggregator owns the access-code
-  // redaction layer). Fail-soft — a context miss degrades the brief, never
-  // blocks it.
-  let context = null;
-  try {
-    const ContextAggregator = require('./context-aggregator');
-    context = await ContextAggregator.getContextForCustomer(customer);
-  } catch (err) {
-    logger.warn(`[previsit-brief] context aggregation failed for ${svc.id}: ${err.message}`);
-  }
+  // redaction layer). NOT fail-soft: a context outage nulls fields that
+  // feed the grounding hash, so continuing would replace a complete
+  // cached brief with one missing account flags, calls, and pending
+  // scope. Propagate — runSweep counts the visit failed and the prior
+  // brief survives.
+  const ContextAggregator = require('./context-aggregator');
+  const context = await ContextAggregator.getContextForCustomer(customer);
 
   // Access/pet/chemical guidance is copied DETERMINISTICALLY from this
   // row — a lookup outage must not collapse into "no preferences": the
