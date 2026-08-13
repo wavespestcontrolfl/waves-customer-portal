@@ -10216,20 +10216,35 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
       // bill. A lost response is safe to retry.
       try {
         const outcome = await db.transaction(async (trx) => {
-          // Keyed by CUSTOMER, not the series: a setup-only accept draft is
-          // deliberately unattached (Codex P0 r12), so a visitIds filter
-          // would make it unrestorable.
+          // LOCK ORDER matches the switch and every mint writer (Codex P1
+          // r21): per-customer prepay advisory lock → scheduled-invoice mint
+          // lock → invoice row lock. The unlocked pre-read supplies ids and
+          // dates; every guard re-runs on the LOCKED re-read.
+          const preRow = await trx('invoices')
+            .where({ id, customer_id: undoCustomerId })
+            .first('id', 'customer_id', 'scheduled_service_id', 'notes', 'status');
+          if (!preRow || String(preRow.status || '').toLowerCase() !== 'void') return { skipped: true };
+          // Shared with the term-cancel restore (invoice.js) so the two can
+          // never disagree; falls back to the accept series' first upcoming
+          // visit for an UNATTACHED setup-only row (Codex P0 r13).
+          const assertDate = await InvoiceService.prepaySwitchRestoreAssertDate(trx, preRow);
+          await lockAndAssertNoAnnualPrepayOverlap(
+            trx, undoCustomerId, assertDate, false,
+            'This customer has a live annual prepay through',
+          );
+          if (preRow.scheduled_service_id) {
+            const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+            await acquireScheduledInvoiceMintLock(trx, preRow.scheduled_service_id);
+          }
           const row = await trx('invoices')
             .where({ id, customer_id: undoCustomerId })
             .forUpdate()
             .first('id', 'invoice_number', 'status', 'line_items', 'notes', 'title',
               'scheduled_service_id', 'customer_id');
-          // Only a row THIS LANE retired: void, carrying this estimate's
-          // accept stamp AND the durable superseded-by marker the switch
-          // stamped at retirement (Codex P0 r12 — without the marker, a
-          // crafted id could resurrect an invoice someone voided on purpose
-          // outside the switch), and the prepay that superseded it must be
-          // DEAD — otherwise this is a stale abort racing a live year.
+          // Identity recheck + full guard suite on the LOCKED row: void,
+          // carrying this estimate's accept stamp AND the durable
+          // superseded-by marker the switch stamped at retirement (Codex P0
+          // r12), with the superseding prepay DEAD.
           if (!row || String(row.status || '').toLowerCase() !== 'void') return { skipped: true };
           if (!provenance || !provenance.test(String(row.notes || ''))) return { skipped: true };
           const supersededBy = /\[prepay-switch-superseded-by:([^\]]+)\]/.exec(String(row.notes || ''));
@@ -10244,34 +10259,14 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
           if (!prepayDead) {
             return { failed: { id, invoiceNumber: row.invoice_number || null, error: 'the annual prepay that superseded it is still live — void it from Invoices first, then retry' } };
           }
-          // NEVER restore beside coverage of the RESTORED VISIT, checked
-          // INSIDE the transaction under the SAME per-customer advisory lock
-          // every prepay mint takes (Codex P0 r5): a concurrent mint
-          // serializes behind this instead of slipping a term between check
-          // and re-mint. Asserted against the VISIT's date, not today (Codex
-          // P0 r11): an aborted FUTURE-start renewal switch must restore
-          // even while the current year still runs — the double-bill risk is
-          // coverage spanning the visit being re-billed.
-          // Shared with the term-cancel restore (invoice.js) so the two can
-          // never disagree; falls back to the accept series' first upcoming
-          // visit for an UNATTACHED setup-only row (Codex P0 r13).
-          const assertDate = await InvoiceService.prepaySwitchRestoreAssertDate(trx, row);
-          await lockAndAssertNoAnnualPrepayOverlap(
-            trx, undoCustomerId, assertDate, false,
-            'This customer has a live annual prepay through',
-          );
-          // Already restored (this call raced a duplicate, or an earlier
-          // response was lost) — report the existing replacement, mint nothing.
+          // Already restored (raced a duplicate, or an earlier response was
+          // lost) — report the existing replacement, mint nothing.
           const existing = await trx('invoices')
             .where('notes', 'like', `%${restoreMarker(row.id)}%`)
             .first('id', 'invoice_number');
           if (existing) {
             return { restored: { replacedInvoiceId: id, invoiceId: existing.id, invoiceNumber: existing.invoice_number || null } };
           }
-          // Same live-AR guard as the term-cancel restore (Codex P0 r9): a
-          // visit that completed while the prepay sat unpaid already minted
-          // its own per-application invoice — restoring the old one beside
-          // it would bill the application twice. Skip; billing moved on.
           let lines = invoiceLineItems(row.line_items)
             .map((li) => ({
               description: String(li?.description || ''),
@@ -10279,15 +10274,11 @@ router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
               unit_price: Number(li?.unit_price ?? li?.amount),
             }))
             .filter((li) => li.description && Number.isFinite(li.unit_price));
+          // Live-AR classification under the mint lock, byte-matched with the
+          // term-cancel restore (Codex P0 r19): fee-only when a live invoice
+          // provably bills the base application; full restore beside
+          // unrelated invoices; unreadable defers to manual review.
           if (row.scheduled_service_id) {
-            // Canonical mint lock + line-level classification, byte-matched
-            // with the term-cancel restore in services/invoice (Codex P0
-            // r19): serialize against every completion/checkout writer, then
-            // demote to fee-only ONLY when a live invoice provably bills the
-            // base application; unrelated live invoices keep the full
-            // restore, unreadable ones go to manual review.
-            const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
-            await acquireScheduledInvoiceMintLock(trx, row.scheduled_service_id);
             const liveOnVisit = await trx('invoices')
               .where({ scheduled_service_id: row.scheduled_service_id })
               .whereNot({ id: row.id })

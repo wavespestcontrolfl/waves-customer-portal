@@ -29,7 +29,7 @@
 // stale abort can never double-bill. A failed restore is loud: the operator
 // must know this visit currently has no invoice behind it.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import MobilePaymentSheet from './MobilePaymentSheet';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -120,6 +120,11 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
   const [actionError, setActionError] = useState('');
   // Minted prepay invoice awaiting in-person tender.
   const [collecting, setCollecting] = useState(null);
+  // MobilePaymentSheet fires onChargeSuccess AND THEN onClose on a
+  // successful tender (Codex P0 r21) — whichever handler runs first claims
+  // the outcome and the other becomes a no-op, so the abort path can never
+  // race the success path past the activation gate.
+  const tenderOutcomeClaimed = useRef(false);
   // Set when the switch stopped mid-way and the operator has to finish by
   // hand: a restore that failed, an ambiguous network outcome, or a prepay
   // void that refused. { title, message, detail, voided } — `voided` powers
@@ -215,6 +220,8 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
     // payment_pending term) AND put the per-application invoice back, so the
     // visit bills exactly what it billed before the operator tapped in.
     const abortAndClose = async () => {
+      if (tenderOutcomeClaimed.current) return;
+      tenderOutcomeClaimed.current = true;
       setBusy('abort');
       try {
         const fresh = await adminFetch(`/admin/invoices/${invoice.id}`).catch(() => null);
@@ -225,8 +232,11 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
         // already half-happened: skip the (impossible) void and go straight
         // to restoring the per-application invoice.
         if (fresh && PREPAY_SETTLED_STATUSES.includes(status)) {
-          setCollecting(null);
-          finish(invoice);
+          // Settled out-of-band mid-abort — route through the SAME
+          // activation gate as the success path (Codex P0 r21): paid is
+          // not coverage.
+          tenderOutcomeClaimed.current = false;
+          await collected();
           return;
         }
         if (fresh && status === 'processing') {
@@ -277,6 +287,8 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
     // status; anything else parks with instructions, because the term is
     // still payment_pending and the charge can yet fail.
     const collected = async () => {
+      if (tenderOutcomeClaimed.current) return;
+      tenderOutcomeClaimed.current = true;
       setBusy('confirm');
       const fresh = await adminFetch(`/admin/invoices/${invoice.id}`).catch(() => null);
       const status = String(fresh?.status || '').toLowerCase();

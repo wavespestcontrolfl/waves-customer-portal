@@ -4203,37 +4203,43 @@ const InvoiceService = {
     // prepay — serialize on the row instead of both observing "no marker"
     // and each minting a collectible replacement.
     const restoreOne = async (trx, id) => {
+      // LOCK ORDER matches the switch and every mint writer (Codex P1 r21):
+      // per-customer prepay advisory lock → scheduled-invoice mint lock →
+      // invoice row lock. An unlocked pre-read supplies the ids and dates the
+      // advisory steps need; every guard then re-runs on the LOCKED re-read,
+      // so nothing decided here rests on the unlocked snapshot.
+      const preRow = await trx("invoices")
+        .where({ id })
+        .first("id", "customer_id", "scheduled_service_id", "notes", "status");
+      if (!preRow || String(preRow.status || "").toLowerCase() !== "void") return null;
+      // The double-bill question is whether coverage spans the RESTORED
+      // VISIT, not today (Codex P0 r11): an aborted FUTURE-start renewal
+      // switch must still restore even while the current year runs.
+      const assertDate = await prepaySwitchRestoreAssertDate(trx, preRow);
+      try {
+        const { lockAndAssertNoAnnualPrepayOverlap } = require("../routes/admin-customers")._private;
+        await lockAndAssertNoAnnualPrepayOverlap(
+          trx, preRow.customer_id, assertDate, false,
+          "Customer already has an annual prepay term through",
+        );
+      } catch (lockErr) {
+        if (lockErr && lockErr.annualPrepayOverlap) {
+          logger.warn(`[invoice] switch-supersede restore skipped for ${preRow.id}: a live annual prepay term stands — restoring would double-bill`);
+          return null;
+        }
+        throw lockErr;
+      }
+      if (preRow.scheduled_service_id) {
+        const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
+        await acquireScheduledInvoiceMintLock(trx, preRow.scheduled_service_id);
+      }
       const row = await trx("invoices")
         .where({ id })
         .forUpdate()
         .first("id", "invoice_number", "status", "line_items", "notes", "title",
           "scheduled_service_id", "customer_id");
+      // Identity recheck on the locked row.
       if (!row || String(row.status || "").toLowerCase() !== "void") return null;
-      // Serialize against EVERY prepay mint with the same per-customer
-      // advisory lock + overlap assert they all take (Codex on-site-switch
-      // P0 r9): without it, a new Customer 360 / on-site mint could commit a
-      // fresh term while this restore recreates the per-application invoice
-      // — both collectible. A live term ⇒ skip the restore (billing belongs
-      // to the new coverage), never throw the caller's sync over. Lazy
-      // require: admin-customers requires this module at load, so a
-      // top-level import would be a cycle.
-      // The double-bill question is whether coverage spans the RESTORED
-      // VISIT, not today (Codex P0 r11): an aborted FUTURE-start renewal
-      // switch must still restore even while the current year runs.
-      const assertDate = await prepaySwitchRestoreAssertDate(trx, row);
-      try {
-        const { lockAndAssertNoAnnualPrepayOverlap } = require("../routes/admin-customers")._private;
-        await lockAndAssertNoAnnualPrepayOverlap(
-          trx, row.customer_id, assertDate, false,
-          "Customer already has an annual prepay term through",
-        );
-      } catch (lockErr) {
-        if (lockErr && lockErr.annualPrepayOverlap) {
-          logger.warn(`[invoice] switch-supersede restore skipped for ${row.invoice_number || row.id}: a live annual prepay term stands — restoring would double-bill`);
-          return null;
-        }
-        throw lockErr;
-      }
       const restoreMarker = prepaySwitchRestoreMarker(row.id);
       const existing = await trx("invoices")
         .where("notes", "like", `%${restoreMarker}%`)
@@ -4246,19 +4252,11 @@ const InvoiceService = {
           unit_price: Number(li?.unit_price ?? li?.amount),
         }))
         .filter((li) => li.description && Number.isFinite(li.unit_price));
-      // Live AR on the same visit (Codex P0 r9/r17/r19): serialize on the
-      // CANONICAL scheduled-invoice mint lock — the same one every
-      // completion/checkout writer takes — so a concurrent completion mint
-      // cannot land between this check and the create. Then classify what
-      // the live invoices actually bill: only an invoice that provably
-      // bills the BASE APPLICATION (a *_primary line or the accept's own
-      // first-application line) demotes the restore to setup-fee-only; live
-      // invoices that clearly bill something ELSE (a manual add-on) leave
-      // the full restore intact, and anything unreadable defers to manual
-      // review rather than guessing in either direction.
+      // Live AR classification under the mint lock (Codex P0 r9/r17/r19):
+      // only an invoice provably billing the BASE application demotes the
+      // restore to setup-fee-only; unrelated live invoices keep the full
+      // restore; unreadable ones defer to manual review.
       if (row.scheduled_service_id) {
-        const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
-        await acquireScheduledInvoiceMintLock(trx, row.scheduled_service_id);
         const liveOnVisit = await trx("invoices")
           .where({ scheduled_service_id: row.scheduled_service_id })
           .whereNot({ id: row.id })

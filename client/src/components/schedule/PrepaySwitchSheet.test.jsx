@@ -16,10 +16,13 @@ import PrepaySwitchSheet from './PrepaySwitchSheet';
 // The tender sheet is a whole payment stack; stand in for it with the two
 // outcomes this component branches on.
 vi.mock('./MobilePaymentSheet', () => ({
+  // The REAL sheet fires onChargeSuccess and THEN onClose on success (Codex
+  // P0 r21) — the mock mirrors that pairing so every success test exercises
+  // the abort-race guard.
   default: ({ onChargeSuccess, onClose, amount }) => (
     <div>
       <div>tender {amount}</div>
-      <button type="button" onClick={() => onChargeSuccess()}>tender-success</button>
+      <button type="button" onClick={() => { onChargeSuccess(); onClose(); }}>tender-success</button>
       <button type="button" onClick={() => onClose()}>tender-abort</button>
     </div>
   ),
@@ -130,6 +133,10 @@ describe('PrepaySwitchSheet', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'tender-success' }));
     expect(await screen.findByText('Annual prepay collected')).toBeInTheDocument();
+    // The paired onClose (abort path) must have been a no-op: nothing voided,
+    // nothing restored (Codex P0 r21).
+    expect(voidedPrepay()).toBe(false);
+    expect(didUndo()).toBe(false);
     // Success only after the SERVER confirms a settled status (Codex P0 r15)
     // — the tender sheet fires onChargeSuccess for processing tenders too.
     expect(calls.some((c) => c.path === '/api/admin/invoices/inv-prepay' && c.method === 'GET')).toBe(true);
