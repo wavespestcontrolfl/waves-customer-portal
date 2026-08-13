@@ -1318,6 +1318,11 @@ module.exports = {
   // derivation to drift.
   quotedPerVisitForServiceKey: (estimate, serviceKey) =>
     quoteAmountFromLine(findLineItem(estimate, serviceKey)).perVisit || null,
+  // Ownership/qualifying loader (report click-to-estimate lane): the mint's
+  // in-transaction ownership revalidation must resolve the customer's
+  // current services EXACTLY the way the card's composition did — one
+  // loader, one street-scope resolution, no second derivation to drift.
+  loadCurrentServiceKeys,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.
   _private: { resolvePropertyContext, missingPropertyFor },

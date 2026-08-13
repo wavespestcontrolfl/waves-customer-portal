@@ -113,7 +113,9 @@ async function mintReportClickEstimate(trx, {
     serverRecomputeFromEstimateData,
   } = deps.persistence || require('../admin-estimate-persistence');
   const recompute = deps.recompute || serverRecomputeFromEstimateData;
-  const { quotedPerVisitForServiceKey, addressForCustomer } = deps.pricingAi || require('../customer-pricing-ai');
+  const {
+    quotedPerVisitForServiceKey, addressForCustomer, loadCurrentServiceKeys,
+  } = deps.pricingAi || require('../customer-pricing-ai');
   const computeMembershipContext = deps.computeMembershipContext
     || require('../estimate-membership-context').computeMembershipContext;
   const { pricingBundleMatchesEstimateTotals } = deps.bundleUtils
@@ -187,6 +189,36 @@ async function mintReportClickEstimate(trx, {
   if (addressForCustomer(freshCustomer) !== addressForCustomer(customer)
     || String(freshCustomer.property_type || '') !== String(customer.property_type || '')) {
     throw new ClickEstimateDriftError('customer premises changed between pricing and mint');
+  }
+
+  // Ownership revalidation INSIDE the transaction (in-hook audit r7 P0):
+  // context.currentServiceKeys was loaded at composition, before this
+  // customer lock — an acceptance or staff add landing in between would
+  // let the mint publish an acceptable estimate for a service the customer
+  // now OWNS (duplicate billing on accept), and the lineage lock only sees
+  // prior CTA mints. Same loader + street-scope resolution the composition
+  // used; premises equality above guarantees the same scope.
+  const freshServices = await loadCurrentServiceKeys(trx, freshCustomer);
+  if (freshServices.ownershipLookupFailed) {
+    // FAIL CLOSED, retryable — unknown ownership must not publish a price
+    // (same posture as the membership snapshot below).
+    throw new Error('ownership revalidation failed before click-to-estimate mint');
+  }
+  const mapOwnKey = (key) => (key === 'termite_bait' ? 'termite' : key);
+  const nowHeldKeys = new Set([
+    ...freshServices.currentServiceKeys, ...freshServices.ownedServiceKeys,
+  ].map(mapOwnKey));
+  if (nowHeldKeys.has(mapOwnKey(crossSell.serviceKey))) {
+    throw new ClickEstimateDriftError('target service is now owned — offer is stale');
+  }
+  // The qualifying baseline priced the card (priors union into the tier):
+  // any change — added OR removed — is a different price basis. Refuse as
+  // drift; the next report render re-composes against the new baseline.
+  const freshQualifying = new Set(freshServices.currentServiceKeys.map(mapOwnKey));
+  const pricedQualifying = new Set(priorQualifyingServices.map(mapOwnKey));
+  if (freshQualifying.size !== pricedQualifying.size
+    || [...pricedQualifying].some((key) => !freshQualifying.has(key))) {
+    throw new ClickEstimateDriftError('qualifying services changed between pricing and mint');
   }
 
   const estimateData = {

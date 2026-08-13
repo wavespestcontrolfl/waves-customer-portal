@@ -77,6 +77,12 @@ function baseArgs(overrides = {}) {
     pricingAi: {
       quotedPerVisitForServiceKey: () => 114,
       addressForCustomer: (c) => [c.address_line1, c.city, c.zip].filter(Boolean).join(', '),
+      // In-transaction ownership revalidation (audit r7 P0): the default
+      // fresh read AGREES with the composed baseline (lawn qualifying,
+      // pest not owned) — drift tests override this.
+      loadCurrentServiceKeys: jest.fn(async () => ({
+        currentServiceKeys: ['lawn'], ownedServiceKeys: ['lawn'], ownershipLookupFailed: false,
+      })),
     },
     computeMembershipContext: jest.fn(async () => ({ member: true })),
     bundleUtils: { pricingBundleMatchesEstimateTotals: () => true },
@@ -243,6 +249,41 @@ describe('mintReportClickEstimate', () => {
     await expect(mintReportClickEstimate(trx, args)).rejects.toThrow(ClickEstimateDriftError);
   });
 
+  test('a target service the customer NOW owns refuses the mint as drift (audit r7 P0)', async () => {
+    // An acceptance or staff add between composition and the tap: the
+    // in-transaction re-read sees pest owned — publishing another
+    // acceptable pest estimate would duplicate billing on accept.
+    const { trx, ops } = fakeTrx();
+    const args = baseArgs();
+    args.deps.pricingAi.loadCurrentServiceKeys = jest.fn(async () => ({
+      currentServiceKeys: ['lawn'], ownedServiceKeys: ['lawn', 'pest_control'], ownershipLookupFailed: false,
+    }));
+    await expect(mintReportClickEstimate(trx, args)).rejects.toThrow(/now owned/);
+    expect(ops.inserts).toHaveLength(0);
+  });
+
+  test('a CHANGED qualifying baseline refuses the mint as drift — the card priced a different tier basis', async () => {
+    const { trx, ops } = fakeTrx();
+    const args = baseArgs();
+    args.deps.pricingAi.loadCurrentServiceKeys = jest.fn(async () => ({
+      currentServiceKeys: ['lawn', 'mosquito'], ownedServiceKeys: ['lawn', 'mosquito'], ownershipLookupFailed: false,
+    }));
+    await expect(mintReportClickEstimate(trx, args)).rejects.toThrow(/qualifying services changed/);
+    expect(ops.inserts).toHaveLength(0);
+  });
+
+  test('a failed ownership revalidation fails CLOSED as a retryable non-drift error', async () => {
+    const { trx, ops } = fakeTrx();
+    const args = baseArgs();
+    args.deps.pricingAi.loadCurrentServiceKeys = jest.fn(async () => ({
+      currentServiceKeys: [], ownedServiceKeys: [], ownershipLookupFailed: true,
+    }));
+    const err = await mintReportClickEstimate(trx, args).catch((e) => e);
+    expect(err.message).toMatch(/ownership revalidation failed/);
+    expect(err.name).not.toBe('ClickEstimateDriftError');
+    expect(ops.inserts).toHaveLength(0);
+  });
+
   test('a member whose membership context fails to load fails CLOSED (no estimate at wrong terms)', async () => {
     const { trx, ops } = fakeTrx();
     const args = baseArgs();
@@ -255,6 +296,9 @@ describe('mintReportClickEstimate', () => {
     const { trx, ops } = fakeTrx();
     const args = baseArgs();
     args.crossSell.engineContext.currentServiceKeys = [];
+    args.deps.pricingAi.loadCurrentServiceKeys = jest.fn(async () => ({
+      currentServiceKeys: [], ownedServiceKeys: [], ownershipLookupFailed: false,
+    }));
     args.deps.computeMembershipContext = jest.fn(async () => null);
     const out = await mintReportClickEstimate(trx, args);
     expect(out.reused).toBe(false);
