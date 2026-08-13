@@ -281,6 +281,18 @@ async function serviceReportText(customerId, { visitDate = null, tier = 'redacte
       + 'and pass the date exactly as it reports it — do NOT describe any visit until then.';
   }
   if (wanted) query.where('service_date', wanted);
+  // ⭐ TWO VISITS, ONE DATE — ASK, DON'T GUESS. A date-only filter with .first()
+  // silently picked the greatest id; a caller asking about the OTHER service
+  // then heard the wrong visit's findings and re-entry guidance. When the date
+  // is ambiguous the tool says so and names the services instead of choosing.
+  if (wanted) {
+    const sameDay = await query.clone().limit(3).select('id', 'service_type');
+    if (sameDay.length > 1) {
+      const names = sameDay.map((r) => promptSafe(r.service_type, 40)).filter(Boolean).join(' and ');
+      return `There is more than one completed visit on that date (${names}). Ask the caller WHICH service they `
+        + 'mean, then call get_service_report again — do not describe either visit until they say.';
+    }
+  }
   const record = await query.first('id', 'service_date', 'service_type', 'technician_notes',
     'structured_notes', 'status', 'started_at', 'ended_at', 'advisory');
   if (!record) {

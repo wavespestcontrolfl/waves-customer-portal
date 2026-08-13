@@ -78,7 +78,7 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // rejections, so there is no retry churn.
   try {
     const fresh = await db('scheduled_services').where({ id: svc.id }).first('status');
-    if (!fresh || ['cancelled', 'skipped'].includes(String(fresh.status))) {
+    if (!fresh || ['cancelled', 'skipped', 'rescheduled'].includes(String(fresh.status))) {
       logger.info(`[${routeTag}] activation stood down for ${svc.id} — row is ${fresh ? fresh.status : 'gone'}`);
       return false;
     }
@@ -423,7 +423,7 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // Reporting FALSE keeps the row unstamped, same as the entry check.
   try {
     const post = await db('scheduled_services').where({ id: svc.id }).first('status');
-    if (post && ['cancelled', 'skipped'].includes(String(post.status))) {
+    if (post && ['cancelled', 'skipped', 'rescheduled'].includes(String(post.status))) {
       const AppointmentReminders = require('./appointment-reminders');
       await AppointmentReminders.handleCancellation(svc.id, { sendNotification: false }).catch(() => {});
       logger.info(`[${routeTag}] visit ${svc.id} went ${post.status} during the confirm hook — reminder closed, activation stood down`);
@@ -828,7 +828,11 @@ async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } =
       .orWhere((q2) => q2
         .where('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION)
         .whereNot('status', 'pending')))
-    .whereNotIn('status', ['cancelled', 'skipped'])
+    // ⭐ 'rescheduled' is a SUPERSEDED row (the live visit is a different row) —
+    // activating it arms reminders for an appointment the customer already
+    // moved. Excluded here AND at the activation entry check, so neither rail
+    // can resurrect it.
+    .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
     // Random order (Codex #3361 r15 P2): with more rows than the batch cap,
     // an unordered LIMIT could hand a batch of permanently-unactivatable
     // rows (bad slot data, malformed payloads) to every run and starve the

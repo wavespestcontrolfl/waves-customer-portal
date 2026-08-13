@@ -424,8 +424,18 @@ async function fireReserviceAlertsAndStamp({ row, lane, covered, unverifiedReque
   // POST /api/requests writes to. Internal only; fail-open.
   let notif = null;
   try {
+    // ⭐ THE FEED ROW IS DEDUPED ACROSS RETRIES. A failing owner page releases
+    // the claim and the sweep retries hourly — without this check every retry
+    // minted ANOTHER bell card for the same ticket. One persisted feed row per
+    // request id is the receipt; the page below keeps its own.
+    const db = require('../../models/db');
+    const existingFeedRow = await db('notifications')
+      .whereRaw("metadata->>'requestId' = ?", [String(row.id)])
+      .first('id')
+      .catch(() => null);
+    if (existingFeedRow) notif = { id: existingFeedRow.id, deduped: true };
     const NotificationService = require('../notification-service');
-    notif = await NotificationService.notifyAdmin(
+    if (!notif) notif = await NotificationService.notifyAdmin(
       'service',
       `${urgency === 'urgent' ? '🚨 URGENT ' : ''}${unverifiedRequester ? '⚠️ UNVERIFIED REQUESTER — ' : ''}`
       + 'Phone assistant re-service request',

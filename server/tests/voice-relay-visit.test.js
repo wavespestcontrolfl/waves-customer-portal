@@ -55,6 +55,7 @@ function makeBuilder(rows) {
   const chain = ['whereNull', 'whereIn', 'whereNotIn', 'whereNotNull', 'orderBy', 'orderByRaw', 'select', 'limit',
     'whereRaw', 'orWhereRaw', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'whereNot', 'join', 'leftJoin'];
   for (const m of chain) b[m] = jest.fn(() => b);
+  b.clone = jest.fn(() => b); // the same-date disambiguation probe clones the query
   b.where = jest.fn(function whereImpl(arg) { if (typeof arg === 'function') arg.call(b, b); return b; });
   b.first = jest.fn(() => Promise.resolve(rows[0] || null));
   b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
@@ -411,6 +412,21 @@ describe('get_service_report', () => {
     expect(out).not.toContain('internal finding');
     expect(out).not.toContain('Secret Product');
     expect(out).toMatch(/Do NOT describe findings or products/);
+  });
+
+  test('two completed visits on ONE date → the tool asks which, describes neither', async () => {
+    primeDb({
+      scheduled_services: [],
+      service_records: [
+        { id: 'sr-a', service_date: '2026-08-01', service_type: 'Pest Control', technician_notes: null, structured_notes: null, status: 'completed' },
+        { id: 'sr-b', service_date: '2026-08-01', service_type: 'Lawn Care', technician_notes: null, structured_notes: null, status: 'completed' },
+      ],
+    });
+    const out = await executeTool('get_service_report', { visit_date: '2026-08-01' }, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).toMatch(/more than one completed visit/i);
+    expect(out).toContain('Pest Control');
+    expect(out).toContain('Lawn Care');
+    expect(out).toMatch(/Ask the caller WHICH service/);
   });
 
   test('a visit_date pins the record; an unknown date reports nothing on file', async () => {

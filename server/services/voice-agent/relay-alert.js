@@ -377,8 +377,63 @@ async function alertOwnerReservice(request = {}, ctx = {}) {
   }
 }
 
+/**
+ * Hourly backstop for the crash window the lease alone cannot cover: the lease
+ * makes an abandoned claim RECLAIMABLE, but the only reclaimer was the live
+ * capture_lead path — and after the socket died, Twilio sent the caller to
+ * voicemail, so nothing on that call ever claimed again and the hot lead
+ * stayed unpaged. This sweep finds claimed-unsent call_log rows past the
+ * lease, recovers the lead by its own twilio_call_sid, and re-fires the page
+ * through alertOwnerHotLead (which re-takes the expired lease atomically —
+ * concurrent rails still cannot double-page).
+ */
+async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
+  const db = require('../../models/db');
+  let rows = [];
+  try {
+    rows = await db('call_log')
+      .whereRaw(`(metadata->>'${HOT_ALERT_KEY}') IS NOT NULL`)
+      .whereRaw(`(metadata->>'${HOT_ALERT_SENT_KEY}') IS NULL`)
+      .whereRaw(`(metadata->>'${HOT_ALERT_KEY}')::timestamptz < now() - ${HOT_ALERT_CLAIM_LEASE}`)
+      .orderBy('created_at', 'asc')
+      .limit(limit)
+      .select('id', 'twilio_call_sid');
+  } catch (err) {
+    logger.error(`[voice-relay-alert] abandoned hot-alert sweep query failed: ${err.message}`);
+    return 0;
+  }
+  let paged = 0;
+  for (const row of rows) {
+    let lead = null;
+    try {
+       
+      lead = await db('leads')
+        .where({ twilio_call_sid: row.twilio_call_sid })
+        .whereNull('deleted_at')
+        .orderBy('created_at', 'desc')
+        .first('first_name', 'last_name', 'phone', 'city', 'lead_quality', 'transcript_summary');
+    } catch { /* fall through to release */ }
+    if (!lead || String(lead.lead_quality || '').toLowerCase() !== 'hot') {
+      // Nothing hot to page (or no lead at all — the bell rang new_lead
+      // regardless): release so the row leaves the sweep population.
+       
+      await releaseHotAlertClaim(row.twilio_call_sid).catch(() => {});
+      continue;
+    }
+     
+    const ok = await alertOwnerHotLead(
+      { ...lead, call_summary: lead.transcript_summary, urgency_reason: 'recovered by the hot-alert sweep' },
+      { callSid: row.twilio_call_sid },
+    ).catch(() => false);
+    if (ok) paged += 1;
+  }
+  if (rows.length) logger.info(`[voice-relay-alert] abandoned hot-alert sweep: ${rows.length} candidate(s), ${paged} paged`);
+  return paged;
+}
+
 module.exports = {
   alertOwnerHotLead,
+  sweepAbandonedHotAlerts,
   alertOwnerReservice,
   buildHotLeadAlert,
   buildReserviceAlert,

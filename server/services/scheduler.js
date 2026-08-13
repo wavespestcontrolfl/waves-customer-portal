@@ -710,6 +710,9 @@ function initScheduledJobs() {
     try {
       await runExclusive('voice-reservice-alert-sweep', async () => {
         await require('./voice-agent/relay-reservice').sweepUnalertedVoiceReservices();
+        // Same cadence, same rationale: a hot-lead page whose process died
+        // between the claim and the send has no live-call retry left.
+        await require('./voice-agent/relay-alert').sweepAbandonedHotAlerts();
       });
     } catch (err) {
       logger.error(`[voice-reservice-alert-sweep] hourly sweep failed: ${err.message}`);
