@@ -25,7 +25,7 @@ const state = {
 function makeBuilder(table) {
   const b = {};
   const chain = (name) => { b[name] = jest.fn(() => b); };
-  ['join', 'where', 'andWhere', 'whereNot', 'whereNotIn', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
+  ['join', 'forUpdate', 'where', 'andWhere', 'whereNot', 'whereNotIn', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
     'orderBy', 'limit', 'groupBy', 'groupByRaw', 'select', 'first'].forEach(chain);
   b.update = jest.fn((patch) => {
     // Only row-scoped updates (where({id,...})) are the matcher's claims and
@@ -75,6 +75,8 @@ const mockDb = jest.fn((table) => makeBuilder(table));
 // raw with bindings returns both (suggestionMerge asserts); binding-less
 // raw stays a string (the jsonb key-subtraction clears assert on it)
 mockDb.raw = jest.fn((sql, bindings) => (bindings ? { sql, bindings } : sql));
+// transaction passthrough — the callback gets the same table router
+mockDb.transaction = jest.fn(async (cb) => cb(mockDb));
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // A confirmed payout link must echo into the EXISTING reconciliation
@@ -569,6 +571,22 @@ describe('runDeterministicMatching', () => {
     expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
     expect(sugOf(revert).rejectedPayoutIds).toEqual(['po-1']);
     expect(sugOf(revert).autoRevert.payoutId).toBe('po-1');
+    // the decision was made under the payout row lock, state re-read inside
+    const lockingBuilder = state.builders.find(x => x.table === 'stripe_payouts' && x.b.forUpdate.mock.calls.length > 0);
+    expect(lockingBuilder).toBeDefined();
+  });
+
+  test('a reconciled payout with a DISCREPANT confirmed amount matches by its actual banked amount', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'DEPOSIT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
+    // Stripe expected 2418.66, but a human confirmed 2400.00 actually landed
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: true }];
+    state.reconRows = [{ status: 'confirmed', actual_amount: '2400.00' }];
+    const summary = await runDeterministicMatching();
+    // the expected-amount coincidence does NOT auto-link…
+    expect(summary.payoutsLinked).toBe(0);
+    // …and the parked candidate shows the true banked amount
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).payoutCandidates);
+    expect(sugOf(parked).payoutCandidates[0].amount).toBe(2400);
   });
 
   test('a linked-but-unreconciled row with NO human rejection gets its pending marker restored', async () => {

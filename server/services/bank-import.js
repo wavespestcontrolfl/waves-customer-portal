@@ -211,6 +211,22 @@ function toDateStr(v) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// A payout a human already reconciled may carry a DIFFERENT banked amount
+// than Stripe's expected amount (discrepant confirmed reconciliation).
+// Matching must compare against the money that actually hit the bank, or a
+// coincidental same-expected-amount credit could hide behind it.
+async function effectivePayoutAmount(candidate, dbOrTrx = db) {
+  if (!candidate.reconciled) return Number(candidate.amount);
+  const latest = await dbOrTrx('bank_reconciliation')
+    .where('payout_id', candidate.id)
+    .where('status', 'confirmed')
+    .orderBy('reconciled_at', 'desc')
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .first('actual_amount');
+  return latest && latest.actual_amount != null ? Number(latest.actual_amount) : Number(candidate.amount);
+}
+
 // Server-side plausibility for MANUAL links — the same amount tolerance and
 // date windows the deterministic matcher uses. The UI only offers parked
 // candidates (which already satisfied these), so any request outside them
@@ -272,34 +288,42 @@ async function healUnreconciledLinks() {
   let reverted = 0;
   let remarked = 0;
   for (const row of rows) {
-    const latest = await db('bank_reconciliation')
-      .where('payout_id', row.matched_payout_id)
-      .orderBy('reconciled_at', 'desc')
-      .orderBy('created_at', 'desc')
-      .orderBy('id', 'desc') // deterministic final tie-breaker
-      .first('status', 'reconciled_by');
-    if (latest && latest.status === 'rejected' && !String(latest.reconciled_by || '').startsWith('bank-import')) {
-      const { reconcilePending, ...rest } = row.suggestion || {};
-      const changed = await db('bank_transactions')
-        .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
-        .update({
-          status: 'unmatched',
-          matched_payout_id: null,
-          match_method: null,
-          matched_at: null,
-          suggestion: suggestionMerge({
-            rejectedPayoutIds: [...new Set([...(rest.rejectedPayoutIds || []), row.matched_payout_id])],
-            autoRevert: { at: new Date().toISOString(), payoutId: row.matched_payout_id, reason: 'reconciliation rejected by a human on the Banking page' },
-          }, ['reconcilePending']),
-          updated_at: new Date(),
-        });
-      if (changed) reverted++;
-    } else {
-      const changed = await db('bank_transactions')
-        .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
-        .update({ suggestion: suggestionMerge({ reconcilePending: true }), updated_at: new Date() });
-      if (changed) remarked++;
-    }
+    // Per-row transaction with the payout LOCKED and its state re-read —
+    // the outer scan is only a hint. A human who confirms the payout after
+    // the scan can't be raced into a wrongful revert + permanent exclusion.
+    // (Same payout-then-bank-row lock order as every other writer.)
+    await db.transaction(async (trx) => {
+      const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('reconciled');
+      if (!sp || sp.reconciled) return; // state changed since the scan — nothing to heal
+      const latest = await trx('bank_reconciliation')
+        .where('payout_id', row.matched_payout_id)
+        .orderBy('reconciled_at', 'desc')
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc') // deterministic final tie-breaker
+        .first('status', 'reconciled_by');
+      if (latest && latest.status === 'rejected' && !String(latest.reconciled_by || '').startsWith('bank-import')) {
+        const { reconcilePending, ...rest } = row.suggestion || {};
+        const changed = await trx('bank_transactions')
+          .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+          .update({
+            status: 'unmatched',
+            matched_payout_id: null,
+            match_method: null,
+            matched_at: null,
+            suggestion: suggestionMerge({
+              rejectedPayoutIds: [...new Set([...(rest.rejectedPayoutIds || []), row.matched_payout_id])],
+              autoRevert: { at: new Date().toISOString(), payoutId: row.matched_payout_id, reason: 'reconciliation rejected by a human on the Banking page' },
+            }, ['reconcilePending']),
+            updated_at: new Date(),
+          });
+        if (changed) reverted++;
+      } else {
+        const changed = await trx('bank_transactions')
+          .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+          .update({ suggestion: suggestionMerge({ reconcilePending: true }), updated_at: new Date() });
+        if (changed) remarked++;
+      }
+    });
   }
   return { reverted, remarked };
 }
@@ -555,14 +579,17 @@ async function runDeterministicMatching({ limit } = {}) {
         .whereNotExists(function claimed() {
           this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_payout_id = stripe_payouts.id');
         })
-        .select('id', 'amount', 'arrival_date')
+        .select('id', 'amount', 'arrival_date', 'reconciled')
         // 8 is a parking cap, not a uniqueness cap: auto-link still demands
         // candidates.length === 1, so a cap-hidden extra can only PREVENT a
         // link, never fake "exactly one".
         .limit(8);
       if (rejected.payoutIds.length) payoutQuery = payoutQuery.whereNotIn('id', rejected.payoutIds);
-      const candidates = await payoutQuery;
-      const exact = candidates.filter(c => centsEqual(c.amount, row.amount));
+      const fetched = await payoutQuery;
+      // reconciled candidates compare against their confirmed ACTUAL amount
+      const candidates = [];
+      for (const c of fetched) candidates.push({ ...c, effective_amount: await effectivePayoutAmount(c) });
+      const exact = candidates.filter(c => centsEqual(c.effective_amount, row.amount));
       if (candidates.length === 1 && exact.length === 1) {
         try {
           // Reconciliation intent is persisted ATOMICALLY with the claim —
@@ -614,7 +641,7 @@ async function runDeterministicMatching({ limit } = {}) {
         summary.ambiguous++;
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
           suggestion: suggestionMerge({
-            payoutCandidates: candidates.map(c => ({ id: c.id, amount: Number(c.amount), arrival_date: toDateStr(c.arrival_date) })),
+            payoutCandidates: candidates.map(c => ({ id: c.id, amount: c.effective_amount, arrival_date: toDateStr(c.arrival_date) })),
             payoutCandidatesTotal: candidates.length,
           }),
           updated_at: new Date(),
@@ -706,6 +733,7 @@ module.exports = {
   echoPayoutReconciliation,
   isPlausibleExpenseLink,
   isPlausiblePayoutLink,
+  effectivePayoutAmount,
   suggestionMerge,
   ledgerCoverage,
   // exported for tests

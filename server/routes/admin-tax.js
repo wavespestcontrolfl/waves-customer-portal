@@ -2009,7 +2009,7 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
       return res.status(400).json({ error: 'only bank-account credits link to payouts' });
     }
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
-    const payout = await db('stripe_payouts').where({ id: payoutId }).first('id', 'status', 'amount', 'arrival_date');
+    const payout = await db('stripe_payouts').where({ id: payoutId }).first('id', 'status', 'amount', 'arrival_date', 'reconciled');
     if (!payout) return res.status(404).json({ error: 'payout not found' });
     // Only money that actually REACHED the bank can explain a bank credit —
     // the same rule the automatic matcher applies, enforced server-side so
@@ -2018,8 +2018,10 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
       return res.status(400).json({ error: `payout is ${payout.status}, not paid — only settled payouts can explain a bank credit` });
     }
     // same amount tolerance + arrival window the matcher's candidates
-    // satisfy — an unrelated payout would falsify the reconciliation
-    if (!bankImport.isPlausiblePayoutLink(row, payout)) {
+    // satisfy — an unrelated payout would falsify the reconciliation. A
+    // reconciled payout compares against its confirmed ACTUAL banked amount.
+    const effectiveAmount = await bankImport.effectivePayoutAmount(payout);
+    if (!bankImport.isPlausiblePayoutLink(row, { amount: effectiveAmount, arrival_date: payout.arrival_date })) {
       return res.status(400).json({ error: 'that payout does not plausibly match this bank row (amount/arrival outside the matching window)' });
     }
     // The pending flag ALWAYS rides in the claim (an unlocked reconciled
