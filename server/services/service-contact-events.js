@@ -20,7 +20,11 @@
  * save (same posture as the account.updated email dispatch).
  *
  * Descriptions mask phones to last-4; the full contact detail lives in
- * metadata. Both the timeline endpoint and the raw table are admin-only.
+ * metadata — the People panel (Phase 2) needs it for removed-contact
+ * history, which no other table retains. Both the timeline endpoint and the
+ * raw table are admin-only, and the global dashboard recentActivity feed
+ * strips metadata from service_contact_* rows (routes/admin-dashboard.js)
+ * so full contact detail stays scoped to the customer's own timeline.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -64,6 +68,7 @@ function changedFields(beforePerson, afterPerson) {
   if (norm(beforePerson.name) !== norm(afterPerson.name)) fields.push('name');
   if (phoneKey(beforePerson.phone) !== phoneKey(afterPerson.phone)) fields.push('phone');
   if (norm(beforePerson.email) !== norm(afterPerson.email)) fields.push('email');
+  if (norm(beforePerson.role) !== norm(afterPerson.role)) fields.push('role');
   return fields;
 }
 

@@ -99,6 +99,16 @@ describe('diffServiceContacts', () => {
     ]);
   });
 
+  test('a role-only change is an update flagged on role', () => {
+    const events = diffServiceContacts(jane, {
+      ...jane,
+      service_contact_role: 'tenant',
+    });
+    expect(events).toEqual([
+      expect.objectContaining({ action: 'service_contact_updated', changed: ['role'] }),
+    ]);
+  });
+
   test('an unchanged echo save produces no events', () => {
     expect(diffServiceContacts(jane, { ...jane })).toEqual([]);
   });
