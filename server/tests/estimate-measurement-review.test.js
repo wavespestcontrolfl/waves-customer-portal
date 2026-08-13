@@ -63,7 +63,7 @@ function mockDb({ estimate = ESTIMATE_ROW, insertResult, insertError, dupeRow } 
         }),
         where: () => ({
           whereNotIn: () => ({ first: async () => (typeof dupeRow === 'function' ? dupeRow() : dupeRow) }),
-          whereRaw: () => ({ update: async () => 1 }),
+          whereRaw: function whereRaw() { return { whereRaw, update: async () => 1 }; },
           update: async () => 1,
         }),
       };
@@ -396,6 +396,33 @@ describe('createEstimateMeasurementReview', () => {
     // Pre-check dedupe: no insert is even attempted — but the UNDELIVERED
     // handoff is re-sent so the office cannot permanently miss a challenge.
     expect(database.inserts).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('a dedupe against a FRESH lease never double-arms (another sender is mid-flight)', async () => {
+    const database = mockDb({ dupeRow: { id: 'req-existing', pricing_revision: JSON.stringify({ notifyLeaseAt: new Date().toISOString() }) } });
+    const result = await createEstimateMeasurementReview({
+      estimateToken: 'tok-1',
+      reasons: ['bigger'],
+      database,
+      viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
+    });
+    expect(result).toEqual({ success: true, deduped: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a dedupe against a STALE lease re-arms (crashed sender is recoverable)', async () => {
+    const stale = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+    const database = mockDb({ dupeRow: { id: 'req-existing', subject: 's', description: 'd', customer_id: 'cust-1', pricing_revision: JSON.stringify({ notifyLeaseAt: stale }) } });
+    const result = await createEstimateMeasurementReview({
+      estimateToken: 'tok-1',
+      reasons: ['bigger'],
+      database,
+      viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
+    });
+    expect(result).toEqual({ success: true, deduped: true });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 

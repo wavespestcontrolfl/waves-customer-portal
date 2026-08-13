@@ -374,7 +374,11 @@ async function resolveEstimateCustomer(database, estimate = {}, opts = {}) {
   if (!created) {
     const safeExisting = await findSafeExistingCustomerForEstimate(database, estimate);
     if (safeExisting) {
-      await database('estimates').where({ id: estimate.id }).update({ customer_id: safeExisting.id });
+      // Conflict path honors the no-estimate-mutation option too (codex
+      // #3376 P1 — this was the one backfill site missing the guard).
+      if (!skipBackfill) {
+        await database('estimates').where({ id: estimate.id }).update({ customer_id: safeExisting.id });
+      }
       return safeExisting;
     }
     const conflict = new Error('Customer contact could not be safely matched');

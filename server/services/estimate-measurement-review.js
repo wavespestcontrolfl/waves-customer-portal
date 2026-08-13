@@ -270,7 +270,9 @@ async function sendOfficeNotification(database, { subject, description, customer
 // payload when the existing open request has NO delivery stamp — both
 // original attempts failed and the deep-link notification is the office's
 // only route to the request (codex #3376 P2).
-function dedupedOutcome(existingRow, estimateId) {
+const NOTIFY_LEASE_MS = 10 * 60 * 1000;
+
+function dedupedOutcome(existingRow, estimateId, nowMs = Date.now()) {
   let revision = null;
   try {
     revision = typeof existingRow.pricing_revision === 'string'
@@ -278,6 +280,12 @@ function dedupedOutcome(existingRow, estimateId) {
       : (existingRow.pricing_revision || null);
   } catch { revision = null; }
   if (revision?.notifiedAt) return { success: true, deduped: true };
+  // A FRESH lease means another sender is mid-flight — don't double-arm. A
+  // stale lease means that sender died between claim and send (codex #3376
+  // P1: a permanent claim would lose the workflow's only handoff forever);
+  // the lease expiring re-arms delivery on the next customer retry.
+  const leaseAt = Date.parse(revision?.notifyLeaseAt || '') || 0;
+  if (leaseAt && nowMs - leaseAt < NOTIFY_LEASE_MS) return { success: true, deduped: true };
   return {
     success: true,
     deduped: true,
