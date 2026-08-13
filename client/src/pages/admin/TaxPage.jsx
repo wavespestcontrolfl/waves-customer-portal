@@ -4530,18 +4530,20 @@ function BankImportTab() {
                       Undo
                     </button>
                   )}
-                  {(r.status === "matched_expense" || r.status === "matched_payout") && (
+                  {(r.status === "matched_expense" || r.status === "matched_payout" || r.status === "refund_applied") && (
                     <button
                       type="button"
                       disabled={!!busy}
                       style={{ ...inputStyle, cursor: "pointer", color: D.muted }}
-                      title="Wrong match? Returns the row to Needs Review; the linked expense/payout itself is untouched"
+                      title={r.status === "refund_applied"
+                        ? "Undo this refund — restores the adjusted expense and returns the credit to review"
+                        : "Wrong match? Returns the row to Needs Review; the linked expense/payout itself is untouched"}
                       onClick={() => {
-                        if (window.confirm("Unlink this bank row from its matched ledger record?"))
+                        if (window.confirm(r.status === "refund_applied" ? "Undo this refund? The adjusted expense is restored." : "Unlink this bank row from its matched ledger record?"))
                           act("unlink", `/admin/tax/bank-import/${r.id}/unlink`);
                       }}
                     >
-                      Unlink
+                      {r.status === "refund_applied" ? "Undo refund" : "Unlink"}
                     </button>
                   )}
                 </td>

@@ -2063,7 +2063,20 @@ router.post('/bank-import/:id/apply-refund', async (req, res, next) => {
             match_method: 'refund',
             matched_at: new Date(),
             updated_at: new Date(),
-            suggestion: bankImport.suggestionMerge({ refundAppliedTo: expenseId, refundAmount: refund }),
+            // refundRestore = exact pre-adjustment values, so undo can
+            // restore the expense byte-for-byte (and verify nothing else
+            // changed it in between)
+            suggestion: bankImport.suggestionMerge({
+              refundAppliedTo: expenseId,
+              refundAmount: refund,
+              // prev = exact pre-adjustment values; applied = what we wrote,
+              // so undo can verify NOTHING ELSE edited the expense since
+              refundRestore: {
+                prevAmount: oldAmount,
+                prevDeductible: expense.tax_deductible_amount == null ? null : Number(expense.tax_deductible_amount),
+                appliedDeductible: newDeductible,
+              },
+            }),
           });
         if (!claimed) {
           const e = new Error('row was matched by someone else mid-flight');
@@ -2194,8 +2207,62 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
   try {
     const row = await db('bank_transactions').where({ id: req.params.id }).first();
     if (!row) return res.status(404).json({ error: 'row not found' });
-    if (!['matched_expense', 'matched_payout'].includes(row.status)) {
+    if (!['matched_expense', 'matched_payout', 'refund_applied'].includes(row.status)) {
       return res.status(409).json({ error: `only matched rows can be unlinked (row is ${row.status})` });
+    }
+
+    // refund_applied undo: atomically RESTORE the adjusted expense from the
+    // refundRestore snapshot (verifying nothing else changed it since) and
+    // return the credit row to review. If the expense was deleted, the undo
+    // just releases the row — there is nothing left to restore.
+    if (row.status === 'refund_applied') {
+      const target = row.suggestion?.refundAppliedTo;
+      const restore = row.suggestion?.refundRestore;
+      const refund = Number(row.amount);
+      try {
+        await db.transaction(async (trx) => {
+          const expense = target ? await trx('expenses').where({ id: target }).forUpdate().first('id', 'amount', 'tax_deductible_amount', 'notes') : null;
+          if (expense && restore) {
+            const expected = Math.round((Number(restore.prevAmount) - refund) * 100) / 100;
+            const amountUntouched = Math.round(Number(expense.amount) * 100) === Math.round(expected * 100);
+            // deductible must ALSO equal what apply-refund wrote — an
+            // operator's later deductible/category edit would otherwise be
+            // silently destroyed by restoring the old snapshot
+            const appliedDeductible = restore.appliedDeductible === undefined ? null : restore.appliedDeductible;
+            const deductibleUntouched = (expense.tax_deductible_amount == null && appliedDeductible == null)
+              || (expense.tax_deductible_amount != null && appliedDeductible != null
+                && Math.round(Number(expense.tax_deductible_amount) * 100) === Math.round(Number(appliedDeductible) * 100));
+            if (!amountUntouched || !deductibleUntouched) {
+              const e = new Error('the expense changed since this refund was applied — undo it manually on the Expenses tab');
+              e.status = 409;
+              throw e;
+            }
+            await trx('expenses').where({ id: target }).update({
+              amount: restore.prevAmount,
+              tax_deductible_amount: restore.prevDeductible,
+              notes: `${expense.notes ? `${expense.notes} ` : ''}[Refund $${refund.toFixed(2)} UNDONE ${etDateString()}]`,
+            });
+          }
+          const changed = await trx('bank_transactions')
+            .where({ id: row.id, status: 'refund_applied' })
+            .update({
+              status: 'unmatched',
+              match_method: null,
+              matched_at: null,
+              suggestion: bankImport.suggestionMerge({ refundUndone: { at: new Date().toISOString(), expenseId: target || null } }, ['refundAppliedTo', 'refundAmount', 'refundRestore']),
+              updated_at: new Date(),
+            });
+          if (!changed) {
+            const e = new Error('row changed mid-flight — reload');
+            e.status = 409;
+            throw e;
+          }
+        });
+      } catch (err) {
+        if (err.status) return res.status(err.status).json({ error: err.message });
+        throw err;
+      }
+      return res.json({ success: true, reconciliation: null });
     }
     const baseSuggestion = row.suggestion || {};
     // rejections are CUMULATIVE: unlinking B after A must not let the

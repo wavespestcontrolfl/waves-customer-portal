@@ -42,12 +42,14 @@ function makeBuilder(table) {
       : table === 'stripe_payouts' ? state.payouts
         : table === 'expenses' ? state.expenses
           : table === 'bank_reconciliation' ? state.reconRows : [];
-    // the heal query joins payouts and filters to unreconciled, unmarked links
+    // the heal queries join payouts: one scans UNRECONCILED links, the
+    // amount-mismatch scan targets RECONCILED ones (both skip pending rows)
     if (table === 'bank_transactions as bt') {
+      const wantReconciled = b.where.mock.calls.some(c => c[0] === 'sp.reconciled' && c[1] === true);
       rows = state.bankRows.filter(r => r.status === 'matched_payout'
         && r.matched_payout_id
         && !(r.suggestion && r.suggestion.reconcilePending)
-        && state.payouts.some(p => p.id === r.matched_payout_id && p.reconciled === false));
+        && state.payouts.some(p => p.id === r.matched_payout_id && p.reconciled === wantReconciled));
     }
     // mirror the status + pending-flag filters so the unmatched loop and the
     // reconciliation sweep each see only their own rows (a row with no
@@ -708,6 +710,38 @@ describe('runDeterministicMatching', () => {
     const summary = await runDeterministicMatching({ limit: 2 });
     expect(summary.scanned).toBe(2); // fresh pool exactly fills the limit
     expect(summary.moreRemaining).toBe(true); // …but the examined row is not forgotten
+  });
+
+  test("a human DRAFT reconciliation pauses automation — no re-mark, no revert, no re-confirm", async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
+    state.payouts = [{ id: 'po-1', reconciled: false }];
+    state.reconRows = [{ status: 'draft', reconciled_by: 'adam' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.linksRemarked).toBe(0);
+    expect(summary.linksReverted).toBe(0);
+    expect(state.updates).toHaveLength(0);
+    expect(reconcilePayout).not.toHaveBeenCalled();
+  });
+
+  test('a RECONCILED link whose later human reconciliation carries a different amount is reverted', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: true }];
+    state.reconRows = [{ status: 'confirmed', actual_amount: '2000.00', reconciled_by: 'adam' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.linksReverted).toBe(1);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
+    expect(sugOf(revert).autoRevert.reason).toContain('different banked amount');
+  });
+
+  test('a refund_applied row whose target expense was DELETED reverts to review', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '20.00', direction: 'credit', account_type: 'card', status: 'refund_applied', suggestion: { refundAppliedTo: 'exp-gone', refundAmount: 20 } }];
+    state.expenses = []; // the expense no longer exists
+    const summary = await runDeterministicMatching();
+    expect(summary.orphanRefundsReverted).toBe(1);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert.where).toContainEqual({ id: 'bt-1', status: 'refund_applied' });
+    expect(sugOf(revert).autoRevert.reason).toContain('deleted');
   });
 
   test('a bounded pass reports moreRemaining instead of scanning everything', async () => {

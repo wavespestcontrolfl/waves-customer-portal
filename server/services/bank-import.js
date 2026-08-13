@@ -317,6 +317,9 @@ async function healUnreconciledLinks() {
             updated_at: new Date(),
           });
         if (changed) reverted++;
+      } else if (latest && latest.status === 'draft' && !String(latest.reconciled_by || '').startsWith('bank-import')) {
+        // a human DRAFT is deliberation in progress — automation neither
+        // re-confirms over it nor reverts; leave the row alone this pass
       } else {
         const changed = await trx('bank_transactions')
           .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
@@ -325,11 +328,80 @@ async function healUnreconciledLinks() {
       }
     });
   }
-  return { reverted, remarked };
+
+  // The INVERSE gap: a payout that IS reconciled, but a later human
+  // reconciliation carries a different actual amount than the linked bank
+  // credit — the stale link would block the correct deposit forever. Revert
+  // under the payout lock after re-reading state; the human's
+  // reconciliation itself is never touched.
+  const linkedReconciled = await db('bank_transactions as bt')
+    .join('stripe_payouts as sp', 'sp.id', 'bt.matched_payout_id')
+    .where('bt.status', 'matched_payout')
+    .where('sp.reconciled', true)
+    // pending-flagged rows belong to the echo/retry path, whose guard
+    // revalidation handles this same case
+    .whereRaw("coalesce(bt.suggestion->>'reconcilePending','') <> 'true'")
+    .select('bt.id as id', 'bt.amount as amount', 'bt.matched_payout_id as matched_payout_id');
+  let amountReverts = 0;
+  for (const row of linkedReconciled) {
+    const effective = await effectivePayoutAmount({ id: row.matched_payout_id, reconciled: true });
+    if (withinCandidateTolerance(effective, row.amount)) continue;
+    await db.transaction(async (trx) => {
+      const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('id', 'amount', 'reconciled');
+      if (!sp || !sp.reconciled) return; // state changed since the scan
+      const lockedEffective = await effectivePayoutAmount(sp, trx);
+      if (withinCandidateTolerance(lockedEffective, row.amount)) return;
+      const changed = await trx('bank_transactions')
+        .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+        .update({
+          status: 'unmatched',
+          matched_payout_id: null,
+          match_method: null,
+          matched_at: null,
+          suggestion: suggestionMerge({
+            autoRevert: { at: new Date().toISOString(), payoutId: row.matched_payout_id, reason: 'a later human reconciliation recorded a different banked amount' },
+          }, ['reconcilePending']),
+          updated_at: new Date(),
+        });
+      if (changed) amountReverts++;
+    });
+  }
+  return { reverted: reverted + amountReverts, remarked };
+}
+
+// A refund_applied credit whose target expense was DELETED must leave that
+// state — its netting would keep skewing coverage while the adjustment it
+// represents no longer exists. (The link lives in suggestion JSON, so the
+// FK SET NULL self-heal can't see it.)
+async function healOrphanRefunds() {
+  const rows = await db('bank_transactions')
+    .where({ status: 'refund_applied' })
+    .select('id', 'suggestion');
+  let reverted = 0;
+  for (const row of rows) {
+    const target = row.suggestion?.refundAppliedTo;
+    if (!target) continue;
+    const expense = await db('expenses').where({ id: target }).first('id');
+    if (expense) continue;
+    const changed = await db('bank_transactions')
+      .where({ id: row.id, status: 'refund_applied' })
+      .update({
+        status: 'unmatched',
+        match_method: null,
+        matched_at: null,
+        suggestion: suggestionMerge({
+          autoRevert: { at: new Date().toISOString(), expenseId: target, reason: 'the refunded expense was deleted' },
+        }, ['refundAppliedTo', 'refundAmount', 'refundRestore']),
+        updated_at: new Date(),
+      });
+    if (changed) reverted++;
+  }
+  return reverted;
 }
 
 async function retryPendingReconciliations() {
   const healLinks = await healUnreconciledLinks();
+  const orphanRefunds = await healOrphanRefunds();
   const pending = await db('bank_transactions')
     .where({ status: 'matched_payout' })
     .whereNotNull('matched_payout_id')
@@ -364,7 +436,7 @@ async function retryPendingReconciliations() {
   // (Reversals need no sweep: the unlink route runs its unlink CAS inside
   // the reversal's own transaction, so a failed reversal rolls the unlink
   // back — there is never a committed unlink awaiting reversal.)
-  return { pending: pending.length, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked };
+  return { pending: pending.length, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds };
 }
 
 // A deleted expense/payout SET-NULLs the FK but leaves the status behind —
@@ -605,7 +677,7 @@ async function runDeterministicMatching({ limit } = {}) {
     }
     moreRemaining = moreFresh || moreExamined;
   }
-  const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked };
+  const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted };
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);
@@ -815,24 +887,47 @@ async function ledgerCoverage(year) {
   // and a debit's covered value is capped at the CURRENT linked expense
   // amount (apply-refund reduces it after linking) — otherwise a $58 debit
   // linked to a now-$38 expense would still report $58 covered.
+  // Refund rows join the DEBIT that claims their target expense (at most
+  // one — matched_expense_id is partially unique): the refund then nets
+  // against total in the PURCHASE's month, matching where the LEAST cap
+  // reduces covered — a July purchase refunded in August stays 100%-covered
+  // in July instead of skewing two months. A refund against a MANUAL
+  // expense (no claiming debit) doesn't net at all — otherwise total would
+  // shrink without touching covered and coverage could exceed 100%.
   const rows = await db('bank_transactions as bt')
     .leftJoin('expenses as e', 'e.id', 'bt.matched_expense_id')
+    .leftJoin('bank_transactions as bt2', function refundTargetDebit() {
+      this.on(db.raw("bt.status = 'refund_applied'"))
+        .andOn(db.raw('bt2.matched_expense_id is not null'))
+        .andOn(db.raw("bt2.matched_expense_id::text = bt.suggestion->>'refundAppliedTo'"));
+    })
     .whereNot('bt.status', 'ignored')
-    .whereRaw('extract(year from bt.txn_date) = ?', [Number(year)])
+    .whereRaw('extract(year from coalesce(bt2.txn_date, bt.txn_date)) = ?', [Number(year)])
     .where(function scope() {
       this.where('bt.direction', 'debit').orWhere('bt.status', 'refund_applied');
     })
     .select(
-      db.raw("to_char(bt.txn_date, 'YYYY-MM') as month"),
-      db.raw("sum(case when bt.direction = 'debit' then bt.amount else -bt.amount end) as total"),
+      db.raw("to_char(coalesce(bt2.txn_date, bt.txn_date), 'YYYY-MM') as month"),
+      db.raw(`sum(case
+        when bt.direction = 'debit' then bt.amount
+        when bt2.id is not null then -bt.amount
+        else 0 end) as total`),
       db.raw("sum(case when bt.direction = 'debit' and bt.status in ('matched_expense','created_expense') and bt.matched_expense_id is not null then least(bt.amount, greatest(coalesce(e.amount, 0), 0)) else 0 end) as covered"),
     )
-    .groupByRaw("to_char(bt.txn_date, 'YYYY-MM')")
+    .groupByRaw("to_char(coalesce(bt2.txn_date, bt.txn_date), 'YYYY-MM')")
     .orderBy('month');
   return rows.map(r => {
     const total = Number(r.total) || 0;
     const covered = Number(r.covered) || 0;
-    return { month: r.month, total, covered, unexplained: Math.round((total - covered) * 100) / 100, pct: total > 0 ? Math.round((covered / total) * 100) : null };
+    // honest bounds even under edge orderings: never negative unexplained,
+    // never >100%
+    return {
+      month: r.month,
+      total,
+      covered,
+      unexplained: Math.max(0, Math.round((total - covered) * 100) / 100),
+      pct: total > 0 ? Math.min(100, Math.round((covered / total) * 100)) : null,
+    };
   });
 }
 

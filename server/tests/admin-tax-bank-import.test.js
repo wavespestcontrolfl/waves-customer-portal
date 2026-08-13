@@ -582,6 +582,64 @@ describe('apply-refund (gate on)', () => {
     expect(res.status).toBe(409);
     expect(mockDb.transaction).toHaveBeenCalled(); // real DB rolls the update back with the throw
   });
+
+  test('the refund claim stores a refundRestore snapshot for exact undo', async () => {
+    await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });
+    expect(sugOf(state.bankUpdates[0]).refundRestore).toEqual({ prevAmount: 58.12, prevDeductible: 29.06, appliedDeductible: 19.06 });
+  });
+
+  test('undo (unlink) RESTORES the expense from the snapshot and returns the credit to review', async () => {
+    state.bankRow = {
+      id: 'bt-1', amount: '20.00', direction: 'credit', account_type: 'card', status: 'refund_applied',
+      suggestion: { refundAppliedTo: 'exp-9', refundAmount: 20, refundRestore: { prevAmount: 58.12, prevDeductible: 29.06, appliedDeductible: 19.06 } },
+    };
+    state.expenseRow = { id: 'exp-9', amount: '38.12', tax_deductible_amount: '19.06', notes: 'n' };
+    const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
+    expect(res.status).toBe(200);
+    const upd = state.expenseUpdates[0];
+    expect(upd.amount).toBe(58.12);
+    expect(upd.tax_deductible_amount).toBe(29.06);
+    expect(upd.notes).toContain('UNDONE');
+    const claim = state.bankUpdates[0];
+    expect(claim.wheres).toContainEqual({ id: 'bt-1', status: 'refund_applied' });
+    expect(claim.patch.status).toBe('unmatched');
+    expect(sugOf(claim).refundUndone.expenseId).toBe('exp-9');
+  });
+
+  test('undo refuses when the DEDUCTIBLE changed since the refund — later tax edits are never destroyed', async () => {
+    state.bankRow = {
+      id: 'bt-1', amount: '20.00', direction: 'credit', account_type: 'card', status: 'refund_applied',
+      suggestion: { refundAppliedTo: 'exp-9', refundAmount: 20, refundRestore: { prevAmount: 58.12, prevDeductible: 29.06, appliedDeductible: 19.06 } },
+    };
+    // amount untouched, but the operator re-categorized → deductible differs
+    state.expenseRow = { id: 'exp-9', amount: '38.12', tax_deductible_amount: '38.12', notes: 'n' };
+    const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
+    expect(res.status).toBe(409);
+    expect(state.expenseUpdates).toHaveLength(0);
+  });
+
+  test('undo refuses when the expense changed since the refund (manual fix territory)', async () => {
+    state.bankRow = {
+      id: 'bt-1', amount: '20.00', direction: 'credit', account_type: 'card', status: 'refund_applied',
+      suggestion: { refundAppliedTo: 'exp-9', refundAmount: 20, refundRestore: { prevAmount: 58.12, prevDeductible: 29.06, appliedDeductible: 19.06 } },
+    };
+    state.expenseRow = { id: 'exp-9', amount: '10.00', tax_deductible_amount: '5.00', notes: 'n' }; // drifted
+    const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
+    expect(res.status).toBe(409);
+    expect(state.expenseUpdates).toHaveLength(0);
+  });
+
+  test('undo with the expense deleted just releases the credit row', async () => {
+    state.bankRow = {
+      id: 'bt-1', amount: '20.00', direction: 'credit', account_type: 'card', status: 'refund_applied',
+      suggestion: { refundAppliedTo: 'exp-9', refundAmount: 20, refundRestore: { prevAmount: 58.12, prevDeductible: 29.06, appliedDeductible: 19.06 } },
+    };
+    state.expenseRow = null;
+    const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
+    expect(res.status).toBe(200);
+    expect(state.expenseUpdates).toHaveLength(0);
+    expect(state.bankUpdates[0].patch.status).toBe('unmatched');
+  });
 });
 
 describe('link-payout (gate on)', () => {
