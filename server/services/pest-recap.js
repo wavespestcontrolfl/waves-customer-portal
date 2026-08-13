@@ -583,7 +583,11 @@ async function submitRecap({
   if (recordId) {
     try {
       const freshRecord = await db('service_records').where({ id: recordId }).first();
-      if (freshRecord) {
+      // v1-template records ONLY (pre-push r3 P1): reports-public composes
+      // the cross-sell card solely for service_report_v1, and recap-written
+      // records aren't all stamped with it — warming a report that can
+      // never render the card would spend county/vision calls for nothing.
+      if (freshRecord && freshRecord.report_template_version === 'service_report_v1') {
         const { prewarmReportCrossSellEvidenceBounded } = require('./service-report/evidence-prewarm');
         await prewarmReportCrossSellEvidenceBounded(freshRecord, db, { maxWaitMs: 10000 });
       }

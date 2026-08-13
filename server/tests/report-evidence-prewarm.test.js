@@ -118,4 +118,10 @@ describe('completion wiring (source contracts — both handlers are too heavy to
     expect(recapSrc.indexOf('prewarmReportCrossSellEvidenceBounded'))
       .toBeLessThan(recapSrc.indexOf('body: smsRecap(recapText)'));
   });
+
+  test('pest-recap: only v1-template records warm — the card renders for no other template (r3 P1)', () => {
+    // Spend guard: a recap record without service_report_v1 renders a
+    // report the composer never decorates, so warming it buys nothing.
+    expect(recapSrc).toMatch(/freshRecord && freshRecord\.report_template_version === 'service_report_v1'/);
+  });
 });
