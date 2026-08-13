@@ -8122,17 +8122,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // any completion. Backfills are excluded: their customers already
     // received (or never had) the report moment this exists to serve.
     // Replays are cache-first no-ops.
-    // Delivery posture joins the guard (codex #3382 r2 P1): 'disabled'
-    // (typed kill switch — no public token is ever minted) and
-    // 'internal_only' (Phase-1b shadow — staff-review only) reports can't
-    // reach a customer, so warming their evidence spends county/vision
-    // calls and up to 10s of completion latency on a card no customer can
-    // see.
-    if (useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record?.id
-      && !['disabled', 'internal_only'].includes(typedDeliveryMode)) {
-      const { prewarmReportCrossSellEvidenceBounded } = require('../services/service-report/evidence-prewarm');
-      await prewarmReportCrossSellEvidenceBounded(record, db, { maxWaitMs: 10000 });
-    }
 
     // Live-override completions correct the linked technician timer too
     // (codex P1, pre-push audit round 20c): the correction is authoritative
@@ -8494,6 +8483,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       typedDeliveryMode,
     })) {
       return res.status(422).json(photoCaptionBannedCopyPayload(captionBannedViolations));
+    }
+    // Warm the cross-sell card's property-evidence cache (owner lane
+    // 2026-08-13). Placed AFTER the frozen-delivery re-derivation above
+    // (pre-push r6 P1: on a crash-resumed completion the live profile can
+    // disagree with the record's frozen typedReportDelivery in either
+    // direction — spending on a frozen internal-only report, or skipping
+    // the warm for a frozen auto-send one) and BEFORE any customer
+    // artifact is minted. Bounded wait, the T&S auto-scorer's pattern: on
+    // timeout the warm finishes in the background and the next view
+    // self-heals; a cold first view is exactly today's CTA behavior.
+    // 'disabled' (no public token is ever minted) and 'internal_only'
+    // (staff-review shadow) reports can't reach a customer — no spend.
+    // crossSellWarm is retained for the post-maintenance re-warm below,
+    // which must chain on it rather than race its in-flight lookup.
+    let crossSellWarm = null;
+    if (useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record?.id
+      && !['disabled', 'internal_only'].includes(typedDeliveryMode)) {
+      const { prewarmReportCrossSellEvidenceBounded } = require('../services/service-report/evidence-prewarm');
+      const bounded = prewarmReportCrossSellEvidenceBounded(record, db, { maxWaitMs: 10000 });
+      crossSellWarm = bounded.warm;
+      await bounded.outcome;
     }
     const portalUrl = publicPortalUrl();
     let reportUrl = portalUrl;
@@ -11156,13 +11166,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // ran against an ownership view with no upcoming row — the composer
       // suppresses that (recent uncorroborated identity) and spends
       // nothing. The refill just created the next visit, so the report IS
-      // card-eligible now; this pass does the real warm. Cache-first, so
-      // in the common case (first warm succeeded) it's a no-op read.
-      // Fire-and-forget: everything customer-facing already went out.
-      if (useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record?.id
-        && !['disabled', 'internal_only'].includes(typedDeliveryMode)) {
+      // card-eligible now; this pass does the real warm. CHAINED on the
+      // first warm's own promise (pre-push r6 P1: after a bounded timeout
+      // the first lookup is still in flight, and performPropertyLookup has
+      // no in-flight dedupe — an unconditional second call could hit slow
+      // providers twice and race cache writes). crossSellWarm non-null ⇔
+      // the guard passed earlier under the frozen posture, so this reuses
+      // that decision; cache-first makes it a no-op read whenever the
+      // first warm already did the work. Fire-and-forget: everything
+      // customer-facing already went out.
+      if (crossSellWarm) {
         const { prewarmReportCrossSellEvidence } = require('../services/service-report/evidence-prewarm');
-        void prewarmReportCrossSellEvidence(record, db);
+        void crossSellWarm.catch(() => null).then(() => prewarmReportCrossSellEvidence(record, db));
       }
     } catch (seriesErr) {
       logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);

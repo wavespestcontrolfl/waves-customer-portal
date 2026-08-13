@@ -79,21 +79,24 @@ describe('bounded wait (pre-push r1 P1: the SMS races the warm)', () => {
   test('a fast warm resolves through with its result before the deadline — and clears the timer (r2 P1)', async () => {
     buildReportCrossSell.mockResolvedValue({ mode: 'priced' });
     const clearSpy = jest.spyOn(global, 'clearTimeout');
-    await expect(prewarmReportCrossSellEvidenceBounded(RECORD, DB, { maxWaitMs: 500 })).resolves.toBe('priced');
+    const { outcome } = prewarmReportCrossSellEvidenceBounded(RECORD, DB, { maxWaitMs: 500 });
+    await expect(outcome).resolves.toBe('priced');
     // A fast warm must not leave the deadline handle live — completions
     // otherwise accumulate timers and graceful shutdown waits on them.
     expect(clearSpy).toHaveBeenCalled();
     clearSpy.mockRestore();
   });
 
-  test('a slow warm yields "timeout" at the deadline and keeps running in the background', async () => {
+  test('a slow warm yields "timeout" at the deadline and hands back the LIVE warm promise (r6 P1)', async () => {
     let finish;
     buildReportCrossSell.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
-    const bounded = prewarmReportCrossSellEvidenceBounded(RECORD, DB, { maxWaitMs: 30 });
-    await expect(bounded).resolves.toBe('timeout');
-    // The underlying warm was not cancelled — completing it later is what
-    // lets the customer's NEXT view find the cache warm.
+    const { outcome, warm } = prewarmReportCrossSellEvidenceBounded(RECORD, DB, { maxWaitMs: 30 });
+    await expect(outcome).resolves.toBe('timeout');
+    // The underlying warm was not cancelled and is EXPOSED — a later
+    // re-warm must chain on it (no in-flight dedupe in the lookup) instead
+    // of racing a second paid pipeline against it.
     finish({ mode: 'priced' });
+    await expect(warm).resolves.toBe('priced');
     expect(buildReportCrossSell).toHaveBeenCalledTimes(1);
   });
 });
@@ -106,12 +109,21 @@ describe('completion wiring (source contracts — both handlers are too heavy to
 
   test('dispatch: bounded call site guarded on v1 + complete + non-backfill + customer-deliverable posture (r2 P1)', () => {
     expect(dispatchSrc).toMatch(/useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record\?\.id\s*\n\s*&& !\['disabled', 'internal_only'\]\.includes\(typedDeliveryMode\)/);
-    expect(dispatchSrc).toMatch(/await prewarmReportCrossSellEvidenceBounded\(record, db, \{ maxWaitMs: 10000 \}\)/);
+    expect(dispatchSrc).toMatch(/await bounded\.outcome/);
   });
 
-  test('dispatch: a second fire-and-forget warm runs AFTER series maintenance for the consumed-last-visit case (r2 P2)', () => {
+  test('dispatch: the warm runs AFTER the frozen-delivery re-derivation and BEFORE token minting (r6 P1)', () => {
+    const frozenAt = dispatchSrc.indexOf('typedDeliveryMode = frozenDelivery');
+    const warmAt = dispatchSrc.indexOf('prewarmReportCrossSellEvidenceBounded(record, db');
+    const tokenAt = dispatchSrc.indexOf('ensureReportToken(record.id)');
+    expect(frozenAt).toBeGreaterThan(0);
+    expect(warmAt).toBeGreaterThan(frozenAt);
+    expect(tokenAt).toBeGreaterThan(warmAt);
+  });
+
+  test('dispatch: the post-maintenance re-warm CHAINS on the first warm — never races its in-flight lookup (r2 P2 + r6 P1)', () => {
     const maintenanceAt = dispatchSrc.indexOf('runPostCompletionSeriesMaintenance({ db, svc');
-    const rewarmAt = dispatchSrc.indexOf('void prewarmReportCrossSellEvidence(record, db)');
+    const rewarmAt = dispatchSrc.indexOf('void crossSellWarm.catch(() => null).then(() => prewarmReportCrossSellEvidence(record, db))');
     expect(maintenanceAt).toBeGreaterThan(0);
     expect(rewarmAt).toBeGreaterThan(maintenanceAt);
   });

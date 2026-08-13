@@ -59,6 +59,12 @@ async function prewarmReportCrossSellEvidence(serviceRecord, database) {
 // a bounded window BEFORE the customer artifacts go out, and on timeout let
 // it finish in the background (the very next view self-heals to a priced
 // card — a cold first view is exactly today's behavior, never wrong data).
+// Returns { outcome, warm }: outcome settles at the deadline or when the
+// warm finishes, whichever is first; warm is the UNDERLYING promise, which
+// keeps running after a timeout — callers that re-warm later (the
+// series-refill pass) must chain on it, because performPropertyLookup has
+// no in-flight dedupe and a concurrent second call would double-hit slow
+// providers and race cache writes (pre-push r6 P1).
 function prewarmReportCrossSellEvidenceBounded(serviceRecord, database, { maxWaitMs = 10000 } = {}) {
   const warm = prewarmReportCrossSellEvidence(serviceRecord, database);
   // The timer is cleared when the race settles (pre-push r2 P1): a fast
@@ -66,7 +72,8 @@ function prewarmReportCrossSellEvidenceBounded(serviceRecord, database, { maxWai
   // timers and graceful shutdown waits on them.
   let timer;
   const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), maxWaitMs); });
-  return Promise.race([warm, deadline]).finally(() => clearTimeout(timer));
+  const outcome = Promise.race([warm, deadline]).finally(() => clearTimeout(timer));
+  return { outcome, warm };
 }
 
 module.exports = { prewarmReportCrossSellEvidence, prewarmReportCrossSellEvidenceBounded };
