@@ -68,6 +68,19 @@ function conn({
     q.whereNotIn = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
     if (table === 'payments') {
+      // The real lookup rides metadata->>'invoice_id' via whereRaw — a
+      // column-shaped where({invoice_id}) would throw in prod (Codex P0
+      // r16), so the stub only answers the raw form.
+      q.whereRaw = jest.fn((sql) => {
+        if (!/metadata/.test(String(sql))) throw new Error('payments has no invoice_id column');
+        return q;
+      });
+      q.where = jest.fn((...args) => {
+        if (args[0] && typeof args[0] === 'object' && args[0].invoice_id !== undefined) {
+          throw new Error('payments has no invoice_id column');
+        }
+        return q;
+      });
       q.first = jest.fn(async () => paymentRow);
       q.select = jest.fn(async () => (paymentRow ? [paymentRow] : []));
     } else if (table === 'scheduled_services') {

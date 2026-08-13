@@ -4334,10 +4334,14 @@ const InvoiceService = {
         // or an unreadable ledger, leaves the draft alone (Codex P0 r15).
         let expirable = true;
         if (prepay.stripe_payment_intent_id) {
+          // Invoice linkage lives in payments.metadata, not a column — the
+          // same parameterized lookup voidInvoice's own money guard uses
+          // (Codex P0 r16: a bare invoice_id column query throws on every
+          // row, and the catch's fail-closed then parked the repair forever).
           try {
             const livePayment = await conn("payments")
-              .where({ invoice_id: prepay.id })
               .whereNotIn("status", ["failed", "canceled", "cancelled"])
+              .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(prepay.id)])
               .first("id");
             expirable = !livePayment;
           } catch {
