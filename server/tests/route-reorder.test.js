@@ -146,13 +146,16 @@ test('a reminder-sent visit freezes its whole day', async () => {
   expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-16', reason: 'REMINDER_SENT_FROZEN' }));
 });
 
-test('FAIL CLOSED: unreadable reminder status skips the day', async () => {
+test('FAIL CLOSED + FAIL LOUD: unreadable reminder status freezes the day AND degrades run status', async () => {
   stopsByDate['2026-08-17'] = backtrackDay();
   routeTiers.loadReminderFreeze.mockResolvedValue({ failed: true, frozen: new Set() });
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);
+  expect(res.failed).toBe(1);
+  expect(res.status).toBe('completed_with_errors'); // never a green run on a guard outage
+  expect(ledgerInserts[0].failed_count).toBe(1);
   const ledger = JSON.parse(ledgerInserts[0].result);
-  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-17', reason: 'REMINDER_STATUS_UNKNOWN' }));
+  expect(ledger.failures).toContainEqual(expect.objectContaining({ date: '2026-08-17', reason: 'REMINDER_STATUS_UNKNOWN' }));
 });
 
 test('>25 geocoded stops for one tech-day is SKIPPED and LOGGED, never truncated', async () => {

@@ -184,8 +184,13 @@ async function runRouteReorder(opts = {}) {
       }
       const freeze = await loadReminderFreeze(db, stops.map((s) => s.id), now);
       if (freeze.failed) {
-        // Fail closed — cannot prove no reminder went out for this day.
-        summary.skipped.push({ date: dateStr, reason: 'REMINDER_STATUS_UNKNOWN', stops: stops.length });
+        // Fail closed AND fail loud — cannot prove no reminder went out for
+        // this day, and an outage that silently disables the whole pass must
+        // not leave the nightly run green (status + failed_count surface it
+        // as an exception on the dispatch card).
+        status = 'completed_with_errors';
+        summary.failed.push({ date: dateStr, reason: 'REMINDER_STATUS_UNKNOWN', stops: stops.length });
+        logger.error(`[route-reorder] ${dateStr}: reminder-freeze read failed — day frozen (fail closed)`);
         continue;
       }
       if (stops.some((s) => freeze.frozen.has(s.id))) {

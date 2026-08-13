@@ -109,12 +109,21 @@ test('a 72h reminder sent between pass 1 and the apply freezes the move', async 
   expect(decisions('no_change').map((d) => d.reason_code)).toContain('REMINDER_SENT_FROZEN');
 });
 
-test('an unreadable apply-time re-check fails closed (no move)', async () => {
+test('an unreadable apply-time re-check fails closed (no move) and degrades run status', async () => {
   reminderResults = [[], new Error('db down')];
   const res = await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true });
   expect(res.changed).toBe(0);
   expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
   expect(decisions('no_change').map((d) => d.reason_code)).toContain('REMINDER_STATUS_UNKNOWN');
+  expect(res.status).toBe('completed_with_errors'); // guard outage never reports green
+});
+
+test('a failed pass-1 bulk guard read freezes everything AND degrades run status', async () => {
+  reminderResults = [new Error('db down')];
+  const res = await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true });
+  expect(res.changed).toBe(0);
+  expect(res.status).toBe('completed_with_errors');
+  expect(decisions('skipped').map((d) => d.reason_code)).toContain('REMINDER_STATUS_UNKNOWN');
 });
 
 test('a run crossing ET midnight recomputes the tier window before applying', async () => {

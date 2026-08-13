@@ -222,11 +222,19 @@ async function runAutoDispatch(opts = {}) {
     // rather than moving without the guard.
     let reminderFreeze = null;
     let anchorMap = null;
+    let guardReadDegraded = false; // a failed guard read must not report a green run
     if (tiersOn) {
       reminderFreeze = await routeTiers.loadReminderFreeze(db, services.map((s) => s.id), nowDate);
       // ALL ids, not just change_count>0 — the durable move records (not the
       // best-effort stamp) decide whether a visit has spent drift budget.
       anchorMap = await routeTiers.loadAnchorMap(db, services.map((s) => s.id));
+      // Fail closed AND fail loud: the skips below keep every visit safe, but
+      // an outage that silently disables all tier moves must not leave cron
+      // health green (the run completes as completed_with_errors).
+      if ((reminderFreeze && reminderFreeze.failed) || anchorMap === null) {
+        guardReadDegraded = true;
+        logger.error('[auto-dispatch] route-tiers guard read failed (reminder freeze or anchor evidence) — all tier moves frozen this run');
+      }
     }
 
     for (const service of services) {
@@ -407,6 +415,7 @@ async function runAutoDispatch(opts = {}) {
           if (tiersOn) {
             const applyFreeze = await routeTiers.loadReminderFreeze(db, [pm.service.id], new Date());
             if (applyFreeze.failed) {
+              guardReadDegraded = true;
               await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: 'REMINDER_STATUS_UNKNOWN', reason_description: 'Reminder-sent status unreadable at apply time — frozen (fail closed)', ...pm.result.audit });
               continue;
             }
@@ -477,7 +486,7 @@ async function runAutoDispatch(opts = {}) {
       }
     }
 
-    if (totals.failed > 0) runStatus = 'completed_with_errors';
+    if (totals.failed > 0 || guardReadDegraded) runStatus = 'completed_with_errors';
   } catch (fatal) {
     runStatus = 'failed';
     runError = fatal.message;
