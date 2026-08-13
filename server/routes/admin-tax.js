@@ -1964,12 +1964,17 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
   try {
     const { expenseId } = req.body || {};
     if (!expenseId) return res.status(400).json({ error: 'expenseId is required' });
-    const row = await db('bank_transactions').where({ id: req.params.id }).first('id', 'direction', 'status');
+    const row = await db('bank_transactions').where({ id: req.params.id }).first('id', 'direction', 'status', 'amount', 'txn_date');
     if (!row) return res.status(404).json({ error: 'row not found' });
     if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits link to expenses' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
-    const expense = await db('expenses').where({ id: expenseId }).first('id');
+    const expense = await db('expenses').where({ id: expenseId }).first('id', 'amount', 'expense_date');
     if (!expense) return res.status(404).json({ error: 'expense not found' });
+    // same amount tolerance + date window the matcher's candidates satisfy —
+    // a stale/crafted id outside them would falsify coverage
+    if (!bankImport.isPlausibleExpenseLink(row, expense)) {
+      return res.status(400).json({ error: 'that expense does not plausibly match this bank row (amount/date outside the matching window)' });
+    }
     let claimed;
     try {
       claimed = await db('bank_transactions')
@@ -2000,13 +2005,18 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
       return res.status(400).json({ error: 'only bank-account credits link to payouts' });
     }
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
-    const payout = await db('stripe_payouts').where({ id: payoutId }).first('id', 'status');
+    const payout = await db('stripe_payouts').where({ id: payoutId }).first('id', 'status', 'amount', 'arrival_date');
     if (!payout) return res.status(404).json({ error: 'payout not found' });
     // Only money that actually REACHED the bank can explain a bank credit —
     // the same rule the automatic matcher applies, enforced server-side so
     // a stale or crafted request can't link a pending/failed payout.
     if (payout.status !== 'paid') {
       return res.status(400).json({ error: `payout is ${payout.status}, not paid — only settled payouts can explain a bank credit` });
+    }
+    // same amount tolerance + arrival window the matcher's candidates
+    // satisfy — an unrelated payout would falsify the reconciliation
+    if (!bankImport.isPlausiblePayoutLink(row, payout)) {
+      return res.status(400).json({ error: 'that payout does not plausibly match this bank row (amount/arrival outside the matching window)' });
     }
     // The pending flag ALWAYS rides in the claim (an unlocked reconciled
     // pre-read can go stale); the guarded echo below resolves current state.

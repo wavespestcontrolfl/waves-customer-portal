@@ -211,6 +211,29 @@ function toDateStr(v) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// Server-side plausibility for MANUAL links — the same amount tolerance and
+// date windows the deterministic matcher uses. The UI only offers parked
+// candidates (which already satisfied these), so any request outside them
+// is stale or crafted and would corrupt coverage/reconciliation.
+// cent-space comparison — float subtraction can't represent 0.01 exactly
+function withinCandidateTolerance(a, b) {
+  return Math.abs(Math.round(Number(a) * 100) - Math.round(Number(b) * 100)) <= Math.round(CANDIDATE_AMOUNT_TOLERANCE * 100);
+}
+function isPlausibleExpenseLink(row, expense) {
+  const txnDate = toDateStr(row.txn_date);
+  const expDate = toDateStr(expense.expense_date);
+  return withinCandidateTolerance(expense.amount, row.amount)
+    && expDate >= addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS)
+    && expDate <= addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS);
+}
+function isPlausiblePayoutLink(row, payout) {
+  const txnDate = toDateStr(row.txn_date);
+  const arrival = toDateStr(payout.arrival_date);
+  return withinCandidateTolerance(payout.amount, row.amount)
+    && arrival >= addDays(txnDate, -PAYOUT_DATE_WINDOW_DAYS)
+    && arrival <= addDays(txnDate, PAYOUT_DATE_WINDOW_DAYS);
+}
+
 // The migration's partial unique indexes are the real double-claim guard;
 // a concurrent pass that loses the race surfaces here as a unique
 // violation, which just means "someone else claimed it" — skip, don't fail.
@@ -671,6 +694,8 @@ module.exports = {
   transferSuggestion,
   runDeterministicMatching,
   echoPayoutReconciliation,
+  isPlausibleExpenseLink,
+  isPlausiblePayoutLink,
   ledgerCoverage,
   // exported for tests
   parseAmount,

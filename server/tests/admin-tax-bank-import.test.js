@@ -324,8 +324,16 @@ describe('create-expense (gate on)', () => {
 describe('link-expense (gate on)', () => {
   beforeEach(() => {
     process.env.GATE_BANK_IMPORT = 'true';
-    state.bankRow = { id: 'bt-1', direction: 'debit', status: 'unmatched' };
-    state.expenseRow = { id: 'exp-9' };
+    state.bankRow = { id: 'bt-1', direction: 'debit', status: 'unmatched', amount: '58.12', txn_date: '2026-08-09' };
+    state.expenseRow = { id: 'exp-9', amount: '58.12', expense_date: '2026-08-10' };
+  });
+
+  test('an expense outside the amount/date matching window is refused', async () => {
+    state.expenseRow = { id: 'exp-9', amount: '999.00', expense_date: '2026-08-10' };
+    expect((await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'exp-9' })).status).toBe(400);
+    state.expenseRow = { id: 'exp-9', amount: '58.12', expense_date: '2026-07-01' };
+    expect((await post('/admin/tax/bank-import/bt-1/link-expense', { expenseId: 'exp-9' })).status).toBe(400);
+    expect(state.bankUpdates).toHaveLength(0);
   });
 
   test('links via CAS with match_method=manual', async () => {
@@ -488,8 +496,16 @@ describe('force-duplicates upload (gate on)', () => {
 describe('link-payout (gate on)', () => {
   beforeEach(() => {
     process.env.GATE_BANK_IMPORT = 'true';
-    state.bankRow = { id: 'bt-1', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'unmatched', suggestion: { payoutCandidates: [{ id: 'po-9' }] } };
-    state.payoutRow = { id: 'po-9', status: 'paid' };
+    state.bankRow = { id: 'bt-1', amount: '2418.66', txn_date: '2026-08-11', direction: 'credit', account_type: 'bank', status: 'unmatched', suggestion: { payoutCandidates: [{ id: 'po-9' }] } };
+    state.payoutRow = { id: 'po-9', status: 'paid', amount: '2418.66', arrival_date: '2026-08-10' };
+  });
+
+  test('a payout outside the amount/arrival matching window is refused', async () => {
+    state.payoutRow = { id: 'po-9', status: 'paid', amount: '100.00', arrival_date: '2026-08-10' };
+    expect((await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' })).status).toBe(400);
+    state.payoutRow = { id: 'po-9', status: 'paid', amount: '2418.66', arrival_date: '2026-07-01' };
+    expect((await post('/admin/tax/bank-import/bt-1/link-payout', { payoutId: 'po-9' })).status).toBe(400);
+    expect(state.bankUpdates).toHaveLength(0);
   });
 
   test('claims via CAS with match_method=manual and echoes reconciliation (pending flag in the claim)', async () => {

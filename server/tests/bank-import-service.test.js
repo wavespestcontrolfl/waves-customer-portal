@@ -83,6 +83,7 @@ const { reconcilePayout } = require('../services/stripe-banking');
 const {
   parseStatementCsv, withRowHashes, hashRow, transferSuggestion,
   runDeterministicMatching, parseDateCell, addDays, vendorEvidence,
+  isPlausibleExpenseLink, isPlausiblePayoutLink,
 } = require('../services/bank-import');
 
 beforeEach(() => {
@@ -239,6 +240,24 @@ describe('vendorEvidence', () => {
 
   test('an expense with no vendor_name can never auto-link', () => {
     expect(vendorEvidence('SITEONE LANDSCAPE SUPPLY', { vendor_name: null, description: 'SiteOne order' })).toBe(false);
+  });
+});
+
+describe('manual-link plausibility (same windows as the matcher)', () => {
+  const row = { amount: '58.12', txn_date: '2026-08-09' };
+
+  test('expense links require exact-tolerance amount and the ±5-day window', () => {
+    expect(isPlausibleExpenseLink(row, { amount: '58.12', expense_date: '2026-08-12' })).toBe(true);
+    expect(isPlausibleExpenseLink(row, { amount: '58.13', expense_date: '2026-08-12' })).toBe(true); // within tolerance
+    expect(isPlausibleExpenseLink(row, { amount: '999.00', expense_date: '2026-08-12' })).toBe(false);
+    expect(isPlausibleExpenseLink(row, { amount: '58.12', expense_date: '2026-08-20' })).toBe(false);
+  });
+
+  test('payout links require exact-tolerance amount and the ±3-day arrival window', () => {
+    const credit = { amount: '2418.66', txn_date: '2026-08-11' };
+    expect(isPlausiblePayoutLink(credit, { amount: '2418.66', arrival_date: '2026-08-08' })).toBe(true);
+    expect(isPlausiblePayoutLink(credit, { amount: '2418.66', arrival_date: '2026-08-07' })).toBe(false);
+    expect(isPlausiblePayoutLink(credit, { amount: '100.00', arrival_date: '2026-08-11' })).toBe(false);
   });
 });
 
