@@ -38,7 +38,7 @@ afterEach(() => {
 // awaiting it resolves to `result`.
 function builder(result) {
   const b = {};
-  for (const m of ['whereNot', 'orderBy', 'first', 'where', 'orWhere', 'insert', 'onConflict', 'merge', 'count', 'limit']) {
+  for (const m of ['whereNot', 'orderBy', 'first', 'where', 'orWhere', 'insert', 'onConflict', 'merge', 'count', 'limit', 'whereNull', 'whereNotNull', 'whereRaw']) {
     b[m] = jest.fn(() => b);
   }
   b.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
@@ -274,48 +274,42 @@ describe('findConstructionActivity', () => {
 
   test('issued recently with no CO → underConstruction evidence', async () => {
     const recentIso = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    db.mockImplementation(() => builder([{
+    // First targeted query (underConstruction) finds the row; the newBuild
+    // query finds nothing.
+    let call = 0;
+    db.mockImplementation(() => builder(call++ === 0 ? {
       permit_no: 'BLD9902-0001', status: 'Permit Issued', permit_type: 'Residential',
       type_of_work: 'New Single Family', issued_date: recentIso, co_date: null,
       last_seen_at: new Date().toISOString(),
-    }]));
+    } : undefined));
     const activity = await findConstructionActivity({ parcelPin: '4567890123' });
     expect(activity.underConstruction).toBe(true);
     expect(activity.newBuild).toBe(false);
   });
 
-  test('recent CO → newBuild, not underConstruction', async () => {
+  test('recent new-construction CO → newBuild, not underConstruction', async () => {
     const coIso = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    db.mockImplementation(() => builder([{
+    // underConstruction query empty; newBuild query (type_of_work New%,
+    // CO within window) finds the row.
+    let call = 0;
+    db.mockImplementation(() => builder(call++ === 0 ? undefined : {
       permit_no: 'BLD9902-0001', status: 'Closed', permit_type: 'Residential',
       type_of_work: 'New Single Family', issued_date: '2026-01-05', co_date: coIso,
-    }]));
+    }));
     const activity = await findConstructionActivity({ looseKey: '200sample34219' });
     expect(activity.newBuild).toBe(true);
     expect(activity.underConstruction).toBe(false);
   });
 
-  test('a permit the weekly re-sync stopped seeing is NOT underConstruction', async () => {
-    const recentIso = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    db.mockImplementation(() => builder([{
-      permit_no: 'BLD9902-0003', status: 'Permit Issued', permit_type: 'Residential',
-      type_of_work: 'New Single Family', issued_date: recentIso, co_date: null,
-      last_seen_at: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString(),
-    }]));
-    const activity = await findConstructionActivity({ parcelPin: '4567890123' });
-    expect(activity.underConstruction).toBe(false);
+  test('no signal rows (vanished/stale/alteration-only permits) → null, no evidence attached', async () => {
+    // The targeted SQL excludes vanished permits (stale last_seen_at),
+    // >24-month issues, and non-New CO rows — the mock returns empty for
+    // both signal queries, and the contract is NO evidence object at all.
+    db.mockImplementation(() => builder(undefined));
+    expect(await findConstructionActivity({ parcelPin: '4567890123' })).toBeNull();
   });
 
-  test('stale issued permit with no CO is NOT underConstruction (24-month window)', async () => {
-    db.mockImplementation(() => builder([{
-      permit_no: 'BLD9902-0002', status: 'Permit Issued', permit_type: 'Residential',
-      type_of_work: 'New Single Family', issued_date: '2022-01-05', co_date: null,
-      last_seen_at: new Date().toISOString(),
-    }]));
-    const activity = await findConstructionActivity({ parcelPin: '4567890123' });
-    expect(activity.underConstruction).toBe(false);
-    expect(activity.newBuild).toBe(false);
-  });
+
 });
 
 describe('syncPermits', () => {

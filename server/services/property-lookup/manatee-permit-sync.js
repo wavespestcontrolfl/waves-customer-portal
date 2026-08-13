@@ -523,79 +523,64 @@ function monthsAgoIso(months) {
 }
 
 const toIso = (v) => (v ? new Date(v).toISOString().slice(0, 10) : null);
-const isTerminalStatus = (s) => /^(closed|canceled|withdrawn)$/i.test(String(s || ''));
-// A "New ..." type-of-work is new construction; a null one (CO-report-only
-// row) counts as a new build ONLY when the CO followed issuance within 30
-// months — an alteration's CO shouldn't read as a brand-new home.
-function isNewBuildRow(row, coIso) {
-  const tow = String(row.type_of_work || '');
-  if (tow) return /^new\b/i.test(tow.trim());
-  const issued = toIso(row.issued_date);
-  if (!issued || !coIso) return false;
-  const issuedPlus30mo = new Date(new Date(`${issued}T00:00:00Z`).getTime() + 30 * 30 * 24 * 60 * 60 * 1000);
-  return new Date(`${coIso}T00:00:00Z`) <= issuedPlus30mo;
-}
 
 /**
- * Synced construction evidence for a parcel/address, AGGREGATED across the
- * parcel's recent permits (newest-row-only let an unrelated later permit —
- * a fence, an alteration — hide a valid signal):
- *   underConstruction — ANY permit issued within 24 months, no CO, status
- *     not terminal → satellite imagery may predate the build.
- *   newBuild — ANY new-construction permit (type-of-work "New ...", or a
- *     CO-only row whose CO tracked issuance) with a CO within 18 months.
- * The surfaced permit fields describe the row that drove the strongest
- * signal (underConstruction > newBuild > newest). Cheap read path,
- * fail-open at the caller. Null when nothing matches.
+ * Synced construction evidence for a parcel/address. Each signal is its own
+ * TARGETED query (a row-scan capped at N let later trade/alteration permits
+ * push the signal-carrying record out of the window):
+ *   underConstruction — a permit issued within 24 months, no CO, status not
+ *     terminal, AND still present in the county's current report
+ *     (last_seen_at fresh — a vanished permit was canceled/withdrawn) →
+ *     satellite imagery may predate the build.
+ *   newBuild — a permit with type-of-work "New ..." whose CO is within 18
+ *     months. FAIL CLOSED on missing type_of_work: a CO-report-only row
+ *     (permit issued before the UC sync range) never counts — an
+ *     alteration's CO must not read as a brand-new home.
+ * Returns null when neither signal fires — no evidence is attached for
+ * merely-has-permit-history parcels. Strict parcel-first precedence (the
+ * loose key is only consulted when the parcel tier has no signal — an OR
+ * would let a neighbor's permit fabricate evidence).
  */
 async function findConstructionActivity({ parcelPin, looseKey } = {}) {
-  // Same strict parcel-first precedence as findSyncedPoolPermit — an OR'd
-  // loose key could let a neighbor's newer permit outrank the parcel match.
   const tiers = [
     parcelPin ? ['parcel_pin', String(parcelPin)] : null,
     looseKey ? ['address_loose_key', looseKey] : null,
   ].filter(Boolean);
   if (!tiers.length) return null;
-  let rows = [];
-  for (const [col, val] of tiers) {
-    rows = await db('construction_permit_records')
-      .where(col, val)
-      .orderBy('issued_date', 'desc')
-      .limit(10);
-    if (rows.length) break;
-  }
-  if (!rows.length) return null;
-
   const activeFloor = monthsAgoIso(CONSTRUCTION_ACTIVE_MONTHS);
   const coFloor = monthsAgoIso(NEW_BUILD_CO_MONTHS);
-  const seenFloor = Date.now() - ACTIVE_SEEN_WITHIN_DAYS * 24 * 60 * 60 * 1000;
-  let ucRow = null;
-  let nbRow = null;
-  for (const row of rows) {
-    const issuedAt = toIso(row.issued_date);
-    const coIssuedAt = toIso(row.co_date);
-    // last_seen_at guard: rows the weekly full re-sync stopped seeing have
-    // dropped out of the county's report (canceled/withdrawn without a CO)
-    // — stale rows must not keep asserting active construction.
-    const recentlySeen = row.last_seen_at && new Date(row.last_seen_at).getTime() >= seenFloor;
-    if (!ucRow && recentlySeen && !coIssuedAt && !isTerminalStatus(row.status) && issuedAt && issuedAt >= activeFloor) {
-      ucRow = row;
-    }
-    if (!nbRow && coIssuedAt && coIssuedAt >= coFloor && isNewBuildRow(row, coIssuedAt)) {
-      nbRow = row;
+  const seenAfter = new Date(Date.now() - ACTIVE_SEEN_WITHIN_DAYS * 24 * 60 * 60 * 1000);
+  for (const [col, val] of tiers) {
+    const ucRow = await db('construction_permit_records')
+      .where(col, val)
+      .whereNull('co_date')
+      .where('issued_date', '>=', activeFloor)
+      .where('last_seen_at', '>=', seenAfter)
+      .whereRaw("LOWER(COALESCE(status, '')) NOT IN ('closed', 'canceled', 'withdrawn')")
+      .orderBy('issued_date', 'desc')
+      .first();
+    const nbRow = await db('construction_permit_records')
+      .where(col, val)
+      .whereNotNull('co_date')
+      .where('co_date', '>=', coFloor)
+      .whereRaw("type_of_work ILIKE 'new%'")
+      .orderBy('co_date', 'desc')
+      .first();
+    if (ucRow || nbRow) {
+      const top = ucRow || nbRow;
+      return {
+        permitNo: top.permit_no,
+        status: top.status || null,
+        permitType: top.permit_type || null,
+        typeOfWork: top.type_of_work || null,
+        issuedAt: toIso(top.issued_date),
+        coIssuedAt: toIso(top.co_date),
+        underConstruction: Boolean(ucRow),
+        newBuild: Boolean(nbRow),
+      };
     }
   }
-  const top = ucRow || nbRow || rows[0];
-  return {
-    permitNo: top.permit_no,
-    status: top.status || null,
-    permitType: top.permit_type || null,
-    typeOfWork: top.type_of_work || null,
-    issuedAt: toIso(top.issued_date),
-    coIssuedAt: toIso(top.co_date),
-    underConstruction: Boolean(ucRow),
-    newBuild: Boolean(nbRow),
-  };
+  return null;
 }
 
 module.exports = {

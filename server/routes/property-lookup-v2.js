@@ -265,14 +265,18 @@ async function performPropertyLookupCore(address, options = {}) {
           const { findSyncedPoolPermit, findConstructionActivity, looseKeyFromFreeform } = require('../services/property-lookup/manatee-permit-sync');
           const looseKey = looseKeyFromFreeform(address);
           const parcelPin = cached.property_record._parcel.paoParcelId;
-          if (cached.property_record._poolPermits && !cached.property_record._poolPermits.poolPermit) {
+          const cachedPermits = cached.property_record._poolPermits;
+          // Sync-sourced permits carry a `status` key (GIS permits never
+          // do). Revalidate them on every hit — a permit cached while
+          // active and since Canceled must CLEAR, not ride the TTL — and
+          // fill empty markers. GIS-sourced evidence is never touched.
+          const syncSourced = Boolean(cachedPermits?.poolPermit && cachedPermits.poolPermit.status !== undefined);
+          if (cachedPermits && (!cachedPermits.poolPermit || syncSourced)) {
             const synced = await findSyncedPoolPermit({ parcelPin, looseKey });
-            if (synced) {
-              cached.property_record._poolPermits = {
-                ...cached.property_record._poolPermits,
-                poolPermit: synced,
-              };
-            }
+            cached.property_record._poolPermits = {
+              ...cachedPermits,
+              poolPermit: synced || (syncSourced ? null : cachedPermits.poolPermit),
+            };
           }
           const construction = await findConstructionActivity({ parcelPin, looseKey });
           if (construction) cached.property_record._constructionActivity = construction;
