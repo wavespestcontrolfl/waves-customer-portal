@@ -224,6 +224,12 @@ describe('gate darkness', () => {
 describe('upload (gate on)', () => {
   beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; });
 
+  test('a whitespace-only account label is rejected before any write', async () => {
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: '   ', accountType: 'bank', csv: 'Date,Description,Amount\n08/10/2026,X,-1.00' });
+    expect(res.status).toBe(400);
+    expect(state.insertedBank).toHaveLength(0);
+  });
+
   test('rejects a missing account label, bad account type, and an empty CSV', async () => {
     expect((await post('/admin/tax/bank-import/upload', { accountType: 'bank', csv: 'Date,Description,Amount\n08/10/2026,X,-1.00' })).status).toBe(400);
     expect((await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', csv: 'Date,Description,Amount\n08/10/2026,X,-1.00' })).status).toBe(400);

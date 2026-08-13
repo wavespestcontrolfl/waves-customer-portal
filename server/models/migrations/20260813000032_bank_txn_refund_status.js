@@ -24,19 +24,19 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('bank_transactions'))) return;
+  // FAIL CLOSED: a refund_applied row represents a REAL reduction already
+  // written into an expense. Downgrading the row would abandon that money
+  // adjustment with no undo path, and auto-reversing ledger values from a
+  // migration is not this system's contract. The operator undoes the
+  // refunds in the UI (which restores each expense from its snapshot)
+  // before this rollback may proceed.
+  const [{ count }] = await knex('bank_transactions').where({ status: 'refund_applied' }).count('* as count');
+  if (Number(count) > 0) {
+    throw new Error(`cannot roll back: ${count} refund_applied row(s) exist — undo each refund in /admin/tax Bank Import first (restores the adjusted expenses), then rerun`);
+  }
   await knex.raw(`
     ALTER TABLE bank_transactions
     DROP CONSTRAINT IF EXISTS bank_transactions_status_check
-  `);
-  // The restored CHECK excludes 'refund_applied' — convert those rows to a
-  // legal legacy status FIRST or the ALTER fails outright. 'ignored' is the
-  // safe downgrade (the row leaves review without touching the ledger); the
-  // audit trail survives in suggestion, plus a marker of the downgrade.
-  await knex.raw(`
-    UPDATE bank_transactions
-    SET status = 'ignored',
-        suggestion = coalesce(suggestion, '{}'::jsonb) || '{"downgradedFrom":"refund_applied"}'::jsonb
-    WHERE status = 'refund_applied'
   `);
   await knex.raw(`
     ALTER TABLE bank_transactions
