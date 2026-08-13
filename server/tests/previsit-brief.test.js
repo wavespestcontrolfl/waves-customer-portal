@@ -552,11 +552,20 @@ describe('briefClearOnReclassification (update-details service switch)', () => {
     expect(briefServableForDate(null, '2026-08-13')).toBe(false);
   });
 
-  test('same-boundary switches and briefless rows keep the stored state', () => {
-    expect(briefClearOnReclassification('pest_general', 'visit_brief_v1')).toBeNull();
+  test('ANY service change clears a generic visit brief (guidance is service-scoped)', () => {
+    // e.g. pest → lawn: history products must not survive as guidance for
+    // a lawn visit (protocol-window authority) — the stale row would stay
+    // servable until a later sweep tick, or past 19:49, all night. The
+    // caller only invokes this on an ACTUAL service_type change.
+    expect(briefClearOnReclassification('pest_general', 'visit_brief_v1')).toEqual(CLEAR);
+  });
+
+  test('WDO-to-WDO relabels and briefless/legacy rows keep the stored state', () => {
     expect(briefClearOnReclassification('wdo_inspection', 'wdo_inspection')).toBeNull();
     expect(briefClearOnReclassification('pest_general', null)).toBeNull();
     expect(briefClearOnReclassification('pest_general', undefined)).toBeNull();
+    // Untyped/legacy brief — not this lane's write, left alone.
+    expect(briefClearOnReclassification('pest_general', 'legacy_note')).toBeNull();
   });
 });
 

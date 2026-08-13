@@ -1362,16 +1362,6 @@ async function runSweep(dbh = db) {
   return result;
 }
 
-// Decision for update-details on a service_type edit: a switch across the
-// WDO boundary must clear the stored brief in the SAME row update, or it
-// strands — regenerate-brief routes by pre_service_brief_type (a stale
-// 'wdo_inspection' forces the WDO branch, where the tagger, now
-// classifying the new service as non-WDO, leaves the old brief untouched)
-// while generateVisitBrief refuses to overwrite WDO-typed rows. Returns
-// the clearing column updates, or null when the stored brief still
-// matches the new classification (or none is stored). Same-boundary
-// switches keep the brief: the next sweep's grounding hash regenerates
-// content-stale briefs on its own.
 // Read-path staleness check for a stored visit brief: servable only when
 // its for_date stamp matches the visit's CURRENT scheduled date (ET). A
 // reschedule strands the stored row on the old day's grounding —
@@ -1385,16 +1375,33 @@ function briefServableForDate(brief, scheduledDate) {
   return !!brief && !!brief.for_date && brief.for_date === calendarDay(scheduledDate);
 }
 
+// Decision for update-details on an ACTUAL service_type change (callers
+// must not invoke it for a same-value re-post — a label re-save must not
+// wipe a good brief). Returns the clearing column updates, or null when
+// the stored brief survives the edit:
+//  - A generic visit brief clears on EVERY service change: its grounded
+//    product guidance is service-scoped (pest → lawn swaps history
+//    products for protocol-window products — lawn-protocol authority
+//    rule), and the stale row stays immediately servable until a later
+//    sweep tick, or past the 19:49 sweep, all night.
+//  - A WDO brief clears only when the switch leaves the WDO boundary:
+//    it belongs to the tagger, and a WDO-to-WDO relabel keeps it. A
+//    stale WDO type would otherwise strand — regenerate-brief routes by
+//    pre_service_brief_type into the WDO branch (where the tagger, now
+//    classifying the new service as non-WDO, leaves the old brief
+//    untouched) while generateVisitBrief refuses to overwrite WDO rows.
+//  - Untyped/legacy briefs are not this lane's writes — left alone.
 function briefClearOnReclassification(newTag, storedBriefType) {
   if (!storedBriefType) return null;
-  const newIsWdo = newTag === 'wdo_inspection';
-  const storedIsWdo = String(storedBriefType) === WDO_BRIEF_TYPE;
-  if (newIsWdo === storedIsWdo) return null;
-  return {
+  const stored = String(storedBriefType);
+  const clear = {
     pre_service_brief: null,
     pre_service_brief_type: null,
     pre_service_brief_generated_at: null,
   };
+  if (stored === VISIT_BRIEF_TYPE) return clear;
+  if (stored === WDO_BRIEF_TYPE && newTag !== 'wdo_inspection') return clear;
+  return null;
 }
 
 module.exports = {

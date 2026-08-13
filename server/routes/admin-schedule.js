@@ -5583,11 +5583,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             }
           }
         }
-        // A service switch across the WDO boundary must not strand the
-        // stored brief (rationale on briefClearOnReclassification): clear
-        // it in the same row update so the next sweep or an admin
-        // regenerate rebuilds the correct-type brief.
-        if (updates.service_type !== undefined && preTupleRow) {
+        // An actual service change must not leave the stored brief
+        // servable (rationale on briefClearOnReclassification): clear it
+        // in the same row update so the next sweep or an admin
+        // regenerate rebuilds the correct brief. Same-value re-posts
+        // (modal label re-saves) are not a change and keep the brief.
+        if (updates.service_type !== undefined && preTupleRow
+          && String(updates.service_type) !== String(preTupleRow.service_type || '')) {
           const { briefClearOnReclassification } = require('../services/previsit-brief');
           const clear = briefClearOnReclassification(
             classifyAppointmentTag(updates.service_type),
