@@ -1751,6 +1751,18 @@ describe('r63 — a reordered unit address is the same property', () => {
     )).toBe(true);
   });
 
+  test('the bare-whitespace form canonicalizes too (r65)', () => {
+    expect(sameStreetAddress('Unit 7 123 Main St, Bradenton, FL', '123 Main St Unit 7, Bradenton, FL')).toBe(true);
+    expect(sameStreetAddress('#12 900 Bayview Ter', '900 Bayview Ter #12')).toBe(true);
+  });
+
+  test('number completion works behind a leading unit (r65)', () => {
+    const { addressCompletesGatheredStreet } = require('../services/estimator-engine/address-compare');
+    expect(addressCompletesGatheredStreet('Unit 7, 4801 62nd Avenue East', 'Unit 7, 62nd Avenue East')).toBe(true);
+    // A DIFFERENT named unit is not the same property's completion.
+    expect(addressCompletesGatheredStreet('Unit 9, 4801 62nd Avenue East', 'Unit 7, 62nd Avenue East')).toBe(false);
+  });
+
   test('two explicit different units stay separate properties', () => {
     expect(sameStreetAddress('Unit 7, 123 Main St', '123 Main St Unit 9')).toBe(false);
     expect(sameStreetAddress('Apt 4 at 123 Main St', '123 Main St Apt 9')).toBe(false);

@@ -74,16 +74,21 @@ function canonicalizeRouteTokens(tokens) {
 // reorder (no FL city starts with a digit).
 const LEADING_UNIT_SEGMENT_RE = /^(?:(?:unit|apt|apartment|ste|suite)\s*#?\s*[\w-]+|#\s*\w+)$/i;
 // The comma-free "Apt 4 at 123 Main St" form is expressly supported by
-// hasPrimaryStreetNumber, so it must canonicalize here too (codex r64 P1).
+// hasPrimaryStreetNumber, so it must canonicalize here too (codex r64 P1),
+// and so must the bare-whitespace "Unit 7 123 Main St" / "#12 900 Bayview
+// Ter" forms the subpremise signal accepts (codex r65 P1) — the designator
+// token cannot contain a space, so the split lands where the digit-leading
+// street begins.
 const LEADING_UNIT_AT_RE = /^\s*((?:unit|apt|apartment|ste|suite)\s*#?\s*[\w-]+|#\s*\w+)\s+at\s+(\d.*)$/i;
+const LEADING_UNIT_SPACE_RE = /^\s*((?:unit|apt|apartment|ste|suite)\s*#?\s*[\w-]+|#\s*\w+)\s+(\d.*)$/i;
 
 function canonicalizeLeadingUnit(s) {
   const str = String(s || '');
   const parts = str.split(',');
   const first = parts[0].trim();
-  const atForm = first.match(LEADING_UNIT_AT_RE);
-  if (atForm) {
-    return [`${atForm[2].trim()} ${atForm[1].trim()}`, ...parts.slice(1)].join(', ');
+  const inline = first.match(LEADING_UNIT_AT_RE) || first.match(LEADING_UNIT_SPACE_RE);
+  if (inline) {
+    return [`${inline[2].trim()} ${inline[1].trim()}`, ...parts.slice(1)].join(', ');
   }
   if (parts.length < 2) return str;
   const second = (parts[1] || '').trim();
@@ -215,13 +220,18 @@ function sameStreetAddress(rawA, rawB, { requireExactUnit = false, requireNamedU
 const PRIMARY_STREET_NUMBER_RE = /^\s*\d+[a-z]?(?:[-/]\w+)?\s+\S/i;
 
 function addressCompletesGatheredStreet(finalAddress, gatheredAddress) {
-  const gatheredFirst = String(gatheredAddress || '').split(',')[0].trim();
-  const finalStr = String(finalAddress || '').trim();
+  // A leading unit rides along with a completion ("Unit 7, 62nd Avenue
+  // East" → "Unit 7, 4801 62nd Avenue East") — canonicalize both sides to
+  // street-first so the number test sees the street, not the designator
+  // (codex r65 P1); sameStreetAddress below still compares the units.
+  const gatheredCanonical = canonicalizeLeadingUnit(gatheredAddress);
+  const gatheredFirst = String(gatheredCanonical || '').split(',')[0].trim();
+  const finalStr = canonicalizeLeadingUnit(String(finalAddress || '').trim());
   if (!gatheredFirst || !finalStr) return false;
   if (PRIMARY_STREET_NUMBER_RE.test(gatheredFirst)) return false; // gathered already numbered
   if (!PRIMARY_STREET_NUMBER_RE.test(finalStr)) return false; // final supplies no number either
   const withoutNumber = finalStr.replace(/^\s*\d+[a-z]?(?:[-/]\w+)?\s+/i, '');
-  return withoutNumber !== finalStr && sameStreetAddress(withoutNumber, gatheredAddress);
+  return withoutNumber !== finalStr && sameStreetAddress(withoutNumber, gatheredCanonical);
 }
 
 module.exports = {
