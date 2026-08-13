@@ -172,9 +172,32 @@ function sameStreetAddress(a, b, { requireExactUnit = false, requireNamedUnit = 
   return true;
 }
 
+// Did the final address merely COMPLETE a numberless gathered street
+// ("62nd Avenue East" → "4801 62nd Avenue East")? sameStreetAddress
+// compares whole street lines, so supplying the missing house number reads
+// as a different street, and the cross-property fence then discarded the
+// call's tenancy/type/stated measurements for what is the SAME property
+// corrected (codex r56 P1). True only when the gathered line has NO
+// primary street number (the r41 rule: ordinal names like "62nd" don't
+// count as numbers), the final one DOES, and the final line minus that
+// number street-matches the gathered line. A correction that changes the
+// street TEXT itself still fences — conservative direction.
+const PRIMARY_STREET_NUMBER_RE = /^\s*\d+[a-z]?(?:[-/]\w+)?\s+\S/i;
+
+function addressCompletesGatheredStreet(finalAddress, gatheredAddress) {
+  const gatheredFirst = String(gatheredAddress || '').split(',')[0].trim();
+  const finalStr = String(finalAddress || '').trim();
+  if (!gatheredFirst || !finalStr) return false;
+  if (PRIMARY_STREET_NUMBER_RE.test(gatheredFirst)) return false; // gathered already numbered
+  if (!PRIMARY_STREET_NUMBER_RE.test(finalStr)) return false; // final supplies no number either
+  const withoutNumber = finalStr.replace(/^\s*\d+[a-z]?(?:[-/]\w+)?\s+/i, '');
+  return withoutNumber !== finalStr && sameStreetAddress(withoutNumber, gatheredAddress);
+}
+
 module.exports = {
   sameStreetAddress,
   addressAddsLocality,
+  addressCompletesGatheredStreet,
   STREET_TOKEN_ALIASES,
   // Shared so street-key builders (scope-guards burst dedup) cut route
   // spellings identically to how this module compares them.

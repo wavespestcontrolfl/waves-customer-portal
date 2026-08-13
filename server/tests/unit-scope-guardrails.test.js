@@ -1396,10 +1396,15 @@ describe('a unit-first address is a subpremise for scope too (r51)', () => {
     expect(shadowPrivate.hasSubpremiseSignal({
       address: 'Apt 4 at 123 Main Street, Venice, FL 34285', extraction: null,
     })).toBe(true);
-    // No street number after the designator: not a serviceable unit-first
-    // address ("62nd Avenue East, Unit 7" keeps failing elsewhere too).
+    // A comma-carrying designator counts even without a street number (the
+    // r56 interior rule — a stated unit is a unit; the missing street
+    // number red-lanes separately via hasPrimaryStreetNumber)…
     expect(shadowPrivate.hasSubpremiseSignal({
       address: 'Unit 7, Bayview Terrace, Venice, FL', extraction: null,
+    })).toBe(true);
+    // …but a bare designator token folded into a street name does not.
+    expect(shadowPrivate.hasSubpremiseSignal({
+      address: 'Unit 7 Bayview Terrace, Venice, FL', extraction: null,
     })).toBe(false);
   });
 
@@ -1513,5 +1518,38 @@ describe('association callers keep association scope on condo records (r51)', ()
       extraction: { caller: { relationship_to_property: 'owner' }, property: {} },
       intent: {},
     })).toBe(true);
+  });
+});
+
+describe('r56 — city-only partials keep unit scope; number-completion is not a switch', () => {
+  const { _private: shadowPrivate } = require('../services/estimator-engine/property-facts-shadow');
+  const { addressCompletesGatheredStreet } = require('../services/estimator-engine/address-compare');
+
+  test('a unit suffix ahead of a city-only tail is a subpremise', () => {
+    // The locality stripper only knows FL/Florida tails; the interior
+    // designator must carry the signal on its own.
+    expect(shadowPrivate.hasSubpremiseSignal({
+      address: '900 Bayview Ter, Apt 4, Venice', extraction: null,
+    })).toBe(true);
+    expect(shadowPrivate.hasSubpremiseSignal({
+      address: '55 Bay Dr, #12, Venice', extraction: null,
+    })).toBe(true);
+    // No designator, city-only tail: still not a unit.
+    expect(shadowPrivate.hasSubpremiseSignal({
+      address: '900 Bayview Ter, Venice', extraction: null,
+    })).toBe(false);
+  });
+
+  test('supplying the missing house number completes the street, never switches it', () => {
+    expect(addressCompletesGatheredStreet('4801 62nd Avenue East', '62nd Avenue East')).toBe(true);
+    expect(addressCompletesGatheredStreet('4801 62nd Avenue East, Bradenton, FL', '62nd Avenue East')).toBe(true);
+    // Ordinal street names are NOT house numbers (the r41 rule).
+    expect(addressCompletesGatheredStreet('4801 62nd Avenue East', '48th Avenue East')).toBe(false);
+    // A gathered address that already has a number is never "completed".
+    expect(addressCompletesGatheredStreet('4801 62nd Avenue East', '100 62nd Avenue East')).toBe(false);
+    // Different street text stays a switch — conservative direction.
+    expect(addressCompletesGatheredStreet('4801 Lakefront Dr', '62nd Avenue East')).toBe(false);
+    // A final address with no number completes nothing.
+    expect(addressCompletesGatheredStreet('62nd Avenue East', '62nd Avenue East')).toBe(false);
   });
 });

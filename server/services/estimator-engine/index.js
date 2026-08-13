@@ -381,7 +381,7 @@ function commercialHint(context) {
   return propType === 'commercial' || context.lead?.is_commercial === true;
 }
 
-const { sameStreetAddress, addressAddsLocality } = require('./address-compare');
+const { sameStreetAddress, addressAddsLocality, addressCompletesGatheredStreet } = require('./address-compare');
 
 // Property lookup + (when the county roll is unassessed) the
 // subdivision-median dig. Both fail-open.
@@ -1538,8 +1538,13 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // property's extraction on a true switch (codex r18 P1: the V2 pass
     // ran before this flag existed, so an owner-unit's stated area could
     // become suite evidence for a whole commercial building).
+    // A final address that merely SUPPLIES the missing house number for a
+    // numberless gathered street is a correction of the same property, not
+    // a switch — fencing it discarded the call's tenancy/type/stated
+    // measurements and killed otherwise valid drafts (codex r56 P1).
     const crossPropertyRegather = addressRegathered
-      && !!address && !sameStreetAddress(intent.address, address);
+      && !!address && !sameStreetAddress(intent.address, address)
+      && !addressCompletesGatheredStreet(intent.address, address);
 
     // Wrong-premise parcel signals (global flag / snapped record) are
     // stripped here exactly as in the pre-compose arbitration — the

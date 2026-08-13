@@ -54,9 +54,20 @@ const DWELLING_SUBPREMISE_RE = /(?:\b(?:unit|apt|apartment|ste|suite)\s*[#]?\s*[
 // designators only, same as the end-anchored form.
 const LEADING_DWELLING_SUBPREMISE_RE = /^\s*(?:(?:unit|apt|apartment|ste|suite)\s*[#]?\s*[\w-]+|#\s*\w+)\s*(?:,\s*|\s+at\s+|\s+)\d/i;
 
+// An INTERIOR designator followed by a comma is a subpremise regardless of
+// what trails it: the locality stripper recognizes only FL/Florida tails,
+// so a city-only partial ("900 Bayview Ter, Apt 4, Venice") left the unit
+// mid-string where the end-anchored form missed it, and a flattened
+// single-family record kept whole-structure scope (codex r56 P1). The
+// comma bound keeps street/city names from matching — no FL locality is
+// "Apt <token>," — and dwelling designators only, as everywhere else.
+const INTERIOR_DWELLING_SUBPREMISE_RE = /(?:\b(?:unit|apt|apartment|ste|suite)\s*[#]?\s*[\w-]+|#\s*\w+)\s*,/i;
+
 function hasDwellingSubpremise(line) {
   const stripped = stripTrailingLocality(line);
-  return DWELLING_SUBPREMISE_RE.test(stripped) || LEADING_DWELLING_SUBPREMISE_RE.test(stripped);
+  return DWELLING_SUBPREMISE_RE.test(stripped)
+    || LEADING_DWELLING_SUBPREMISE_RE.test(stripped)
+    || INTERIOR_DWELLING_SUBPREMISE_RE.test(String(line || ''));
 }
 
 // Strip the trailing locality so the unit suffix sits at the end of the
