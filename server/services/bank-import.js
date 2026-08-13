@@ -639,9 +639,16 @@ async function runDeterministicMatching({ limit } = {}) {
       }
       return;
     }
+    // Candidate keys are SUBTRACTED here: reaching markScanned means the
+    // rescan found nothing, so any previously parked candidates are stale
+    // (deleted, claimed elsewhere, or out of window) — leaving them would
+    // keep the UI offering targets that can only 404/409.
     await db('bank_transactions')
       .where({ id: row.id, status: 'unmatched' })
-      .update({ suggestion: suggestionMerge({ noMatch: true }), updated_at: new Date() });
+      .update({
+        suggestion: suggestionMerge({ noMatch: true }, ['candidates', 'candidatesTotal', 'payoutCandidates', 'payoutCandidatesTotal', 'refundCandidates', 'refundCandidatesTotal']),
+        updated_at: new Date(),
+      });
   };
   let unmatched;
   let moreRemaining = false;

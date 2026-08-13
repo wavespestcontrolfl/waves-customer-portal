@@ -579,6 +579,19 @@ describe('runDeterministicMatching', () => {
     expect(state.updates.find(u => u.patch.status === 'matched_expense')).toBeDefined();
   });
 
+  test('an empty rescan CLEARS stale parked candidates while demoting to noMatch', async () => {
+    // the parked expense was deleted/claimed since — the rescan finds none
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-10', description: 'MYSTERY', amount: 55, direction: 'debit', suggestion: { candidates: [{ id: 'exp-gone' }], candidatesTotal: 1 } }];
+    state.expenses = [];
+    await runDeterministicMatching();
+    const mark = state.updates.find(u => sugOf(u) && sugOf(u).noMatch === true);
+    expect(mark).toBeDefined();
+    // the merge SUBTRACTS the stale candidate keys so the UI stops offering them
+    expect(mark.patch.suggestion.sql).toContain("- 'candidates'");
+    expect(mark.patch.suggestion.sql).toContain("- 'payoutCandidates'");
+    expect(mark.patch.suggestion.sql).toContain("- 'refundCandidates'");
+  });
+
   test('a processed row with NOTHING to propose is marked noMatch so bounded passes advance past it', async () => {
     state.bankRows = [
       { id: 'bt-1', txn_date: '2026-08-10', description: 'MYSTERY VENDOR', amount: 55, direction: 'debit', suggestion: null },
