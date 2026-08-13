@@ -565,7 +565,14 @@ const AgronomicWiki = {
           const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
           if (!weather && etCalendarDayOf(treatmentDate) === etDateString()) {
             const fawn = await require('./fawn-weather').getCurrent();
-            if (fawn && fawn.station !== 'unavailable') weather = fawn;
+            // On fetch failure getCurrent() serves its cached _lastSnapshot,
+            // which has no expiry — require a fresh observation (≤6h) so a
+            // days-old cache can't be persisted as treatment-day conditions.
+            const FRESH_MS = 6 * 60 * 60 * 1000;
+            const fresh = fawn?.timestamp
+              && Number.isFinite(new Date(fawn.timestamp).getTime())
+              && Date.now() - new Date(fawn.timestamp).getTime() < FRESH_MS;
+            if (fawn && fawn.station !== 'unavailable' && fresh) weather = fawn;
           }
           if (weather) {
             await db('treatment_outcomes').where({ id: outcome.id }).update({

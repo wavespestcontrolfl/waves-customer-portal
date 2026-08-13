@@ -801,9 +801,12 @@ async function detectContradictions() {
                 severity: 0.6,
               };
 
+              // Dedupe scoped to THIS product — a broad KB entry can match
+              // several efficacy products, and a product-blind predicate
+              // would collapse them all onto the first inserted row.
               const existing = await db('knowledge_contradictions')
                 .where({ kb_entry_id: kbEntry.id, contradiction_type: 'claim_vs_data' })
-                .whereRaw("description ILIKE ?", [`%peak season%shoulder%`])
+                .whereRaw("description ILIKE ?", [`%${eff.product_name}%peak season%shoulder%`])
                 .where({ status: 'open' })
                 .first();
 

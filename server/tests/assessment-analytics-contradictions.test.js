@@ -216,6 +216,43 @@ test('peak-vs-shoulder uses the slug fallback when no exact bridge match exists'
   }));
 });
 
+test('seasonal dedupe is scoped per product — two products under one KB entry both insert', async () => {
+  const seasonalStats = {
+    avg_delta_overall: 2,
+    application_count: 6,
+    peak_stats: JSON.stringify({ count: 6, avgDelta: -5 }),
+    shoulder_stats: JSON.stringify({ count: 5, avgDelta: 9 }),
+    dormant_stats: null,
+  };
+  const dedupeQueries = [];
+  const dbMock = makeDb({
+    product_efficacy: [
+      { product_name: 'Bifen I/T', ...seasonalStats },
+      { product_name: 'Bifen XTS', ...seasonalStats },
+    ],
+    knowledge_base: [{ ...KB_PRODUCT, title: 'Product: Bifen', content: 'Apply Bifen in summer peak season.' }],
+    knowledge_bridge: [
+      { kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bifen-it', wiki_slug: 'product/bifen-i-t', relevance_score: 0.95 },
+      { kb_entry_id: 'kb-1', wiki_entry_id: 'wiki-bifen-xts', wiki_slug: 'product/bifen-xts', relevance_score: 0.95 },
+    ],
+    knowledge_entries: [],
+    knowledge_contradictions: (rec) => {
+      const raw = rec.ops.find(([m]) => m === 'whereRaw');
+      if (raw) dedupeQueries.push(raw[1][1]);
+      return []; // nothing pre-existing — both should insert
+    },
+  });
+  global.__analyticsDbMock = dbMock;
+
+  const result = await analytics.detectContradictions();
+
+  expect(result.contradictions).toBe(2);
+  const ids = dbMock.state.inserts.knowledge_contradictions.map((c) => c.wiki_entry_id);
+  expect(ids).toEqual(['wiki-bifen-it', 'wiki-bifen-xts']);
+  // The dedupe predicate must carry the product name, not just the phrase
+  expect(dedupeQueries.some((q) => String(q).includes('Bifen I/T'))).toBe(true);
+});
+
 test('an existing open row with null attribution is backfilled and gated when the bridge resolves', async () => {
   const updates = [];
   const dbMock = makeDb({
