@@ -942,7 +942,14 @@ const AgronomicWiki = {
               await db('knowledge_base')
                 .where({ wiki_entry_id: staleEntry.id, source: 'wiki-sync' })
                 .del();
-            } catch { /* knowledge_base.wiki_entry_id column may not exist */ }
+            } catch (mirrorErr) {
+              // Tolerate ONLY the legacy-schema shapes (42703 undefined
+              // column / 42P01 undefined table). Anything else rethrows
+              // into the prune-failure path below — swallowing a
+              // transient error here and then deleting the source would
+              // leave an active orphaned mirror permanently readable.
+              if (mirrorErr?.code !== '42703' && mirrorErr?.code !== '42P01') throw mirrorErr;
+            }
             pruned = await db('knowledge_entries').where({ id: staleEntry.id }).del();
           }
         } catch (err) {
