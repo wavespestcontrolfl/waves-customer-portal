@@ -12134,7 +12134,11 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
     }
 
     const RainOut = require('../services/rain-out');
-    const options = await RainOut.getOptions(req.params.serviceId);
+    // This route has no assignment check by design, so the name policy
+    // has to come from the CALLER, not the service's technician_id.
+    const options = await RainOut.getOptions(req.params.serviceId, {
+      caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
+    });
     if (!options.ok) {
       return res.status(options.reason === 'not_found' ? 404 : 409).json({ error: options.reason });
     }
@@ -12167,6 +12171,42 @@ router.post('/:serviceId/rain-out/custom-preview', async (req, res, next) => {
       const code = result.reason === 'not_found' ? 404
         : ['bad_reason', 'bad_target'].includes(result.reason) ? 400 : 409;
       return res.status(code).json({ error: result.reason });
+    }
+    return res.json(result);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/dispatch/:serviceId/rain-out/target-check
+// body: { target: { date, window: { start, end } } }
+//
+// Advisory overlap probe for the Quick Move sheet: the custom-time picker
+// (and any selected preset) re-checks here on every change so the
+// dispatcher sees the overlapped stop's customer + window BEFORE tapping
+// Move instead of discovering it as commit's SLOT_TAKEN rejection.
+// Warn-only + read-only: the sheet never disables Move on this data and
+// nothing is locked or reserved — the rebooker's rung-1-locked probe at
+// commit stays the enforcer.
+// Router-inherited requireTechOrAdmin, NOT requireAdmin: this sheet is the
+// canonical Quick Move surface and every neighbouring rain-out endpoint is
+// tech-reachable, so admin-gating just this one left tech-role dispatchers
+// with a silently-swallowed 403 and no warning at all. The enumeration risk
+// codex raised is closed by the payload instead of the door: `caller` drives
+// nameScope, so a non-admin gets names only for their OWN assigned stops and
+// arbitrary probes come back window-only.
+router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
+  try {
+    const { target } = req.body || {};
+    if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
+      return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
+    }
+    const RainOut = require('../services/rain-out');
+    const result = await RainOut.checkTarget({
+      serviceId: req.params.serviceId,
+      target,
+      caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
+    });
+    if (!result.ok) {
+      return res.status(result.reason === 'not_found' ? 404 : 400).json({ error: result.reason });
     }
     return res.json(result);
   } catch (err) { next(err); }

@@ -1241,6 +1241,45 @@ function RainOutSheet({ service, onClose, onDone }) {
   const visibleOptions = allOptions.filter((opt) => optionVisibleFor(opt, reason));
   const selected = visibleOptions.find((opt) => keyOf(opt) === selectedKey) || null;
 
+  // Overlap disclaimer (owner ask 2026-08-12): the same-day presets are
+  // pure clock offsets, so they can land on another booked stop — the
+  // options payload annotates each with `conflicts` (name + window) from
+  // the same occupancy predicate the server enforces at commit. Warn-only:
+  // Move stays enabled; commit's locked check rejects real overlaps.
+  const fmtHHMM = (v) => {
+    const m = hhmmMin(v);
+    if (m == null) return v;
+    const h = Math.floor(m / 60);
+    const h12 = h % 12 || 12;
+    return `${h12}:${String(m % 60).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+  };
+  // A route-scope same-day push shifts the remaining route stops by the
+  // same delta (commit moves tail-first), so an overlap with a stop
+  // that's moving too is not a definite failure — drop flagged siblings
+  // from the warning while scope=route (codex #3375 P2).
+  // `conflicts` = what THIS stop's new window hits, minus the stops that
+  // shift with a route push (they vacate before it lands).
+  // `routeConflicts` = what those shifted stops would themselves land on —
+  // only real while scope=route, and the reason a route Move can fail
+  // halfway with the earlier stops already booked and already texted.
+  const conflictsFor = (src) => [
+    ...(src?.conflicts || []).filter((c) => !(scope === 'route' && c.isRouteSibling)),
+    ...(scope === 'route' ? (src?.routeConflicts || []) : []),
+  ];
+  const selectedConflicts = conflictsFor(selected);
+  const conflictLabel = (c) => {
+    // A self-collision is two of THIS route's own stops projected onto one
+    // window — naming a customer would be wrong, the fix is a different time.
+    const who = c.isRouteSelfCollision
+      ? 'another stop on this route landing at the same time'
+      : (c.customerName || (c.isHold ? 'an estimate-slot hold' : 'another appointment'));
+    const when = c.windowStart
+      ? `, ${fmtHHMM(c.windowStart)}${c.windowEnd ? `-${fmtHHMM(c.windowEnd)}` : ''}`
+      : '';
+    const what = c.serviceType ? ` (${c.serviceType.toLowerCase()})` : '';
+    return `${who}${when}${what}`;
+  };
+
   // Reason side effects: no-show is single-stop only (server rejects route
   // scope); running late may hide the highlighted same-day preset.
   const pickReason = (code) => {
@@ -1380,18 +1419,38 @@ function RainOutSheet({ service, onClose, onDone }) {
                         <span style={{ color: DARK.muted, fontSize: 12 }}> — storm may pass</span>
                       )}
                     </span>
-                    {opt.rainChance != null && (
-                      <span style={{
-                        fontSize: 12, fontWeight: 700,
-                        color: opt.rainChance >= 50 ? '#f59e0b' : '#22c55e',
-                      }}>
-                        {opt.rainChance}% 🌧
+                    {(conflictsFor(opt).length > 0 || opt.rainChance != null) && (
+                      <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                        {conflictsFor(opt).length > 0 && (
+                          <span style={{ fontSize: 12, fontWeight: 700, color: '#f59e0b' }}>overlaps</span>
+                        )}
+                        {opt.rainChance != null && (
+                          <span style={{
+                            fontSize: 12, fontWeight: 700,
+                            color: opt.rainChance >= 50 ? '#f59e0b' : '#22c55e',
+                          }}>
+                            {opt.rainChance}% 🌧
+                          </span>
+                        )}
                       </span>
                     )}
                   </button>
                 );
               })}
             </div>
+
+            {/* Overlap disclaimer — warn-only: Move stays enabled, the
+                server's locked occupancy check rejects real overlaps. */}
+            {selectedConflicts.length > 0 && (
+              <div style={{
+                fontSize: 13, padding: '8px 10px', borderRadius: 8, marginTop: -8, marginBottom: 16,
+                background: '#f59e0b1a', border: '1px solid #f59e0b', color: '#f59e0b',
+              }}>
+                {`⚠️ This time overlaps ${conflictLabel(selectedConflicts[0])}`}
+                {selectedConflicts.length > 1 && ` and ${selectedConflicts.length - 1} more`}
+                {' — the schedule will block this move. Pick a different time.'}
+              </div>
+            )}
 
             {options.remainingRouteCount > 0 && reason !== 'customer_noshow' && (
               <>

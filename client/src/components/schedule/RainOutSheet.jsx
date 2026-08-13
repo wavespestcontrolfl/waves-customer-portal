@@ -468,6 +468,68 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const customOverBudget = !!(customSeg && !customSeg.withinCap);
   const customMissing = !!(isCustomReason && notify && !note.trim());
 
+  // Overlap advisory (owner ask 2026-08-12): every selection change —
+  // preset OR custom time — re-checks the target against the schedule
+  // (POST rain-out/target-check → checkTarget: the same tech-blind
+  // occupancy predicate commit enforces) so the dispatcher sees the
+  // overlapped stop's customer + window BEFORE tapping Move instead of
+  // discovering it as commit's SLOT_TAKEN rejection. Warn-only: Move
+  // stays enabled (this data can be seconds stale in either direction —
+  // the rebooker's locked probe at commit is the enforcer), and a fetch
+  // failure just hides the warning. While the live check is in flight
+  // the options payload's same-day preset annotation (opt.conflicts)
+  // fills in.
+  const [liveCheck, setLiveCheck] = useState(null);
+  useEffect(() => {
+    setLiveCheck(null);
+    if (!(selectedDate && selectedStart && selectedEnd)) return undefined;
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/admin/dispatch/${service.id}/rain-out/target-check`, {
+          method: 'POST',
+          headers: authHeaders(),
+          signal: controller.signal,
+          body: JSON.stringify({
+            target: { date: selectedDate, window: { start: selectedStart, end: selectedEnd } },
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!controller.signal.aborted && res.ok && Array.isArray(data?.conflicts)) {
+          setLiveCheck(data);
+        }
+      } catch { /* advisory only — commit still rejects real overlaps */ }
+    }, 300);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [selectedDate, selectedStart, selectedEnd, service.id]);
+  // Two lists, one scope toggle (codex #3375 P2 ×2):
+  //   conflicts      — what the ANCHOR's window hits. A route-scope push
+  //                    shifts the remaining stops by the same delta
+  //                    (commit moves tail-first), so an overlap with a
+  //                    stop that's moving too is not a definite failure:
+  //                    drop flagged siblings while scope=route.
+  //   routeConflicts — what those SHIFTED stops would land on. Only real
+  //                    while scope=route, and the reason a route Move can
+  //                    fail halfway with the earlier stops already booked
+  //                    and already texted.
+  const conflictsFor = (src) => [
+    ...(src?.conflicts || []).filter((c) => !(scope === 'route' && c.isRouteSibling)),
+    ...(scope === 'route' ? (src?.routeConflicts || []) : []),
+  ];
+  const activeConflicts = conflictsFor(liveCheck ?? selected);
+  const conflictLabel = (c) => {
+    // A self-collision is two of THIS route's own stops projected onto one
+    // window — naming a customer would be wrong, the fix is a different time.
+    const who = c.isRouteSelfCollision
+      ? 'another stop on this route landing at the same time'
+      : (c.customerName || (c.isHold ? 'an estimate-slot hold' : 'another appointment'));
+    const when = c.windowStart
+      ? `, ${fmtTime(c.windowStart)}${c.windowEnd ? `-${fmtTime(c.windowEnd)}` : ''}`
+      : '';
+    const what = c.serviceType ? ` (${c.serviceType.toLowerCase()})` : '';
+    return `${who}${when}${what}`;
+  };
+
   const handleCommit = async () => {
     if (!selected || busy || noteBlocked || customMissing || customOverBudget) return;
     setBusy(true);
@@ -643,9 +705,16 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                         <span style={{ color: '#71717A', fontWeight: 400 }}> — storm may pass</span>
                       )}
                     </span>
-                    {opt.rainChance != null && (
-                      <span style={{ fontSize: 12, fontWeight: 500, color: opt.rainChance >= 50 ? '#B45309' : '#15803D' }}>
-                        {opt.rainChance}% rain
+                    {(conflictsFor(opt).length > 0 || opt.rainChance != null) && (
+                      <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                        {conflictsFor(opt).length > 0 && (
+                          <span style={{ fontSize: 12, fontWeight: 500, color: '#B45309' }}>overlaps</span>
+                        )}
+                        {opt.rainChance != null && (
+                          <span style={{ fontSize: 12, fontWeight: 500, color: opt.rainChance >= 50 ? '#B45309' : '#15803D' }}>
+                            {opt.rainChance}% rain
+                          </span>
+                        )}
                       </span>
                     )}
                   </button>
@@ -718,6 +787,20 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 {runningLateFloorMin > 0 && hhmmToMin(customWindow?.start) < runningLateFloorMin
                   ? `Running late needs a time after the current window — pick ${fmtTime(minTodayStart)} or later.`
                   : `That hour has already started today — pick ${fmtTime(minTodayStart)} or later.`}
+              </div>
+            )}
+
+            {/* Overlap disclaimer — warn-only (owner call 2026-08-12): the
+                Move button stays enabled; the server's locked occupancy
+                check at commit is the enforcer and rejects real overlaps. */}
+            {activeConflicts.length > 0 && selected && (
+              <div style={{
+                fontSize: 13, padding: '8px 10px', borderRadius: 8, marginTop: -8, marginBottom: 18,
+                background: '#FFFBEB', border: '1px solid #FDE68A', color: '#B45309',
+              }}>
+                {`⚠️ This time overlaps ${conflictLabel(activeConflicts[0])}`}
+                {activeConflicts.length > 1 && ` and ${activeConflicts.length - 1} more`}
+                {' — the schedule will block this move. Pick a different time.'}
               </div>
             )}
 

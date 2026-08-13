@@ -560,6 +560,9 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
     .orderByRaw('COALESCE(route_order, 999), window_start NULLS LAST')
     .select(
       'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type', 'route_order',
+      // Feeds the route-scope simulation's effective-end derivation for
+      // rows with a start but no stored end.
+      'estimated_duration_minutes',
       // Stamped service-address fields feed the moved-SMS forecast copy.
       'lat', 'lng', 'service_address_zip',
       // Collective anchoring needs recurrence membership for EVERY route
@@ -611,12 +614,351 @@ function sameDayOptions(now = new Date()) {
   return options;
 }
 
+// Advisory overlap probe for the Quick Move sheets (owner ask 2026-08-12:
+// picking a time that overlaps another appointment gave no warning until
+// commit's SLOT_TAKEN). Same tech-blind predicate — occupancy.js's own
+// listOccupiedWindows/windowsOverlap pair, which is the range variant of
+// the SQL findConflictingVisits runs — AND the same status exclusions the
+// rebooker enforces at its commit gate (rebooker.js occupancyClash:
+// cancelled + completed don't occupy) so the sheet warns
+// on exactly what commit would reject — an offer/commit mismatch in either
+// direction is how the /book 409 dead-end loop happened. Read-only, no
+// rung-1 lock (offer surface — occupancy.js EXEMPT list); the rebooker's
+// locked probe stays the enforcer, this only makes the rejection visible
+// BEFORE the Move tap. Warn-only by design: the sheets never disable Move
+// on this data (it can be seconds stale in either direction).
+// nameScope gates WHO gets identified, and defaults to nobody (fail
+// closed). The probe is tech-blind by design — it must see every
+// technician's rows to mirror commit — but the payload rides two very
+// different trust levels: `checkTarget` is admin-only (requireAdmin) and
+// passes NAME_ALL, while `getOptions` is reachable by an assigned tech
+// (GET /api/tech/services/:id/rain-out-options), so it passes its own
+// technician id and every other tech's row degrades to the sheets'
+// "another appointment" fallback. Window + hold status stay on every row:
+// non-identifying, and they're what makes the warning actionable.
+const TARGET_CONFLICT_LIMIT = 3;
+const NAME_ALL = Symbol('rain-out:name-all');
+// WHO IS ASKING decides who gets named — never the row's own assignment.
+// The admin dispatch options route is requireTechOrAdmin with NO
+// assignment check by design ("any dispatcher may rain-out a stop on a
+// tech's behalf"), so scoping names to the SERVICE's technician would let
+// tech A read tech B's customers just by requesting B's service (codex
+// #3375 P1). Admin sees every name; the assigned tech sees their own
+// stops (already visible on their route) and nothing else; anyone else,
+// and any caller that forgot to identify itself, gets no names at all.
+function nameScopeFor(caller, service) {
+  if (caller?.isAdmin) return NAME_ALL;
+  const techId = caller?.technicianId;
+  if (techId && service?.technician_id && String(techId) === String(service.technician_id)) {
+    return String(techId);
+  }
+  return null;
+}
+// ONE occupancy snapshot per request, filtered in memory per candidate
+// window — the per-window query was O(options x route stops) round trips on
+// every sheet open (codex #3375 P1). This is still the canonical mechanism,
+// not a parallel one: listOccupiedWindows is occupancy.js's own range
+// variant of the SAME predicate (identical status/hold/windowless
+// conventions, and it precomputes endMin with the same
+// estimated_duration_minutes-or-60 fallback the SQL COALESCEs), and
+// windowsOverlap is the exported half-open comparison the SQL implements.
+async function loadOccupancy({ dateFrom, dateTo, nameScope = null }) {
+  const { listOccupiedWindows } = require('./scheduling/occupancy');
+  const rows = await listOccupiedWindows({
+    dateFrom,
+    dateTo,
+    // Same status exclusions the rebooker enforces at its commit gate.
+    excludeStatuses: ['cancelled', 'completed'],
+  });
+  const canName = (row) => (nameScope === NAME_ALL
+    ? true
+    : !!nameScope && String(row.technician_id) === String(nameScope));
+  // One customer lookup for the whole response, and only for rows this
+  // caller is allowed to see named.
+  const customerIds = [...new Set(rows.filter(canName).map((r) => r.customer_id).filter(Boolean))];
+  const customers = customerIds.length
+    ? await db('customers').whereIn('id', customerIds).select('id', 'first_name', 'last_name')
+    : [];
+  const nameById = new Map(customers.map((c) => [
+    String(c.id),
+    [c.first_name, c.last_name].filter(Boolean).join(' ').trim() || null,
+  ]));
+  return { rows, canName, nameById };
+}
+
+const EMPTY_OCCUPANCY = { rows: [], canName: () => false, nameById: new Map() };
+
+function conflictsForTarget(occupancy, serviceId, date, window, {
+  routeSiblingIds = null, excludeServiceIds = null,
+} = {}) {
+  const { windowsOverlap } = require('./scheduling/occupancy');
+  const startMin = hhmmToMinutes(window.start);
+  const endMin = hhmmToMinutes(window.end);
+  if (startMin == null || endMin == null) return [];
+  const excluded = new Set((excludeServiceIds || [serviceId]).map(String));
+  const rows = occupancy.rows.filter((r) => r.date === date
+    && !excluded.has(String(r.id))
+    && windowsOverlap(r.startMin, r.endMin, startMin, endMin));
+  if (!rows.length) return [];
+  // Partition BEFORE the cap. The sheets drop flagged siblings while
+  // scope=route, so slicing in query order could spend the whole cap on
+  // rows that get filtered out and leave a definite conflict unshown —
+  // the same offer/commit mismatch this advisory exists to close, just
+  // reintroduced by the truncation. Non-siblings first (stable within
+  // each group), cap second, so a definite conflict always outranks a
+  // stop that's moving with the push.
+  const isSibling = (row) => !!routeSiblingIds?.has(String(row.id));
+  const kept = [...rows.filter((r) => !isSibling(r)), ...rows.filter(isSibling)]
+    .slice(0, TARGET_CONFLICT_LIMIT);
+  const { canName, nameById } = occupancy;
+  return kept.map((row) => {
+    // startMin/endMin come from listOccupiedWindows, which already applied
+    // the predicate's own nullable-window_end fallback — so the warning
+    // quotes the span that actually blocked.
+    return {
+      // Row id, not customer data — the sheets never render it; it exists
+      // so the route-scope merge can dedupe one stop hit by two members.
+      id: String(row.id),
+      windowStart: minutesToHHMM(row.startMin),
+      windowEnd: minutesToHHMM(row.endMin),
+      customerName: (canName(row) && row.customer_id)
+        ? (nameById.get(String(row.customer_id)) || null)
+        : null,
+      serviceType: canName(row) ? (row.service_type || null) : null,
+      // customer-NULL rows with a live reservation stamp are estimate-slot
+      // holds — real occupancy, but there's no customer name to show.
+      isHold: !row.customer_id && !!row.reservation_expires_at,
+      // A "rest of route" same-day push shifts every remaining route stop
+      // by the anchor's delta (commit() moves tail-first, so a sibling
+      // vacates its window before the anchor lands on it) — an overlap
+      // with a stop that's moving too is NOT a definite failure. Flagged
+      // so the sheets can drop these from the warning when scope=route
+      // (codex #3375 P2). Only today's rows can carry the flag: the probe
+      // is date-scoped and route siblings sit on today until commit.
+      isRouteSibling: isSibling(row),
+    };
+  });
+}
+
+// A route-scope Move commits EVERY remaining stop, and the rebooker runs
+// its occupancy gate per member — so a sibling's landing window can
+// SLOT_TAKEN while the anchor's own target is clear, and the route ends up
+// PARTIALLY moved (the stops before the straggler already booked and
+// already texted). Probing only the anchor's window left that invisible
+// until it happened (codex #3375 P2), which is the same offer/commit
+// mismatch this advisory exists to close, in its most expensive form.
+//
+// Project each member's landing window exactly the way commit() does —
+// same-day: shift both bounds by the anchor's delta, or fall back to the
+// anchor's own window when the stop has no parseable pair (commit's
+// windowless-mover fallback); day move: keep its own window on the target
+// date, and a windowless stop stays inert to the predicate. EVERY swept id
+// is excluded: members moving together aren't conflicts, the same
+// reasoning isRouteSibling encodes for the anchor probe. Member-vs-member
+// collisions are the shapes commit documents as deliberately loud
+// (pre-overlapped pairs, inverted route_order, a windowless mover) and
+// stay out of scope — they can't be judged from the pre-move schedule
+// anyway, since commit moves tail-first and each stop vacates before the
+// next lands.
+function routeScopeConflicts({ occupancy, serviceId, service, route, target }) {
+  if (!route.length) return [];
+  const targetDate = String(target.date).split('T')[0];
+  const anchorDateStr = service.scheduled_date
+    ? String(service.scheduled_date instanceof Date
+        ? service.scheduled_date.toISOString()
+        : service.scheduled_date).slice(0, 10)
+    : null;
+  const isSameDay = targetDate === anchorDateStr;
+  const anchorStartMin = hhmmToMinutes(toHHMM(service.window_start));
+  const targetStartMin = hhmmToMinutes(target.window.start);
+  const siblingDelta = (isSameDay && anchorStartMin != null && targetStartMin != null)
+    ? targetStartMin - anchorStartMin
+    : 0;
+  const sweptIds = [...new Set([String(serviceId), ...route.map((j) => String(j.id))])];
+
+  const windows = route.map((job) => {
+    if (isSameDay) {
+      const startMin = hhmmToMinutes(toHHMM(job.window_start));
+      const endMin = hhmmToMinutes(toHHMM(job.window_end));
+      return (startMin != null && endMin != null)
+        ? { start: minutesToHHMM(startMin + siblingDelta), end: minutesToHHMM(endMin + siblingDelta) }
+        : target.window;
+    }
+    const start = toHHMM(job.window_start);
+    const end = toHHMM(job.window_end);
+    // A day-move row with a start but NO stored end lands with a null end,
+    // and commit runs no conflict gate for it at all: rebooker.reschedule
+    // computes `windowEnd = win.end || service.window_end` (both null here)
+    // and both occupancy checks sit behind `if (updates.window_start &&
+    // windowEnd)`. So there is nothing for this advisory to pre-warn — it
+    // cannot SLOT_TAKEN, and telling the dispatcher "the schedule will
+    // block this move" would be a false positive. Modeled as no landing
+    // deliberately; do NOT "fix" this into a derived span without first
+    // fixing the gate it is mirroring. That gate skip is a real latent
+    // double-booking hole, but it is PRE-EXISTING on main and reaches every
+    // reschedule caller (customer links, dispatch board, series shifts) —
+    // out of scope for a warn-only advisory, tracked for its own lane.
+    // (Same-day is different: commit's windowless-mover fallback hands the
+    // row `target.window`, a real span, which the branch above returns.)
+    return (start && end) ? { start, end } : null;
+  });
+  // Member-vs-member collisions: simulate commit()'s own sweep. commit
+  // probes each member's target against every OTHER member's row — it
+  // excludes only the row it is moving — so a not-yet-processed member
+  // still occupies its CURRENT window and an already-processed one
+  // occupies its LANDED window. Walking that same order is the only way
+  // to see the shapes a projection-only comparison misses (codex #3375
+  // P1): with a manual route_order that inverts time order, tail-first no
+  // longer implies "vacated first", and a sibling can land on the
+  // ANCHOR's still-current row while their two landings never overlap
+  // each other. It also subsumes the projected-landing cases — a
+  // same-day WINDOWLESS mover takes `target.window` verbatim, and two
+  // siblings sharing a window collide — because whichever is processed
+  // second meets the first at its landed position. These are the shapes
+  // commit() documents as deliberately loud; now they are loud BEFORE the
+  // tap. The reported span is the INTERSECTION: the slice contested.
+  // Mirror the predicate's EFFECTIVE end: window_end is nullable and
+  // occupancy.js COALESCEs it to window_start + estimated_duration_minutes
+  // (60 default). Treating a null end as "windowless" would drop a row the
+  // predicate says is occupied, so a member could land on it unwarned
+  // (codex #3375 P1). Same derivation conflictsForTarget uses.
+  const cur = (row) => {
+    const start = toHHMM(row?.window_start);
+    if (!start) return null;
+    const end = toHHMM(row?.window_end);
+    if (end) return { start, end };
+    const startMin = hhmmToMinutes(start);
+    if (startMin == null) return null;
+    const duration = Number(row.estimated_duration_minutes) > 0
+      ? Number(row.estimated_duration_minutes)
+      : 60;
+    return { start, end: minutesToHHMM(startMin + duration) };
+  };
+  const members = [
+    { id: String(serviceId), current: cur(service), landing: target.window },
+    ...route.map((job, i) => ({ id: String(job.id), current: cur(job), landing: windows[i] })),
+  ];
+  // Same order commit uses: tail-first on a same-day forward push so each
+  // target window is already clear, head-first otherwise.
+  const ordered = (isSameDay && siblingDelta > 0) ? [...members].reverse() : members;
+  const positions = new Map(members.map((m) => [m.id, m.current]));
+  const moved = new Set();
+  const overlapSpans = new Map();
+  for (const m of ordered) {
+    const landing = m.landing;
+    const lStart = landing ? hhmmToMinutes(landing.start) : null;
+    const lEnd = landing ? hhmmToMinutes(landing.end) : null;
+    if (lStart != null && lEnd != null) {
+      for (const other of members) {
+        if (other.id === m.id) continue;
+        // On a DAY move a not-yet-moved member is still sitting on the old
+        // date, which a target-date probe cannot match at all.
+        if (!moved.has(other.id) && !isSameDay) continue;
+        const pos = positions.get(other.id);
+        if (!pos) continue; // windowless rows are inert to the predicate
+        const pStart = hhmmToMinutes(pos.start);
+        const pEnd = hhmmToMinutes(pos.end);
+        if (pStart == null || pEnd == null) continue;
+        // Canonical half-open predicate (occupancy.js: window_start <
+        // probeEnd AND effective_end > probeStart) — not key equality,
+        // which would miss 14:00-15:00 against 14:30-15:30.
+        if (!(pStart < lEnd && pEnd > lStart)) continue;
+        const start = minutesToHHMM(Math.max(pStart, lStart));
+        const end = minutesToHHMM(Math.min(pEnd, lEnd));
+        overlapSpans.set(`${start}|${end}`, { start, end });
+      }
+    }
+    positions.set(m.id, landing);
+    moved.add(m.id);
+  }
+  const selfCollisions = [...overlapSpans.values()].map((w) => ({
+    id: `route-collision:${w.start}|${w.end}`,
+    windowStart: w.start,
+    windowEnd: w.end,
+    customerName: null,
+    serviceType: null,
+    isHold: false,
+    isRouteSibling: false,
+    // The sheets render dedicated copy: this is two of THIS route's own
+    // stops, not someone else's booking.
+    isRouteSelfCollision: true,
+  }));
+
+  const anchorKey = `${target.window.start}|${target.window.end}`;
+  // One external probe per DISTINCT landing window — the anchor's own
+  // window is already covered by the anchor probe.
+  const distinctByKey = new Map();
+  for (const w of windows) {
+    if (!w) continue;
+    const key = `${w.start}|${w.end}`;
+    if (key !== anchorKey && !distinctByKey.has(key)) distinctByKey.set(key, w);
+  }
+  const distinct = [...distinctByKey.values()];
+  const probed = distinct.map((w) => conflictsForTarget(
+    occupancy, serviceId, targetDate, w, { excludeServiceIds: sweptIds },
+  ));
+  const byId = new Map();
+  for (const conflict of probed.flat()) {
+    if (!byId.has(conflict.id)) byId.set(conflict.id, conflict);
+  }
+  // Self-collisions first: they're certain, where a probe result can go
+  // stale between here and the tap.
+  return [...selfCollisions, ...byId.values()].slice(0, TARGET_CONFLICT_LIMIT);
+}
+
+/**
+ * Advisory overlap check for a sheet-picked target (the admin sheet's
+ * custom time re-checks on every date/hour change). Never blocks anything —
+ * commit's locked probe is the enforcer.
+ */
+async function checkTarget({ serviceId, target, caller = null }) {
+  if (!target?.date || !target.window?.start || !target.window?.end) {
+    return { ok: false, reason: 'bad_target' };
+  }
+  const service = await db('scheduled_services')
+    .where({ id: serviceId })
+    // window_end too: the route-scope simulation needs the anchor's CURRENT
+    // occupied span, not just its start — a sibling can land on the row the
+    // anchor has not vacated yet.
+    .first('id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
+      'estimated_duration_minutes', 'route_order');
+  if (!service) return { ok: false, reason: 'not_found' };
+  // Route siblings flagged (not excluded) so one response serves both
+  // scopes — the sheet filters by its live scope toggle without refetching.
+  const route = await remainingRouteJobs(service.technician_id, etDateString(), serviceId, service);
+  const targetDate = String(target.date).split('T')[0];
+  // Fail-open exactly as before: a snapshot failure hides the badges, it
+  // never blocks the sheet.
+  let occupancy = EMPTY_OCCUPANCY;
+  try {
+    occupancy = await loadOccupancy({
+      dateFrom: targetDate, dateTo: targetDate, nameScope: nameScopeFor(caller, service),
+    });
+  } catch (err) {
+    logger.info(`[rain-out] occupancy snapshot failed for ${serviceId} ${targetDate}: ${err.message}`);
+  }
+  const conflicts = conflictsForTarget(occupancy, serviceId, targetDate, target.window, {
+    routeSiblingIds: new Set(route.map((j) => String(j.id))),
+  });
+  // Returned alongside (not merged): the sheet shows these only while the
+  // scope toggle is on "this + rest of route", the one case commit moves
+  // them. Best-effort — a probe failure degrades to the anchor-only
+  // warning rather than blocking the sheet.
+  let routeConflicts = [];
+  try {
+    routeConflicts = routeScopeConflicts({ occupancy, serviceId, service, route, target });
+  } catch (err) {
+    logger.info(`[rain-out] route-scope conflict probe failed for ${serviceId}: ${err.message}`);
+  }
+  return { ok: true, conflicts, routeConflicts };
+}
+
 /**
  * Everything the tech sheet needs in one fetch: same-day windows,
  * route-scored day options with rain badges, the remaining-route count
  * for the scope toggle, and today's outlook for the header.
  */
-async function getOptions(serviceId) {
+async function getOptions(serviceId, { caller = null } = {}) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
 
@@ -658,6 +1000,55 @@ async function getOptions(serviceId) {
   });
 
   const route = await remainingRouteJobs(service.technician_id, todayStr, serviceId, service);
+
+  // Overlap advisory on the same-day presets: +2h/+4h are pure clock
+  // offsets with no occupancy input, so they can land on a booked stop.
+  // Day options skip the ANCHOR probe — findRescheduleOptions already
+  // filters its candidates against the same predicate (rebooker.js
+  // candidate clash check), so the anchor's own window arrives
+  // conflict-free — but that check only ever saw the anchor, so they still
+  // need the route-scope probe below. Route siblings are flagged, not
+  // dropped — the sheet filters by its scope toggle (a route-scope
+  // same-day push shifts them too). Best-effort: a probe failure renders
+  // the pill without a badge, never blocks the sheet (same fail-open
+  // posture as the rain badges).
+  const routeSiblingIds = new Set(route.map((j) => String(j.id)));
+  // ONE snapshot covering every date this payload annotates — today's
+  // presets plus the day options — instead of a query per option per route
+  // stop (codex #3375 P1). Fail-open in one place: no snapshot, no badges.
+  const annotatedDates = [todayStr, ...days.map((d) => d.date)].filter(Boolean).sort();
+  let occupancy = EMPTY_OCCUPANCY;
+  try {
+    occupancy = await loadOccupancy({
+      dateFrom: annotatedDates[0],
+      dateTo: annotatedDates[annotatedDates.length - 1],
+      nameScope: nameScopeFor(caller, service),
+    });
+  } catch (err) {
+    logger.info(`[rain-out] occupancy snapshot failed for ${serviceId}: ${err.message}`);
+  }
+  for (const opt of sameDay) {
+    opt.conflicts = conflictsForTarget(occupancy, serviceId, opt.date, opt.window, { routeSiblingIds });
+    // What the shifted rest-of-route would land on — shown only while the
+    // sheet's scope toggle is on "rest of route".
+    opt.routeConflicts = routeScopeConflicts({
+      occupancy, serviceId, service, route, target: { date: opt.date, window: opt.window },
+    });
+  }
+
+  // Day options need the route-scope probe too (codex #3375 P1): the
+  // rebooker's candidate filter cleared the ANCHOR's window on that date
+  // and nothing else, but a route-scope day move carries every remaining
+  // stop onto the same date keeping its own window — and that date is a
+  // different day's schedule the candidate check never looked at. Without
+  // this the tech picks a "clean" Thursday, commit moves and texts the
+  // early stops, then SLOT_TAKENs on the sibling. Probed concurrently:
+  // one batch per option instead of days × route round-trips.
+  for (const opt of days) {
+    opt.routeConflicts = routeScopeConflicts({
+      occupancy, serviceId, service, route, target: { date: opt.date, window: opt.window },
+    });
+  }
 
   // Custom-reason availability for the sheet: the option renders only when
   // the gate is on AND the template row is live — a missing/disabled row
@@ -1445,10 +1836,12 @@ module.exports = {
   getOptions,
   commit,
   previewCustomSms,
+  checkTarget,
   _test: {
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
     EXTRA_REASON_LEADS, isValidReason, sanitizeCustomerNote,
     CUSTOM_REASON, CUSTOM_TEMPLATE_KEY, customLinkClause, renderCustomMovedBody,
+    conflictsForTarget,
   },
 };
