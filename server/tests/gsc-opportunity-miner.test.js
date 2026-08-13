@@ -2034,7 +2034,7 @@ describe('listicle_family scoring + action mapping', () => {
     // race the transition nor observe it halfway.
     // …with the city-service target fence BETWEEN the family revalidation
     // and the upserts, under the same advisory lock (local_gap revival).
-    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,1800}_revalidateFamilyBatch\(trx, allOpportunities, \{ lockEvenIfEmpty: sweepWillRun \|\| localGapSweepWillRun \}\)[\s\S]{0,400}_revalidateCityServiceBatch\(trx, familyChecked, \{ frozenKeys: cityServiceFrozenKeys \}\)[\s\S]{0,100}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1200}_sweepStaleFamilyRows\([\s\S]{0,300}familyExemptions[\s\S]{0,20}\)/);
+    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,1800}_revalidateFamilyBatch\(trx, allOpportunities, \{ lockEvenIfEmpty: sweepWillRun \|\| localGapSweepWillRun \}\)[\s\S]{0,900}_revalidateCityServiceBatch\(trx, familyChecked, \{ frozenKeys: cityServiceFrozenKeys, collectFrozenTargets: sweepFrozenTargets \}\)[\s\S]{0,300}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1200}_sweepStaleFamilyRows\([\s\S]{0,300}familyExemptions[\s\S]{0,20}\)/);
     expect(src).toMatch(/\.forUpdate\(\)/);
     // Non-family conflicts re-read INSIDE the transaction (audit r24) —
     // the pre-mine fence query alone left a producer race window.
@@ -2991,5 +2991,39 @@ describe('inventory truth + money-family exclusion + full twin merge (round-9 cl
     // The twin's blocked topic survives — the merged brief covers wasp
     // phrasings, so the FAQ mandate must strip.
     expect(out[0].signal_metadata.specialty_topic).toBe('wasp');
+  });
+});
+
+describe('in-lock frozen targets reach the sweep (round-12 cloud P1)', () => {
+  test('the fence reports a target frozen mid-mine into the caller set', async () => {
+    const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+    const { cityServiceTargetKey } = require('../services/seo/gsc-opportunity-miner')._internals;
+    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::q', service: 'termite', city: 'sarasota', status: 'done', bucket: 'no_content_yet', query: 'q' }];
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        select: jest.fn(() => Promise.resolve(chain._locked ? inflight : [])),
+      };
+      return chain;
+    });
+    const miner = new GscOpportunityMiner();
+    const collected = new Set();
+    await miner._revalidateCityServiceBatch(trx, [{
+      bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::termite::sarasota::_',
+      service: 'termite', city: 'sarasota', score: 56, signal_metadata: {},
+    }], { collectFrozenTargets: collected });
+    // The pre-transaction snapshot never saw this done row — the fence
+    // did, under the lock, and the sweep must too.
+    expect(collected.has(cityServiceTargetKey('termite', 'sarasota'))).toBe(true);
+  });
+
+  test('mineAll unions the fence discoveries into the sweep set', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    expect(src).toMatch(/const sweepFrozenTargets = new Set\(cityServiceFrozenTargets\)/);
+    expect(src).toMatch(/collectFrozenTargets: sweepFrozenTargets/);
+    expect(src).toMatch(/_sweepStaleLocalGapRows\(\n\s*\(buckets\.local_gap \|\| \[\]\),\n\s*sweepFrozenTargets,/);
   });
 });

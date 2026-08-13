@@ -1910,7 +1910,11 @@ class GscOpportunityMiner {
         // City-service targets recheck under the SAME advisory lock (held
         // for the rest of the transaction) — one in-flight row per
         // (service, city) target across buckets and across mines.
-        const revalidated = await this._revalidateCityServiceBatch(trx, familyChecked, { frozenKeys: cityServiceFrozenKeys });
+        // The sweep's frozen-target set starts from the pre-transaction
+        // snapshot and is EXTENDED by whatever the fence discovers under
+        // the lock — a target frozen mid-mine reaches the sweep too.
+        const sweepFrozenTargets = new Set(cityServiceFrozenTargets);
+        const revalidated = await this._revalidateCityServiceBatch(trx, familyChecked, { frozenKeys: cityServiceFrozenKeys, collectFrozenTargets: sweepFrozenTargets });
         persisted = await this.persistAll(revalidated, trx);
         // Family-lane sweep ONLY after the upserts land, only when the
         // lane actually ran (gates on, no miner error — an empty bucket
@@ -1977,7 +1981,7 @@ class GscOpportunityMiner {
             // MINE no longer emitted.
             await this._sweepStaleLocalGapRows(
               (buckets.local_gap || []),
-              cityServiceFrozenTargets,
+              sweepFrozenTargets,
               trx
             );
           }
@@ -3903,7 +3907,7 @@ class GscOpportunityMiner {
   // different key. Deferral self-heals: a superseded PENDING twin is
   // retired by the recovered-query sweep, freeing the target for the next
   // mine; claimed/pending_review twins free it when their run completes.
-  async _revalidateCityServiceBatch(trx, opportunities = [], { frozenKeys = new Set() } = {}) {
+  async _revalidateCityServiceBatch(trx, opportunities = [], { frozenKeys = new Set(), collectFrozenTargets = null } = {}) {
     const CS = 'create_or_refresh_city_service_page';
     if (!opportunities.some((o) => o.action_type === CS)) return opportunities;
     // RECENT done rows ride along as TARGET-level fences (rounds 6-7):
@@ -3959,6 +3963,11 @@ class GscOpportunityMiner {
       const key = cityServiceTargetKey(r.service, r.city);
       if (!occupied.has(key)) occupied.set(key, []);
       occupied.get(key).push(r);
+      // Share the IN-LOCK frozen-target knowledge with the caller (cloud
+      // P1): the pre-transaction snapshot cannot see a target completed
+      // or human-dismissed since it was read, and the sweep must not
+      // leave that target's pending twin claimable.
+      if (collectFrozenTargets && isFrozenRow(r)) collectFrozenTargets.add(key);
     }
     let deferred = 0;
     const supersede = [];
