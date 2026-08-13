@@ -383,12 +383,27 @@ async function reserve({ customerId, purchaseId, slotId }) {
       estimateId: estimate.id,
       slotId,
     });
-    await db('one_tap_purchases').where({ id: purchase.id }).update({
-      scheduled_service_id: scheduledServiceId,
-      slot_id: String(slotId),
-      status: 'reserved',
-      updated_at: db.fn.now(),
-    });
+    // CAS on the still-open states (P1): a concurrent re-init can void this
+    // purchase between the unlocked read above and here — a blind id-keyed
+    // update would revive the voided row as reserved/confirmable. When the
+    // CAS loses, release the hold we just created and bounce the client.
+    const reserved = await db('one_tap_purchases')
+      .where({ id: purchase.id })
+      .whereIn('status', ['initiated', 'reserved'])
+      .update({
+        scheduled_service_id: scheduledServiceId,
+        slot_id: String(slotId),
+        status: 'reserved',
+        updated_at: db.fn.now(),
+      });
+    if (!reserved) {
+      try {
+        await slotReservation.releaseReservation({ scheduledServiceId, estimateId: estimate.id });
+      } catch (releaseErr) {
+        logger.warn(`[one-tap-purchase] lost-CAS hold release failed (code=${releaseErr?.code || 'none'})`);
+      }
+      throw httpError(409, OFFER_CHANGED);
+    }
     return { scheduledServiceId, expiresAt, holdMinutes: HOLD_MINUTES };
   } catch (err) {
     if (err.code === 'INVALID_SLOT_ID') throw httpError(400, 'invalid slotId format');
@@ -415,12 +430,22 @@ async function release({ customerId, purchaseId }) {
     });
   }
   if (purchase.status === 'reserved') {
-    await db('one_tap_purchases').where({ id: purchase.id }).update({
-      status: 'initiated',
-      scheduled_service_id: null,
-      slot_id: null,
-      updated_at: db.fn.now(),
-    });
+    // CAS on the snapshot's state AND hold identity (P1): if confirm commits
+    // while releaseReservation above is in flight, a blind id-keyed update
+    // would knock the completed ledger row back to initiated and orphan the
+    // committed visit's linkage. A lost CAS is fine — the row moved on.
+    await db('one_tap_purchases')
+      .where({
+        id: purchase.id,
+        status: 'reserved',
+        scheduled_service_id: purchase.scheduled_service_id,
+      })
+      .update({
+        status: 'initiated',
+        scheduled_service_id: null,
+        slot_id: null,
+        updated_at: db.fn.now(),
+      });
   }
   return { released: true };
 }
@@ -486,11 +511,17 @@ async function voidPurchase(purchase) {
       logger.warn(`[one-tap-purchase] void-time hold release failed (code=${err?.code || 'none'})`);
     }
   }
-  await db('one_tap_purchases').where({ id: purchase.id }).update({
-    status: 'voided',
-    scheduled_service_id: null,
-    updated_at: db.fn.now(),
-  }).catch(() => {});
+  // Same CAS discipline as release: only a still-open row may be voided —
+  // a purchase that completed since this snapshot keeps its committed state.
+  await db('one_tap_purchases')
+    .where({ id: purchase.id })
+    .whereIn('status', ['initiated', 'reserved'])
+    .update({
+      status: 'voided',
+      scheduled_service_id: null,
+      updated_at: db.fn.now(),
+    })
+    .catch(() => {});
 }
 
 function formatVisitWhen(firstVisit) {
