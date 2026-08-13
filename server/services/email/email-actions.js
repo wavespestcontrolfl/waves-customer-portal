@@ -51,6 +51,15 @@ function parseExtractedAddress(raw) {
   if (!text) return { line1: null, city: null, state: null, zip: null };
   const zip = (text.match(/\b\d{5}\b/) || [null])[0];
   const parts = text.split(',').map((p) => p.trim()).filter(Boolean);
+  // A unit-FIRST classifier address ("Unit 7, 123 Main St, Bradenton…")
+  // put the designator in parts[0] — line1 became "Unit 7", the street was
+  // misread as the city, and readiness asked for an address the customer
+  // had already supplied (codex GH r57 P2). Swap so the street leads;
+  // the designator folds back into line1 exactly like a trailing one.
+  if (parts.length > 1 && ADDRESS_UNIT_RE.test(parts[0]) && /^\d/.test(parts[1])) {
+    const unit = parts.shift();
+    parts[0] = `${parts[0]}, ${unit}`;
+  }
   const line1Parts = [parts[0] || text];
   const rest = parts.slice(1);
   while (rest.length && (ADDRESS_UNIT_RE.test(rest[0]) || /^#?\d+[A-Za-z]?$/.test(rest[0]))) {

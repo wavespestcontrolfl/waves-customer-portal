@@ -139,8 +139,18 @@ const COMMERCIAL_TEXT_RE = new RegExp(
     // Deliberately requires COMPLEX-WIDE or MANAGEMENT phrasing: a
     // resident of an HOA community ("my HOA requires quarterly service",
     // "we live in an HOA") is a residential customer — the schema's own
-    // hoa_community_flag vs hoa_common_area_service distinction.
-    '(?:apartment|condo\\w*|multi.?family)\\s+(?:complex|community|building)\\b',
+    // hoa_community_flag vs hoa_common_area_service distinction. The bare
+    // premises noun is NOT enough: "I live in an apartment complex and
+    // need pest control inside my unit" is unit-resident prose, and
+    // matching it red-laned the exact residential-unit customer this lane
+    // exists to serve (codex GH r57 P2) — so the noun needs service-wide
+    // context ("the entire complex", "all units") or a service-for-the-
+    // complex phrasing; management verbs stay on their own alternative
+    // below, and 'my' is deliberately absent from the possessives here
+    // ("my apartment complex" is how a resident names where they live).
+    '(?:entire|whole)\\s+(?:apartment\\s+|condo\\w*\\s+|multi.?family\\s+)?(?:complex|community|building)\\b',
+    'all\\s+(?:the\\s+)?units\\b',
+    '(?:service|treat\\w*|spray\\w*|quote|pest\\s+control)\\s+for\\s+(?:an?\\s+|the\\s+|our\\s+)(?:apartment|condo\\w*|multi.?family)\\s+(?:complex|community|building)\\b',
     '\\b(?:i|we)\\s+(?:manage|own|operate|run)\\s+(?:an?\\s+|the\\s+|our\\s+)?(?:apartment|condo\\w*|multi.?family|complex|building)\\b',
     '(?:hoa|association)\\s+common\\s*areas?',
     'common\\s*areas?\\s+(?:of|for|at)\\s+(?:the\\s+|our\\s+)?(?:hoa|association|complex|community|building)',

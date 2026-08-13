@@ -105,7 +105,14 @@ function hasSubpremiseSignal({ address, extraction }) {
   // nonempty value counts; the free-text lines still need the regex.
   const lines = [extractionAddress?.raw_text, extractionAddress?.street_line_1,
     extractionAddress?.raw, extractionAddress?.line1];
-  if (String(extractionAddress?.street_line_2 || '').trim()) return true;
+  // …but the dwelling-only rule applies to line2 as well: a mobile-home/RV
+  // tenant's "Lot 5" or "Space 12" identifies a whole structure on leased
+  // land, and counting it promoted the record to residential_unit and
+  // cleared its valid county area and lot (codex GH r57 P2 — same class as
+  // the r30 address-suffix rule). Any OTHER nonempty line2 ("Apt 4", "7B",
+  // "#12") is a unit line by construction.
+  const line2 = String(extractionAddress?.street_line_2 || '').trim();
+  if (line2 && !/^(?:lot|spc|space)\b/i.test(line2)) return true;
   // Free-text lines carry localities too (raw_text especially).
   return lines.some((line) => line && hasDwellingSubpremise(line));
 }

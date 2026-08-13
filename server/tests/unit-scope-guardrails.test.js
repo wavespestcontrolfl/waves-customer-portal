@@ -1553,3 +1553,28 @@ describe('r56 — city-only partials keep unit scope; number-completion is not a
     expect(addressCompletesGatheredStreet('62nd Avenue East', '62nd Avenue East')).toBe(false);
   });
 });
+
+describe('GH r57 — resident prose, lot-only line2, unit-first email parse', () => {
+  const { _private: shadowPrivate } = require('../services/estimator-engine/property-facts-shadow');
+
+  test('unit-resident prose naming the complex is not commercial intent', () => {
+    expect(commercialTextSignal('I live in an apartment complex and need pest control inside my unit')).toBe(false);
+    expect(commercialTextSignal('roaches in my apartment building, unit 4 only')).toBe(false);
+    // Whole-property and management phrasings still trip it.
+    expect(commercialTextSignal('we need the entire complex treated')).toBe(true);
+    expect(commercialTextSignal('quote for all units please')).toBe(true);
+    expect(commercialTextSignal('pest control for an apartment complex')).toBe(true);
+    expect(commercialTextSignal('I manage an apartment complex')).toBe(true);
+  });
+
+  test('a lot/space line2 keeps whole-structure scope; a unit line2 does not', () => {
+    const withLine2 = (v) => shadowPrivate.hasSubpremiseSignal({
+      address: null,
+      extraction: { property: { service_address: { street_line_1: '100 Park Rd', street_line_2: v } } },
+    });
+    expect(withLine2('Lot 5')).toBe(false);
+    expect(withLine2('Space 12')).toBe(false);
+    expect(withLine2('Apt 4')).toBe(true);
+    expect(withLine2('7B')).toBe(true);
+  });
+});

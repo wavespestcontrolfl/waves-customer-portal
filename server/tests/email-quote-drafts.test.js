@@ -127,6 +127,17 @@ describe('parseExtractedAddress', () => {
     expect(parseExtractedAddress('')).toEqual({ line1: null, city: null, state: null, zip: null });
   });
 
+  test('a unit-first classifier address leads with its street', () => {
+    // "Unit 7" as line1 misread the street as the city and readiness asked
+    // for an address the customer had already supplied (codex GH r57 P2).
+    expect(parseExtractedAddress('Unit 7, 123 Main St, Bradenton, FL 34201')).toEqual({
+      line1: '123 Main St, Unit 7', city: 'Bradenton', state: 'FL', zip: '34201',
+    });
+    // A numberless street never swaps — line1 stays the designator and the
+    // address-quality gate asks for the street, which is the right recovery.
+    expect(parseExtractedAddress('Unit 7, Bayview Ter, Venice, FL').line1).toBe('Unit 7');
+  });
+
   test('unit designators fold into line1 so the real city survives', () => {
     expect(parseExtractedAddress('123 Main St, Apt 4, Sarasota, FL 34239')).toEqual({
       line1: '123 Main St, Apt 4', city: 'Sarasota', state: 'FL', zip: '34239',
