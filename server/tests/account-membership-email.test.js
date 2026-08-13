@@ -278,7 +278,23 @@ describe('account and membership email sender', () => {
       statusLabel: 'Acknowledged',
     });
 
-    expect(result).toMatchObject({ skipped: true, reason: 'service_report_owner_follow_up' });
+    expect(result).toMatchObject({ skipped: true, reason: 'cta_owner_follow_up' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a portal-home recommendation request never sends a lifecycle email (owner-follow-up only)', async () => {
+    setDbQueues({ customers: [chain({ first: customer() })] });
+
+    const result = await AccountMembershipEmail.sendRequestUpdated({
+      customerId: 'cust-1',
+      request: {
+        id: 'req-portal', subject: 'Add Tree & Shrub Care — requested from portal home',
+        category: 'add_service', source: 'portal_home', status: 'acknowledged',
+      },
+      statusLabel: 'Acknowledged',
+    });
+
+    expect(result).toMatchObject({ skipped: true, reason: 'cta_owner_follow_up' });
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 

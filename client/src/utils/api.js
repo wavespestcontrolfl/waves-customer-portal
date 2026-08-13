@@ -563,6 +563,19 @@ export class ApiClient {
     return this.request('/property-score');
   }
 
+  // ---- Portal home recommendations (GATE_PROPERTY_RECOMMENDATIONS; gate-off
+  // answers available:false) ----
+  getPropertyRecommendations() {
+    return this.request('/property-recommendations');
+  }
+
+  requestPropertyRecommendation(payload) {
+    return this.request('/property-recommendations/request', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
   getLawnHealthPhotos(customerId, assessmentId) {
     return this.request(`/lawn-health/${customerId}/photos/${assessmentId}`);
   }
