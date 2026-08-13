@@ -2842,7 +2842,11 @@ describe('pages-leg freshness + mappable winners (round-6 cloud P1s)', () => {
     // the map nonempty while a new hub page is missing from the snapshot.
     expect(lg).toMatch(/pagesMax < queriesMax - graceMs/);
     expect(lg).toMatch(/pagesMax < Date\.now\(\) - absMs/);
-    expect(lg).toMatch(/gsc_pages hub coverage is stale relative to gsc_queries/);
+    // …and the guard is TWO-SIDED: a dead query sync with fresh pages
+    // must fail too, or an empty mine sweeps valid rows as signal-gone.
+    expect(lg).toMatch(/if \(!pagesMax \|\| !queriesMax/);
+    expect(lg).toMatch(/queriesMax < Date\.now\(\) - absMs/);
+    expect(lg).toMatch(/hub snapshot is missing or stale/);
     // Same knobs as the query-page-map freshness mechanism — no new ones.
     expect(lg).toMatch(/QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS/);
     expect(lg).toMatch(/MAP_ABSOLUTE_STALENESS_DAYS/);

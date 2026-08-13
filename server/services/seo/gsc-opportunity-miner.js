@@ -2601,10 +2601,15 @@ class GscOpportunityMiner {
     const absMs = GscOpportunityMiner.MAP_ABSOLUTE_STALENESS_DAYS * 86400_000;
     const pagesMax = fr.pages_max ? new Date(fr.pages_max).getTime() : 0;
     const queriesMax = fr.queries_max ? new Date(fr.queries_max).getTime() : 0;
-    if (!pagesMax
-      || (queriesMax && pagesMax < queriesMax - graceMs)
-      || pagesMax < Date.now() - absMs) {
-      throw new Error('gsc_pages hub coverage is stale relative to gsc_queries — refusing to judge city-service coverage from an old snapshot');
+    // BOTH legs must be present and inside the absolute bound (cloud P1:
+    // the guard was one-sided — a dead QUERY sync with fresh pages passed
+    // the conditional relative check, mined an empty/incomplete batch,
+    // and the sweep then expired valid pending rows as "signal gone").
+    if (!pagesMax || !queriesMax
+      || pagesMax < queriesMax - graceMs
+      || pagesMax < Date.now() - absMs
+      || queriesMax < Date.now() - absMs) {
+      throw new Error('gsc_pages/gsc_queries hub snapshot is missing or stale — refusing to mine city-service coverage or run its sweep');
     }
 
     // PER-QUERY rows, not pre-aggregated pairs: the classifier label must
