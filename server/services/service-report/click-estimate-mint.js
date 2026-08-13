@@ -94,6 +94,9 @@ async function lockPriorMintLineage(trx, { customerId, serviceKey }) {
     .where({ customer_id: customerId, source: 'service_report_cta' })
     .whereNull('archived_at')
     .whereRaw("estimate_data->'reportCtaMint'->>'serviceKey' = ?", [String(serviceKey || '')])
+    // Newest first, so every positional pick downstream (accepted-history
+    // vs current mint, GitHub P0 on c788026d1) is deterministic.
+    .orderBy('created_at', 'desc')
     .forUpdate()
     .noWait();
 }
@@ -280,10 +283,20 @@ async function mintReportClickEstimate(trx, {
   // tap arrive deduped=false with the offer unchanged, and archiving the
   // live estimate the customer already holds would kill their token
   // mid-consideration.
-  let fingerprintMatch = liveMints.find((row) => {
+  const fingerprintMatches = liveMints.filter((row) => {
     const mark = reportCtaMintOf(row);
     return mark?.fingerprint && crossSell?.fingerprint && mark.fingerprint === crossSell.fingerprint;
   });
+  // Prefer the live UNACCEPTED match (GitHub P0 on c788026d1): after a
+  // service is accepted, canceled, and minted again, the lineage holds
+  // BOTH the historical accepted row and the current live mint under the
+  // same fingerprint. An unordered find() could select the accepted one —
+  // and discarding it as canceled history below would then send the mint
+  // path off to archive the CURRENT live row and issue another, breaking
+  // the token the customer may already have open. Among accepted rows the
+  // lineage query's newest-first order keeps the latest acceptance.
+  let fingerprintMatch = fingerprintMatches.find((row) => row.status !== 'accepted')
+    || fingerprintMatches[0];
 
   // Ownership revalidation INSIDE the transaction, BEFORE any reuse
   // (in-hook audits r7+r8 P0; hoisted above the accepted fast path in the

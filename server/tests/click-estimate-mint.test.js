@@ -39,6 +39,7 @@ function fakeTrx({ priorEstimateRows = [], customerRow = CUSTOMER } = {}) {
       whereNull() { return q; },
       whereNot() { return q; },
       whereRaw() { return q; },
+      orderBy() { return q; },
       forUpdate() { q._forUpdate = true; return q; },
       noWait() { q._noWait = true; ops.noWaitLocks.push({ table, forUpdate: !!q._forUpdate }); return q; },
       // Awaiting the bare chain (the prior-mint lineage query) resolves the
@@ -776,6 +777,25 @@ describe('mintReportClickEstimate', () => {
     // The accepted row itself is never archived.
     const archive = ops.updates.find((u) => u.table === 'estimates' && u.patch.archived_at);
     expect(archive).toBeUndefined();
+  });
+
+  test('accepted HISTORY never shadows the current live mint — same fingerprint, both in lineage, the live row is reused (GitHub P0 on c788026d1)', async () => {
+    // accept → cancel → re-mint leaves BOTH rows under one fingerprint.
+    // The accepted row listed FIRST is the order that broke: an unordered
+    // find() picked it, the not-held guard discarded it as history, and
+    // the mint path archived the CURRENT live row — killing the token the
+    // customer may have open. The unaccepted live row must win.
+    const acceptedHistory = priorMint({ id: 'est-history', status: 'accepted' });
+    const currentLive = priorMint({ id: 'est-current', token: 'tok-current' });
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [acceptedHistory, currentLive] });
+    const out = await mintReportClickEstimate(trx, baseArgs({
+      deduped: false,
+      requestRow: { id: 'req-3', pricing_revision: JSON.stringify({ mintedEstimate: { id: 'est-current', token: 'tok-current' } }) },
+    }));
+    expect(out.reused).toBe(true);
+    expect(out.estimateId).toBe('est-current');
+    expect(ops.inserts).toHaveLength(0);
+    expect(ops.updates.filter((u) => u.table === 'estimates')).toHaveLength(0);
   });
 
   test('the turf-profile revalidation read takes the row lock — the admin turf PUT writes without the customer lock (GitHub round P1)', async () => {
