@@ -397,6 +397,25 @@ async function runAutoDispatch(opts = {}) {
             continue;
           }
 
+          // ROUTE-TIERS: re-check the reminder freeze right before applying —
+          // pass 1 read it before a potentially long scoring pass, and the
+          // 72h reminder must stay the HARD gate at apply time too. The
+          // residual race after this point is closed by the rebooker's atomic
+          // `expect` (it pins the ORIGINAL scheduled_date; a visit whose date
+          // slipped near enough for a 72h reminder to fire has necessarily
+          // changed date and 409s). Fail closed on an unreadable re-check.
+          if (tiersOn) {
+            const applyFreeze = await routeTiers.loadReminderFreeze(db, [pm.service.id]);
+            if (applyFreeze.failed) {
+              await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: 'REMINDER_STATUS_UNKNOWN', reason_description: 'Reminder-sent status unreadable at apply time — frozen (fail closed)', ...pm.result.audit });
+              continue;
+            }
+            if (applyFreeze.frozen.has(pm.service.id)) {
+              await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: 'REMINDER_SENT_FROZEN', reason_description: '72-hour reminder was sent during the run — visit is frozen', ...pm.result.audit });
+              continue;
+            }
+          }
+
           fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
           if (fresh.kind !== 'move') {
             // Re-scoring against the live schedule no longer clears the bar (an
