@@ -843,8 +843,12 @@ async function executeTool(name, input = {}, ctx = {}) {
       // below already recognised the idiom, but nothing could ever hand it one:
       // clauses only exist where STOP matches, so the branch was unreachable and
       // the plainest total opt-out there is recorded nothing.
+      // "take my number/phone number/info off" is the same verb as "take me
+      // off" with the thing being removed named in the middle — a short bounded
+      // gap keeps it one clause and never crosses punctuation.
       const STOP = '(?:stop|no more|no longer|never|don\'?t|do not|quit|cease|remove'
-        + '|unsubscribe|opt(?:\\s+(?:me|us))?\\s+out|take (?:me|us) off|leave (?:me|us) alone)';
+        + '|unsubscribe|opt(?:\\s+(?:me|us))?\\s+out'
+        + '|take (?:me|us|(?:my|our)[^,;.!?]{0,20}?) off|leave (?:me|us) alone)';
       // The carve-out a caller attaches to a stop: "…except by text", "…only
       // text me". What follows one of these words is a channel they KEPT, and
       // it can sit inside the stop clause or just past its boundary.
@@ -895,7 +899,12 @@ async function executeTool(name, input = {}, ctx = {}) {
       // anymore", "take me off your list". It is NOT total when the same clause
       // scopes it to a non-SMS channel ("don't reach me by email"), which is
       // the inverse mistake: suppressing texts the caller never mentioned.
-      const NON_SMS_CHANNEL = /\b(?:e-?mail|mail|letter|post|call|calls|calling|phone)\b/i;
+      // ⭐ "PHONE NUMBER" IS NOT A CHANNEL. "Remove my phone number from your
+      // list" is the most literal total opt-out a caller can state, and a bare
+      // \bphone\b veto read the word as call-channel scoping and left their
+      // texts running. "Phone" only scopes the stop to CALLS when it is not the
+      // noun-phrase "phone number".
+      const NON_SMS_CHANNEL = /\b(?:e-?mail|mail|letter|post|call|calls|calling|phone(?!\s+number))\b/i;
       // EVERY total-stop pattern is clause-scoped — including the idioms. The
       // unscoped fallback searched the WHOLE instruction, so "do not contact me
       // by email" matched "do not contact" and suppressed texts the caller
@@ -972,6 +981,10 @@ async function executeTool(name, input = {}, ctx = {}) {
           + 'recorded on the lead for a human'
         );
       }
+      // Whether the SMS opt-out actually LANDED — threaded into the lead write
+      // below so the human-facing record can distinguish "already stopped" from
+      // "still needs you". Only a confirmed { ok: true } counts.
+      let smsSuppressionApplied = false;
       if (optOutRequested && callerVerified) {
         try {
           const { recordSuppression } = require('../messaging/validators/suppression');
@@ -994,6 +1007,7 @@ async function executeTool(name, input = {}, ctx = {}) {
             source: 'voice_agent',
             capturedBody: String(input.contact_preference || 'Caller asked not to be contacted (voice agent).').slice(0, 300),
           });
+          smsSuppressionApplied = !!(suppression && suppression.ok);
           if (suppression && suppression.ok) {
             // ⭐ SMS ONLY, AND THE LOG SAYS SO. `messaging_suppression` is
             // phone-keyed: it stops texts, and nothing else. A caller who said
@@ -1029,6 +1043,9 @@ async function executeTool(name, input = {}, ctx = {}) {
         // The caller's OWN number, so the lead lookup can tell "their history"
         // from "an unclaimed lead on somebody else's callback number".
         aniPhone: ctx.from || null,
+        // The lifecycle-customer notification must not tell staff "nothing was
+        // changed" over a suppression that already landed.
+        smsSuppressionApplied,
         toPhone: ctx.to || null,
         callSid: ctx.callSid || null,
         language: ctx.language || null,

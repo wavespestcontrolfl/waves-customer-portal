@@ -372,6 +372,31 @@ describe('existing-customer contact instructions still reach a human', () => {
     assertNoSuppressionWrite();
   });
 
+  // ⭐ THE ALERT TELLS THE TRUTH ABOUT WHAT ALREADY HAPPENED. The agent applies
+  // an explicit verified SMS opt-out itself; telling staff "nothing was
+  // changed" over a suppression that already landed reports a false compliance
+  // state in the exact place they check it.
+  test('when the SMS opt-out already landed, the alert says so — not "nothing was changed"', async () => {
+    await createLeadFromExtraction(
+      { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
+      { phone: CALLER, callSid: 'CA-dnc-applied', smsSuppressionApplied: true },
+    );
+    const [, , body] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(body).toMatch(/ALREADY STOPPED/i);
+    expect(body).not.toMatch(/Nothing was changed automatically/i);
+    expect(body).toMatch(/still needs a human/i); // the email half stays theirs
+  });
+
+  test('when no suppression landed, the alert still says nothing was changed', async () => {
+    await createLeadFromExtraction(
+      { call_summary: 'Asked us to stop contacting them.', do_not_contact_request: true },
+      { phone: CALLER, callSid: 'CA-dnc-unapplied', smsSuppressionApplied: false },
+    );
+    const [, , body] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(body).toMatch(/Nothing was changed automatically/i);
+    expect(body).not.toMatch(/ALREADY STOPPED/i);
+  });
+
   // ⭐ THE ROW IS THE ONLY ARTIFACT, SO IT MUST BEAT THE BELL POLICY. The admin
   // bell policy silences the 'service' category by default when it is on, and
   // its suppression sentinel is TRUTHY (`{ id: null, suppressed: true }`) —
@@ -579,7 +604,14 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     // "leave me alone" was recognised by the total-stop test and could never
     // REACH it — clauses only exist where a stop verb matches, and it was not
     // one. The plainest total opt-out in the list recorded nothing.
-    for (const words of ['remove my number from your system', "don't bother me anymore", 'leave me alone', 'just leave us alone']) {
+    // "remove my PHONE NUMBER" is the same request with one more word — and a
+    // bare \bphone\b veto read that word as call-channel scoping and left the
+    // texts running. "Phone" only scopes a stop to CALLS when it is not the
+    // noun-phrase "phone number".
+    for (const words of [
+      'remove my number from your system', "don't bother me anymore", 'leave me alone', 'just leave us alone',
+      'remove my phone number from your list', 'take my phone number off your list',
+    ]) {
       jest.clearAllMocks();
       await executeTool('capture_lead', {
         call_summary: 'Asked to be left alone.',
@@ -646,6 +678,15 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     await executeTool('capture_lead', {
       call_summary: 'Email opt-out.',
       contact_preference: 'do not contact me by email',
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).not.toHaveBeenCalled();
+  });
+
+  test('"don\'t reach me by phone" is still call-scoped — no SMS suppression', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Phone opt-out.',
+      contact_preference: "don't reach me by phone, text me instead",
       do_not_contact_request: true,
     }, CTX);
     expect(recordSuppression).not.toHaveBeenCalled();

@@ -101,7 +101,19 @@ async function surfaceContactInstructionForCustomer(customer, extracted = {}, op
       'service',
       `${dnc ? '🚫 DO-NOT-CONTACT request' : '📞 Contact preference'} stated on a phone call`,
       [
-        dnc ? 'The caller asked NOT to be contacted. Nothing was changed automatically — review and action it.' : null,
+        // ⭐ THE ALERT TELLS THE TRUTH ABOUT WHAT ALREADY HAPPENED. The voice
+        // agent applies an explicit, verified SMS opt-out itself (the one write
+        // it makes — relay-tools, via recordSuppression); telling staff
+        // "nothing was changed" over a suppression that already landed reports
+        // a false compliance state in the exact place they check it. Everything
+        // BEYOND that write (email, broader preferences) is still theirs.
+        dnc && opts.smsSuppressionApplied
+          ? 'The caller asked NOT to be contacted. Automated TEXTS to their number are ALREADY STOPPED '
+            + '(the voice agent applied the SMS opt-out). Any email or broader preference still needs a human — review and action the rest.'
+          : null,
+        dnc && !opts.smsSuppressionApplied
+          ? 'The caller asked NOT to be contacted. Nothing was changed automatically — review and action it.'
+          : null,
         instruction.preferred_contact_method ? `Preferred method: ${instruction.preferred_contact_method}.` : null,
         instruction.contact_preference ? `In their words: "${instruction.contact_preference}"` : null,
       ].filter(Boolean).join('\n'),
