@@ -213,38 +213,55 @@ async function sendOfficeNotification(database, { subject, description, customer
     logger.error(`[estimate-measurement-review] admin notification threw for request ${requestId}: ${err.message}`);
     return null;
   });
-  // Delivery (or policy suppression) stamps notifiedAt into the request's
-  // pricing_revision — the durable marker the dedupe path checks so a later
-  // customer retry re-arms an UNDELIVERED handoff (codex #3376 P2) without
-  // ever double-ringing a delivered one.
-  const stampDelivered = async () => {
+  // ATOMIC delivery claim (codex #3376 P1: the commit lands before the send,
+  // so a concurrent retry could re-arm between commit and a post-send stamp
+  // and double-ring the office). Claim-before-send: the conditional
+  // jsonb_set only fires where notifiedAt is absent — exactly one caller
+  // wins; losers return silently. If BOTH send attempts then fail, the
+  // claim is cleared (best effort) so a later customer retry re-arms; the
+  // crash window between claim and clear degrades to the loud FAILED-TWICE
+  // log + the office sweep, never to a double bell (one-request/one-bell
+  // contract).
+  let claimed = 0;
+  try {
+    claimed = await database('service_requests')
+      .where({ id: requestId })
+      .whereRaw("COALESCE(pricing_revision->>'notifiedAt', '') = ''")
+      .update({
+        pricing_revision: database.raw(
+          "jsonb_set(COALESCE(pricing_revision, '{}'::jsonb), '{notifiedAt}', to_jsonb(NOW()::text))"
+        ),
+      });
+  } catch (err) {
+    logger.warn(`[estimate-measurement-review] notify claim failed for request ${requestId}: ${err.message} — skipping send (a retry will re-arm)`);
+    return;
+  }
+  if (!claimed) return; // another sender owns delivery
+
+  const clearClaim = async () => {
     try {
       await database('service_requests')
         .where({ id: requestId })
         .update({
-          pricing_revision: database.raw(
-            "jsonb_set(COALESCE(pricing_revision, '{}'::jsonb), '{notifiedAt}', to_jsonb(NOW()::text))"
-          ),
+          pricing_revision: database.raw("COALESCE(pricing_revision, '{}'::jsonb) - 'notifiedAt'"),
         });
     } catch (err) {
-      // Stamp failure just means a future retry re-sends — the notification
-      // itself is idempotent enough for the office (same deep-link).
-      logger.warn(`[estimate-measurement-review] notifiedAt stamp failed for request ${requestId}: ${err.message}`);
+      logger.warn(`[estimate-measurement-review] notify claim clear failed for request ${requestId}: ${err.message}`);
     }
   };
 
   const first = await attempt();
   // suppressed:true is POLICY (internal/demo accounts must not ring the
   // bell), not an outage — terminal success, no retry, no loud error
-  // (codex #3376 final head P3).
+  // (codex #3376 final head P3). The claim stays: suppression IS delivery.
   if (first?.suppressed) {
     logger.info(`[estimate-measurement-review] admin notification suppressed by policy for request ${requestId}`);
-    await stampDelivered();
     return;
   }
-  if (first?.id) { await stampDelivered(); return; }
+  if (first?.id) return;
   const second = await attempt();
-  if (second?.suppressed || second?.id) { await stampDelivered(); return; }
+  if (second?.suppressed || second?.id) return;
+  await clearClaim();
   logger.error(`[estimate-measurement-review] admin notification FAILED TWICE for request ${requestId} — request row stands, office unnotified; customer retries will re-arm the send`);
 }
 

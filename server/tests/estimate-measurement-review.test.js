@@ -63,6 +63,7 @@ function mockDb({ estimate = ESTIMATE_ROW, insertResult, insertError, dupeRow } 
         }),
         where: () => ({
           whereNotIn: () => ({ first: async () => (typeof dupeRow === 'function' ? dupeRow() : dupeRow) }),
+          whereRaw: () => ({ update: async () => 1 }),
           update: async () => 1,
         }),
       };
