@@ -834,8 +834,12 @@ async function executeTool(name, input = {}, ctx = {}) {
       // has. "Never text me again" produced no stop clause at all, so the single
       // clearest withdrawal in the list read as naming no channel and left the
       // texts running.
+      // ⭐ AND "LEAVE ME ALONE" HAS TO GET IN THE DOOR FIRST. The total-stop test
+      // below already recognised the idiom, but nothing could ever hand it one:
+      // clauses only exist where STOP matches, so the branch was unreachable and
+      // the plainest total opt-out there is recorded nothing.
       const STOP = '(?:stop|no more|no longer|never|don\'?t|do not|quit|cease|remove'
-        + '|unsubscribe|opt(?:\\s+(?:me|us))?\\s+out|take me off)';
+        + '|unsubscribe|opt(?:\\s+(?:me|us))?\\s+out|take (?:me|us) off|leave (?:me|us) alone)';
       // The carve-out a caller attaches to a stop: "…except by text", "…only
       // text me". What follows one of these words is a channel they KEPT, and
       // it can sit inside the stop clause or just past its boundary.
@@ -898,7 +902,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       // it stays a real SMS withdrawal — they left email as the only way in.)
       const totalStop = stopClauses.some((c) => (
         (/\b(?:contact|contacting|reach|reaching|bother|bothering|number|list)\b/i.test(c.stopped)
-          || /\b(?:leave me alone|take me off (?:your |the )?list|do not contact)\b/i.test(c.stopped))
+          || /\b(?:leave (?:me|us) alone|take (?:me|us) off (?:your |the )?list|do not contact)\b/i.test(c.stopped))
         && !NON_SMS_CHANNEL.test(c.stopped)
         && !TEXTY.test(c.kept)
       ));

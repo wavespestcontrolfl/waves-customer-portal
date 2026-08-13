@@ -472,8 +472,11 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
   });
 
-  test('"remove my number" and "don\'t bother me anymore" are total stops too', async () => {
-    for (const words of ['remove my number from your system', "don't bother me anymore"]) {
+  test('"remove my number" / "don\'t bother me anymore" / "leave me alone" are total stops too', async () => {
+    // "leave me alone" was recognised by the total-stop test and could never
+    // REACH it — clauses only exist where a stop verb matches, and it was not
+    // one. The plainest total opt-out in the list recorded nothing.
+    for (const words of ['remove my number from your system', "don't bother me anymore", 'leave me alone', 'just leave us alone']) {
       jest.clearAllMocks();
       await executeTool('capture_lead', {
         call_summary: 'Asked to be left alone.',
