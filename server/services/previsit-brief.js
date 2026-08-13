@@ -52,6 +52,9 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { compilePropertyAlerts } = require('./property-alerts');
+// The shared deterministic access-code redactor (context-aggregator's own
+// layer) — re-applied here to EVERY free-text slice at the LLM boundary.
+const { redactAccessCodes } = require('./context-aggregator');
 const { normalizeServiceType, detectServiceCategory } = require('../utils/service-normalizer');
 const { etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
 
@@ -118,6 +121,20 @@ function timestampDay(value) {
   }
 }
 
+// Deep-apply the access-code redactor to every string in the LLM payload.
+// The aggregator already redacts its own slices; this boundary pass also
+// covers strings assembled HERE from raw rows (pet/sensitivity flag
+// details, call summaries, estimate service_interest, since-last lines) so
+// no free-text path can carry a credential into a prompt.
+function redactDeep(value) {
+  if (typeof value === 'string') return redactAccessCodes(value);
+  if (Array.isArray(value)) return value.map(redactDeep);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactDeep(v)]));
+  }
+  return value;
+}
+
 function parseStoredBrief(raw) {
   if (!raw) return null;
   try {
@@ -153,14 +170,23 @@ function shapeHistoryProduct(row) {
 
 // ── Deterministic grounding assembly ────────────────────────────────────────
 
+// Returns { available, last, lastLine, recent }. A query FAILURE is not an
+// empty history: available:false marks the history UNREADABLE so no caller
+// can turn an outage into the false fact "this is a first visit" (the
+// new-customer claim is omitted entirely when history can't be read).
 async function loadRecentServiceRecords(dbh, customerId, serviceType) {
-  const rows = await dbh('service_records')
-    .where({ customer_id: customerId, status: 'completed' })
-    .orderBy('service_date', 'desc')
-    .orderBy('created_at', 'desc')
-    .limit(10)
-    .select('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'started_at', 'pressure_index')
-    .catch(() => []);
+  let rows;
+  try {
+    rows = await dbh('service_records')
+      .where({ customer_id: customerId, status: 'completed' })
+      .orderBy('service_date', 'desc')
+      .orderBy('created_at', 'desc')
+      .limit(10)
+      .select('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'started_at', 'pressure_index');
+  } catch (err) {
+    logger.warn(`[previsit-brief] service history unreadable for customer ${customerId}: ${err.message}`);
+    return { available: false, last: null, lastLine: null, recent: [] };
+  }
   let lastLine = null;
   try {
     const { detectServiceLine } = require('./service-report/service-line-configs');
@@ -171,7 +197,35 @@ async function loadRecentServiceRecords(dbh, customerId, serviceType) {
   } catch {
     lastLine = null;
   }
-  return { last: rows[0] || null, lastLine, recent: rows.slice(0, 5) };
+  return { available: true, last: rows[0] || null, lastLine, recent: rows.slice(0, 5) };
+}
+
+// Catalog vocabulary for the ungrounded-claim scan: every products_catalog
+// name and label target term. Returns null when the catalog is unreadable
+// (the caller fails CLOSED to the deterministic template — an unvalidatable
+// LLM output is treated like a failed one).
+async function loadCatalogVocabulary(dbh) {
+  try {
+    const rows = await dbh('products_catalog').select('name', 'target_pests');
+    const names = new Set();
+    const targets = new Set();
+    for (const row of rows || []) {
+      const name = cleanText(row.name, 120);
+      if (name && name.length >= 4) names.add(name.toLowerCase());
+      let pests = row.target_pests;
+      if (typeof pests === 'string') {
+        try { pests = JSON.parse(pests); } catch { pests = pests.split(','); }
+      }
+      for (const pest of Array.isArray(pests) ? pests : []) {
+        const term = cleanText(pest, 80);
+        if (term && term.length >= 4) targets.add(term.toLowerCase());
+      }
+    }
+    return { names: [...names], targets: [...targets] };
+  } catch (err) {
+    logger.warn(`[previsit-brief] products_catalog vocabulary unreadable: ${err.message}`);
+    return null;
+  }
 }
 
 async function loadProductHistory(dbh, recordIds) {
@@ -383,9 +437,9 @@ async function assembleGrounding(svc, dbh = db) {
     .first()
     .catch(() => null);
 
-  const { last, lastLine, recent } = await loadRecentServiceRecords(dbh, svc.customer_id, svc.service_type);
-  const lastVisitRecord = lastLine || last;
-  const productRows = await loadProductHistory(dbh, recent.map((r) => r.id));
+  const history = await loadRecentServiceRecords(dbh, svc.customer_id, svc.service_type);
+  const lastVisitRecord = history.lastLine || history.last;
+  const productRows = await loadProductHistory(dbh, history.recent.map((r) => r.id));
   const lastVisitProducts = lastVisitRecord
     ? productRows.filter((r) => r.service_record_id === lastVisitRecord.id).map(shapeHistoryProduct)
     : [];
@@ -430,8 +484,13 @@ async function assembleGrounding(svc, dbh = db) {
     pendingEstimate: context?.pendingEstimate || null,
   };
 
-  const genuinelyNew = !last;
+  // First-visit is a POSITIVE claim: it may only be made when history was
+  // actually readable and empty. An outage (available:false) asserts
+  // nothing — no new-customer alert, no first-visit prompt fact.
+  const genuinelyNew = history.available ? !history.last : false;
   const access = buildAccessBlock(prefs, svc, genuinelyNew, normalizedType);
+
+  const catalogVocabulary = await loadCatalogVocabulary(dbh);
 
   // The ONLY facts the LLM may see: already-redacted context slices plus
   // deterministic history/label facts. No access block, no raw
@@ -442,8 +501,12 @@ async function assembleGrounding(svc, dbh = db) {
       serviceType: normalizedType,
       scheduledDate: calendarDay(svc.scheduled_date),
       isRecurring: !!svc.is_recurring,
-      newCustomer: genuinelyNew,
+      // Omitted entirely when history is unreadable — the model must not
+      // see (and the template must not assert) a first-visit claim that an
+      // outage manufactured.
+      ...(history.available ? { newCustomer: genuinelyNew } : {}),
     },
+    history: { available: history.available },
     lastVisit: lastVisitRecord ? {
       date: calendarDay(lastVisitRecord.service_date),
       serviceType: cleanText(lastVisitRecord.service_type, 120),
@@ -497,7 +560,13 @@ async function assembleGrounding(svc, dbh = db) {
     lastVisitProducts,
     sinceLastVisit,
     openScope,
-    llmFacts,
+    catalogVocabulary,
+    // Every free-text slice is run through the shared access-code redactor
+    // at this boundary (belt over the context-aggregator's own layer):
+    // pet/sensitivity flag details and call summaries arrive as raw
+    // operator/customer text. The deterministic stored access block above
+    // is intentionally NOT redacted.
+    llmFacts: redactDeep(llmFacts),
   };
 }
 
@@ -569,6 +638,36 @@ function templateBriefBody(grounding) {
   };
 }
 
+// Ungrounded-claim scan (no NLP — exact vocabulary matching): the model
+// may only mention a products_catalog product name or label target term
+// that appeared in its OWN input (the redacted llmFacts, which carry the
+// deterministic fixed product-name lists). Any catalog term in the output
+// that is absent from the input is an invented/renamed product or an
+// ungrounded pest-target claim. Returns the offending term or null.
+function findUngroundedClaim(body, grounding) {
+  const vocab = grounding.catalogVocabulary;
+  if (!vocab) return null; // caller handles the unreadable-catalog case
+  const outputText = [
+    ...(body.priorities || []),
+    ...(body.watch_items || []),
+    body.last_visit_summary,
+    body.open_scope,
+    body.customer_context,
+  ].filter(Boolean).join(' ').toLowerCase();
+  if (!outputText) return null;
+  const groundedText = JSON.stringify(grounding.llmFacts).toLowerCase();
+  const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const kind of ['names', 'targets']) {
+    for (const term of vocab[kind] || []) {
+      const re = new RegExp(`\\b${escapeRe(term)}\\b`);
+      if (re.test(outputText) && !re.test(groundedText)) {
+        return { kind, term };
+      }
+    }
+  }
+  return null;
+}
+
 async function generateBriefBody(grounding, deps = {}) {
   const fallback = () => ({ via: 'template', body: templateBriefBody(grounding) });
   if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) return fallback();
@@ -597,6 +696,18 @@ async function generateBriefBody(grounding, deps = {}) {
     // Defensive: forbidden genera must never appear anywhere in the prose.
     if (FORBIDDEN_TARGET_RE.test([body.last_visit_summary, body.open_scope, body.customer_context].join(' '))) {
       logger.warn('[previsit-brief] LLM output named a forbidden target; using deterministic template');
+      return fallback();
+    }
+    // Grounded-allowlist validation. An unreadable catalog means the output
+    // CANNOT be validated — treated like a failed LLM pass (fail closed to
+    // the deterministic template), consistent with the fallback posture.
+    if (!grounding.catalogVocabulary) {
+      logger.warn('[previsit-brief] catalog vocabulary unavailable — output unvalidatable; using deterministic template');
+      return fallback();
+    }
+    const ungrounded = findUngroundedClaim(body, grounding);
+    if (ungrounded) {
+      logger.warn(`[previsit-brief] LLM output made an ungrounded ${ungrounded.kind === 'names' ? 'product' : 'target'} claim ("${ungrounded.term}"); using deterministic template`);
       return fallback();
     }
     return { via: 'llm', body };
@@ -743,6 +854,9 @@ module.exports = {
   WDO_BRIEF_TYPE,
   _test: {
     assembleGrounding,
+    findUngroundedClaim,
+    redactDeep,
+    loadCatalogVocabulary,
     templateBriefBody,
     generateBriefBody,
     buildAccessBlock,

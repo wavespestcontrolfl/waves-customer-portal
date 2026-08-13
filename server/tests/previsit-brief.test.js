@@ -23,9 +23,16 @@ jest.mock('../services/llm/call', () => ({
   dispatchWithFallback: (...args) => global.__dispatch(...args),
 }));
 const mockGetContext = jest.fn();
-jest.mock('../services/context-aggregator', () => ({
-  getContextForCustomer: (...args) => mockGetContext(...args),
-}));
+jest.mock('../services/context-aggregator', () => {
+  // The REAL redactor (not a mock): the payload-boundary redaction tests
+  // must exercise the production masking behavior (jest.requireActual per
+  // the mock-is-not-a-production-export rule).
+  const { redactAccessCodes } = jest.requireActual('../services/context-aggregator');
+  return {
+    getContextForCustomer: (...args) => mockGetContext(...args),
+    redactAccessCodes,
+  };
+});
 jest.mock('../services/appointment-tagger', () => ({
   classifyAppointmentType: (serviceType) => (
     /wdo|wood destroying/i.test(String(serviceType || ''))
@@ -273,6 +280,124 @@ describe('access codes', () => {
       { type: 'gate', text: 'Yard: 4545' },
       { type: 'gate', text: 'Garage: 9876' },
     ]));
+  });
+});
+
+describe('history outage — no manufactured first-visit claim', () => {
+  test('a service_records failure never becomes "new customer"', async () => {
+    const state = useDb(baseResponses({
+      service_records: () => { throw new Error('history db down'); },
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+
+    // The LLM payload carries an explicit unavailable sentinel and NO
+    // first-visit claim.
+    const text = global.__dispatch.mock.calls[0][1].text;
+    const facts = JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
+    expect(facts.history).toEqual({ available: false });
+    expect(facts.visit).not.toHaveProperty('newCustomer');
+    expect(facts.lastVisit).toBeNull();
+
+    // The stored access block carries no new-customer alert either.
+    const { brief } = storedBrief(state);
+    expect(brief.access.alerts.map((a) => a.type)).not.toContain('new_customer');
+    expect(brief.last_visit.date).toBeNull();
+  });
+
+  test('the deterministic template does not assert first-visit on an outage', async () => {
+    global.__dispatch = jest.fn(async () => ({ ok: false, reason: 'down' }));
+    const state = useDb(baseResponses({
+      service_records: () => { throw new Error('history db down'); },
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('template');
+    const { brief } = storedBrief(state);
+    expect(JSON.stringify(brief.priorities)).not.toMatch(/first visit/i);
+  });
+
+  test('genuinely-empty history (readable) still claims new customer', async () => {
+    const state = useDb(baseResponses({ service_records: [] }));
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const text = global.__dispatch.mock.calls[0][1].text;
+    const facts = JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
+    expect(facts.history).toEqual({ available: true });
+    expect(facts.visit.newCustomer).toBe(true);
+    const { brief } = storedBrief(state);
+    expect(brief.access.alerts.map((a) => a.type)).toContain('new_customer');
+  });
+});
+
+describe('grounded allowlist validation of LLM output', () => {
+  const CATALOG = [
+    { name: 'Termidor SC', target_pests: ['termites'] },
+    { name: 'Bifen IT', target_pests: ['ants', 'chinch bugs'] },
+  ];
+
+  test('an invented product name falls back to the deterministic template', async () => {
+    global.__dispatch = jest.fn(async () => ({
+      ok: true,
+      json: { ...CLEAN_LLM_JSON, priorities: ['Apply Termidor SC to the slab edge'] },
+    }));
+    const state = useDb(baseResponses({ products_catalog: CATALOG }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('template');
+    expect(storedBrief(state).brief.generated_via).toBe('template');
+  });
+
+  test('an ungrounded pest-target claim falls back to the deterministic template', async () => {
+    global.__dispatch = jest.fn(async () => ({
+      ok: true,
+      json: { ...CLEAN_LLM_JSON, watch_items: ['Watch for termites along the fence line'] },
+    }));
+    useDb(baseResponses({ products_catalog: CATALOG }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('template');
+  });
+
+  test('mentioning a GROUNDED product and target is accepted', async () => {
+    global.__dispatch = jest.fn(async () => ({
+      ok: true,
+      // Bifen IT is in the grounded history product names; "ants" appears
+      // in the grounded call summary.
+      json: { ...CLEAN_LLM_JSON, priorities: ['Re-check the ants treated with Bifen IT'] },
+    }));
+    useDb(baseResponses({ products_catalog: CATALOG }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('llm');
+  });
+
+  test('an unreadable catalog makes the LLM output unvalidatable — template', async () => {
+    useDb(baseResponses({ products_catalog: () => { throw new Error('catalog down'); } }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    expect(out.via).toBe('template');
+  });
+});
+
+describe('LLM-boundary redaction of free text', () => {
+  test('codes in flag details and call summaries are masked in the payload, not in the access block', async () => {
+    mockGetContext.mockResolvedValueOnce({
+      serviceHistory: [],
+      propertyProfile: null,
+      flags: [{ type: 'pet_alert', severity: 'info', detail: 'Dog in yard, gate code 2468 to enter' }],
+      recentCalls: [{ summary: 'Customer said the garage code is 1357', direction: 'inbound', date: '2026-08-01T15:00:00Z' }],
+      recentInteractions: [],
+      pendingEstimate: null,
+    });
+    const state = useDb(baseResponses());
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+
+    const payload = JSON.stringify(global.__dispatch.mock.calls[0]);
+    expect(payload).not.toContain('2468');
+    expect(payload).not.toContain('1357');
+    expect(payload).toContain('[redacted]');
+
+    // The deterministic stored access block keeps the real codes.
+    const { brief } = storedBrief(state);
+    expect(brief.access.codes.propertyGate).toBe('4545');
+    expect(brief.access.codes.garage).toBe('9876');
   });
 });
 
