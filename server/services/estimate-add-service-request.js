@@ -300,7 +300,18 @@ function buildEstimateServiceRevisionDraft(estimate = {}, requestedService) {
   }
 }
 
-async function resolveEstimateCustomer(database, estimate = {}) {
+// opts.sourceDetail: attribution stamp for a newly-created customer profile.
+// Defaults to this module's add-service label; other flows that share this
+// resolver (estimate-measurement-review) pass their own so lead attribution
+// reflects the actual entry point (codex #3376).
+async function resolveEstimateCustomer(database, estimate = {}, opts = {}) {
+  const sourceDetail = opts.sourceDetail || 'estimate_add_service_request';
+  // The measurement-review flow's contract says the estimate row is NEVER
+  // mutated (codex #3376 P1) — it resolves/creates the customer for the
+  // request row only and skips the customer_id backfill both here and on
+  // the created-profile path. Add-service keeps the backfill (its draft
+  // revision flow depends on the linkage).
+  const skipBackfill = opts.skipEstimateBackfill === true;
   if (estimate.customer_id) {
     const customer = await database('customers')
       .where({ id: estimate.customer_id })
@@ -311,7 +322,7 @@ async function resolveEstimateCustomer(database, estimate = {}) {
 
   const customer = await findSafeExistingCustomerForEstimate(database, estimate);
   if (customer) {
-    if (!estimate.customer_id) {
+    if (!estimate.customer_id && !skipBackfill) {
       await database('estimates').where({ id: estimate.id }).update({ customer_id: customer.id });
     }
     return customer;
@@ -352,18 +363,22 @@ async function resolveEstimateCustomer(database, estimate = {}) {
     member_since: null,
     stage: 'new_lead',
     lead_source: SOURCE_PUBLIC_ESTIMATE,
-    lead_source_detail: 'estimate_add_service_request',
+    lead_source_detail: sourceDetail,
     lead_source_channel: 'public_estimate',
     pipeline_stage: 'new_lead',
     pipeline_stage_changed_at: new Date(),
     last_contact_date: new Date(),
-    last_contact_type: 'estimate_add_service_request',
+    last_contact_type: sourceDetail,
   })).onConflict().ignore().returning('*');
 
   if (!created) {
     const safeExisting = await findSafeExistingCustomerForEstimate(database, estimate);
     if (safeExisting) {
-      await database('estimates').where({ id: estimate.id }).update({ customer_id: safeExisting.id });
+      // Conflict path honors the no-estimate-mutation option too (codex
+      // #3376 P1 — this was the one backfill site missing the guard).
+      if (!skipBackfill) {
+        await database('estimates').where({ id: estimate.id }).update({ customer_id: safeExisting.id });
+      }
       return safeExisting;
     }
     const conflict = new Error('Customer contact could not be safely matched');
@@ -371,7 +386,9 @@ async function resolveEstimateCustomer(database, estimate = {}) {
     throw conflict;
   }
 
-  await database('estimates').where({ id: estimate.id }).update({ customer_id: created.id });
+  if (!skipBackfill) {
+    await database('estimates').where({ id: estimate.id }).update({ customer_id: created.id });
+  }
   await database('property_preferences').insert({ customer_id: created.id }).catch((err) => {
     logger.warn(`[estimate-add-service-request] property_preferences create skipped for ${created.id}: ${err.message}`);
   });
@@ -770,4 +787,8 @@ module.exports = {
   serializePricingRevisionSummary,
   buildEstimateServiceRevisionDraft,
   createEstimateAddServiceRequest,
+  // Shared with estimate-measurement-review (the lawn-area challenge flow):
+  // both park service_requests rows off a public estimate token and need the
+  // same attach-or-create customer resolution.
+  resolveEstimateCustomer,
 };
