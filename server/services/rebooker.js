@@ -9,6 +9,7 @@ const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
   addETMonthsByWeekday, etNthWeekdayOfMonth, sameDayWindowElapsed,
+  deriveWindowEnd,
 } = require('../utils/datetime-et');
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
@@ -212,19 +213,32 @@ function emitCustomerJobRefresh(service, toStatus) {
 // read side — the booked row will block OTHERS across its derived span,
 // while its own booking checked nothing (or less). Derive the same span
 // here so write-side gates probe exactly what the row will occupy.
-// Capped at 23:59: `time` can't carry past midnight, and the suggestion
-// probe (findRescheduleOptions) applies the same cap.
+// deriveWindowEnd is the CANONICAL derivation (datetime-et) and its
+// contract is inherited whole: null = the span would cross midnight, and
+// "callers must treat null as a validation failure, never as a windowless
+// visit" — so this THROWS the same pick-an-earlier-start rejection
+// admin-schedule and the IB reschedule tool raise (codex #3377 P1: a
+// 23:59 clamp silently under-probed the tail, and Postgres time
+// arithmetic would wrap the booked row's effective end before its start).
+// The pre-fix code was strictly worse on this edge either way: the series
+// fallback built a '24:30' literal that blew up the ?::time cast inside
+// the transaction.
 // Kill switch: REBOOKER_NULL_END_OCCUPANCY=off restores the legacy
 // behavior at every call site (single path skips its gate again, series
 // fallbacks return to flat 60) — callers key on the env, not this helper.
 function occupancyProbeEnd(windowStart, storedEnd, estimatedDurationMinutes) {
   if (storedEnd) return storedEnd;
   if (!windowStart) return null;
-  const [h, m] = String(windowStart).split(':').map(Number);
-  if (!Number.isFinite(h)) return null;
   const dur = Number(estimatedDurationMinutes) > 0 ? Number(estimatedDurationMinutes) : 60;
-  const total = Math.min(h * 60 + (m || 0) + dur, 23 * 60 + 59);
-  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+  const derived = deriveWindowEnd(windowStart, dur);
+  if (!derived) {
+    throw Object.assign(new Error('That window would cross midnight — pick an earlier start'), {
+      statusCode: 400,
+      isOperational: true,
+      code: 'INVALID_WINDOW',
+    });
+  }
+  return derived;
 }
 
 // Convert "08:00-09:00" → { start: '08:00', end: '09:00' }. Tolerates objects.
@@ -585,6 +599,17 @@ class SmartRebooker {
         // operator lock/move is caught atomically here, not just by a prior read.
         // .where({}) is a no-op, so callers that omit it are unaffected.
         .where(options.expect || {})
+        // When the occupancy gate derived its span FROM the duration (null
+        // stored end), pin that duration in the CAS: a concurrent
+        // duration-only edit (admin editor commits exactly that) would
+        // otherwise leave the probe checking the OLD span while the final
+        // row occupies the new one — the tail lands unchecked (codex #3377
+        // P1). The advisory locks can't serialize this: the duration editor
+        // doesn't take them. A raced edit makes the write miss and surface
+        // the concurrent-change 409 below, same as every other CAS field.
+        .where((!windowEnd && occupancyGateEnd)
+          ? { estimated_duration_minutes: service.estimated_duration_minutes ?? null }
+          : {})
         .update({
           ...updates,
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
@@ -1200,6 +1225,13 @@ class SmartRebooker {
               // must invalidate the match, not be steamrolled.
               window_end: sib.window_end ?? null,
               technician_id: sib.technician_id ?? null,
+              // Duration pin, only when the occupancy probes above derived
+              // their span from it (null landing end + gate on): a
+              // concurrent duration-only edit must invalidate the match —
+              // same rationale as the single-path CAS (codex #3377 P1).
+              ...((!updateData.window_end && process.env.REBOOKER_NULL_END_OCCUPANCY !== 'off')
+                ? { estimated_duration_minutes: sib.estimated_duration_minutes ?? null }
+                : {}),
             }),
           // Full tracker/lifecycle snapshot too: the sibRewound decision
           // came from this read — see the single-job CAS above.

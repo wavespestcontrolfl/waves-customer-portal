@@ -2449,6 +2449,42 @@ describe('rain-out service', () => {
       ]);
     });
 
+    test('route scope: a null-end sibling whose derived span crosses midnight projects NO landing', async () => {
+      // deriveWindowEnd returns null past midnight and commit REJECTS that
+      // move outright (INVALID_WINDOW) — there is no landing to
+      // overlap-check, and warning "the schedule will block this move"
+      // about an occupancy conflict would name the wrong rejection.
+      listOccupiedWindows.mockResolvedValue(occ('2026-06-20', [{
+        id: 'svc-booked', customer_id: 'cust-b', technician_id: 'tech-1', status: 'confirmed',
+        service_type: 'Lawn Treatment', window_start: '23:30:00', window_end: '23:59:00',
+        estimated_duration_minutes: 29, reservation_expires_at: null,
+      }]));
+      wireDb({
+        scheduled_services: [
+          chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: '2026-06-11',
+              window_start: '09:00', window_end: '10:00', route_order: 1,
+            }),
+          }),
+          chain({
+            rows: [{
+              id: 'svc-2', window_start: '23:30:00', window_end: null,
+              estimated_duration_minutes: 90, route_order: 2,
+            }],
+          }),
+        ],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        caller: { isAdmin: true, technicianId: 'tech-1' },
+        target: { date: '2026-06-20', window: { start: '09:00', end: '10:00' } },
+      });
+
+      expect(result.routeConflicts).toEqual([]);
+    });
+
     test('route scope: REBOOKER_NULL_END_OCCUPANCY=off restores the no-warning boundary', async () => {
       // With the kill switch off, commit skips the null-end gate again —
       // warning here would claim a block commit will not enforce. The
