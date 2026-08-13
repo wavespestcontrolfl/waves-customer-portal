@@ -190,36 +190,44 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     expect(claimPredicate).toContain('relay_hot_alert_sent_at'); // …only when never sent
   });
 
-  // ⭐ THE SWEEP STARTS FROM THE LEAD, NOT THE CLAIM. A crash BEFORE the claim
-  // left a durable hot lead invisible to a claim-scanning sweep forever; and
-  // leads persist hotness as urgency='urgent' (there is no lead_quality
-  // column — selecting one THREW, and the empty catch read the throw as
-  // "no lead" and released the claim, permanently skipping the page).
-  test('the sweep selects urgent leads joined to their call row and re-pages via the normal path', async () => {
-    const rows = [{
-      call_sid: 'CA-swept-1', first_name: 'Pat', last_name: 'Rivera',
-      phone: CALLER, city: 'Bradenton', transcript_summary: 'Swarming termites in the living room.',
+  // ⭐ THE SWEEP KEYS ON THE RELAY'S OWN OBLIGATION MARKER — never lead urgency
+  // (the recorded-call pipeline marks human-call leads urgent too, and a reused
+  // lead's stale twilio_call_sid hid genuine relay ones). capture_lead stamps
+  // call_log.metadata.relay_hot_alert_needed + relay_lead_id before the page
+  // attempt; the sweep resolves the lead through that exact linkage.
+  test('the sweep keys on relay_hot_alert_needed and resolves the lead by relay_lead_id', async () => {
+    const callRows = [{
+      twilio_call_sid: 'CA-swept-1',
+      metadata: { relay_hot_alert_needed: 'true', relay_lead_id: 'lead-9' },
     }];
+    const callBuilder = {};
+    for (const m of ['where', 'whereRaw', 'orderBy', 'limit']) callBuilder[m] = jest.fn(() => callBuilder);
+    callBuilder.select = jest.fn(async () => callRows);
+    callBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'cl-1' }]) }));
+    callBuilder.first = jest.fn(async () => null);
     const leadsBuilder = {};
-    for (const m of ['join', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'orderBy', 'limit']) {
-      leadsBuilder[m] = jest.fn(() => leadsBuilder);
-    }
-    leadsBuilder.select = jest.fn(async () => rows);
-    // alertOwnerHotLead's own claim path (call_log) + delivery probe (notifications).
-    const claimBuilder = {};
-    for (const m of ['where', 'whereRaw']) claimBuilder[m] = jest.fn(() => claimBuilder);
-    claimBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'cl-1' }]) }));
-    claimBuilder.first = jest.fn(async () => null);
-    db.mockImplementation((table) => (table === 'leads' ? leadsBuilder : claimBuilder));
+    for (const m of ['where', 'whereNull']) leadsBuilder[m] = jest.fn(() => leadsBuilder);
+    leadsBuilder.first = jest.fn(async () => ({
+      first_name: 'Pat', last_name: 'Rivera', phone: CALLER, city: 'Bradenton',
+      transcript_summary: 'Swarming termites in the living room.',
+    }));
+    const notifBuilder = {};
+    for (const m of ['where', 'whereRaw']) notifBuilder[m] = jest.fn(() => notifBuilder);
+    notifBuilder.first = jest.fn(async () => null);
+    db.mockImplementation((table) => {
+      if (table === 'leads') return leadsBuilder;
+      if (table === 'notifications') return notifBuilder;
+      return callBuilder;
+    });
     db.raw = jest.fn((sql) => ({ __raw: sql }));
     process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
 
     const paged = await relayAlert.sweepAbandonedHotAlerts();
     expect(paged).toBe(1);
     expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
-    // The query keys on urgency (the real column) and the missing SENT receipt.
-    expect(leadsBuilder.where).toHaveBeenCalledWith('leads.urgency', 'urgent');
-    const raws = leadsBuilder.whereRaw.mock.calls.map(([sql]) => String(sql));
+    expect(leadsBuilder.where).toHaveBeenCalledWith({ id: 'lead-9' }); // exact linkage, not urgency
+    const raws = callBuilder.whereRaw.mock.calls.map(([sql]) => String(sql));
+    expect(raws.some((sql) => sql.includes('relay_hot_alert_needed'))).toBe(true);
     expect(raws.some((sql) => sql.includes('relay_hot_alert_sent_at'))).toBe(true);
   });
 

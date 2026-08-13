@@ -1069,6 +1069,32 @@ async function executeTool(name, input = {}, ctx = {}) {
       // single active lead", which can convert an unrelated open quote to WON.
       const capturedLeadId = leadResult && leadResult.leadId;
       if (capturedLeadId && typeof ctx.noteLeadId === 'function') ctx.noteLeadId(capturedLeadId);
+      // ⭐ EXACT CALL→LEAD PROVENANCE, ON THE CALL'S OWN ROW. leads only stamp
+      // twilio_call_sid at INSERT — a reused lead keeps its original call — so
+      // "find this call's lead by leads.twilio_call_sid" silently misses every
+      // reuse. The linkage lives on call_log.metadata instead: relay_lead_id is
+      // what the office-confirm recovery and the hot-alert sweep resolve
+      // through, and relay_hot_alert_needed (written BEFORE the page attempt)
+      // is the sweep's obligation marker — scoped to relay calls only, closing
+      // the crash gap between the lead commit and the alert claim. Fail-soft:
+      // the lead is the durable artifact and must never be lost to this stamp.
+      if (capturedLeadId && ctx.callSid) {
+        try {
+          const db = require('../../models/db');
+          const linkage = { relay_lead_id: String(capturedLeadId) };
+          if (String(input.lead_quality || '').toLowerCase() === 'hot') linkage.relay_hot_alert_needed = 'true';
+          await db('call_log')
+            .where({ twilio_call_sid: ctx.callSid })
+            .update({
+              metadata: db.raw(
+                "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+                [JSON.stringify(linkage)],
+              ),
+            });
+        } catch (linkErr) {
+          logger.warn(`[voice-relay] call→lead linkage stamp failed callSid=${ctx.callSid}: ${linkErr.message}`);
+        }
+      }
       // capture_lead usually runs AFTER request_booking (the prompt says so),
       // so back-fill the card that was already written for this call.
       if (capturedLeadId && typeof ctx.bookingRequested === 'function' && ctx.bookingRequested()) {

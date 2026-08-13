@@ -419,52 +419,66 @@ async function alertOwnerReservice(request = {}, ctx = {}) {
 }
 
 /**
- * Hourly backstop for the crash windows the lease alone cannot cover. Two of
- * them: a process that died AFTER claiming but before sending (claimed-unsent),
- * and one that died BEFORE the claim existed at all — the lead committed, the
- * page never started, and a claim-scanning sweep would never see it. So the
- * sweep starts from the DURABLE artifact instead: recent URGENT leads
- * (`leads.urgency = 'urgent'` is how a hot capture persists — leads carry no
- * lead_quality column) joined to their own call_log row, kept only while the
- * SENT receipt is missing. Each candidate re-enters through alertOwnerHotLead
- * itself, whose atomic claim/lease and delivery-evidence probe keep concurrent
- * rails from double-paging. Leads with no call row are skipped: without a row
- * to receipt against, every run would page again forever.
+ * Hourly backstop for the crash windows the lease alone cannot cover: died
+ * after claiming but before sending, and died before the claim existed at all.
+ * The sweep keys on the RELAY'S OWN obligation marker —
+ * call_log.metadata.relay_hot_alert_needed, written by capture_lead alongside
+ * the exact relay_lead_id linkage BEFORE the page attempt — never on lead
+ * urgency: the recorded-call pipeline marks human-call leads urgent too, and an
+ * urgency-scoped sweep paged the owner for calls the relay never touched
+ * (while a reused lead's stale twilio_call_sid hid genuine relay ones). A row
+ * leaves the population when the SENT receipt lands, or when its lead cannot
+ * be resolved (marker removed — nothing to page).
  */
 async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
   const db = require('../../models/db');
   let rows = [];
   try {
-    rows = await db('leads')
-      .join('call_log', 'call_log.twilio_call_sid', 'leads.twilio_call_sid')
-      .where('leads.urgency', 'urgent')
-      .whereNull('leads.deleted_at')
-      .whereNotNull('leads.twilio_call_sid')
+    rows = await db('call_log')
+      .whereRaw("(metadata->>'relay_hot_alert_needed') IS NOT NULL")
+      .whereRaw(`(metadata->>'${HOT_ALERT_SENT_KEY}') IS NULL`)
       // Recent only: this recovers crashed pages, it does not re-litigate history.
-      .where('leads.created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
-      .whereRaw(`(call_log.metadata->>'${HOT_ALERT_SENT_KEY}') IS NULL`)
-      .orderBy('leads.created_at', 'asc')
+      .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
+      .orderBy('created_at', 'asc')
       .limit(limit)
-      .select('leads.twilio_call_sid as call_sid', 'leads.first_name', 'leads.last_name',
-        'leads.phone', 'leads.city', 'leads.transcript_summary');
+      .select('twilio_call_sid', 'metadata');
   } catch (err) {
     logger.error(`[voice-relay-alert] abandoned hot-alert sweep query failed: ${err.message}`);
     return 0;
   }
   let paged = 0;
   for (const row of rows) {
+    const meta = typeof row.metadata === 'string' ? (() => { try { return JSON.parse(row.metadata); } catch { return {}; } })() : (row.metadata || {});
+    const leadId = meta.relay_lead_id || null;
+    let lead = null;
+    if (leadId) {
+      try {
+         
+        lead = await db('leads')
+          .where({ id: leadId })
+          .whereNull('deleted_at')
+          .first('first_name', 'last_name', 'phone', 'city', 'transcript_summary');
+      } catch { /* fall through */ }
+    }
+    if (!lead) {
+      // No lead to page about — clear the obligation so the row leaves the
+      // sweep population instead of retrying hourly forever.
+       
+      await db('call_log')
+        .where({ twilio_call_sid: row.twilio_call_sid })
+        .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'relay_hot_alert_needed'") })
+        .catch(() => {});
+      continue;
+    }
      
     const ok = await alertOwnerHotLead(
       {
-        first_name: row.first_name,
-        last_name: row.last_name,
-        phone: row.phone,
-        city: row.city,
-        lead_quality: 'hot', // reconstructed from urgency='urgent' — see the query
-        call_summary: row.transcript_summary,
+        ...lead,
+        lead_quality: 'hot', // the obligation marker is only written for hot captures
+        call_summary: lead.transcript_summary,
         urgency_reason: 'recovered by the hot-alert sweep',
       },
-      { callSid: row.call_sid },
+      { callSid: row.twilio_call_sid },
     ).catch(() => false);
     if (ok) paged += 1;
   }

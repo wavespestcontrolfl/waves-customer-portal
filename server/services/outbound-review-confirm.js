@@ -288,19 +288,26 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
         // `twilio_call_sid`, so the call can be asked directly — an EXACT
         // recovery keyed to this call, never the single-active-lead guess the
         // comment below rules out.
+        // Exact linkage only: capture_lead stamps call_log.metadata.relay_lead_id
+        // for THIS call. (leads.twilio_call_sid is set at INSERT only — a lead
+        // reused by phone keeps its ORIGINAL call's sid, so a sid-keyed lookup
+        // silently missed every reuse and could never be trusted here.)
         const callRow = await db('call_log')
           .where({ id: svc.source_call_log_id })
-          .first('twilio_call_sid');
-        const recovered = callRow && callRow.twilio_call_sid
+          .first('metadata');
+        const callMeta = callRow && (typeof callRow.metadata === 'string'
+          ? (() => { try { return JSON.parse(callRow.metadata); } catch { return {}; } })()
+          : (callRow.metadata || {}));
+        const linkedLeadId = callMeta && callMeta.relay_lead_id ? String(callMeta.relay_lead_id) : null;
+        const recovered = linkedLeadId
           ? await db('leads')
-            .where({ twilio_call_sid: callRow.twilio_call_sid })
+            .where({ id: linkedLeadId })
             .whereNull('deleted_at')
-            .orderBy('created_at', 'desc')
             .first('id', 'status')
           : null;
         if (recovered) {
           leadId = recovered.id;
-          logger.info(`[${routeTag}] voice card for ${svc.id} carried no lead_id — recovered lead ${leadId} by CallSid`);
+          logger.info(`[${routeTag}] voice card for ${svc.id} carried no lead_id — recovered lead ${leadId} via call_log.metadata.relay_lead_id`);
         }
         // ⭐ NO LEAD ON A VOICE CARD MEANS NO LEAD — DO NOT GUESS ONE.
         // The single-active-lead fallback below exists for PRE-PAYLOAD

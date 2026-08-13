@@ -699,10 +699,13 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
   // a lead that really exists would be skipped forever. The call stamps its own
   // CallSid on the lead, so the confirm asks the call directly — exact, not the
   // single-active-lead guess the case above rules out.
-  test('a null lead_id is RECOVERED by CallSid before it is believed', async () => {
+  test('a null lead_id is RECOVERED via call_log.metadata.relay_lead_id before it is believed', async () => {
+    // NOT by leads.twilio_call_sid — that column is set at INSERT only, so a
+    // lead reused by phone keeps its ORIGINAL call's sid and a sid-keyed
+    // lookup silently missed every reuse.
     const db = confirmHookDb({
       cardPayload: { origin: 'voice_agent', lead_id: null },
-      callRow: { twilio_call_sid: 'CA-voice-1' },
+      callRow: { twilio_call_sid: 'CA-voice-1', metadata: { relay_lead_id: 'lead-recovered' } },
       leadRow: { id: 'lead-recovered', status: 'new' },
       fallbackLeads: [{ id: 'lead-unrelated', status: 'estimate_sent' }],
     });
