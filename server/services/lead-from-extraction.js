@@ -108,6 +108,14 @@ async function surfaceContactInstructionForCustomer(customer, extracted = {}, op
       {
         icon: dnc ? '🚫' : '📞',
         link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+        // ⭐ THIS ROW IS THE ONLY ARTIFACT. A lifecycle customer gets no lead, so
+        // a stated contact instruction lives nowhere but this feed row — and the
+        // admin bell policy silences the whole 'service' category by default
+        // when it is on, which would have made a caller's "email only" (or the
+        // DNC's paper trail) vanish without a sound. `bell: true` is the
+        // policy's own site-level tag for "this specific notification must
+        // ring": a consent instruction is compliance, not FYI noise.
+        bell: true,
         metadata: {
           customerId: customer.id,
           source: 'voice_agent',
@@ -116,8 +124,14 @@ async function surfaceContactInstructionForCustomer(customer, extracted = {}, op
         },
       },
     );
-    if (!notif) {
-      logger.error(`[voice-agent-lead] contact instruction for customer ${customer.id} did NOT persist to the admin feed (dnc=${dnc})`);
+    // ⭐ SUPPRESSED IS NOT PERSISTED. notifyAdmin's suppression sentinel is
+    // truthy on purpose (`{ id: null, suppressed: true }`), so a bare truthiness
+    // check here read "no row was written" as success. With `bell: true` the
+    // policy can no longer silence this site, so a suppressed return means the
+    // internal-test-customer gate — deliberate, but still zero artifact, and
+    // this function must never claim otherwise.
+    if (!notif || notif.suppressed) {
+      logger.error(`[voice-agent-lead] contact instruction for customer ${customer.id} did NOT persist to the admin feed (dnc=${dnc}${notif && notif.suppressed ? `, suppressed:${notif.reason || 'internal_test'}` : ''})`);
       return false;
     }
     logger.info(`[voice-agent-lead] contact instruction surfaced for existing customer ${customer.id} (dnc=${dnc})`);

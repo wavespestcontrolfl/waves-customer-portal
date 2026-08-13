@@ -331,6 +331,30 @@ describe('existing-customer contact instructions still reach a human', () => {
     assertNoSuppressionWrite();
   });
 
+  // ⭐ THE ROW IS THE ONLY ARTIFACT, SO IT MUST BEAT THE BELL POLICY. The admin
+  // bell policy silences the 'service' category by default when it is on, and
+  // its suppression sentinel is TRUTHY (`{ id: null, suppressed: true }`) —
+  // read at face value, a lifecycle customer's "email only" would vanish
+  // without a sound and this function would log it as surfaced.
+  test('the feed row carries bell:true — a consent instruction is never policy-silenced', async () => {
+    await createLeadFromExtraction(
+      { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
+      { phone: CALLER, callSid: 'CA-dnc-2' },
+    );
+    const [, , , opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(opts.bell).toBe(true);
+  });
+
+  test('a truthy SUPPRESSED sentinel is treated as not-persisted, not success', async () => {
+    const logger = require('../services/logger');
+    NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true, reason: 'bell_policy' });
+    await createLeadFromExtraction(
+      { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
+      { phone: CALLER, callSid: 'CA-dnc-3' },
+    );
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/did NOT persist to the admin feed/i));
+  });
+
   test('a lifecycle customer who stated NO preference triggers no notification', async () => {
     await createLeadFromExtraction({ call_summary: 'Just asking about the last visit.' }, { phone: CALLER });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();

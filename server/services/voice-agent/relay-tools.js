@@ -1058,13 +1058,31 @@ async function executeTool(name, input = {}, ctx = {}) {
       // Deliberately AFTER the lead write: the lead is the durable artifact and
       // must never be lost to an alert failure. Never customer-facing.
       const { alertOwnerHotLead } = require('./relay-alert');
-      await alertOwnerHotLead({ ...extracted, phone: callerPhone, urgency_reason: input.urgency_reason || null }, ctx);
+      const ownerPaged = await alertOwnerHotLead({ ...extracted, phone: callerPhone, urgency_reason: input.urgency_reason || null }, ctx);
+      // ⭐ THE MODEL ONLY PROMISES A PAGE THAT WENT OUT. The prompt lets her tell
+      // a hot caller "a team member is being notified right away" — and this
+      // call used to discard the boolean that says whether anyone actually was
+      // (ADAM_PHONE unset, or the internal-alert redirect had nowhere to put
+      // it). A hot lead whose page did not go out — and was not already paged
+      // earlier on this call — gets the promise explicitly withdrawn in the
+      // tool result, which is where the model reads what really happened.
+      const wasHot = String(input.lead_quality || '').toLowerCase() === 'hot';
+      const alreadyPaged = typeof ctx.isOwnerAlerted === 'function'
+        ? ctx.isOwnerAlerted() === true
+        : ctx.ownerAlerted === true;
+      const pageCaveat = wasHot && !ownerPaged && !alreadyPaged
+        ? ' IMPORTANT: the urgent page to the team could NOT be confirmed — do NOT tell the caller a team '
+          + 'member is being notified right away. Say a Waves team member will follow up as soon as possible, '
+          + 'nothing stronger.'
+        : '';
       if (!leadCreated) {
         return 'Noted on this customer\'s account — this is an existing customer, so no new lead was created and '
           + 'none should be. The call and your summary are on their record for the office to review. Tell the caller '
-          + 'a Waves team member will follow up, and do not say a new request or appointment was created.';
+          + 'a Waves team member will follow up, and do not say a new request or appointment was created.'
+          + pageCaveat;
       }
-      return 'Lead saved successfully. Let the caller know a Waves team member will follow up shortly to confirm details and scheduling.';
+      return 'Lead saved successfully. Let the caller know a Waves team member will follow up shortly to confirm '
+        + 'details and scheduling.' + pageCaveat;
     }
 
     if (name === 'get_availability') {

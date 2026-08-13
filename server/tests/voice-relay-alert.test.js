@@ -315,6 +315,39 @@ describe('capture_lead → alert wiring (the live path)', () => {
     expect(createLeadFromExtraction).toHaveBeenCalledTimes(1);
   });
 
+  // ⭐ THE MODEL ONLY PROMISES A PAGE THAT WENT OUT. The prompt lets her tell a
+  // hot caller "a team member is being notified right away"; when the page did
+  // not go out, the tool result is where she learns not to say it.
+  test('a hot lead whose page FAILED gets the promise withdrawn in the tool result', async () => {
+    TwilioService.sendSMS.mockRejectedValue(new Error('bell down'));
+    const out = await executeTool('capture_lead', {
+      call_summary: 'Angry about a missed visit.', lead_quality: 'hot',
+    }, { from: CALLER, callSid: 'CA-live-3', markCaptured: jest.fn() });
+    expect(out).toMatch(/could NOT be confirmed/i);
+    expect(out).toMatch(/do NOT tell the caller a team member is being notified right away/i);
+  });
+
+  test('a DELIVERED page keeps the promise, and an already-paged call keeps it too', async () => {
+    const delivered = await executeTool('capture_lead', {
+      call_summary: 'Swarming termites.', lead_quality: 'hot',
+    }, { from: CALLER, callSid: 'CA-live-4', markCaptured: jest.fn(), markOwnerAlerted: jest.fn() });
+    expect(delivered).not.toMatch(/could NOT be confirmed/i);
+    // Second capture on the SAME call: alertOwnerHotLead stands down on the
+    // latch (returns false), but the earlier page was real — no withdrawal.
+    const again = await executeTool('capture_lead', {
+      call_summary: 'Swarming termites, more detail.', lead_quality: 'hot',
+    }, { from: CALLER, callSid: 'CA-live-4', markCaptured: jest.fn(), isOwnerAlerted: () => true });
+    expect(again).not.toMatch(/could NOT be confirmed/i);
+  });
+
+  test('a non-hot lead never carries the withdrawal (there was no promise)', async () => {
+    TwilioService.sendSMS.mockRejectedValue(new Error('down'));
+    const out = await executeTool('capture_lead', {
+      call_summary: 'Just price shopping.', lead_quality: 'warm',
+    }, { from: CALLER, callSid: 'CA-live-5', markCaptured: jest.fn() });
+    expect(out).not.toMatch(/could NOT be confirmed/i);
+  });
+
   test('a COLD capture_lead alerts nobody', async () => {
     await executeTool('capture_lead', {
       call_summary: 'Just price shopping.', lead_quality: 'cold',
