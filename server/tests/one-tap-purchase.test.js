@@ -118,6 +118,7 @@ jest.mock('../services/payment-method-consents', () => ({
 jest.mock('../services/waveguard-existing-services', () => ({
   ...jest.requireActual('../services/waveguard-existing-services'),
   loadOwnedRecurringServiceKeys: jest.fn(async () => []),
+  loadExistingQualifyingServiceKeys: jest.fn(async () => ['pest_control']),
 }));
 jest.mock('../services/estimate-accepted-email', () => ({
   sendEstimateAcceptedOnboarding: jest.fn(async () => ({})),
@@ -787,10 +788,13 @@ describe('GET /api/property-recommendations oneTap flag', () => {
     id: 'cust-1', pipeline_stage: 'active_customer', monthly_rate: 89, billing_mode: 'per_application',
   };
 
-  function recsApp({ recsGate, oneTapGate, customerRow = ELIGIBLE_CUSTOMER }) {
+  function recsApp({ recsGate, oneTapGate, customerRow = ELIGIBLE_CUSTOMER, qualifyingKeys = ['pest_control'] }) {
     jest.resetModules();
     jest.doMock('../middleware/auth', () => ({
       authenticate: (req, _res, nextFn) => { req.customerId = 'cust-1'; nextFn(); },
+    }));
+    jest.doMock('../services/waveguard-existing-services', () => ({
+      loadExistingQualifyingServiceKeys: jest.fn(async () => qualifyingKeys),
     }));
     jest.doMock('../services/property-recommendations', () => ({
       buildPropertyRecommendations: async () => ({ cards: [] }),
@@ -849,6 +853,12 @@ describe('GET /api/property-recommendations oneTap flag', () => {
 
   test('a missing customer row fails closed to oneTap:false', async () => {
     const url = await listen(recsApp({ recsGate: true, oneTapGate: true, customerRow: null }));
+    const got = await (await fetch(`${url}/api/property-recommendations/`)).json();
+    expect(got).toMatchObject({ available: true, oneTap: false });
+  });
+
+  test('a non-member (no qualifying recurring services) is fenced out of oneTap — init would refuse them', async () => {
+    const url = await listen(recsApp({ recsGate: true, oneTapGate: true, qualifyingKeys: [] }));
     const got = await (await fetch(`${url}/api/property-recommendations/`)).json();
     expect(got).toMatchObject({ available: true, oneTap: false });
   });

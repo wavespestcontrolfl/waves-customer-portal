@@ -1014,14 +1014,25 @@ function RecommendationsCard({ data }) {
         await api.saveStripeCard(null, returned.setupIntentId);
         cardJustSaved = true;
       } catch { /* state fetch below reports hasCardOnFile either way */ }
+      let resolved = false;
       try {
         const state = await api.oneTapGet(resumeId);
+        resolved = true;
         if (state.open) setPurchaseResume({ ...state, cardJustSaved });
-      } catch { /* purchase moved on — nothing to resume */ }
-      clearReturnedSetupIntent();
-      const url = new URL(window.location.href);
-      url.searchParams.delete('one_tap_resume');
-      window.history.replaceState({}, '', url.toString());
+      } catch (err) {
+        // Deterministic outcomes (gone/voided/gate off) end the resume; a
+        // transient failure (network, 5xx) must KEEP the return params so a
+        // reload retries instead of stranding the held purchase.
+        resolved = err?.status === 404 || err?.status === 409 || err?.status === 400;
+      }
+      if (resolved) {
+        clearReturnedSetupIntent();
+        const url = new URL(window.location.href);
+        url.searchParams.delete('one_tap_resume');
+        window.history.replaceState({}, '', url.toString());
+      } else {
+        resumeProcessedRef.current = false;
+      }
     })();
   }, []);
   if (!data?.cards?.length) return null;

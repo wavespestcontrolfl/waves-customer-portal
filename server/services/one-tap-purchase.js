@@ -196,7 +196,14 @@ async function initPurchase({ customerId, clicked, ip, userAgent }) {
   // the owned qualifying families as priorQualifyingServices so the engine
   // prices at the COMBINED WaveGuard tier (without them it unions nothing
   // and prices standalone Bronze — estimate-engine tierServiceKeys).
-  const ownedFamilyKeys = [...new Set(basis.result?.currentServiceKeys || [])];
+  // Reverse the offer-vocabulary mapping before handing keys to the engine:
+  // currentServiceKeys spells termite ownership 'termite' (display vocab),
+  // but determineWaveGuardTier's qualifying list only counts the canonical
+  // 'termite_bait' — passing the display key would silently drop a tier
+  // step (and its discount) for termite owners.
+  const ownedFamilyKeys = [...new Set(
+    (basis.result?.currentServiceKeys || []).map((k) => (k === 'termite' ? 'termite_bait' : k))
+  )];
   const context = { grassType: propertyContext.grassType, palmCount: propertyContext.palmCount };
   const engineInputs = {
     ...propertyContext.propertyInput,
@@ -286,17 +293,70 @@ async function initPurchase({ customerId, clicked, ip, userAgent }) {
     },
   };
 
-  // Supersede any prior open one-tap attempt. CAS on the still-open states
-  // (P0): a purchase that COMPLETES between a read and a blind id-keyed
-  // update must never be flipped to voided — the status filter inside the
-  // single UPDATE closes that window, and holds are released only for rows
-  // the update actually transitioned (releaseReservation itself only
-  // deletes live customer-less holds, so a committed visit is untouchable).
-  const superseded = await db('one_tap_purchases')
-    .where({ customer_id: customerId })
-    .whereIn('status', ['initiated', 'reserved'])
-    .update({ status: 'voided', updated_at: db.fn.now() })
-    .returning(['id', 'estimate_id', 'scheduled_service_id']);
+  // Supersede-then-create runs in ONE transaction serialized by a
+  // per-customer advisory lock (P2: two tabs initing concurrently could
+  // both pass the supersede update before either inserted, leaving two
+  // open purchases — and two capacity-blocking holds). The CAS on the
+  // still-open states stays (P0): a purchase that COMPLETES between a read
+  // and a blind id-keyed update must never be flipped to voided — holds
+  // are released post-commit and only for rows the update actually
+  // transitioned (releaseReservation only deletes live customer-less
+  // holds, so a committed visit is untouchable either way).
+  const token = crypto.randomBytes(16).toString('hex');
+  const { superseded, estimate, purchase } = await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`one_tap_init:${customerId}`]);
+    const priorOpen = await trx('one_tap_purchases')
+      .where({ customer_id: customerId })
+      .whereIn('status', ['initiated', 'reserved'])
+      .update({ status: 'voided', updated_at: trx.fn.now() })
+      .returning(['id', 'estimate_id', 'scheduled_service_id']);
+    await trx('estimates')
+      .where({ customer_id: customerId, source: 'one_tap_purchase', status: 'draft' })
+      .whereNull('archived_at')
+      .update({ archived_at: trx.fn.now() });
+
+    // The draft rides the customer's on-file address so resolveEstimateCoords
+    // adopts the customer coords (ride-along slot ranking needs them).
+    const [estimateRow] = await trx('estimates').insert({
+      customer_id: customerId,
+      status: 'draft',
+      source: 'one_tap_purchase',
+      // Denormalized identity: the admin estimate list renders and searches
+      // these columns directly (no customers join) — without them a one-tap
+      // estimate shows blank and is unfindable by name/phone.
+      customer_name: `${basis.customer.first_name || ''} ${basis.customer.last_name || ''}`.trim() || null,
+      customer_phone: basis.customer.phone || null,
+      customer_email: basis.customer.email || null,
+      address: pricingAi.addressForCustomer(basis.customer) || null,
+      monthly_total: monthlyTotal,
+      annual_total: annualAfter,
+      onetime_total: 0,
+      waveguard_tier: membershipSnapshot.tierLabel || null,
+      token,
+      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      notes: null,
+      estimate_data: JSON.stringify(estimateData),
+    }).returning('*');
+
+    const [purchaseRow] = await trx('one_tap_purchases').insert({
+      customer_id: customerId,
+      estimate_id: estimateRow.id,
+      service_key: offer.serviceKey,
+      option_id: offer.option.id,
+      fingerprint: offer.fingerprint,
+      per_visit: perVisit,
+      status: 'initiated',
+      terms_version: TERMS_VERSION,
+      terms_snapshot: TERMS_TEXT,
+      consent_ip: ip || null,
+      consent_user_agent: userAgent || null,
+    }).returning('*');
+
+    return { superseded: priorOpen, estimate: estimateRow, purchase: purchaseRow };
+  });
+
+  // Hold release AFTER commit — a rolled-back init must not have freed a
+  // hold that still belongs to the (still-open) prior purchase.
   for (const prior of superseded) {
     if (prior.scheduled_service_id) {
       try {
@@ -310,48 +370,6 @@ async function initPurchase({ customerId, clicked, ip, userAgent }) {
       }
     }
   }
-  await db('estimates')
-    .where({ customer_id: customerId, source: 'one_tap_purchase', status: 'draft' })
-    .whereNull('archived_at')
-    .update({ archived_at: db.fn.now() });
-
-  // The draft rides the customer's on-file address so resolveEstimateCoords
-  // adopts the customer coords (ride-along slot ranking needs them).
-  const token = crypto.randomBytes(16).toString('hex');
-  const [estimate] = await db('estimates').insert({
-    customer_id: customerId,
-    status: 'draft',
-    source: 'one_tap_purchase',
-    // Denormalized identity: the admin estimate list renders and searches
-    // these columns directly (no customers join) — without them a one-tap
-    // estimate shows blank and is unfindable by name/phone.
-    customer_name: `${basis.customer.first_name || ''} ${basis.customer.last_name || ''}`.trim() || null,
-    customer_phone: basis.customer.phone || null,
-    customer_email: basis.customer.email || null,
-    address: pricingAi.addressForCustomer(basis.customer) || null,
-    monthly_total: monthlyTotal,
-    annual_total: annualAfter,
-    onetime_total: 0,
-    waveguard_tier: membershipSnapshot.tierLabel || null,
-    token,
-    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
-    notes: null,
-    estimate_data: JSON.stringify(estimateData),
-  }).returning('*');
-
-  const [purchase] = await db('one_tap_purchases').insert({
-    customer_id: customerId,
-    estimate_id: estimate.id,
-    service_key: offer.serviceKey,
-    option_id: offer.option.id,
-    fingerprint: offer.fingerprint,
-    per_visit: perVisit,
-    status: 'initiated',
-    terms_version: TERMS_VERSION,
-    terms_snapshot: TERMS_TEXT,
-    consent_ip: ip || null,
-    consent_user_agent: userAgent || null,
-  }).returning('*');
 
   // Card presence decides whether CONFIRM shows inline card capture. Lookup
   // errors bubble inside the helper by design; here they degrade to "ask

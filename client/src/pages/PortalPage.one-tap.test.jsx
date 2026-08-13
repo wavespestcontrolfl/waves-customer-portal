@@ -155,7 +155,7 @@ describe('one-tap purchase CTA gating', () => {
     });
     api.oneTapReserve.mockResolvedValue({ scheduledServiceId: 'ss-1', expiresAt: new Date(Date.now() + 900000).toISOString(), holdMinutes: 15 });
     api.oneTapConfirm.mockResolvedValue({
-      success: true, perVisit: 84, label: 'Lawn Care',
+      success: true, perVisit: 84, label: 'Lawn Care', emailQueued: true,
       firstVisit: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00' },
     });
 

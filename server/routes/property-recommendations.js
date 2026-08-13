@@ -52,9 +52,13 @@ router.get('/', async (req, res, next) => {
     const result = await buildPropertyRecommendations(req.customerId);
     // Server-computed one-tap availability (bet 3): the client shows the
     // priced offer's purchase CTA only when this is true. Additive — the
-    // existing fields are untouched. Monthly-membership accounts are fenced
-    // out (their converter path would fold the add-on into monthly_rate,
-    // contradicting the per-application terms); the write side re-checks.
+    // existing fields are untouched. Two fences mirror init's own refusals
+    // so the button never renders for an account init would deterministically
+    // 409: monthly-membership lanes (the converter would fold the add-on
+    // into monthly_rate, contradicting per-application terms) and
+    // non-members (isExistingCustomer derives from the same qualifying-rows
+    // authority — their $99 setup fee would be silently waived). The write
+    // side re-checks both.
     let oneTap = gateEnvValue('GATE_ONE_TAP_PURCHASE');
     if (oneTap) {
       const { customerPreservesMonthlyMembership } = require('../services/billing-cadence');
@@ -62,6 +66,11 @@ router.get('/', async (req, res, next) => {
         .where({ id: req.customerId })
         .first('pipeline_stage', 'monthly_rate', 'billing_mode');
       oneTap = !!customer && !customerPreservesMonthlyMembership(customer);
+    }
+    if (oneTap) {
+      const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+      const qualifyingKeys = await loadExistingQualifyingServiceKeys(db, req.customerId).catch(() => []);
+      oneTap = qualifyingKeys.length > 0;
     }
     return res.json({ available: true, oneTap, ...result });
   } catch (err) {
