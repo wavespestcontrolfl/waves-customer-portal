@@ -167,6 +167,20 @@ async function initPurchase({ customerId, clicked }) {
   if (customerPreservesMonthlyMembership(basis.customer)) {
     throw httpError(409, 'One-tap purchase is not available on this account — send us a request instead.');
   }
+  // Payer fence at the WRITE side too (GH r6 P0): the GET flag hides the
+  // button for payer-billed accounts, but init must refuse regardless —
+  // otherwise the flow's card-collection step could enroll the homeowner's
+  // card on an account whose invoices route to a third-party payer.
+  let initPayerBilled = true;
+  try {
+    initPayerBilled = await customerIsPayerBilled(db, customerId);
+  } catch (err) {
+    logger.warn(`[one-tap-purchase] payer check failed at init, refusing (fail closed): ${err.message}`);
+    initPayerBilled = true;
+  }
+  if (initPayerBilled) {
+    throw httpError(409, 'One-tap purchase is not available on this account — send us a request instead.');
+  }
 
   const pricingAi = require('./customer-pricing-ai');
   const pricingEngine = require('./pricing-engine');
@@ -616,9 +630,37 @@ async function slots({ customerId, purchaseId }) {
 // authoritative in-transaction re-check. `database` is db or the confirm trx.
 // Fail closed everywhere: an unprovable premises or a thrown ownership read
 // means we cannot prove the family is un-owned, so nothing may be sold.
+// Payer-billed accounts are fenced out of one-tap ENTIRELY (GH r6 P0): the
+// existing card-collection endpoint (/api/billing/cards) enrolls Auto Pay
+// the moment a card saves — BEFORE any confirm-time guard could run — and
+// enrolling the homeowner's card on a payer-routed account points self-pay
+// charging at the wrong party. throwOnError because the resolver's default
+// fail-soft contract returns self-pay on a lookup outage, which would
+// silently defeat the fence; callers treat a throw as payer-billed (fail
+// closed). Mirrored by the GET oneTap flag.
+async function customerIsPayerBilled(database, customerId) {
+  const PayerService = require('./payer');
+  const resolved = await PayerService.resolveForInvoice({
+    database,
+    customerId,
+    throwOnError: true,
+  });
+  return !!resolved?.payerId;
+}
+
 async function assertTargetStillPurchasable(database, customer, serviceKey) {
   if (!customer || customer.active === false || customer.deleted_at) throw httpError(409, OFFER_CHANGED);
   if (customerPreservesMonthlyMembership(customer)) {
+    throw httpError(409, 'One-tap purchase is not available on this account — send us a request instead.');
+  }
+  let payerBilled = true;
+  try {
+    payerBilled = await customerIsPayerBilled(database, customer.id);
+  } catch (err) {
+    logger.warn(`[one-tap-purchase] payer re-check failed, refusing (fail closed): ${err.message}`);
+    payerBilled = true;
+  }
+  if (payerBilled) {
     throw httpError(409, 'One-tap purchase is not available on this account — send us a request instead.');
   }
   const linkage = require('./estimate-property-linkage');
@@ -1001,30 +1043,63 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   // office exception — the committed purchase stands, but never silently
   // unprotected. Ownership is inherent: the card row was looked up BY this
   // customerId.
+  // Payer routing first (GH r6 P1): a member whose invoices route to a
+  // third-party payer must never have the homeowner's card flipped into
+  // Auto Pay — the enrollment would point OTHER self-pay charging at the
+  // wrong party. Same resolveForInvoice authority the accept path's policy
+  // resolver consults; throwOnError because the default fail-soft contract
+  // returns self-pay on a lookup outage, which would silently defeat this
+  // check. Payer-billed ⇒ skip enrollment (invoices route to the payer);
+  // a failed check fails CLOSED (skip + office exception).
+  let payerBilled = false;
+  let payerCheckFailed = false;
   try {
-    const { enrollConsentedMethod } = require('./autopay-enrollment');
-    const enrollment = await enrollConsentedMethod({
+    const PayerService = require('./payer');
+    const resolvedPayer = await PayerService.resolveForInvoice({
       customerId,
-      paymentMethodId: card.id,
-      source: 'one_tap_purchase',
-      details: { via: 'one_tap_confirm', estimate_id: purchase.estimate_id, purchase_id: purchase.id },
+      scheduledServiceId: committed?.id || null,
+      throwOnError: true,
     });
-    if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
-      await require('./notification-service').notifyAdmin(
-        'billing',
-        'One-tap purchase: Auto Pay enrollment refused',
-        `A one-tap purchase confirmed with a consented saved card but Auto Pay enrollment was refused (${enrollment.reason}) — re-add a payment method or the visits will invoice unprotected.`,
-        { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: purchase.estimate_id, purchaseId: purchase.id, reason: enrollment.reason } },
-      ).catch(() => {});
-    }
-  } catch (e) {
-    logger.error(`[one-tap-purchase] Auto Pay enrollment failed for customer ${customerId}: ${e.message}`);
+    payerBilled = !!resolvedPayer?.payerId;
+  } catch (err) {
+    payerCheckFailed = true;
+    logger.warn(`[one-tap-purchase] payer re-check failed — skipping Auto Pay enrollment (fail closed): ${err.message}`);
+  }
+  if (payerBilled) {
+    logger.info(`[one-tap-purchase] Auto Pay enrollment skipped: customer ${customerId} is payer-billed`);
+  } else if (payerCheckFailed) {
     await require('./notification-service').notifyAdmin(
       'billing',
-      'One-tap purchase: Auto Pay enrollment failed',
-      'A one-tap purchase confirmed but Auto Pay enrollment threw — review the account or the visits will invoice unprotected.',
+      'One-tap purchase: Auto Pay enrollment skipped (payer check failed)',
+      'A one-tap purchase confirmed but the payer-routing check failed, so Auto Pay was NOT enrolled (fail closed) — review the account or self-pay visits will invoice unprotected.',
       { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: purchase.estimate_id, purchaseId: purchase.id } },
     ).catch(() => {});
+  } else {
+    try {
+      const { enrollConsentedMethod } = require('./autopay-enrollment');
+      const enrollment = await enrollConsentedMethod({
+        customerId,
+        paymentMethodId: card.id,
+        source: 'one_tap_purchase',
+        details: { via: 'one_tap_confirm', estimate_id: purchase.estimate_id, purchase_id: purchase.id },
+      });
+      if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
+        await require('./notification-service').notifyAdmin(
+          'billing',
+          'One-tap purchase: Auto Pay enrollment refused',
+          `A one-tap purchase confirmed with a consented saved card but Auto Pay enrollment was refused (${enrollment.reason}) — re-add a payment method or the visits will invoice unprotected.`,
+          { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: purchase.estimate_id, purchaseId: purchase.id, reason: enrollment.reason } },
+        ).catch(() => {});
+      }
+    } catch (e) {
+      logger.error(`[one-tap-purchase] Auto Pay enrollment failed for customer ${customerId}: ${e.message}`);
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'One-tap purchase: Auto Pay enrollment failed',
+        'A one-tap purchase confirmed but Auto Pay enrollment threw — review the account or the visits will invoice unprotected.',
+        { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: purchase.estimate_id, purchaseId: purchase.id } },
+      ).catch(() => {});
+    }
   }
   const serviceLabel = committed?.service_type
     || String(purchase.service_key || 'service').replace(/_/g, ' ');

@@ -53,26 +53,31 @@ jest.mock('../routes/estimate-public', () => ({
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => true) }));
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
+jest.mock('../services/slot-reservation', () => ({
+  releaseReservation: jest.fn(async () => ({ released: true })),
+}));
 
 const express = require('express');
+const slotReservation = require('../services/slot-reservation');
 const db = require('../models/db');
 const router = require('../routes/admin-estimates');
 
 // Table-aware recording builders: db('estimates') answers the draft row,
 // db('one_tap_purchases') answers the configured ledger rows; the
 // transaction replays the same table map and records deletes.
-function makeTableDb({ estimate, oneTapRows = [] }) {
+function makeTableDb({ estimate, oneTapRows = [], holdRows = [] }) {
   const calls = { deleted: [], updated: [] };
   const builderFor = (table) => {
     const b = {};
-    for (const m of ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotIn', 'select', 'orderBy', 'limit']) {
+    for (const m of ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereNotIn', 'select', 'orderBy', 'limit']) {
       b[m] = jest.fn((...args) => {
         if (typeof args[0] === 'function') args[0].call(b, b);
         return b;
       });
     }
     b.first = jest.fn(async () => (table === 'estimates' ? estimate : undefined));
-    b.then = (resolve, reject) => Promise.resolve(table === 'one_tap_purchases' ? oneTapRows : []).then(resolve, reject);
+    const listFor = { one_tap_purchases: oneTapRows, scheduled_services: holdRows };
+    b.then = (resolve, reject) => Promise.resolve(listFor[table] || []).then(resolve, reject);
     b.update = jest.fn(async (patch) => { calls.updated.push({ table, patch }); return 1; });
     b.del = jest.fn(async () => { calls.deleted.push(table); return 1; });
     return b;
@@ -123,6 +128,22 @@ describe('draft delete with one-tap ledger rows', () => {
       const res = await fetch(`${baseUrl}/estimates/est-1`, { method: 'DELETE' });
       expect(res.status).toBe(400);
       expect(calls.deleted).toEqual([]);
+    });
+  });
+
+  test('a reserved attempt\'s LIVE hold is released through slot-reservation before the estimate delete (GH r6 P2)', async () => {
+    const calls = makeTableDb({
+      estimate: { id: 'est-1', status: 'draft' },
+      oneTapRows: [{ id: 'otp-1', status: 'reserved' }],
+      holdRows: [{ id: 'ss-hold-1' }],
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/est-1`, { method: 'DELETE' });
+      expect(res.status).toBe(200);
+      expect(slotReservation.releaseReservation).toHaveBeenCalledWith({
+        scheduledServiceId: 'ss-hold-1', estimateId: 'est-1',
+      });
+      expect(calls.deleted).toEqual(expect.arrayContaining(['one_tap_purchases', 'estimates']));
     });
   });
 

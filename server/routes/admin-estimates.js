@@ -3163,6 +3163,21 @@ router.delete('/:id', async (req, res, next) => {
     if (oneTapRows.some((r) => r.status === 'completed')) {
       return res.status(400).json({ error: 'This estimate carries a completed one-tap purchase and cannot be deleted.' });
     }
+    // A reserved attempt's LIVE hold also references this estimate
+    // (scheduled_services.source_estimate_id, NO ACTION) — release it
+    // through the slot-reservation mechanism first or the estimate delete
+    // below still 23503s until the hold sweeper runs.
+    const liveHolds = await db('scheduled_services')
+      .where({ source_estimate_id: req.params.id })
+      .whereNull('customer_id')
+      .whereNotNull('reservation_expires_at')
+      .select('id');
+    for (const hold of liveHolds) {
+      await require('../services/slot-reservation').releaseReservation({
+        scheduledServiceId: hold.id,
+        estimateId: req.params.id,
+      });
+    }
     await db.transaction(async (trx) => {
       if (oneTapRows.length) {
         await trx('one_tap_purchases')

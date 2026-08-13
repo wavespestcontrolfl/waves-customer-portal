@@ -156,6 +156,9 @@ jest.mock('../services/new-recurring-welcome-sms', () => ({
 jest.mock('../services/autopay-enrollment', () => ({
   enrollConsentedMethod: jest.fn(async () => ({ enrolled: true })),
 }));
+jest.mock('../services/payer', () => ({
+  resolveForInvoice: jest.fn(async () => ({ payerId: null })),
+}));
 jest.mock('../services/appointment-tagger', () => ({
   onServiceScheduled: jest.fn(async () => ({})),
 }));
@@ -185,6 +188,7 @@ const { triggerNotification } = require('../services/notification-triggers');
 const { sendNewRecurringWelcome } = require('../services/new-recurring-welcome-sms');
 
 const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+const PayerService = require('../services/payer');
 const AppointmentTagger = require('../services/appointment-tagger');
 const { maybeCreateTermiteProgramAgreement } = require('../services/termite-program-agreement');
 const { treeShrubTierCatalogStamp } = require('../routes/estimate-public');
@@ -454,6 +458,14 @@ describe('initPurchase', () => {
 
 // ── reserve / release ────────────────────────────────────────────────────
 describe('initPurchase — GH r5 hardening', () => {
+  test('a payer-billed account is refused at init — nothing persists (GH r6 P0)', async () => {
+    PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
+    await expect(oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(db.__state.tables.one_tap_purchases).toHaveLength(0);
+    expect(db.__state.tables.estimates).toHaveLength(0);
+  });
+
   test('init records NO consent metadata — the customer has not agreed to anything yet', async () => {
     await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
     const purchase = db.__state.tables.one_tap_purchases[0];
@@ -736,6 +748,28 @@ describe('confirm', () => {
     }));
   });
 
+  // ── Payer fence (GH r6 P0): payer-billed accounts are refused OUTRIGHT —
+  // the flow's card-collection step (/api/billing/cards) enrolls Auto Pay
+  // the moment a card saves, before any confirm-time guard could run.
+  test('a payer-billed account is refused at confirm: 409 + void, no conversion, no enrollment', async () => {
+    PayerService.resolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(db.__state.tables.one_tap_purchases[0].status).toBe('voided');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(enrollConsentedMethod).not.toHaveBeenCalled();
+    PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+  });
+
+  test('an unknowable payer picture fails CLOSED at confirm (409 + void)', async () => {
+    PayerService.resolveForInvoice.mockRejectedValue(new Error('payer lookup down'));
+    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(db.__state.tables.one_tap_purchases[0].status).toBe('voided');
+    expect(enrollConsentedMethod).not.toHaveBeenCalled();
+    PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+  });
+
   test('a refused enrollment parks a billing office exception — the purchase stands', async () => {
     enrollConsentedMethod.mockResolvedValueOnce({ enrolled: false, reason: 'method_removed' });
     const out = await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
@@ -990,10 +1024,16 @@ describe('GET /api/property-recommendations oneTap flag', () => {
     id: 'cust-1', pipeline_stage: 'active_customer', monthly_rate: 89, billing_mode: 'per_application',
   };
 
-  function recsApp({ recsGate, oneTapGate, customerRow = ELIGIBLE_CUSTOMER, qualifyingKeys = ['pest_control'] }) {
+  function recsApp({ recsGate, oneTapGate, customerRow = ELIGIBLE_CUSTOMER, qualifyingKeys = ['pest_control'], payer = { payerId: null } }) {
     jest.resetModules();
     jest.doMock('../middleware/auth', () => ({
       authenticate: (req, _res, nextFn) => { req.customerId = 'cust-1'; nextFn(); },
+    }));
+    jest.doMock('../services/payer', () => ({
+      resolveForInvoice: jest.fn(async () => {
+        if (payer instanceof Error) throw payer;
+        return payer;
+      }),
     }));
     jest.doMock('../services/waveguard-existing-services', () => ({
       loadExistingQualifyingServiceKeys: jest.fn(async () => qualifyingKeys),
@@ -1027,6 +1067,7 @@ describe('GET /api/property-recommendations oneTap flag', () => {
     delete process.env.GATE_ONE_TAP_PURCHASE;
     jest.dontMock('../middleware/auth');
     jest.dontMock('../services/property-recommendations');
+    jest.dontMock('../services/payer');
     if (server) { await new Promise((resolve) => server.close(resolve)); server = null; }
   });
 
@@ -1061,6 +1102,18 @@ describe('GET /api/property-recommendations oneTap flag', () => {
 
   test('a non-member (no qualifying recurring services) is fenced out of oneTap — init would refuse them', async () => {
     const url = await listen(recsApp({ recsGate: true, oneTapGate: true, qualifyingKeys: [] }));
+    const got = await (await fetch(`${url}/api/property-recommendations/`)).json();
+    expect(got).toMatchObject({ available: true, oneTap: false });
+  });
+
+  test('a payer-billed account is fenced out of oneTap — the card-collection step would enroll the wrong party (GH r6 P0)', async () => {
+    const url = await listen(recsApp({ recsGate: true, oneTapGate: true, payer: { payerId: 'payer-1' } }));
+    const got = await (await fetch(`${url}/api/property-recommendations/`)).json();
+    expect(got).toMatchObject({ available: true, oneTap: false });
+  });
+
+  test('an unknowable payer picture fails closed to oneTap:false', async () => {
+    const url = await listen(recsApp({ recsGate: true, oneTapGate: true, payer: new Error('payer lookup down') }));
     const got = await (await fetch(`${url}/api/property-recommendations/`)).json();
     expect(got).toMatchObject({ available: true, oneTap: false });
   });

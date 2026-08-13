@@ -72,6 +72,16 @@ router.get('/', async (req, res, next) => {
       const qualifyingKeys = await loadExistingQualifyingServiceKeys(db, req.customerId).catch(() => []);
       oneTap = qualifyingKeys.length > 0;
     }
+    if (oneTap) {
+      // Payer fence mirror (GH r6 P0): payer-billed accounts are fenced out
+      // of one-tap at init/confirm — the flow's card-collection step would
+      // otherwise enroll the homeowner's card on a payer-routed account.
+      // Fail closed: an unknowable payer picture hides the button.
+      const { resolveForInvoice } = require('../services/payer');
+      oneTap = await resolveForInvoice({ customerId: req.customerId, throwOnError: true })
+        .then((p) => !p?.payerId)
+        .catch(() => false);
+    }
     return res.json({ available: true, oneTap, ...result });
   } catch (err) {
     next(err);
