@@ -206,8 +206,16 @@ async function releaseHotAlertClaim(callSid) {
 // receipt failure (page delivered, receipt write lost) can probe for it instead
 // of paging twice. The CallSid tail is an opaque id, not PII.
 function hotAlertNotificationTitle(callSid) {
-  const tail = String(callSid || '').slice(-8) || 'unknown';
-  return `🚨 Hot lead — phone assistant call …${tail}`;
+  // A collision-resistant digest, not a truncated tail: the probe searches ALL
+  // historical notifications by title, and an 8-char suffix repeats across a
+  // long enough call history — a colliding earlier call would mark a NEW hot
+  // lead "already delivered" and skip its page. 16 hex chars of sha256 over
+  // the full CallSid keeps the title short and the key effectively unique.
+  const sid = String(callSid || '');
+  const digest = sid
+    ? require('crypto').createHash('sha256').update(sid).digest('hex').slice(0, 16)
+    : 'unknown';
+  return `🚨 Hot lead — phone assistant call ${digest}`;
 }
 
 async function hotAlertAlreadyDelivered(callSid) {
