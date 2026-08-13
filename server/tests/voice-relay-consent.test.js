@@ -463,6 +463,29 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
   });
 
+  // ⭐ THE CALLER'S WORDS ARE THE TRIGGER, NOT A BOX THE MODEL TICKS.
+  // `do_not_contact_request` is an optional field filled in at the model's
+  // discretion; a caller who says "stop texting me" has withdrawn consent
+  // whether or not it remembered, and TCPA does not care which field the
+  // transcriber preferred.
+  test('an explicit verbal stop suppresses even with do_not_contact_request MISSING', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Asked us to stop texting.',
+      contact_preference: 'stop texting me',
+      // no do_not_contact_request at all
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+  });
+
+  test('an explicit verbal stop suppresses even with the flag explicitly FALSE', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Asked us to stop texting.',
+      contact_preference: 'never text me again',
+      do_not_contact_request: false,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+  });
+
   test('an explicitly STATED "stop texting me" does suppress SMS', async () => {
     await executeTool('capture_lead', {
       call_summary: 'Asked us to stop texting.',

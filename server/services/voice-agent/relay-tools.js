@@ -942,15 +942,25 @@ async function executeTool(name, input = {}, ctx = {}) {
       // into a gate-off capability means running signed-call verification
       // outside the context gate — a deliberate change to that promise, and an
       // owner call, not a silent one.
+      // ⭐ THE WORDS DECIDE, NOT AN OPTIONAL BOOLEAN. Suppression used to fire
+      // only when `do_not_contact_request` was exactly true — a field the model
+      // fills in at its own discretion, alongside the caller's verbatim words.
+      // A caller who says "stop texting me" has withdrawn consent whether or not
+      // the model remembered to tick a box, and TCPA does not care which of the
+      // two the transcriber preferred. So the CLASSIFIER is the trigger; the
+      // flag is one more way to arrive at it, never a precondition. (A bare flag
+      // with no words still writes nothing — that case names no channel, which
+      // is why `smsOptOut` stays false for it.)
+      const optOutRequested = smsOptOut;
       const callerVerified = ctx.callerVerified === true;
-      if (input.do_not_contact_request === true && !emailOnlyRequest && !callerVerified) {
+      if (optOutRequested && !callerVerified) {
         logger.warn(
           `[voice-relay] verbal do-not-contact from an UNVERIFIED session callSid=${ctx.callSid || 'n/a'} — no `
           + 'messaging suppression written (an unverified ANI must not be able to silence a customer\'s texts); '
           + 'recorded on the lead for a human'
         );
       }
-      if (input.do_not_contact_request === true && !emailOnlyRequest && callerVerified) {
+      if (optOutRequested && callerVerified) {
         try {
           const { recordSuppression } = require('../messaging/validators/suppression');
           // ⭐ IT RESOLVES ON FAILURE. recordSuppression catches its own DB
