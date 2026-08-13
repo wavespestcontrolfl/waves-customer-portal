@@ -25,7 +25,7 @@ const {
   formatETDay, formatETDate, formatETTime,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
-const { customerOnAutopay } = require('../services/autopay-eligibility');
+const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected } = require('../services/billing-lane');
 const DiscountEngine = require('../services/discount-engine');
 const { isReService } = require('../services/re-service');
@@ -1871,15 +1871,18 @@ function compactCheckoutInvoiceLines(rawLines) {
 }
 
 // "No card on file — collect on site" alert for the day-view propertyAlerts
-// feed (tech Next Stop card + dispatch chips). Fires only when on-site
-// collection is actually plausible: nothing saved in payment_methods, the
-// visit bills the homeowner (not a third-party payer), it isn't prepaid,
-// and its checkout invoice isn't already paid. Deliberately NOT the
-// customerOnAutopay predicate — a customer with a saved card but autopay
-// off can still be charged on file; only a truly empty wallet needs the
-// tech to collect before leaving.
-function noCardOnFileAlert({ hasMethodOnFile, billedToPayerId, prepaidMethod, checkoutInvoicePaid }) {
-  if (hasMethodOnFile || billedToPayerId || prepaidMethod || checkoutInvoicePaid) return null;
+// feed (tech Next Stop card + dispatch chips). Rides the sheet's existing
+// completion-billing prediction as the "is money actually due" authority —
+// payer-billed, prepaid/paid, membership- or annual-covered, and free
+// callback/follow-up visits all collapse to non-'invoice' kinds there, so
+// the badge fires only when completion will cut an invoice this customer
+// has no chargeable way to settle remotely. Deliberately NOT the
+// customerOnAutopay predicate — a saved card with autopay off is still
+// chargeable on file; only a truly empty (or expired/blocked) wallet needs
+// the tech to collect before leaving.
+function noCardOnFileAlert({ hasChargeableMethod, prediction }) {
+  if (hasChargeableMethod) return null;
+  if (!prediction || prediction.kind !== 'invoice' || !(Number(prediction.amount) > 0)) return null;
   return { type: 'no_card_on_file', text: 'NO CARD ON FILE — collect payment on site' };
 }
 
@@ -2104,26 +2107,6 @@ router.get('/', async (req, res, next) => {
         if (svcPrefs.interior_spray === false) alerts.push({ type: 'service_pref', text: 'EXTERIOR ONLY — no interior treatment' });
         if (svcPrefs.exterior_sweep === false) alerts.push({ type: 'service_pref', text: 'Skip eave/cobweb sweep' });
       }
-      // Payment-capture flag — the tech needs to know at the doorstep that
-      // nothing chargeable exists behind this customer (autopay_enabled can
-      // be true with no saved method, so the autopay flag alone lies).
-      // Fail toward NOT flagging, like the reads above: a wrong badge on a
-      // covered customer teaches the tech to ignore it.
-      let hasMethodOnFile = true;
-      try {
-        hasMethodOnFile = !!(await db('payment_methods')
-          .where({ customer_id: s.customer_id, processor: 'stripe' })
-          .whereNotNull('stripe_payment_method_id')
-          .first('id'));
-      } catch { hasMethodOnFile = true; }
-      const noCardAlert = noCardOnFileAlert({
-        hasMethodOnFile,
-        billedToPayerId: s.billed_to_payer_id,
-        prepaidMethod: s.prepaid_method,
-        checkoutInvoicePaid: checkoutInvoice?.status === 'paid',
-      });
-      if (noCardAlert) alerts.push(noCardAlert);
-
       const zone = s.zone || getZone(s.city, s.zip);
       const autopayActive = await customerOnAutopay({
         id: s.customer_id,
@@ -2196,6 +2179,33 @@ router.get('/', async (req, res, next) => {
           annualCoverageValidated,
         }),
       };
+      // Payment-capture flag — the tech needs to know at the doorstep that
+      // nothing chargeable exists behind this customer (autopay_enabled can
+      // be true with no saved method, so the autopay flag alone lies).
+      // "Chargeable" means what the manual charge path can actually use: a
+      // non-expired card, or a bank method while ACH isn't blocked — NOT
+      // just any payment_methods row. Fail toward NOT flagging, like the
+      // reads above: a wrong badge on a covered customer teaches the tech
+      // to ignore it.
+      if (billingLane.prediction?.kind === 'invoice') {
+        let hasChargeableMethod = true;
+        try {
+          const methods = await db('payment_methods')
+            .where({ customer_id: s.customer_id, processor: 'stripe' })
+            .whereNotNull('stripe_payment_method_id')
+            .select('method_type', 'exp_month', 'exp_year');
+          hasChargeableMethod = methods.some((m) => (
+            isBankMethodType(m.method_type)
+              ? (!s.ach_status || s.ach_status === 'active')
+              : !isExpiredCardMethod(m)
+          ));
+        } catch { hasChargeableMethod = true; }
+        const noCardAlert = noCardOnFileAlert({
+          hasChargeableMethod,
+          prediction: billingLane.prediction,
+        });
+        if (noCardAlert) alerts.push(noCardAlert);
+      }
 
       // Add-on verdicts are kept SEPARATE and handed to traceFeedFields
       // (codex P1 r7): collapsing first with combineRowVerdicts reintroduces
