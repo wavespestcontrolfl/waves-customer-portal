@@ -426,6 +426,11 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     const clashCall = occupancy.findConflictingVisits.mock.calls[0][0];
     expect(clashCall.excludeStatuses).toEqual(['cancelled', 'skipped', 'rescheduled']);
 
+    // ⭐ SPOKEN ARRIVAL COPY IS THE SHARED +120 RANGE, never a point time —
+    // "around 9:00 AM" would be contradicted by every reminder's "9 to 11".
+    expect(out).toMatch(/arrival window of 9:00 AM - 11:00 AM/);
+    expect(out).not.toMatch(/starting around/);
+
     // The pending request surfaces in the EXISTING admin confirm queue.
     const triageInsert = trxBuilders.triage_items.insert;
     expect(triageInsert).toHaveBeenCalledTimes(1);

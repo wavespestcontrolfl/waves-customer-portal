@@ -417,8 +417,11 @@ function buildReserviceAlert({ lane, urgency, subject, issue, covered, requestId
  */
 async function alertOwnerReservice(request = {}, ctx = {}) {
   try {
+    // Same recovery carve-out as the hot-lead sender: an obligation persisted
+    // while the lane was live must deliver even after a rollback — the sweep
+    // passes recovery:true; live callers never do.
     const { isContextEnabled } = require('./relay-context');
-    if (!isContextEnabled()) return false;
+    if (!isContextEnabled() && ctx.recovery !== true) return false;
     const to = ownerAlertPhone();
     if (!to) {
       logger.warn('[voice-relay-alert] re-service filed but ADAM_PHONE is unset — no owner alert sent');

@@ -540,7 +540,7 @@ async function sweepUnalertedVoiceReservices({ limit = 10 } = {}) {
     // the page copy without it is simply more conservative.
      
     const ok = await fireReserviceAlertsAndStamp({
-      row, lane, covered: false, unverifiedRequester: unverified, ctx: {},
+      row, lane, covered: false, unverifiedRequester: unverified, ctx: { recovery: true },
     }).catch(() => false);
     if (ok) paged += 1;
   }

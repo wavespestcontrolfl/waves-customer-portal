@@ -904,8 +904,16 @@ async function requestBookingText(input = {}, ctx = {}) {
     + `${thirdParty ? ' [UNVERIFIED third-party requester]' : ''} (callSid=${ctx.callSid || 'n/a'})`
   );
 
-  const spokenTime = slot.start_label || String(windowStart);
-  return `Booking REQUEST submitted for ${catalogRow.name} on ${dateStr} starting around ${spokenTime}. `
+  // Customer-facing arrival copy is the SHARED +120min range (AGENTS.md) —
+  // never a point time. "Around 9:00 AM" reads as a promise the reminders and
+  // track page would then contradict with "9 to 11".
+  let spokenTime = slot.start_label || String(windowStart);
+  try {
+    const { arrivalWindowRange, formatSmsTimeRange } = require('../../utils/sms-time-format');
+    const range = arrivalWindowRange(windowStart);
+    if (range) spokenTime = formatSmsTimeRange(range);
+  } catch { /* the bare start remains the fallback */ }
+  return `Booking REQUEST submitted for ${catalogRow.name} on ${dateStr} with an arrival window of ${spokenTime}. `
     + 'This is NOT a confirmed appointment: tell the caller a Waves team member will text or call '
     + 'shortly to confirm the final time. Do NOT say the time is locked in, booked, or guaranteed. '
     + 'Then call capture_lead as usual before ending the call.';
