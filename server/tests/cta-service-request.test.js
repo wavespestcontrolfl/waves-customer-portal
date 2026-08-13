@@ -108,6 +108,28 @@ describe('writeOrRefreshCtaRequest', () => {
     expect(ops.inserts).toHaveLength(0);
   });
 
+  test('a refresh from a surface with NO mint hook preserves the minted-estimate linkage (#3391 audit P1)', async () => {
+    // Portal-home tap after a report mint: the fresh snapshot carries no
+    // mintedEstimate, but wholesale-replacing pricing_revision would erase
+    // the pointer — a later report tap would mint a SECOND estimate with no
+    // way to archive the first (two live honorable prices).
+    const minted = { id: 'est-1', token: 'tok-1', mintedAt: '2026-08-13T00:00:00Z' };
+    const { db, ops } = fakeDb({
+      existing: {
+        id: 'req-1',
+        source: 'service_report',
+        subject: 'old subject',
+        pricing_revision: JSON.stringify({ source: 'service_report', crossSell: {}, mintedEstimate: minted }),
+      },
+    });
+    const outcome = await writeOrRefreshCtaRequest(db, ARGS);
+    expect(outcome.refreshed).toBe(true);
+    const stored = JSON.parse(ops.updates[0].patch.pricing_revision);
+    expect(stored.mintedEstimate).toEqual(minted);
+    // The offer snapshot itself is still the fresh one.
+    expect(stored.offer).toEqual(ARGS.revisionSnapshot.offer);
+  });
+
   test('onWrite runs inside the transaction on a real write', async () => {
     const { db } = fakeDb();
     const onWrite = jest.fn();

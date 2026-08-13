@@ -105,7 +105,19 @@ async function writeOrRefreshCtaRequest(db, {
       await trx('service_requests').where({ id: existing.id }).update({
         subject,
         description,
-        pricing_revision: JSON.stringify(revisionSnapshot),
+        // The minted-estimate linkage SURVIVES a refresh the fresh snapshot
+        // doesn't carry it in (out-of-band audit P1 on #3391): a surface
+        // with no mint hook (portal home) refreshing the shared row must
+        // not erase the pointer a report mint stamped — a later report tap
+        // could then mint a second estimate with no way to archive the
+        // first, leaving two live honorable prices. A mint hook that runs
+        // after this write re-stamps the key with its own outcome either way.
+        pricing_revision: JSON.stringify({
+          ...revisionSnapshot,
+          ...(priorPricingRevision?.mintedEstimate && !revisionSnapshot?.mintedEstimate
+            ? { mintedEstimate: priorPricingRevision.mintedEstimate }
+            : {}),
+        }),
         updated_at: new Date(),
       });
       if (onWrite) await onWrite(trx);
