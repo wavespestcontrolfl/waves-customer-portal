@@ -3589,6 +3589,13 @@ export function ServiceSection({
             // cadence total accept/billing charges, so the bundle card keeps
             // its combined /mo total.
             preferPerApplicationPrice={section.key !== 'bundle'}
+            // The area this section's price was computed from, next to the
+            // price it explains (owner 2026-08-12). Never on the 'bundle'
+            // card: that card carries a combined total, so hanging one
+            // member service's area off it would read as the basis for the
+            // whole plan — the same over-claim preferPerApplicationPrice
+            // excludes bundles for.
+            measuredBasis={section.key === 'bundle' ? null : (section.intelligence?.measuredBasis || null)}
             // The bundle card used to keep its combined /mo total here; that
             // is a plan total the estimate surface must not carry ("per
             // month" audit 2026-08-01) — its headline now names the billing

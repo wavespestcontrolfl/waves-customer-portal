@@ -17455,6 +17455,53 @@ function attachTermiteBondSelector(services = [], estData = {}) {
   return services;
 }
 
+// The area a section's price was computed from, rendered next to that price
+// (owner ask 2026-08-12: the treatable area drives solution volume and the
+// per-application charge, so it belongs beside the number it explains).
+//
+// Lawn only, deliberately: it is the service priced per treatable sq ft. The
+// AI property card further down already lists mosquito/termite/bed areas, and
+// duplicating those beside prices they explain less directly is a separate
+// call. Reads the SAME provenance the engine priced with — lawnMeta.lsf plus
+// turfBasis — so this line can never disagree with the charge.
+//
+// Provenance labels mirror buildShowYourWork: a county seed is a ratio guess
+// off county records, NOT a measurement, so it must never read as satellite.
+// An unrecognized basis falls to the verify wording rather than inheriting a
+// definite claim.
+const TURF_BASIS_DISPLAY_SOURCE = {
+  measuredTurfSf: 'Measured on site',
+  lawnSqFt: 'Confirmed with you',
+  estimatedTurfSf: 'AI satellite measurement',
+  countyPrior: 'County records (estimated)',
+};
+
+function measuredBasisForSection(sectionKey, estData = {}) {
+  if (sectionKey !== 'lawn_care') return null;
+  // v1 saves nest the selected-lawn provenance one level deeper.
+  const meta = estData?.lawnMeta || estData?.results?.lawnMeta
+    || estData?.result?.lawnMeta || estData?.result?.results?.lawnMeta || null;
+  const sqft = Number(meta?.lsf);
+  if (!Number.isFinite(sqft) || sqft <= 0) return null;
+  const basis = String(meta?.turfBasis || '').trim();
+  return {
+    label: 'Treatable lawn',
+    value: `${Math.round(sqft).toLocaleString()} sq ft`,
+    source: TURF_BASIS_DISPLAY_SOURCE[basis] || "Estimated — we'll verify on your first visit",
+  };
+}
+
+// Mutates in place, mirroring attachTermiteBondSelector. Never touches the
+// synthetic 'bundle' section: it carries a combined total, so one member
+// service's area hung off it would read as the basis for the whole plan.
+function attachMeasuredBasis(services = [], estData = {}) {
+  for (const section of services) {
+    if (!section || !section.intelligence || section.key === 'bundle') continue;
+    const basis = measuredBasisForSection(section.key, estData);
+    if (basis) section.intelligence.measuredBasis = basis;
+  }
+}
+
 function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   const estResult = estData?.result || estData?.engineResult || estData || {};
   const recurringServices = recurringServicesWithSupplements(estResult);
@@ -18278,6 +18325,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     lowConfidenceLines,
   );
   attachTermiteBondSelector(services, estData);
+  attachMeasuredBasis(services, estData);
   const combinedRecurring = withCombinedLowConfidenceRange(
     buildCombinedRecurring(contractPayload, estimate, estData, services),
     lowConfidenceRange,
@@ -21369,3 +21417,7 @@ module.exports.planCreditFirstVisitSlice = planCreditFirstVisitSlice;
 // keeps an already-sent Tree & Shrub quote at its sent price after an admin
 // flips the v4.7 pricing_config knobs.
 module.exports.estimateTreeShrubKnobSignal = require('../services/estimate-tree-shrub-knob-replay').treeShrubKnobSignalForReplay;
+// Test hooks (measured-basis lane 2026-08-12): the treatable-area line the
+// lawn PriceCard renders beside its per-application price.
+module.exports.measuredBasisForSection = measuredBasisForSection;
+module.exports.attachMeasuredBasis = attachMeasuredBasis;

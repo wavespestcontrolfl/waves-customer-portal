@@ -207,7 +207,7 @@ export function perApplicationNetForFrequency(frequency) {
 // "$X/mo" it showed instead was a plan total the estimate surface must not
 // carry. With the flag the headline names the billing unit and the itemized
 // rows below carry the actual per-application prices.
-export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false }) {
+export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null }) {
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -492,6 +492,21 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
               2026-07-23, AGENTS.md); the cadences are distinguished by the
               per-application discount itself plus this count. */}
           {visitsPerYear} {perApplicationNoun}{visitsPerYear === 1 ? '' : 's'} per year
+        </div>
+      ) : null}
+
+      {/* The measured basis behind an area-priced service (owner ask
+          2026-08-12). Lawn is priced per treatable sq ft, so the area IS the
+          explanation for the per-application price — it belongs next to that
+          price, not only in the AI property card further down the page.
+          Server-supplied and already rounded; absent when the section has no
+          area basis, so a service priced some other way shows nothing. */}
+      {measuredBasis?.label && measuredBasis?.value ? (
+        <div style={{ fontSize: 13.5, color: CUSTOMER_SURFACE.muted, marginTop: 6, lineHeight: 1.5 }}>
+          {measuredBasis.label}: <strong style={{ color: CUSTOMER_SURFACE.text }}>{measuredBasis.value}</strong>
+          {measuredBasis.source ? (
+            <span style={{ whiteSpace: 'nowrap' }}> · {measuredBasis.source}</span>
+          ) : null}
         </div>
       ) : null}
 
