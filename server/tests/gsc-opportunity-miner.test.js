@@ -2469,7 +2469,8 @@ describe('cross-bucket keys canonicalize service ALIASES (round-4 P1)', () => {
   });
 });
 
-describe('arbitration is FROZEN-ROW aware (round-5 P1)', () => {
+describe('done/skipped fence the whole TARGET, not just their key (round-5/6 P1s)', () => {
+  const { cityServiceTargetKey } = require('../services/seo/gsc-opportunity-miner')._internals;
   const row = (bucket, { query = null, score = 60, dedupe_key } = {}) => ({
     bucket,
     action_type: 'create_or_refresh_city_service_page',
@@ -2482,38 +2483,58 @@ describe('arbitration is FROZEN-ROW aware (round-5 P1)', () => {
     signal_metadata: { impressions: 120 },
   });
 
-  test('a winner aimed at a done/skipped key cannot displace a landable twin', () => {
-    // The upsert's frozen-row guard skips the preferred key entirely —
-    // electing it would remove the eligible twin and land nothing.
-    const frozenNcy = row('no_content_yet', { query: 'termite inspection sarasota', score: 70, dedupe_key: 'no_content_yet::termite::sarasota::termite inspection sarasota' });
-    const lg = row('local_gap', { score: 56, dedupe_key: 'local_gap::termite::sarasota::_' });
-    const out = arbitrateCityServiceTargets([frozenNcy, lg], {
-      frozenKeys: new Set([frozenNcy.dedupe_key]),
+  test('a frozen target drops EVERY candidate — no sibling-bucket bypass', () => {
+    // A skipped row is an operator's standing "no page for this pair";
+    // persisting an unfrozen twin under a different key would re-justify
+    // what the operator declined.
+    const ncy = row('no_content_yet', { query: 'termite inspection sarasota', score: 70, dedupe_key: 'k1' });
+    const lg = row('local_gap', { score: 56, dedupe_key: 'k2' });
+    const out = arbitrateCityServiceTargets([ncy, lg], {
+      frozenTargets: new Set([cityServiceTargetKey('termite', 'sarasota')]),
     });
-    expect(out).toHaveLength(1);
-    expect(out[0].bucket).toBe('local_gap');
+    expect(out).toHaveLength(0);
   });
 
-  test('with NO frozen keys the query-bearing winner rule is unchanged', () => {
+  test('a frozen target drops a SINGLE candidate too', () => {
+    const lg = row('local_gap', { score: 56, dedupe_key: 'k2' });
+    const out = arbitrateCityServiceTargets([lg], {
+      frozenTargets: new Set([cityServiceTargetKey('termite', 'sarasota')]),
+    });
+    expect(out).toHaveLength(0);
+  });
+
+  test('with NO frozen targets the query-bearing winner rule is unchanged', () => {
     const ncy = row('no_content_yet', { query: 'termite inspection sarasota', score: 55, dedupe_key: 'k1' });
     const lg = row('local_gap', { score: 68, dedupe_key: 'k2' });
     const out = arbitrateCityServiceTargets([ncy, lg]);
+    expect(out).toHaveLength(1);
     expect(out[0].bucket).toBe('no_content_yet');
   });
 
-  test('an all-frozen group still keeps its best candidate for calibration', () => {
-    const a = row('no_content_yet', { query: 'q1', score: 70, dedupe_key: 'ka' });
-    const b = row('local_gap', { score: 56, dedupe_key: 'kb' });
-    const out = arbitrateCityServiceTargets([a, b], { frozenKeys: new Set(['ka', 'kb']) });
-    expect(out).toHaveLength(1);
-    expect(out[0].dedupe_key).toBe('ka');
-  });
-
-  test('mineAll reads frozen city-service keys before arbitrating, fail-soft', () => {
+  test('mineAll reads frozen city-service TARGETS before arbitrating, fail-soft', () => {
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
-    expect(src).toMatch(/whereIn\('status', \['done', 'skipped'\]\)[\s\S]{0,200}cityServiceFrozenKeys = new Set/);
-    expect(src).toMatch(/frozen-key lookup failed[\s\S]{0,60}arbitration proceeds frozen-blind/);
-    expect(src).toMatch(/arbitrateCityServiceTargets\(\n?\s*\[\.\.\.minedOpportunities, \.\.\.buckets\.link_boost\],\n?\s*\{ frozenKeys: cityServiceFrozenKeys \}/);
+    expect(src).toMatch(/whereIn\('status', \['done', 'skipped'\]\)[\s\S]{0,300}cityServiceTargetKey\(r\.service, r\.city\)/);
+    expect(src).toMatch(/frozen-target lookup failed[\s\S]{0,60}arbitration proceeds frozen-blind/);
+    expect(src).toMatch(/arbitrateCityServiceTargets\(\n?\s*\[\.\.\.minedOpportunities, \.\.\.buckets\.link_boost\],\n?\s*\{ frozenTargets: cityServiceFrozenTargets \}/);
+  });
+
+  test('the in-flight fence re-checks the frozen-target rule under the lock', async () => {
+    const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+    const miner = new GscOpportunityMiner();
+    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::old', service: 'termite', city: 'sarasota', status: 'skipped', bucket: 'no_content_yet', query: 'old' }];
+    const trx = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue(inflight),
+    }));
+    // Even the frozen row's OWN key is blocked — a skipped target admits
+    // nothing, upsert-refresh path included.
+    const out = await miner._revalidateCityServiceBatch(trx, [
+      { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::termite::sarasota::_', service: 'termite', city: 'sarasota', score: 56, signal_metadata: {} },
+      { bucket: 'no_content_yet', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'no_content_yet::termite::sarasota::old', service: 'termite', city: 'sarasota', score: 70, query: 'old', signal_metadata: {} },
+    ]);
+    expect(out).toHaveLength(0);
   });
 });
