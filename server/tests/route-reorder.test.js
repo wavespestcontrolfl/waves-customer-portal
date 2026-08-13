@@ -118,7 +118,7 @@ beforeEach(() => {
           // Unchanged tech-day: mirror the loaded stops for this date+tech.
           return (stopsByDate[filters.scheduled_date] || [])
             .filter((s) => s.technician_id === filters.technician_id)
-            .map((s) => ({ id: s.id, window_start: s.window_start, time_window: s.time_window, route_order: s.route_order, lat: s.lat, lng: s.lng }));
+            .map((s) => ({ id: s.id, window_start: s.window_start, time_window: s.time_window, window_end: s.window_end, estimated_duration_minutes: s.estimated_duration_minutes, route_order: s.route_order, lat: s.lat, lng: s.lng }));
         },
         update: async (u) => { attempted.push({ id: filters.id, ...u }); return 1; },
       };
@@ -305,6 +305,51 @@ test('savings baseline mirrors the dispatch display order: windowless last, crea
   // 'none' has time_window 'morning' but the board shows it LAST, so the
   // baseline must too.
   expect(currentOrder(day).map((s) => s.id)).toEqual(['r1', 'w9', 'tieA', 'tieB', 'none']);
+});
+
+test('feasibility guard: untimed stops wedged between fixed windows that provably cannot fit SKIP the day', async () => {
+  // Baseline (route_order): B(10:00) first, then A(09:00), then 3 untimed —
+  // long route. Optimizer's lng-sort proposes A, U1, U2, U3, B — chronology
+  // passes (09:00 before 10:00) and saves distance, but three 60-minute
+  // untimed stops between the windows push B's start to 13:00, past its
+  // 10:00–12:00 promise. The day must be skipped, never written.
+  stopsByDate['2026-08-18'] = [
+    stop('B', { lng: 5, route_order: 1, window_start: '10:00' }),
+    stop('A', { lng: 1, route_order: 2, window_start: '09:00' }),
+    stop('U1', { lng: 2, route_order: 3, window_start: null }),
+    stop('U2', { lng: 3, route_order: 4, window_start: null }),
+    stop('U3', { lng: 4, route_order: 5, window_start: null }),
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(db.transaction).not.toHaveBeenCalled();
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'WINDOW_FIT_CONFLICT' }));
+});
+
+test('feasibility guard semantics: one untimed stop between windows FITS (the promise is time+2h)', () => {
+  const { violatesWindowFeasibility } = require('../services/route-reorder')._internals;
+  const RO = require('../services/route-optimizer');
+  const a = stop('a', { window_start: '09:00' });
+  const u = stop('u', { window_start: null });
+  const b = stop('b', { window_start: '10:00' });
+  // 09:00 (60m) → untimed (60m) → b starts 11:00 ≤ 12:00 window end: feasible.
+  expect(violatesWindowFeasibility(RO, [a, u, b], [a, u, b])).toBe(false);
+  // An explicit window_end tighter than +2h is honored: b must start by 10:30.
+  const bTight = stop('b', { window_start: '10:00', window_end: '10:30' });
+  expect(violatesWindowFeasibility(RO, [a, u, bTight], [a, u, bTight])).toBe(true);
+  // Custom durations count: a 150-minute untimed job blows the default window.
+  const uLong = stop('u', { window_start: null, estimated_duration_minutes: 150 });
+  expect(violatesWindowFeasibility(RO, [a, uLong, b], [a, uLong, b])).toBe(true);
+});
+
+test('effectiveWindowRange: window_end honored, +120 default, real band ends', () => {
+  const { effectiveWindowRange } = require('../services/route-reorder')._internals;
+  expect(effectiveWindowRange({ window_start: '09:00:00', window_end: '11:30:00' })).toEqual({ startMin: 540, endMin: 690 });
+  expect(effectiveWindowRange({ window_start: '09:00' })).toEqual({ startMin: 540, endMin: 660 });
+  expect(effectiveWindowRange({ window_start: null, time_window: 'morning' })).toEqual({ startMin: 480, endMin: 720 });
+  expect(effectiveWindowRange({ window_start: null, time_window: 'afternoon' })).toEqual({ startMin: 720, endMin: 1020 });
+  expect(effectiveWindowRange({ window_start: null, time_window: null })).toBeNull();
 });
 
 test('effectiveWindowStart: window_start wins, legacy bands map, free text is unconstrained', () => {

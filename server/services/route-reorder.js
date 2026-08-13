@@ -127,6 +127,76 @@ function effectiveWindowStart(stop) {
   return null; // 'any' / free text — no chronology promise to enforce
 }
 
+const hhmmToMin = (hhmm) => {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  return h * 60 + m;
+};
+
+/**
+ * The [start, end] minute-of-day range a stop is PROMISED to begin within,
+ * or null when unconstrained. window_start rows: end = window_end when set,
+ * else start + 120 — the 72h reminder promises "time + 2h window", so that
+ * default IS the customer promise, not a guess. Legacy bands get their real
+ * band ends (morning = 08:00–12:00, afternoon = 12:00–17:00); a literal
+ * HH:MM in time_window gets the same +120 promise window.
+ */
+function effectiveWindowRange(stop) {
+  if (stop.window_start) {
+    const ws = hhmmToMin(String(stop.window_start).slice(0, 5));
+    const we = stop.window_end ? hhmmToMin(String(stop.window_end).slice(0, 5)) : ws + 120;
+    return { startMin: ws, endMin: Math.max(we, ws) };
+  }
+  const raw = String(stop.time_window || '').trim().toLowerCase();
+  if (raw === 'morning') return { startMin: 8 * 60, endMin: 12 * 60 };
+  if (raw === 'afternoon') return { startMin: 12 * 60, endMin: 17 * 60 };
+  const m = raw.match(/^(\d{1,2}):(\d{2})/);
+  if (m) {
+    const ws = Number(m[1]) * 60 + Number(m[2]);
+    return { startMin: ws, endMin: ws + 120 };
+  }
+  return null;
+}
+
+/**
+ * True when the proposed order provably CANNOT be driven (codex GitHub round
+ * P1): the chronology guard proves timed stops stay in window-start order,
+ * but the optimizer can still wedge untimed stops BETWEEN fixed windows —
+ * 09:00 stop → three 60-minute untimed stops → 10:00 stop passes chronology
+ * yet the tech cannot make the second window. Simulate the day under the ONE
+ * shared leg model (fallbackLegMetrics minutes over haversine — the same
+ * model the savings decision uses): depart HQ at the 08:00 day open, each
+ * stop takes estimated_duration_minutes (default 60), a promised stop may
+ * wait for its window to OPEN but must START no later than its window end
+ * (effectiveWindowRange — the actual customer promise). The simulation is
+ * optimistic (no buffers, straight-line travel), so a failure here is a real
+ * impossibility — and rejection only SKIPS the day (safe direction), never
+ * writes.
+ */
+function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops) {
+  const byId = new Map(sourceStops.map((s) => [s.id, s]));
+  let clock = 8 * 60; // minute-of-day, ET day open
+  let prev = RouteOptimizer.HQ;
+  for (const stop of orderedStops) {
+    const s = byId.get(stop.id) || stop;
+    const lat = parseFloat(s.lat);
+    const lng = parseFloat(s.lng);
+    let travelMin = 0;
+    if (lat && lng) {
+      travelMin = RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng)).minutes || 0;
+      prev = { lat, lng };
+    }
+    let startMin = clock + travelMin;
+    const range = effectiveWindowRange(s);
+    if (range) {
+      if (startMin > range.endMin) return true; // provably misses the promise
+      startMin = Math.max(startMin, range.startMin); // waiting for open is fine
+    }
+    const dur = Number(s.estimated_duration_minutes) > 0 ? Number(s.estimated_duration_minutes) : 60;
+    clock = startMin + dur;
+  }
+  return false;
+}
+
 /**
  * Distance of an ordered stop sequence (HQ → stops → HQ) under the ONE shared
  * in-house model (route-optimizer's haversine legs through fallbackLegMetrics,
@@ -209,7 +279,9 @@ async function runRouteReorder(opts = {}) {
           select: [
             'scheduled_services.id', 'scheduled_services.technician_id',
             'scheduled_services.route_order', 'scheduled_services.window_start',
-            'scheduled_services.time_window', 'scheduled_services.service_type',
+            'scheduled_services.time_window', 'scheduled_services.window_end',
+            'scheduled_services.estimated_duration_minutes',
+            'scheduled_services.service_type',
             'scheduled_services.zone', 'scheduled_services.created_at',
             ...guardedCoordSelects(db),
           ],
@@ -342,6 +414,15 @@ async function runRouteReorder(opts = {}) {
             continue;
           }
 
+          // Feasibility guard: chronology alone lets untimed stops wedge
+          // between fixed windows; if the simulated day provably cannot make
+          // every promised window, skip the tech-day rather than write an
+          // undriveable sequence.
+          if (violatesWindowFeasibility(RouteOptimizer, result.orderedStops, techStops)) {
+            summary.skipped.push({ ...entryBase, reason: 'WINDOW_FIT_CONFLICT', ...metrics });
+            continue;
+          }
+
           // Same write as the trusted /optimize path (route_order = position),
           // but transactional AND revalidated at COMMIT time: the optimizer
           // call can take seconds, so inside the transaction the tech-day is
@@ -405,11 +486,20 @@ async function runRouteReorder(opts = {}) {
                 .forUpdate('scheduled_services')
                 .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
                 .select('scheduled_services.id', 'scheduled_services.window_start',
-                  'scheduled_services.time_window',
+                  'scheduled_services.time_window', 'scheduled_services.window_end',
+                  'scheduled_services.estimated_duration_minutes',
                   'scheduled_services.route_order', ...guardedCoordSelects(trx));
               const num = (v) => (v == null || v === '' ? null : parseFloat(v));
+              // Full guard-input signature: window RANGE + service duration —
+              // the chronology AND feasibility guards were evaluated against
+              // these, so any mid-run change invalidates the order.
+              const windowSig = (s) => {
+                const r = effectiveWindowRange(s);
+                const dur = Number(s.estimated_duration_minutes) > 0 ? Number(s.estimated_duration_minutes) : 60;
+                return `${r ? `${r.startMin}-${r.endMin}` : 'open'}|${dur}`;
+              };
               const snapshot = new Map(techStops.map((s) => [s.id, {
-                window: effectiveWindowStart(s),
+                window: windowSig(s),
                 routeOrder: s.route_order == null ? null : Number(s.route_order),
                 lat: num(s.lat),
                 lng: num(s.lng),
@@ -418,7 +508,7 @@ async function runRouteReorder(opts = {}) {
               for (const row of live) {
                 const snap = snapshot.get(row.id);
                 if (!snap) throw stale(`stop ${row.id} joined the tech-day during the run`);
-                const win = effectiveWindowStart(row);
+                const win = windowSig(row);
                 if (win !== snap.window) throw stale(`stop ${row.id} window changed during the run`);
                 // route_order too: a dispatcher's manual reorder landing while
                 // the optimizer ran must WIN — never overwrite the operator's
@@ -628,5 +718,5 @@ module.exports = {
   runRouteReorderIfEnabled,
   recordSkippedTick,
   getRouteReorderConfig,
-  _internals: { currentOrder, effectiveWindowStart, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
+  _internals: { currentOrder, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
 };
