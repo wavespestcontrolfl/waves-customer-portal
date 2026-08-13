@@ -679,12 +679,15 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       const slotUpdates = serviceContactSlotUpdates(contacts, beforeRow);
       const consentUpdates = serviceContactConsentUpdates(contacts, updates.serviceContactsConsent);
       let lockedBefore = beforeRow;
+      let lockedAt = null;
       await db.transaction(async (trx) => {
         // Row lock + re-read: the audit diff below must describe the actual
         // DB transition — a concurrent save may have moved the row since the
         // unlocked beforeRow read, and diffing against that stale snapshot
-        // fabricates or drops timeline events.
+        // fabricates or drops timeline events. The lock-held timestamp
+        // orders the events even if a later save's insert lands first.
         lockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
+        lockedAt = new Date();
         if (optinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           optinClaims = await claimRecipientOptins({ ...optinArgs, trx });
@@ -707,6 +710,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         after: { ...lockedBefore, ...slotUpdates, ...consentUpdates },
         source: 'portal',
         actorCustomerId: req.customerId,
+        occurredAt: lockedAt,
       });
     } else if (updates.serviceContact !== undefined) {
       // Legacy single-contact save: writes slot 1 only. Role handling
@@ -756,10 +760,12 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       };
       const legacyConsentUpdates = serviceContactConsentUpdates(postSave, updates.serviceContactsConsent);
       let legacyLockedBefore = beforeRow;
+      let legacyLockedAt = null;
       await db.transaction(async (trx) => {
         // Same row-lock re-read as the list save — the audit diff must
         // describe the actual DB transition, not a possibly-stale snapshot.
         legacyLockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
+        legacyLockedAt = new Date();
         if (legacyOptinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           legacyClaims = await claimRecipientOptins({ ...legacyOptinArgs, trx });
@@ -780,6 +786,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         after: { ...legacyLockedBefore, ...legacySlot1Updates, ...legacyConsentUpdates },
         source: 'portal',
         actorCustomerId: req.customerId,
+        occurredAt: legacyLockedAt,
       });
     }
 

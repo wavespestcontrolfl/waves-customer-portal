@@ -748,13 +748,16 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
   if (!winnerId || !loserId || winnerId === loserId) {
     throw new Error('executeMerge: winnerId and loserId must be distinct');
   }
-  // Locked winner snapshot, hoisted for the post-commit contact audit event.
+  // Locked winner snapshot + lock-held timestamp, hoisted for the
+  // post-commit contact audit event.
   let winnerBeforeMerge = null;
+  let mergeLockedAt = null;
   const result = await db.transaction(async (trx) => {
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loser = locked.find((r) => r.id === loserId);
     winnerBeforeMerge = winner;
+    mergeLockedAt = new Date();
     if (!winner || !loser) throw new Error('executeMerge: customer not found');
     if (winner.deleted_at || loser.deleted_at) throw new Error('executeMerge: refusing to merge a deleted customer');
     // The surviving row must be live: retiring an active customer into an
@@ -1507,6 +1510,7 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       before: winnerBeforeMerge,
       after: { ...winnerBeforeMerge, ...result.backfills },
       source: 'dedupe',
+      occurredAt: mergeLockedAt,
     });
   }
   return result;
@@ -2102,6 +2106,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
   // contact audit event (backfilled loser contacts leaving the winner).
   let winnerBeforeUndo = null;
   let winnerPatchApplied = null;
+  let undoLockedAt = null;
   const result = await db.transaction(async (trx) => {
     const journal = await trx('customer_merge_journal').where({ id: journalId }).forUpdate().first();
     if (!journal) refuse('Merge journal entry not found');
@@ -3569,6 +3574,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       await trx('customers').where({ id: winnerId }).update({ ...winnerPatch, updated_at: trx.fn.now() });
       winnerBeforeUndo = winner;
       winnerPatchApplied = winnerPatch;
+      undoLockedAt = new Date();
     }
     if (!ledgerMovedBack && creditsMovedBack) {
       await trx('customers').where({ id: winnerId }).decrement('account_credits', creditsMovedBack);
@@ -3752,6 +3758,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       before: winnerBeforeUndo,
       after: { ...winnerBeforeUndo, ...winnerPatchApplied },
       source: 'dedupe_undo',
+      occurredAt: undoLockedAt,
     });
   }
 

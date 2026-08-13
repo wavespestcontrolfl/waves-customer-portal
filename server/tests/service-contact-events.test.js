@@ -230,6 +230,35 @@ describe('recordServiceContactChanges', () => {
     }));
   });
 
+  test('admin descriptions name the acting staff member when the lookup resolves', async () => {
+    const insert = jest.fn(() => Promise.resolve([]));
+    db.mockImplementation((table) => (table === 'technicians'
+      ? { where: () => ({ first: () => Promise.resolve({ name: 'Virginia' }) }) }
+      : { insert }));
+    await recordServiceContactChanges({
+      customerId: 'cust-1',
+      before: beforeRow,
+      after: {},
+      source: 'admin',
+      adminUserId: 'tech-1',
+    });
+    expect(insert.mock.calls[0][0][0].description)
+      .toBe('Jane S. removed as on-location contact — admin: Virginia');
+  });
+
+  test('occurredAt stamps created_at so lock-serialized saves keep timeline order', async () => {
+    const insert = mockInsert();
+    const lockedAt = new Date('2026-08-13T12:00:00Z');
+    await recordServiceContactChanges({
+      customerId: 'cust-1',
+      before: {},
+      after: beforeRow,
+      source: 'portal',
+      occurredAt: lockedAt,
+    });
+    expect(insert.mock.calls[0][0][0].created_at).toBe(lockedAt);
+  });
+
   test('no events means no insert at all', async () => {
     const insert = mockInsert();
     const events = await recordServiceContactChanges({

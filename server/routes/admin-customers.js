@@ -3174,6 +3174,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // (The audit only fires when slot fields are in `updates`, which
     // guarantees the locking transaction below ran and reassigned this.)
     let contactAuditBefore = before;
+    let contactAuditAt = null;
     const laneStampEligible = req.body.billingMode === undefined && updates.billing_mode === undefined;
     if (Object.keys(updates).length) {
       const contactConflict = await findCrossAccountContactConflict(
@@ -3217,6 +3218,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // moved, stranding them.
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           contactAuditBefore = lockedBefore;
+          contactAuditAt = new Date();
           // Implied-monthly stamp (#3140), decided from the LOCKED row: only
           // when this lane-less save still transitions the locked state into
           // the inferred-monthly shape — a concurrent explicit lane
@@ -3470,6 +3472,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         after: { ...contactAuditBefore, ...updates },
         source: 'admin',
         adminUserId: req.technicianId || null,
+        occurredAt: contactAuditAt,
       });
     }
 

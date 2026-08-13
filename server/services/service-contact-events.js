@@ -173,6 +173,13 @@ function describeEvent(event, sourceLabel) {
  * @param {string} args.source           'portal' | 'admin' | 'dedupe'
  * @param {string} [args.actorCustomerId] portal saves: the authenticated customer
  * @param {string} [args.adminUserId]    admin saves: technicians.id (activity_log FK)
+ * @param {Date}   [args.occurredAt]     timestamp captured while the save held
+ *                                       the customer row lock. The lock
+ *                                       serializes concurrent saves, so
+ *                                       stamping it as created_at keeps the
+ *                                       timeline order matching the transition
+ *                                       order even when a later save's
+ *                                       post-commit insert lands first.
  */
 async function recordServiceContactChanges({
   customerId,
@@ -181,11 +188,25 @@ async function recordServiceContactChanges({
   source = 'portal',
   actorCustomerId = null,
   adminUserId = null,
+  occurredAt = null,
 } = {}) {
   try {
     const events = diffServiceContacts(before, after);
     if (!events.length) return [];
-    const sourceLabel = SOURCE_LABELS[source] || source;
+    let sourceLabel = SOURCE_LABELS[source] || source;
+    // Admin saves name the acting staff member in the visible description —
+    // the timeline renders only descriptions, and "who made the change" is
+    // the point of the audit trail. Staff names are not customer PII (the
+    // dashboard already shows technician names). Best-effort: a failed
+    // lookup keeps the generic label rather than losing the event.
+    if (source === 'admin' && adminUserId) {
+      try {
+        const tech = await db('technicians').where({ id: adminUserId }).first('name');
+        if (tech && tech.name) sourceLabel = `admin: ${tech.name}`;
+      } catch (err) {
+        // keep the generic label
+      }
+    }
     await db('activity_log').insert(events.map((event) => ({
       customer_id: customerId,
       admin_user_id: adminUserId || null,
@@ -208,6 +229,7 @@ async function recordServiceContactChanges({
         consent_text_version: after.service_contacts_consent_text_version || null,
         changed_fields: event.changed,
       }),
+      ...(occurredAt ? { created_at: occurredAt } : {}),
     })));
     return events;
   } catch (err) {
