@@ -253,8 +253,12 @@ async function loadProductHistory(dbh, recordIds) {
       'pc.name as catalog_name',
       'pc.active_ingredient as catalog_active_ingredient',
       'pc.epa_reg_number',
-    )
-    .catch(() => []);
+    );
+  // No .catch(() => []) here: only a SUCCESSFUL empty query means "no
+  // products". A transient DB/join failure collapsed to [] changes the
+  // grounding hash and would persist a brief with the product guidance
+  // erased over a valid cached one; propagate instead — runSweep counts
+  // the visit failed and the prior brief survives.
   const rank = new Map(recordIds.map((id, i) => [String(id), i]));
   // Array.prototype.sort is stable, so within-record created_at order holds.
   return rows.slice().sort((a, b) => (
