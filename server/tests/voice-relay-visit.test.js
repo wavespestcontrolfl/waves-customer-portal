@@ -153,14 +153,31 @@ describe('get_today_eta', () => {
     expect(out).not.toContain('3 PM');
   });
 
-  test('no window on the row → falls back to appointment_reminders.appointment_time', async () => {
+  // ⭐ appointment_time IS A TIMESTAMP. pg returns the column as a Date, and
+  // the clock parser only reads "HH:MM…" strings — so the production fallback
+  // always produced null and the caller heard "no time window is set". The
+  // stamp is normalized to its AMERICA/NEW_YORK wall clock and spoken as the
+  // same start-plus-two-hours arrival window every other surface promises.
+  test('no window on the row → falls back to the reminder TIMESTAMP as an ET arrival window', async () => {
+    primeDb({
+      scheduled_services: [{ ...VISIT_TODAY, window_start: null, window_end: null }],
+      // 17:30Z = 13:30 ET on this date (EDT) — a real timestamptz value.
+      appointment_reminders: [{ appointment_time: new Date('2026-08-12T17:30:00Z') }],
+    });
+    const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).toContain('1:30 PM'); // ET wall clock, never host TZ / UTC
+    expect(out).toContain('3:30 PM'); // …and the +120min window, not a bare start
+    expect(builders.appointment_reminders.where).toHaveBeenCalledWith({ scheduled_service_id: 'ss-1', cancelled: false });
+  });
+
+  test('a legacy time-only reminder value still speaks (and still gets the window)', async () => {
     primeDb({
       scheduled_services: [{ ...VISIT_TODAY, window_start: null, window_end: null }],
       appointment_reminders: [{ appointment_time: '13:30:00' }],
     });
     const out = await executeTool('get_today_eta', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
     expect(out).toContain('1:30 PM');
-    expect(builders.appointment_reminders.where).toHaveBeenCalledWith({ scheduled_service_id: 'ss-1', cancelled: false });
+    expect(out).toContain('3:30 PM');
   });
 
   test('en_route track_state → announces the tech is on the way (read-only peek)', async () => {

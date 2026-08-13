@@ -149,21 +149,52 @@ async function todayEtaText(customerId, { tier = 'redacted' } = {}) {
   const arrivalRange = arrivalWindowRange(row.window_start);
   let windowStart = speakClock(arrivalRange ? arrivalRange.split('-')[0] : row.window_start);
   const windowEnd = arrivalRange ? speakClock(arrivalRange.split('-')[1]) : null;
+  let windowEndFromReminder = null;
   if (!windowStart) {
     // Fallback to the reminder rail's stamped clock time (the same
     // appointment_time the confirmation/reminder messages speak).
+    //
+    // ⭐ IT IS A TIMESTAMP, NOT A CLOCK STRING. `appointment_time` comes back
+    // from pg as a Date (timestamptz), and speakClock parses only "HH:MM…"
+    // strings — so in production this fallback always produced null and the
+    // caller heard "no time window is set". The stamp is normalized to its
+    // AMERICA/NEW_YORK wall clock first (never the host TZ — the one rule
+    // every timestamp in this repo lives by), then goes through the SAME
+    // shared arrivalWindowRange as the primary path, so the fallback speaks
+    // the identical start-plus-two-hours the reminder texts promise.
     const reminder = await db('appointment_reminders')
       .where({ scheduled_service_id: row.id, cancelled: false })
       .orderBy('appointment_time', 'asc')
       .first('appointment_time')
       .catch(() => null);
-    if (reminder && reminder.appointment_time) windowStart = speakClock(reminder.appointment_time);
+    if (reminder && reminder.appointment_time) {
+      let hhmm = null;
+      const raw = reminder.appointment_time;
+      if (typeof raw === 'string' && /^\d{1,2}:\d{2}/.test(raw)) {
+        hhmm = raw.slice(0, 5); // legacy time-only value
+      } else {
+        const asDate = raw instanceof Date ? raw : new Date(raw);
+        if (!Number.isNaN(asDate.getTime())) {
+          hhmm = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit',
+          }).format(asDate);
+        }
+      }
+      const reminderRange = hhmm ? arrivalWindowRange(hhmm) : null;
+      if (reminderRange) {
+        windowStart = speakClock(reminderRange.split('-')[0]);
+        windowEndFromReminder = speakClock(reminderRange.split('-')[1]);
+      } else if (hhmm) {
+        windowStart = speakClock(hhmm);
+      }
+    }
   }
 
   const { promptSafe } = require('./relay-context');
   const service = promptSafe(row.service_type, 60);
   const parts = [];
-  if (windowStart && windowEnd) parts.push(`Today's appointment window is ${windowStart} to ${windowEnd}`);
+  const spokenEnd = windowEnd || windowEndFromReminder;
+  if (windowStart && spokenEnd) parts.push(`Today's appointment window is ${windowStart} to ${spokenEnd}`);
   else if (windowStart) parts.push(`Today's appointment starts around ${windowStart}`);
   else parts.push('There is an appointment on the schedule for today, but no time window is set on it');
   if (service) parts[0] += ` for ${service}`;

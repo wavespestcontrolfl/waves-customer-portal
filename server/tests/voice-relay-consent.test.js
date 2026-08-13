@@ -643,6 +643,37 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
     }
   });
 
+  // ⭐ A NEGATED STOP IS A REQUEST TO CONTINUE. "Don't stop texting me" begins
+  // with a stop verb and contains a texting word — read naively it classified
+  // as an SMS withdrawal and silenced exactly the channel the caller asked to
+  // KEEP. The negation pair is neutralized before clause extraction, so
+  // neither the outer nor the inner verb can seed a stop clause.
+  test('"don\'t stop texting me" / "never stop the reminders" never suppress', async () => {
+    for (const words of [
+      "don't stop texting me",
+      'never stop texting me, I like the reminders',
+      'do not stop the text reminders',
+      "don't ever stop texting me",
+    ]) {
+      jest.clearAllMocks();
+      await executeTool('capture_lead', {
+        call_summary: 'Wants to KEEP the texts.',
+        contact_preference: words,
+        do_not_contact_request: false,
+      }, CTX);
+      expect(recordSuppression).not.toHaveBeenCalled();
+    }
+  });
+
+  test('…while a lone "don\'t text me" is still a real stop', async () => {
+    await executeTool('capture_lead', {
+      call_summary: 'Asked us to stop texting.',
+      contact_preference: "don't text me",
+      do_not_contact_request: true,
+    }, CTX);
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: CALLER }));
+  });
+
   // ⭐ THE INVERSE MISTAKE. A carve-out names the channel the caller KEPT, and
   // it sits inside the stop clause — reading the clause as one string turned
   // "text me and nothing else" into a text withdrawal, silencing the only way

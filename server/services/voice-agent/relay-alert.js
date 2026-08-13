@@ -108,7 +108,12 @@ function buildHotLeadAlert({ firstName, lastName, phone, city, requestedService,
 // key so the retry rail stays open (the latch doctrine below, made durable).
 // Fail-OPEN on a claim error: for an internal hot-lead page, a rare duplicate
 // is safer than a missed swarm call.
+// Two keys, because CLAIMED IS NOT DELIVERED: the claim is who owns the send,
+// the sent receipt is proof the page went out. A losing claimant that treated
+// the claim itself as coverage could tell its caller "the team was notified"
+// while the winner's send failed and released — hot lead paged by nobody.
 const HOT_ALERT_KEY = 'relay_hot_alert_at';
+const HOT_ALERT_SENT_KEY = 'relay_hot_alert_sent_at';
 
 async function claimHotAlertForCall(callSid) {
   const key = String(callSid || '').trim();
@@ -125,7 +130,7 @@ async function claimHotAlertForCall(callSid) {
       })
       .returning('id');
     if (rows && rows.length > 0) return { claimed: true, durable: true };
-    // No unclaimed row: either another session already paged this call, or
+    // No unclaimed row: either another session already claimed this call, or
     // there is no call_log row at all (nothing to dedupe against) — only the
     // former means "stand down".
     const exists = await db('call_log').where({ twilio_call_sid: key }).first('id');
@@ -133,6 +138,41 @@ async function claimHotAlertForCall(callSid) {
   } catch (err) {
     logger.warn(`[voice-relay-alert] hot-alert claim failed for ${key} — paging anyway (fail-open): ${err.message}`);
     return { claimed: true, durable: false };
+  }
+}
+
+async function markHotAlertSent(callSid) {
+  const key = String(callSid || '').trim();
+  if (!key) return;
+  try {
+    const db = require('../../models/db');
+    await db('call_log')
+      .where({ twilio_call_sid: key })
+      .update({
+        metadata: db.raw(
+          `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${HOT_ALERT_SENT_KEY}}', to_jsonb(now()::text), true)`,
+        ),
+      });
+  } catch (err) {
+    // The claim key still stands, so no duplicate page — a loser just cannot
+    // confirm coverage and stays conservative about the promise.
+    logger.warn(`[voice-relay-alert] hot-alert sent receipt failed for ${key}: ${err.message}`);
+  }
+}
+
+async function hotAlertState(callSid) {
+  const key = String(callSid || '').trim();
+  if (!key) return null;
+  try {
+    const db = require('../../models/db');
+    const row = await db('call_log').where({ twilio_call_sid: key }).first('metadata');
+    const meta = row && (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata);
+    return {
+      claimed: !!(meta && meta[HOT_ALERT_KEY]),
+      sent: !!(meta && meta[HOT_ALERT_SENT_KEY]),
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -170,14 +210,35 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     }
 
     // The durable one-per-CALL receipt (reconnects build a fresh session).
-    const claim = await claimHotAlertForCall(ctx.callSid);
+    let claim = await claimHotAlertForCall(ctx.callSid);
     if (!claim.claimed) {
-      // An earlier session of this same call already paged (or is completing
-      // its page): this call IS covered, so the session latch is set and the
-      // caller may keep being told the team was notified.
-      if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
-      logger.info(`[voice-relay-alert] hot-lead page already sent for callSid=${ctx.callSid} — not paging twice`);
-      return true;
+      // Somebody else holds the claim — but CLAIMED IS NOT DELIVERED. Wait
+      // briefly for their SENT receipt: present ⇒ this call is covered (latch
+      // + true, the promise stands). Claim released mid-wait ⇒ their send
+      // FAILED — take the claim over and page ourselves. Still claimed with
+      // no receipt after the wait ⇒ report false WITHOUT the latch: the
+      // caller is not promised a page nobody can prove, and a later
+      // capture_lead on this session can try again.
+      for (let i = 0; i < 3; i += 1) {
+        await new Promise((r) => { const t = setTimeout(r, 400); t.unref?.(); });
+        const state = await hotAlertState(ctx.callSid);
+        if (state && state.sent) {
+          if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
+          logger.info(`[voice-relay-alert] hot-lead page already sent for callSid=${ctx.callSid} — not paging twice`);
+          return true;
+        }
+        if (state && !state.claimed) {
+          claim = await claimHotAlertForCall(ctx.callSid);
+          break; // released — the winner failed; try to take over
+        }
+      }
+      if (!claim.claimed) {
+        logger.warn(
+          `[voice-relay-alert] hot-lead claim held elsewhere with NO delivery receipt callSid=${ctx.callSid} `
+          + '— not paging (no duplicate) and not confirming (no false promise)'
+        );
+        return false;
+      }
     }
 
     const body = buildHotLeadAlert({
@@ -217,6 +278,9 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
     // so the next attempt on this call can still get through, and the send
     // itself stays idempotent-by-latch once it succeeds.
     if (typeof ctx.markOwnerAlerted === 'function') ctx.markOwnerAlerted();
+    // The durable DELIVERY receipt — what a losing claimant on a reconnect
+    // needs to see before telling its caller the team was notified.
+    if (claim.durable) await markHotAlertSent(ctx.callSid);
     logger.info(`[voice-relay-alert] hot-lead owner alert sent callSid=${ctx.callSid || 'n/a'} caller=${maskPhone(lead.phone)}`);
     return true;
   } catch (err) {

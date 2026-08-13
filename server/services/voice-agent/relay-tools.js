@@ -809,7 +809,16 @@ async function executeTool(name, input = {}, ctx = {}) {
       // same as every other stated preference in this lane; a general "stop
       // contacting me" still takes the SMS suppression (the one channel this
       // platform sends automatically) with its email half explicitly pending.
-      const preferenceText = String(input.contact_preference || '');
+      // ⭐ A NEGATED STOP IS A REQUEST TO CONTINUE. "Don't stop texting me" and
+      // "never stop the reminders" each begin with a word the classifier
+      // treats as a stop verb, and the inner "stop texting" would classify as
+      // an SMS withdrawal — silencing exactly the channel the caller asked to
+      // KEEP. The negation pair is rewritten to a neutral verb BEFORE clause
+      // extraction, so neither the outer nor the inner verb can seed a stop
+      // clause. (Scoped to stop-verb pairs only: a lone "don't text me" is
+      // still a real stop.)
+      const NEGATED_STOP_RE = /\b(?:don'?t|do not|never)\s+(?:ever\s+)?(?:stop|quit|cease|unsubscribe|remove|opt\s+(?:me|us)?\s*out)\b/gi;
+      const preferenceText = String(input.contact_preference || '').replace(NEGATED_STOP_RE, 'KEEP');
       const mentionsEmail = /\bemail(s|ing)?\b/i.test(preferenceText)
         || String(input.preferred_contact_method || '') === 'email';
       // The channels named, kept apart: "stop calling me" is a PHONE opt-out and

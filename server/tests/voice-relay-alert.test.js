@@ -100,11 +100,12 @@ describe('GATE OFF — dark', () => {
 describe('GATE ON — the durable one-page-per-CALL receipt', () => {
   const db = require('../models/db');
 
-  function primeClaimDb({ claimWins }) {
+  function primeClaimDb({ claimWins, metadata = { relay_hot_alert_at: 't1', relay_hot_alert_sent_at: 't2' } }) {
     const builder = {};
     for (const m of ['where', 'whereRaw']) builder[m] = jest.fn(() => builder);
     builder.update = jest.fn(() => ({ returning: jest.fn(async () => (claimWins ? [{ id: 'cl-1' }] : [])) }));
-    builder.first = jest.fn(async () => ({ id: 'cl-1' })); // the row exists
+    // The row exists; `metadata` is what the loser's state read sees.
+    builder.first = jest.fn(async () => ({ id: 'cl-1', metadata }));
     db.mockImplementation(() => builder);
     db.raw = jest.fn((sql) => ({ __raw: sql }));
     return builder;
@@ -113,7 +114,8 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
   beforeEach(() => { process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; });
 
   test('a reconnected session (fresh latch, same CallSid) does NOT page twice', async () => {
-    primeClaimDb({ claimWins: false }); // an earlier session already burned it
+    // An earlier session burned the claim AND wrote the delivery receipt.
+    primeClaimDb({ claimWins: false });
     const ctx = { callSid: 'CA-reconnect', markOwnerAlerted: jest.fn() };
     const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx);
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
@@ -121,6 +123,40 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     expect(ctx.markOwnerAlerted).toHaveBeenCalled();
     expect(out).toBe(true);
   });
+
+  // ⭐ CLAIMED IS NOT DELIVERED. A claim with no SENT receipt means the winner
+  // is still in flight (or about to fail): the loser neither pages (no
+  // duplicate) nor confirms (no false promise), and crucially does NOT latch —
+  // a later attempt on this session can still page if the winner released.
+  test('a claim with NO delivery receipt is not coverage — no page, no latch, false', async () => {
+    primeClaimDb({ claimWins: false, metadata: { relay_hot_alert_at: 't1' } }); // claimed, never sent
+    const ctx = { callSid: 'CA-inflight', markOwnerAlerted: jest.fn() };
+    const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx);
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(ctx.markOwnerAlerted).not.toHaveBeenCalled();
+    expect(out).toBe(false);
+  }, 15000);
+
+  test('a claim RELEASED mid-wait (the winner failed) is taken over and paged', async () => {
+    // First claim attempt loses; the state read then shows the key gone
+    // (winner released); the takeover claim wins.
+    const builder = {};
+    for (const m of ['where', 'whereRaw']) builder[m] = jest.fn(() => builder);
+    let claims = 0;
+    builder.update = jest.fn(() => ({
+      returning: jest.fn(async () => {
+        claims += 1;
+        return claims >= 2 ? [{ id: 'cl-1' }] : []; // lose, then win the takeover
+      }),
+    }));
+    builder.first = jest.fn(async () => ({ id: 'cl-1', metadata: {} })); // released, no receipt
+    db.mockImplementation(() => builder);
+    db.raw = jest.fn((sql) => ({ __raw: sql }));
+    const ctx = { callSid: 'CA-takeover', markOwnerAlerted: jest.fn() };
+    const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, ctx);
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    expect(out).toBe(true);
+  }, 15000);
 
   test('a FAILED send releases the durable claim so a retry can still page', async () => {
     const builder = primeClaimDb({ claimWins: true });
