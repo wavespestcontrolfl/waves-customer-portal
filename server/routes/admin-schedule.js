@@ -10553,11 +10553,13 @@ router.post('/:id/card-request', requireAdmin, async (req, res, next) => {
 
 // POST /api/admin/schedule/:id/regenerate-brief
 // Routes by brief type: WDO visits replay the tagger hook (unchanged
-// behavior — regenerates the WDO brief); every other visit regenerates the
-// generic visit brief, which requires GATE_PREVISIT_BRIEF. Gate off → 409
-// with nothing changed (same convention as the edit-appt visit-count gate);
-// the tagger hook is NOT replayed for non-WDO visits anymore — its side
-// effects (prep flows) belong to booking, not to brief regeneration.
+// behavior — regenerates the WDO brief); every other visit replays the
+// tagger hook TOO (its prep-flow enrollment and booking pre-drafts are
+// explicitly idempotent for replays from this route — dropping the
+// replay would remove the operator's only retry for a failed booking-time
+// run) and then regenerates the generic visit brief, which requires
+// GATE_PREVISIT_BRIEF. Gate off → 409 with nothing changed (same
+// convention as the edit-appt visit-count gate).
 router.post('/:id/regenerate-brief', async (req, res, next) => {
   try {
     if (!(await technicianOwnsScheduledService(req, req.params.id))) {
@@ -10577,6 +10579,10 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
       || String(target.pre_service_brief_type || '') === PrevisitBrief.WDO_BRIEF_TYPE;
     if (isWdo) {
       await AppointmentTagger.onServiceScheduled(req.params.id, { suppressWelcome: true });
+      // Same mid-flight reassignment recheck as the generic path below.
+      if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+        return res.status(404).json({ error: 'Scheduled service not found' });
+      }
       const svc = await db('scheduled_services').where({ id: req.params.id }).first();
       return res.json({ success: true, brief: briefValue(svc.pre_service_brief) });
     }
@@ -10584,6 +10590,11 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
     if (!PrevisitBrief.briefGateEnabled()) {
       return res.status(409).json({ error: 'Pre-visit briefs are turned off (GATE_PREVISIT_BRIEF). Nothing was changed.' });
     }
+    // Tagger replay first (idempotent — appointment-tagger's own contract
+    // for this route): the operator's retry for a failed booking-time run
+    // (prep email/SMS enrollment, assessment pre-draft) must survive the
+    // generic-brief path.
+    await AppointmentTagger.onServiceScheduled(req.params.id, { suppressWelcome: true });
     // force: the operator explicitly asked — a genuine data removal may
     // legitimately empty a section the regression guard would otherwise
     // hold against a suspected outage.
@@ -10601,6 +10612,13 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
         error: `Visit brief not regenerated (${outcome.reason}). Nothing was changed.`,
         reason: outcome.reason,
       });
+    }
+    // Re-check ownership before returning: generation can run minutes
+    // (LLM fallback chain), and a dispatch reassignment mid-flight would
+    // otherwise hand the regenerated brief — deterministic gate/garage/
+    // lockbox codes included — to the FORMER technician.
+    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
+      return res.status(404).json({ error: 'Scheduled service not found' });
     }
     const svc = await db('scheduled_services').where({ id: req.params.id }).first();
     res.json({

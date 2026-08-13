@@ -249,7 +249,10 @@ describe('POST /:id/regenerate-brief', () => {
       expect(body.unchanged).toBe(false);
       expect(body.brief.version).toBe('visit_brief_v1');
       expect(mockGenerateVisitBrief).toHaveBeenCalledWith('svc-1', { force: true });
-      expect(mockOnServiceScheduled).not.toHaveBeenCalled();
+      // The tagger replay is the operator retry for a failed booking-time
+      // run (idempotent per appointment-tagger) — it rides non-WDO
+      // regeneration too.
+      expect(mockOnServiceScheduled).toHaveBeenCalledWith('svc-1', { suppressWelcome: true });
     });
   });
 

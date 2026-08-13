@@ -842,7 +842,11 @@ function extractOutputReferences(text) {
   // Verb alternatives cover both sentence case and lowercase WITHOUT the /i
   // flag — under /i the [A-Z] anchor in the capture would match lowercase
   // words and flag ordinary prose ("use caution") as product references.
-  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near)\b)[\w.-]+){0,3})/g)) push(products, m[1]);
+  // Capture is case-INSENSITIVE on the object ("apply bifen sc" must be
+  // seen, not just "Apply Bifen SC"); the all-words-common skip in the
+  // validator keeps ordinary prose objects ("use caution") from
+  // over-rejecting.
+  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near)\b)[\w.-]+){0,3})/g)) push(products, m[1]);
   for (const m of text.matchAll(/\b(?:for|targeting|against)\s+((?:[a-z][a-z'-]*\s+){0,3}[a-z][a-z'-]*)/g)) push(targets, m[1]);
   // Organism references that never pass a preposition: "<X> activity/
   // damage/infestation" and "signs/evidence of <X>" ("Emerald ash borer
@@ -899,9 +903,16 @@ function findUngroundedClaim(body, grounding) {
     const phrase = String(term || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
     return !phrase || groundedText.includes(phrase);
   };
+  // Ordinary-prose verb objects ("use caution", "apply along the fence"):
+  // a capture whose every word is a stopword/common-prose word is not a
+  // product reference — the rare-word pass still owns single novel words.
+  const allWordsCommon = (term) => String(term).toLowerCase().split(/\s+/).every((w) => (
+    w.length < 4 || REFERENCE_STOP_WORDS.has(w) || COMMON_PROSE_WORDS.has(w)
+  ));
   for (const field of outputFields) {
     const refs = extractOutputReferences(String(field));
     for (const term of refs.products) {
+      if (allWordsCommon(term)) continue;
       if (!groundedExact(term)) return { kind: 'novel_product', term };
     }
     for (const term of refs.targets) {
@@ -969,7 +980,11 @@ function validateBriefJson(json, grounding) {
   for (const term of json.mentioned_terms) {
     if (typeof term !== 'string') return { reason: 'mentioned_terms_not_string' };
     if (FORBIDDEN_TARGET_RE.test(term)) return { reason: 'forbidden_genus' };
-    if (!isGroundedReference(term, selfReportGrounding)) {
+    // EXACT normalized phrase, never the fuzzy word tier: "bifen sc"
+    // must not ground on "Bifen IT" via the shared 'bifen' word (the
+    // two-letter suffix is under the significant-word threshold).
+    const phrase = String(term).toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
+    if (phrase && !selfReportGrounding.includes(phrase)) {
       return { reason: `ungrounded_term:${cleanText(term, 60)}` };
     }
   }
@@ -1184,17 +1199,27 @@ async function runSweep(dbh = db) {
     .select('s.id');
 
   const result = { considered: visits.length, generated: 0, unchanged: 0, skipped: 0, failed: 0 };
-  for (const visit of visits) {
-    try {
-      const outcome = await generateVisitBrief(visit.id, { dbh });
-      if (outcome.generated) result.generated += 1;
-      else if (outcome.reason === 'unchanged') result.unchanged += 1;
-      else result.skipped += 1;
-    } catch (err) {
-      result.failed += 1;
-      logger.error(`[previsit-brief] sweep generation failed for ${visit.id}: ${err.message}`);
+  // Bounded concurrency, not a serial walk: one provider stall can hold a
+  // visit for the fallback chain's full multi-minute budget, and serially
+  // that delay multiplies by route length while runExclusive keeps later
+  // cron ticks from helping — the tail of the route would start briefless
+  // exactly during an outage. Four workers bound the worst case without
+  // hammering the provider.
+  const queue = [...visits];
+  const worker = async () => {
+    for (let visit = queue.shift(); visit; visit = queue.shift()) {
+      try {
+        const outcome = await generateVisitBrief(visit.id, { dbh });
+        if (outcome.generated) result.generated += 1;
+        else if (outcome.reason === 'unchanged') result.unchanged += 1;
+        else result.skipped += 1;
+      } catch (err) {
+        result.failed += 1;
+        logger.error(`[previsit-brief] sweep generation failed for ${visit.id}: ${err.message}`);
+      }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, queue.length) }, worker));
   return result;
 }
 
