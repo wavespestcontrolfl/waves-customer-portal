@@ -765,35 +765,50 @@ async function routeScopeConflicts({ serviceId, service, route, target, nameScop
   // BEFORE the tap. Ordering shapes (a uniform shift of an already-ordered
   // route) still can't be judged statically and stay out.
   const anchorKey = `${target.window.start}|${target.window.end}`;
-  const landings = new Map([[anchorKey, target.window]]);
-  const collidingKeys = new Set();
-  for (const w of windows) {
-    if (!w) continue;
-    const key = `${w.start}|${w.end}`;
-    if (landings.has(key)) collidingKeys.add(key);
-    else landings.set(key, w);
+  // Pairwise over EVERY projected landing including the anchor's own
+  // target, using the canonical half-open predicate (occupancy.js:
+  // `window_start < probeEnd AND effective_end > probeStart`) — not key
+  // equality, which would miss 14:00-15:00 against 14:30-15:30 (codex
+  // #3375 P1). Identical windows are just the degenerate case, and stay
+  // caught because duplicates sit in this list separately. The reported
+  // span is the INTERSECTION: the slice actually contested.
+  const allLandings = [target.window, ...windows.filter(Boolean)];
+  const overlapSpans = new Map();
+  for (let i = 0; i < allLandings.length; i += 1) {
+    for (let j = i + 1; j < allLandings.length; j += 1) {
+      const aStart = hhmmToMinutes(allLandings[i].start);
+      const aEnd = hhmmToMinutes(allLandings[i].end);
+      const bStart = hhmmToMinutes(allLandings[j].start);
+      const bEnd = hhmmToMinutes(allLandings[j].end);
+      if (aStart == null || aEnd == null || bStart == null || bEnd == null) continue;
+      if (!(aStart < bEnd && aEnd > bStart)) continue;
+      const start = minutesToHHMM(Math.max(aStart, bStart));
+      const end = minutesToHHMM(Math.min(aEnd, bEnd));
+      overlapSpans.set(`${start}|${end}`, { start, end });
+    }
   }
-  const selfCollisions = [...collidingKeys].map((key) => {
-    const w = landings.get(key);
-    return {
-      id: `route-collision:${key}`,
-      windowStart: w.start,
-      windowEnd: w.end,
-      customerName: null,
-      serviceType: null,
-      isHold: false,
-      isRouteSibling: false,
-      // The sheets render dedicated copy: this is two of THIS route's own
-      // stops, not someone else's booking.
-      isRouteSelfCollision: true,
-    };
-  });
+  const selfCollisions = [...overlapSpans.values()].map((w) => ({
+    id: `route-collision:${w.start}|${w.end}`,
+    windowStart: w.start,
+    windowEnd: w.end,
+    customerName: null,
+    serviceType: null,
+    isHold: false,
+    isRouteSibling: false,
+    // The sheets render dedicated copy: this is two of THIS route's own
+    // stops, not someone else's booking.
+    isRouteSelfCollision: true,
+  }));
 
   // One external probe per DISTINCT landing window — the anchor's own
   // window is already covered by the anchor probe.
-  const distinct = [...landings.entries()]
-    .filter(([key]) => key !== anchorKey)
-    .map(([, w]) => w);
+  const distinctByKey = new Map();
+  for (const w of windows) {
+    if (!w) continue;
+    const key = `${w.start}|${w.end}`;
+    if (key !== anchorKey && !distinctByKey.has(key)) distinctByKey.set(key, w);
+  }
+  const distinct = [...distinctByKey.values()];
   const probed = distinct.length
     ? await Promise.all(distinct.map((w) => conflictsForTarget(
       serviceId, targetDate, w, { nameScope, excludeServiceIds: sweptIds },

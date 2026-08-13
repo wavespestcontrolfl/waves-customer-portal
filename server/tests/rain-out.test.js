@@ -2209,6 +2209,64 @@ describe('rain-out service', () => {
       })]);
     });
 
+    test('route scope: PARTIALLY overlapping projected landings collide too', async () => {
+      // 10:00-11:00 and 10:30-11:30 both shift +5h → 15:00-16:00 and
+      // 15:30-16:30. Different windows, so key equality saw nothing, but
+      // the canonical half-open predicate overlaps them and commit's
+      // per-member gate rejects the second. The reported span is the
+      // contested intersection.
+      findConflictingVisits.mockResolvedValue([]);
+      wireDb({
+        scheduled_services: [
+          chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: etDateString(), window_start: '09:00', route_order: 1,
+            }),
+          }),
+          chain({
+            rows: [
+              { id: 'svc-2', window_start: '10:00:00', window_end: '11:00:00' },
+              { id: 'svc-3', window_start: '10:30:00', window_end: '11:30:00' },
+            ],
+          }),
+        ],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: etDateString(), window: { start: '14:00', end: '15:00' } },
+      });
+
+      expect(result.routeConflicts).toEqual([expect.objectContaining({
+        isRouteSelfCollision: true, windowStart: '15:30', windowEnd: '16:00',
+      })]);
+    });
+
+    test('route scope: adjacent landings do NOT collide (half-open, like the predicate)', async () => {
+      // 09:00-10:00 shifted +5h = 14:00-15:00 abuts the anchor's 15:00
+      // target exactly. `end > otherStart` is false, so no warning — the
+      // same boundary the SQL predicate uses, or every back-to-back route
+      // would warn.
+      findConflictingVisits.mockResolvedValue([]);
+      wireDb({
+        scheduled_services: [
+          chain({
+            first: jest.fn().mockResolvedValue({
+              id: 'svc-1', technician_id: 'tech-1', scheduled_date: etDateString(), window_start: '10:00', route_order: 1,
+            }),
+          }),
+          chain({ rows: [{ id: 'svc-2', window_start: '09:00:00', window_end: '10:00:00' }] }),
+        ],
+      });
+
+      const result = await RainOut.checkTarget({
+        serviceId: 'svc-1',
+        target: { date: etDateString(), window: { start: '15:00', end: '16:00' } },
+      });
+
+      expect(result.routeConflicts).toEqual([]);
+    });
+
     test('route scope: a day move keeps each sibling\'s own window on the target date', async () => {
       findConflictingVisits.mockResolvedValue([]);
       wireDb({
