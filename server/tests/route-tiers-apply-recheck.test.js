@@ -117,6 +117,39 @@ test('an unreadable apply-time re-check fails closed (no move)', async () => {
   expect(decisions('no_change').map((d) => d.reason_code)).toContain('REMINDER_STATUS_UNKNOWN');
 });
 
+test('a run crossing ET midnight recomputes the tier window before applying', async () => {
+  reminderResults = [[], []];
+  // Visit 8 days out at pass 1. Between scoring and apply the clock jumps 2
+  // days (simulated via the candidate-slots mock's side effect), so at apply
+  // time the visit is 6 days out — tier 3, no day-moves. The pass-2 recompute
+  // must refuse the move.
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  try {
+    jest.setSystemTime(new Date('2026-08-13T08:10:00Z'));
+    const visitDate = shiftDateStr(etDateString(new Date()), 8);
+    const candDate = shiftDateStr(visitDate, 2);
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return buildChain([]);
+      if (table === 'scheduled_services') return buildChain([{ ...svc(), scheduled_date: visitDate }]);
+      return buildChain([]);
+    });
+    candidateSlots.findValidCandidateSlots.mockImplementation(async () => {
+      // Advance the wall clock 2 days during the "long scoring pass".
+      jest.setSystemTime(new Date('2026-08-15T08:10:00Z'));
+      return {
+        current: { ...CURRENT, date: visitDate },
+        candidates: [{ ...CAND, date: candDate }],
+      };
+    });
+    const res = await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true });
+    expect(res.changed).toBe(0);
+    expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+    expect(decisions('no_change').map((d) => d.reason_code)).toContain('TIER_LOCKED');
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
 test('a pass-1 frozen visit never reaches scoring at all', async () => {
   reminderResults = [
     [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: `${VISIT_DATE}T09:00:00Z`, reminder_72h_sent: true, suppressed_by_sibling: false }],

@@ -414,6 +414,26 @@ async function runAutoDispatch(opts = {}) {
               await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: 'REMINDER_SENT_FROZEN', reason_description: '72-hour reminder was sent during the run — visit is frozen', ...pm.result.audit });
               continue;
             }
+
+            // Recompute tier legality against the CURRENT ET date — a slow or
+            // manual run crossing ET midnight must not apply yesterday's
+            // window (the visit may have dropped into the <7-day no-day-move
+            // tier, and the >=5-days-out destination floor moves with the
+            // date). The refreshed window feeds the re-evaluation below, so
+            // every candidate the apply step can pick is legal NOW.
+            const todayNow = etDateString(new Date());
+            const daysOutNow = routeTiers.daysBetween(todayNow, toDateStr(pm.service.scheduled_date));
+            const radiusNow = routeTiers.tierRadiusForDaysOut(daysOutNow);
+            const anchorNow = pm.ctx.tierMeta && pm.ctx.tierMeta.anchor;
+            const windowNow = radiusNow > 0 && anchorNow
+              ? routeTiers.tierMoveWindow({ origDate: pm.service.scheduled_date, anchorDate: anchorNow, today: todayNow, radius: radiusNow })
+              : null;
+            if (!windowNow) {
+              await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: 'TIER_LOCKED', reason_description: `No longer legally movable at apply time (${daysOutNow} days out)`, ...pm.result.audit });
+              continue;
+            }
+            pm.ctx.tierWindow = windowNow;
+            pm.ctx.tierMeta = { ...pm.ctx.tierMeta, days_out: daysOutNow, radius: radiusNow, window: windowNow };
           }
 
           fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
