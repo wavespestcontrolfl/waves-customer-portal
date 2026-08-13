@@ -263,6 +263,50 @@ test('legacy time_window bands participate in the chronology guard (afternoon ne
   expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'WINDOW_ORDER_CONFLICT' }));
 });
 
+test('optimizer result that is not an exact permutation FAILS the tech-day loud, never writes', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  // External API returned a truncated waypoint list — one stop missing.
+  RouteOptimizer.optimizeRoute.mockImplementation(async (stops) => ({
+    orderedStops: [...stops].sort((p, q) => p.lng - q.lng).slice(0, 2),
+    totalDistanceMeters: 1,
+    totalDurationSeconds: 1,
+    source: 'google_routes_api',
+  }));
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(res.failed).toBe(1);
+  expect(res.status).toBe('completed_with_errors');
+  expect(db.transaction).not.toHaveBeenCalled();
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.failures).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'OPTIMIZER_RESULT_MISMATCH' }));
+});
+
+test('optimizer result with a duplicated stop FAILS the tech-day (same guard)', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  RouteOptimizer.optimizeRoute.mockImplementation(async (stops) => {
+    const sorted = [...stops].sort((p, q) => p.lng - q.lng);
+    return { orderedStops: [sorted[0], sorted[0], sorted[1]], totalDistanceMeters: 1, totalDurationSeconds: 1, source: 'google_routes_api' };
+  });
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.failed).toBe(1);
+  expect(db.transaction).not.toHaveBeenCalled();
+});
+
+test('savings baseline mirrors the dispatch display order: windowless last, created_at ties — NOT time_window', () => {
+  const { currentOrder } = require('../services/route-reorder')._internals;
+  const day = [
+    stop('w9', { route_order: null, window_start: '09:00', created_at: '2026-08-01T00:00:00Z' }),
+    stop('none', { route_order: null, window_start: null, time_window: 'morning', created_at: '2026-08-01T00:00:00Z' }),
+    stop('tieB', { route_order: null, window_start: '13:00', created_at: '2026-08-02T00:00:00Z' }),
+    stop('tieA', { route_order: null, window_start: '13:00', created_at: '2026-08-01T00:00:00Z' }),
+    stop('r1', { route_order: 1, window_start: null, created_at: '2026-08-03T00:00:00Z' }),
+  ];
+  // COALESCE(route_order,999), COALESCE(window_start,'23:59'), created_at —
+  // 'none' has time_window 'morning' but the board shows it LAST, so the
+  // baseline must too.
+  expect(currentOrder(day).map((s) => s.id)).toEqual(['r1', 'w9', 'tieA', 'tieB', 'none']);
+});
+
 test('effectiveWindowStart: window_start wins, legacy bands map, free text is unconstrained', () => {
   const { effectiveWindowStart } = require('../services/route-reorder')._internals;
   expect(effectiveWindowStart({ window_start: '09:00:00', time_window: 'afternoon' })).toBe('09:00');

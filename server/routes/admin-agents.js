@@ -816,7 +816,13 @@ async function loadPlannerRunTasks() {
       const dayMoves = asNumber(result?.auto_dispatch?.run?.changed);
       // ET calendar day, not UTC — an evening ET run must not label tomorrow.
       const dateLabel = row.created_at ? etDateString(new Date(row.created_at)) : '';
-      const failedRun = asNumber(row.failed_count) > 0 || row.status === 'failed';
+      // The nightly ledger row carries BOTH passes: the paired 4:10 day-move
+      // run rides in result.auto_dispatch.run. A degraded/failed day-move
+      // pass must surface as an exception even when the 4:20 reorder itself
+      // was healthy (codex GitHub round P2).
+      const adStatus = result?.auto_dispatch?.run?.status;
+      const failedRun = asNumber(row.failed_count) > 0 || row.status === 'failed'
+        || adStatus === 'failed' || adStatus === 'completed_with_errors';
       // A 'skipped' row is a TICK that never ran (writer lock still held at
       // 4:20 — see recordSkippedTick). Its zero counts are not "0 problems";
       // the night had NO reorder pass at all, which must read as an

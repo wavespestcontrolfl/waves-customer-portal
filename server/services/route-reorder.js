@@ -79,17 +79,25 @@ function getRouteReorderConfig(overrides = {}) {
   };
 }
 
-/** Stops ordered as the board currently runs them: route_order asc (nulls
- *  last), then window start, then id — the "before" baseline savings are
- *  measured against. */
+/** Stops ordered as the board currently runs them — the "before" baseline
+ *  savings are measured against. MUST mirror the dispatch consumers' SQL
+ *  exactly (dispatch.js jobs query: COALESCE(route_order, 999),
+ *  COALESCE(window_start, '23:59'), created_at — no time_window, windowless
+ *  stops LAST): a baseline built from any other sequence measures savings
+ *  against a route nobody drives and can trigger a spurious reorder of an
+ *  already-efficient day (codex GitHub round P2). `id` is a final stable
+ *  tiebreak only — SQL leaves created_at ties unordered. */
 function currentOrder(stops) {
   return [...stops].sort((a, b) => {
-    const ra = a.route_order == null ? Infinity : Number(a.route_order);
-    const rb = b.route_order == null ? Infinity : Number(b.route_order);
+    const ra = a.route_order == null ? 999 : Number(a.route_order);
+    const rb = b.route_order == null ? 999 : Number(b.route_order);
     if (ra !== rb) return ra - rb;
-    const wa = effectiveWindowStart(a) || '';
-    const wb = effectiveWindowStart(b) || '';
+    const wa = a.window_start ? String(a.window_start).slice(0, 5) : '23:59';
+    const wb = b.window_start ? String(b.window_start).slice(0, 5) : '23:59';
     if (wa !== wb) return wa < wb ? -1 : 1;
+    const ca = a.created_at ? new Date(a.created_at).getTime() : 0;
+    const cb = b.created_at ? new Date(b.created_at).getTime() : 0;
+    if (ca !== cb) return ca - cb;
     return String(a.id) < String(b.id) ? -1 : 1;
   });
 }
@@ -198,7 +206,7 @@ async function runRouteReorder(opts = {}) {
             'scheduled_services.id', 'scheduled_services.technician_id',
             'scheduled_services.route_order', 'scheduled_services.window_start',
             'scheduled_services.time_window', 'scheduled_services.service_type',
-            'scheduled_services.zone',
+            'scheduled_services.zone', 'scheduled_services.created_at',
             ...guardedCoordSelects(db),
           ],
         }).whereRaw(LIVE_HOLD_SQL);
@@ -284,6 +292,24 @@ async function runRouteReorder(opts = {}) {
             ordered.map((s) => ({ id: s.id, lat: parseFloat(s.lat) || null, lng: parseFloat(s.lng) || null, serviceType: s.service_type })),
             { startLat: RouteOptimizer.HQ.lat, startLng: RouteOptimizer.HQ.lng, endAtStart: true, techId },
           );
+          // PERMUTATION GUARD (uncapped audit P1): orderedStops is built from
+          // the external API's waypoint-index list, and route-optimizer
+          // defaults a missing list to [] — a missing/partial/duplicated
+          // response would yield artificial "savings" against a truncated
+          // route and then rewrite only a subset of the day's rows. Require
+          // an exact, duplicate-free permutation of the input before any
+          // savings math or write; anything else is a contract violation and
+          // fails LOUD (degrades run status), never a quiet skip.
+          const returnedIds = (result.orderedStops || []).map((s) => s.id);
+          const returnedSet = new Set(returnedIds);
+          if (returnedIds.length !== techStops.length
+              || returnedSet.size !== returnedIds.length
+              || techStops.some((s) => !returnedSet.has(s.id))) {
+            status = 'completed_with_errors';
+            summary.failed.push({ ...entryBase, reason: 'OPTIMIZER_RESULT_MISMATCH', returned: returnedIds.length });
+            logger.error(`[route-reorder] ${dateStr} tech ${techId}: optimizer returned ${returnedIds.length} stops for ${techStops.length} — not a permutation, day untouched`);
+            continue;
+          }
           // SAME-MODEL before/after — never subtract Google road meters from a
           // straight-line baseline (codex round-2 P1).
           const beforeMeters = modelDistanceMeters(RouteOptimizer, ordered);
