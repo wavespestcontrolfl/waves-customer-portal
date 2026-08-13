@@ -1222,13 +1222,25 @@ function isPersistable(o) {
 // compose to one claimable row per target. In-flight (claimed /
 // pending_review) predecessors are handled under the persist transaction —
 // see _revalidateCityServiceBatch.
+// The CANONICAL identity of a city-service target, shared by the
+// arbitration and the in-flight fence. Buckets disagree on service
+// spelling — local_gap emits canonical 'tree-shrub'/'pest' while
+// striking_distance and aeo_gap pass the sync's raw 'tree_shrub'/
+// 'specialty' through — and a raw-keyed comparison reads those as two
+// different targets, letting both rows persist for one page (pre-push
+// P1). An uncanonicalizable service keeps its own spelling rather than
+// collapsing into a shared null bucket.
+function cityServiceTargetKey(service, city) {
+  return ownPageKey(canonicalizeServiceCategory(service) || service, city);
+}
+
 function arbitrateCityServiceTargets(opportunities = []) {
   const CS = 'create_or_refresh_city_service_page';
   const byTarget = new Map();
   const out = [];
   for (const o of opportunities) {
     if (o.action_type !== CS || !o.service || !o.city) { out.push(o); continue; }
-    const key = ownPageKey(o.service, o.city);
+    const key = cityServiceTargetKey(o.service, o.city);
     if (!byTarget.has(key)) byTarget.set(key, []);
     byTarget.get(key).push(o);
   }
@@ -3558,7 +3570,7 @@ class GscOpportunityMiner {
     const occupied = new Map();
     for (const r of inflight) {
       if (!r.service || !r.city) continue;
-      const key = ownPageKey(r.service, r.city);
+      const key = cityServiceTargetKey(r.service, r.city);
       if (!occupied.has(key)) occupied.set(key, []);
       occupied.get(key).push(r);
     }
@@ -3566,7 +3578,7 @@ class GscOpportunityMiner {
     const supersede = [];
     const out = opportunities.filter((o) => {
       if (o.action_type !== CS || !o.service || !o.city) return true;
-      const rows = (occupied.get(ownPageKey(o.service, o.city)) || [])
+      const rows = (occupied.get(cityServiceTargetKey(o.service, o.city)) || [])
         .filter((r) => r.dedupe_key !== o.dedupe_key);
       // The candidate's OWN row does not occupy its target — that is the
       // ordinary upsert-refresh path.
@@ -4310,6 +4322,7 @@ module.exports.GscOpportunityMiner = GscOpportunityMiner;
 // Exposed for unit tests — pure functions, no DB.
 module.exports._internals = {
   arbitrateCityServiceTargets,
+  cityServiceTargetKey,
   persistFloorFor,
   isPersistable,
   normalizeCity,

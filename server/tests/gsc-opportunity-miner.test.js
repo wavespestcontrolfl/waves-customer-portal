@@ -2423,3 +2423,48 @@ describe('arbitration yields only to FLOOR-CLEARING candidates (round-3 P1)', ()
     expect(out[0].bucket).toBe('striking_distance');
   });
 });
+
+describe('cross-bucket keys canonicalize service ALIASES (round-4 P1)', () => {
+  const { cityServiceTargetKey } = require('../services/seo/gsc-opportunity-miner')._internals;
+
+  test('raw and canonical spellings resolve to ONE target key', () => {
+    expect(cityServiceTargetKey('tree_shrub', 'sarasota')).toBe(cityServiceTargetKey('tree-shrub', 'sarasota'));
+    expect(cityServiceTargetKey('specialty', 'venice')).toBe(cityServiceTargetKey('pest', 'venice'));
+    // Unknown spellings keep their identity rather than collapsing into a
+    // shared null bucket.
+    expect(cityServiceTargetKey('mystery', 'venice')).not.toBe(cityServiceTargetKey('pest', 'venice'));
+  });
+
+  test('a raw-service striking_distance row collapses with a canonical local_gap twin', () => {
+    const lg = {
+      bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', query: null,
+      page_url: null, service: 'tree-shrub', city: 'sarasota', score: 56, signal_metadata: { impressions: 200 },
+    };
+    const sd = {
+      bucket: 'striking_distance', action_type: 'create_or_refresh_city_service_page',
+      query: 'tree trimming sarasota', page_url: null, service: 'tree_shrub', city: 'sarasota',
+      score: 80, signal_metadata: { impressions: 120 },
+    };
+    const out = arbitrateCityServiceTargets([lg, sd]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('striking_distance');
+    expect(out[0].signal_metadata.segment_impressions).toBe(200);
+  });
+
+  test('the in-flight fence sees a raw-service pending row as occupying the canonical target', async () => {
+    const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+    const miner = new GscOpportunityMiner();
+    const inflight = [{ dedupe_key: 'striking_distance::tree_shrub::sarasota::q', service: 'tree_shrub', city: 'sarasota', status: 'claimed', bucket: 'striking_distance', query: 'q' }];
+    const trx = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue(inflight),
+    }));
+    const out = await miner._revalidateCityServiceBatch(trx, [{
+      bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::tree-shrub::sarasota::_',
+      service: 'tree-shrub', city: 'sarasota', score: 56, signal_metadata: {},
+    }]);
+    expect(out).toHaveLength(0);
+  });
+});
