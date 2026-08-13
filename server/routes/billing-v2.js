@@ -637,6 +637,57 @@ router.post('/cards', async (req, res, next) => {
       ip: req.ip,
       userAgent: req.get('user-agent') || null,
     });
+    // Payer routing BEFORE enrollment (Codex #3395 r7 P1): a customer whose
+    // invoices route to a third-party payer must never have their saved
+    // card flipped into Auto Pay — self-pay charging would point at the
+    // wrong party, and no later guard can undo an enrollment that already
+    // happened here (the one-tap flow's confirm-time payer fence can only
+    // void the purchase). Same resolveForInvoice authority the estimate
+    // accept path consults; throwOnError because the resolver's fail-soft
+    // default returns self-pay on a lookup outage, silently defeating the
+    // guard. Payer-billed (or an unknowable picture — fail closed) keeps
+    // the method SAVED with consent recorded, skips enrollment, and parks
+    // an office exception so the skip is never silent.
+    let payerBlocked = false;
+    let payerCheckFailed = false;
+    try {
+      const resolvedPayer = await require('../services/payer')
+        .resolveForInvoice({ customerId: req.customerId, throwOnError: true });
+      payerBlocked = !!resolvedPayer?.payerId;
+    } catch (payerErr) {
+      payerBlocked = true;
+      payerCheckFailed = true;
+      logger.warn(`[billing-v2] payer check failed before enrollment — skipping (fail closed): ${payerErr.message}`);
+    }
+    if (payerBlocked) {
+      await require('../services/notification-service').notifyAdmin(
+        'billing',
+        payerCheckFailed
+          ? 'Card saved without Auto Pay (payer check failed)'
+          : 'Card saved without Auto Pay (payer-billed)',
+        payerCheckFailed
+          ? 'A portal card save skipped Auto Pay enrollment because the payer-routing check failed (fail closed) — review the account and enroll manually if it is self-pay.'
+          : 'A portal card save skipped Auto Pay enrollment because this account’s invoices route to a third-party payer — enrolling the saved card would charge the wrong party on self-pay invoices.',
+        { link: `/admin/customers/${req.customerId}`, metadata: { customerId: req.customerId, paymentMethodId: card.id } },
+      ).catch(() => {});
+      return res.json({
+        success: true,
+        enrolled: false,
+        enrollReason: payerCheckFailed ? 'payer_check_failed' : 'payer_billed',
+        card: {
+          id: card.id,
+          processor: 'stripe',
+          methodType: card.method_type || 'card',
+          brand: card.card_brand,
+          lastFour: card.last_four,
+          expMonth: card.exp_month,
+          expYear: card.exp_year,
+          isDefault: card.is_default,
+          bankName: card.bank_name || null,
+          bankLastFour: card.bank_last_four || null,
+        },
+      });
+    }
     const { enrollConsentedMethod } = require('../services/autopay-enrollment');
     const enrollment = await enrollConsentedMethod({
       customerId: req.customerId,

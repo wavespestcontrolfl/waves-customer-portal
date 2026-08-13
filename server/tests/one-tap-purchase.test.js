@@ -836,6 +836,24 @@ describe('confirm', () => {
     expect(maybeCreateTermiteProgramAgreement).not.toHaveBeenCalled();
   });
 
+  // ── Concurrent-confirm idempotency (GH r7 P2): a confirm that started
+  // while the row was reserved but loses the row-lock race to a completing
+  // confirm must get the canonical success back, never the generic 409.
+  test('a confirm that finds the row completed under the lock answers canonically', async () => {
+    const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
+    acquireOccupancyLock.mockImplementationOnce(async () => {
+      // Simulate the other tab's confirm committing while this one waits.
+      db.__state.tables.one_tap_purchases[0].status = 'completed';
+    });
+    const out = await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    expect(out.success).toBe(true);
+    expect(out.perVisit).toBe(84);
+    expect(out.firstVisit).toEqual({ date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00' });
+    // The loser converts nothing and re-sends nothing.
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+  });
+
   // ── Re-pick recovery is hold-identity-aware (GH r5 P2): a concurrent
   // re-reserve that already replaced the pointer must not be erased by the
   // failed confirm's reset.

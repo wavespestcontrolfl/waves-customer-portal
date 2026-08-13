@@ -763,6 +763,29 @@ function to12h(value) {
   return `${hour}:${String(m || 0).padStart(2, '0')} ${suffix}`;
 }
 
+// Canonical success payload for a purchase that already completed —
+// rebuilt from stored rows; no notifications or emails are re-sent (all
+// sends are dedupe-keyed/idempotent anyway).
+async function completedRetryResponse(customerId, completedPurchase) {
+  const visit = completedPurchase.scheduled_service_id
+    ? await db('scheduled_services')
+      .where({ id: completedPurchase.scheduled_service_id })
+      .first('scheduled_date', 'window_start', 'service_type')
+    : null;
+  const retryCustomer = await db('customers').where({ id: customerId }).first('email');
+  return {
+    success: true,
+    firstVisit: visit ? {
+      date: dateOnly(visit.scheduled_date),
+      windowStart: hhmm(visit.window_start),
+      windowEnd: arrivalEndFor(visit.window_start),
+    } : null,
+    perVisit: Number(completedPurchase.per_visit),
+    label: visit?.service_type || String(completedPurchase.service_key || 'service').replace(/_/g, ' '),
+    emailQueued: !!(retryCustomer?.email && String(retryCustomer.email).includes('@')),
+  };
+}
+
 // ── confirm ──────────────────────────────────────────────────────────────
 async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent }) {
   if (termsAccepted !== true) throw httpError(400, 'You must agree to the terms to confirm.');
@@ -771,26 +794,8 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   // response was lost leaves the customer on the confirm button. Their
   // retry must get the canonical success back — a generic 409 renders the
   // client's "nothing was purchased" screen over a purchase that EXISTS.
-  // Rebuilt from stored rows; no notifications or emails are re-sent (all
-  // sends are dedupe-keyed/idempotent anyway).
   if (purchase.status === 'completed') {
-    const visit = purchase.scheduled_service_id
-      ? await db('scheduled_services')
-        .where({ id: purchase.scheduled_service_id })
-        .first('scheduled_date', 'window_start', 'service_type')
-      : null;
-    const retryCustomer = await db('customers').where({ id: customerId }).first('email');
-    return {
-      success: true,
-      firstVisit: visit ? {
-        date: dateOnly(visit.scheduled_date),
-        windowStart: hhmm(visit.window_start),
-        windowEnd: arrivalEndFor(visit.window_start),
-      } : null,
-      perVisit: Number(purchase.per_visit),
-      label: visit?.service_type || String(purchase.service_key || 'service').replace(/_/g, ' '),
-      emailQueued: !!(retryCustomer?.email && String(retryCustomer.email).includes('@')),
-    };
+    return completedRetryResponse(customerId, purchase);
   }
   if (purchase.status !== 'reserved' || !purchase.scheduled_service_id) {
     throw httpError(409, 'Pick a time before confirming.');
@@ -860,6 +865,13 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
         .where({ id: purchase.id })
         .forUpdate()
         .first();
+      // Concurrent-confirm idempotency (GH r7 P2): two confirms that BOTH
+      // started while the row was reserved serialize on this lock — the
+      // loser must get the canonical success back, not a 409 that renders
+      // "nothing was purchased" over a conversion that just committed.
+      if (purchaseRow && purchaseRow.status === 'completed') {
+        return { alreadyCompleted: purchaseRow };
+      }
       if (!purchaseRow || purchaseRow.status !== 'reserved') throw httpError(409, OFFER_CHANGED);
       const freshCustomer = await trx('customers').where({ id: customerId }).first();
       await assertTargetStillPurchasable(trx, freshCustomer, purchase.service_key);
@@ -1018,6 +1030,12 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
         .catch(() => {});
     }
     throw err;
+  }
+
+  // Concurrent-confirm loser: the first confirm did all the work (and its
+  // post-commit sends are dedupe-keyed) — just answer canonically.
+  if (txOut.alreadyCompleted) {
+    return completedRetryResponse(customerId, txOut.alreadyCompleted);
   }
 
   // ── Post-commit (best-effort — never roll back the purchase) ──────────
