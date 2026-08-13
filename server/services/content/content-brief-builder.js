@@ -713,12 +713,23 @@ class ContentBriefBuilder {
     const contributingQueries = Array.isArray(opportunity.signal_metadata?.contributing_queries)
       ? opportunity.signal_metadata.contributing_queries.filter(Boolean)
       : [];
-    if (decision.action_type === 'create_or_refresh_city_service_page'
-      && opportunity.bucket === 'no_content_yet'
+    // Deliberately NOT gated on the action still being city-service. The
+    // decision router can reroute this row (blog, customer-question page)
+    // after the miner collapsed the segment, and the collapsed queries have
+    // nowhere else to go — they were dropped precisely because they resolved
+    // to this one target. Gating on the original action would silently
+    // discard their demand exactly when the reroute makes the winner's
+    // phrasing least representative (Codex P1).
+    if (opportunity.bucket === 'no_content_yet'
       && contributingQueries.length > 1) {
+      // The noun has to follow the REROUTED action, or a blog brief would be
+      // told it is a city-service page.
+      const coverageSubject = decision.action_type === 'create_or_refresh_city_service_page'
+        ? 'this page is the single target for'
+        : 'this piece carries the whole segment demand behind';
       requiredSections = [
         ...requiredSections,
-        `segment coverage: this page is the single target for EVERY phrasing of this city+service intent — ${contributingQueries.map((q) => `"${q}"`).join(', ')} — address each one directly rather than only the primary phrasing`,
+        `segment coverage: ${coverageSubject} EVERY phrasing of this city+service intent — ${contributingQueries.map((q) => `"${q}"`).join(', ')} — address each one directly rather than only the primary phrasing`,
       ];
     }
 

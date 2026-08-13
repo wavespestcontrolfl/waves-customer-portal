@@ -3270,3 +3270,31 @@ describe('operator brief text for the comparison gate includes sourcing fields (
     expect(operatorBriefTextForComparisonGate({ bucket: 'mined' }, { voice_constraints: { operator_brief: { required_sources: ['https://www.orkin.com/x'] } } })).toBe('');
   });
 });
+
+describe('city-service protected-page paths match the brief builder (Codex P1 on #3372)', () => {
+  const { servicePathSlug, cityServicePath } = _internals;
+  const { _internals: briefInternals } = require('../services/content/content-brief-builder');
+
+  test('tree-shrub resolves to the REAL route, not the phantom fallthrough', () => {
+    // no_content_yet city-service rows carry no page_url and a null
+    // target_url, so this map alone decides which path the protected-page
+    // guard probes. Without the key the fallthrough builds
+    // /tree-shrub-{city}-fl/, which does not exist — the guard would then
+    // fail to see the live page it is supposed to protect.
+    expect(servicePathSlug('tree-shrub')).toBe('tree-and-shrub-care');
+    // The miner canonicalizes 'tree_shrub' → 'tree-shrub', but the raw
+    // underscore form must not regress either.
+    expect(servicePathSlug('tree_shrub')).toBe('tree-and-shrub-care');
+    expect(cityServicePath('tree-shrub', 'Venice')).toBe('/tree-and-shrub-care-venice-fl/');
+  });
+
+  test('every service the brief builder can target has the SAME runner slug', () => {
+    // The two maps are the same contract expressed twice; a service present
+    // in one and missing from the other is exactly how this bug happened.
+    const briefMap = briefInternals?.SERVICE_CITY_SLUG;
+    expect(briefMap).toBeTruthy();
+    for (const [service, slug] of Object.entries(briefMap)) {
+      expect([service, servicePathSlug(service)]).toEqual([service, slug]);
+    }
+  });
+});

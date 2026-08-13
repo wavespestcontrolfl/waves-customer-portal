@@ -743,6 +743,45 @@ describe('_composeBrief family-refresh coverage section (Codex r21 on #3255)', (
     expect(brief.gsc_signal.contributing_impressions).toBe(145);
   });
 
+  test('a REROUTED collapsed row still binds every contributing query', () => {
+    // The router can move this row off the city-service action after the
+    // miner already collapsed the segment. The losing queries have nowhere
+    // else to go — they were dropped because they resolved to that one
+    // target — so the section must survive the reroute, with wording that
+    // matches whatever the row became.
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-ncy-rerouted',
+        bucket: 'no_content_yet',
+        query: 'termite inspection sarasota fl',
+        page_url: null,
+        service: 'termite',
+        city: 'Sarasota',
+        signal_metadata: {
+          impressions: 80,
+          contributing_queries: [
+            'termite inspection sarasota fl',
+            'termite treatment cost sarasota',
+          ],
+        },
+      },
+      signals: {},
+      decision: {
+        page_type: 'blog',
+        action_type: 'new_supporting_blog',
+        final_score: 60,
+        score_breakdown: {},
+      },
+      existingBriefVersions: 0,
+    });
+    const segmentSection = brief.required_sections.find((sec) => /segment coverage/i.test(sec));
+    expect(segmentSection).toBeTruthy();
+    expect(segmentSection).toContain('termite treatment cost sarasota');
+    // …and it must not call a blog a page.
+    expect(segmentSection).not.toContain('this page is the single target');
+  });
+
   test('a single-query city-service row gets NO segment section', () => {
     // Nothing was collapsed, so there is no extra demand to bind — the
     // section would just be noise in the writer contract.
