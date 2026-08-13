@@ -65,7 +65,42 @@ function canonicalizeRouteTokens(tokens) {
   return out;
 }
 
-function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
+// A unit-FIRST address ("Unit 7, 123 Main St, …") is the same street as
+// its street-first form ("123 Main St Unit 7") — comparing the raw
+// segments made the reorder read as a DIFFERENT property, and the
+// cross-property fence then discarded the call's tenancy and stated unit
+// area (codex r63 P1). Mirrors the r41/r57 leading-designator rules: only
+// a recognized designator segment followed by a digit-leading street may
+// reorder (no FL city starts with a digit).
+const LEADING_UNIT_SEGMENT_RE = /^(?:(?:unit|apt|apartment|ste|suite)\s*#?\s*[\w-]+|#\s*\w+)$/i;
+// The comma-free "Apt 4 at 123 Main St" form is expressly supported by
+// hasPrimaryStreetNumber, so it must canonicalize here too (codex r64 P1),
+// and so must the bare-whitespace "Unit 7 123 Main St" / "#12 900 Bayview
+// Ter" forms the subpremise signal accepts (codex r65 P1) — the designator
+// token cannot contain a space, so the split lands where the digit-leading
+// street begins.
+const LEADING_UNIT_AT_RE = /^\s*((?:unit|apt|apartment|ste|suite)\s*#?\s*[\w-]+|#\s*\w+)\s+at\s+(\d.*)$/i;
+const LEADING_UNIT_SPACE_RE = /^\s*((?:unit|apt|apartment|ste|suite)\s*#?\s*[\w-]+|#\s*\w+)\s+(\d.*)$/i;
+
+function canonicalizeLeadingUnit(s) {
+  const str = String(s || '');
+  const parts = str.split(',');
+  const first = parts[0].trim();
+  const inline = first.match(LEADING_UNIT_AT_RE) || first.match(LEADING_UNIT_SPACE_RE);
+  if (inline) {
+    return [`${inline[2].trim()} ${inline[1].trim()}`, ...parts.slice(1)].join(', ');
+  }
+  if (parts.length < 2) return str;
+  const second = (parts[1] || '').trim();
+  if (LEADING_UNIT_SEGMENT_RE.test(first) && /^\d/.test(second)) {
+    return [`${second} ${first}`, ...parts.slice(2)].join(', ');
+  }
+  return str;
+}
+
+function sameStreetAddress(rawA, rawB, { requireExactUnit = false, requireNamedUnit = false } = {}) {
+  const a = canonicalizeLeadingUnit(rawA);
+  const b = canonicalizeLeadingUnit(rawB);
   const normSegment = (s) => canonicalizeRouteTokens(String(s || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
@@ -120,7 +155,16 @@ function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
   // credential for Apt A cannot authenticate Apt B. Duplicate detection uses
   // the default conservative mode below because one missing unit is not proof
   // that two active-service records are different properties.
-  if (requireExactUnit && aa.unit !== bb.unit) return false;
+  // requireNamedUnit is the stronger form, for a caller AUTHENTICATING a
+  // unit rather than merely separating two of them: a unit credential needs
+  // an actual unit to be scoped TO, and two addresses that both lack a unit
+  // ID authenticate nothing — a building-level saved measurement would
+  // otherwise compare "exactly equal" to an apartment quote that never
+  // stated its unit, because unit-less === unit-less (codex pre-push r20
+  // P1). Duplicate detection and re-gather decisions keep the conservative
+  // default; only an explicit opt-in gets this.
+  if (requireNamedUnit && !(aa.unit && bb.unit)) return false;
+  if ((requireExactUnit || requireNamedUnit) && aa.unit !== bb.unit) return false;
   // A known-vs-unknown unit remains a possible duplicate and therefore
   // compares equal conservatively. Only two explicit, different unit IDs are
   // proven separate service addresses.
@@ -163,9 +207,37 @@ function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
   return true;
 }
 
+// Did the final address merely COMPLETE a numberless gathered street
+// ("62nd Avenue East" → "4801 62nd Avenue East")? sameStreetAddress
+// compares whole street lines, so supplying the missing house number reads
+// as a different street, and the cross-property fence then discarded the
+// call's tenancy/type/stated measurements for what is the SAME property
+// corrected (codex r56 P1). True only when the gathered line has NO
+// primary street number (the r41 rule: ordinal names like "62nd" don't
+// count as numbers), the final one DOES, and the final line minus that
+// number street-matches the gathered line. A correction that changes the
+// street TEXT itself still fences — conservative direction.
+const PRIMARY_STREET_NUMBER_RE = /^\s*\d+[a-z]?(?:[-/]\w+)?\s+\S/i;
+
+function addressCompletesGatheredStreet(finalAddress, gatheredAddress) {
+  // A leading unit rides along with a completion ("Unit 7, 62nd Avenue
+  // East" → "Unit 7, 4801 62nd Avenue East") — canonicalize both sides to
+  // street-first so the number test sees the street, not the designator
+  // (codex r65 P1); sameStreetAddress below still compares the units.
+  const gatheredCanonical = canonicalizeLeadingUnit(gatheredAddress);
+  const gatheredFirst = String(gatheredCanonical || '').split(',')[0].trim();
+  const finalStr = canonicalizeLeadingUnit(String(finalAddress || '').trim());
+  if (!gatheredFirst || !finalStr) return false;
+  if (PRIMARY_STREET_NUMBER_RE.test(gatheredFirst)) return false; // gathered already numbered
+  if (!PRIMARY_STREET_NUMBER_RE.test(finalStr)) return false; // final supplies no number either
+  const withoutNumber = finalStr.replace(/^\s*\d+[a-z]?(?:[-/]\w+)?\s+/i, '');
+  return withoutNumber !== finalStr && sameStreetAddress(withoutNumber, gatheredCanonical);
+}
+
 module.exports = {
   sameStreetAddress,
   addressAddsLocality,
+  addressCompletesGatheredStreet,
   STREET_TOKEN_ALIASES,
   // Shared so street-key builders (scope-guards burst dedup) cut route
   // spellings identically to how this module compares them.

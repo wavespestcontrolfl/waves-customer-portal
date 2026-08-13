@@ -149,6 +149,16 @@ const gates = {
   // permanent record and its S3 cache key does not vary on this gate).
   reportCrossSell: process.env.GATE_REPORT_CROSS_SELL === 'true',
 
+  // Warm the property-evidence cache at visit completion so the cross-sell
+  // card can price at render (the composer reads cache-only — a customer
+  // must never wait on county APIs). Runs the composer itself with a
+  // persisting lookup, post-commit and fire-and-forget, so every render
+  // suppression also suppresses the spend. External-API + vision spend per
+  // completed report on a cold cache — ships dark, owner flips. Inert
+  // unless GATE_REPORT_CROSS_SELL is also on. Gate off: completions behave
+  // exactly as today and the card keeps falling back to the quote CTA.
+  reportCrossSellPrewarm: process.env.GATE_REPORT_CROSS_SELL_PREWARM === 'true',
+
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is
   // ready … Invoice for today's visit: {pay_url}") has been unreachable since
@@ -172,6 +182,29 @@ const gates = {
   // only be reached from Customer 360 as before. Kill switch: unset or any
   // non-'true' value; nothing is minted retroactively when it flips.
   prepayOnBook: process.env.GATE_PREPAY_ON_BOOK === 'true',
+
+  // Switching an ALREADY-ACCEPTED per-application customer to annual prepay
+  // from the appointment sheet — the "changed their mind on site" case
+  // (owner ask 2026-08-12). Opens the same prepay-on-book preview + Customer
+  // 360 mint on an ESTIMATE-ORIGIN series, which the preview otherwise
+  // refuses because the accept flow owns that choice; once the estimate is
+  // accepted the quote is closed and its prepay door is gone, so this is the
+  // only door left. Owner ruling 2026-08-12: the $99 setup fee already
+  // invoiced on the accept-minted draft is WAIVED on the switch — the flow
+  // supersedes (voids) that unpaid invoice, so the prepaid year is exactly
+  // visits × per-visit price. Money surface — fail-closed ==='true' in EVERY
+  // environment. Gate off: the availability probe answers switchEnabled
+  // false, the sheet renders no prepay action, and the preview refuses
+  // estimate-origin series exactly as today. Kill switch: unset or any
+  // non-'true' value; nothing already minted is affected when it flips.
+  //
+  // Deliberate overlap with GATE_PREPAY_ON_BOOK: this gate also admits the
+  // preview's COMMITTED mode for a NON-estimate series, so the sheet's
+  // action works on a phone-booked recurring plan too (the on-site twin of
+  // prepay-on-book). It never admits the pre-save DRAFT probe — that stays
+  // the New Appointment modal's, behind its own gate. Both are read-only;
+  // every mint still goes through the Customer 360 route and its guards.
+  onsitePrepaySwitch: process.env.GATE_ONSITE_PREPAY_SWITCH === 'true',
 
   // Setting a recurring plan's LENGTH from Edit appointment. The count is not
   // a stored field — a fixed plan is recurring_ongoing=false plus exactly N
@@ -1088,6 +1121,24 @@ const gates = {
   // Enable with GATE_ESTIMATE_EXTENSION_REQUEST=true.
   estimateExtensionRequest: isProd ? process.env.GATE_ESTIMATE_EXTENSION_REQUEST === 'true' : true,
 
+  // "Does the lawn size look off?" — the customer challenge sheet on the
+  // treatable-area line of the estimate (owner GO 2026-08-12). Parks a
+  // service_requests row ('lawn_area_review') + admin notification; the sent
+  // estimate never changes until the office re-measures. Gates BOTH the /data
+  // payload flag (which is what renders the link) and the POST endpoint.
+  // No customer comms anywhere in the flow. Ships DARK.
+  // Enable with GATE_ESTIMATE_MEASUREMENT_REVIEW=true.
+  estimateMeasurementReview: isProd ? process.env.GATE_ESTIMATE_MEASUREMENT_REVIEW === 'true' : true,
+
+  // The `lawn_area` block on POST /public/quote/calculate — the priced
+  // treatable-area basis the website estimator renders as "Priced for N sq
+  // ft". Ships DARK because merely EMITTING the field activates the deployed
+  // astro widget's source labels, and until astro PR #464 deploys those
+  // labels include the banned verify-on-first-visit wording (owner ruling
+  // 2026-08-12). Flip AFTER #464 is live on the hub + spokes.
+  // Enable with GATE_PUBLIC_QUOTE_LAWN_AREA=true.
+  publicQuoteLawnArea: isProd ? process.env.GATE_PUBLIC_QUOTE_LAWN_AREA === 'true' : true,
+
   // Commercial estimate glass parity — the customer estimate page renders an
   // authored commercial proposal's line items INSIDE the glass layout (plus
   // the commercial copy pack + inclusions) instead of the bare "formal
@@ -1149,6 +1200,26 @@ const gates = {
   // run endpoints are unaffected by this gate (they're requireAdmin-only).
   autoDispatch: isProd ? process.env.GATE_AUTO_DISPATCH === 'true' : true,
 
+  // ROUTE-TIERS — tiered day-move radius for recurring maintenance visits
+  // inside the auto-dispatch run (≥14d: ±5 days; 7–13d: ±3; <7d: no day-moves;
+  // <72h or 72h-reminder-sent: frozen), plus the ±5-day cumulative drift
+  // budget, the ≥5-days-out destination floor, and the reminder-sent freeze.
+  // OFF = auto-dispatch's legacy flat 14-day lock, byte for byte. Read at CALL
+  // time via gateEnvValue (same pattern and rationale as
+  // GATE_DRIVE_TIME_CALIBRATION: it moves the numbers/windows scheduling
+  // decisions are made with, so the flip is a deliberate act in EVERY
+  // environment — never an ambient dev default — and needs no redeploy).
+  // Kill switch: unset GATE_ROUTE_TIERS.
+  routeTiers: gateEnvValue('GATE_ROUTE_TIERS'),
+
+  // ROUTE-TIERS nightly intra-day reorder pass (tier 3 band, 72h–7d): 4:20am
+  // cron that rewrites route_order per tech-day when savings clear the floor.
+  // Separate kill switch from routeTiers — either half can run alone. Explicit
+  // opt-in in every environment (it writes scheduled_services.route_order and
+  // can call the Google Routes API, so it must never auto-run in dev).
+  // Double-gated behind cronJobs. Kill switch: unset GATE_ROUTE_REORDER.
+  routeReorder: gateEnvValue('GATE_ROUTE_REORDER'),
+
   // Drive-Time Calibration — swaps the straight-line drive-time approximation
   // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
   // real trips: a fixed per-leg overhead plus a per-mile rate. Purely an
@@ -1162,6 +1233,20 @@ const gates = {
   // with the scheduler — with a bare === 'true' a value of `1`/`on`/`TRUE`
   // would calibrate the estimator while logGateStatus reported it disabled.
   driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
+
+  // Vision Delta Scoring — one VISION-tier call per treatment outcome's best
+  // before/after photo pair (server/services/vision-delta.js); the verdict
+  // feeds the agronomic wiki as photo-verified visual change. Paid vision
+  // per pair, so explicit opt-in in EVERY environment. Off → the sweep
+  // returns {skipped:'gated'} before any DB read and the whole lane is
+  // inert (the 3:40 ET cron leg adds no gate of its own — the check inside
+  // sweepUnscoredOutcomes is the single source of truth). Kill switch:
+  // unset or any non-truthy value.
+  // NOTE: the sweep parses this at CALL time via gateEnvValue() (tests flip
+  // the env at runtime, and a flip must not depend on this module's load
+  // moment) — registered with the SAME parser so this registry entry,
+  // logGateStatus, and the sweep can never disagree.
+  visionDelta: gateEnvValue('GATE_VISION_DELTA'),
 
   // Weekly autonomous vendor price scan -> stages a price-match draft for the
   // SiteOne rep (never auto-sends; a human reviews + sends from /admin/price-match).

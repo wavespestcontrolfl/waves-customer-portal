@@ -9,7 +9,7 @@ const logger = require('./logger');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive } = require('../utils/cron-lock');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
@@ -755,6 +755,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:40AM — Vision delta scoring sweep (before/after photo pairs on
+  // treatment_outcomes → VISION-tier visual-change verdict). Bounded (25/run),
+  // idempotent (vision_scored_at is terminal), and entirely inert unless
+  // GATE_VISION_DELTA is set (canonical gateEnvValue parse; registered as
+  // visionDelta in config/feature-gates.js) — the gate check lives inside the service
+  // (single source of truth), so this leg is a no-op beyond the gated early
+  // return. runExclusive: read-then-act — a deploy overlap must not
+  // double-score (and double-bill) the same photo pairs.
+  // =========================================================================
+  cron.schedule('40 3 * * *', async () => {
+    try {
+      const res = await runExclusive('vision-delta-sweep', () =>
+        require('./vision-delta').sweepUnscoredOutcomes());
+      if (res && !res.skipped) {
+        logger.info(`Vision delta sweep: ${res.scored}/${res.candidates} scored`);
+      }
+    } catch (err) {
+      logger.error(`Vision delta sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
   // renames from the unit-review queue only: "Gallons" -> gal at factor 1;
   // missing-unit and ambiguous-oz rows stay parked for review). Gate is
@@ -902,9 +924,87 @@ function initScheduledJobs() {
         const { runAutoDispatch } = require('./auto-dispatch');
         const result = await runAutoDispatch({ triggeredBy: 'cron' });
         logger.info(`[auto-dispatch] cron run ${result.runId} ${result.status}: evaluated=${result.evaluated} recommended=${result.recommended} changed=${result.changed} skipped=${result.skipped} failed=${result.failed}`);
+        // completed_with_errors (guard-read outage or failed applies) and
+        // failed must FAIL job health — the run row already records the
+        // detail; a degraded night must not read as a green
+        // auto-dispatch-recurring (same guard as the 4:20 reorder cron).
+        if (result.status !== 'completed') {
+          throw new Error(`auto-dispatch run ${result.runId} unhealthy: status=${result.status} failed=${result.failed}`);
+        }
       });
     } catch (err) {
       logger.error(`Auto-Dispatch run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 4:20AM — ROUTE-TIERS nightly intra-day reorder (tier 3: 72h–7d
+  // band). Rewrites route_order per tech-day via the shared optimizer when
+  // savings clear the floor; NEVER moves a visit's date/window/tech, skips any
+  // day containing a frozen visit (<72h or 72h reminder sent), never touches
+  // >25-stop tech-days (Google cap — logged, not truncated). Double-gated
+  // (cronJobs AND routeReorder); the tier day-moves themselves ride the 4:10
+  // auto-dispatch run above (its eligibility is tier-aware when
+  // GATE_ROUTE_TIERS is on). Zero customer comms by construction.
+  // =========================================================================
+  cron.schedule('20 4 * * *', async () => {
+    // Call-time read (NOT the baked isEnabled snapshot) so a Railway var flip
+    // takes effect on the next tick without a redeploy — matching the
+    // documented gate contract and the service's own internal check.
+    if (!gateEnvValue('GATE_ROUTE_REORDER')) return;
+    logger.info('Running: Route-Tiers nightly reorder');
+    try {
+      // runExclusive x2: 'route-tiers-nightly' guards against deploy-overlap
+      // double-runs of THIS job; nesting inside 'auto-dispatch-recurring'
+      // serializes the two autonomous schedule WRITERS — auto-dispatch's
+      // apply pass can land moves onto reorder-band days (destination floor
+      // is 5 days out, band is 1–6), and SERIALIZABLE isolation alone cannot
+      // fence a concurrent writer running at weaker isolation. If the 4:10
+      // run is still holding the lock, tonight's reorder tick is skipped
+      // (advisory lock is non-blocking) and picked up tomorrow.
+      await runExclusive('route-tiers-nightly', async () => {
+        const { runRouteReorderIfEnabled, recordSkippedTick } = require('./route-reorder');
+        // recordHealth:false — this invocation only BORROWS the writer lock;
+        // recording it would stamp a fresh 4:20 success under the 4:10 job's
+        // name, clearing real failures and falsifying last_success_at.
+        const inner = await runExclusive('auto-dispatch-recurring', async () => runRouteReorderIfEnabled(), { recordHealth: false });
+        // STRICT boolean — a completed run returns skipped as a NUMERIC
+        // count of skipped tech-days (frozen days are routine), and a
+        // truthy check would ledger a false skipped tick + fail job health
+        // on any normal night with one skip. Only runExclusive's
+        // lock-contention shape ({ skipped: true, reason }) means the tick
+        // itself never ran (uncapped audit r27 P1).
+        if (inner && inner.skipped === true) {
+          // The 4:10 job still held the writer lock — the tick did NOT run.
+          // Ledger it as skipped so job health / the dispatch card never show
+          // a lock-starved night as a successful run with no output.
+          logger.warn(`[route-reorder] tick skipped (${inner.reason}) — auto-dispatch still holds the writer lock`);
+          const tickId = await recordSkippedTick(inner.reason);
+          // recordSkippedTick swallows insert errors and returns null — a
+          // lost skip ledger must fail job health like any lost ledger, or
+          // the night is invisible everywhere.
+          if (tickId == null) {
+            throw new Error(`route-reorder skipped tick (${inner.reason}) could not be ledgered`);
+          }
+          // Ledgered — but the night still had NO reorder pass. Returning
+          // normally would let the outer runExclusive stamp
+          // 'route-tiers-nightly' as a fresh SUCCESS, hiding the missed run
+          // from job health (uncapped audit r20 P1). Fail loud like every
+          // other not-fully-successful night; the ledger row keeps the
+          // dispatch card accurate either way.
+          throw new Error(`route-reorder tick skipped (${inner.reason}) — no reorder ran (ledger ${tickId})`);
+        }
+        const result = inner || {};
+        logger.info(`[route-reorder] cron run ${result.status}: applied=${result.applied ?? 0} skipped=${result.skipped ?? 0} failed=${result.failed ?? 0} ledger=${result.ledgerId ?? 'none'}`);
+        // Anything short of a fully-successful, ledgered run must FAIL job
+        // health — a guard outage (completed_with_errors) or a lost ledger
+        // otherwise reads as a healthy night with no visible output.
+        if (result.status !== 'gate_off' && (result.status !== 'completed' || result.ledgerId == null)) {
+          throw new Error(`route-reorder run unhealthy: status=${result.status ?? 'unknown'} ledger=${result.ledgerId ?? 'none'}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Route-Tiers reorder run failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3416,6 +3516,29 @@ function initScheduledJobs() {
       logger.info(`Lawn area weather sync: ${JSON.stringify(result || {})}`);
     } catch (err) {
       logger.error(`Lawn area weather sync cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // PROPERTY ALERTS SWEEP (GATE_PROPERTY_ALERTS; off = shadow-log only)
+  // Daily 10:05 AM ET — bell + native push advisories (rain/skip-irrigation,
+  // clean-inspection reassurance). MUST stay mid-morning ET: notifyCustomer's
+  // push path has no send-window fence of its own, so this schedule IS the
+  // quiet-hours guarantee. Runs after the 4:40 weather sync so the rain
+  // window reads today's refreshed observed data.
+  // =========================================================================
+  cron.schedule('5 10 * * *', async () => {
+    try {
+      // runExclusive: customer-facing bell/push sends — a deploy overlap
+      // must not double-sweep (the ledger's unique dedupe key is the second
+      // line of defense).
+      await runExclusive('property-alerts-sweep', async () => {
+        const { runPropertyAlertsSweep } = require('./property-alerts');
+        const result = await runPropertyAlertsSweep();
+        logger.info(`[property-alerts] cron run: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Property alerts sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

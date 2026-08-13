@@ -1,0 +1,460 @@
+// "Does the lawn size look off?" — the customer challenge flow for the
+// treatable-area line on the estimate (owner GO 2026-08-12).
+//
+// Design constraints, all owner rulings:
+// - The customer NEVER self-adjusts the priced area (a customer-set basis
+//   reintroduces shown ≠ billed). A challenge parks a review request for the
+//   office; the estimate stays exactly as sent until the office re-measures
+//   and sends a revision.
+// - No customer comms from this flow — the sheet's success state is the
+//   confirmation, and the office sends any follow-up (owner sends all comms).
+// - No tech-visit promise anywhere in the copy (owner 2026-08-12: verify-on-
+//   first-visit wording writes a work order for the field tech).
+//
+// Mechanism reuse (find-the-existing-mechanism rule): rides the same
+// `service_requests` table + open-request unique index the add-service flow
+// uses (migration 20260606000001) — `requested_service` is a DEDICATED key
+// ('lawn_area_review') so a re-measure request can coexist with a real
+// "add lawn care" request on the same estimate, while duplicate OPEN
+// re-measures dedupe on the partial unique index exactly like add-service.
+
+const db = require('../models/db');
+const logger = require('./logger');
+const NotificationService = require('./notification-service');
+const {
+  INACTIVE_ESTIMATE_STATUSES,
+  SOURCE_PUBLIC_ESTIMATE,
+  OPEN_REQUEST_TERMINAL_STATUSES,
+  resolveEstimateCustomer,
+} = require('./estimate-add-service-request');
+
+const MEASUREMENT_REVIEW_SERVICE_KEY = 'lawn_area_review';
+
+// Chip set shown on the sheet — keys are the API contract, labels are what
+// the office reads on the request. Free-text arrives separately via `note`.
+const MEASUREMENT_REVIEW_REASONS = {
+  less_lawn: 'We have less lawn than that',
+  rock_or_beds: 'Part of the yard is rock or beds',
+  new_pool_or_landscaping: 'New pool or landscaping',
+  fenced_area: "A fenced area shouldn't be treated",
+  bigger: "It's bigger than that",
+};
+
+function cleanText(value, max = 500) {
+  return String(value || '').replace(/[<>]/g, '').trim().slice(0, max);
+}
+
+function normalizeReasons(reasons) {
+  if (!Array.isArray(reasons)) return [];
+  const seen = new Set();
+  const keys = [];
+  for (const raw of reasons) {
+    const key = String(raw || '').trim();
+    if (MEASUREMENT_REVIEW_REASONS[key] && !seen.has(key)) {
+      seen.add(key);
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
+function isMeasurementReviewEligible(estimate) {
+  if (!estimate) return false;
+  const status = String(estimate.status || '').toLowerCase();
+  return !INACTIVE_ESTIMATE_STATUSES.includes(status);
+}
+
+// The FULL customer-viewability contract (publication, expiry, archive,
+// linkage-invalidation) — codex #3376 r2: a leaked draft/archived/past-
+// expiry token must not be able to park a request, resolve a customer, or
+// ring the office for an estimate every customer-facing read already
+// refuses. Lazy require: estimate-public itself requires this service only
+// inside its route handler, so the cycle never bites at load time.
+function defaultViewabilityCheck(estimate) {
+  const { isEstimateCustomerViewable } = require('../routes/estimate-public');
+  return isEstimateCustomerViewable(estimate);
+}
+
+async function createEstimateMeasurementReview({
+  estimateToken,
+  reasons,
+  note,
+  database = db,
+  viewabilityCheck = defaultViewabilityCheck,
+  // callSideBlockedFor(dbx, estimateRow) -> Promise<bool> — the DURABLE
+  // call-side linkage verdict (AGENTS.md call-pipeline fail-closed rules),
+  // re-checked INSIDE the transaction on the locked row (local audit P0:
+  // call processing can invalidate the linkage after the route's pre-check,
+  // and the service must not create/link a customer from wrong-lead data).
+  // Reads through the transaction connection so the verdict is consistent
+  // with the locked row. Default fail-OPEN only for direct unit callers;
+  // the route always passes the real check.
+  callSideBlockedFor = async () => false,
+  // basisFor(estimateRow) -> Promise<{ sqft, source } | null> — the basis
+  // built by the route from the SAME helpers that render the area line.
+  // Called TWICE: pre-lock for the fast 404 (pest-only estimates take no
+  // lawn challenge, indistinguishable from an unknown token) and AGAIN on
+  // the LOCKED row (local audit P1: a concurrent revision can change or
+  // remove the basis while this request waits — stored metadata must come
+  // from the locked row, never the pre-lock read).
+  basisFor = () => null,
+} = {}) {
+  const token = String(estimateToken || '').trim();
+  if (!token) {
+    const err = new Error('Estimate not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const reasonKeys = normalizeReasons(reasons);
+  const cleanNote = cleanText(note, 500);
+
+  const estimate = await database('estimates').where({ token }).first();
+  // All three gates, all 404 (indistinguishable): the full customer-
+  // viewability contract; this flow's own accepted/declined exclusion (a
+  // customer who accepted the price challenges through the office, not the
+  // sheet — viewability alone still renders accepted estimates); and the
+  // lawn-basis requirement (no lawn line, no lawn challenge).
+  if (!estimate || !viewabilityCheck(estimate) || !isMeasurementReviewEligible(estimate) || !(await basisFor(estimate))) {
+    const err = new Error('Estimate not found');
+    err.status = 404;
+    throw err;
+  }
+
+  // Content validation only AFTER the token has fully cleared the public
+  // eligibility gates (codex #3376 final head P0): a 400 for an unknown-but-
+  // well-formed token would only fire while the gate is LIVE, letting
+  // anonymous probes distinguish gate state and breaking the required
+  // gate-off/unknown/malformed 404 indistinguishability. A real customer
+  // with an empty sheet still gets the helpful 400.
+  if (!reasonKeys.length && !cleanNote) {
+    const err = new Error('Tell us what looks off so we can re-check it.');
+    err.status = 400;
+    throw err;
+  }
+
+  // Serialize per-estimate (codex #3376 P1): two concurrent first-time POSTs
+  // for an estimate with no linked customer would BOTH reach the attach-or-
+  // create resolver and mint duplicate customer profiles before either
+  // insert hits the dedupe index. A row lock on the estimate makes the
+  // second request wait, see the first's customer_id backfill, and dedupe
+  // normally. Falls back to unserialized on databases without transaction
+  // support (unit-test mocks) — the route always passes real knex.
+  const runSerialized = typeof database.transaction === 'function'
+    ? (fn) => database.transaction(async (trx) => {
+      await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+      const locked = await trx('estimates').where({ id: estimate.id }).first();
+      return fn(trx, locked || estimate);
+    })
+    : (fn) => fn(database, estimate);
+  // Unserialized fallback: no lock exists, so the pre-lock basis is the best
+  // available — used only by unit-test mocks; the route always passes knex.
+
+
+  const serialized = typeof database.transaction === 'function';
+  const outcome = await runSerialized(async (dbx, lockedEstimate) => {
+    // Re-validate EVERYTHING on the LOCKED row (local audit P1s): a
+    // concurrent accept/decline/archive/expiry/linkage-invalidation — or a
+    // revision that changes/removes the lawn basis — can commit while this
+    // request waited on the lock. Status checks and the basis both re-derive
+    // from the locked row; the stored metadata is the locked basis, never
+    // the pre-lock read.
+    const lockedBasis = await basisFor(lockedEstimate);
+    if (!viewabilityCheck(lockedEstimate) || !isMeasurementReviewEligible(lockedEstimate) || !lockedBasis) {
+      const err = new Error('Estimate not found');
+      err.status = 404;
+      throw err;
+    }
+    // Call-side verdict on the LOCKED row, through the trx connection
+    // (local audit P0) — fail closed before any customer/request write.
+    if (await callSideBlockedFor(dbx, lockedEstimate)) {
+      const err = new Error('Estimate not found');
+      err.status = 404;
+      throw err;
+    }
+    return createReviewRow({
+      database: dbx,
+      estimate: lockedEstimate,
+      reasonKeys,
+      cleanNote,
+      shownSqFt: lockedBasis.sqft,
+      shownSource: lockedBasis.source,
+      serialized,
+    });
+  });
+
+  // Office notification AFTER the transaction commits (local audit P1):
+  // inside the trx a later commit failure would leave a notification
+  // pointing at a rolled-back request, and notifyAdmin's own DB/network
+  // round-trips would hold the estimate row lock for their duration.
+  if (outcome && outcome.notify) {
+    await sendOfficeNotification(database, outcome.notify);
+    delete outcome.notify;
+  }
+  return outcome;
+}
+
+// notifyAdmin swallows persistence errors and resolves null/suppressed
+// rather than rejecting, and this is the flow's ONLY handoff — retry once,
+// then log LOUDLY; the request row stands either way (extension-route
+// pattern).
+async function sendOfficeNotification(database, { subject, description, customerId, estimateId, requestId }) {
+  const attempt = () => NotificationService.notifyAdmin(
+    'estimate_measurement_review',
+    subject,
+    description,
+    {
+      // Deep-link to the Customer 360 PANEL (codex #3376: the standalone
+      // requests page is gone; note the ?customerId=<id> panel form).
+      link: `/admin/customers?customerId=${customerId}`,
+      metadata: { estimateId, requestId, customerId },
+    }
+  ).catch((err) => {
+    logger.error(`[estimate-measurement-review] admin notification threw for request ${requestId}: ${err.message}`);
+    return null;
+  });
+  // ATOMIC delivery claim (codex #3376 P1: the commit lands before the send,
+  // so a concurrent retry could re-arm between commit and a post-send stamp
+  // and double-ring the office). Claim-before-send: the conditional
+  // jsonb_set only fires where notifiedAt is absent — exactly one caller
+  // wins; losers return silently. If BOTH send attempts then fail, the
+  // claim is cleared (best effort) so a later customer retry re-arms; the
+  // crash window between claim and clear degrades to the loud FAILED-TWICE
+  // log + the office sweep, never to a double bell (one-request/one-bell
+  // contract).
+  // Ownership fence (codex #3376 P1): a sender that outlives its own lease
+  // must not complete or clear a SUCCESSOR's lease — every claim carries a
+  // unique token, and both completion updates are conditioned on it.
+  const leaseToken = require('crypto').randomUUID();
+  let claimed = 0;
+  try {
+    claimed = await database('service_requests')
+      .where({ id: requestId })
+      .whereRaw("COALESCE(pricing_revision->>'notifiedAt', '') = ''")
+      .whereRaw(
+        "(COALESCE(pricing_revision->>'notifyLeaseAt', '') = '' OR (pricing_revision->>'notifyLeaseAt')::timestamptz < NOW() - interval '10 minutes')"
+      )
+      .update({
+        pricing_revision: database.raw(
+          "jsonb_set(jsonb_set(COALESCE(pricing_revision, '{}'::jsonb), '{notifyLeaseAt}', to_jsonb(NOW()::text)), '{notifyLeaseToken}', to_jsonb(?::text))",
+          [leaseToken]
+        ),
+      });
+  } catch (err) {
+    logger.warn(`[estimate-measurement-review] notify lease claim failed for request ${requestId}: ${err.message} — skipping send (a retry will re-arm)`);
+    return;
+  }
+  if (!claimed) return; // another sender holds a fresh lease or delivery is done
+
+  const markDelivered = async () => {
+    try {
+      await database('service_requests')
+        .where({ id: requestId })
+        .whereRaw("pricing_revision->>'notifyLeaseToken' = ?", [leaseToken])
+        .update({
+          pricing_revision: database.raw(
+            "jsonb_set(COALESCE(pricing_revision, '{}'::jsonb) - 'notifyLeaseAt' - 'notifyLeaseToken', '{notifiedAt}', to_jsonb(NOW()::text))"
+          ),
+        });
+    } catch (err) {
+      // The fresh lease still guards double-rings for its window; a later
+      // retry after expiry re-sends — an extra bell beats a lost one.
+      logger.warn(`[estimate-measurement-review] notifiedAt stamp failed for request ${requestId}: ${err.message}`);
+    }
+  };
+  const releaseLease = async () => {
+    try {
+      await database('service_requests')
+        .where({ id: requestId })
+        .whereRaw("pricing_revision->>'notifyLeaseToken' = ?", [leaseToken])
+        .update({
+          pricing_revision: database.raw("COALESCE(pricing_revision, '{}'::jsonb) - 'notifyLeaseAt' - 'notifyLeaseToken'"),
+        });
+    } catch (err) {
+      logger.warn(`[estimate-measurement-review] notify lease release failed for request ${requestId}: ${err.message}`);
+    }
+  };
+
+  // Crash-idempotent send (codex #3376 P2): the bell INSERT itself must not
+  // duplicate. Two windows exist around the lease alone — a crash between
+  // insert and the notifiedAt stamp (lease expires, retry re-inserts), and a
+  // send outliving its lease (successor + zombie both insert). Both senders
+  // therefore serialize on a per-request advisory xact lock held ACROSS the
+  // existence check AND the send: a successor waits out a live zombie, then
+  // sees its bell and stamps without inserting; a crashed sender's lock
+  // releases automatically and its bell (if inserted) is found by the check.
+  // suppressed:true stays POLICY (terminal success, no retry, no loud error).
+  const deliver = async () => {
+    const first = await attempt();
+    if (first?.suppressed) {
+      logger.info(`[estimate-measurement-review] admin notification suppressed by policy for request ${requestId}`);
+      return true;
+    }
+    if (first?.id) return true;
+    const second = await attempt();
+    return !!(second?.suppressed || second?.id);
+  };
+
+  let delivered = false;
+  if (typeof database.transaction === 'function') {
+    delivered = await database.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`measurement-review-notify:${requestId}`]);
+      const existingBell = await trx('notifications')
+        .where({ recipient_type: 'admin', category: 'estimate_measurement_review' })
+        .whereRaw("metadata->>'requestId' = ?", [String(requestId)])
+        .first()
+        .catch(() => null);
+      if (existingBell) return true; // crash-after-insert recovery: bell exists
+      return deliver();
+    }).catch((err) => {
+      logger.error(`[estimate-measurement-review] notify lock/send failed for request ${requestId}: ${err.message}`);
+      return false;
+    });
+  } else {
+    // Unit-test mocks without transaction support — best-effort path.
+    delivered = await deliver();
+  }
+
+  if (delivered) { await markDelivered(); return; }
+  await releaseLease();
+  logger.error(`[estimate-measurement-review] admin notification FAILED TWICE for request ${requestId} — request row stands, office unnotified; customer retries will re-arm the send`);
+}
+
+
+// Outcome for a deduped submission: success, plus a re-armed notification
+// payload when the existing open request has NO delivery stamp — both
+// original attempts failed and the deep-link notification is the office's
+// only route to the request (codex #3376 P2).
+const NOTIFY_LEASE_MS = 10 * 60 * 1000;
+
+function dedupedOutcome(existingRow, estimateId, nowMs = Date.now()) {
+  let revision = null;
+  try {
+    revision = typeof existingRow.pricing_revision === 'string'
+      ? JSON.parse(existingRow.pricing_revision)
+      : (existingRow.pricing_revision || null);
+  } catch { revision = null; }
+  if (revision?.notifiedAt) return { success: true, deduped: true };
+  // A FRESH lease means another sender is mid-flight — don't double-arm. A
+  // stale lease means that sender died between claim and send (codex #3376
+  // P1: a permanent claim would lose the workflow's only handoff forever);
+  // the lease expiring re-arms delivery on the next customer retry.
+  const leaseAt = Date.parse(revision?.notifyLeaseAt || '') || 0;
+  if (leaseAt && nowMs - leaseAt < NOTIFY_LEASE_MS) return { success: true, deduped: true };
+  return {
+    success: true,
+    deduped: true,
+    notify: {
+      subject: existingRow.subject,
+      description: existingRow.description,
+      customerId: existingRow.customer_id,
+      estimateId,
+      requestId: existingRow.id,
+    },
+  };
+}
+
+async function createReviewRow({ database, estimate, reasonKeys, cleanNote, shownSqFt, shownSource, serialized = false }) {
+  // Pre-insert dedupe. Under the serialized path this runs while HOLDING the
+  // estimate row lock, so it is authoritative — and it must be, because on
+  // Postgres a 23505 unique violation ABORTS the surrounding transaction and
+  // any follow-up query in the catch would 500 (local audit P1). The catch
+  // below only services the unserialized (mock/test) path.
+  const existingOpen = await database('service_requests')
+    .where({ estimate_id: estimate.id, requested_service: MEASUREMENT_REVIEW_SERVICE_KEY })
+    .whereNotIn(database.raw("COALESCE(status, 'new')"), OPEN_REQUEST_TERMINAL_STATUSES)
+    .first();
+  if (existingOpen) return dedupedOutcome(existingOpen, estimate.id);
+
+  const customer = await resolveEstimateCustomer(database, estimate, {
+    // Attribution reflects the actual entry point, not the add-service flow
+    // this resolver was born in (codex #3376).
+    sourceDetail: 'estimate_measurement_review',
+    // Route contract: the estimate row is NEVER mutated — the shared
+    // resolver's customer_id backfill is an estimate write, so this flow
+    // skips it (codex #3376 P1). The request row still links the customer.
+    skipEstimateBackfill: true,
+  });
+
+  const estimateNumber = estimate.estimate_number || estimate.id;
+  const reasonLabels = reasonKeys.map((k) => MEASUREMENT_REVIEW_REASONS[k]);
+  const shown = Number(shownSqFt);
+  const shownLine = Number.isFinite(shown) && shown > 0
+    ? `Estimate showed ${Math.round(shown).toLocaleString()} sq ft${shownSource ? ` (${cleanText(shownSource, 80)})` : ''}.`
+    : null;
+
+  const subject = `Re-measure lawn for estimate #${estimateNumber}`;
+  const description = [
+    `Customer says the treatable lawn area looks off on estimate ${estimateNumber}.`,
+    reasonLabels.length ? `Reasons: ${reasonLabels.join('; ')}.` : null,
+    shownLine,
+    cleanNote ? `Customer note: ${cleanNote}` : null,
+    // Same expiry qualification as the customer copy (codex #3376): a
+    // challenge does NOT extend the estimate, so staff must not assure a
+    // customer the old quote outlives its normal expiration.
+    'Re-measure and send a revised estimate; the sent estimate stays as-is until then but still expires on its normal date.',
+  ].filter(Boolean).join(' ');
+
+  let request;
+  try {
+    [request] = await database('service_requests').insert({
+      customer_id: customer.id,
+      estimate_id: estimate.id,
+      requested_service: MEASUREMENT_REVIEW_SERVICE_KEY,
+      source: SOURCE_PUBLIC_ESTIMATE,
+      category: 'measurement_review',
+      subject,
+      description,
+      urgency: 'routine',
+      status: 'new',
+      pricing_revision: JSON.stringify({
+        type: 'lawn_area_review',
+        reasons: reasonKeys,
+        note: cleanNote || null,
+        shownSqFt: Number.isFinite(shown) && shown > 0 ? Math.round(shown) : null,
+        shownSource: cleanText(shownSource, 80) || null,
+      }),
+    }).returning('*');
+  } catch (err) {
+    // Partial unique index on open (estimate_id, requested_service): a second
+    // open challenge on the same estimate is the same ask — return the
+    // existing one instead of erroring the sheet.
+    if (err.code === '23505') {
+      // Serialized path: the row lock made the pre-check authoritative, and
+      // the aborted transaction cannot run another query — rethrow and let
+      // the transaction roll back (this indicates a bug, not a normal race).
+      if (serialized) throw err;
+      const dupe = await database('service_requests')
+        .where({ estimate_id: estimate.id, requested_service: MEASUREMENT_REVIEW_SERVICE_KEY })
+        .whereNotIn(database.raw("COALESCE(status, 'new')"), OPEN_REQUEST_TERMINAL_STATUSES)
+        .first();
+      if (dupe) return dedupedOutcome(dupe, estimate.id);
+    }
+    throw err;
+  }
+
+  logger.info(`[estimate-measurement-review] request ${request.id} for estimate ${estimate.id} (${reasonKeys.join(',') || 'note-only'})`);
+
+  // Notification payload only — the SEND happens after the transaction
+  // commits (local audit P1: an in-trx send can point at a rolled-back
+  // request and holds the estimate row lock through network round-trips).
+  return {
+    success: true,
+    deduped: false,
+    notify: {
+      subject,
+      description,
+      customerId: customer.id,
+      estimateId: estimate.id,
+      requestId: request.id,
+    },
+  };
+}
+
+module.exports = {
+  MEASUREMENT_REVIEW_SERVICE_KEY,
+  MEASUREMENT_REVIEW_REASONS,
+  normalizeReasons,
+  isMeasurementReviewEligible,
+  createEstimateMeasurementReview,
+};

@@ -142,6 +142,7 @@ const PREF_SELECT = [
   'auto_flip_en_route',
   'service_completed',
   'seasonal_tips',
+  'weather_alerts',
   'sms_enabled',
   'email_enabled',
   'billing_email',
@@ -177,6 +178,7 @@ function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
     autoFlipEnRoute: prefs.auto_flip_en_route !== false,
     serviceCompleted: prefs.service_completed !== false,
     seasonalTips: prefs.seasonal_tips !== false,
+    weatherAlerts: prefs.weather_alerts !== false,
     smsEnabled: prefs.sms_enabled !== false,
     emailEnabled: prefs.email_enabled !== false,
     billingEmail: prefs.billing_email || '',
@@ -220,6 +222,7 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   if (updates.autoFlipEnRoute !== undefined) dbUpdates.auto_flip_en_route = updates.autoFlipEnRoute;
   if (updates.serviceCompleted !== undefined) dbUpdates.service_completed = updates.serviceCompleted;
   if (updates.seasonalTips !== undefined) dbUpdates.seasonal_tips = updates.seasonalTips;
+  if (updates.weatherAlerts !== undefined) dbUpdates.weather_alerts = updates.weatherAlerts;
   if (updates.smsEnabled !== undefined) dbUpdates.sms_enabled = updates.smsEnabled;
   if (updates.emailEnabled !== undefined) dbUpdates.email_enabled = updates.emailEnabled;
   if (updates.billingEmail !== undefined) {
@@ -263,6 +266,7 @@ const ACCOUNT_PREF_LABELS = {
   autoFlipEnRoute: 'Auto En Route from GPS',
   serviceCompleted: 'Service Complete Report',
   seasonalTips: 'Seasonal Lawn Tips',
+  weatherAlerts: 'Weather & Property Alerts',
   smsEnabled: 'Text Messages',
   emailEnabled: 'Email Messages',
   billingEmail: 'Billing Recipient Email',
@@ -302,6 +306,7 @@ const DB_FIELD_BY_PREF = {
   autoFlipEnRoute: 'auto_flip_en_route',
   serviceCompleted: 'service_completed',
   seasonalTips: 'seasonal_tips',
+  weatherAlerts: 'weather_alerts',
   smsEnabled: 'sms_enabled',
   emailEnabled: 'email_enabled',
   billingEmail: 'billing_email',
@@ -525,6 +530,7 @@ router.put('/preferences', async (req, res, next) => {
       // delete after a deploy cycle.
       billingReminder: Joi.boolean().strip(),
       seasonalTips: Joi.boolean(),
+      weatherAlerts: Joi.boolean(),
       smsEnabled: Joi.boolean(),
       emailEnabled: Joi.boolean(),
       billingEmail: Joi.string().trim().email().max(200).allow('', null),

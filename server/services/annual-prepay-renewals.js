@@ -2587,6 +2587,23 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         // Coverage is gone — return the customer to a billable mode (the
         // monthly cron skips 'annual_prepay' outright; see GUARD 3b).
         await resetBillingModeAfterTermCancel(updated, conn);
+        // An ON-SITE SWITCH retired the accept-minted per-application
+        // invoice when this prepay was created; with the prepay dead that
+        // AR (setup fee included) must come back, or it is silently gone
+        // forever — nothing else ever re-mints it. Marker-keyed and
+        // idempotent; best-effort (never blocks the void/refund sync).
+        if (updated.prepay_invoice_id) {
+          try {
+            await require('./invoice').restoreSwitchSupersededInvoicesForPrepay(updated.prepay_invoice_id, conn);
+          } catch (err) {
+            // The markers are durable, so this is recoverable — but only by a
+            // human who knows: the void succeeded and the superseded
+            // per-application AR is still missing. ERROR (Sentry-visible),
+            // with the fix spelled out (Codex on-site-switch P0 r9: a warn
+            // here was a permanent silent AR loss).
+            logger.error(`[annual-prepay] FIX: switch-superseded restore FAILED for term ${updated.id} (prepay invoice ${updated.prepay_invoice_id}): ${err.message}. The customer's per-application invoice is still void — re-run POST /admin/schedule/<visitId>/prepay-switch/undo or rebuild it from Invoices.`);
+          }
+        }
       }
     }
 
@@ -2697,7 +2714,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
             this.where('status', 'cancelled').whereNotNull('renewal_decision');
           });
       })
-      .select('id', 'customer_id', 'source_estimate_id');
+      .select('id', 'customer_id', 'source_estimate_id', 'prepay_invoice_id');
     for (const decided of decidedCoveredTerms) {
       // Same customer-first lock order as the true-refund cancel branch
       // above (deadlock guard vs the accept transaction).
@@ -2723,6 +2740,19 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // The helper self-checks for replacement coverage, so a renewed
       // customer (live follow-on term) keeps their mode.
       await resetBillingModeAfterTermCancel(decided, conn);
+      // A DECIDED term's refund removes its coverage too (Codex P0 r30) —
+      // an on-site switch's superseded per-application invoice must come
+      // back here as well, or the AR is void forever (this loop never runs
+      // the true-void branch's restore, and the sweep's covering-term guard
+      // reads the decided window as live). The restore itself excludes the
+      // refunded prepay's own term from its covering-term decision.
+      if (decided.prepay_invoice_id) {
+        try {
+          await require('./invoice').restoreSwitchSupersededInvoicesForPrepay(decided.prepay_invoice_id, conn);
+        } catch (err) {
+          logger.error(`[annual-prepay] FIX: switch-superseded restore FAILED for decided term ${decided.id} (prepay invoice ${decided.prepay_invoice_id}): ${err.message}. The customer's per-application invoice is still void — re-run POST /admin/schedule/<visitId>/prepay-switch/undo or rebuild it from Invoices.`);
+        }
+      }
     }
   }
 

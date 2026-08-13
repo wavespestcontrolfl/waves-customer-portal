@@ -1598,6 +1598,7 @@ async function deductProductInventory(trx, {
   if (insufficient && !allowNegative) {
     const err = new Error(`${inventoryProduct.name} requires ${deductedAmount} ${inventoryUnit}, but only ${stockBefore} ${inventoryUnit} is on hand.`);
     err.statusCode = 400;
+    err.isOperational = true;
     err.code = 'waveguard_inventory_lockout';
     throw err;
   }
@@ -1713,22 +1714,22 @@ function completionFindingSeverity(text) {
 async function attachLawnAssessmentOutcomePhotoRefs(outcome, assessmentId) {
   if (!outcome || !assessmentId) return;
   try {
+    // setOutcomeBestPhotoKey: a re-elected best photo on an already-scored
+    // outcome atomically clears the vision-delta fields so the stored verdict
+    // can never describe a photo pair the row no longer points at.
+    const VisionDelta = require('../services/vision-delta');
     const bestPhoto = await db('lawn_assessment_photos')
       .where({ assessment_id: assessmentId, is_best_photo: true })
       .first();
     if (bestPhoto) {
-      await db('treatment_outcomes')
-        .where({ id: outcome.id })
-        .update({ post_best_photo_key: bestPhoto.s3_key });
+      await VisionDelta.setOutcomeBestPhotoKey(outcome.id, 'post_best_photo_key', bestPhoto.s3_key);
     }
     if (outcome.pre_assessment_id) {
       const preBestPhoto = await db('lawn_assessment_photos')
         .where({ assessment_id: outcome.pre_assessment_id, is_best_photo: true })
         .first();
       if (preBestPhoto) {
-        await db('treatment_outcomes')
-          .where({ id: outcome.id })
-          .update({ pre_best_photo_key: preBestPhoto.s3_key });
+        await VisionDelta.setOutcomeBestPhotoKey(outcome.id, 'pre_best_photo_key', preBestPhoto.s3_key);
       }
     }
   } catch (err) {
@@ -8110,6 +8111,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    // Warm the cross-sell card's property-evidence cache (owner lane
+    // 2026-08-13). Post-commit with a BOUNDED wait, the same posture as the
+    // T&S auto-score's 12s race above (pre-push r1 P1: the completion SMS
+    // goes out from this very handler moments later, so a pure background
+    // warm loses the race for customers who open the link immediately).
+    // On timeout the warm finishes in the background and the next view
+    // self-heals to a priced card; a cold first view is exactly today's
+    // CTA behavior, never wrong data. The module is double-gated (dark by
+    // default) and never rejects, so a slow or failing lookup can't affect
+    // any completion. Backfills are excluded: their customers already
+    // received (or never had) the report moment this exists to serve.
+    // Replays are cache-first no-ops.
+
     // Live-override completions correct the linked technician timer too
     // (codex P1, pre-push audit round 20c): the correction is authoritative
     // for costing via the durable stamp, but without this sync timesheets
@@ -8470,6 +8484,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       typedDeliveryMode,
     })) {
       return res.status(422).json(photoCaptionBannedCopyPayload(captionBannedViolations));
+    }
+    // Warm the cross-sell card's property-evidence cache (owner lane
+    // 2026-08-13). Placed AFTER the frozen-delivery re-derivation above
+    // (pre-push r6 P1: on a crash-resumed completion the live profile can
+    // disagree with the record's frozen typedReportDelivery in either
+    // direction — spending on a frozen internal-only report, or skipping
+    // the warm for a frozen auto-send one) and BEFORE any customer
+    // artifact is minted. Bounded wait, the T&S auto-scorer's pattern: on
+    // timeout the warm finishes in the background and the next view
+    // self-heals; a cold first view is exactly today's CTA behavior.
+    // 'disabled' (no public token is ever minted) and 'internal_only'
+    // (staff-review shadow) reports can't reach a customer — no spend.
+    // crossSellWarm is retained for the post-maintenance re-warm below,
+    // which must chain on it rather than race its in-flight lookup.
+    let crossSellWarm = null;
+    if (useServiceReportV1 && !isIncompleteVisit && !isBackfillCompletion && record?.id
+      && !['disabled', 'internal_only'].includes(typedDeliveryMode)) {
+      const { prewarmReportCrossSellEvidenceBounded } = require('../services/service-report/evidence-prewarm');
+      const bounded = prewarmReportCrossSellEvidenceBounded(record, db, { maxWaitMs: 10000 });
+      crossSellWarm = bounded.warm;
+      await bounded.outcome;
     }
     const portalUrl = publicPortalUrl();
     let reportUrl = portalUrl;
@@ -11127,6 +11162,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     try {
       const { runPostCompletionSeriesMaintenance } = require('../services/recurring-series-extend');
       await runPostCompletionSeriesMaintenance({ db, svc, source: 'dispatch_complete' });
+      // Re-warm AFTER the refill (codex #3382 r2 P2): when this completion
+      // consumed a series' last scheduled visit, the earlier bounded warm
+      // ran against an ownership view with no upcoming row — the composer
+      // suppresses that (recent uncorroborated identity) and spends
+      // nothing. The refill just created the next visit, so the report IS
+      // card-eligible now; this pass does the real warm. CHAINED on the
+      // first warm's own promise (pre-push r6 P1: after a bounded timeout
+      // the first lookup is still in flight, and performPropertyLookup has
+      // no in-flight dedupe — an unconditional second call could hit slow
+      // providers twice and race cache writes). crossSellWarm non-null ⇔
+      // the guard passed earlier under the frozen posture, so this reuses
+      // that decision; cache-first makes it a no-op read whenever the
+      // first warm already did the work. Fire-and-forget: everything
+      // customer-facing already went out.
+      if (crossSellWarm) {
+        const { prewarmReportCrossSellEvidence } = require('../services/service-report/evidence-prewarm');
+        void crossSellWarm.catch(() => null).then(() => prewarmReportCrossSellEvidence(record, db));
+      }
     } catch (seriesErr) {
       logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
     }
@@ -11223,22 +11276,68 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 });
 
 // PUT /api/admin/dispatch/:serviceId/reorder
+// Fenced + stale-guarded (uncapped audit r22 P1): every route_order writer
+// holds the tech-day 'slot-reserve' advisory lock or it can interleave with
+// the nightly reorder's fenced rewrite and leave a mixed sequence. The write
+// is keyed to the tech-day read before the lock — a row that moved while we
+// waited misses the predicate and the request 409s instead of stamping a
+// stale sequence onto the row's new day.
 router.put('/:serviceId/reorder', async (req, res, next) => {
   try {
-    await db('scheduled_services').where({ id: req.params.serviceId }).update({ route_order: req.body.routeOrder });
-    res.json({ success: true });
-  } catch (err) { next(err); }
+    const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    let found = true;
+    await db.transaction(async (trx) => {
+      const prov = await trx('scheduled_services')
+        .where({ id: req.params.serviceId })
+        .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+      if (!prov) { found = false; return; } // pre-fence behavior: unknown id was a silent no-op
+      await lockTechDays(trx, [{ techId: prov.technician_id, date: prov.day }]);
+      const updated = await trx('scheduled_services')
+        .where({ id: req.params.serviceId })
+        .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [prov.day])
+        .modify((q) => (prov.technician_id ? q.where('technician_id', prov.technician_id) : q.whereNull('technician_id')))
+        .update({ route_order: req.body.routeOrder });
+      if (updated !== 1) throw Object.assign(new Error('schedule changed while reordering'), { code: 'STALE_OPTIMIZE' });
+    });
+    res.json({ success: true, ...(found ? {} : { updated: 0 }) });
+  } catch (err) {
+    if (err.code === 'STALE_OPTIMIZE') return res.status(409).json({ error: 'Schedule changed while reordering — reload and retry' });
+    next(err);
+  }
 });
 
 // PUT /api/admin/dispatch/reorder-bulk
+// One transaction, complete tech-day lock union acquired ONCE sorted, every
+// write keyed to its pre-lock tech-day — same contract as the single-row
+// endpoint above. The pre-fence version wrote row-by-row unfenced and
+// non-transactional: racing the nightly reorder could land half the manual
+// order before its rewrite and half after (uncapped audit r22 P1).
 router.put('/reorder/bulk', async (req, res, next) => {
   try {
     const { order } = req.body;
-    for (const item of order) {
-      await db('scheduled_services').where({ id: item.serviceId }).update({ route_order: item.routeOrder });
-    }
+    const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    await db.transaction(async (trx) => {
+      const rows = await trx('scheduled_services')
+        .whereIn('id', (order || []).map((i) => i.serviceId))
+        .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+      const byId = new Map(rows.map((r) => [String(r.id), r]));
+      await lockTechDays(trx, rows.map((r) => ({ techId: r.technician_id, date: r.day })));
+      for (const item of order || []) {
+        const prov = byId.get(String(item.serviceId));
+        if (!prov) continue; // pre-fence behavior: unknown id was a silent no-op
+        const updated = await trx('scheduled_services')
+          .where({ id: item.serviceId })
+          .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [prov.day])
+          .modify((q) => (prov.technician_id ? q.where('technician_id', prov.technician_id) : q.whereNull('technician_id')))
+          .update({ route_order: item.routeOrder });
+        if (updated !== 1) throw Object.assign(new Error('schedule changed while reordering'), { code: 'STALE_OPTIMIZE' });
+      }
+    });
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'STALE_OPTIMIZE') return res.status(409).json({ error: 'Schedule changed while reordering — reload and retry' });
+    next(err);
+  }
 });
 
 // GET /api/admin/dispatch/products/catalog
@@ -13783,6 +13882,7 @@ module.exports._test = {
   shouldRejectPhotoCaptionBannedCopy,
   internalOnlyProductsBlockPayload,
   completionOwnershipError,
+  deductProductInventory,
   serviceReportEmailEligible,
   membershipDuesCoverVisit,
   shouldAutoInvoiceCompletion,

@@ -139,6 +139,59 @@ function invoiceHasNonBaseCharges(invoice) {
 // Ledger-backed estimate deposit credit rides as a `deposit_credit` line; voidInvoice
 // restores it (restoreDepositCreditForVoidedInvoice). Settling 'prepaid' would strand
 // it, so these defer to the caller's void.
+// On-site prepay-switch markers (see admin-schedule prepay-switch): the
+// superseded-by marker rides a voided per-application invoice's notes keyed
+// by the prepay invoice that replaced it; the restore marker rides the
+// replacement's notes keyed by the voided row. Together they make every
+// restore idempotent and every superseded row findable when its prepay dies.
+function prepaySwitchSupersededByMarker(prepayInvoiceId) {
+  return `[prepay-switch-superseded-by:${prepayInvoiceId}]`;
+}
+function prepaySwitchRestoreMarker(voidedInvoiceId) {
+  return `[prepay-switch-restore:${voidedInvoiceId}]`;
+}
+// A REPLACEMENT must never inherit the superseded-by marker (Codex
+// on-site-switch P0 r11): if the replacement is itself voided later, a
+// subsequent sync for the old prepay would read it as ANOTHER superseded
+// invoice and mint fresh collectible AR.
+function stripPrepaySwitchSupersededMarkers(notes) {
+  return String(notes || "").replace(/\n?\[prepay-switch-superseded-by:[^\]]+\]/g, "");
+}
+
+// The date the restore's overlap assert runs against: the RESTORED VISIT's
+// date, falling back for an UNATTACHED setup-only row (Codex P0 r13) to the
+// first upcoming visit of the accept's own series (the provenance stamp
+// carries the estimate id) — today only as the last resort. Shared by the
+// term-cancel restore and the undo endpoint so the two can never disagree.
+async function prepaySwitchRestoreAssertDate(trx, row) {
+  const dateOf = (v) => {
+    const m = /^\d{4}-\d{2}-\d{2}/.exec(v instanceof Date ? v.toISOString() : String(v || ""));
+    return m ? m[0] : null;
+  };
+  if (row.scheduled_service_id) {
+    const visitRow = await trx("scheduled_services")
+      .where({ id: row.scheduled_service_id })
+      .first("scheduled_date");
+    const d = visitRow && dateOf(visitRow.scheduled_date);
+    if (d) return d;
+  }
+  const est = /Auto-generated from accepted estimate #([^\s.]+)/i.exec(String(row.notes || ""));
+  if (est) {
+    try {
+      const seriesRows = await trx("scheduled_services")
+        .where({ source_estimate_id: est[1] })
+        .whereNotIn("status", ["cancelled", "canceled", "rescheduled"])
+        .select("scheduled_date");
+      const today = etDateString();
+      const dates = seriesRows.map((r) => dateOf(r.scheduled_date)).filter(Boolean).sort();
+      const upcoming = dates.find((d) => d >= today);
+      if (upcoming) return upcoming;
+      if (dates.length) return dates[dates.length - 1];
+    } catch { /* fall through to today */ }
+  }
+  return etDateString();
+}
+
 function invoiceHasDepositCreditLine(invoice) {
   return parseInvoiceLineItems(invoice.line_items).some(
     (li) => String(li.category || "") === "deposit_credit",
@@ -4124,6 +4177,284 @@ const InvoiceService = {
    * reopen to their pre-settlement collectible status so the work is owed again.
    * NEVER reopens a cash-paid invoice. Best-effort per invoice.
    */
+  /**
+   * Restore invoices the ON-SITE PREPAY SWITCH retired, keyed by the prepay
+   * invoice that superseded them (the switch stamps each voided row with
+   * prepaySwitchSupersededByMarker(prepayInvoiceId)). Called from the
+   * annual-prepay true-void/refund sync so that cancelling an UNPAID switch
+   * prepay through the ordinary Invoices flow puts the per-application
+   * invoice (setup fee included) back on the books — without this, the
+   * accept-minted AR is silently gone the moment the sheet closes (Codex
+   * on-site-switch P0 r7). Idempotent via prepaySwitchRestoreMarker: a row
+   * whose replacement already exists is skipped, never double-minted.
+   * Best-effort per row; returns the restored descriptors.
+   */
+  async restoreSwitchSupersededInvoicesForPrepay(prepayInvoiceId, conn = db) {
+    if (!prepayInvoiceId) return [];
+    const marker = prepaySwitchSupersededByMarker(prepayInvoiceId);
+    const candidates = await conn("invoices")
+      .where({ status: "void" })
+      .where("notes", "like", `%${marker}%`)
+      .select("id");
+    // Each restore runs with the SUPERSEDED ROW LOCKED and the marker check
+    // + re-mint in one transaction (Codex on-site-switch P0 r8): the undo
+    // endpoint locks the same row the same way, so the two restorers — an
+    // operator tapping Restore while another tab finishes voiding the
+    // prepay — serialize on the row instead of both observing "no marker"
+    // and each minting a collectible replacement.
+    const restoreOne = async (trx, id) => {
+      // LOCK ORDER matches the switch and every mint writer (Codex P1 r21):
+      // per-customer prepay advisory lock → scheduled-invoice mint lock →
+      // invoice row lock. An unlocked pre-read supplies the ids and dates the
+      // advisory steps need; every guard then re-runs on the LOCKED re-read,
+      // so nothing decided here rests on the unlocked snapshot.
+      const preRow = await trx("invoices")
+        .where({ id })
+        .first("id", "customer_id", "scheduled_service_id", "notes", "status");
+      if (!preRow || String(preRow.status || "").toLowerCase() !== "void") return null;
+      // The superseding prepay's id rides the durable marker — used by the
+      // containment exclusion and the reconciliation guard below.
+      const sbForRecon = /\[prepay-switch-superseded-by:([^\]]+)\]/.exec(String(preRow.notes || ""));
+      // The double-bill question is whether coverage spans the RESTORED
+      // VISIT, not today (Codex P0 r11): an aborted FUTURE-start renewal
+      // switch must still restore even while the current year runs.
+      const assertDate = await prepaySwitchRestoreAssertDate(trx, preRow);
+      // Advisory lock ONLY (allowOverlap=true): the shared assert's overlap
+      // test is start-agnostic — built for "new term starting at X", it
+      // reads ANY term ending after assertDate as a conflict, so a future
+      // term starting after this visit would park the restore forever
+      // (Codex P0 r23). The double-bill question is CONTAINMENT: a binding
+      // term whose window actually spans the restored visit's date.
+      const { lockAndAssertNoAnnualPrepayOverlap } = require("../routes/admin-customers")._private;
+      await lockAndAssertNoAnnualPrepayOverlap(trx, preRow.customer_id, assertDate, true);
+      const { annualPrepayOverlapStatusClause } = require("../services/secure-appointment-plans");
+      const covering = await trx("annual_prepay_terms")
+        .where({ customer_id: preRow.customer_id })
+        .where(annualPrepayOverlapStatusClause())
+        .where("term_start", "<=", assertDate)
+        .where("term_end", ">=", assertDate)
+        // The superseding prepay's OWN term never blocks its restore (Codex
+        // P0 r30): a decided renewed/switch_plan window whose invoice just
+        // refunded still reads as covering here, but that coverage is
+        // precisely what the refund removed.
+        .modify((q) => { if (sbForRecon) q.whereNot({ prepay_invoice_id: sbForRecon[1] }); })
+        .first("id");
+      if (covering) {
+        logger.warn(`[invoice] switch-supersede restore skipped for ${preRow.id}: a prepaid year covers ${assertDate} — restoring would double-bill`);
+        return null;
+      }
+      // The superseding prepay must have NO unresolved Stripe outcome
+      // (Codex P0 r29): a charged-but-orphaned or ambiguous tender means
+      // money may be collected with nothing local — restoring the old
+      // receivable beside it re-bills a paid customer. Fail toward manual
+      // review on any refusal or unverifiable read.
+      if (sbForRecon) {
+        try {
+          await require("./stripe").assertNoInvoiceChargeReconciliationPending(sbForRecon[1], trx);
+        } catch (reconErr) {
+          logger.warn(`[invoice] switch-supersede restore deferred for ${preRow.id}: prepay ${sbForRecon[1]} has an unresolved charge outcome (${reconErr.message}) — manual review`);
+          return null;
+        }
+      }
+      if (preRow.scheduled_service_id) {
+        const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
+        await acquireScheduledInvoiceMintLock(trx, preRow.scheduled_service_id);
+      }
+      const row = await trx("invoices")
+        .where({ id })
+        .forUpdate()
+        .first("id", "invoice_number", "status", "line_items", "notes", "title",
+          "scheduled_service_id", "customer_id");
+      // Identity recheck on the locked row.
+      if (!row || String(row.status || "").toLowerCase() !== "void") return null;
+      const restoreMarker = prepaySwitchRestoreMarker(row.id);
+      const existing = await trx("invoices")
+        .where("notes", "like", `%${restoreMarker}%`)
+        .first("id");
+      if (existing) return null;
+      let lines = parseInvoiceLineItems(row.line_items)
+        .map((li) => ({
+          description: String(li?.description || ""),
+          quantity: Number(li?.quantity) > 0 ? Number(li.quantity) : 1,
+          unit_price: Number(li?.unit_price ?? li?.amount),
+        }))
+        .filter((li) => li.description && Number.isFinite(li.unit_price));
+      // Live AR classification under the mint lock (Codex P0 r9/r17/r19):
+      // only an invoice provably billing the BASE application demotes the
+      // restore to setup-fee-only; unrelated live invoices keep the full
+      // restore; unreadable ones defer to manual review.
+      if (row.scheduled_service_id) {
+        const liveOnVisit = await trx("invoices")
+          .where({ scheduled_service_id: row.scheduled_service_id })
+          .whereNot({ id: row.id })
+          .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
+          .select("id", "invoice_number", "line_items");
+        if (liveOnVisit.length > 0) {
+          const billsApplication = (inv) => parseInvoiceLineItems(inv.line_items).some((li) => (
+            /_primary$/.test(String(li?.client_id || ""))
+            || /^First service application$/i.test(String(li?.description || "").trim())
+          ));
+          const unreadable = liveOnVisit.some((inv) => parseInvoiceLineItems(inv.line_items).length === 0);
+          if (unreadable) {
+            logger.warn(`[invoice] switch-supersede restore deferred for ${row.invoice_number || row.id}: live invoice on the visit has unreadable lines — manual review`);
+            return null;
+          }
+          if (liveOnVisit.some(billsApplication)) {
+            lines = lines.filter((li) => /setup fee/i.test(li.description));
+            if (lines.length === 0) {
+              logger.info(`[invoice] switch-supersede restore skipped for ${row.invoice_number || row.id}: the application is already billed and no setup fee rode the superseded row`);
+              return null;
+            }
+            logger.info(`[invoice] switch-supersede restoring SETUP FEE ONLY for ${row.invoice_number || row.id}: application billed by a live visit invoice`);
+          }
+          // else: live invoices bill something unrelated — full restore.
+        }
+      }
+      if (lines.length === 0) {
+        logger.warn(`[invoice] switch-supersede restore skipped for ${row.invoice_number || row.id}: no readable line items`);
+        return null;
+      }
+      const recreated = await this.create({
+        database: trx,
+        customerId: row.customer_id,
+        scheduledServiceId: row.scheduled_service_id,
+        title: row.title || "Service invoice",
+        lineItems: lines,
+        notes: `${stripPrepaySwitchSupersededMarkers(row.notes)}\n${restoreMarker} Re-created after the annual prepay that superseded it was cancelled; replaces voided ${row.invoice_number || row.id}.`.trim(),
+        // ET calendar, never UTC — after ~8PM Eastern a UTC slice dates the
+        // restored invoice tomorrow.
+        dueDate: etDateString(),
+      });
+      return { replacedInvoiceId: row.id, invoiceId: recreated?.id || null, invoiceNumber: recreated?.invoice_number || null };
+    };
+    const restored = [];
+    for (const candidate of candidates) {
+      const out = conn.isTransaction
+        ? await restoreOne(conn, candidate.id)
+        : await conn.transaction((trx) => restoreOne(trx, candidate.id));
+      if (out) restored.push(out);
+    }
+    return restored;
+  },
+
+  /**
+   * Durable repair sweep for the on-site prepay switch (Codex P0 r13): a
+   * restore that failed transiently inside a term-cancel sync must not lose
+   * the AR forever — the superseded-by markers persist on the void rows, so
+   * this sweep finds every void invoice still carrying one whose superseding
+   * prepay is terminal and re-runs the (idempotent, lock-guarded) restore.
+   * Wired into the daily billing cron; safe to run any number of times.
+   */
+  async sweepOrphanedPrepaySwitchRestores(conn = db) {
+    const rows = await conn("invoices")
+      .where({ status: "void" })
+      .where("notes", "like", "%[prepay-switch-superseded-by:%")
+      .select("id", "notes");
+    const prepayIds = new Set();
+    for (const row of rows) {
+      const m = /\[prepay-switch-superseded-by:([^\]]+)\]/.exec(String(row.notes || ""));
+      if (m) prepayIds.add(m[1]);
+    }
+    const restored = [];
+    // A switch prepay ABANDONED mid-tender (browser crash, tab eviction —
+    // Codex P0 r14) sits payment_pending forever: an unsent draft nobody can
+    // pay, with the superseded invoice void beside it. Any such draft older
+    // than this cutoff is expired here — voidInvoice cancels its pending
+    // term through the canonical sync, and the restore below re-mints the
+    // superseded AR in the same pass. Generous cutoff: a real tender ends in
+    // minutes; a day means no live flow can be yanked out from under.
+    const ABANDONED_SWITCH_PREPAY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+    for (const prepayId of prepayIds) {
+      const prepay = await conn("invoices")
+        .where({ id: prepayId })
+        .first("id", "status", "sent_at", "paid_at", "stripe_payment_intent_id", "created_at");
+      let dead = !!prepay
+        && ["void", "cancelled", "canceled", "refunded"].includes(String(prepay.status || "").toLowerCase());
+      // A FULL Stripe refund cancels the TERM through the payment sync while
+      // the invoice itself commonly stays 'paid' (Codex P0 r22) — deadness
+      // must also read the canonical term state. Only a TRUE void/refund
+      // cancel counts (renewal_decision NULL): a decided renewal lapse keeps
+      // its paid, covered year, and restoring beside it would double-bill.
+      if (!dead && prepay) {
+        const term = await conn("annual_prepay_terms")
+          .where({ prepay_invoice_id: prepayId })
+          .first("status", "renewal_decision");
+        if (term && String(term.status || "") === "cancelled" && !term.renewal_decision) {
+          dead = true;
+        }
+      }
+      if (!dead && prepay
+        && String(prepay.status || "").toLowerCase() === "draft"
+        && !prepay.sent_at && !prepay.paid_at
+        && prepay.created_at
+        && Date.now() - new Date(prepay.created_at).getTime() > ABANDONED_SWITCH_PREPAY_MAX_AGE_MS) {
+        // A PI on the draft usually means a tender FAILED mid-collection
+        // (a settling one flips the invoice off draft) — but verify against
+        // the payments ledger and fail CLOSED: any non-terminal payment row,
+        // or an unreadable ledger, leaves the draft alone (Codex P0 r15).
+        let expirable = true;
+        if (prepay.stripe_payment_intent_id) {
+          // Invoice linkage lives in payments.metadata, not a column — the
+          // same parameterized lookup voidInvoice's own money guard uses
+          // (Codex P0 r16: a bare invoice_id column query throws on every
+          // row, and the catch's fail-closed then parked the repair forever).
+          try {
+            const livePayment = await conn("payments")
+              .whereNotIn("status", ["failed", "canceled", "cancelled"])
+              .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(prepay.id)])
+              .first("id");
+            expirable = !livePayment;
+          } catch {
+            expirable = false;
+          }
+        }
+        if (expirable) {
+          // A charge can have succeeded at Stripe with NOTHING local — the
+          // supported STRIPE_CHARGED_DB_FAILED shape leaves the draft with
+          // no PI and no payments row (Codex P0 r29). The canonical
+          // reconciliation guard reads the durable tender-attempt and
+          // orphan-charge markers; anything pending — or an unverifiable
+          // read — leaves the draft for manual review, never auto-void.
+          try {
+            await require("./stripe").assertNoInvoiceChargeReconciliationPending(prepay.id, conn);
+          } catch (reconErr) {
+            logger.warn(`[invoice] switch-restore sweep leaving prepay ${prepay.id} for manual review: ${reconErr.message}`);
+            continue;
+          }
+          try {
+            await this.voidInvoice(prepay.id);
+            dead = true;
+            logger.info(`[invoice] switch-restore sweep expired abandoned prepay ${prepay.id} — term cancelled, restoring superseded AR`);
+          } catch (err) {
+            logger.warn(`[invoice] switch-restore sweep could not expire abandoned prepay ${prepay.id}: ${err.message} — next sweep retries`);
+            continue;
+          }
+        }
+      }
+      if (!dead) continue;
+      // voidInvoice's term sync is best-effort and can have failed at void
+      // time, leaving the term payment_pending — the overlap assert would
+      // then skip the restore forever (Codex P0 r15). Re-run the idempotent
+      // sync for every terminal prepay before restoring: a still-pending
+      // term is cancelled now, an already-cancelled one is a no-op.
+      try {
+        await require("./annual-prepay-renewals").syncTermForInvoicePayment(prepayId, conn);
+      } catch (err) {
+        logger.warn(`[invoice] switch-restore sweep term-sync failed for prepay ${prepayId}: ${err.message} — next sweep retries`);
+        continue;
+      }
+      try {
+        restored.push(...await this.restoreSwitchSupersededInvoicesForPrepay(prepayId, conn));
+      } catch (err) {
+        logger.warn(`[invoice] switch-restore sweep failed for prepay ${prepayId}: ${err.message} — next sweep retries`);
+      }
+    }
+    if (restored.length) {
+      logger.info(`[invoice] switch-restore sweep re-minted ${restored.length} invoice(s): ${restored.map((r) => r.invoiceNumber || r.invoiceId).join(", ")}`);
+    }
+    return restored;
+  },
+
   async reopenAnnualPrepayCoveredInvoicesForTerm(termId, conn = db) {
     if (!termId) return 0;
     let reopened = 0;
@@ -4491,6 +4822,10 @@ InvoiceService._internals = {
 InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'canceled', 'cancelled'];
 
 module.exports = InvoiceService;
+module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
+module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;
+module.exports.stripPrepaySwitchSupersededMarkers = stripPrepaySwitchSupersededMarkers;
+module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;
 // Exposed for unit tests (pure helpers).
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;

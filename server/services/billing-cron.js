@@ -584,6 +584,17 @@ const BillingCron = {
 
     logger.info(`[billing-cron] Starting payment retries`);
 
+    // Durable repair leg for the on-site prepay switch (Codex P0 r13): a
+    // superseded per-application invoice whose restore failed transiently
+    // during a prepay void/refund is found again through its persistent
+    // marker and re-minted here. Idempotent + lock-guarded inside the
+    // service; best-effort so a sweep blip never blocks the retries.
+    try {
+      await require('./invoice').sweepOrphanedPrepaySwitchRestores();
+    } catch (err) {
+      logger.warn(`[billing-cron] prepay-switch restore sweep failed: ${err.message} — next run retries`);
+    }
+
     const failedPayments = await db('payments')
       .where({ status: 'failed' })
       .whereNull('superseded_by_payment_id')

@@ -141,7 +141,13 @@ router.patch('/:id', async (req, res, next) => {
       return res.json({ request: current, statusChanged: false });
     }
 
-    if (statusChanged) {
+    // measurement_review rows (the estimate "does the lawn size look off?"
+    // flow) are office-only by contract — the customer is NEVER auto-messaged
+    // anywhere in that lane (owner rule: the owner sends all comms; the office
+    // answers a challenge with a revised estimate, not a lifecycle email). A
+    // staff "Mark handled" must not leak an automated status email (codex
+    // #3376 r2 P1).
+    if (statusChanged && updated.category !== 'measurement_review') {
       // Notify the customer their request moved forward. Fire-and-forget like
       // the request-received path — an email hiccup must not fail the staff
       // action. Idempotency on the sender keys to updated_at, so each distinct

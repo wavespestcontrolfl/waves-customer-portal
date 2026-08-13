@@ -1,4 +1,11 @@
 jest.mock('../models/db', () => jest.fn());
+// The follow-up shift is a separate fenced+transactional unit with its own
+// suite (call-booking-catalog.test.js) — mocked so this suite's sequential
+// db-query queue models only the rebooker's own queries.
+jest.mock('../services/call-booking-catalog', () => ({
+  ...jest.requireActual('../services/call-booking-catalog'),
+  shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -69,7 +76,6 @@ describe('track token expiry on reschedule paths', () => {
     });
     const logInsert = chain();
     // Post-commit best-effort shift of a call-created follow-up child.
-    const followupShift = chain({ update: jest.fn().mockResolvedValue(0) });
     const logCount = chain({
       first: jest.fn().mockResolvedValue({ count: '1' }),
     });
@@ -83,7 +89,7 @@ describe('track token expiry on reschedule paths', () => {
     db.transaction = jest.fn(async (callback) => callback(trx));
     db.fn = { now: jest.fn(() => 'now()') };
 
-    const dbQueries = [serviceLookup, followupShift, logCount];
+    const dbQueries = [serviceLookup, logCount];
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return dbQueries.shift();
@@ -219,6 +225,15 @@ describe('track token expiry on reschedule paths', () => {
       if (table === 'scheduled_services') return scheduledQueries.shift();
       throw new Error(`Unexpected db table ${table}`);
     });
+    // The mover wraps each per-stop CAS in a short trx solely to hold the
+    // tech-day advisory fence (tech-day-lock.js) — model that real surface:
+    // the CAS update runs on the trx, the fence probes go through trx.raw.
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledQueries.shift();
+      throw new Error(`Unexpected trx table ${table}`);
+    });
+    trx.raw = rawFactory('trx.raw');
+    db.transaction = jest.fn(async (callback) => callback(trx));
 
     await expect(executeScheduleTool('move_stops_to_day', {
       service_ids: ['svc-1'],
@@ -240,5 +255,16 @@ describe('track token expiry on reschedule paths', () => {
       bindings: ['2027-06-03', '11:00:00'],
     });
     expect(payload.track_token_expires_at.sql).toContain("AT TIME ZONE 'America/New_York'");
+    // Fence coverage: both the leaving and joining tech-day keys, in the
+    // canonical '<techId|unassigned>:<YYYY-MM-DD>' form the other slot-reserve
+    // holders use — a differently-built key silently fails to collide.
+    expect(trx.raw).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['slot-reserve', 'unassigned:2026-05-20'],
+    );
+    expect(trx.raw).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['slot-reserve', 'unassigned:2027-06-03'],
+    );
   });
 });

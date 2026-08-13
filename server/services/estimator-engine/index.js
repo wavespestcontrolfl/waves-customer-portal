@@ -381,7 +381,7 @@ function commercialHint(context) {
   return propType === 'commercial' || context.lead?.is_commercial === true;
 }
 
-const { sameStreetAddress, addressAddsLocality } = require('./address-compare');
+const { sameStreetAddress, addressAddsLocality, addressCompletesGatheredStreet } = require('./address-compare');
 
 // Property lookup + (when the county roll is unassessed) the
 // subdivision-median dig. Both fail-open.
@@ -1503,6 +1503,49 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     const profileDescribesQuotedProperty = !addressRegathered
       && !!(customerSavedAddress && quotedAddress && sameStreetAddress(customerSavedAddress, quotedAddress));
 
+    // A saved MEASUREMENT is a unit-scoped credential, and the match above
+    // cannot authenticate one: it compares address_line1 only (customers
+    // store the unit in address_line2 as often as in line1) and its default
+    // mode treats a known-vs-unknown unit as equal ON PURPOSE, so duplicate
+    // detection stays conservative. Apt A's saved turf would therefore look
+    // like Apt B's measurement and suppress the unit-scope no-lot review
+    // (codex pre-push r19 P1). Computed separately — unit-aware and exact —
+    // and consumed ONLY where a measurement can SUPPRESS review;
+    // profileDescribesQuotedProperty keeps its existing tolerant semantics
+    // for everything else, so no pricing input changes here.
+    // requireNamedUnit, not merely requireExactUnit: this flag has to
+    // AUTHENTICATE the priced unit, and two addresses that both lack a unit
+    // ID authenticate nothing — a building-level saved property_sqft would
+    // pass an exact-match test against an apartment quote whose unit was
+    // never stated, and the scope can still be a unit by extraction or
+    // property type (codex pre-push r20 P1). No unit on both sides ⇒ false
+    // ⇒ the draft parks, which is the correct answer for an unauthenticated
+    // measurement.
+    const customerSavedUnitAddress = trustedCustomer?.address_line1
+      ? [
+        [trustedCustomer.address_line1, trustedCustomer.address_line2].filter(Boolean).join(' '),
+        trustedCustomer.city,
+        trustedCustomer.zip,
+      ].filter(Boolean).join(', ')
+      : null;
+    const profileMeasurementUnitExact = profileDescribesQuotedProperty
+      && !!(customerSavedUnitAddress && quotedAddress
+        && sameStreetAddress(customerSavedUnitAddress, quotedAddress, { requireNamedUnit: true }));
+
+    // Did the composer switch to a DIFFERENT property (not merely refine
+    // the same street with locality)? Computed here because BOTH the V2
+    // shadow pass and the unit-scope model must fence the primary
+    // property's extraction on a true switch (codex r18 P1: the V2 pass
+    // ran before this flag existed, so an owner-unit's stated area could
+    // become suite evidence for a whole commercial building).
+    // A final address that merely SUPPLIES the missing house number for a
+    // numberless gathered street is a correction of the same property, not
+    // a switch — fencing it discarded the call's tenancy/type/stated
+    // measurements and killed otherwise valid drafts (codex r56 P1).
+    const crossPropertyRegather = addressRegathered
+      && !!address && !sameStreetAddress(intent.address, address)
+      && !addressCompletesGatheredStreet(intent.address, address);
+
     // Wrong-premise parcel signals (global flag / snapped record) are
     // stripped here exactly as in the pre-compose arbitration — the
     // re-gathered signals carry their OWN audit, so a corrected address is
@@ -1524,6 +1567,61 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     });
     result.propertyFacts = propertyFacts;
 
+    // Facts view for the SCOPE classifiers on a true property switch: the
+    // arbitration deliberately keeps the call's caller-stated facts (they
+    // describe the property discussed on the call), but a classifier must
+    // not read the ORIGINAL property's tenancy or type when the composer
+    // quoted a different address — with no record on the re-gathered
+    // lookup, that stale type could label the new address a unit and clear
+    // its lot (codex r22 P1). Non-destructive: the priced propertyFacts
+    // are untouched.
+    // Only the ORIGINAL extraction/profile fallback is fenced — the
+    // RE-GATHERED record's own type describes the quoted property, so a
+    // reliably identified condo/townhome keeps its pricing adjustment
+    // instead of being nulled to 'unknown' and parked (codex r32 P1).
+    // resolvePropertyFacts derives propertyType from the RECORD first and
+    // the extraction only as a fallback, so a record that carries a type is
+    // what produced propertyFacts.propertyType (already pricing-safe) — no
+    // re-normalization, and no extra import to break suites that mock the
+    // arbitration module.
+    const regatheredPropertyType = (crossPropertyRegather && effectiveParcelOk
+      && effectiveSignals.propertyRecord?.propertyType)
+      ? (propertyFacts.propertyType || null)
+      : null;
+    // CALLER-STATED / profile measurements describe the property discussed
+    // on the call, not a different quoted address: leaving them let a
+    // switched-to commercial building price off the original unit's stated
+    // area and duck the 10,000-sqft relationship threshold (codex r46 P1).
+    // County/lookup values come from the RE-GATHERED record and stay.
+    const EXTRACTION_SOURCED_FACTS = new Set(['caller_stated', 'customer_profile']);
+    const fenceExtractionFact = (fact, label) => {
+      const source = String(fact?.source || '');
+      if (!EXTRACTION_SOURCED_FACTS.has(source) || !Number(fact?.value)) return fact;
+      return {
+        value: null,
+        source: 'unresolved',
+        confidence: 'none',
+        rejected: [
+          ...(fact.rejected || []),
+          {
+            value: Number(fact.value),
+            source,
+            reason: `describes the originally discussed property, not the quoted ${label}`,
+          },
+        ],
+      };
+    };
+    const fenceCrossPropertyFacts = (facts) => ({
+      ...facts,
+      tenant: false,
+      propertyType: regatheredPropertyType || null,
+      home: fenceExtractionFact(facts.home, 'address'),
+      lot: fenceExtractionFact(facts.lot, 'address'),
+    });
+    const scopeFacts = crossPropertyRegather
+      ? fenceCrossPropertyFacts(propertyFacts)
+      : propertyFacts;
+
     // Property Facts V2 — scoped measurement selection. Shadow by default:
     // computed and stored on the draft for evaluation, never priced from
     // until GATE_PROPERTY_FACTS_V2 flips. Fail-open (returns null on error).
@@ -1535,14 +1633,107 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // Same wrong-premise strip as V1 arbitration — with the V2 gate ON,
       // applyV2ToPropertyFacts would otherwise re-adopt the snapped parcel.
       propertyRecord: effectiveParcelOk ? effectiveSignals.propertyRecord : null,
-      extraction: context.extraction,
+      // Cross-property fence (codex r18 P1): the primary property's unit
+      // signal and stated area must not describe a different quoted
+      // property — with both gates on, that stated area could replace the
+      // new building's county measurement as "suite evidence".
+      extraction: crossPropertyRegather ? null : context.extraction,
       intent,
-      propertyFacts,
+      // Tenancy/type are inherited too: resolvePropertyFacts copied the
+      // PRIMARY extraction's tenant flag and type onto propertyFacts, and
+      // V2 reads them directly — nulling only `extraction` still
+      // classified a newly gathered whole building as a suite and rejected
+      // its county area as wrong-scope (codex r21/r22 P1s).
+      propertyFacts: scopeFacts,
       address: intent.address || result.addressUsed || address,
     });
     result.propertyFactsV2 = propertyFactsV2;
     if (propertyFactsV2 && propertyFactsV2Enabled()) {
       applyV2ToPropertyFacts(propertyFacts, propertyFactsV2);
+    }
+
+    // Unit-scope model (GATE_UNIT_SCOPE_GUARDRAILS): first-class
+    // propertyUse × serviceScope × customerRelationship × sizeBasis so a
+    // unit tenant, an association, and a whole-property owner stop sharing
+    // one overloaded propertyType (owner ruling 2026-08-11). Always
+    // computed and stored (audit); gate ON additionally marks a unit's
+    // absent lot NOT APPLICABLE so classifyLane stops flagging a lot the
+    // property doesn't have. Fail-open: a model failure never sinks a draft.
+    try {
+      const {
+        unitScopeGuardrailsEnabled, resolveUnitScopeModel, applyUnitScopeToPropertyFacts,
+        commercialCategoryConflict, lookupCategoryConflict,
+      } = require('./unit-scope-model');
+      // crossPropertyRegather (computed above, shared with the V2 pass)
+      // fences the primary property's extraction only on a genuine street
+      // change: addressRegathered also fires on same-property refinements
+      // — no prior gathered address, or the same street gaining city/ZIP —
+      // where the extraction still describes the quoted property and
+      // discarding its signals would bypass the category guard (codex r6
+      // P1). A true switch must not let a primary-address tenant
+      // extraction classify another property or clear its lot (codex r4 P1).
+      const unitScope = resolveUnitScopeModel({
+        propertyRecord: effectiveParcelOk ? effectiveSignals.propertyRecord : null,
+        extraction: crossPropertyRegather ? null : context.extraction,
+        intent,
+        propertyFacts: scopeFacts,
+        address: intent.address || result.addressUsed || address,
+      });
+      if (crossPropertyRegather) unitScope.crossPropertyExtraction = true;
+      propertyFacts.unitScope = unitScope;
+      result.unitScope = unitScope;
+      // Category-conflict signal, resolved HERE where the re-gather is
+      // known (codex r3 P1): when the composer quoted a DIFFERENT
+      // property, the primary extraction must neither red-lane the quoted
+      // one (commercial primary, residential secondary) nor is it evidence
+      // about it; the re-gathered lookup's own signals carry the quoted
+      // property's category. classifyLane consumes the stamp.
+      // On a cross-property re-gather the primary extraction is not
+      // evidence — but the re-gathered lookup's OWN classification is: a
+      // residential intent quoting a property the lookup typed COMMERCIAL
+      // must still conflict (codex r8 P1: the unconditional null let a
+      // residential intent survive for a secondary office/warehouse).
+      // detectCategory types EVERY apartment/multifamily record COMMERCIAL
+      // (it answers the whole-property question), so a residential-unit
+      // scope must be exempt or a valid second-property apartment quote
+      // would always red-lane (codex r13 P2) — the exact conflation this
+      // lane exists to end: a unit tenant is a residential customer.
+      // The LOOKUP's own verdict on the quoted property, applied on BOTH
+      // paths (codex r14 P1: the primary path checked only the extraction,
+      // so a county-typed office/warehouse with a residential-or-unknown
+      // extraction slipped through). The residential-unit exemption is
+      // decided by the VERDICT's own subtype/source, not the scope label
+      // alone — see lookupCategoryConflict (codex r15/r16 P1s).
+      const lookupConflict = effectiveParcelOk
+        ? lookupCategoryConflict({
+          isCommercialIntent: intent.is_commercial,
+          enrichedCategory: effectiveSignals.enriched?.category,
+          commercialSubtype: effectiveSignals.enriched?.commercialSubtype,
+          commercialDetectionSource: effectiveSignals.enriched?.commercialDetectionSource,
+          serviceScope: unitScope.serviceScope,
+          // Positive unit-OCCUPANCY evidence (not merely a condo/apartment
+          // property type): tenancy, or a Unit/Apt subpremise on the
+          // service address.
+          unitOccupantEvidence: unitScope.subpremiseSignal === true
+            || unitScope.customerRelationship === 'tenant',
+        })
+        : null;
+      propertyFacts.categoryConflict = crossPropertyRegather
+        ? lookupConflict
+        : (commercialCategoryConflict({ extraction: context.extraction, intent })
+          || lookupConflict);
+      // The lot-clearing mutation runs on BOTH paths: the cross-property
+      // fence already lives at the model's INPUT (extraction nulled,
+      // tenancy suppressed above), so any unit scope the model still
+      // infers comes from the QUOTED property's own evidence — its
+      // re-gathered record and composed address. Skipping the apply there
+      // let a second-property Unit/Suite quote keep the master-parcel lot
+      // (codex r10 P1, refining the r4 fence).
+      if (unitScopeGuardrailsEnabled()) {
+        applyUnitScopeToPropertyFacts(propertyFacts, unitScope);
+      }
+    } catch (err) {
+      logger.warn(`[estimator-engine] unit-scope model failed: ${err.message}`);
     }
 
     // Existing-customer pricing context: qualifying services for the combined
@@ -1564,15 +1755,74 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     if (intent.decision === 'draft' && Object.keys(intent.services || {}).length) {
       engineInput = buildEngineInput({
         intent,
-        propertyFacts,
+        // Gate ON: a true property switch must not PRICE the quoted
+        // property with the original property's type either — scopeFacts
+        // fences it, so an unresolved type reaches the pricer as 'unknown'
+        // (neutral default) and the stamp below parks the draft instead of
+        // green-laning on a type that describes another address (codex r26
+        // P1). Same object as propertyFacts on every other path.
+        // Built HERE, not from the pre-mutation scopeFacts clone: the V2 and
+        // unit-scope applies REPLACE home/lot on propertyFacts (clearing a
+        // master-parcel lot, for one), and pricing from a stale clone would
+        // charge for a lot the lane review shows as cleared (codex r27 P1).
+        propertyFacts: (require('./unit-scope-model').unitScopeGuardrailsEnabled()
+          && crossPropertyRegather)
+          ? fenceCrossPropertyFacts(propertyFacts)
+          : propertyFacts,
         context,
         priorQualifyingServices,
         profileDescribesQuotedProperty,
+        profileMeasurementUnitExact,
         // Feature modifiers resolved by the lookup of the QUOTED address
         // (effectiveSignals tracks the re-gather) — pool/cage, landscaping,
         // water adjacency feed real pricing adjustments.
         lookupEnriched: effectiveSignals.enriched,
       });
+      // Stamp what ACTUALLY fed pricing (gate ON only — the kill switch
+      // must restore the previous lane behavior exactly, codex r1 P2): a
+      // residential draft parks for review when the type that reached the
+      // pest pricer is 'unknown' OR outside the pricer's own alias
+      // vocabulary (it silently defaults those to single_family — checked
+      // via its normalizer, never a literal-string list, codex r1 P1), OR
+      // the raw extraction/lookup type is a multifamily/apartment family
+      // that pricingSafePropertyType's substring match collapsed into
+      // 'single_family' (the '…family…' regex swallows 'multi_family' —
+      // the exact silent default the motivating apartment draft hit).
+      try {
+        const { unitScopeGuardrailsEnabled } = require('./unit-scope-model');
+        if (unitScopeGuardrailsEnabled() && !intent.is_commercial) {
+          const { normalizePestPropertyType } = require('../pricing-engine/service-pricing');
+          // The raw source that actually SUPPLIED engineInput.propertyType,
+          // in the exact precedence the pricing chain uses: the lookup
+          // record first (resolvePropertyFacts prefers it over the
+          // extraction — codex r4 P1: extraction-first here let a
+          // multifamily lookup priced single-family stay green), then the
+          // extraction, then the matched profile (buildEngineInput's
+          // fallback — codex r3 P1: customers.property_type='multifamily'
+          // collapses through pricingSafePropertyType's /family/ branch
+          // exactly like the others).
+          // On a cross-property switch only the RE-GATHERED record
+          // describes the quoted property — the extraction and profile
+          // describe the original one, so they must not make the type look
+          // resolved (codex r26 P1).
+          const rawType = String(
+            (effectiveParcelOk ? effectiveSignals.propertyRecord?.propertyType : '')
+            || (crossPropertyRegather ? '' : (context.extraction?.property?.property_type
+              || (profileDescribesQuotedProperty ? trustedCustomer?.property_type : '')))
+            || '',
+          ).toLowerCase();
+          const meta = normalizePestPropertyType(engineInput.propertyType);
+          const multiCollapsed = /multi.?family|apartment/.test(rawType)
+            && meta.propertyType === 'single_family';
+          if (engineInput.propertyType === 'unknown'
+            || meta.propertyTypeWasDefaulted
+            || multiCollapsed) {
+            propertyFacts.propertyTypeUnresolved = true;
+          }
+        }
+      } catch (err) {
+        logger.warn(`[estimator-engine] property-type stamp failed: ${err.message}`);
+      }
       try {
         engineResult = generateEstimateSafely(engineInput);
         totals = deriveTotals(engineResult);
@@ -1620,7 +1870,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       && Object.keys(intent.services || {}).length > 0
       && !!intent.address;
     const { lane, reasons, causes = [] } = (engineResult || !draftable)
-      ? classifyLane({ intent, propertyFacts, engineResult, totals, comps, calibration, context })
+      ? classifyLane({ intent, propertyFacts, engineResult, engineInput, totals, comps, calibration, context })
       : { lane: LANES.RED, reasons: ['pricing engine failed for the selected services'] };
     result.lane = lane;
     result.reasons = reasons;
@@ -1772,7 +2022,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         if (!dryRun) {
           try {
             const missing = [];
-            if (!intent.address) missing.push('street_address');
+            // A NONEMPTY but numberless address (incomplete_address red)
+            // needs the same ask as a missing one — without this the
+            // machine-readable cause stalled with only an operator bell
+            // (codex r8 P1).
+            if (!intent.address || causes.includes('incomplete_address')) missing.push('street_address');
             if (!Object.keys(intent.services || {}).length) missing.push('specific_service');
             // Scope guards: a skip with nothing to clarify must not text
             // the customer a which-service question — out-of-scope work

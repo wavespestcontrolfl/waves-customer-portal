@@ -790,6 +790,7 @@ const AgronomicWiki = {
         stats,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
+        visionScoreToken: countVisionScored(outcomes),
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
@@ -882,6 +883,7 @@ const AgronomicWiki = {
         assessmentCount: assessments.length,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
+        visionScoreToken: countVisionScored(outcomes),
         // Assessment-only condition pages (no outcomes yet) fingerprint on
         // the matching assessment ids — an empty id set would make the skip
         // guard blind to a changed assessment set with an equal count.
@@ -923,6 +925,7 @@ const AgronomicWiki = {
         customerCount,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
+        visionScoreToken: countVisionScored(outcomes),
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
@@ -1010,6 +1013,7 @@ const AgronomicWiki = {
         stats,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
+        visionScoreToken: countVisionScored(outcomes),
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
@@ -1048,6 +1052,21 @@ const AgronomicWiki = {
       // past the cap while count stays equal (delete+backfill, alias remap).
       const sourceIds = data.allOutcomeIds || (data.outcomes || []).map((o) => o.id);
 
+      // Vision scores (photo_verified_visual_change) land AFTER outcomes
+      // exist, so count + id-set alone would freeze existing pages before
+      // their outcomes get scored — the weekly refresh would keep advancing
+      // last_data_update while skipping. Fold the scored-outcome count into
+      // the fingerprint as a synthetic token (the column already carries
+      // assessment ids for condition pages — it is a change-detection
+      // fingerprint, not strict provenance). Zero scored outcomes = no token,
+      // so pre-vision rows stay byte-identical and don't mass-regenerate.
+      const visionScoreToken = typeof data.visionScoreToken === 'string' && data.visionScoreToken
+        ? data.visionScoreToken
+        : null;
+      const fingerprintIds = visionScoreToken
+        ? [...sourceIds, visionScoreToken]
+        : sourceIds;
+
       // Skip regeneration when the underlying data hasn't changed — the AI
       // pass would just rewrite the same page. Placeholder stubs are always
       // retried. last_data_update advances so the page doesn't get re-marked
@@ -1059,7 +1078,7 @@ const AgronomicWiki = {
         existing &&
         !existing.content.includes('*Pending AI generation') &&
         existing.data_point_count === dataPointCount &&
-        sameSourceIds(existing.source_treatment_ids, sourceIds)
+        sameSourceIds(existing.source_treatment_ids, fingerprintIds)
       ) {
         // Data unchanged, but the review state may not be: a contradiction
         // that appeared since the last write must re-gate the page here too.
@@ -1122,6 +1141,9 @@ ${JSON.stringify((data.outcomes || []).map((o) => ({
   days: o.days_between_assessments,
   grass: o.grass_type,
   products: o.products_applied,
+  // Photo-verified visual change: -100..100 delta scored by vision model from
+  // the tech's before/after photos; null = not photo-verified.
+  photo_verified_visual_change: o.vision_delta_score ?? null,
 })), null, 2)}
 
 Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve existing content that is still supported. Update statistics. Flag any contradictions.' : 'Generate a new wiki page from this data.'} Return the complete markdown page content.`;
@@ -1204,7 +1226,7 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         confidence,
         last_data_update: new Date(),
         stale_flag: false,
-        source_treatment_ids: JSON.stringify(sourceIds),
+        source_treatment_ids: JSON.stringify(fingerprintIds),
         review_tier: tier,
         review_status: reviewStatus,
         risk_flags: JSON.stringify(flags),
@@ -1350,12 +1372,151 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
   },
 
   // ────────────────────────────────────────────────────────────
+  // markOutcomePagesStale — flag the wiki pages fed by an outcome as
+  // regenerate-eligible WITHOUT firing generation. Resolves the same page
+  // set linkTreatmentOutcome's fan-out updates: product pages via
+  // products_applied (canonical-resolved), the grass-track page, and the
+  // treatment month's seasonal page. weeklyRefresh selects purely on
+  // stale_flag=true (its 60-day rule only ADDS flags), so a flagged page is
+  // picked up on the next weekly run regardless of age. Used by the
+  // vision-delta scorer so a newly photo-verified outcome doesn't wait out
+  // the 60-day staleness window. Never throws.
+  // ────────────────────────────────────────────────────────────
+  async markOutcomePagesStale(outcome) {
+    try {
+      if (!outcome) return 0;
+      const slugs = new Set();
+
+      let products = outcome.products_applied;
+      if (typeof products === 'string') {
+        try { products = JSON.parse(products); } catch { products = []; }
+      }
+      for (const p of Array.isArray(products) ? products : []) {
+        if (p?.name) {
+          const { canonicalName } = await resolveCanonicalProduct(p.name);
+          slugs.add(`product/${slugify(canonicalName)}`);
+        }
+      }
+
+      if (outcome.grass_track) slugs.add(`track/${slugify(String(outcome.grass_track))}`);
+
+      if (outcome.treatment_date) {
+        // treatment_date is a date-only business field; updateSeasonalPage
+        // selects by EXTRACT(MONTH ...) — the calendar month of the stored
+        // date. Read the month from the literal date, never through
+        // new Date('YYYY-MM-DD').getMonth() (UTC-midnight parse shifts
+        // 'YYYY-MM-01' into the PREVIOUS month in any western-hemisphere
+        // local timezone). pg Date objects parse at local midnight, so
+        // getMonth() on a real Date matches the stored date.
+        const raw = outcome.treatment_date;
+        const literal = /^(\d{4})-(\d{2})-(\d{2})/.exec(typeof raw === 'string' ? raw : '');
+        const month = literal
+          ? Number(literal[2])
+          : (raw instanceof Date && !Number.isNaN(raw.getTime()) ? raw.getMonth() + 1 : null);
+        const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
+          'july', 'august', 'september', 'october', 'november', 'december'];
+        if (monthNames[month - 1]) slugs.add(`seasonal/${monthNames[month - 1]}`);
+      }
+
+      // Condition pages aggregate outcomes by CUSTOMER set
+      // (updateConditionPage: assessments whose observations mention the
+      // condition → those customers' outcomes) — so any condition page whose
+      // name appears in this customer's assessment observations consumes
+      // this outcome and must re-gen too. Same substring semantics as the
+      // ilike %name% query, inverted in JS over the (small) page set.
+      if (outcome.customer_id) {
+        const conditionPages = await db('knowledge_entries')
+          .where({ category: 'condition' })
+          .select('slug', 'title');
+        if (conditionPages.length) {
+          const observationRows = await db('lawn_assessments')
+            .where({ customer_id: outcome.customer_id })
+            .whereNotNull('observations')
+            .select('observations');
+          const haystack = observationRows.map((r) => String(r.observations).toLowerCase());
+          for (const page of conditionPages) {
+            const name = String(page.title || '').replace(/^Condition:\s*/i, '').toLowerCase();
+            if (name && haystack.some((obs) => obs.includes(name))) slugs.add(page.slug);
+          }
+        }
+      }
+
+      if (!slugs.size) return 0;
+      const flagged = await db('knowledge_entries')
+        .whereIn('slug', [...slugs])
+        .where({ stale_flag: false })
+        .update({ stale_flag: true, updated_at: new Date() });
+      if (flagged) {
+        logger.info(`[agronomic-wiki] Marked ${flagged} page(s) stale for outcome ${outcome.id}`);
+      }
+      return flagged;
+    } catch (err) {
+      logger.error(`[agronomic-wiki] markOutcomePagesStale failed for outcome ${outcome?.id}: ${err.message}`);
+      return 0;
+    }
+  },
+
+  // ────────────────────────────────────────────────────────────
   // weeklyRefresh — cron job: update stale pages, generate seasonal page
   // ────────────────────────────────────────────────────────────
   async weeklyRefresh() {
     logger.info('[agronomic-wiki] Starting weekly refresh');
 
     try {
+      // 0. Vision-score invalidation reconcile: scoreOutcome's stale-flagging
+      // is best-effort (a transient failure there is swallowed and the sweep
+      // never re-selects a scored row), so re-run the idempotent flagging for
+      // recently scored outcomes here. 8-day window = one weekly cycle plus
+      // margin; already-regenerated pages skip cheaply via the fingerprint
+      // token and the skip branch clears the flag again.
+      try {
+        // Select on the terminal stamp (vision_scored_at), NOT a non-null
+        // score: a cleared-then-replaced pair whose replacement scores null
+        // or fails terminally still stamps scored_at, and its pages may
+        // narrate the REMOVED score — this weekly pass is the durable retry
+        // behind the best-effort flagging at clear/score time. Over-flagging
+        // is cheap: an unchanged fingerprint takes the skip branch and
+        // clears the flag again.
+        //
+        // Keyset-paginate the whole 8-day window oldest-first on the
+        // composite (vision_scored_at, id) — a timestamp-only cursor would
+        // drop rows sharing the boundary timestamp, and a burst larger than
+        // one page must never silently age out before the next weekly run.
+        // The gated sweep stamps ≤25/day, so 20×100 is far past any
+        // legitimate volume.
+        const windowStart = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+        let cursorTs = windowStart;
+        let cursorId = null;
+        for (let page = 0; page < 20; page++) {
+          let query = db('treatment_outcomes').whereNotNull('vision_scored_at');
+          if (cursorId === null) {
+            query = query.where('vision_scored_at', '>', cursorTs);
+          } else {
+            const ts = cursorTs;
+            const id = cursorId;
+            query = query.where(function () {
+              this.where('vision_scored_at', '>', ts)
+                .orWhere(function () {
+                  this.where('vision_scored_at', ts).andWhere('id', '>', id);
+                });
+            });
+          }
+          const batch = await query
+            .orderBy('vision_scored_at', 'asc')
+            .orderBy('id', 'asc')
+            .limit(100);
+          for (const outcome of batch) {
+            await AgronomicWiki.markOutcomePagesStale(outcome);
+          }
+          if (batch.length < 100) break;
+          const last = batch[batch.length - 1];
+          cursorTs = last.vision_scored_at;
+          cursorId = last.id;
+        }
+      } catch (err) {
+        logger.error(`[agronomic-wiki] Vision-score stale reconcile failed: ${err.message}`);
+      }
+
       // 1. Mark stale pages (last_data_update > 60 days ago)
       const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
       await db('knowledge_entries')
@@ -1728,6 +1889,24 @@ async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug)
   }
 }
 
+// Count outcomes carrying a photo-verified visual-change score, over the FULL
+// (unsliced) outcome set — feeds generatePage's skip fingerprint so a newly
+// scored outcome makes the page regenerate-eligible. Null scores
+// (non-comparable / low-confidence pairs) don't change the prompt input, so
+// they don't count.
+function countVisionScored(outcomes) {
+  const scored = (outcomes || []).filter((o) => o.vision_delta_score !== null && o.vision_delta_score !== undefined);
+  if (!scored.length) return null;
+  // Newest scored_at rides the token: a re-scored pair (photo key changed,
+  // count unchanged) must still change the fingerprint or the page would
+  // skip regeneration and keep narrating the old verdict.
+  const maxMs = Math.max(0, ...scored.map((o) => {
+    const ms = o.vision_scored_at ? new Date(o.vision_scored_at).getTime() : 0;
+    return Number.isFinite(ms) ? ms : 0;
+  }));
+  return `vision-scored:${scored.length}:${maxMs}`;
+}
+
 function aggregateOutcomes(outcomes) {
   if (!outcomes.length) return { count: 0 };
 
@@ -1766,6 +1945,19 @@ function aggregateOutcomes(outcomes) {
     seasonDistribution: seasons,
     grassTypeDistribution: grassTypes,
     trackDistribution: tracks,
+    // Photo-verified visual change, aggregated over the FULL outcome set: the
+    // prompt's per-outcome sample is capped at 50 newest, but the sweep
+    // scores oldest-first — a scored outcome outside the sample changes the
+    // skip fingerprint, so its score must reach the prompt through stats or
+    // the regeneration writes a page that never saw it and then skips forever.
+    photoVerified: (() => {
+      const scored = outcomes.filter((o) => o.vision_delta_score != null);
+      if (!scored.length) return { count: 0 };
+      return {
+        count: scored.length,
+        avgVisualChange: avg(scored.map((o) => o.vision_delta_score)),
+      };
+    })(),
   };
 }
 
@@ -1786,6 +1978,8 @@ module.exports.__private = {
   resolveCanonicalProduct,
   classifyReviewTier,
   sameFlagSets,
+  countVisionScored,
+  aggregateOutcomes,
   PRE_ASSESSMENT_MAX_AGE_DAYS,
   POST_ASSESSMENT_MAX_DAYS,
 };

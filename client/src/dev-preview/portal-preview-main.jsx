@@ -434,6 +434,56 @@ Object.assign(api, {
   getActiveTracker: async () => ({ tracker: null }),
   getTodayTracker: async () => ({ tracker: null }),
 
+  // portal home recommendations (GATE_PROPERTY_RECOMMENDATIONS) — demo stack:
+  // one advice card, the matrix offer for a pest+lawn persona (tree & shrub),
+  // one quote-only seasonal note.
+  getPropertyRecommendations: async () => ({
+    available: true,
+    cards: [
+      {
+        id: 'irrigation_advice', kind: 'advice', priority: 'high',
+        title: 'Ease up on irrigation',
+        body: 'Your recent lawn visits show more combined rain and irrigation than your lawn needs. Cutting back a watering cycle this week helps prevent fungus.',
+        asOf: day(-22),
+      },
+      {
+        id: 'plan_offer', kind: 'offer', priority: 'medium',
+        title: 'Tree & Shrub Care',
+        body: 'Your plan does not include this yet. The price is based on the property details already on file — no inspection needed.',
+        serviceKey: 'tree_shrub', mode: 'priced', relationship: 'add',
+        option: { id: 'tree-standard', label: 'Tree & Shrub Care', cadence: '6x per year', perVisit: 84, waveguardTier: 'Gold', confidence: 'high' },
+        fingerprint: 'demo-fingerprint', ctaLabel: 'Add Tree & Shrub Care',
+      },
+      {
+        id: 'mosquito_note', kind: 'ask', priority: 'low',
+        title: 'Mosquito coverage',
+        body: 'Mosquito season is at its peak in Southwest Florida, and your plan does not include mosquito protection. Ask us for a quote if you would like it added.',
+        serviceKey: 'mosquito', ctaLabel: 'Ask about mosquito coverage',
+      },
+    ],
+  }),
+  requestPropertyRecommendation: async () => ({ success: true }),
+
+  // property alerts (GATE_PROPERTY_ALERTS) — recent advisories from the
+  // daily sweep.
+  getPropertyAlerts: async () => ({
+    available: true,
+    alerts: [
+      {
+        id: 'al-1', ruleKey: 'rain_skip_irrigation',
+        title: 'Heavy rain in your area',
+        body: 'Your service area received about 2.1" of rain in the last 3 days. We recommend skipping your next irrigation cycle.',
+        firedAt: new Date().toISOString(),
+      },
+      {
+        id: 'al-2', ruleKey: 'lawn_inspection_reassurance',
+        title: 'Chinch bug conditions: elevated',
+        body: 'Summer heat favors chinch bug activity in Southwest Florida lawns. Your lawn was inspected 9 days ago — no chinch bug activity was found.',
+        firedAt: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
+      },
+    ],
+  }),
+
   // misc / catch-alls — PortalPage also calls api.request directly
   // ('/tracking/maps-key', '/ai/chat', AuthProvider's '/auth/logout').
   request: async (path) => {

@@ -8,6 +8,7 @@ const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
+const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { previewText, stripSchedulerAuditText } = require('../utils/visit-notes');
 const { mowingAlertText } = require('../utils/mowing-schedule');
@@ -25,7 +26,7 @@ const {
   formatETDay, formatETDate, formatETTime,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
-const { customerOnAutopay } = require('../services/autopay-eligibility');
+const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected } = require('../services/billing-lane');
 const DiscountEngine = require('../services/discount-engine');
 const { isReService } = require('../services/re-service');
@@ -994,6 +995,27 @@ async function getAssignmentTargetIds(conn, jobId, assignmentScope) {
 async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScope = 'this_only', trx }) {
   const conn = trx || db;
   const { scope, job, parentId, targetIds } = await getAssignmentTargetIds(conn, jobId, assignmentScope);
+  // Multi-visit series assignment under a caller transaction: pre-acquire
+  // the COMPLETE tech-day fence set once, sorted (codex GitHub round P2) —
+  // the per-row applyAssignment fence otherwise locks each visit's day in
+  // its own call, and sequential sorted-within-call acquisitions can cross
+  // with the globally sorted unions the other writers take (hold B:day1,
+  // wait A:day2 vs hold A:day2, wait B:day1 → PG deadlock). Advisory xact
+  // locks are reentrant, so the per-row calls never wait after this.
+  // Without a caller trx each row runs in its own single-call transaction,
+  // which is already order-safe.
+  if (trx && targetIds.length > 1) {
+    const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    const fenceRows = await trx('scheduled_services')
+      .whereIn('id', targetIds)
+      .select('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+    const fencePairs = [];
+    for (const r of fenceRows) {
+      fencePairs.push({ techId: r.technician_id, date: r.day });
+      fencePairs.push({ techId: technicianId || null, date: r.day });
+    }
+    await lockTechDays(trx, fencePairs);
+  }
   const changedJobIds = [];
   let templateChanged = false;
   let technicianName = null;
@@ -1870,6 +1892,22 @@ function compactCheckoutInvoiceLines(rawLines) {
     .slice(0, 8);
 }
 
+// "No card on file — collect on site" alert for the day-view propertyAlerts
+// feed (tech Next Stop card + dispatch chips). Rides the sheet's existing
+// completion-billing prediction as the "is money actually due" authority —
+// payer-billed, prepaid/paid, membership- or annual-covered, and free
+// callback/follow-up visits all collapse to non-'invoice' kinds there, so
+// the badge fires only when completion will cut an invoice this customer
+// has no chargeable way to settle remotely. Deliberately NOT the
+// customerOnAutopay predicate — a saved card with autopay off is still
+// chargeable on file; only a truly empty (or expired/blocked) wallet needs
+// the tech to collect before leaving.
+function noCardOnFileAlert({ hasChargeableMethod, prediction }) {
+  if (hasChargeableMethod) return null;
+  if (!prediction || prediction.kind !== 'invoice' || !(Number(prediction.amount) > 0)) return null;
+  return { type: 'no_card_on_file', text: 'NO CARD ON FILE — collect payment on site' };
+}
+
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
   try {
@@ -2091,7 +2129,6 @@ router.get('/', async (req, res, next) => {
         if (svcPrefs.interior_spray === false) alerts.push({ type: 'service_pref', text: 'EXTERIOR ONLY — no interior treatment' });
         if (svcPrefs.exterior_sweep === false) alerts.push({ type: 'service_pref', text: 'Skip eave/cobweb sweep' });
       }
-
       const zone = s.zone || getZone(s.city, s.zip);
       const autopayActive = await customerOnAutopay({
         id: s.customer_id,
@@ -2164,6 +2201,45 @@ router.get('/', async (req, res, next) => {
           annualCoverageValidated,
         }),
       };
+      // Payment-capture flag — the tech needs to know at the doorstep that
+      // nothing chargeable exists behind this customer (autopay_enabled can
+      // be true with no saved method, so the autopay flag alone lies).
+      // "Chargeable" means what the manual charge path can actually use: a
+      // non-expired card, or a bank method while ACH isn't blocked — NOT
+      // just any payment_methods row. Fail toward NOT flagging, like the
+      // reads above: a wrong badge on a covered customer teaches the tech
+      // to ignore it.
+      if (billingLane.prediction?.kind === 'invoice') {
+        let hasChargeableMethod = true;
+        try {
+          const methods = await db('payment_methods')
+            .where({ customer_id: s.customer_id, processor: 'stripe' })
+            .whereNotNull('stripe_payment_method_id')
+            .select('method_type', 'ach_status', 'exp_month', 'exp_year');
+          hasChargeableMethod = methods.some((m) => {
+            if (isBankMethodType(m.method_type)) {
+              // Both ACH gates the collection paths enforce: the customer-
+              // level health block (billing-v2 default-swap) and the row's
+              // own unverified/failed state (customer-autopay).
+              if (s.ach_status && s.ach_status !== 'active') return false;
+              return !['pending_verification', 'verification_failed'].includes(m.ach_status);
+            }
+            // Legacy rows carry 2-digit years — normalize BEFORE the expiry
+            // check, as the default-swap route does, or a valid '12/32' card
+            // reads as year 32 and isExpiredCardMethod fails closed.
+            const rawYear = parseInt(m.exp_year, 10);
+            return !isExpiredCardMethod({
+              ...m,
+              exp_year: Number.isFinite(rawYear) && rawYear < 100 ? rawYear + 2000 : m.exp_year,
+            });
+          });
+        } catch { hasChargeableMethod = true; }
+        const noCardAlert = noCardOnFileAlert({
+          hasChargeableMethod,
+          prediction: billingLane.prediction,
+        });
+        if (noCardAlert) alerts.push(noCardAlert);
+      }
 
       // Add-on verdicts are kept SEPARATE and handed to traceFeedFields
       // (codex P1 r7): collapsing first with combineRowVerdicts reintroduces
@@ -4543,6 +4619,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // rows matched = the row changed under us; refuse this id (the
               // batch carries the reason).
               const prevDate = normalizeDateOnly(svc.scheduled_date);
+              // Tech-day membership change (bulk board move): shared fence
+              // for the leaving and joining day + drop the stale sequence
+              // number — see scheduling/tech-day-lock.js.
+              if (prevDate !== bulkTargetDate) {
+                const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+                await lockTechDays(trx, [
+                  { techId: svc.technician_id, date: prevDate },
+                  { techId: svc.technician_id, date: bulkTargetDate },
+                ]);
+                updates.route_order = null;
+              }
               // Full observed tracker/lifecycle snapshot joins the CAS: the
               // rewind decision above came from this trx's read, and tracker
               // writers advance state, stamps, and SMS guards without
@@ -5508,6 +5595,34 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         : null;
 
       if (assignmentShouldRun) {
+        // COMPLETE tech-day lock set, ONCE, sorted (uncapped audit r20 P1):
+        // the assignment path locks each target row's day in its own
+        // lockTechDays call and the date-move fence below locks old+new day
+        // in another — sequential sorted-within-call acquisitions break the
+        // global sort order that keeps single-call lockers (bulk board move,
+        // nightly reorder) deadlock-free, so a backward date move could hold
+        // tech:newer while waiting on tech:older. Advisory xact locks are
+        // reentrant: the inner per-step calls re-acquire already-held keys
+        // without blocking, so this up-front union is the only acquisition
+        // that can ever wait. Keys are provisional (unlocked reads) — the
+        // locked reads/CAS guards downstream still decide correctness; a row
+        // that moves concurrently aborts there, it is never mis-fenced.
+        const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+        const { targetIds: fenceTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
+        const fenceRows = await trx('scheduled_services')
+          .whereIn('id', fenceTargetIds)
+          .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+        const fencePairs = [];
+        for (const row of fenceRows) {
+          fencePairs.push({ techId: row.technician_id, date: row.day });
+          fencePairs.push({ techId: requestedTechnicianId, date: row.day });
+          if (String(row.id) === String(req.params.id) && updates.scheduled_date !== undefined) {
+            fencePairs.push({ techId: row.technician_id, date: dateOnly(updates.scheduled_date) });
+            fencePairs.push({ techId: requestedTechnicianId, date: dateOnly(updates.scheduled_date) });
+          }
+        }
+        await lockTechDays(trx, fencePairs);
+
         const assignment = await assignScheduleJobs({
           jobId: req.params.id,
           technicianId: requestedTechnicianId,
@@ -5529,6 +5644,26 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // making later resolution tuple-independent. Ambiguous soft-join
         // matches stay untouched — stamping one of several same-day rows
         // could bind the wrong visit; FK-carrying records need no heal.
+        // Tech-day fence BEFORE the FOR UPDATE row lock below (uncapped audit
+        // r17 deadlock): the nightly reorder acquires advisory-then-rows, so
+        // taking the row lock first here formed an advisory/row lock cycle.
+        // Keys are read provisionally WITHOUT locking; after the locked read
+        // below, a key mismatch (row moved concurrently) aborts the edit
+        // rather than proceeding with the wrong day fenced.
+        let provFence = null;
+        if (updates.scheduled_date !== undefined) {
+          const prov = await trx('scheduled_services')
+            .where({ id: req.params.id })
+            .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+          if (prov) {
+            const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+            await lockTechDays(trx, [
+              { techId: prov.technician_id, date: prov.day },
+              { techId: prov.technician_id, date: dateOnly(updates.scheduled_date) },
+            ]);
+            provFence = { techId: prov.technician_id || null, day: prov.day };
+          }
+        }
         let preTupleRow = null;
         if (updates.scheduled_date !== undefined || updates.service_type !== undefined) {
           // FOR UPDATE first (codex P2 #3152 round 20): the correction and
@@ -5595,6 +5730,23 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const reminderBefore = reminderFieldsTouched
           ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start')
           : null;
+        if (dateActuallyMoves) {
+          // The fence was taken BEFORE the FOR UPDATE above (lock-order
+          // contract with the nightly reorder). Revalidate the provisional
+          // key against the locked row — a concurrent move between the
+          // provisional read and the row lock means the wrong day is fenced.
+          if (!provFence
+            || provFence.techId !== (preTupleRow.technician_id || null)
+            || provFence.day !== dateOnly(preTupleRow.scheduled_date)) {
+            throw Object.assign(
+              new Error('the visit moved concurrently while the edit was pending — re-check and retry'),
+              { isValidation: true },
+            );
+          }
+          // Old day's sequence number is meaningless on the new date —
+          // consumers append NULLs last.
+          updates.route_order = null;
+        }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         // Rebooker-parity live-move bookkeeping (same split as the bulk
         // board move): the job_status_history audit row is atomic with the
@@ -5901,6 +6053,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 scheduled_date: nextDateStr,
                 recurring_pattern: recurringPattern,
               };
+              // Fence-or-clear contract: a cadence rewrite that actually
+              // moves the child's date must not carry its route_order into
+              // the destination day (NULL appends after the ordered run).
+              if (childDateChanged) childUpdates.route_order = null;
               if (seriesCols.recurring_ongoing) childUpdates.recurring_ongoing = !!recurringOngoing;
               if (seriesCols.recurring_nth) childUpdates.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
               if (seriesCols.recurring_weekday) childUpdates.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
@@ -5988,6 +6144,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 if (!nextDateStr) continue;
                 const boosterDateChanged = normalizeDateOnly(booster.scheduled_date) !== nextDateStr;
                 const boosterUpdates = { scheduled_date: nextDateStr };
+                // Fence-or-clear contract — same as the child rewrite above.
+                if (boosterDateChanged) boosterUpdates.route_order = null;
                 if (seriesCols.skip_weekends) boosterUpdates.skip_weekends = skipChild;
                 if (seriesCols.weekend_shift && skipChild) boosterUpdates.weekend_shift = dirChild;
                 let boosterRewound = false;
@@ -8697,28 +8855,23 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     const { date, technicianId } = req.body;
     const dateStr = date || etDateString();
 
-    const services = await db('scheduled_services')
-      .where({ scheduled_date: dateStr })
-      .where(function () {
-        if (technicianId) this.where({ technician_id: technicianId });
-      })
-      .whereNotIn('status', ['cancelled', 'completed'])
-      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .select(
+    // Shared day-stops scaffold (services/scheduling/day-stops) — same rows as
+    // the inline query it replaced: same status exclusions, same select list,
+    // same stamped-address divergence guard on the coordinate fallback.
+    const services = await dayStopsQuery(db, {
+      dateStr,
+      technicianId: technicianId || null,
+      excludeStatuses: ['cancelled', 'completed'],
+      select: [
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        // Primary-home coords are only a valid fallback when the visit's
-        // stamped address doesn't DIVERGE from the primary — a divergent
-        // stamp with no coords must degrade to "no pin" (optimizer appends
-        // coordless stops), never route to the wrong house. City/zip follow
-        // the stamp so zone grouping reflects the booked property.
-        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
-        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
+        ...guardedCoordSelects(db),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
-        db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
-      );
+        db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name"),
+      ],
+    });
 
     if (!services.length) {
       return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
@@ -8739,11 +8892,35 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       techId: technicianId || null,
     });
 
-    // Update route_order on each service
-    for (let i = 0; i < result.orderedStops.length; i++) {
-      await db('scheduled_services')
-        .where({ id: result.orderedStops[i].id })
-        .update({ route_order: i + 1 });
+    // Update route_order on each service — fenced + transactional: an
+    // unfenced per-row loop racing the nightly reorder could interleave and
+    // leave a mixed sequence. Same 'slot-reserve' tech-day lock as every
+    // other route_order writer (scheduling/tech-day-lock.js); this board-wide
+    // endpoint locks every tech-day it rewrites.
+    {
+      const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+      await db.transaction(async (trx) => {
+        await lockTechDays(trx, services.map((s) => ({ techId: s.technician_id, date: dateStr })));
+        // Stale-snapshot guard (uncapped audit r21 P1): the optimizer ran
+        // BEFORE this fence was acquired — a reassignment/date move that
+        // committed while we waited for the lock must not receive the stale
+        // sequence number on its new tech-day. Each write is constrained to
+        // the tech-day the stop was optimized FOR; any miss aborts the whole
+        // rewrite untouched (operator reloads and retries).
+        const techById = new Map(services.map((s) => [s.id, s.technician_id || null]));
+        for (let i = 0; i < result.orderedStops.length; i++) {
+          const stopId = result.orderedStops[i].id;
+          const expectTech = techById.get(stopId) || null;
+          const updated = await trx('scheduled_services')
+            .where({ id: stopId })
+            .where('scheduled_date', dateStr)
+            .modify((q) => (expectTech ? q.where('technician_id', expectTech) : q.whereNull('technician_id')))
+            .update({ route_order: i + 1 });
+          if (updated !== 1) {
+            throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+          }
+        }
+      });
     }
 
     const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
@@ -8781,7 +8958,12 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     }
 
     res.json(response);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'STALE_OPTIMIZE') {
+      return res.status(409).json({ error: 'Schedule changed while optimizing — reload and retry' });
+    }
+    next(err);
+  }
 });
 
 // POST /api/admin/schedule/optimize-route — single-tech route optimization
@@ -8797,25 +8979,21 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
 
     const dateStr = date || etDateString();
 
-    const services = await db('scheduled_services')
-      .where({ scheduled_date: dateStr, technician_id: technicianId })
-      .whereNotIn('status', ['cancelled', 'completed'])
-      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-      .select(
+    // Shared day-stops scaffold — same rows as the inline query it replaced.
+    const services = await dayStopsQuery(db, {
+      dateStr,
+      technicianId,
+      excludeStatuses: ['cancelled', 'completed'],
+      select: [
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        // Primary-home coords are only a valid fallback when the visit's
-        // stamped address doesn't DIVERGE from the primary — a divergent
-        // stamp with no coords must degrade to "no pin" (optimizer appends
-        // coordless stops), never route to the wrong house. City/zip follow
-        // the stamp so zone grouping reflects the booked property.
-        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
-        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
+        ...guardedCoordSelects(db),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
-        db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
-      );
+        db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name"),
+      ],
+    });
 
     if (!services.length) {
       return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
@@ -8835,11 +9013,25 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       techId: technicianId,
     });
 
-    // Update route_order
-    for (let i = 0; i < result.orderedStops.length; i++) {
-      await db('scheduled_services')
-        .where({ id: result.orderedStops[i].id })
-        .update({ route_order: i + 1 });
+    // Update route_order — fenced + transactional, same contract as
+    // /optimize above (single tech-day here).
+    {
+      const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+      await db.transaction(async (trx) => {
+        await lockTechDays(trx, [{ techId: technicianId, date: dateStr }]);
+        // Stale-snapshot guard — same contract as /optimize above: the stop
+        // must still be on THIS tech-day or the whole rewrite aborts.
+        for (let i = 0; i < result.orderedStops.length; i++) {
+          const updated = await trx('scheduled_services')
+            .where({ id: result.orderedStops[i].id })
+            .where('scheduled_date', dateStr)
+            .where('technician_id', technicianId)
+            .update({ route_order: i + 1 });
+          if (updated !== 1) {
+            throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+          }
+        }
+      });
     }
 
     const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
@@ -8875,7 +9067,12 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
     }
 
     res.json(response);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'STALE_OPTIMIZE') {
+      return res.status(409).json({ error: 'Schedule changed while optimizing — reload and retry' });
+    }
+    next(err);
+  }
 });
 
 // GET /api/admin/schedule/zone-density
@@ -9077,6 +9274,264 @@ router.get('/card-request-availability', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── On-site prepay switch: the superseded-invoice rules ──────────────────
+// ONE definition, used by the read-only preview (what the operator is shown)
+// and by the write path that actually voids (what is enforced). Splitting
+// them is how a display rule and a money rule drift apart, so both call this.
+//
+// Returns { ok: true, supersedes: [...] } or { ok: false, blockReason }.
+// Every refusal is fail-closed: the switch is a one-tap FIELD action, so
+// anything needing an AR judgement (delivered invoice, money in flight,
+// applied credit, ledger-backed deposit, third-party payer, an invoice this
+// accept didn't mint) is pushed back to the office instead of guessed at.
+const SUPERSEDE_DEAD_STATUSES = new Set(['void', 'cancelled', 'canceled', 'refunded']);
+
+function invoiceLineItems(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    try { const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
+  }
+  return [];
+}
+
+// The estimate converter's provenance stamp for an accept-minted invoice.
+// One definition — the resolver's supersede match and the supersede
+// endpoint's idempotent re-report must agree on what "this accept's
+// invoice" means.
+function acceptProvenanceRe(estimateId) {
+  return new RegExp(
+    `Auto-generated from accepted estimate #${String(estimateId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+    'i',
+  );
+}
+
+// Marker written into a restored invoice's notes, keyed by the VOIDED row it
+// replaces — the undo's idempotency anchor (a marker match means the restore
+// already happened, so a retried/duplicated undo can never mint a second
+// replacement; Codex P0 r3). Shared with services/invoice.js, whose
+// term-cancel compensation uses the same markers.
+const {
+  prepaySwitchRestoreMarker: restoreMarker,
+  prepaySwitchSupersededByMarker: supersededByMarker,
+  stripPrepaySwitchSupersededMarkers: stripSupersededMarkers,
+} = require('../services/invoice');
+
+async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db }) {
+  if (!Array.isArray(visitIds) || visitIds.length === 0) {
+    return { ok: true, supersedes: [] };
+  }
+  // NON-ESTIMATE lane (the prepay-on-book twin): nothing was accept-minted,
+  // so nothing is safely voidable — but a LIVE invoice already attached to
+  // the series (an uncollected checkout pre-mint, a manual draft) must not
+  // sit payable beside a freshly collected year (Codex PR #3381 r1 P1:
+  // returning supersedes:[] here skipped the invoice query entirely and the
+  // switch double-billed). Fail closed: any live attached invoice refuses
+  // the switch; the operator resolves it from Invoices first.
+  if (!estimateId || !customerId) {
+    let liveAttached;
+    try {
+      liveAttached = await conn('invoices')
+        .whereIn('scheduled_service_id', visitIds)
+        .whereNotIn('status', [...SUPERSEDE_DEAD_STATUSES])
+        .first('id', 'invoice_number', 'status');
+    } catch (err) {
+      logger.warn(`[schedule:prepay-switch] attached-invoice lookup failed for ${visitIds.join(',')}: ${err.message} — refusing`);
+      return { ok: false, blockReason: 'couldn’t confirm what this visit is already invoiced for — refresh and try again' };
+    }
+    if (liveAttached) {
+      return { ok: false, blockReason: `can’t be switched here — this visit already carries ${liveAttached.invoice_number || 'an invoice'} (${String(liveAttached.status || '').toLowerCase()}), which the prepaid year does not replace. Resolve it from Invoices first` };
+    }
+    return { ok: true, supersedes: [] };
+  }
+  let rows;
+  try {
+    // TWO nets, unioned (Codex P0 r12): invoices ATTACHED to the series, and
+    // the customer's invoices carrying this estimate's accept-provenance
+    // stamp — a SETUP-ONLY accept draft (first-application $0) is
+    // deliberately left unattached by the converter
+    // (shouldAttachScheduledServiceToStandardDraftInvoice), so a visit-scoped
+    // query alone would miss it and the promised waiver would leave the $99
+    // draft payable beside the prepaid year.
+    rows = await conn('invoices')
+      .where(function supersedeNets() {
+        this.whereIn('scheduled_service_id', visitIds)
+          .orWhere(function customerProvenance() {
+            this.where({ customer_id: customerId })
+              .where('notes', 'like', `%Auto-generated from accepted estimate #${String(estimateId)}%`);
+          });
+      })
+      .select('id', 'invoice_number', 'status', 'total', 'credit_applied', 'paid_at',
+        'payer_id', 'annual_prepay_term_id', 'line_items', 'sent_at', 'stripe_payment_intent_id',
+        'notes');
+  } catch (err) {
+    logger.warn(`[schedule:prepay-switch] attached-invoice lookup failed for ${visitIds.join(',')}: ${err.message} — refusing`);
+    return { ok: false, blockReason: 'couldn’t confirm what this visit is already invoiced for — refresh and try again' };
+  }
+
+  // PROVENANCE, not position (Codex P0 r2). "Every live draft on this visit"
+  // is the wrong set: a manually built or duplicate draft would be swept into
+  // the void and real AR would quietly disappear. Only the invoice the ACCEPT
+  // minted for THIS estimate is what the prepaid year replaces, and the
+  // converter stamps that into notes.
+  const acceptStamp = acceptProvenanceRe(estimateId);
+  const supersedes = [];
+  for (const inv of rows) {
+    const status = String(inv.status || '').toLowerCase();
+    if (SUPERSEDE_DEAD_STATUSES.has(status)) continue;
+    if (!acceptStamp.test(String(inv.notes || ''))) {
+      return { ok: false, blockReason: `can’t be switched here — this visit also carries ${inv.invoice_number || 'another invoice'} (${status}), which the prepaid year does not replace. Resolve it from Invoices first` };
+    }
+    if (inv.annual_prepay_term_id) {
+      return { ok: false, blockReason: 'already has an annual prepay invoice on this visit — collect or void that one first' };
+    }
+    // Money already collected or in flight — a refund decision, not a field
+    // action. Checked before delivery so the reason stays accurate.
+    if (inv.paid_at || ['paid', 'prepaid', 'processing'].includes(status)) {
+      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is already ${status === 'prepaid' ? 'settled by account credit' : status}. Resolve it first, then mint the prepay from Customer 360` };
+    }
+    // UNDELIVERED DRAFTS ONLY (Codex P0 r1). A delivered invoice has a live
+    // pay link in the customer's hands; one carrying a PaymentIntent has a
+    // payment in flight. Voiding either is a deliberate office decision.
+    if (inv.sent_at || inv.stripe_payment_intent_id) {
+      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has already gone out to the customer. Void it from Invoices first, then switch` };
+    }
+    if (status !== 'draft') {
+      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is ${status}, not an unsent draft. Resolve it first, then mint the prepay from Customer 360` };
+    }
+    if (Number(inv.credit_applied || 0) > 0) {
+      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has account credit applied. Void it from Invoices (which returns the credit) and mint the prepay from Customer 360` };
+    }
+    // A ledger-backed ESTIMATE DEPOSIT rides as a `deposit_credit` LINE, not
+    // as credit_applied (Codex P0 r2). Voiding returns it to the ledger, but
+    // the prepay mint carries no deposit credit and a covered year cuts no
+    // later invoice for it to land on — the paid deposit would strand.
+    const lines = invoiceLineItems(inv.line_items);
+    // PROOF the invoice bills only THIS plan (Codex P0 r18): the root-series
+    // count can read 1 even when the converter combined services, so the
+    // decisive check is the invoice's own lines — a per-application accept
+    // mints exactly a setup-fee line and/or a first-application line, and
+    // ANYTHING else means sibling charges ride this invoice and voiding it
+    // would erase them.
+    const RECOGNIZED_ACCEPT_LINES = /^(WaveGuard Membership — one-time setup fee|First service application)$/;
+    // deposit_credit lines are exempt here only so the DEDICATED guard below
+    // refuses them with its accurate ledger-restore reason.
+    const unrecognized = lines.find((li) => String(li?.category || '') !== 'deposit_credit'
+      && !RECOGNIZED_ACCEPT_LINES.test(String(li?.description || '').trim()));
+    if (unrecognized) {
+      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the accept invoice'} carries charges beyond this plan’s setup fee and first application (“${String(unrecognized?.description || '').slice(0, 60)}”). Handle it from Customer 360, where the invoice can be split first` };
+    }
+    if (lines.some((li) => String(li?.category || '') === 'deposit_credit')) {
+      return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit carries an estimate deposit credit. Mint the prepay from Customer 360 so the deposit is applied to it` };
+    }
+    if (inv.payer_id) {
+      return { ok: false, blockReason: 'isn’t available — this visit’s invoice bills to a third-party payer' };
+    }
+    supersedes.push({
+      id: inv.id,
+      invoiceNumber: inv.invoice_number || null,
+      status,
+      total: Math.round(Number(inv.total || 0) * 100) / 100,
+      lines: lines
+        .map((li) => ({ description: String(li?.description || ''), amount: Number(li?.amount ?? li?.unit_price) }))
+        .filter((li) => li.description && Number.isFinite(li.amount)),
+    });
+  }
+  // ONE invoice, by construction: the accept mints exactly one. More than
+  // one live accept-provenance invoice is an abnormal state this one-tap
+  // action must not try to untangle — and single-row supersede is what makes
+  // the retire step atomic (no partial-void state can exist; Codex P0 r3).
+  if (supersedes.length > 1) {
+    return { ok: false, blockReason: 'can\u2019t be switched here \u2014 this visit carries more than one live invoice. Resolve them from Invoices, then mint the prepay from Customer 360' };
+  }
+  return { ok: true, supersedes };
+}
+
+// The series anchor + accepted-estimate provenance for an on-site switch.
+// Shared by the preview and the supersede/undo writes so "is this a legit
+// post-accept switch?" has one answer. Returns { ok, visit, anchor,
+// estimateId } or { ok: false, status, blockReason }.
+async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
+  const visit = await conn('scheduled_services')
+    .where({ id: scheduledServiceId })
+    .first('id', 'customer_id', 'source_estimate_id', 'recurring_parent_id');
+  if (!visit) return { ok: false, status: 404, blockReason: 'Scheduled service not found' };
+  const anchor = visit.recurring_parent_id
+    ? (await conn('scheduled_services')
+      .where({ id: visit.recurring_parent_id })
+      .first('id', 'customer_id', 'source_estimate_id')) || visit
+    : visit;
+  // A committed series with NO estimate origin is the prepay-on-book twin:
+  // nothing was accept-minted, so there is nothing to supersede — estimateId
+  // null tells the switch to mint without retiring anything, and gives the
+  // undo no provenance to match (so it restores nothing).
+  // The supersede/lock net must span the WHOLE series (Codex PR #3381 r2
+  // P0): an invoice can hang off any covered CHILD, not just the tapped
+  // visit or the root — miss one and the year collects while it stays
+  // payable. Fail closed on an unreadable children read.
+  let seriesIds;
+  try {
+    const children = await conn('scheduled_services')
+      .where({ recurring_parent_id: anchor.id })
+      .select('id');
+    seriesIds = [...new Set([visit.id, anchor.id, ...children.map((c) => c.id)].filter(Boolean).map(String))];
+  } catch (err) {
+    logger.warn(`[schedule:prepay-switch] series-children read failed for ${anchor.id}: ${err.message} — refusing`);
+    return { ok: false, status: 409, blockReason: 'couldn’t confirm the visits in this series — refresh and try again' };
+  }
+  if (!anchor.source_estimate_id) {
+    return {
+      ok: true,
+      visit,
+      anchor,
+      customerId: String(anchor.customer_id || visit.customer_id || ''),
+      estimateId: null,
+      visitIds: seriesIds,
+    };
+  }
+  // A multi-service accept mints ONE combined invoice for the whole
+  // estimate (Codex P0 r17): switching a single series would void sibling
+  // services' charges with it. Refuse when the estimate carries more than
+  // one recurring root series — that reconciliation belongs to Customer
+  // 360, where the invoice can be split first. Fail closed on a bad read.
+  try {
+    const roots = await conn('scheduled_services')
+      .where({ source_estimate_id: anchor.source_estimate_id })
+      .whereNull('recurring_parent_id')
+      .where(function recurringRoots() {
+        this.where('is_recurring', true).orWhereNotNull('recurring_pattern');
+      })
+      .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+      .count({ n: '*' })
+      .first();
+    if (Number(roots?.n) > 1) {
+      return { ok: false, status: 409, blockReason: 'is part of a multi-service plan — its accept invoice covers other services too. Handle this switch from Customer 360, where the invoice can be split first' };
+    }
+  } catch (err) {
+    logger.warn(`[schedule:prepay-switch] series-root count failed for estimate ${anchor.source_estimate_id}: ${err.message} — refusing`);
+    return { ok: false, status: 409, blockReason: 'couldn’t confirm what the accept invoice covers — refresh and try again' };
+  }
+  let estimate;
+  try {
+    estimate = await conn('estimates')
+      .where({ id: anchor.source_estimate_id })
+      .first('id', 'status', 'accepted_at');
+  } catch (err) {
+    logger.warn(`[schedule:prepay-switch] estimate lookup failed for ${anchor.id}: ${err.message} — refusing`);
+    return { ok: false, status: 409, blockReason: 'couldn’t confirm the linked quote’s status — refresh and try again' };
+  }
+  if (!estimate || !estimate.accepted_at || String(estimate.status || '').toLowerCase() !== 'accepted') {
+    return { ok: false, status: 409, blockReason: 'is handled by the linked quote — accept it as annual prepay from the estimate instead' };
+  }
+  return {
+    ok: true,
+    visit,
+    anchor,
+    customerId: String(anchor.customer_id || visit.customer_id || ''),
+    estimateId: String(anchor.source_estimate_id),
+    visitIds: seriesIds,
+  };
+}
+
 // GET /api/admin/schedule/annual-prepay-availability — is the manual
 // prepay-on-book lane live? The New Appointment modal renders its Billing
 // control only on true: an offered choice that silently no-ops while the
@@ -9085,9 +9540,16 @@ router.get('/card-request-availability', async (req, res, next) => {
 // requireAdmin, NOT the router-level tech gate (Codex #3161 r3 P2): the
 // preview below is admin-only, so a technician answered `true` here would be
 // shown a Billing control whose every price probe 403s.
+// `switchEnabled` is the SEPARATE on-site lane (GATE_ONSITE_PREPAY_SWITCH):
+// the appointment sheet's "switch this accepted customer to annual prepay"
+// action. Same rule as `enabled` — the sheet renders the action only on true,
+// never an offered choice that no-ops while the lane is dark.
 router.get('/annual-prepay-availability', requireAdmin, async (_req, res, next) => {
   try {
-    res.json({ enabled: isEnabled('prepayOnBook') });
+    res.json({
+      enabled: isEnabled('prepayOnBook'),
+      switchEnabled: isEnabled('onsitePrepaySwitch'),
+    });
   } catch (err) { next(err); }
 });
 
@@ -9119,12 +9581,16 @@ router.get('/annual-prepay-availability', requireAdmin, async (_req, res, next) 
 //               and persists its own estimated_price, so a draft-shaped
 //               payload replayed after save could invoice a per-visit amount
 //               the committed series never carried.
-router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
-  try {
+async function computeAnnualPrepayPreview(query, conn = db) {
     // Dark by default (GATE_PREPAY_ON_BOOK): 404 rather than a blockReason —
     // while the lane is off the endpoint is unobservable, exactly like the
-    // /secure select-plan route.
-    if (!isEnabled('prepayOnBook')) return res.status(404).json({ error: 'Not found' });
+    // /secure select-plan route. GATE_ONSITE_PREPAY_SWITCH opens the SAME
+    // preview for the on-site switch lane (an already-accepted customer
+    // changing their mind at the visit); it admits only COMMITTED mode —
+    // the draft probe stays the prepay-on-book modal's alone, so flipping
+    // one gate never widens the other's surface.
+    const switchLane = isEnabled('onsitePrepaySwitch');
+    if (!isEnabled('prepayOnBook') && !switchLane) return { httpStatus: 404, httpBody: { error: 'Not found' } };
     const {
       computeSeriesPrepayPricing,
       PLAN_CLASS_BY_SERVICE_KEY,
@@ -9135,22 +9601,35 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     // timestamptz shifts the boundary a day in ET.
     const { callBookingDateOnly } = require('../services/call-booking-catalog');
 
-    const blocked = (blockReason) => res.json({ eligible: false, blockReason });
+    const blocked = (blockReason) => ({ eligible: false, blockReason });
 
     // ── Resolve the plan inputs ──────────────────────────────────────────
     // Committed mode wins when a visit id is supplied; the series PARENT owns
     // the cadence and the weekend rule, so a child row resolves to it.
-    const scheduledServiceId = String(req.query.scheduledServiceId || '').trim();
+    const scheduledServiceId = String(query.scheduledServiceId || '').trim();
     let input = null;
+    // Set only by the on-site switch lane: this series came from an accepted
+    // estimate, so accept already minted a per-application invoice that the
+    // prepaid year supersedes. Drives the supersede lookup below.
+    let isAcceptedSwitch = false;
+    // The rows an accept-minted invoice can hang off: the visit the operator
+    // is looking at and its series parent (the accept attaches its
+    // setup + first-application invoice to the FIRST scheduled service, which
+    // is the parent for every later child).
+    let supersedeVisitIds = [];
+    // The accepted estimate this series came from — the provenance the
+    // supersede match is bound to, so only ITS accept-minted invoice can be
+    // replaced.
+    let anchorEstimateId = null;
     if (scheduledServiceId) {
-      const visit = await db('scheduled_services')
+      const visit = await conn('scheduled_services')
         .where({ id: scheduledServiceId })
         .first('id', 'customer_id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
           'recurring_pattern', 'recurring_interval_days', 'recurring_parent_id', 'skip_weekends',
           'recurring_ongoing', 'booster_months', 'source_estimate_id');
-      if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
+      if (!visit) return { httpStatus: 404, httpBody: { error: 'Scheduled service not found' } };
       const parent = visit.recurring_parent_id
-        ? await db('scheduled_services')
+        ? await conn('scheduled_services')
           .where({ id: visit.recurring_parent_id })
           .first('id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
             'recurring_pattern', 'recurring_interval_days', 'skip_weekends', 'recurring_ongoing',
@@ -9159,8 +9638,27 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       const anchor = parent || visit;
       // An estimate-origin series already made its billing choice at accept —
       // that lane owns its own prepay control.
+      //
+      // …UNLESS the estimate is already ACCEPTED and the on-site switch lane
+      // is live (owner ask 2026-08-12). Once accepted, the quote's own prepay
+      // door is closed — "accept it as annual prepay from the estimate" is
+      // advice the operator can no longer follow — and the customer standing
+      // in front of them has changed their mind. The switch supersedes the
+      // per-application invoice that accept minted (below). Anything other
+      // than a cleanly accepted estimate keeps the original refusal: a still
+      // OPEN quote should be accepted as prepay through its own flow, which
+      // prices the year and discloses the terms the customer signs.
       if (anchor.source_estimate_id) {
-        return blocked('is handled by the linked quote — accept it as annual prepay from the estimate instead');
+        if (!switchLane) {
+          return blocked('is handled by the linked quote — accept it as annual prepay from the estimate instead');
+        }
+        // Same provenance check the supersede WRITE runs, so the preview can
+        // never offer a switch the write would refuse (and vice versa).
+        const target = await resolveAcceptedSwitchTarget(visit.id, conn);
+        if (!target.ok) return blocked(target.blockReason);
+        isAcceptedSwitch = true;
+        anchorEstimateId = target.estimateId;
+        supersedeVisitIds = target.visitIds;
       }
       // Fail CLOSED on an unreadable add-on count (Codex #3161 r2 P2):
       // swallowing the error as "no add-ons" would let a transient blip
@@ -9168,7 +9666,7 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       // actually carries add-on lines billing outside its coverage.
       let addonCount;
       try {
-        addonCount = await db('scheduled_service_addons')
+        addonCount = await conn('scheduled_service_addons')
           .where({ scheduled_service_id: anchor.id })
           .count({ n: '*' })
           .first();
@@ -9187,7 +9685,7 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       let bookedVisitCount = null;
       if (anchor.recurring_ongoing === false) {
         try {
-          const seriesCount = await db('scheduled_services')
+          const seriesCount = await conn('scheduled_services')
             .where(function series() {
               this.where({ id: anchor.id }).orWhere({ recurring_parent_id: anchor.id });
             })
@@ -9215,28 +9713,32 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
         windowStartRaw: anchor.window_start || null,
       };
     } else {
-      const draftCount = Number.parseInt(req.query.recurringCount, 10);
+      // Draft mode belongs to the prepay-on-book modal alone. The switch lane
+      // only ever previews a COMMITTED series, so its gate must not expose the
+      // pre-save probe (which prices from client-supplied query params).
+      if (!isEnabled('prepayOnBook')) return { httpStatus: 404, httpBody: { error: 'Not found' } };
+      const draftCount = Number.parseInt(query.recurringCount, 10);
       input = {
         mode: 'draft',
         bookedVisitCount: Number.isInteger(draftCount) && draftCount >= 2 ? draftCount : null,
-        customerId: String(req.query.customerId || '').trim(),
-        coverageServiceType: String(req.query.serviceType || '').trim(),
-        perVisit: req.query.price === undefined || req.query.price === null || req.query.price === ''
+        customerId: String(query.customerId || '').trim(),
+        coverageServiceType: String(query.serviceType || '').trim(),
+        perVisit: query.price === undefined || query.price === null || query.price === ''
           ? null
-          : Number(req.query.price),
-        rawCadence: String(req.query.cadence || '').trim(),
-        intervalDays: Number(req.query.intervalDays),
-        hasAddons: req.query.hasAddons === 'true',
-        hasBoosters: req.query.hasBoosters === 'true',
-        skipWeekends: req.query.skipWeekends === 'true',
-        firstVisitDateRaw: req.query.firstVisitDate,
-        windowStartRaw: req.query.windowStart,
+          : Number(query.price),
+        rawCadence: String(query.cadence || '').trim(),
+        intervalDays: Number(query.intervalDays),
+        hasAddons: query.hasAddons === 'true',
+        hasBoosters: query.hasBoosters === 'true',
+        skipWeekends: query.skipWeekends === 'true',
+        firstVisitDateRaw: query.firstVisitDate,
+        windowStartRaw: query.windowStart,
       };
     }
 
     const { customerId, coverageServiceType, perVisit } = input;
     if (!customerId || !coverageServiceType) {
-      return res.status(400).json({ error: 'customerId and serviceType are required' });
+      return { httpStatus: 400, httpBody: { error: 'customerId and serviceType are required' } };
     }
 
     // A blank / zero rate is "manual quote pending", NEVER $0 (waves-billing
@@ -9305,11 +9807,11 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     }
     if (input.hasBoosters) return blocked('can’t be combined with booster months');
 
-    const customer = await db('customers')
+    const customer = await conn('customers')
       .where({ id: customerId })
       .whereNull('deleted_at')
       .first('id', 'property_type', 'billing_mode', 'waveguard_tier', 'monthly_rate');
-    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    if (!customer) return { httpStatus: 404, httpBody: { error: 'Customer not found' } };
 
     // Monthly members' visits are covered by dues — the booking POST strips
     // estimated_price for them (memberSeriesCovered), so an armed prepay
@@ -9341,7 +9843,7 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     // funnel and the /secure lane).
     try {
       const PayerService = require('../services/payer');
-      const resolved = await PayerService.resolveForInvoice({ customerId, throwOnError: true });
+      const resolved = await PayerService.resolveForInvoice({ database: conn, customerId, throwOnError: true });
       if (resolved?.payerId) return blocked('isn’t available — this customer’s invoices bill to a third-party payer');
     } catch (payerErr) {
       logger.warn(`[schedule:prepay-preview] payer lookup failed for customer ${customerId}: ${payerErr.message} — refusing`);
@@ -9395,7 +9897,7 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     // term start, not today (Codex #3161 r3 P2) — the mint's own guard allows
     // termStart > activeTermEnd, so a renewal booked to begin after the
     // current term ends is a legitimate sale, not an overlap.
-    const overlapping = await db('annual_prepay_terms')
+    const overlapping = await conn('annual_prepay_terms')
       .where({ customer_id: customerId })
       .where(annualPrepayOverlapStatusClause())
       .orderBy('term_end', 'desc')
@@ -9405,10 +9907,52 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       return blocked(`isn’t available — this customer already has an annual prepay term through ${overlapEnd}. Book the first visit after that date to sell the renewal`);
     }
 
+    // ── What the prepaid year SUPERSEDES (on-site switch lane only) ───────
+    // Reported here, never voided here: this endpoint is read-only, and the
+    // rules live in resolveSupersededInvoices so the write path enforces the
+    // exact set the operator was shown.
+    let supersedes = [];
+    if (isAcceptedSwitch) {
+      const resolved = await resolveSupersededInvoices({
+        visitIds: supersedeVisitIds,
+        estimateId: anchorEstimateId,
+        customerId,
+        conn,
+      });
+      if (!resolved.ok) return blocked(resolved.blockReason);
+      supersedes = resolved.supersedes;
+    } else if (switchLane && input.mode === 'committed' && scheduledServiceId) {
+      // NON-ESTIMATE committed series under the switch gate: run the SAME
+      // resolver the write path runs (estimateId null ⇒ live-attached-
+      // invoice refusal), so the sheet never renders a collectible offer the
+      // POST then 409s (Codex P1: preview/write parity). Scoped to the
+      // switch gate so the prepay-on-book modal lane stays byte-identical
+      // while only ITS gate is lit.
+      const target = await resolveAcceptedSwitchTarget(scheduledServiceId, conn);
+      if (!target.ok) return blocked(target.blockReason);
+      const resolved = await resolveSupersededInvoices({
+        visitIds: target.visitIds,
+        estimateId: null,
+        customerId: target.customerId || customerId,
+        conn,
+      });
+      if (!resolved.ok) return blocked(resolved.blockReason);
+    }
+
     const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass });
     const planLabel = `${coverageServiceType} Annual Prepay`;
 
-    res.json({
+    // The setup fee is only real — and therefore only waivable — when it is
+    // ACTUALLY on an invoice this switch supersedes. Derived from the line
+    // items, never assumed from the plan class (the manual prepay-on-book
+    // lane never writes the fee, so it has nothing to waive; see setupFee
+    // below).
+    const supersededSetupFee = supersedes
+      .flatMap((inv) => inv.lines)
+      .filter((li) => /setup fee/i.test(li.description))
+      .reduce((sum, li) => sum + (Number(li.amount) || 0), 0);
+
+    return {
       eligible: true,
       blockReason: null,
       perVisit: Math.round(perVisit * 100) / 100,
@@ -9426,7 +9970,20 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       // writes that fee, so a per-visit booking here never owes it and there
       // is nothing to waive — claiming otherwise sells a discount that does
       // not exist. (The class still drives the no-percentage rule above.)
-      setupFee: null,
+      //
+      // The on-site switch lane is the one case where the fee IS real: the
+      // accept already invoiced it, that invoice is superseded here, and the
+      // amount comes off its own line items rather than a constant. Zero
+      // superseded fee ⇒ null, same as every other lane.
+      setupFee: supersededSetupFee > 0
+        ? { amount: Math.round(supersededSetupFee * 100) / 100, waivedWithPrepay: true }
+        : null,
+      // Invoices the prepaid year replaces. The caller retires them through
+      // POST /:id/prepay-switch/supersede BEFORE minting the prepay, so there
+      // is never a window where both are payable; an abandoned switch calls
+      // /undo, which re-mints an equivalent draft. Always an array; empty on
+      // every lane but the switch.
+      supersedes,
       termStart,
       // Ready-to-post body for the Customer 360 mint
       // (POST /api/admin/customers/:id/annual-prepay-invoice), so the modal
@@ -9440,9 +9997,643 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
         termStart,
         ...(firstVisitDate ? { firstVisitDate } : {}),
         ...(firstVisitWindowStart ? { firstVisitWindowStart } : {}),
-        note: 'Annual prepay sold when the visit was booked.',
+        note: isAcceptedSwitch
+          ? 'Annual prepay sold at the visit — switched from per application.'
+          : 'Annual prepay sold when the visit was booked.',
       },
+      // Internal: the switch endpoint's supersede context. Stripped from
+      // the HTTP payload by the route wrapper.
+      _switch: isAcceptedSwitch ? { estimateId: anchorEstimateId, visitIds: supersedeVisitIds } : null,
+    };
+}
+
+// GET /api/admin/schedule/annual-prepay-preview — the HTTP face of
+// computeAnnualPrepayPreview. Kept as a thin wrapper so the atomic
+// prepay-switch endpoint can run the SAME eligibility+pricing computation
+// server-side instead of trusting a payload the client carried over from an
+// earlier preview call.
+router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
+  try {
+    const out = await computeAnnualPrepayPreview(req.query);
+    if (out.httpStatus) return res.status(out.httpStatus).json(out.httpBody);
+    const { _switch, ...payload } = out;
+    res.json(payload);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/:id/prepay-switch — the WHOLE switch, one server
+// operation (Codex P0 r4: split client requests left a crash gap where the
+// per-application invoice was void with no replacement, and let billing state
+// drift between the void and the mint).
+//
+// One transaction, mirroring the proven /secure plan-choice mint
+// (secure-appointment-plans.selectSecurePlan) and the Customer 360 mint it
+// mirrors: per-customer advisory lock + in-transaction overlap assert, locked
+// re-reads of the visit and customer, in-transaction payer re-check, then —
+// atomically — a CAS void of the superseded accept-minted draft and the
+// prepay invoice + payment_pending term mint. Either everything commits or
+// nothing does; there is no instant where the old invoice is void without
+// the prepay existing, and none where both are payable.
+//
+// Every number is recomputed here via computeAnnualPrepayPreview — the
+// client sends NOTHING the server trusts. COLLECT-ONLY: the minted invoice
+// goes straight to the in-person tender; no pay link is ever sent from this
+// endpoint (send-later lives in Customer 360).
+//
+// Retry-safe: a lost response leaves a payment_pending term, so a retried
+// call fails the overlap assert (409) instead of minting a second year.
+router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
+  try {
+    if (!isEnabled('onsitePrepaySwitch')) return res.status(404).json({ error: 'Not found' });
+
+    // Server-derived eligibility + pricing — the same computation the sheet
+    // previewed, re-run fresh so nothing stale or client-shaped is minted.
+    const p = await computeAnnualPrepayPreview({ scheduledServiceId: req.params.id });
+    if (p.httpStatus) return res.status(p.httpStatus).json(p.httpBody);
+    if (!p.eligible) return res.status(409).json({ error: `This visit ${p.blockReason}` });
+
+    const target = await resolveAcceptedSwitchTarget(req.params.id);
+    if (!target.ok) return res.status(target.status || 409).json({ error: target.blockReason });
+
+    const InvoiceService = require('../services/invoice');
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+
+    let invoice = null;
+    let voided = [];
+    let mintedTerm = null;
+    // The AUTHORITATIVE payload is recomputed inside the transaction after
+    // the locks land (below); the pre-transaction preview above is only the
+    // fast-fail. Hoisted so the post-commit audit can reference it.
+    let mintPayload = p.mintPayload;
+    try {
+      await db.transaction(async (trx) => {
+        // Advisory lock + overlap re-check: a concurrent Customer 360 mint,
+        // /secure selection, or a RETRY of this same switch serializes here
+        // and collapses to one term.
+        const lockCustomerId = target.anchor.customer_id || target.visit.customer_id;
+        await lockAndAssertNoAnnualPrepayOverlap(
+          trx, lockCustomerId, mintPayload.termStart, false,
+          'Customer already has an annual prepay term through',
+        );
+        // Lock the visit and the customer (same order as the accept
+        // transaction — customer-family locks before invoice writes), then
+        // re-check the visit is still live.
+        const liveVisit = await trx('scheduled_services')
+          .where({ id: target.visit.id })
+          .forUpdate()
+          .first('id', 'status', 'customer_id');
+        // Live-status ALLOWLIST (Codex PR #3381 r2 P1): coverage
+        // deliberately never stamps completed/skipped rows, so a terminal
+        // visit could collect a year that then reports visitCovered:false
+        // forever. Only a visit that can still be stamped may switch.
+        const LIVE_SWITCH_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+        if (!liveVisit || !LIVE_SWITCH_STATUSES.includes(String(liveVisit.status || ''))) {
+          const err = new Error(liveVisit && ['completed', 'skipped'].includes(String(liveVisit.status || ''))
+            ? 'This visit is already closed out — coverage can’t stamp it. Sell the prepay from Customer 360 instead'
+            : 'This visit is no longer live — refresh the schedule');
+          err.switchConflict = true;
+          throw err;
+        }
+        // Identity pin (Codex P0 r9): the advisory lock above was taken for
+        // the PRE-transaction customer. A visit reassigned to a different
+        // customer in the gap would mint under a lock nobody holds for that
+        // customer — refuse instead.
+        if (String(liveVisit.customer_id) !== String(lockCustomerId)) {
+          const err = new Error('This visit was reassigned to a different customer — refresh the schedule');
+          err.switchConflict = true;
+          throw err;
+        }
+        // Provenance pin (Codex P0 r13): the supersede/mint context below
+        // rides `target`, resolved before the transaction. Re-resolve under
+        // the locks and refuse on ANY drift — a reparented series or a
+        // swapped source estimate would otherwise price from the new series
+        // while superseding the old one's invoice (or nothing at all).
+        const liveTarget = await resolveAcceptedSwitchTarget(req.params.id, trx);
+        if (!liveTarget.ok
+          || String(liveTarget.estimateId || '') !== String(target.estimateId || '')
+          || String(liveTarget.customerId || '') !== String(target.customerId || '')
+          || JSON.stringify([...liveTarget.visitIds].sort()) !== JSON.stringify([...target.visitIds].sort())) {
+          const err = new Error('This visit’s series changed while switching — refresh and try again');
+          err.switchConflict = true;
+          throw err;
+        }
+        await trx('customers').where({ id: liveVisit.customer_id }).forUpdate().first('id');
+        // In-transaction payer re-check (crib of the /secure mint): a payer
+        // attached since the preview must abort — the homeowner must not be
+        // invoiced for a third party's bill.
+        try {
+          const payerNow = await require('../services/payer').resolveForInvoice({
+            database: trx,
+            customerId: String(liveVisit.customer_id),
+            scheduledServiceId: String(target.visit.id),
+            throwOnError: true,
+          });
+          if (payerNow?.payerId) {
+            const err = new Error('This customer’s invoices now bill to a third-party payer');
+            err.switchConflict = true;
+            throw err;
+          }
+        } catch (payerErr) {
+          if (payerErr.switchConflict) throw payerErr;
+          const err = new Error('Couldn’t confirm who this customer bills to — refresh and try again');
+          err.switchConflict = true;
+          throw err;
+        }
+
+        // Lock the remaining PRICING INPUTS (Codex P0 r9): the recompute
+        // below prices from the series PARENT (a child visit inherits its
+        // rate/cadence), counts series children, and refuses on add-ons —
+        // all of which a concurrent editor could otherwise change mid-mint.
+        const anchorRowId = target.anchor.id || target.visit.id;
+        await trx('scheduled_services')
+          .where(function seriesRows() {
+            this.where({ id: anchorRowId }).orWhere({ recurring_parent_id: anchorRowId });
+          })
+          .forUpdate()
+          .select('id');
+        await trx('scheduled_service_addons')
+          .where({ scheduled_service_id: anchorRowId })
+          .forUpdate()
+          .select('id');
+
+        // Recompute eligibility + pricing UNDER the locks (Codex P0 r8):
+        // the pre-transaction preview priced from rows a concurrent editor
+        // could still change. With the visit and customer rows now locked,
+        // any in-flight edit to price, cadence, billing mode, or add-ons has
+        // either committed (and this recompute sees it) or is blocked behind
+        // these locks until commit — the stale-payload window is gone. The
+        // recompute rides THIS transaction's connection, so its reads see
+        // the locked, settled state (Codex P0 r9).
+        const live = await computeAnnualPrepayPreview({ scheduledServiceId: req.params.id }, trx);
+        if (live.httpStatus || !live.eligible) {
+          const err = new Error(`This visit ${live.blockReason || 'is no longer eligible for the switch'}`);
+          err.switchConflict = true;
+          throw err;
+        }
+        mintPayload = live.mintPayload;
+        // Re-assert overlap with the AUTHORITATIVE term start (Codex P0 r9):
+        // the first assert ran against the pre-transaction start, and a
+        // concurrent date move could shift the recomputed start into an
+        // existing term's window. Same advisory lock (idempotent within the
+        // transaction), fresh boundary.
+        await lockAndAssertNoAnnualPrepayOverlap(
+          trx, lockCustomerId, mintPayload.termStart, false,
+          'Customer already has an annual prepay term through',
+        );
+
+        // Lock EVERY invoice attached to the series before resolving (Codex
+        // P0 r5): the resolver's read and the CAS below must see the same
+        // rows no concurrent writer can mutate — an edit to line items,
+        // payer, or linkage between resolve and void would otherwise be
+        // erased by the void. With the rows locked, the resolve below IS the
+        // current state until commit; the CAS conditions stay as
+        // defense-in-depth.
+        await trx('invoices')
+          .where(function supersedeNets() {
+            this.whereIn('scheduled_service_id', target.visitIds);
+            if (target.estimateId) {
+              this.orWhere(function customerProvenance() {
+                this.where({ customer_id: target.customerId })
+                  .where('notes', 'like', `%Auto-generated from accepted estimate #${String(target.estimateId)}%`);
+              });
+            }
+          })
+          .forUpdate()
+          .select('id');
+        // Re-resolve the supersede set UNDER the locks, then retire it with
+        // a CAS that re-asserts the pristine-draft conditions in the UPDATE
+        // itself — if the invoice was sent, charged, or touched since the
+        // resolver read it, the row count comes back 0 and everything rolls
+        // back. This is the atomic void-with-mint.
+        const resolved = await resolveSupersededInvoices({
+          visitIds: target.visitIds,
+          estimateId: target.estimateId,
+          customerId: target.customerId,
+          conn: trx,
+        });
+        if (!resolved.ok) {
+          const err = new Error(`This visit ${resolved.blockReason}`);
+          err.switchConflict = true;
+          throw err;
+        }
+        for (const inv of resolved.supersedes) {
+          // Mirror voidInvoice's money guards under the lock (Codex P0 r20):
+          // a manually recorded payment rides payment_recorded_at or a
+          // paid/processing payments-ledger row (metadata linkage), neither
+          // of which the resolver's column guards see. Recorded money means
+          // this is a refund decision — never a switch.
+          const recordedPayment = await trx('payments')
+            .whereIn('status', ['paid', 'processing'])
+            .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(inv.id)])
+            .first('id');
+          if (recordedPayment) {
+            const err = new Error(`${inv.invoiceNumber || 'The per-application invoice'} has a recorded payment — resolve it from Invoices, never a switch`);
+            err.switchConflict = true;
+            throw err;
+          }
+          const retired = await trx('invoices')
+            .where({ id: inv.id, status: 'draft' })
+            .whereNull('sent_at')
+            .whereNull('paid_at')
+            .whereNull('payment_recorded_at')
+            .whereNull('stripe_payment_intent_id')
+            .update({ status: 'void', updated_at: new Date() });
+          if (retired !== 1) {
+            const err = new Error(`${inv.invoiceNumber || 'The per-application invoice'} changed while switching — refresh and try again`);
+            err.switchConflict = true;
+            throw err;
+          }
+          // No dunning/PI/deposit cleanup needed BY CONSTRUCTION: the
+          // resolver only admits unsent drafts with no PaymentIntent, no
+          // applied credit, and no deposit line — the states the canonical
+          // voidInvoice exists to untangle are all refused upstream.
+        }
+        voided = resolved.supersedes.map((inv) => ({ id: inv.id, invoiceNumber: inv.invoiceNumber, total: inv.total }));
+
+        invoice = await InvoiceService.create({
+          database: trx,
+          customerId: liveVisit.customer_id,
+          title: `${mintPayload.serviceType} - Annual Prepay`,
+          lineItems: [{
+            description: `${mintPayload.serviceType} - ${mintPayload.visitCount} prepaid application${mintPayload.visitCount === 1 ? '' : 's'}`,
+            quantity: 1,
+            unit_price: mintPayload.amount,
+            category: 'Annual prepay',
+          }],
+          notes: `${mintPayload.note} (visit ${target.visit.id})`,
+          dueDate: etDateString(),
+        });
+        // The sheet displayed a tax-free residential total; anything else
+        // coming back (unexpected tax, payer accrual) aborts the whole
+        // switch rather than charging a number nobody was shown.
+        if (Math.round(Number(invoice.total) * 100) !== Math.round(Number(mintPayload.amount) * 100)) {
+          const err = new Error('The minted total did not match the quoted total — switch aborted');
+          err.switchConflict = true;
+          throw err;
+        }
+
+        // Durable pointer FROM each retired row TO the prepay that replaced
+        // it (Codex P0 r7): if this prepay is later voided/refunded through
+        // the ordinary flows — long after this sheet is gone — the term-
+        // cancel sync follows the marker and re-mints the per-application
+        // invoice. Without it, the accept-minted AR dies silently with the
+        // prepay.
+        for (const inv of voided) {
+          await trx('invoices')
+            .where({ id: inv.id })
+            .update({
+              notes: trx.raw('concat(coalesce(notes, ?), ?)', ['', `\n${supersededByMarker(invoice.id)}`]),
+              updated_at: new Date(),
+            });
+        }
+
+        const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
+          customerId: liveVisit.customer_id,
+          // Estimate-origin switches carry their provenance so a later
+          // void/refund restores billing_mode to per_application, exactly
+          // like an accept-time prepay (resetBillingModeAfterTermCancel).
+          sourceEstimateId: target.estimateId || null,
+          prepayInvoiceId: invoice.id,
+          planLabel: mintPayload.planLabel,
+          monthlyRate: Math.round((mintPayload.amount / 12) * 100) / 100,
+          prepayAmount: Math.round(Number(invoice.total) * 100) / 100,
+          termStart: mintPayload.termStart,
+          coverageServiceType: mintPayload.serviceType,
+          coverageVisitCount: mintPayload.visitCount,
+          coverageCadence: mintPayload.coverageCadence,
+          ...(mintPayload.firstVisitDate ? { firstVisitDate: mintPayload.firstVisitDate } : {}),
+          ...(mintPayload.firstVisitWindowStart ? { firstVisitWindowStart: mintPayload.firstVisitWindowStart } : {}),
+          conn: trx,
+        });
+        if (!term) throw new Error('annual prepay term could not be created');
+        // A REUSED term keeps its old prepay_invoice_id (createTerm's merge
+        // is deliberately non-destructive), and after an aborted switch that
+        // id points at the invoice the abort voided — the payment sync keys
+        // on prepay_invoice_id, so paying THIS invoice would never activate
+        // coverage (Codex P0 r5). Rebind, but only a term this lane may own:
+        // undecided, and bound to nothing or to a dead invoice. Anything
+        // else is history this endpoint must not rewrite.
+        const boundId = term.prepay_invoice_id ? String(term.prepay_invoice_id) : null;
+        if (boundId !== String(invoice.id)) {
+          let rebindable = !term.renewal_decision;
+          if (rebindable && boundId) {
+            const bound = await trx('invoices').where({ id: boundId }).first('id', 'status');
+            rebindable = !bound
+              || ['void', 'cancelled', 'canceled', 'refunded'].includes(String(bound.status || '').toLowerCase());
+          }
+          if (!rebindable) {
+            const err = new Error('An existing annual prepay term is still bound to another invoice — resolve it from Customer 360');
+            err.switchConflict = true;
+            throw err;
+          }
+          await trx('annual_prepay_terms')
+            .where({ id: term.id })
+            .update({ prepay_invoice_id: invoice.id, updated_at: new Date() });
+          term.prepay_invoice_id = invoice.id;
+        }
+        mintedTerm = term;
+
+      });
+    } catch (err) {
+      if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
+      if (err && err.switchConflict) return res.status(409).json({ error: err.message });
+      throw err;
+    }
+
+    // Best-effort audit AFTER commit (Codex P0 r6, same lesson as the
+    // pre-slab SAVEPOINT bug): a failed INSERT inside the transaction aborts
+    // it at the PostgreSQL level, and swallowing that error lets the
+    // callback resolve — COMMIT silently becomes ROLLBACK while the route
+    // reports 201 for a switch that never happened. Outside the transaction
+    // a lost audit row is just a lost audit row.
+    await db('activity_log').insert({
+      customer_id: target.anchor.customer_id || target.visit.customer_id,
+      action: 'annual_prepay_invoice_created',
+      description: `Annual prepay invoice ${invoice.invoice_number} created from the on-site switch for ${mintPayload.serviceType}: $${Number(mintPayload.amount).toFixed(2)} covering ${mintPayload.visitCount} visit(s)${voided.length ? `; supersedes ${voided.map((v) => v.invoiceNumber || v.id).join(', ')}` : ''}`,
+      metadata: JSON.stringify({
+        invoice_id: invoice.id,
+        invoice_number: invoice.invoice_number,
+        annual_prepay_term_id: mintedTerm?.id || null,
+        scheduled_service_id: target.visit.id,
+        superseded_invoice_ids: voided.map((v) => v.id),
+        charge_in_person: true,
+      }),
+      created_at: new Date(),
+    }).catch((err) => logger.warn(`[schedule:prepay-switch] activity_log insert failed: ${err.message}`));
+
+    // COLLECT-ONLY by design (owner scope ruling 2026-08-12): the on-site
+    // switch means the card is in hand — the invoice is handed straight to
+    // the tender sheet and settles within minutes, so no pay link ever goes
+    // out from here and no days-long unpaid-prepay limbo exists for other
+    // flows to trip over. Send-the-invoice-later stays where it always was:
+    // Customer 360 → Annual prepay.
+    logger.info(`[schedule:prepay-switch] switched visit ${req.params.id}: minted ${invoice.invoice_number}, superseded ${voided.map((v) => v.invoiceNumber || v.id).join(', ') || 'nothing'}`);
+    res.status(201).json({ invoice, voided });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/:id/prepay-switch/undo — the operator backed out
+// of the tender (or the mint failed) after the per-application invoice was
+// already retired. Re-mint an equivalent draft so the visit bills exactly
+// what it billed before the switch was attempted.
+//
+// Amounts are read from the VOIDED ROW, never from the request (waves-billing:
+// never trust client-sent amounts) — the client supplies only ids, and each is
+// verified to be a void invoice belonging to this visit's series. Idempotent:
+// a row already replaced is skipped rather than duplicated.
+// GET /api/admin/schedule/:id/prepay-switch/status — is the switch's prepay
+// actually ACTIVATED? Paid is not activated (Codex P0 r20): the payment
+// routes deliberately swallow a failed syncTermForInvoicePayment, so an
+// invoice can sit paid while the term is payment_pending and the visits
+// unstamped — completing then would bill per application again. The client
+// claims success ONLY on this answer; a paid-but-pending state is repaired
+// synchronously here (the sync is idempotent) before answering. Ungated like
+// the undo: it is read-and-repair for switches already in flight.
+router.get('/:id/prepay-switch/status', requireAdmin, async (req, res, next) => {
+  try {
+    const invoiceId = String(req.query.invoiceId || '').trim();
+    if (!invoiceId) return res.status(400).json({ error: 'invoiceId is required' });
+    const visit = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'prepaid_method', 'annual_prepay_term_id');
+    if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
+    const invoice = await db('invoices')
+      .where({ id: invoiceId, customer_id: visit.customer_id })
+      .first('id', 'status', 'paid_at', 'annual_prepay_term_id');
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found for this customer' });
+
+    const invoiceStatus = String(invoice.status || '').toLowerCase();
+    const settled = ['paid', 'prepaid'].includes(invoiceStatus) || !!invoice.paid_at;
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    const readTerm = async () => (invoice.annual_prepay_term_id
+      ? db('annual_prepay_terms').where({ id: invoice.annual_prepay_term_id }).first('id', 'status')
+      : db('annual_prepay_terms').where({ prepay_invoice_id: invoice.id }).first('id', 'status'));
+    let term = await readTerm();
+    const termActiveStatuses = ['active', 'renewal_pending'];
+    if (settled && (!term || !termActiveStatuses.includes(String(term.status || '')))) {
+      // Paid but not activated — the exact swallowed-sync gap. Repair now.
+      try {
+        await AnnualPrepayRenewals.syncTermForInvoicePayment(invoice.id);
+      } catch (err) {
+        logger.warn(`[schedule:prepay-switch] status repair sync failed for invoice ${invoice.id}: ${err.message}`);
+      }
+      term = await readTerm();
+    }
+    // Coverage is judged by the COMPLETION PATH'S OWN AUTHORITY (Codex P0
+    // r27): annualPrepayCoversVisit validates the stamp's amount, the live
+    // paid term, the customer binding, and the coverage-service match — a
+    // loose method+id check here could bless a stale stamp from ANOTHER
+    // term, tell the operator to complete, and have the real completion
+    // gate reject coverage and bill again. The stamp must also point at
+    // THIS invoice's term.
+    const freshVisit = await db('scheduled_services')
+      .where({ id: visit.id })
+      .first('id', 'customer_id', 'service_type', 'prepaid_method', 'prepaid_amount',
+        'annual_prepay_term_id', 'scheduled_date');
+    const termActive = !!term && termActiveStatuses.includes(String(term.status || ''));
+    const stampMatchesTerm = !!freshVisit && !!term
+      && String(freshVisit.annual_prepay_term_id || '') === String(term.id);
+    const visitCovered = stampMatchesTerm
+      && await AnnualPrepayRenewals.annualPrepayCoversVisit(freshVisit, db);
+    res.json({
+      invoiceStatus,
+      settled,
+      termStatus: term ? term.status : null,
+      termActive,
+      visitCovered,
+      activated: settled && termActive && visitCovered,
     });
+  } catch (err) { next(err); }
+});
+
+// DELIBERATELY NOT GATED (Codex P1 r7): this is the compensation leg. A
+// client that started a switch just before the kill switch flipped can still
+// void its uncollected prepay through the ordinary invoice route — refusing
+// the restore here would strand the visit with no invoice at all. The
+// endpoint is admin-only, provenance-bound, marker-idempotent, and refuses
+// under any live prepay term, so keeping it reachable while the lane is dark
+// exposes nothing new; only NEW switches (preview + mint) are gated.
+router.post('/:id/prepay-switch/undo', requireAdmin, async (req, res, next) => {
+  try {
+    const target = await resolveAcceptedSwitchTarget(req.params.id);
+    if (!target.ok) return res.status(target.status || 409).json({ error: target.blockReason });
+
+    const ids = Array.isArray(req.body?.voidedInvoiceIds)
+      ? req.body.voidedInvoiceIds.map(String).filter(Boolean)
+      : [];
+    if (ids.length === 0) return res.json({ restored: [] });
+
+    const InvoiceService = require('../services/invoice');
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    const undoCustomerId = target.anchor.customer_id || target.visit.customer_id;
+    // Provenance-bound (Codex P0 r4): only the accept-minted invoice this
+    // lane itself retired is restorable — a crafted id pointing at some
+    // unrelated historical void invoice matches nothing and restores
+    // nothing. No estimate origin ⇒ nothing was superseded ⇒ nothing to
+    // restore.
+    const provenance = target.estimateId ? acceptProvenanceRe(target.estimateId) : null;
+    const restored = [];
+    const failed = [];
+    for (const id of ids) {
+      // IDEMPOTENT + TRANSACTIONAL (Codex P0 r3): the voided row is locked,
+      // the restore-marker check and the re-mint commit together, and the
+      // marker makes a retried/duplicated undo a no-op instead of a second
+      // bill. A lost response is safe to retry.
+      try {
+        const outcome = await db.transaction(async (trx) => {
+          // LOCK ORDER matches the switch and every mint writer (Codex P1
+          // r21): per-customer prepay advisory lock → scheduled-invoice mint
+          // lock → invoice row lock. The unlocked pre-read supplies ids and
+          // dates; every guard re-runs on the LOCKED re-read.
+          const preRow = await trx('invoices')
+            .where({ id, customer_id: undoCustomerId })
+            .first('id', 'customer_id', 'scheduled_service_id', 'notes', 'status', 'invoice_number');
+          if (!preRow || String(preRow.status || '').toLowerCase() !== 'void') return { skipped: true };
+          // Shared with the term-cancel restore (invoice.js) so the two can
+          // never disagree; falls back to the accept series' first upcoming
+          // visit for an UNATTACHED setup-only row (Codex P0 r13).
+          const assertDate = await InvoiceService.prepaySwitchRestoreAssertDate(trx, preRow);
+          // Advisory lock ONLY, then a CONTAINMENT check (Codex P0 r23): the
+          // shared assert is start-agnostic and would read a FUTURE term as
+          // a conflict, parking this restore forever. Double-bill means a
+          // binding term whose window spans the restored visit's date.
+          await lockAndAssertNoAnnualPrepayOverlap(trx, undoCustomerId, assertDate, true);
+          const { annualPrepayOverlapStatusClause } = require('../services/secure-appointment-plans');
+          // The superseding prepay's own term is excluded (Codex P0 r30):
+          // its coverage is exactly what the abort/refund removed. Its id
+          // rides the durable marker in the row's notes.
+          const preSb = /\[prepay-switch-superseded-by:([^\]]+)\]/.exec(String(preRow.notes || ''));
+          const coveringTerm = await trx('annual_prepay_terms')
+            .where({ customer_id: undoCustomerId })
+            .where(annualPrepayOverlapStatusClause())
+            .where('term_start', '<=', assertDate)
+            .where('term_end', '>=', assertDate)
+            .modify((q) => { if (preSb) q.whereNot({ prepay_invoice_id: preSb[1] }); })
+            .first('id');
+          if (coveringTerm) {
+            return { failed: { id, invoiceNumber: preRow.invoice_number || null, error: `a prepaid year covers ${assertDate} — restoring the per-application invoice would bill them twice. Void the prepay from Invoices first if the switch really is being unwound` } };
+          }
+          if (preRow.scheduled_service_id) {
+            const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+            await acquireScheduledInvoiceMintLock(trx, preRow.scheduled_service_id);
+          }
+          const row = await trx('invoices')
+            .where({ id, customer_id: undoCustomerId })
+            .forUpdate()
+            .first('id', 'invoice_number', 'status', 'line_items', 'notes', 'title',
+              'scheduled_service_id', 'customer_id');
+          // Identity recheck + full guard suite on the LOCKED row: void,
+          // carrying this estimate's accept stamp AND the durable
+          // superseded-by marker the switch stamped at retirement (Codex P0
+          // r12), with the superseding prepay DEAD.
+          if (!row || String(row.status || '').toLowerCase() !== 'void') return { skipped: true };
+          if (!provenance || !provenance.test(String(row.notes || ''))) return { skipped: true };
+          const supersededBy = /\[prepay-switch-superseded-by:([^\]]+)\]/.exec(String(row.notes || ''));
+          if (!supersededBy) return { skipped: true };
+          const prepayRow = await trx('invoices')
+            .where({ id: supersededBy[1] })
+            .first('id', 'status');
+          const prepayDead = !!prepayRow
+            && ['void', 'cancelled', 'canceled', 'refunded'].includes(String(prepayRow.status || '').toLowerCase());
+          // Surfaced, not silently skipped (Codex P0 r17): the operator must
+          // know the restore is BLOCKED by a live year, not done.
+          if (!prepayDead) {
+            return { failed: { id, invoiceNumber: row.invoice_number || null, error: 'the annual prepay that superseded it is still live — void it from Invoices first, then retry' } };
+          }
+          // And the prepay's Stripe outcome must be RESOLVED (Codex P0 r29):
+          // an orphaned/ambiguous saved-card tender can mean money collected
+          // with nothing local — restoring here would re-bill a paid
+          // customer. Fail closed to manual review on refusal OR an
+          // unverifiable read.
+          try {
+            await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(supersededBy[1], trx);
+          } catch (reconErr) {
+            return { failed: { id, invoiceNumber: row.invoice_number || null, error: `the superseding prepay has an unresolved Stripe charge outcome (${reconErr.message}) — reconcile it in Stripe/Invoices before restoring` } };
+          }
+          // Already restored (raced a duplicate, or an earlier response was
+          // lost) — report the existing replacement, mint nothing.
+          const existing = await trx('invoices')
+            .where('notes', 'like', `%${restoreMarker(row.id)}%`)
+            .first('id', 'invoice_number');
+          if (existing) {
+            return { restored: { replacedInvoiceId: id, invoiceId: existing.id, invoiceNumber: existing.invoice_number || null } };
+          }
+          let lines = invoiceLineItems(row.line_items)
+            .map((li) => ({
+              description: String(li?.description || ''),
+              quantity: Number(li?.quantity) > 0 ? Number(li.quantity) : 1,
+              unit_price: Number(li?.unit_price ?? li?.amount),
+            }))
+            .filter((li) => li.description && Number.isFinite(li.unit_price));
+          // Live-AR classification under the mint lock, byte-matched with the
+          // term-cancel restore (Codex P0 r19): fee-only when a live invoice
+          // provably bills the base application; full restore beside
+          // unrelated invoices; unreadable defers to manual review.
+          if (row.scheduled_service_id) {
+            const liveOnVisit = await trx('invoices')
+              .where({ scheduled_service_id: row.scheduled_service_id })
+              .whereNot({ id: row.id })
+              .whereNotIn('status', ['void', 'cancelled', 'canceled', 'refunded'])
+              .select('id', 'invoice_number', 'line_items');
+            if (liveOnVisit.length > 0) {
+              const billsApplication = (inv) => invoiceLineItems(inv.line_items).some((li) => (
+                /_primary$/.test(String(li?.client_id || ''))
+                || /^First service application$/i.test(String(li?.description || '').trim())
+              ));
+              const unreadable = liveOnVisit.some((inv) => invoiceLineItems(inv.line_items).length === 0);
+              if (unreadable) {
+                return { failed: { id, invoiceNumber: row.invoice_number || null, error: 'a live invoice on this visit has unreadable lines — reconcile from Invoices' } };
+              }
+              if (liveOnVisit.some(billsApplication)) {
+                lines = lines.filter((li) => /setup fee/i.test(li.description));
+                if (lines.length === 0) {
+                  logger.info(`[schedule:prepay-switch] undo restore skipped for ${row.invoice_number || id}: the application is already billed and no setup fee rode the superseded row`);
+                  return { skipped: true };
+                }
+                logger.info(`[schedule:prepay-switch] undo restoring SETUP FEE ONLY for ${row.invoice_number || id}: application billed by a live visit invoice`);
+              }
+              // else: live invoices bill something unrelated — full restore.
+            }
+          }
+          if (lines.length === 0) return { failed: { id, invoiceNumber: row.invoice_number || null, error: 'no readable line items' } };
+          let recreated;
+          try {
+            recreated = await InvoiceService.create({
+              database: trx,
+              customerId: row.customer_id,
+              scheduledServiceId: row.scheduled_service_id,
+              title: row.title || 'Service invoice',
+              lineItems: lines,
+              // Superseded-by markers stripped (Codex P0 r11): the
+              // replacement must never read as superseded itself, or a later
+              // void of IT would let the old prepay's sync mint fresh AR.
+              notes: `${stripSupersededMarkers(row.notes)}\n${restoreMarker(row.id)} Re-created after an annual-prepay switch was cancelled; replaces voided ${row.invoice_number || id}.`.trim(),
+              dueDate: etDateString(),
+            });
+          } catch (createErr) {
+            // Caught INSIDE the transaction so the failure report keeps the
+            // row's identity; nothing was written, so committing is a no-op.
+            return { failed: { id, invoiceNumber: row.invoice_number || null, error: createErr.message } };
+          }
+          return { restored: { replacedInvoiceId: id, invoiceId: recreated?.id || null, invoiceNumber: recreated?.invoice_number || null } };
+        });
+        if (outcome.restored) restored.push(outcome.restored);
+        else if (outcome.failed) failed.push(outcome.failed);
+      } catch (err) {
+        // The live-prepay assert aborts the WHOLE request — restoring the
+        // other ids would be the same double-bill.
+        if (err && err.annualPrepayOverlap) {
+          return res.status(409).json({
+            error: 'This customer has a live annual prepay — restoring the per-application invoice would bill them twice. Void the prepay from Invoices first if the switch really is being unwound.',
+          });
+        }
+        logger.error(`[schedule:prepay-switch] undo re-mint FAILED for voided ${id}: ${err.message}`);
+        failed.push({ id, invoiceNumber: null, error: err.message });
+      }
+    }
+    logger.info(`[schedule:prepay-switch] undo for visit ${req.params.id}: restored ${restored.length}, failed ${failed.length}`);
+    res.json({ restored, failed });
   } catch (err) { next(err); }
 });
 
@@ -11220,6 +12411,7 @@ function flushEstimateSlotCaches() {
 }
 
 router._test = {
+  noCardOnFileAlert,
   isTechnicianRequest,
   scopeToAssignedTech,
   technicianOwnsScheduledService,

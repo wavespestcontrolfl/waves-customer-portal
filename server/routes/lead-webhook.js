@@ -445,6 +445,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     estimateAutomationReadiness = applyLeadEstimateAutomationGate(evaluateLeadEstimateAutomationReadiness({
       intake,
       customer,
+      // Raw submission: carries structured commercial flags the intake
+      // shape doesn't model (codex r44 P1).
+      body,
       phone: phoneFormatted,
       serviceInterest,
     }));
@@ -1083,6 +1086,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
                   serviceInterest: triageServiceInterestUpdate,
                 },
                 customer,
+                // Structured commercial flags must survive the triage
+                // re-evaluation too, or a concrete generic service label
+                // replaces the blocked snapshot with an auto-sendable
+                // residential one (codex r46 P1).
+                body,
                 phone: phoneFormatted,
                 serviceInterest: triageServiceInterestUpdate,
               }));
@@ -1576,6 +1584,18 @@ function buildLeadWebhookIntake(body = {}) {
     lastName,
     serviceInterest,
     leadSource,
+    // Free-prose message body — the readiness gate's commercial-signal scan
+    // reads it (a residential form whose own words describe a commercial
+    // premises must park, not auto-price).
+    // EXACT prose key names only — a substring pattern swept attribution
+    // and address metadata ('lead_source_detail', an address-detail field)
+    // into the commercial-signal scan, where "Commercial Pest Control
+    // campaign" wrongly blocked a residential lead (codex r8 P2).
+    message: firstNonEmpty(
+      body.message,
+      body['Message'],
+      findField(body, /^(?:message|comments?|notes?|description|details)$/i),
+    ),
   };
 }
 
