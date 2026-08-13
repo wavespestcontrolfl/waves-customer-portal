@@ -8939,11 +8939,14 @@ function haversine(lat1, lng1, lat2, lng2) {
 // behavior-preserving). Same tech-ownership scoping as every per-visit read.
 router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
   try {
-    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
-      return res.status(404).json({ error: 'Scheduled service not found' });
-    }
-    const svc = await db('scheduled_services').where({ id: req.params.id }).first();
-    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // ONE ownership-scoped fetch — a separate check-then-SELECT lets a
+    // dispatch reassignment in between hand the credential-bearing brief
+    // (gate/garage/lockbox codes) to the former technician.
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.*');
+    if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
     if (!svc.pre_service_brief) return res.json({ brief: null });
     // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
     // off, generic visit briefs cached while the gate was on are WITHDRAWN
@@ -10579,11 +10582,12 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
       || String(target.pre_service_brief_type || '') === PrevisitBrief.WDO_BRIEF_TYPE;
     if (isWdo) {
       await AppointmentTagger.onServiceScheduled(req.params.id, { suppressWelcome: true });
-      // Same mid-flight reassignment recheck as the generic path below.
-      if (!(await technicianOwnsScheduledService(req, req.params.id))) {
-        return res.status(404).json({ error: 'Scheduled service not found' });
-      }
-      const svc = await db('scheduled_services').where({ id: req.params.id }).first();
+      // Ownership-scoped final read (atomic — see the generic path below).
+      const svc = await db('scheduled_services')
+        .where({ 'scheduled_services.id': req.params.id })
+        .modify((q) => technicianCurrentVisitFilter(req, q))
+        .first('scheduled_services.*');
+      if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
       return res.json({ success: true, brief: briefValue(svc.pre_service_brief) });
     }
 
@@ -10610,18 +10614,20 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
         reason: outcome.reason,
       });
     }
-    // Re-check ownership before returning: generation can run minutes
-    // (LLM fallback chain), and a dispatch reassignment mid-flight would
-    // otherwise hand the regenerated brief — deterministic gate/garage/
-    // lockbox codes included — to the FORMER technician.
-    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
-      return res.status(404).json({ error: 'Scheduled service not found' });
-    }
-    const svc = await db('scheduled_services').where({ id: req.params.id }).first();
+    // Ownership-scoped final read in ONE query: generation can run
+    // minutes (LLM fallback chain), and a check-then-SELECT would let a
+    // mid-flight dispatch reassignment hand the regenerated brief —
+    // deterministic gate/garage/lockbox codes included — to the FORMER
+    // technician.
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.*');
+    if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
     res.json({
       success: true,
       unchanged: outcome.reason === 'unchanged',
-      brief: briefValue(svc?.pre_service_brief),
+      brief: briefValue(svc.pre_service_brief),
     });
   } catch (err) { next(err); }
 });

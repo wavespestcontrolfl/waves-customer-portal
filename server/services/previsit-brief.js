@@ -1128,14 +1128,15 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
 
   // Input-hash cache: everything that lands in the stored brief hashes in,
   // so any grounding change regenerates and an unchanged route no-ops.
-  const groundingHash = crypto.createHash('sha256')
+  const hashOf = (g) => crypto.createHash('sha256')
     .update(`${PROMPT_VERSION}|${stableStringify({
-      llmFacts: grounding.llmFacts,
-      access: grounding.access,
-      productGuidance: grounding.productGuidance,
-      lastVisitProducts: grounding.lastVisitProducts,
+      llmFacts: g.llmFacts,
+      access: g.access,
+      productGuidance: g.productGuidance,
+      lastVisitProducts: g.lastVisitProducts,
     })}`)
     .digest('hex');
+  const groundingHash = hashOf(grounding);
 
   const existing = parseStoredBrief(svc.pre_service_brief);
   if (
@@ -1146,6 +1147,28 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
   }
 
   const { via, body } = await generateBriefBody(grounding, deps);
+
+  // The LLM leg can run minutes. The CAS below only defends against
+  // OTHER brief writers — preferences, protocol guidance, or the visit
+  // itself may have changed with no competing write. Re-read the
+  // deterministic grounding and verify the hash right before persisting;
+  // a mismatch means this body was built from obsolete facts (stale
+  // access codes included) — drop it and let the next sweep tick
+  // regenerate from the fresh grounding.
+  if (via !== 'template' || body) {
+    const freshSvc = await dbh('scheduled_services')
+      .where({ 'scheduled_services.id': scheduledServiceId })
+      .first();
+    if (!freshSvc) return { skipped: true, reason: 'not_found' };
+    if (TERMINAL_STATUSES.has(String(freshSvc.status || '').toLowerCase())) {
+      return { skipped: true, reason: 'terminal_status' };
+    }
+    const freshGrounding = await assembleGrounding(freshSvc, dbh);
+    if (freshGrounding.error) return { skipped: true, reason: freshGrounding.error };
+    if (hashOf(freshGrounding) !== groundingHash) {
+      return { skipped: true, reason: 'grounding_changed' };
+    }
+  }
 
   const brief = {
     version: VISIT_BRIEF_TYPE,

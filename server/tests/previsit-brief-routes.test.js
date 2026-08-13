@@ -58,14 +58,16 @@ function stubTables(rows, { ownsVisit = true } = {}) {
     q.where = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
     q.whereNot = jest.fn(() => q);
-    // The tech-ownership probe selects exactly 'scheduled_services.id';
-    // the data reads select plain column lists — distinguish so a test
-    // can present a visit that EXISTS but is not the tech's.
-    q.first = jest.fn(async (...cols) => (
-      cols[0] === 'scheduled_services.id'
-        ? (ownsVisit ? { id: 'svc-1' } : undefined)
-        : rows[table]
-    ));
+    q.modify = jest.fn((cb) => { cb(q); return q; });
+    // The tech-ownership probe selects exactly 'scheduled_services.id' and
+    // the atomic ownership-scoped reads select 'scheduled_services.*' —
+    // both honor ownsVisit so a test can present a visit that EXISTS but
+    // is not the tech's. Plain column lists are unscoped data reads.
+    q.first = jest.fn(async (...cols) => {
+      if (cols[0] === 'scheduled_services.id') return ownsVisit ? { id: 'svc-1' } : undefined;
+      if (cols[0] === 'scheduled_services.*') return ownsVisit ? rows[table] : undefined;
+      return rows[table];
+    });
     return q;
   });
 }

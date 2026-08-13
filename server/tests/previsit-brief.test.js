@@ -193,6 +193,12 @@ beforeEach(() => {
   process.env.GATE_PREVISIT_BRIEF = 'true';
   process.env.ANTHROPIC_API_KEY = 'test-key';
   global.__dispatch = jest.fn(async () => ({ ok: true, json: { ...CLEAN_LLM_JSON } }));
+  // Persistent defaults (never ...Once): generateVisitBrief re-reads the
+  // deterministic grounding right before persisting, so every source is
+  // consulted twice per generation.
+  mockGrassContext.mockResolvedValue({ trackKey: 'st_augustine' });
+  mockWindowContext.mockResolvedValue({});
+  mockSummarize.mockReturnValue(null);
   mockGetContext.mockResolvedValue({
     serviceHistory: [{ type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter.' }],
     propertyProfile: { accessNotes: 'gate code [redacted]', pets: 'One dog, friendly' },
@@ -415,7 +421,7 @@ describe('grounded allowlist validation of LLM output', () => {
 
 describe('aggregator serviceHistory is line-scoped', () => {
   test('a pest brief never summarizes lawn/termite work from context history', async () => {
-    mockGetContext.mockResolvedValueOnce({
+    mockGetContext.mockResolvedValue({
       serviceHistory: [
         { type: 'Lawn Care Service', date: '2026-08-05', notes: 'Applied pre-emergent to turf.' },
         { type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter.' },
@@ -563,7 +569,7 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
 
 describe('LLM-boundary redaction of free text', () => {
   test('codes in flag details and call summaries are masked in the payload, not in the access block', async () => {
-    mockGetContext.mockResolvedValueOnce({
+    mockGetContext.mockResolvedValue({
       serviceHistory: [],
       propertyProfile: null,
       flags: [{ type: 'pet_alert', severity: 'info', detail: 'Dog in yard, gate code 2468 to enter' }],
@@ -589,7 +595,7 @@ describe('LLM-boundary redaction of free text', () => {
 
 describe('ET calendar-day labeling (UTC host)', () => {
   test('pg DATE values keep their calendar day; late-ET timestamps do not roll to the next day', async () => {
-    mockGetContext.mockResolvedValueOnce({
+    mockGetContext.mockResolvedValue({
       serviceHistory: [],
       propertyProfile: null,
       flags: [],
@@ -778,7 +784,7 @@ describe('lawn bounded product section', () => {
   });
 
   test('unknown grass track (no assignment) fails CLOSED — no guessed window', async () => {
-    mockGrassContext.mockResolvedValueOnce({ trackKey: null });
+    mockGrassContext.mockResolvedValue({ trackKey: null });
     const state = useDb(baseResponses({
       scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }],
     }));
@@ -793,7 +799,7 @@ describe('lawn bounded product section', () => {
   });
 
   test('an assigned protocol window wins over date derivation (unknown track included)', async () => {
-    mockGrassContext.mockResolvedValueOnce({ trackKey: null });
+    mockGrassContext.mockResolvedValue({ trackKey: null });
     mockSummarize.mockReturnValue({
       window: { key: 'jun_blackout_stress', month: 6, title: 'Blackout stress', visitType: 'spray', goal: 'Survive blackout' },
       products: [
@@ -1009,15 +1015,18 @@ describe('tree & shrub visits are never lawn', () => {
 
 describe('sweep', () => {
   test('iterates today, tallies outcomes, one failure never stops the rest', async () => {
-    let call = 0;
     const state = useDb({
       ...baseResponses(),
+      // Per-visit routing (not call counting — generation reads the visit
+      // row twice now: initial load + the pre-write grounding re-read):
+      // svc-1 always resolves, svc-2's reads always fail.
       scheduled_services: (rec) => {
-        const isSweepSelect = rec.ops.some(([m, args]) => m === 'join');
+        const isSweepSelect = rec.ops.some(([m]) => m === 'join');
         if (isSweepSelect) return [{ id: 'svc-1' }, { id: 'svc-2' }];
-        call += 1;
-        if (call === 1) return [{ ...SVC }];
-        throw new Error('db down');
+        const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
+        const id = whereObj?.['scheduled_services.id'] || whereObj?.id;
+        if (id === 'svc-2') throw new Error('db down');
+        return [{ ...SVC }];
       },
     });
     const out = await PrevisitBrief.runSweep();
