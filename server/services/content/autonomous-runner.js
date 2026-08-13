@@ -3919,6 +3919,16 @@ function servicePathSlug(value) {
     mosquito: 'mosquito-control',
     termite: 'termite-control',
     rodent: 'rodent-control',
+    // MUST match content-brief-builder's SERVICE_CITY_SLUG. Without this key
+    // the fallthrough builds `/tree-shrub-{city}-fl/`, which does not exist,
+    // so the protected-city-service guard probes a phantom path and cannot
+    // see the REAL page at `/tree-and-shrub-care-{city}-fl/` (all eight
+    // cities verified live 2026-07-29). These rows carry no page_url and a
+    // null target_url, so this map is the only thing deciding what gets
+    // checked — a miss means the guard silently fails to protect a live page
+    // (Codex P1). tree_shrub also lands here: slugifyPathPart normalizes the
+    // underscore form to tree-shrub.
+    'tree-shrub': 'tree-and-shrub-care',
     'bed-bug': 'bed-bug-control',
     bedbug: 'bed-bug-control',
     commercial: 'commercial-pest-control',

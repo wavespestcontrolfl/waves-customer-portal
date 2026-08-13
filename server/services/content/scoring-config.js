@@ -141,12 +141,29 @@ const WEEKLY_MIX = {
  * everything else keeps the global minScoreToAct. The env value is read at
  * call time and clamped to [20, minScoreToAct] so a typo can neither open
  * the queue to junk nor silently raise the blog floor above the global one.
+ *
+ * rewrite_title_meta gets the same treatment via AUTONOMOUS_REWRITE_MIN_SCORE
+ * but DEFAULTS to the global floor: ctr_rewrite scores structurally top out
+ * in the 60s–70s (35×0.85 opportunity weight + refreshLift, no contentGap
+ * credit, and the facts boost is scoped to refresh_existing_page), so the
+ * 75 floor made the bucket inert — zero rows persisted all-time as of
+ * 2026-08-11 against 13 qualifying low-CTR queries in the 28d window.
+ * Unset env keeps the historical behavior; the operator opts the lane on by
+ * setting the env (e.g. 60), same clamp rules as the blog floor.
  */
 function minScoreToActFor(actionType) {
-  if (String(actionType || '') !== 'new_supporting_blog') return THRESHOLDS.minScoreToAct;
-  const raw = Number.parseInt(process.env.AUTONOMOUS_BLOG_MIN_SCORE, 10);
-  const floor = Number.isFinite(raw) ? raw : THRESHOLDS.blogMinScoreToAct;
-  return Math.min(Math.max(floor, 20), THRESHOLDS.minScoreToAct);
+  const action = String(actionType || '');
+  if (action === 'new_supporting_blog') {
+    const raw = Number.parseInt(process.env.AUTONOMOUS_BLOG_MIN_SCORE, 10);
+    const floor = Number.isFinite(raw) ? raw : THRESHOLDS.blogMinScoreToAct;
+    return Math.min(Math.max(floor, 20), THRESHOLDS.minScoreToAct);
+  }
+  if (action === 'rewrite_title_meta') {
+    const raw = Number.parseInt(process.env.AUTONOMOUS_REWRITE_MIN_SCORE, 10);
+    const floor = Number.isFinite(raw) ? raw : THRESHOLDS.minScoreToAct;
+    return Math.min(Math.max(floor, 20), THRESHOLDS.minScoreToAct);
+  }
+  return THRESHOLDS.minScoreToAct;
 }
 
 /**

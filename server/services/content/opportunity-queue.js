@@ -69,6 +69,17 @@ function blogMinScoreFor(minScore) {
     : minScore;
 }
 
+// Same override semantics for the rewrite floor (AUTONOMOUS_REWRITE_MIN_SCORE,
+// default = the global floor so unset env changes nothing). Without this
+// claim-side twin, a lowered persist floor would admit rewrite rows that sit
+// forever unclaimable at the global CASE floor — the exact
+// persisted-but-unclaimable trap the listicle_family blog-floor ride fixed.
+function rewriteMinScoreFor(minScore) {
+  return minScore === THRESHOLDS.minScoreToAct
+    ? minScoreToActFor('rewrite_title_meta')
+    : minScore;
+}
+
 class OpportunityQueue {
   /**
    * Read top-N pending opportunities, sorted by score desc. No claim.
@@ -98,8 +109,8 @@ class OpportunityQueue {
         // listicle_family blog-floor ride), so previews show exactly what
         // the runner would claim.
         q = q.whereRaw(
-          `score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') THEN ?::numeric ELSE ?::numeric END`,
-          [blogMinScoreFor(minScore), minScore],
+          `score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') OR (bucket = 'no_content_yet' AND action_type = 'create_or_refresh_city_service_page') THEN ?::numeric WHEN action_type = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END`,
+          [blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore],
         );
       }
       if (bucket) q = q.where('bucket', bucket);
@@ -167,7 +178,13 @@ class OpportunityQueue {
            -- floor would leave 45-74-point refreshes persisted-but-
            -- unclaimable). Bounded to that one action: a demoted family
            -- row must not ride the blog floor into a claim.
-           AND score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') THEN ?::numeric ELSE ?::numeric END
+           -- rewrite_title_meta rides its own env-tunable floor for the
+           -- same reason (AUTONOMOUS_REWRITE_MIN_SCORE; default = global,
+           -- so unset env leaves this branch equal to the ELSE), and a
+           -- link_boost companion DERIVED from a ctr_rewrite parent rides
+           -- it too — the companion inherits the parent's score, so a
+           -- separate floor would strand it persisted-but-unclaimable.
+           AND score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') OR (bucket = 'no_content_yet' AND action_type = 'create_or_refresh_city_service_page') THEN ?::numeric WHEN action_type = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END
            ${whereActionType}
            ${whereExclude}
            ${whereFamilyGate}
@@ -176,7 +193,7 @@ class OpportunityQueue {
          LIMIT 1
        )
        RETURNING *`,
-      [new Date(), maxClaimAttempts(), blogMinScoreFor(minScore), minScore]
+      [new Date(), maxClaimAttempts(), blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore]
         .concat(actionType ? [actionType] : [])
         .concat(exclude.length ? [exclude] : [])
     );
