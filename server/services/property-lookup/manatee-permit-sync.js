@@ -278,7 +278,14 @@ async function upsertChunked(trx, table, conflictCol, rows) {
   for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
     const chunk = rows.slice(i, i + UPSERT_CHUNK).map((row) => ({ ...row, last_seen_at: trx.fn.now() }));
     const mergeCols = Object.keys(chunk[0]).filter((k) => k !== conflictCol && k !== 'county');
-    await trx(table).insert(chunk).onConflict(conflictCol).merge(mergeCols);
+    try {
+      await trx(table).insert(chunk).onConflict(conflictCol).merge(mergeCols);
+    } catch (err) {
+      // Sanitized rethrow: a raw Postgres error can echo row values
+      // (owner names, addresses) via constraint details — the message
+      // propagates into scheduler logs (AGENTS.md PII rule).
+      throw new Error(`${table} upsert failed: ${err?.code || err?.name || 'db_error'}`);
+    }
     written += chunk.length;
   }
   return written;

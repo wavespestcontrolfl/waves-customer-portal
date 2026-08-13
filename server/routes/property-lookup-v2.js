@@ -235,10 +235,14 @@ async function performPropertyLookupCore(address, options = {}) {
       }
       // Permit-evidence backfill, same pattern: query once on hit, persist
       // even when empty (a checked marker), retry only on provider failure.
+      // A gisUnavailable marker (synced pool evidence returned while the
+      // GIS layer was down) also retries here — the enclosure side was
+      // never actually checked, so it must not be persisted as checked.
       if (
         !cacheOnly
         && cached.property_record
-        && cached.property_record._poolPermits === undefined
+        && (cached.property_record._poolPermits === undefined
+          || cached.property_record._poolPermits?.gisUnavailable)
         && cached.property_record._parcel?.paoParcelId
         && cached.property_record._parcel?.county
       ) {
@@ -249,7 +253,7 @@ async function performPropertyLookupCore(address, options = {}) {
         }).catch(() => null);
         if (permits) {
           cached.property_record._poolPermits = permits;
-          if (persist) await attachPoolPermitsToCachedLookup(address, permits);
+          if (persist && !permits.gisUnavailable) await attachPoolPermitsToCachedLookup(address, permits);
         }
       }
       // Synced-table evidence is recomputed IN MEMORY on every cache hit

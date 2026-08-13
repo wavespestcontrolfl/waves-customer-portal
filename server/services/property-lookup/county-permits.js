@@ -144,11 +144,18 @@ async function lookupManateePermits(pin, timeoutMs, address) {
     });
     if (synced) poolPermit = keepNewest(poolPermit, synced);
   } catch (err) {
+    // Code/name only — a raw Knex error message can echo the failing SQL
+    // with parcel/address bindings (AGENTS.md PII rule).
     logger.warn('[county-permits] synced-permit read failed', {
-      error: err?.message || String(err),
+      error: err?.code || err?.name || 'db_error',
     });
   }
   if (gisError && !poolPermit) throw gisError;
+  // gisUnavailable: the pool evidence is real (synced table), but the
+  // enclosure side was NEVER checked — callers must not persist this
+  // result as a completed "checked" marker, or the GIS layer is never
+  // retried for the enclosure.
+  if (gisError) return { poolPermit, enclosurePermit: null, gisUnavailable: true };
   return { poolPermit, enclosurePermit };
 }
 
