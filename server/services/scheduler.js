@@ -934,11 +934,18 @@ function initScheduledJobs() {
       // run is still holding the lock, tonight's reorder tick is skipped
       // (advisory lock is non-blocking) and picked up tomorrow.
       await runExclusive('route-tiers-nightly', async () => {
-        await runExclusive('auto-dispatch-recurring', async () => {
-          const { runRouteReorderIfEnabled } = require('./route-reorder');
-          const result = await runRouteReorderIfEnabled();
-          logger.info(`[route-reorder] cron run ${result.status}: applied=${result.applied ?? 0} skipped=${result.skipped ?? 0} failed=${result.failed ?? 0} ledger=${result.ledgerId ?? 'none'}`);
-        });
+        const { runRouteReorderIfEnabled, recordSkippedTick } = require('./route-reorder');
+        const inner = await runExclusive('auto-dispatch-recurring', async () => runRouteReorderIfEnabled());
+        if (inner && inner.skipped) {
+          // The 4:10 job still held the writer lock — the tick did NOT run.
+          // Ledger it as skipped so job health / the dispatch card never show
+          // a lock-starved night as a successful run with no output.
+          logger.warn(`[route-reorder] tick skipped (${inner.reason}) — auto-dispatch still holds the writer lock`);
+          await recordSkippedTick(inner.reason);
+          return;
+        }
+        const result = inner || {};
+        logger.info(`[route-reorder] cron run ${result.status}: applied=${result.applied ?? 0} skipped=${result.skipped ?? 0} failed=${result.failed ?? 0} ledger=${result.ledgerId ?? 'none'}`);
       });
     } catch (err) {
       logger.error(`Route-Tiers reorder run failed: ${err.message}`);

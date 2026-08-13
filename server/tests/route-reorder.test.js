@@ -32,7 +32,7 @@ const logger = require('../services/logger');
 const { dayStopsQuery } = require('../services/scheduling/day-stops');
 const RouteOptimizer = require('../services/route-optimizer');
 const routeTiers = require('../services/auto-dispatch/route-tiers');
-const { runRouteReorder, runRouteReorderIfEnabled } = require('../services/route-reorder');
+const { runRouteReorder, runRouteReorderIfEnabled, recordSkippedTick } = require('../services/route-reorder');
 
 // Fixed clock: 2026-08-13 04:10 ET (08:10Z). Band = 2026-08-14 .. 2026-08-19.
 const NOW = new Date('2026-08-13T08:10:00Z');
@@ -56,13 +56,18 @@ function backtrackDay(prefix = '', over = {}) {
 let stopsByDate;
 let ledgerInserts;
 let trxUpdates;
+let trxRawCalls;
 let liveRowsOverride; // null ⇒ derive live rows from stopsByDate (unchanged day)
+let adRunRow; // auto_dispatch_runs .first() result
+let dbCalls; // captured where/whereIn/orderBy calls per table
 
 function tableChain(table) {
   const c = { _table: table };
-  ['where', 'whereIn', 'orderBy', 'limit'].forEach((m) => { c[m] = () => c; });
+  ['where', 'whereIn', 'orderBy', 'limit'].forEach((m) => {
+    c[m] = (...args) => { dbCalls.push({ table, method: m, args }); return c; };
+  });
   c.select = () => c;
-  c.first = async () => null; // no auto_dispatch run by default
+  c.first = async () => (table === 'auto_dispatch_runs' ? adRunRow || null : null);
   c.insert = (row) => {
     if (table === 'route_optimization_planner_runs') ledgerInserts.push(row);
     return { returning: async () => [{ id: 'ledger-1' }] };
@@ -76,12 +81,16 @@ beforeEach(() => {
   stopsByDate = {};
   ledgerInserts = [];
   trxUpdates = [];
+  trxRawCalls = [];
   liveRowsOverride = null;
+  adRunRow = null;
+  dbCalls = [];
   dayStopsQuery.mockImplementation(async (_db, { dateStr }) => stopsByDate[dateStr] || []);
   routeTiers.loadReminderFreeze.mockResolvedValue({ failed: false, frozen: new Set() });
   db.mockImplementation((table) => tableChain(table));
   db.transaction.mockImplementation(async (cb) => {
     const attempted = [];
+    let membershipRead = false;
     const trx = () => {
       const filters = {};
       const c = {
@@ -90,6 +99,7 @@ beforeEach(() => {
         forUpdate: () => c,
         leftJoin: () => c,
         select: async () => {
+          membershipRead = true;
           if (liveRowsOverride) return liveRowsOverride;
           // Unchanged tech-day: mirror the loaded stops for this date+tech.
           return (stopsByDate[filters.scheduled_date] || [])
@@ -99,6 +109,9 @@ beforeEach(() => {
         update: async (u) => { attempted.push({ id: filters.id, ...u }); return 1; },
       };
       return c;
+    };
+    trx.raw = async (...args) => {
+      trxRawCalls.push({ args, beforeMembershipRead: !membershipRead });
     };
     // Commit semantics: only surface the writes if the callback didn't throw.
     const out = await cb(trx);
@@ -248,6 +261,78 @@ test('commit-time revalidation: a changed window_start rolls back untouched', as
   expect(trxUpdates).toEqual([]);
   const ledger = JSON.parse(ledgerInserts[0].result);
   expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
+test('the shared slot-reserve writer fence is taken BEFORE the membership read', async () => {
+  // Booking/reschedule writers (rebooker kept-tech lock, slot-reservation
+  // reserves, createSelfBooking) all serialize on
+  // pg_advisory_xact_lock(hashtext('slot-reserve'), hashtext('tech:date')).
+  // The reorder transaction must take the SAME lock, and take it before it
+  // reads membership, or the fence proves nothing.
+  stopsByDate['2026-08-18'] = backtrackDay();
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(1);
+  expect(trxRawCalls).toHaveLength(1);
+  const fence = trxRawCalls[0];
+  expect(fence.args[0]).toContain('pg_advisory_xact_lock');
+  expect(fence.args[1]).toEqual(['slot-reserve', 't1:2026-08-18']);
+  expect(fence.beforeMembershipRead).toBe(true);
+});
+
+test('commit-time reminder-guard OUTAGE fails LOUD: rollback + failure + degraded status', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  // Day-level pre-check clean; the in-transaction commit re-check errors out.
+  routeTiers.loadReminderFreeze
+    .mockResolvedValueOnce({ failed: false, frozen: new Set() })
+    .mockResolvedValueOnce({ failed: true, frozen: new Set() });
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(res.failed).toBe(1); // a guard outage is a FAILURE, not a quiet skip
+  expect(res.status).toBe('completed_with_errors');
+  expect(trxUpdates).toEqual([]); // rolled back
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.failures).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'REMINDER_STATUS_UNKNOWN' }));
+});
+
+test('ledger pairs with that night\'s CRON auto-dispatch run, never a later manual run', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  // The .first() row is whatever the filtered query returns; the assertion
+  // that matters is the FILTERS: triggered_by='cron' and a completed status —
+  // so a manual/dry_run started after 4:10 can never be selected.
+  adRunRow = {
+    id: 'AD-CRON-1', status: 'completed', mode: 'apply', total_evaluated: 10, total_skipped: 2,
+    total_recommended: 1, total_changed: 3, total_failed: 0, created_at: '2026-08-13T08:12:00Z',
+  };
+  await runRouteReorder({ now: NOW });
+  const runFilters = dbCalls.filter((c) => c.table === 'auto_dispatch_runs');
+  expect(runFilters).toContainEqual(expect.objectContaining({ method: 'where', args: ['triggered_by', 'cron'] }));
+  expect(runFilters).toContainEqual(expect.objectContaining({ method: 'whereIn', args: ['status', ['completed', 'completed_with_errors']] }));
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.auto_dispatch.run).toMatchObject({ id: 'AD-CRON-1', mode: 'apply', changed: 3 });
+});
+
+test('a cron run from a PREVIOUS day is not paired (date guard)', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  adRunRow = {
+    id: 'AD-OLD', status: 'completed', mode: 'apply', total_changed: 9, created_at: '2026-08-12T08:12:00Z',
+  };
+  await runRouteReorder({ now: NOW });
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.auto_dispatch.run).toBeNull();
+});
+
+test('recordSkippedTick ledgers a lease-held tick as skipped, never successful', async () => {
+  const id = await recordSkippedTick('lease_held', NOW);
+  expect(id).toBe('ledger-1');
+  expect(ledgerInserts).toHaveLength(1);
+  expect(ledgerInserts[0]).toMatchObject({
+    run_type: 'route_tiers_nightly',
+    status: 'skipped',
+    start_date: '2026-08-14',
+    end_date: '2026-08-19',
+    applied_count: 0,
+  });
+  expect(JSON.parse(ledgerInserts[0].result)).toMatchObject({ skip_reason: 'lease_held' });
 });
 
 test('a tech-day containing a coordless stop is skipped whole (no guessed placement)', async () => {

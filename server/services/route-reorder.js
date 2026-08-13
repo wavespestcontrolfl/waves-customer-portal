@@ -299,6 +299,24 @@ async function runRouteReorder(opts = {}) {
             // auto-dispatch run may still be applying moves under its own
             // advisory lock.
             await db.transaction(async (trx) => {
+              // MEMBERSHIP FENCE (codex GitHub round P1): the writers that can
+              // add/reassign a stop onto this tech-day already serialize on
+              // the tech-scoped 'slot-reserve' advisory xact lock — the
+              // rebooker's move transaction (rebooker.js kept-tech lock),
+              // slot-reservation.js estimate reserves, and createSelfBooking
+              // all take `hashtext('slot-reserve'), hashtext('tech:date')`.
+              // Taking the SAME lock here (blocking, xact-scoped) before the
+              // membership read fences those writers for the duration of the
+              // reorder commit: they queue behind us; anything that committed
+              // before we got the lock is visible to the re-read below.
+              // Single lock per trx (one tech-day), taken before any row
+              // locks — no ordering inversion with the date→tech contract in
+              // scheduling/occupancy.js (tech-lock-only is the accepted
+              // slot-reservation pattern).
+              await trx.raw(
+                'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+                ['slot-reserve', `${techId}:${dateStr}`],
+              );
               const live = await trx('scheduled_services')
                 .where('scheduled_services.scheduled_date', dateStr)
                 .where('scheduled_services.technician_id', techId)
@@ -337,7 +355,12 @@ async function runRouteReorder(opts = {}) {
               // Freeze re-check at commit time (fail closed on unreadable).
               const commitNow = opts.now || new Date();
               const commitFreeze = await loadReminderFreeze(trx, techStops.map((s) => s.id), commitNow);
-              if (commitFreeze.failed) throw stale('reminder status unreadable at commit');
+              if (commitFreeze.failed) {
+                // Guard OUTAGE, not a superseded day — must fail LOUD like the
+                // day-level read (recorded as a failure, degrades run status),
+                // while the throw still rolls the write back.
+                throw Object.assign(new Error('reminder status unreadable at commit'), { code: 'REMINDER_GUARD_OUTAGE' });
+              }
               if (techStops.some((s) => commitFreeze.frozen.has(s.id))) throw stale('a 72h reminder was sent during the run');
               if (techStops.some((s) => withinFreezeClock(dateStr, s.window_start, commitNow))) {
                 throw stale('day entered the 72h freeze window during the run');
@@ -353,6 +376,14 @@ async function runRouteReorder(opts = {}) {
               }
             }, { isolationLevel: 'serializable' });
           } catch (writeErr) {
+            if (writeErr.code === 'REMINDER_GUARD_OUTAGE') {
+              // Fail closed AND loud: the reorder rolled back, and the outage
+              // is a FAILURE (status + failed_count), never a quiet skip.
+              status = 'completed_with_errors';
+              summary.failed.push({ ...entryBase, reason: 'REMINDER_STATUS_UNKNOWN', error: writeErr.message });
+              logger.error(`[route-reorder] ${dateStr} tech ${techId}: reminder-freeze read failed at commit — rolled back (fail closed)`);
+              continue;
+            }
             // 40001 = serialization_failure: a concurrent transaction touched
             // (or inserted into) this tech-day — same treatment as any other
             // superseded day: roll back, skip, never retry blindly.
@@ -395,7 +426,13 @@ async function runRouteReorder(opts = {}) {
  *  (best-effort — a read failure must not lose the reorder ledger row). */
 async function loadAutoDispatchSummary(today) {
   try {
+    // THAT NIGHT'S CRON run specifically — a manual (possibly dry_run) run
+    // started after 4:10 must not shadow it, or the ledger reports the wrong
+    // (often zero) day-moves. triggered_by='cron' is stamped by audit.startRun
+    // from the scheduler's runAutoDispatch({ triggeredBy: 'cron' }).
     const run = await db('auto_dispatch_runs')
+      .where('triggered_by', 'cron')
+      .whereIn('status', ['completed', 'completed_with_errors'])
       .orderBy('created_at', 'desc')
       .first('id', 'status', 'mode', 'total_evaluated', 'total_skipped', 'total_recommended', 'total_changed', 'total_failed', 'created_at');
     if (!run || toDateStr(run.created_at) !== today) return { run: null, moves: [] };
@@ -471,9 +508,42 @@ async function runRouteReorderIfEnabled() {
   return runRouteReorder();
 }
 
+/**
+ * Ledger a tick that could not run because the shared writer lock was held
+ * (e.g. the 4:10 auto-dispatch run still active at 4:20). Without this row
+ * the night looks identical to a successful run in job health — a skipped
+ * tick must be visible as skipped, never as success-with-no-output.
+ */
+async function recordSkippedTick(reason, now = new Date()) {
+  const bandStart = etDateString(addETDays(now, 1));
+  const bandEnd = etDateString(addETDays(now, TIER2_MIN_DAYS_OUT - 1));
+  try {
+    const [row] = await db('route_optimization_planner_runs')
+      .insert({
+        run_type: 'route_tiers_nightly',
+        status: 'skipped',
+        start_date: bandStart,
+        end_date: bandEnd,
+        technician_ids: JSON.stringify([]),
+        service_types: JSON.stringify([]),
+        constraints: JSON.stringify({ gate: 'GATE_ROUTE_REORDER' }),
+        result: JSON.stringify({ skip_reason: reason, reorders: [], skips: [], failures: [] }),
+        applied_count: 0,
+        skipped_count: 0,
+        failed_count: 0,
+      })
+      .returning(['id']);
+    return (row && (row.id || row)) || null;
+  } catch (e) {
+    logger.error(`[route-reorder] skipped-tick ledger insert failed: ${e.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   runRouteReorder,
   runRouteReorderIfEnabled,
+  recordSkippedTick,
   getRouteReorderConfig,
   _internals: { currentOrder, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
 };

@@ -204,7 +204,10 @@ async function loadReminderFreeze(db, serviceIds, now = new Date()) {
     const inSendableBand = (apptTime) => {
       const t = new Date(apptTime).getTime();
       if (Number.isNaN(t)) return true;
-      return t - now.getTime() < REMINDER_SENDABLE_HOURS * 3600000;
+      // Inclusive <=, matching the sender's own `hoursUntil <= 72.25` — at
+      // the exact boundary the sender may still claim the row, so the visit
+      // must already be frozen.
+      return t - now.getTime() <= REMINDER_SENDABLE_HOURS * 3600000;
     };
 
     const frozen = new Set();

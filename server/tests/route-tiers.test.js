@@ -243,13 +243,21 @@ describe('loadReminderFreeze (72h reminder is the HARD gate)', () => {
     expect(res.frozen.has('s1')).toBe(true);
   });
 
-  test('band boundary: just inside 72.25h freezes, just outside does not', async () => {
+  test('band boundary is INCLUSIVE at exactly 72.25h, matching the sender\'s <=', async () => {
     const mk = (appt) => reminderDbStub({
       rows: [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: appt, reminder_72h_sent: false, suppressed_by_sibling: false }],
     });
-    // NOW + 72h → inside (72 < 72.25)
+    // NOW + 72h → inside
     let res = await loadReminderFreeze(mk('2026-08-13T00:00:00Z'), ['s1'], NOW);
     expect(res.frozen.has('s1')).toBe(true);
+    // EXACTLY NOW + 72.25h (72h15m): the sender's own predicate is
+    // `hoursUntil <= 72.25` (appointment-reminders reminderFlagsCoveredByNotice),
+    // so at the boundary it may still claim the row — must be frozen.
+    res = await loadReminderFreeze(mk('2026-08-13T00:15:00.000Z'), ['s1'], NOW);
+    expect(res.frozen.has('s1')).toBe(true);
+    // One millisecond past the boundary → outside the sender's band → free.
+    res = await loadReminderFreeze(mk('2026-08-13T00:15:00.001Z'), ['s1'], NOW);
+    expect(res.frozen.has('s1')).toBe(false);
     // NOW + 73h → outside
     res = await loadReminderFreeze(mk('2026-08-13T01:00:00Z'), ['s1'], NOW);
     expect(res.frozen.has('s1')).toBe(false);
