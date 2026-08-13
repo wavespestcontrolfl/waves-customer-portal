@@ -387,7 +387,11 @@ async function assignTechnician(input) {
     ]));
     return trx('scheduled_services')
       .whereIn('id', serviceIds)
-      .update({ technician_id: tech.id, updated_at: new Date() });
+      // route_order: null — the stop's old sequence number is meaningless in
+      // the day it joins; NULL appends it after the ordered run (every
+      // consumer sorts COALESCE(route_order, 999)) until an optimizer places
+      // it. Carrying the stale number in would interleave it wrongly.
+      .update({ technician_id: tech.id, route_order: null, updated_at: new Date() });
   });
 
   logger.info(`[intelligence-bar:schedule] Assigned ${count} services to ${tech.name}`);
@@ -572,6 +576,9 @@ async function moveStopsToDay(input) {
       )
         .update({
         scheduled_date: dateStr,
+        // Old day's sequence number is meaningless on the new date — NULL
+        // appends the stop after the target day's ordered run.
+        route_order: null,
         notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
         track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
         // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — land a
@@ -787,9 +794,12 @@ async function swapTechAssignments(input) {
       { techId: techB.id, date },
       { techId: null, date },
     ]);
+    // route_order: null on both real reassignments — each stop's sequence
+    // number belonged to its OLD tech's run; carrying it into the new tech's
+    // day would interleave stale numbers (consumers append NULLs last).
     if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
-    if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, updated_at: new Date() });
-    if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, updated_at: new Date() });
+    if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() });
+    if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() });
   });
 
   return {

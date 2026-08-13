@@ -312,7 +312,22 @@ async function runRouteReorder(opts = {}) {
               // Single lock per trx (one tech-day), taken before any row
               // locks — no ordering inversion with the date→tech contract in
               // scheduling/occupancy.js (tech-lock-only is the accepted
-              // slot-reservation pattern).
+              // slot-reservation pattern). The IB assign/swap/move tools hold
+              // the same fence via scheduling/tech-day-lock.js AND null the
+              // stop's route_order on entry.
+              //
+              // Deliberately NOT fenced: pure INSERT paths (appointment
+              // creation, recurring top-ups, estimate acceptance). No insert
+              // path anywhere sets route_order — only optimizer paths write
+              // it — and every consumer orders COALESCE(route_order, 999),
+              // so a stop inserted after this commit appends AFTER the
+              // ordered run: deterministic, never interleaved, identical to
+              // a booking landing after the shipped manual /optimize, and
+              // folded in by the next nightly pass while the day is in band.
+              // The fence's real job is writers that can CARRY or CLOBBER a
+              // non-null route_order (reassign/move/swap/rebooker/manual
+              // reorder mid-run — the latter caught by the commit guard's
+              // route_order re-check).
               await trx.raw(
                 'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
                 ['slot-reserve', `${techId}:${dateStr}`],
