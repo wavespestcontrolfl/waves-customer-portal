@@ -170,34 +170,23 @@ function shapeHistoryProduct(row) {
 
 // ── Deterministic grounding assembly ────────────────────────────────────────
 
-// Returns { available, last, lastLine, recent }. A query FAILURE is not an
-// empty history: available:false marks the history UNREADABLE so no caller
-// can turn an outage into the false fact "this is a first visit" (the
-// new-customer claim is omitted entirely when history can't be read).
+// Returns { available, last, lineRecords }. STRICTLY line-scoped via the
+// shared paged walk (utils/last-line-service): a pest visit must never
+// surface lawn/termite/tree records or their products — no same-line
+// history means an EMPTY section, never a cross-line fallback. `last` is
+// the any-line newest record and feeds ONLY the new-customer check. A
+// query FAILURE is not an empty history: available:false marks the history
+// UNREADABLE so no caller can turn an outage into the false fact "this is
+// a first visit" (the new-customer claim is omitted entirely then).
 async function loadRecentServiceRecords(dbh, customerId, serviceType) {
-  let rows;
   try {
-    rows = await dbh('service_records')
-      .where({ customer_id: customerId, status: 'completed' })
-      .orderBy('service_date', 'desc')
-      .orderBy('created_at', 'desc')
-      .limit(10)
-      .select('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'started_at', 'pressure_index');
+    const { loadRecentLineServices } = require('../utils/last-line-service');
+    const { last, lineRecords } = await loadRecentLineServices(dbh, customerId, serviceType, { limit: 5 });
+    return { available: true, last, lineRecords };
   } catch (err) {
     logger.warn(`[previsit-brief] service history unreadable for customer ${customerId}: ${err.message}`);
-    return { available: false, last: null, lastLine: null, recent: [] };
+    return { available: false, last: null, lineRecords: [] };
   }
-  let lastLine = null;
-  try {
-    const { detectServiceLine } = require('./service-report/service-line-configs');
-    const visitLine = detectServiceLine(serviceType);
-    lastLine = rows.find(
-      (r) => (String(r.service_line || '').trim() || detectServiceLine(r.service_type)) === visitLine,
-    ) || null;
-  } catch {
-    lastLine = null;
-  }
-  return { available: true, last: rows[0] || null, lastLine, recent: rows.slice(0, 5) };
 }
 
 // Catalog vocabulary for the ungrounded-claim scan: every products_catalog
@@ -251,18 +240,24 @@ async function loadProductHistory(dbh, recordIds) {
 
 // One protocol-window product → the deterministic brief entry.
 function shapeWindowProduct(p) {
-  const gates = (p.gates && typeof p.gates === 'object') ? p.gates : {};
   return {
     name: cleanText(p.productName, 120),
     role: cleanText(p.role, 60),
     applicationMode: cleanText(p.applicationMode, 40),
     ratePer1000: p.ratePer1000,
     rateUnit: cleanText(p.rateUnit, 20),
-    // Conditional rows carry their trigger (the plan engine's
-    // base/conditional split) so the section never presents an optional
-    // product as fixed guidance.
-    trigger: cleanText(gates.trigger, 120),
   };
+}
+
+// default_in_plan ≠ unconditional: default rows can carry gates too
+// (maxTempF, soil/stress conditions, blackout sensitivity). No side-effect-
+// free evaluator for this jsonb exists (the plan engine's conditional
+// logic reads protocol text lines; the approvals engine persists), so the
+// brief does not try to evaluate weather/soil gates — it classifies: only
+// a default row with NO gates is fixed guidance.
+function hasProductGates(p) {
+  const gates = (p.gates && typeof p.gates === 'object') ? p.gates : {};
+  return Object.keys(gates).length > 0;
 }
 
 const NO_LAWN_GUIDANCE = Object.freeze({
@@ -338,7 +333,14 @@ async function loadLawnWindowGuidance(dbh, svc) {
       return { ...NO_LAWN_GUIDANCE, reason: 'no_active_protocol' };
     }
     const shaped = (summary.products || [])
-      .map((p) => ({ shapedEntry: shapeWindowProduct(p), defaultInPlan: p.defaultInPlan === true }))
+      .map((p) => ({
+        shapedEntry: shapeWindowProduct(p),
+        // FIXED only when default-in-plan AND gate-free — a default row
+        // with gates (maxTempF, soil conditions, blackout sensitivity) is
+        // still conditional guidance.
+        fixed: p.defaultInPlan === true && !hasProductGates(p),
+        gates: (p.gates && typeof p.gates === 'object') ? p.gates : {},
+      }))
       .filter((p) => p.shapedEntry.name);
     return {
       source: 'lawn_protocol_window',
@@ -352,14 +354,18 @@ async function loadLawnWindowGuidance(dbh, svc) {
         visitType: summary.window.visitType,
         goal: cleanText(summary.window.goal, 300),
       } : null,
-      // Fixed guidance = the window's default-in-plan products only.
-      products: shaped.filter((p) => p.defaultInPlan).map(({ shapedEntry }) => {
-        const { trigger: _trigger, ...fixed } = shapedEntry;
-        return fixed;
-      }),
-      // Optional/gated products, clearly conditional with their trigger.
-      conditional_products: shaped.filter((p) => !p.defaultInPlan)
-        .map((p) => ({ ...p.shapedEntry, conditional: true })),
+      // Fixed guidance = default-in-plan, gate-free products only.
+      products: shaped.filter((p) => p.fixed).map((p) => p.shapedEntry),
+      // Everything gated or optional, carrying the COMPLETE gate object
+      // (never just gates.trigger — premiumTier / soilPIndexBelow / maxTempF
+      // and the rest must survive) plus the trigger convenience field.
+      conditional_products: shaped.filter((p) => !p.fixed)
+        .map((p) => ({
+          ...p.shapedEntry,
+          conditional: true,
+          gates: p.gates,
+          trigger: cleanText(p.gates.trigger, 120),
+        })),
     };
   } catch (err) {
     logger.warn(`[previsit-brief] lawn protocol window lookup failed: ${err.message}`);
@@ -438,8 +444,10 @@ async function assembleGrounding(svc, dbh = db) {
     .catch(() => null);
 
   const history = await loadRecentServiceRecords(dbh, svc.customer_id, svc.service_type);
-  const lastVisitRecord = history.lastLine || history.last;
-  const productRows = await loadProductHistory(dbh, history.recent.map((r) => r.id));
+  // Same-line ONLY — no any-line fallback: a cross-line "last visit" would
+  // drag another line's products and notes into this visit's brief.
+  const lastVisitRecord = history.lineRecords[0] || null;
+  const productRows = await loadProductHistory(dbh, history.lineRecords.map((r) => r.id));
   const lastVisitProducts = lastVisitRecord
     ? productRows.filter((r) => r.service_record_id === lastVisitRecord.id).map(shapeHistoryProduct)
     : [];

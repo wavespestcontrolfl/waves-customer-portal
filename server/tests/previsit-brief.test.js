@@ -47,7 +47,9 @@ jest.mock('../services/service-report/since-last-visit', () => ({
   })),
 }));
 jest.mock('../services/service-report/service-line-configs', () => ({
-  detectServiceLine: () => 'pest',
+  // Line-aware (the real classifier's shape matters now): the brief's
+  // history must be scoped to the visit's service line.
+  detectServiceLine: (serviceType) => (/lawn|turf/i.test(String(serviceType || '')) ? 'lawn' : 'pest'),
 }));
 const mockGrassContext = jest.fn(async () => ({ trackKey: 'st_augustine' }));
 jest.mock('../services/lawn-grass-context', () => ({
@@ -542,7 +544,7 @@ describe('lawn bounded product section', () => {
     mockSummarize.mockReturnValue({
       window: { key: 'jun_blackout_stress', month: 6, title: 'Blackout stress', visitType: 'spray', goal: 'Survive blackout' },
       products: [
-        { productName: 'Fe/Mn Micros', role: 'micronutrients', applicationMode: 'spray', ratePer1000: null, rateUnit: 'label_rate', defaultInPlan: true, gates: { requiresZeroNP: true } },
+        { productName: 'Fe/Mn Micros', role: 'micronutrients', applicationMode: 'spray', ratePer1000: null, rateUnit: 'label_rate', defaultInPlan: true, gates: {} },
       ],
     });
     const state = useDb(baseResponses({
@@ -570,8 +572,10 @@ describe('lawn bounded product section', () => {
     mockSummarize.mockReturnValue({
       window: { key: 'jun_blackout_stress', month: 6, title: 'Blackout stress', visitType: 'spray', goal: 'Survive blackout' },
       products: [
+        { productName: 'Dispatch Sprayable', role: 'wetting_agent', applicationMode: 'spray', ratePer1000: 0.37, rateUnit: 'fl oz', defaultInPlan: true, gates: {} },
+        // default_in_plan but GATED — still conditional, full gates kept.
         { productName: 'Fe/Mn Micros', role: 'micronutrients', applicationMode: 'spray', ratePer1000: null, rateUnit: 'label_rate', defaultInPlan: true, gates: { requiresZeroNP: true } },
-        { productName: 'Talstar P', role: 'insect_curative', applicationMode: 'spot', ratePer1000: 1.0, rateUnit: 'fl oz', defaultInPlan: false, gates: { trigger: 'confirmed_chinch_pressure' } },
+        { productName: 'Talstar P', role: 'insect_curative', applicationMode: 'spot', ratePer1000: 1.0, rateUnit: 'fl oz', defaultInPlan: false, gates: { trigger: 'confirmed_chinch_pressure', maxTempF: 88 } },
       ],
     });
     const state = useDb(baseResponses({
@@ -579,15 +583,22 @@ describe('lawn bounded product section', () => {
     }));
     await PrevisitBrief.generateVisitBrief('svc-1');
     const { brief } = storedBrief(state);
-    // Fixed list = default-in-plan only.
-    expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Fe/Mn Micros']);
-    // Conditional list is labeled with its trigger.
+    // Fixed list = default-in-plan AND gate-free only.
+    expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Dispatch Sprayable']);
+    // Conditional entries keep the COMPLETE gate object, not just trigger.
     expect(brief.product_guidance.conditional_products).toEqual([
-      expect.objectContaining({ name: 'Talstar P', conditional: true, trigger: 'confirmed_chinch_pressure' }),
+      expect.objectContaining({ name: 'Fe/Mn Micros', conditional: true, gates: { requiresZeroNP: true }, trigger: null }),
+      expect.objectContaining({
+        name: 'Talstar P',
+        conditional: true,
+        gates: { trigger: 'confirmed_chinch_pressure', maxTempF: 88 },
+        trigger: 'confirmed_chinch_pressure',
+      }),
     ]);
-    // The LLM's fixed product names exclude the conditional row.
+    // The LLM's fixed product names exclude every conditional row.
     const llmPayload = JSON.stringify(global.__dispatch.mock.calls[0]);
-    expect(llmPayload).toContain('Fe/Mn Micros');
+    expect(llmPayload).toContain('Dispatch Sprayable');
+    expect(llmPayload).not.toContain('Fe/Mn Micros');
     expect(llmPayload).not.toContain('Talstar P');
   });
 
@@ -600,6 +611,74 @@ describe('lawn bounded product section', () => {
     // ⛔ Ganoderma never prefilled as a target; known targets survive.
     expect(brief.product_guidance.products[0].targets).toEqual(['ants']);
     expect(brief.last_visit.products[0].targets).toEqual(['ants']);
+  });
+});
+
+describe('line-scoped product history', () => {
+  const LAWN_RECORD = {
+    id: 'rec-lawn',
+    customer_id: 'cust-1',
+    service_type: 'Lawn Care Service',
+    service_line: 'lawn',
+    service_date: '2026-08-01',
+    started_at: null,
+    pressure_index: null,
+  };
+  const LAWN_PRODUCT_ROW = {
+    service_record_id: 'rec-lawn',
+    product_name: 'Prodiamine 65 WDG',
+    active_ingredient: 'Prodiamine',
+    moa_group: '3',
+    application_rate: 0.3,
+    rate_unit: 'oz',
+    targets: ['crabgrass'],
+    catalog_name: 'Prodiamine 65 WDG',
+    catalog_active_ingredient: 'Prodiamine',
+    epa_reg_number: '66222-40',
+  };
+
+  function whereInAwareProducts(rows) {
+    return (rec) => {
+      const whereIn = rec.ops.find(([m, args]) => m === 'whereIn' && args[0] === 'sp.service_record_id');
+      const ids = whereIn ? whereIn[1][1] : [];
+      return rows.filter((r) => ids.includes(r.service_record_id));
+    };
+  }
+
+  test('a pest visit never surfaces products from lawn records, even newer ones', async () => {
+    const state = useDb(baseResponses({
+      // Lawn record is NEWER than the pest record.
+      service_records: [LAWN_RECORD, SERVICE_RECORD],
+      service_products: whereInAwareProducts([LAWN_PRODUCT_ROW, PRODUCT_ROW]),
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const { brief } = storedBrief(state);
+    // last_visit = the PEST record, not the newer lawn one.
+    expect(brief.last_visit.date).toBe('2026-07-15');
+    expect(brief.product_guidance.source).toBe('service_history');
+    expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Bifen IT']);
+    expect(JSON.stringify(brief)).not.toContain('Prodiamine');
+  });
+
+  test('no same-line history = EMPTY section, never a cross-line fallback', async () => {
+    const state = useDb(baseResponses({
+      service_records: [LAWN_RECORD],
+      service_products: whereInAwareProducts([LAWN_PRODUCT_ROW, PRODUCT_ROW]),
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const { brief } = storedBrief(state);
+    expect(brief.last_visit.date).toBeNull();
+    expect(brief.last_visit.products).toEqual([]);
+    expect(brief.product_guidance.products).toEqual([]);
+    expect(JSON.stringify(brief.product_guidance)).not.toContain('Prodiamine');
+    // History WAS readable — the lawn record still proves not-new-customer.
+    const text = global.__dispatch.mock.calls[0][1].text;
+    const facts = JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
+    expect(facts.history).toEqual({ available: true });
+    expect(facts.visit.newCustomer).toBe(false);
+    expect(facts.lastVisit).toBeNull();
   });
 });
 

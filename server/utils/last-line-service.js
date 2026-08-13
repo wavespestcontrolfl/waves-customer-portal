@@ -42,4 +42,38 @@ async function loadLastServices(db, customerId, serviceType) {
   return { lastService, lastLineService, visitLine };
 }
 
-module.exports = { loadLastServices, _test: { PAGE_SIZE, MAX_ROWS } };
+// Same paged same-line walk, but returns the matching RECORDS (with ids)
+// rather than notes-preview fields — the pre-visit brief loads product
+// history strictly line-scoped (a pest visit must never surface lawn or
+// termite products). Also returns the any-line newest record (`last`) so
+// callers can answer "has this customer had ANY completed visit" (the
+// new-customer check) without a second query. Collects up to `limit`
+// same-line records within the MAX_ROWS walk; past that depth the caller
+// gets what was found — never a cross-line fallback. Throws on a query
+// failure so callers can distinguish an outage from empty history.
+async function loadRecentLineServices(db, customerId, serviceType, { limit = 5 } = {}) {
+  const visitLine = detectServiceLine(serviceType);
+  const lineRecords = [];
+  let last = null;
+  for (let offset = 0; offset < MAX_ROWS; offset += PAGE_SIZE) {
+    const rows = await db('service_records')
+      .where({ customer_id: customerId, status: 'completed' })
+      .orderBy('service_date', 'desc')
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc')
+      .offset(offset)
+      .limit(PAGE_SIZE)
+      .select('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'started_at', 'pressure_index');
+    if (offset === 0) last = rows[0] || null;
+    for (const r of rows) {
+      if ((String(r.service_line || '').trim() || detectServiceLine(r.service_type)) === visitLine) {
+        lineRecords.push(r);
+        if (lineRecords.length >= limit) return { last, lineRecords, visitLine };
+      }
+    }
+    if (rows.length < PAGE_SIZE) break;
+  }
+  return { last, lineRecords, visitLine };
+}
+
+module.exports = { loadLastServices, loadRecentLineServices, _test: { PAGE_SIZE, MAX_ROWS } };
