@@ -24,7 +24,7 @@ jest.mock('../services/call-recording-processor', () => ({
   summarizePriorCall: jest.fn(),
 }));
 jest.mock('../services/waveguard-existing-services', () => ({ loadOwnedRecurringServiceKeys: jest.fn() }));
-jest.mock('../services/open-balance', () => ({ openBalanceSummary: jest.fn() }));
+jest.mock('../services/open-balance', () => ({ openBalanceSummary: jest.fn(), openBalanceExists: jest.fn() }));
 jest.mock('../services/project-types', () => ({ customerSafeServiceNotes: jest.fn((notes) => (notes ? `SAFE:${notes}` : null)) }));
 // ⭐ THE PARSER-APPROVED COPY GATE. Speaking a visit's notes is a report path,
 // and AGENTS.md allows only technicianReportCustomerCopy's reviewed parse
@@ -41,7 +41,7 @@ jest.mock('../services/pricing-engine', () => ({ generateEstimate: jest.fn() }))
 const db = require('../models/db');
 const { summarizePriorCall } = require('../services/call-recording-processor');
 const { loadOwnedRecurringServiceKeys } = require('../services/waveguard-existing-services');
-const { openBalanceSummary } = require('../services/open-balance');
+const { openBalanceSummary, openBalanceExists } = require('../services/open-balance');
 const { generateEstimate } = require('../services/pricing-engine');
 
 const relayContext = require('../services/voice-agent/relay-context');
@@ -137,6 +137,7 @@ beforeEach(() => {
   primeDb();
   loadOwnedRecurringServiceKeys.mockResolvedValue([]);
   openBalanceSummary.mockResolvedValue({ total: 0, count: 0, moreCount: 0, invoices: [] });
+  openBalanceExists.mockResolvedValue(false);
   summarizePriorCall.mockResolvedValue(null);
 });
 
@@ -561,6 +562,7 @@ describe('GATE ON — account tools', () => {
     });
     loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
     openBalanceSummary.mockResolvedValue({ total: 49.5, count: 1, moreCount: 0, invoices: [] });
+    openBalanceExists.mockResolvedValue(true);
     const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full', callerAttested: true });
     expect(out).toContain('Pest Control');
     expect(out).toContain('Tuesday August 18');
@@ -574,12 +576,14 @@ describe('GATE ON — account tools', () => {
   // while this tool read the same number off the same loader for an unattested
   // caller. Everything else the overview says stays: the caller is still known.
   test('full tier WITHOUT attestation-A → overview keeps everything but the AMOUNT', async () => {
+    openBalanceExists.mockResolvedValue(true);
     primeDb({
       scheduled: [{ scheduled_date: '2026-08-18', service_type: 'Pest Control', window_start: '9:00 AM', status: 'confirmed' }],
       records: [{ service_date: '2026-07-31', service_type: 'Lawn Care', technician_notes: 'mowed edges', structured_notes: null, status: 'completed' }],
     });
     loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
     openBalanceSummary.mockResolvedValue({ total: 49.5, count: 1, moreCount: 0, invoices: [] });
+    openBalanceExists.mockResolvedValue(true);
     const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full' });
     expect(out).not.toContain('$49.50');
     expect(out).not.toMatch(/\$\d/);
@@ -595,13 +599,16 @@ describe('GATE ON — account tools', () => {
   // is answering, and hands back existence only. (It is still the CANONICAL
   // loader — a hand-rolled "is there an open invoice" query would fork the
   // definition of an open balance away from every other money surface.)
-  test('the unattested read carries no amount at all — existence only, canonical loader', async () => {
-    openBalanceSummary.mockResolvedValue({ total: 49.5, count: 1, moreCount: 0, invoices: [] });
+  test('the unattested read carries no amount at all — existence only, NO summary fetch', async () => {
+    openBalanceExists.mockResolvedValue(true);
     const balance = await relayContext.loadOpenBalance('c-1111', { amounts: false });
     expect(balance).toEqual({ hasOpen: true });
     expect(balance.total).toBeUndefined();
     expect(balance.count).toBeUndefined();
-    expect(openBalanceSummary).toHaveBeenCalled(); // the money truth still decides
+    // ⭐ The figure is never even FETCHED: the module's own existence probe
+    // (same eligibility rules) answers, and the summary loader stays cold.
+    expect(openBalanceExists).toHaveBeenCalled();
+    expect(openBalanceSummary).not.toHaveBeenCalled();
   });
 
   // FAIL CLOSED: every tier default is 'redacted'. A session ctx with no tier
@@ -614,6 +621,7 @@ describe('GATE ON — account tools', () => {
     });
     loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
     openBalanceSummary.mockResolvedValue({ total: 49.5, count: 1, moreCount: 0, invoices: [] });
+    openBalanceExists.mockResolvedValue(true);
     const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111' });
     expect(out).not.toContain('$49.50');
     expect(out).not.toContain('window starting');
@@ -689,6 +697,7 @@ describe('GATE ON — account tools', () => {
 
   test('balance of zero reads as none', async () => {
     openBalanceSummary.mockResolvedValue({ total: 0, count: 0, moreCount: 0, invoices: [] });
+  openBalanceExists.mockResolvedValue(false);
     const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full', callerAttested: true });
     expect(out).toMatch(/Open balance: none/);
   });
@@ -915,6 +924,7 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
     });
     loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
     openBalanceSummary.mockResolvedValue({ total: 231.75, count: 3, moreCount: 0, invoices: [] });
+    openBalanceExists.mockResolvedValue(true); // the redacted tier reads existence only
     const out = await executeTool('get_account_overview', { customer_ref: 'C1' }, refCtx({ ani: 'c-someone-else' }));
     // PAST dates + service names survive:
     expect(out).toContain('Pest Control');
@@ -935,6 +945,7 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
 
   test('looked-up ref that IS the ANI-matched caller → full tier (their own account)', async () => {
     openBalanceSummary.mockResolvedValue({ total: 49.5, count: 1, moreCount: 0, invoices: [] });
+    openBalanceExists.mockResolvedValue(true);
     const out = await executeTool('get_account_overview', { customer_ref: 'C1' }, refCtx({ ani: 'c-9001' }));
     expect(out).toContain('$49.50');
   });

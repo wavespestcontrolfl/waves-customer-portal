@@ -45,8 +45,11 @@ const MAX_OPEN_INVOICES = 200;
  * link must not fan out into bearer credentials for the account's other
  * invoices).
  */
-async function openBalanceInvoices(customerId, { excludeInvoiceId = null, database = db } = {}) {
-  if (!customerId) return [];
+// The ONE eligibility query — both the full read and the existence probe run
+// this exact selection, so "is there an open balance" can never disagree with
+// the invoice list (the columns are needed either way: eligibility itself is
+// remainder > 0, cents-checked in JS below).
+function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db } = {}) {
   const query = database('invoices')
     .where({ customer_id: customerId })
     .whereIn('status', ['sent', 'viewed', 'overdue'])
@@ -61,36 +64,60 @@ async function openBalanceInvoices(customerId, { excludeInvoiceId = null, databa
       'credit_applied', 'scheduled_service_id', 'stripe_payment_intent_id',
     );
   if (excludeInvoiceId) query.whereNot('id', excludeInvoiceId);
-  const rows = await query;
+  return query;
+}
+
+// The per-row self-pay test the SQL cannot make alone: cents-authoritative
+// remainder plus the LIVE payer re-resolution (fail-closed toward DROP).
+async function rowIsSelfPayDue(customerId, row) {
+  if (!(invoiceAmountDue(row) > 0)) return false;
+  const PayerService = require('./payer');
+  try {
+    const resolved = await PayerService.resolveForInvoice({
+      customerId: String(customerId),
+      ...(row.scheduled_service_id ? { scheduledServiceId: String(row.scheduled_service_id) } : {}),
+      throwOnError: true,
+    });
+    if (resolved?.payerId) return false;
+  } catch (err) {
+    logger.warn(`[open-balance] payer resolve failed for invoice ${row.invoice_number} — dropping from balance (fail closed): ${err.message}`);
+    return false;
+  }
+  return true;
+}
+
+async function openBalanceInvoices(customerId, { excludeInvoiceId = null, database = db } = {}) {
+  if (!customerId) return [];
+  const rows = await openInvoiceQuery(customerId, { excludeInvoiceId, database });
   if (rows.length >= MAX_OPEN_INVOICES) {
     logger.warn(`[open-balance] customer ${customerId} hit the ${MAX_OPEN_INVOICES}-invoice bound — balance surfaces may understate`);
   }
 
-  const PayerService = require('./payer');
   const selfPay = [];
   for (const row of rows) {
-    // invoiceAmountDue is cents-authoritative — re-filter in JS so a row the
-    // SQL GREATEST admitted on float representation can't surface as $0.00.
-    if (!(invoiceAmountDue(row) > 0)) continue;
-    // Live payer re-resolution (pre-push P0). resolveForInvoice is the same
-    // authority the completion charge rails consult: per-visit payer when
-    // the invoice carries one, the customer's DEFAULT payer either way. A
-    // resolve outage fails toward DROP — a payer's bill must never be shown
-    // to (or collected from) the homeowner.
-    try {
-      const resolved = await PayerService.resolveForInvoice({
-        customerId: String(customerId),
-        ...(row.scheduled_service_id ? { scheduledServiceId: String(row.scheduled_service_id) } : {}),
-        throwOnError: true,
-      });
-      if (resolved?.payerId) continue;
-    } catch (err) {
-      logger.warn(`[open-balance] payer resolve failed for invoice ${row.invoice_number} — dropping from balance (fail closed): ${err.message}`);
-      continue;
-    }
-    selfPay.push(row);
+     
+    if (await rowIsSelfPayDue(customerId, row)) selfPay.push(row);
   }
   return selfPay;
+}
+
+/**
+ * EXISTENCE ONLY — "does this customer have any open self-pay balance", with
+ * the exact same eligibility rules as the full read (same SQL, same
+ * cents-authoritative remainder, same live payer re-resolution), but no total
+ * is ever materialized and nothing amount-shaped is returned. Built for the
+ * voice split tier (AGENTS.md): an unattested caller may hear THAT a balance
+ * exists, and the figure must not even be fetched into the session. Stops at
+ * the first qualifying row.
+ */
+async function openBalanceExists(customerId, { excludeInvoiceId = null, database = db } = {}) {
+  if (!customerId) return false;
+  const rows = await openInvoiceQuery(customerId, { excludeInvoiceId, database });
+  for (const row of rows) {
+     
+    if (await rowIsSelfPayDue(customerId, row)) return true; // short-circuit
+  }
+  return false;
 }
 
 /**
@@ -116,4 +143,4 @@ async function openBalanceSummary(customerId, { displayLimit = 5, ...opts } = {}
   };
 }
 
-module.exports = { openBalanceInvoices, openBalanceSummary, MAX_OPEN_INVOICES };
+module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, MAX_OPEN_INVOICES };

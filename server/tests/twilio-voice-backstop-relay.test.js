@@ -237,6 +237,30 @@ describe('buildRelayTwiML — Sandy persona parity (voice + greeting)', () => {
     expect(defaultWelcomeGreeting()).toBe(process.env.VOICE_RELAY_GREETING);
     expect((defaultWelcomeGreeting().match(/automated assistant/gi) || []).length).toBe(1);
   });
+
+  // ⭐ A FALSE DISCLOSURE IS DISCARDED, NOT PATCHED. Appending the canonical
+  // line to "this call is not recorded / you're speaking with a human" made
+  // the caller hear BOTH statements — a contradictory legal notice is no
+  // notice at all. Negation ⇒ the override is thrown away entirely; only a
+  // merely-INCOMPLETE override keeps its copy with the missing half appended.
+  test('a NEGATED override is replaced wholesale by the canonical greeting', () => {
+    for (const bad of [
+      'Hi! This call is not recorded, and you are speaking with a human assistant.',
+      "Welcome to Waves — don't worry, nothing here is recorded.",
+      // The identity lie stated AFFIRMATIVELY — no denial word at all.
+      'This call may be recorded. You are speaking with a human assistant today!',
+    ]) {
+      process.env.VOICE_RELAY_GREETING = bad;
+      const spoken = defaultWelcomeGreeting();
+      expect(spoken).toBe(DEFAULT_WELCOME_GREETING); // canonical, alone
+      expect(spoken).not.toContain('not recorded'); // the false text is GONE
+      expect(spoken).not.toContain('human assistant');
+    }
+    // …while an incomplete-but-honest override still keeps its copy.
+    process.env.VOICE_RELAY_GREETING = 'Thanks for calling Waves!';
+    expect(defaultWelcomeGreeting()).toContain('Thanks for calling Waves!');
+    expect(defaultWelcomeGreeting()).toMatch(/may be recorded/i);
+  });
 });
 
 describe('relay-protocol auth/PII helpers', () => {

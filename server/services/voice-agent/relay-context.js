@@ -649,19 +649,24 @@ async function loadCompletedVisits(customerId, limit = 5) {
  * from being spoken; when the caller may not have it, it does not leave this
  * function.
  *
- * ⭐ AND IT IS STILL THE SAME LOADER. The obvious "cheaper" version of this is a
- * hand-rolled `select 1 from invoices where …open…` — which forks the definition
- * of what an open balance IS away from `openBalanceSummary`, the money-truth
- * mechanism every other surface answers from (voids, drafts, payer-billed rows,
- * credits). A yes/no that disagrees with the invoice list is worse than a
- * withheld figure, so the canonical loader still decides; only the boolean
- * crosses the boundary.
+ * ⭐ AND IT IS STILL THE SAME MECHANISM. The obvious "cheaper" version of this
+ * is a hand-rolled `select 1 from invoices where …open…` — which forks the
+ * definition of what an open balance IS away from the open-balance module, the
+ * money truth every other surface answers from (voids, drafts, payer-billed
+ * rows, credits). `openBalanceExists` is that module's own existence probe:
+ * the exact same eligibility rules, but no total is ever FETCHED — the figure
+ * for a caller who may not hear it never enters this process at all, rather
+ * than being fetched and reduced to a boolean one careless refactor from
+ * exposure.
  */
 async function loadOpenBalance(customerId, { amounts = true } = {}) {
-  const { openBalanceSummary } = require('../open-balance');
+  const { openBalanceSummary, openBalanceExists } = require('../open-balance');
+  if (!amounts) {
+    const hasOpen = await openBalanceExists(customerId).catch(() => null);
+    return hasOpen == null ? null : { hasOpen };
+  }
   const summary = await openBalanceSummary(customerId).catch(() => null);
   if (!summary) return null;
-  if (!amounts) return { hasOpen: Number(summary.total) > 0 };
   return { total: summary.total, count: summary.count, hasOpen: Number(summary.total) > 0 };
 }
 

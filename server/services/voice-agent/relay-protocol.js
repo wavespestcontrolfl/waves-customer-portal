@@ -211,15 +211,30 @@ const DEFAULT_WELCOME_GREETING =
 // rejecting (refusing would strand live calls on a bad env value).
 const RECORDING_DISCLOSURE_RE = /\b(?:is|are|may\s+be|might\s+be|will\s+be|being|gets?)\s+record(?:ed|ing)\b/i;
 const AI_DISCLOSURE_RE = /\b(?:automated|virtual|AI|artificial)\b[^.!?]{0,30}\b(?:assistant|agent|receptionist)\b/i;
-const DISCLOSURE_NEGATION_RE = /\b(?:not|never|isn'?t|aren'?t|won'?t|no)\b[^.!?]{0,40}\b(?:record(?:ed|ing)|automated|virtual|AI|bot)\b/i;
+// "nothing here is recorded" and "don't worry, … recorded" are negations too —
+// the list covers the denial words people actually reach for, not just "not".
+const DISCLOSURE_NEGATION_RE = /\b(?:not|never|isn'?t|aren'?t|won'?t|don'?t|doesn'?t|nothing|none|no)\b[^.!?]{0,40}\b(?:record(?:ed|ing)|automated|virtual|AI|bot|human)\b/i;
+// A positive claim to BE human needs no denial word to be false — "you're
+// speaking with a human assistant" is the identity lie stated affirmatively,
+// and it gets the same wholesale fallback as a negation.
+const HUMAN_CLAIM_RE = /\b(?:speaking (?:with|to)|talking (?:with|to)|this is|i'?m|i am)\b[^.!?]{0,25}\bhuman\b/i;
 const DISCLOSURE_SUFFIX = 'Just so you know, this call may be recorded, and you\'re speaking with our automated assistant.';
 
 function defaultWelcomeGreeting() {
   const override = String(process.env.VOICE_RELAY_GREETING || '').trim();
   if (!override) return DEFAULT_WELCOME_GREETING.replace('Sandy', agentName());
-  if (RECORDING_DISCLOSURE_RE.test(override)
-    && AI_DISCLOSURE_RE.test(override)
-    && !DISCLOSURE_NEGATION_RE.test(override)) return override;
+  const negated = DISCLOSURE_NEGATION_RE.test(override) || HUMAN_CLAIM_RE.test(override);
+  if (!negated
+    && RECORDING_DISCLOSURE_RE.test(override)
+    && AI_DISCLOSURE_RE.test(override)) return override;
+  // ⭐ A FALSE DISCLOSURE IS DISCARDED, NOT PATCHED. Appending the canonical
+  // line to "this call is not recorded, you're speaking with a human" would
+  // make the caller hear both statements — a contradictory legal notice is no
+  // notice at all. Negation ⇒ the override is thrown away entirely and the
+  // canonical greeting speaks alone. Only a merely-INCOMPLETE override (no
+  // negation, a half missing) keeps its copy with the missing half appended —
+  // absent is fixable, false is not.
+  if (negated) return DEFAULT_WELCOME_GREETING.replace('Sandy', agentName());
   return `${override.replace(/\s*$/, '')} ${DISCLOSURE_SUFFIX}`;
 }
 
