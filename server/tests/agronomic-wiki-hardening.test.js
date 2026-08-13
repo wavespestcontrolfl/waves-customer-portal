@@ -270,39 +270,59 @@ describe('generatePage', () => {
     // Same outcomes, same count/ids — but one outcome now carries a score
     await wiki.generatePage('product/talstar-p', 'product', {
       outcomes: [{ id: 'o1', vision_delta_score: 35 }, { id: 'o2' }],
-      visionScoredCount: 1,
+      visionScoreToken: 'vision-scored:1:1755050000000',
     }, 'Product: Talstar P');
 
     expect(global.__anthropicCreate).toHaveBeenCalled();
     const written = (state.updates.knowledge_entries || []).find((u) => 'source_treatment_ids' in u);
-    expect(JSON.parse(written.source_treatment_ids)).toEqual(['o1', 'o2', 'vision-scored:1']);
+    expect(JSON.parse(written.source_treatment_ids)).toEqual(['o1', 'o2', 'vision-scored:1:1755050000000']);
   });
 
-  test('vision fingerprint token: unchanged scored count still skips; a new score regenerates', async () => {
+  test('vision token: unchanged token skips; a new score OR a rescore regenerates', async () => {
     const existing = {
       id: 'ke-1',
       slug: 'product/talstar-p',
       content: '# Talstar P\n\nExisting analysis.',
       data_point_count: 2,
-      source_treatment_ids: ['o1', 'o2', 'vision-scored:1'],
+      source_treatment_ids: ['o1', 'o2', 'vision-scored:1:1755050000000'],
       stale_flag: false,
     };
     useDb({ knowledge_entries: [existing] });
 
     const skipped = await wiki.generatePage('product/talstar-p', 'product', {
       outcomes: [{ id: 'o1', vision_delta_score: 35 }, { id: 'o2' }],
-      visionScoredCount: 1,
+      visionScoreToken: 'vision-scored:1:1755050000000',
     }, 'Product: Talstar P');
     expect(skipped.writeState).toBe('skipped');
     expect(global.__anthropicCreate).not.toHaveBeenCalled();
 
+    // second score → count changes
     useDb({ knowledge_entries: [existing] });
     const regenerated = await wiki.generatePage('product/talstar-p', 'product', {
       outcomes: [{ id: 'o1', vision_delta_score: 35 }, { id: 'o2', vision_delta_score: -10 }],
-      visionScoredCount: 2,
+      visionScoreToken: 'vision-scored:2:1755060000000',
     }, 'Product: Talstar P');
     expect(regenerated.writeState).toBe('generated');
     expect(global.__anthropicCreate).toHaveBeenCalled();
+
+    // RESCORE of the same pair (photo key re-election) → count unchanged but
+    // the newest scored_at moves, so the token changes and the page regenerates
+    useDb({ knowledge_entries: [existing] });
+    const rescored = await wiki.generatePage('product/talstar-p', 'product', {
+      outcomes: [{ id: 'o1', vision_delta_score: 12 }, { id: 'o2' }],
+      visionScoreToken: 'vision-scored:1:1755099999000',
+    }, 'Product: Talstar P');
+    expect(rescored.writeState).toBe('generated');
+  });
+
+  test('countVisionScored builds the count:maxScoredAt token from the full outcome set', () => {
+    const token = wiki.__private.countVisionScored([
+      { id: 'o1', vision_delta_score: 35, vision_scored_at: new Date(1755050000000) },
+      { id: 'o2', vision_delta_score: -5, vision_scored_at: new Date(1755060000000) },
+      { id: 'o3' },
+    ]);
+    expect(token).toBe('vision-scored:2:1755060000000');
+    expect(wiki.__private.countVisionScored([{ id: 'o1' }])).toBeNull();
   });
 
   test('markOutcomePagesStale flags the fan-out page set without firing generation', async () => {

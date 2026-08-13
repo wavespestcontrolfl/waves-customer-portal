@@ -599,7 +599,7 @@ const AgronomicWiki = {
         stats,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
-        visionScoredCount: countVisionScored(outcomes),
+        visionScoreToken: countVisionScored(outcomes),
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
@@ -690,7 +690,7 @@ const AgronomicWiki = {
         assessmentCount: assessments.length,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
-        visionScoredCount: countVisionScored(outcomes),
+        visionScoreToken: countVisionScored(outcomes),
         // Assessment-only condition pages (no outcomes yet) fingerprint on
         // the matching assessment ids — an empty id set would make the skip
         // guard blind to a changed assessment set with an equal count.
@@ -730,7 +730,7 @@ const AgronomicWiki = {
         customerCount,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
-        visionScoredCount: countVisionScored(outcomes),
+        visionScoreToken: countVisionScored(outcomes),
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
@@ -787,7 +787,7 @@ const AgronomicWiki = {
         stats,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
-        visionScoredCount: countVisionScored(outcomes),
+        visionScoreToken: countVisionScored(outcomes),
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
@@ -832,9 +832,11 @@ const AgronomicWiki = {
       // assessment ids for condition pages — it is a change-detection
       // fingerprint, not strict provenance). Zero scored outcomes = no token,
       // so pre-vision rows stay byte-identical and don't mass-regenerate.
-      const visionScoredCount = Number(data.visionScoredCount) || 0;
-      const fingerprintIds = visionScoredCount
-        ? [...sourceIds, `vision-scored:${visionScoredCount}`]
+      const visionScoreToken = typeof data.visionScoreToken === 'string' && data.visionScoreToken
+        ? data.visionScoreToken
+        : null;
+      const fingerprintIds = visionScoreToken
+        ? [...sourceIds, visionScoreToken]
         : sourceIds;
 
       // Skip regeneration when the underlying data hasn't changed — the AI
@@ -1223,6 +1225,24 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
     logger.info('[agronomic-wiki] Starting weekly refresh');
 
     try {
+      // 0. Vision-score invalidation reconcile: scoreOutcome's stale-flagging
+      // is best-effort (a transient failure there is swallowed and the sweep
+      // never re-selects a scored row), so re-run the idempotent flagging for
+      // recently scored outcomes here. 8-day window = one weekly cycle plus
+      // margin; already-regenerated pages skip cheaply via the fingerprint
+      // token and the skip branch clears the flag again.
+      try {
+        const recentlyScored = await db('treatment_outcomes')
+          .whereNotNull('vision_delta_score')
+          .where('vision_scored_at', '>', new Date(Date.now() - 8 * 24 * 60 * 60 * 1000))
+          .limit(100);
+        for (const outcome of recentlyScored) {
+          await AgronomicWiki.markOutcomePagesStale(outcome);
+        }
+      } catch (err) {
+        logger.error(`[agronomic-wiki] Vision-score stale reconcile failed: ${err.message}`);
+      }
+
       // 1. Mark stale pages (last_data_update > 60 days ago)
       const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
       await db('knowledge_entries')
@@ -1566,7 +1586,16 @@ async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug)
 // (non-comparable / low-confidence pairs) don't change the prompt input, so
 // they don't count.
 function countVisionScored(outcomes) {
-  return (outcomes || []).filter((o) => o.vision_delta_score !== null && o.vision_delta_score !== undefined).length;
+  const scored = (outcomes || []).filter((o) => o.vision_delta_score !== null && o.vision_delta_score !== undefined);
+  if (!scored.length) return null;
+  // Newest scored_at rides the token: a re-scored pair (photo key changed,
+  // count unchanged) must still change the fingerprint or the page would
+  // skip regeneration and keep narrating the old verdict.
+  const maxMs = Math.max(0, ...scored.map((o) => {
+    const ms = o.vision_scored_at ? new Date(o.vision_scored_at).getTime() : 0;
+    return Number.isFinite(ms) ? ms : 0;
+  }));
+  return `vision-scored:${scored.length}:${maxMs}`;
 }
 
 function aggregateOutcomes(outcomes) {
@@ -1623,6 +1652,7 @@ module.exports.__private = {
   resolveCanonicalProduct,
   classifyReviewTier,
   sameFlagSets,
+  countVisionScored,
   PRE_ASSESSMENT_MAX_AGE_DAYS,
   POST_ASSESSMENT_MAX_DAYS,
 };
