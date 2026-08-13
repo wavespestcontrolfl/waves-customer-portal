@@ -821,8 +821,12 @@ async function loadPlannerRunTasks() {
       // pass must surface as an exception even when the 4:20 reorder itself
       // was healthy (codex GitHub round P2).
       const adStatus = result?.auto_dispatch?.run?.status;
+      // result.auto_dispatch.error = the summary READ failed (codex GitHub
+      // round P2): the paired day-move pass could not be audited at all,
+      // which must surface as an exception, not render as a healthy night.
       const failedRun = asNumber(row.failed_count) > 0 || row.status === 'failed'
-        || adStatus === 'failed' || adStatus === 'completed_with_errors';
+        || adStatus === 'failed' || adStatus === 'completed_with_errors'
+        || result?.auto_dispatch?.error != null;
       // A 'skipped' row is a TICK that never ran (writer lock still held at
       // 4:20 — see recordSkippedTick). Its zero counts are not "0 problems";
       // the night had NO reorder pass at all, which must read as an

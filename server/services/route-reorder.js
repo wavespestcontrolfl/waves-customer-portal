@@ -44,7 +44,11 @@ const GOOGLE_WAYPOINT_CAP = 25;
 // excluding them anyway keeps the set correct even on a manual re-run.
 // 'rescheduled' phantoms and 'skipped' visits are not real stops (mirrors
 // the candidate-slots neighbor exclusion).
-const EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', 'rescheduled', 'en_route', 'on_site'];
+// no_show included (codex GitHub round P2): it is terminal everywhere else
+// (dispatch-assignment TERMINAL_STATUSES), but the admin details editor can
+// still rewrite a terminal row's scheduled_date into the reorder band — an
+// old missed visit must not distort savings or receive a route_order.
+const EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', 'rescheduled', 'en_route', 'on_site', 'no_show'];
 
 // Live-hold predicate — the occupancy convention (scheduling/occupancy.js):
 // an estimate-slot hold with reservation_expires_at in the past is dead

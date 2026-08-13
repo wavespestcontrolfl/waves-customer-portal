@@ -253,12 +253,32 @@ async function optimizeAllRoutes(input) {
     // unfenced per-row loop racing the nightly reorder leaves a mixed
     // sequence. Locks every tech-day this board-wide rewrite touches.
     const { lockTechDays } = require('../scheduling/tech-day-lock');
-    await db.transaction(async (trx) => {
-      await lockTechDays(trx, services.map((s) => ({ techId: s.technician_id, date })));
-      for (let i = 0; i < result.orderedStops.length; i++) {
-        await trx('scheduled_services').where('id', result.orderedStops[i].id).update({ route_order: i + 1, updated_at: new Date() });
-      }
-    });
+    try {
+      await db.transaction(async (trx) => {
+        await lockTechDays(trx, services.map((s) => ({ techId: s.technician_id, date })));
+        // Stale-snapshot guard (uncapped audit r21 P1): the optimizer ran
+        // BEFORE the fence — a move that committed while we waited must not
+        // receive the stale sequence on its new tech-day. Constrain each
+        // write to the tech-day the stop was optimized FOR; a miss aborts
+        // the whole rewrite untouched.
+        const techById = new Map(services.map((s) => [s.id, s.technician_id || null]));
+        for (let i = 0; i < result.orderedStops.length; i++) {
+          const stopId = result.orderedStops[i].id;
+          const expectTech = techById.get(stopId) || null;
+          const updated = await trx('scheduled_services')
+            .where('id', stopId)
+            .where('scheduled_date', date)
+            .modify((q) => (expectTech ? q.where('technician_id', expectTech) : q.whereNull('technician_id')))
+            .update({ route_order: i + 1, updated_at: new Date() });
+          if (updated !== 1) {
+            throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+          }
+        }
+      });
+    } catch (e) {
+      if (e.code === 'STALE_OPTIMIZE') return { error: 'Schedule changed while optimizing — please retry' };
+      throw e;
+    }
   }
 
   logger.info(`[intelligence-bar:schedule] Optimized routes for ${date}: saved ${savedMiles} miles (${savedPct}%)`);
@@ -332,12 +352,25 @@ async function optimizeTechRoute(input) {
     // Fenced + transactional — single tech-day; same contract as
     // optimize_all_routes above.
     const { lockTechDays } = require('../scheduling/tech-day-lock');
-    await db.transaction(async (trx) => {
-      await lockTechDays(trx, [{ techId: tech.id, date }]);
-      for (let i = 0; i < result.orderedStops.length; i++) {
-        await trx('scheduled_services').where('id', result.orderedStops[i].id).update({ route_order: i + 1, updated_at: new Date() });
-      }
-    });
+    try {
+      await db.transaction(async (trx) => {
+        await lockTechDays(trx, [{ techId: tech.id, date }]);
+        // Stale-snapshot guard — same contract as optimize_all_routes above.
+        for (let i = 0; i < result.orderedStops.length; i++) {
+          const updated = await trx('scheduled_services')
+            .where('id', result.orderedStops[i].id)
+            .where('scheduled_date', date)
+            .where('technician_id', tech.id)
+            .update({ route_order: i + 1, updated_at: new Date() });
+          if (updated !== 1) {
+            throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+          }
+        }
+      });
+    } catch (e) {
+      if (e.code === 'STALE_OPTIMIZE') return { error: 'Schedule changed while optimizing — please retry' };
+      throw e;
+    }
   }
 
   logger.info(`[intelligence-bar:schedule] Optimized ${tech.name}'s route for ${date}: saved ${savedMiles} miles`);

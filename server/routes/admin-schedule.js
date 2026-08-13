@@ -995,6 +995,27 @@ async function getAssignmentTargetIds(conn, jobId, assignmentScope) {
 async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScope = 'this_only', trx }) {
   const conn = trx || db;
   const { scope, job, parentId, targetIds } = await getAssignmentTargetIds(conn, jobId, assignmentScope);
+  // Multi-visit series assignment under a caller transaction: pre-acquire
+  // the COMPLETE tech-day fence set once, sorted (codex GitHub round P2) —
+  // the per-row applyAssignment fence otherwise locks each visit's day in
+  // its own call, and sequential sorted-within-call acquisitions can cross
+  // with the globally sorted unions the other writers take (hold B:day1,
+  // wait A:day2 vs hold A:day2, wait B:day1 → PG deadlock). Advisory xact
+  // locks are reentrant, so the per-row calls never wait after this.
+  // Without a caller trx each row runs in its own single-call transaction,
+  // which is already order-safe.
+  if (trx && targetIds.length > 1) {
+    const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    const fenceRows = await trx('scheduled_services')
+      .whereIn('id', targetIds)
+      .select('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+    const fencePairs = [];
+    for (const r of fenceRows) {
+      fencePairs.push({ techId: r.technician_id, date: r.day });
+      fencePairs.push({ techId: technicianId || null, date: r.day });
+    }
+    await lockTechDays(trx, fencePairs);
+  }
   const changedJobIds = [];
   let templateChanged = false;
   let technicianName = null;
@@ -8820,10 +8841,24 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       const { lockTechDays } = require('../services/scheduling/tech-day-lock');
       await db.transaction(async (trx) => {
         await lockTechDays(trx, services.map((s) => ({ techId: s.technician_id, date: dateStr })));
+        // Stale-snapshot guard (uncapped audit r21 P1): the optimizer ran
+        // BEFORE this fence was acquired — a reassignment/date move that
+        // committed while we waited for the lock must not receive the stale
+        // sequence number on its new tech-day. Each write is constrained to
+        // the tech-day the stop was optimized FOR; any miss aborts the whole
+        // rewrite untouched (operator reloads and retries).
+        const techById = new Map(services.map((s) => [s.id, s.technician_id || null]));
         for (let i = 0; i < result.orderedStops.length; i++) {
-          await trx('scheduled_services')
-            .where({ id: result.orderedStops[i].id })
+          const stopId = result.orderedStops[i].id;
+          const expectTech = techById.get(stopId) || null;
+          const updated = await trx('scheduled_services')
+            .where({ id: stopId })
+            .where('scheduled_date', dateStr)
+            .modify((q) => (expectTech ? q.where('technician_id', expectTech) : q.whereNull('technician_id')))
             .update({ route_order: i + 1 });
+          if (updated !== 1) {
+            throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+          }
         }
       });
     }
@@ -8863,7 +8898,12 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     }
 
     res.json(response);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'STALE_OPTIMIZE') {
+      return res.status(409).json({ error: 'Schedule changed while optimizing — reload and retry' });
+    }
+    next(err);
+  }
 });
 
 // POST /api/admin/schedule/optimize-route — single-tech route optimization
@@ -8919,10 +8959,17 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       const { lockTechDays } = require('../services/scheduling/tech-day-lock');
       await db.transaction(async (trx) => {
         await lockTechDays(trx, [{ techId: technicianId, date: dateStr }]);
+        // Stale-snapshot guard — same contract as /optimize above: the stop
+        // must still be on THIS tech-day or the whole rewrite aborts.
         for (let i = 0; i < result.orderedStops.length; i++) {
-          await trx('scheduled_services')
+          const updated = await trx('scheduled_services')
             .where({ id: result.orderedStops[i].id })
+            .where('scheduled_date', dateStr)
+            .where('technician_id', technicianId)
             .update({ route_order: i + 1 });
+          if (updated !== 1) {
+            throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+          }
         }
       });
     }
@@ -8960,7 +9007,12 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
     }
 
     res.json(response);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'STALE_OPTIMIZE') {
+      return res.status(409).json({ error: 'Schedule changed while optimizing — reload and retry' });
+    }
+    next(err);
+  }
 });
 
 // GET /api/admin/schedule/zone-density
