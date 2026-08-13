@@ -905,6 +905,13 @@ async function executeTool(name, input = {}, ctx = {}) {
         }
         return out;
       })();
+      // ⭐ "NEVER RECEIVED" IS A DELIVERY COMPLAINT, NOT A WITHDRAWAL. Bare
+      // "never"/"no longer" are stop verbs, so "I never received your text" and
+      // "I no longer receive texts" produced text-bearing stop clauses and
+      // silenced reminders for the caller REPORTING they miss them. A stop
+      // clause whose verb phrase is receipt-shaped is discarded.
+      const RECEIPT_COMPLAINT_RE = /^(?:never|no\s+longer|no\s+more)\s+(?:receiv\w*|got|get\b|gets|getting|hear\w*|heard|see|seen|saw|had)\b/i;
+      const actionableStopClauses = stopClauses.filter((c) => !RECEIPT_COMPLAINT_RE.test(String(c.stopped || '').trim()));
       const TEXTY = /\b(?:text|texts|texting|sms|message|messages|messaging)\b/i;
       // ⭐ "NO TEXTS" IS A STOP WITH NO STOP VERB. The bare channel negation —
       // "no texts", "no SMS", "no text messages please" — carries no word from
@@ -923,7 +930,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       const bareNoTexts = preferenceText
         .split(/[,;.!?—–]/)
         .some((clause) => BARE_NO_TEXTS_CLAUSE_RE.test(clause.trim()));
-      const statedSmsStop = stopClauses.some((c) => TEXTY.test(c.stopped) && !TEXTY.test(c.kept))
+      const statedSmsStop = actionableStopClauses.some((c) => TEXTY.test(c.stopped) && !TEXTY.test(c.kept))
         || bareNoTexts;
       // A total stop is any "stop <reaching me at all>" phrasing — and the
       // common ones do not say "contact": "remove my number", "don't bother me
@@ -945,7 +952,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       // by text" is total in its stopped half and still must not switch off the
       // texts they asked to keep. ("…except by email" keeps no texty channel, so
       // it stays a real SMS withdrawal — they left email as the only way in.)
-      const totalStop = stopClauses.some((c) => (
+      const totalStop = actionableStopClauses.some((c) => (
         // "stop all communications" / "do not communicate with me" are the
         // formal registers of the same total withdrawal — the stem covers
         // communicate/communicating/communication(s).
@@ -1177,7 +1184,12 @@ async function executeTool(name, input = {}, ctx = {}) {
       // Deliberately AFTER the lead write: the lead is the durable artifact and
       // must never be lost to an alert failure. Never customer-facing.
       const { alertOwnerHotLead } = require('./relay-alert');
-      const ownerPaged = await alertOwnerHotLead({ ...extracted, phone: callerPhone, urgency_reason: input.urgency_reason || null }, ctx);
+      const ownerPaged = await alertOwnerHotLead({
+        ...extracted, phone: callerPhone, urgency_reason: input.urgency_reason || null,
+        // The deep link on the owner page — the alert body masks numbers, so
+        // the lead page is where the callback number lives.
+        leadId: capturedLeadId || null,
+      }, ctx);
       // ⭐ THE MODEL ONLY PROMISES A PAGE THAT WENT OUT. The prompt lets her tell
       // a hot caller "a team member is being notified right away" — and this
       // call used to discard the boolean that says whether anyone actually was

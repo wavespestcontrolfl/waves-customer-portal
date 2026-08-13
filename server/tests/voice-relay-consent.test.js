@@ -554,6 +554,9 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
       'I received no texts about the appointment',
       'no text messages came through yesterday',
       'there were no texts, can you check',
+      // never/no-longer + a RECEIPT verb = a delivery complaint, not a stop.
+      'I never received your text',
+      'I no longer receive texts from you',
     ]) {
       jest.clearAllMocks();
       await executeTool('capture_lead', {

@@ -215,7 +215,10 @@ function hotAlertNotificationTitle(callSid) {
   const digest = sid
     ? require('crypto').createHash('sha256').update(sid).digest('hex').slice(0, 16)
     : 'unknown';
-  return `🚨 Hot lead — phone assistant call ${digest}`;
+  // Emoji-free ON PURPOSE: the admin notification pipeline strips emoji from
+  // titles at persist time (sanitizeBuiltNotification), so an emoji-bearing
+  // probe key would never match the stored row and the dedupe would re-page.
+  return `Hot lead — phone assistant call ${digest}`;
 }
 
 async function hotAlertAlreadyDelivered(callSid) {
@@ -316,10 +319,19 @@ async function alertOwnerHotLead(lead = {}, ctx = {}) {
 
     // The SAME sender + messageType the self-booking confirm alert uses.
     const TwilioService = require('../twilio');
+    // Deep link straight to the actionable record: the internal-alert
+    // sanitizer masks phone numbers in the BODY (no allowContactDetails on
+    // this trigger), so without a link the owner landed on /admin/dashboard
+    // with a hot lead and no way to call back. The lead (or the matched
+    // customer) page carries the full number.
+    const alertLink = lead.leadId
+      ? `/admin/leads?leadId=${encodeURIComponent(lead.leadId)}`
+      : (ctx.customerId ? `/admin/customers?customerId=${encodeURIComponent(ctx.customerId)}` : '/admin/leads');
     const sent = await TwilioService.sendSMS(to, body, {
       messageType: 'internal_alert',
       // The dedupe key doubles as the bell title; the body carries the detail.
       notificationTitle: hotAlertNotificationTitle(ctx.callSid),
+      link: alertLink,
     });
     // ⭐ `success: true` IS NOT DELIVERY ON THIS PATH. The internal-alert
     // redirect (services/twilio.js redirectInternalAdminSmsToNotification)
@@ -507,6 +519,7 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
     const ok = await alertOwnerHotLead(
       {
         ...lead,
+        leadId: leadId || null, // deep link target on the owner page
         lead_quality: 'hot', // the obligation marker is only written for hot captures
         call_summary: lead.transcript_summary,
         urgency_reason: 'recovered by the hot-alert sweep',
