@@ -80,7 +80,11 @@ const mockDb = jest.fn((table) => {
     return { where: jest.fn(() => ({ first: jest.fn(() => Promise.resolve(state.category)) })) };
   }
   if (table === 'stripe_payouts') {
-    return { where: jest.fn(function w() { return this; }), first: jest.fn(() => Promise.resolve(state.payoutRow)) };
+    return {
+      where: jest.fn(function w() { return this; }),
+      forUpdate: jest.fn(function f() { return this; }),
+      first: jest.fn(() => Promise.resolve(state.payoutRow)),
+    };
   }
   return bankBuilder();
 });
@@ -155,17 +159,8 @@ beforeEach(() => {
   state.category = null;
   state.payoutRow = null;
   state.insertReturningQueue = null;
-  // default behavior mirrors the real service: the precondition runs inside
-  // the reconcile transaction (here: against the same mock db), and a false
-  // return means an atomic skip
   reconcilePayout.mockReset();
-  reconcilePayout.mockImplementation(async (id, _amt, _note, _by, _status, opts) => {
-    if (opts && opts.precondition) {
-      const ok = await opts.precondition(mockDb);
-      if (!ok) return { payout_id: id, skipped: true };
-    }
-    return {};
-  });
+  reconcilePayout.mockImplementation(async () => ({}));
   delete process.env.GATE_BANK_IMPORT;
 });
 
@@ -378,6 +373,24 @@ describe('force-duplicates upload (gate on)', () => {
     expect(state.insertedBank[1]).toMatchObject({ amount: 204.87, direction: 'debit', account_label: 'capone-checking' });
   });
 
+  test('a forced copy cannot collide with a row the SAME upload imported (two new identical rows, one conflicted)', async () => {
+    const { hashRow } = jest.requireActual('../services/bank-import');
+    const hdRow = { txn_date: '2026-08-10', description: 'HD SUPPLY', amount: 204.87, direction: 'debit' };
+    const ordinal1Hash = hashRow('capone-checking', hdRow, 1);
+    const twoIdenticalCsv = 'Date,Description,Amount\n08/10/2026,HD SUPPLY,-204.87\n08/10/2026,HD SUPPLY,-204.87';
+    state.insertReturningQueue = [
+      [{ id: 'bt-new', row_hash: ordinal1Hash }], // bulk: ordinal 0 conflicts (DB copy), ordinal 1 lands
+      [{ id: 'bt-forced' }], // the force attempt lands
+    ];
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv: twoIdenticalCsv, forceDuplicates: true, forceRowHashes: [hdSupplyHash] });
+    const body = await res.json();
+    expect(body.forced).toBe(1);
+    // target ordinal = tuple occurrences (2) + row ordinal (0) = 2 — past
+    // everything this file occupies, so the just-imported ordinal-1 row is safe
+    expect(state.insertedBank[2].row_hash).toBe(hashRow('capone-checking', hdRow, 2));
+    expect(state.insertedBank[2].row_hash).not.toBe(ordinal1Hash);
+  });
+
   test('force only touches the scoped hashes — a full re-post cannot duplicate the rest of the statement', async () => {
     const twoRowCsv = 'Date,Description,Amount\n08/10/2026,HD SUPPLY,-204.87\n08/11/2026,REFUND,15.00';
     state.insertReturningQueue = [
@@ -418,16 +431,16 @@ describe('unlink (gate on)', () => {
     expect(reconcilePayout).not.toHaveBeenCalled();
   });
 
-  test('unlinking a payout row runs the unlink CAS INSIDE the reversal transaction', async () => {
+  test('unlinking a payout row reverses OUR reconciliation inside one transaction', async () => {
+    state.payoutRow = { id: 'po-1', reconciled: true, reconciled_by: 'bank-import:bt-1' };
     const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.reconciliation).toBe('reversed');
-    // the guard rides INTO reconcilePayout (checked under a row lock) and is
-    // ROW-SPECIFIC: only the reconciliation this row authored can be undone;
-    // the precondition carries the unlink so both commit or neither does
+    // ownership was checked under the payout row lock; the reversal joins
+    // the SAME transaction via opts.trx so both commit or neither does
     expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('bt-1'), 'bank-import:bt-1', 'rejected',
-      expect.objectContaining({ onlyIfReconciledBy: 'bank-import:bt-1', precondition: expect.any(Function) }));
+      expect.objectContaining({ trx: expect.anything() }));
     // exactly one update: the in-transaction unlink CAS, scoped to the exact payout
     expect(state.bankUpdates).toHaveLength(1);
     const upd = state.bankUpdates[0];
@@ -436,18 +449,27 @@ describe('unlink (gate on)', () => {
     expect(upd.patch.suggestion.lastUnlink.payoutId).toBe('po-1');
   });
 
-  test('a guard miss (human owns the reconciliation, or none exists) falls back to a plain unlink as kept', async () => {
-    reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-1', skipped: true }); // guard miss: precondition never ran
+  test("someone else's reconciliation is kept — unlink proceeds, banking side untouched", async () => {
+    state.payoutRow = { id: 'po-1', reconciled: true, reconciled_by: 'adam' };
     const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
     const body = await res.json();
     expect(body.reconciliation).toBe('kept');
-    // the plain unlink still happened, with the same CAS
+    expect(reconcilePayout).not.toHaveBeenCalled();
     expect(state.bankUpdates).toHaveLength(1);
-    expect(state.bankUpdates[0].wheres).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
+    expect(state.bankUpdates[0].patch.status).toBe('unmatched');
+  });
+
+  test('an unreconciled payout unlinks with nothing to reverse', async () => {
+    state.payoutRow = { id: 'po-1', reconciled: false, reconciled_by: null };
+    const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
+    const body = await res.json();
+    expect(body.reconciliation).toBeNull();
+    expect(reconcilePayout).not.toHaveBeenCalled();
     expect(state.bankUpdates[0].patch.status).toBe('unmatched');
   });
 
   test('a reversal failure rolls the unlink back — the row stays linked and the operator retries', async () => {
+    state.payoutRow = { id: 'po-1', reconciled: true, reconciled_by: 'bank-import:bt-1' };
     reconcilePayout.mockRejectedValueOnce(new Error('db down'));
     const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
     expect(res.status).toBe(502);

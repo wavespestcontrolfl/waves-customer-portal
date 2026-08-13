@@ -1700,11 +1700,16 @@ router.post('/bank-import/upload', async (req, res, next) => {
     const duplicateRows = hashed.filter(r => !insertedHashes.has(r.row_hash));
     // Force path for the split-across-uploads case: a genuinely distinct
     // identical transaction in a SEPARATE file hashes like a re-upload and
-    // is skipped above. When the operator confirms these are real, insert
-    // EXACTLY ordinal+1 for each confirmed hash — a single deterministic
-    // target makes a replayed confirmation (double-click, network retry)
-    // idempotent: the retry conflicts and reports alreadyPresent instead of
-    // walking to ordinal+2, +3, … forever.
+    // is skipped above. When the operator confirms these are real, each
+    // confirmed row targets ONE deterministic ordinal:
+    //   (occurrences of its tuple in THIS file) + (its own ordinal)
+    // Targets start past every ordinal this file occupies, so a forced copy
+    // can never collide with a row the same upload imported normally (two
+    // new identical rows where only one conflicted); a replayed
+    // confirmation computes the same target, conflicts, and reports
+    // alreadyPresent instead of minting more copies; and because the copy
+    // stays IN the ordinal space, a later fuller export that carries all
+    // occurrences dedupes against it instead of importing extras.
     // ⛔ Force is scoped to EXPLICIT row hashes from the FIRST response's
     // duplicate set: on the confirming re-post every previously inserted row
     // conflicts too, so an unscoped force would duplicate the whole
@@ -1712,8 +1717,11 @@ router.post('/bank-import/upload', async (req, res, next) => {
     let forced = 0;
     let forceAlreadyPresent = 0;
     if (forceDuplicates === true) {
+      const tupleCounts = new Map();
+      for (const h of hashed) tupleCounts.set(h.tuple_key, (tupleCounts.get(h.tuple_key) || 0) + 1);
       const forceSet = new Set(forceRowHashes);
       for (const r of duplicateRows.filter(d => forceSet.has(d.row_hash))) {
+        const targetOrdinal = tupleCounts.get(r.tuple_key) + r.ordinal;
         const [ins] = await db('bank_transactions')
           .insert({
             account_label: accountLabel.trim(),
@@ -1724,7 +1732,7 @@ router.post('/bank-import/upload', async (req, res, next) => {
             direction: r.direction,
             source: 'csv',
             source_file: String(filename || '').slice(0, 300) || null,
-            row_hash: bankImport.hashRow(accountLabel.trim(), r, r.ordinal + 1),
+            row_hash: bankImport.hashRow(accountLabel.trim(), r, targetOrdinal),
           })
           .onConflict('row_hash')
           .ignore()
@@ -1974,33 +1982,40 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       return res.json({ success: true, reconciliation: null });
     }
 
+    // ONE transaction, payout row locked FIRST (same payout→bank-row lock
+    // order as the matcher's echo): the reconciliation decision — reverse
+    // ours / keep a human's or a newer claim's / nothing to do — and the
+    // unlink commit together. A pending echo retry can't land in the gap:
+    // it blocks on the payout lock, and after our commit its still-linked
+    // precondition fails.
     const { reconcilePayout } = require('../services/stripe-banking');
-    let unlinked = false;
-    let result;
+    let reconciliation = null;
     try {
-      result = await reconcilePayout(row.matched_payout_id, Number(row.amount), `Unlinked from bank import row ${row.id}`, `bank-import:${row.id}`, 'rejected', {
-        onlyIfReconciledBy: `bank-import:${row.id}`,
-        // the unlink itself happens HERE, inside the reversal's transaction —
-        // reversal failure rolls the unlink back (the claim is kept until the
-        // reversal completes; the operator just retries)
-        precondition: async (trx) => {
-          unlinked = (await doUnlink(trx)) === 1;
-          return unlinked;
-        },
+      await db.transaction(async (trx) => {
+        const payout = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('reconciled', 'reconciled_by');
+        const changed = await doUnlink(trx);
+        if (!changed) {
+          const e = new Error('row changed mid-flight — reload');
+          e.code = 'CAS_LOST';
+          throw e; // rolls everything back
+        }
+        if (payout && payout.reconciled && payout.reconciled_by === `bank-import:${row.id}`) {
+          // reverse OUR OWN reconciliation inside this same transaction; the
+          // ownership check just happened under the payout lock, so no
+          // further guard is needed
+          await reconcilePayout(row.matched_payout_id, Number(row.amount), `Unlinked from bank import row ${row.id}`, `bank-import:${row.id}`, 'rejected', { trx });
+          reconciliation = 'reversed';
+        } else if (payout && payout.reconciled) {
+          // a human or a newer claim owns the reconciliation — never touched
+          reconciliation = 'kept';
+        }
       });
     } catch (err) {
+      if (err.code === 'CAS_LOST') return res.status(409).json({ error: err.message });
       logger.warn(`[bank-import] unlink of row ${row.id} rolled back — reconciliation reversal failed: ${err.message}`);
       return res.status(502).json({ error: `reconciliation reversal failed (${err.message}) — the row is still linked; retry` });
     }
-    if (result && result.skipped && !unlinked) {
-      // Author-guard miss: there is no bank-import reconciliation by this
-      // row to reverse (never echoed, human owns it, or a newer claim owns
-      // it) — plain unlink, nothing to undo on the banking side.
-      const changed = await doUnlink(db);
-      if (!changed) return res.status(409).json({ error: 'row changed mid-flight — reload' });
-      return res.json({ success: true, reconciliation: 'kept' });
-    }
-    res.json({ success: true, reconciliation: 'reversed' });
+    res.json({ success: true, reconciliation });
   } catch (err) { next(err); }
 });
 

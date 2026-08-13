@@ -156,10 +156,10 @@ function hashRow(accountLabel, r, ordinal) {
 function withRowHashes(accountLabel, rows) {
   const seen = new Map();
   return rows.map(r => {
-    const key = `${r.txn_date}|${String(r.description).replace(/\s+/g, ' ').toUpperCase()}|${Number(r.amount).toFixed(2)}|${r.direction}`;
-    const ordinal = seen.get(key) || 0;
-    seen.set(key, ordinal + 1);
-    return { ...r, ordinal, row_hash: hashRow(accountLabel, r, ordinal) };
+    const tuple_key = `${r.txn_date}|${String(r.description).replace(/\s+/g, ' ').toUpperCase()}|${Number(r.amount).toFixed(2)}|${r.direction}`;
+    const ordinal = seen.get(tuple_key) || 0;
+    seen.set(tuple_key, ordinal + 1);
+    return { ...r, tuple_key, ordinal, row_hash: hashRow(accountLabel, r, ordinal) };
   });
 }
 

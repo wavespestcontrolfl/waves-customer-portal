@@ -575,6 +575,16 @@ describe('stripe banking service', () => {
       expect(reconInserts).toHaveLength(1);
     });
 
+    test('opts.trx joins the external transaction instead of opening one', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: true, reconciled_by: 'bank-import:bt-1' };
+      const before = db.transaction.mock.calls.length;
+      const result = await service.reconcilePayout('local-payout-1', 120, 'undo', 'bank-import:bt-1', 'rejected', { trx: db });
+      expect(db.transaction.mock.calls.length).toBe(before); // no new transaction opened
+      expect(result.skipped).toBeUndefined();
+      expect(reconInserts).toHaveLength(1);
+      expect(payoutUpdate).toMatchObject({ reconciled: false });
+    });
+
     test('no guard passed = unchanged legacy behavior (unconditional write)', async () => {
       payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
       const result = await service.reconcilePayout('local-payout-1', 118.5, 'bank shows less', 'admin', 'confirmed');

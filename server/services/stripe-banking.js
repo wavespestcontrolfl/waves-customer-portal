@@ -1070,10 +1070,13 @@ async function getCashFlow(startDate, endDate) {
  *     run inside the same transaction (after the payout row lock); returning
  *     false skips the write. Callers use it to lock-and-verify their own
  *     rows so the reconciliation can't outlive the state that justified it.
+ *   - trx: run inside this EXISTING transaction instead of opening one —
+ *     for callers that must make the reconciliation atomic with their own
+ *     writes (their commit/rollback governs everything together).
  */
 async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, status = 'confirmed', opts = {}) {
   try {
-    const payout = await db('stripe_payouts').where('id', payoutId).first();
+    const payout = await (opts.trx || db)('stripe_payouts').where('id', payoutId).first();
     if (!payout) throw new Error('Payout not found');
 
     const allowedStatuses = ['draft', 'confirmed', 'rejected'];
@@ -1091,7 +1094,10 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
     const now = new Date().toISOString();
 
     let skipped = false;
-    await db.transaction(async (trx) => {
+    // In an externally-owned transaction the caller's commit/rollback
+    // governs these writes together with its own.
+    const runInTransaction = opts.trx ? (fn) => fn(opts.trx) : (fn) => db.transaction(fn);
+    await runInTransaction(async (trx) => {
       if (opts.onlyIfReconciledBy !== undefined || opts.onlyIfUnreconciled) {
         const cur = await trx('stripe_payouts').where('id', payoutId).forUpdate().first('reconciled', 'reconciled_by');
         const authorOk = opts.onlyIfReconciledBy === undefined
