@@ -242,13 +242,20 @@ const reportEventLimiter = rateLimit({
 // drive the full recomputation + durable writes at the 120/min analytics
 // rate. One normalizer, both call sites.
 const normalizedEventName = (req) => String(req?.body?.eventName || '').trim();
+// The two durable-write actions a report token can take share this low
+// token-keyed limiter: cross_sell_requested events (recompute + rows) and
+// the referral-link tap (promoter enrollment). The skip predicate must name
+// BOTH (pre-push P1): the referral POST carries no eventName, so an
+// eventName-only predicate silently exempted it and left promoter
+// enrollment behind the 120/min IP-keyed limiter alone.
+const isReferralLinkRequest = (req) => /\/referral-link\/?$/.test(String(req?.path || ''));
 const crossSellActionLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => `xsell:${req.params.token || 'anon'}`,
-  skip: (req) => normalizedEventName(req) !== 'cross_sell_requested',
+  skip: (req) => normalizedEventName(req) !== 'cross_sell_requested' && !isReferralLinkRequest(req),
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
@@ -591,14 +598,15 @@ async function buildServiceReportV1ResponseData(service, token, {
         const referralEngine = require('../services/referral-engine');
         const settings = await referralEngine.getLiveSettings();
         if (settings?.program_active) {
-          const referrerCents = Number(settings.referrer_reward_cents || 0);
-          const refereeCents = Number(settings.referee_discount_cents || 0);
+          // Owner-dictated copy 2026-08-13: static headline + CTA, no
+          // amounts on the card. The customer's code and share text are NOT
+          // composed here — rendering a report is a read, and enrolling a
+          // promoter row on a public GET would be a durable write per view
+          // (staff QA reads included). The card's button fetches them from
+          // POST /:token/referral-link, which enrolls on the explicit tap.
           referral = {
-            line: referrerCents > 0 && refereeCents > 0
-              ? 'Refer a friend — you both get rewarded when they start service.'
-              : referrerCents > 0
-                ? 'Refer a friend — you get rewarded when they start service.'
-                : 'Refer a friend — we’ll take just as good care of them.',
+            headline: 'Know someone who could use Waves?',
+            cta: 'Send My Referral Link',
           };
         }
       } catch (err) {
@@ -1342,6 +1350,83 @@ router.get('/:token/recap/video', async (req, res, next) => {
     });
     return obj.body.pipe(res);
   } catch (err) { return next(err); }
+});
+
+// POST /api/reports/:token/referral-link — the referral card's "Send My
+// Referral Link" tap (owner ruling 2026-08-13: the report carries the same
+// share module as the portal's Refer tab). Deliberately a POST on the TAP,
+// not part of the /data render: enrollPromoter creates a durable
+// referral_promoters row, and a public GET must stay read-only (every
+// render — staff QA included — would otherwise enroll the customer).
+// Reuses the portal's own mechanism end to end: enrollPromoter +
+// getPromoterReferralLink, never a parallel code generator. 404 covers
+// dark gate / inactive program / unknown token uniformly (the gate is not
+// probeable — same posture as the cross-sell events).
+router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter, async (req, res, next) => {
+  if (!FULL_TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
+  try {
+    const service = await db('service_records')
+      .where({ report_view_token: req.params.token })
+      .select('id', 'customer_id', 'report_template_version', 'structured_notes')
+      .first();
+    if (!service || service.report_template_version !== 'service_report_v1' || !service.customer_id) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    if (suppressedTypedReport(service)) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    if (!require('../config/feature-gates').isEnabled('reportCrossSell')) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    const referralEngine = require('../services/referral-engine');
+    // Same STRICT settings read as the card composer (codex #3367 PR r2):
+    // no live row / inactive program = the card should not have rendered —
+    // answer as if the route doesn't exist rather than enroll anyone.
+    const settings = await referralEngine.getLiveSettings();
+    if (!settings?.program_active) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    const { promoter } = await referralEngine.enrollPromoter(service.customer_id);
+    const code = String(promoter?.referral_code || '').trim();
+    const link = referralEngine.getPromoterReferralLink(promoter, settings);
+    if (!code || !link) {
+      return res.status(503).json({ error: 'Referral link unavailable — please try again' });
+    }
+    // Share copy the CUSTOMER forwards from their own phone (not a Waves
+    // send): owner voice, no emojis, never a URL shortener. The friend's
+    // discount is mentioned only when the live settings actually grant one
+    // — template copy must never advertise a benefit the referee won't
+    // receive (same rule as the card composer). SMS body drops the URL
+    // scheme (portal-domain links render as previews without it; the email
+    // body keeps the full URL).
+    // Cents format EXACTLY (pre-push P0): referee_discount_cents supports
+    // arbitrary cent amounts, and rounding 4999 to "$50" promises a dollar
+    // the engine never credits. Whole-dollar settings keep the clean "$25".
+    const refereeCents = Math.max(0, Math.trunc(Number(settings.referee_discount_cents) || 0));
+    const refereeAmount = refereeCents % 100 === 0
+      ? `$${refereeCents / 100}`
+      : `$${(refereeCents / 100).toFixed(2)}`;
+    const offerClause = refereeCents > 0
+      ? `they'll take ${refereeAmount} off your first service with my code ${code}`
+      : `mention my code ${code} when you book`;
+    const bareLink = String(link).replace(/^https?:\/\//i, '');
+    return res.json({
+      code,
+      link,
+      smsBody: `We use Waves Pest Control and ${offerClause}. ${bareLink}`,
+      emailSubject: refereeCents > 0 ? `${refereeAmount} off Waves Pest Control` : 'Waves Pest Control',
+      emailBody: `We use Waves Pest Control and ${offerClause}.\n\n${link}`,
+    });
+  } catch (err) {
+    // err.code only, never err.message (pre-push P1): enrollPromoter inserts
+    // customer_phone into a uniquely constrained column, and PG constraint
+    // violations quote the conflicting value — logging the message can put a
+    // phone number in the logs (AGENTS.md PII-in-logs rule).
+    logger.warn(`[reports-public] referral-link failed (code=${err?.code || 'none'}, token=${req.params.token.slice(0, 8)}…)`);
+    return res.status(503).json({ error: 'Referral link unavailable — please try again' });
+  }
 });
 
 // POST /api/reports/:token/pest-pressure/client-rating — customer-facing,

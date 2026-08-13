@@ -23,10 +23,12 @@
 
 const logger = require('../logger');
 
-// Offer ladder (owner ruling 2026-08-11): first family the customer lacks
-// wins; one offer per report, never stacked. Mosquito is deliberately absent
-// — the owner chose termite as the has-everything offer — and palm is
+// Offer families (owner matrix 2026-08-13, superseding the 08-11 first-gap
+// ladder): one offer per report, never stacked. Mosquito is deliberately
+// absent — it affects the price tier but never the target — and palm is
 // assessment-first by catalog design (booking_enabled false), never offered.
+// The full 16-row ownership matrix + identity-start rules live in
+// pickOfferTarget/startFamilyForIdentity below; the test file pins every row.
 const OFFER_LADDER = ['pest_control', 'lawn_care', 'tree_shrub', 'termite'];
 
 // Prompts routed through customer-pricing-ai's own SERVICE_MATCHERS so the
@@ -66,9 +68,51 @@ function offerVocabulary(ownedKeys = []) {
   return new Set(ownedKeys.map((key) => OWNED_KEY_TO_OFFER_KEY[key] || key));
 }
 
+// Ownership matrix (owner ruling 2026-08-13, every cell approved):
+//   everything (pest+lawn+T&S+termite)     → NO card (referral fills the slot)
+//   T&S without lawn (incl. T&S+termite)   → lawn
+//   pest+lawn+T&S                          → termite   (08-11 ruling, kept)
+//   pest+lawn                              → tree & shrub
+//   has pest                               → lawn
+//   has lawn                               → pest
+//   termite-only / rodent- / mosquito-only → pest
+// Rule order IS the precedence: the T&S-without-lawn row deliberately beats
+// both the pest→lawn and termite→pest rows (T&S+termite → lawn, not pest).
 function pickOfferTarget(ownedKeys) {
   const owned = offerVocabulary(ownedKeys);
-  return OFFER_LADDER.find((key) => !owned.has(key)) || null;
+  const pest = owned.has('pest_control');
+  const lawn = owned.has('lawn_care');
+  const tree = owned.has('tree_shrub');
+  const termite = owned.has('termite');
+  if (pest && lawn && tree && termite) return null;
+  if (tree && !lawn) return 'lawn_care';
+  if (pest && lawn && tree) return 'termite';
+  if (pest && lawn) return 'tree_shrub';
+  if (pest) return 'lawn_care';
+  if (lawn) return 'pest_control';
+  // termite-only, or only non-ladder evidence (rodent, mosquito): the
+  // customer has a plan but not the anchor — offer recurring pest.
+  return 'pest_control';
+}
+
+// Identity-start rules (owner matrix 2026-08-13): when the customer owns
+// NOTHING recurring, the offer starts the family today's report belongs to —
+// a one-time lawn visit starts recurring lawn, a one-time T&S visit starts
+// recurring T&S, and everything else (pest, roach/flea/bed-bug specialties,
+// rodent, termite, WDO, mosquito, unknown) starts recurring pest, the anchor.
+// T&S is matched before lawn so a combined "Lawn, Tree & Shrub" identity
+// resolves to the more specific family.
+function startFamilyForIdentity(row = {}) {
+  const s = [row.service_key, row.service_name, row.service_type]
+    .filter(Boolean).join(' ').replace(/[_-]+/g, ' ').toLowerCase();
+  // Palm vetoes the tree match (pre-push P1): "Palm Tree Injections" carries
+  // the tree token but palm is its own assessment-first family — same
+  // palm-first ordering as waveguard-existing-services. A palm one-time
+  // falls through to the default anchor like every other specialty.
+  if (/\bpalms?\b/.test(s)) return 'pest_control';
+  if (/\b(tree|shrub|ornamental)\b/.test(s)) return 'tree_shrub';
+  if (/\b(lawn|turf)\b/.test(s)) return 'lawn_care';
+  return 'pest_control';
 }
 
 // Does the price the pricer just built rest on the SAME qualifying-service
@@ -719,9 +763,15 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // policy) is bounded here because the ownership reads on this same
     // connection succeeded milliseconds earlier.
     const ladderEvidence = [...ownedKeys, ...reportFamilies];
-    const targetKey = pickOfferTarget(ladderEvidence);
-    // Owns the whole ladder → nothing to offer; the report still shows the
-    // referral card, which is client-side and needs no payload.
+    // No recurring evidence at all → the identity-start branch: offer starts
+    // the family today's report belongs to (owner matrix 2026-08-13). With
+    // evidence, the ownership matrix decides. relationship below stays
+    // evidence-driven, so identity-start cards always say "Start".
+    const targetKey = ladderEvidence.length
+      ? pickOfferTarget(ladderEvidence)
+      : startFamilyForIdentity(reportIdentity);
+    // Owns everything → nothing to offer; the report still shows the
+    // referral card, which needs no crossSell payload.
     if (!targetKey) return null;
     if (offerVocabulary(planRateFamilies).has(targetKey)) return null;
 
@@ -879,9 +929,9 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
 
 module.exports = {
   buildReportCrossSell,
-  // Test hooks: ladder + priceability are the card's two decisions.
+  // Test hooks: target matrix + priceability are the card's two decisions.
   _private: {
-    pickOfferTarget, pickOption, optionIsPriceable, offerFingerprint, OFFER_LADDER,
+    pickOfferTarget, startFamilyForIdentity, pickOption, optionIsPriceable, offerFingerprint, OFFER_LADDER,
     // Test hook: what the seed actually carries out of an accepted estimate
     // is the money-bearing contract here — every modifier it drops prices
     // as if the property did not have it.

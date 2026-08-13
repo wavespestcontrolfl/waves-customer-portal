@@ -135,20 +135,76 @@ function dbFor({ customer = CUSTOMER(), serviceTypes = [], turfProfile = null, e
 // Cache-only lookup default: a miss (null) prices from the profile alone.
 const missLookup = async () => null;
 
-describe('offer ladder', () => {
-  const { pickOfferTarget, OFFER_LADDER } = _private;
+describe('offer target matrix (owner ruling 2026-08-13, one test per approved cell)', () => {
+  const { pickOfferTarget, startFamilyForIdentity, OFFER_LADDER } = _private;
 
-  test('one offer per report, first missing family wins, mosquito never offered', () => {
+  test('offer vocabulary is unchanged', () => {
     expect(OFFER_LADDER).toEqual(['pest_control', 'lawn_care', 'tree_shrub', 'termite']);
-    expect(pickOfferTarget([])).toBe('pest_control');
-    expect(pickOfferTarget(['pest_control'])).toBe('lawn_care');
-    expect(pickOfferTarget(['lawn_care'])).toBe('pest_control');
-    expect(pickOfferTarget(['pest_control', 'lawn_care'])).toBe('tree_shrub');
-    expect(pickOfferTarget(['pest_control', 'lawn_care', 'tree_shrub'])).toBe('termite');
-    // Ownership vocabulary termite_bait maps onto the ladder's termite rung.
+  });
+
+  // Every ownership combination of {pest, lawn, T&S, termite}, exactly as
+  // approved. The empty row is absent on purpose — no recurring evidence
+  // routes to the identity-start branch, pinned in the next describe.
+  const P = 'pest_control'; const L = 'lawn_care'; const T = 'tree_shrub'; const X = 'termite';
+  test.each([
+    [[P], L, 'pest only → lawn'],
+    [[L], P, 'lawn only → pest'],
+    [[T], L, 'T&S only → lawn (08-13: T&S-without-lawn beats the pest rung)'],
+    [[X], P, 'termite only → pest'],
+    [[P, L], T, 'pest+lawn → T&S'],
+    [[P, T], L, 'pest+T&S → lawn (pest→lawn and T&S→lawn agree)'],
+    [[P, X], L, 'pest+termite → lawn'],
+    [[L, T], P, 'lawn+T&S → pest (lawn owned, so the T&S rule is inert)'],
+    [[L, X], P, 'lawn+termite → pest'],
+    [[T, X], L, 'T&S+termite → lawn (approved: the T&S rule beats termite→pest)'],
+    [[P, L, T], X, 'pest+lawn+T&S → termite (08-11 ruling, kept)'],
+    [[P, L, X], T, 'pest+lawn+termite → T&S'],
+    [[P, T, X], L, 'pest+T&S+termite → lawn'],
+    [[L, T, X], P, 'lawn+T&S+termite → pest'],
+    [[P, L, T, X], null, 'everything → NO card (the referral card fills the slot)'],
+  ])('%j → %s (%s)', (owned, expected) => {
+    expect(pickOfferTarget(owned)).toBe(expected);
+  });
+
+  test('ownership vocabulary termite_bait maps onto the termite cell', () => {
     expect(pickOfferTarget(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait'])).toBe(null);
-    // Mosquito ownership occupies no rung — the ladder position is unchanged.
+    expect(pickOfferTarget(['termite_bait'])).toBe('pest_control');
+  });
+
+  test('mosquito and rodent evidence never move the target', () => {
+    // Alone: a plan exists but not the anchor — offer pest.
     expect(pickOfferTarget(['mosquito'])).toBe('pest_control');
+    expect(pickOfferTarget(['rodent_bait'])).toBe('pest_control');
+    // Added to any row: the row's answer is unchanged.
+    expect(pickOfferTarget(['pest_control', 'mosquito'])).toBe('lawn_care');
+    expect(pickOfferTarget(['tree_shrub', 'termite', 'mosquito'])).toBe('lawn_care');
+    expect(pickOfferTarget(['pest_control', 'lawn_care', 'tree_shrub', 'termite', 'mosquito'])).toBe(null);
+  });
+});
+
+describe('identity-start rules (owner matrix 2026-08-13: nothing recurring → start the report\'s own family)', () => {
+  const { startFamilyForIdentity } = _private;
+
+  test.each([
+    [{ service_type: 'One-Time Pest Control Service' }, 'pest_control', 'one-time pest → start pest'],
+    [{ service_type: 'German Roach Cleanout' }, 'pest_control', 'roach specialty → start pest'],
+    [{ service_type: 'Flea Treatment' }, 'pest_control', 'flea → start pest'],
+    [{ service_type: 'Bed Bug Treatment' }, 'pest_control', 'bed bug → start pest'],
+    [{ service_type: 'One-Time Lawn Care Visit' }, 'lawn_care', 'one-time lawn → start lawn'],
+    [{ service_key: 'lawn_one_time', service_name: 'One-Time Turf Application' }, 'lawn_care', 'turf wording → start lawn'],
+    [{ service_type: 'Rodent Trapping' }, 'pest_control', 'rodent anything → start pest'],
+    [{ service_type: 'Termite Inspection' }, 'pest_control', 'termite anything → start pest'],
+    [{ service_type: 'WDO Inspection' }, 'pest_control', 'WDO → start pest'],
+    [{ service_type: 'One-Time Mosquito Treatment' }, 'pest_control', 'one-time mosquito → start pest (approved rec)'],
+    [{ service_type: 'Tree & Shrub Treatment' }, 'tree_shrub', 'one-time T&S → start recurring T&S (approved rec)'],
+    [{ service_key: 'palm_injection', service_name: 'Palm Tree Injections' }, 'pest_control', 'palm vetoes the tree token — assessment-first, never offered, falls to the anchor'],
+    [{ service_type: 'Palm Treatment' }, 'pest_control', 'palm wording alone → pest'],
+    [{ service_name: 'Ornamental Care Visit' }, 'tree_shrub', 'ornamental wording is T&S'],
+    [{ service_type: 'Lawn, Tree & Shrub Package' }, 'tree_shrub', 'combined wording → the more specific family'],
+    [{ service_type: 'Mystery Legacy Row' }, 'pest_control', 'unknown identity → pest, the anchor'],
+    [{}, 'pest_control', 'no identity at all → pest'],
+  ])('%j → %s (%s)', (identity, expected) => {
+    expect(startFamilyForIdentity(identity)).toBe(expected);
   });
 });
 
@@ -499,6 +555,34 @@ describe('buildReportCrossSell', () => {
     const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
     expect(result).not.toBeNull();
     expect(result.serviceKey).toBe('pest_control');
+    expect(result.relationship).toBe('start');
+  });
+
+  test('one-time LAWN report with no recurring rows starts recurring lawn, not pest (owner matrix 2026-08-13)', async () => {
+    // End-to-end proof the identity-start branch reads the report's own
+    // identity: same empty ownership as the test above, different report
+    // wording, different offer.
+    const db = dbFor({ serviceTypes: [] });
+    const result = await buildReportCrossSell(
+      SERVICE({ service_type: 'One-Time Lawn Care Visit' }),
+      db,
+      { propertyLookup: missLookup },
+    );
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('lawn_care');
+    expect(result.relationship).toBe('start');
+  });
+
+  test('rodent report with no recurring rows starts recurring pest (owner matrix 2026-08-13)', async () => {
+    const db = dbFor({ serviceTypes: [] });
+    const result = await buildReportCrossSell(
+      SERVICE({ service_type: 'Rodent Trapping' }),
+      db,
+      { propertyLookup: missLookup },
+    );
+    expect(result).not.toBeNull();
+    expect(result.serviceKey).toBe('pest_control');
+    expect(result.relationship).toBe('start');
   });
 
   test('FAIL CLOSED: a broken ownership catalog join suppresses the card entirely', async () => {

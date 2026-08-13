@@ -229,11 +229,20 @@ describe('ReportViewPage report chrome helpers', () => {
   it('uses distinct review request copy for top and bottom placements', () => {
     const top = reviewRequestCopy('top');
     const bottom = reviewRequestCopy('bottom');
-    expect(top.title).toBe("How did today's visit go?");
+    expect(top.title).toBe('How did we do today?');
     expect(bottom.title).toBe('Help the next neighbor choose faster');
     expect(top.title).not.toBe(bottom.title);
-    expect(top.cta).toBe('Share feedback');
+    expect(top.cta).toBe('Rate today’s visit');
     expect(bottom.cta).toBe('Share feedback');
+  });
+
+  it('names the technician and the customer when the payload carries them (owner ruling 2026-08-13)', () => {
+    expect(reviewRequestCopy('top', 'Casey', 'Adam').title).toBe('How did Adam do today, Casey?');
+    // First name only, even from a full technician name.
+    expect(reviewRequestCopy('top', 'Casey', 'Adam Benetti').title).toBe('How did Adam do today, Casey?');
+    // Either side missing degrades gracefully, never renders a dangling comma.
+    expect(reviewRequestCopy('top', '', 'Adam').title).toBe('How did Adam do today?');
+    expect(reviewRequestCopy('top', 'Casey', '').title).toBe('How did we do today, Casey?');
   });
 });
 

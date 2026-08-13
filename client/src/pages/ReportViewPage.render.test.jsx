@@ -8,6 +8,7 @@ import ReportViewPage from './ReportViewPage';
 import legacyLawnReport from './__fixtures__/legacy-lawn-report.json';
 import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
 import mosquitoReportV2 from './__fixtures__/mosquito-report-v2.json';
+import pestReportV2 from './__fixtures__/pest-report-v2.json';
 
 // Full-render guards for the lawn service report. V2 is THE lawn report
 // (owner ruling 2026-07-09, LAWN_REPORT_V2 flag retired): the server builds
@@ -484,5 +485,127 @@ describe('ReportViewPage — staff-view event suppression tracks the CURRENT loa
 
     await waitFor(() => expect(posts.length).toBeGreaterThan(before));
     expect(posts.map((p) => p.eventName)).toContain('share_link_copied');
+  });
+});
+
+describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)', () => {
+  const CARD_TOKEN = 'conversion-cards-token';
+  const payload = {
+    ...legacyLawnReport,
+    customerName: 'Casey Placeholder',
+    technicianName: 'Adam',
+    cityState: 'Parrish, FL',
+    crossSell: {
+      serviceKey: 'pest_control',
+      label: 'Pest Control',
+      mode: 'priced',
+      relationship: 'start',
+      option: { id: 'pest-quarterly', label: 'Quarterly', cadence: '4 visits per year', perVisit: 114, waveguardTier: 'silver' },
+      fingerprint: 'fp-demo',
+    },
+    referral: { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' },
+  };
+
+  function mountWithFetch(fetchImpl) {
+    vi.stubGlobal('fetch', fetchImpl);
+    return render(
+      <MemoryRouter initialEntries={[`/report/${CARD_TOKEN}`]}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  const dataOnlyFetch = () => vi.fn(async (url, init) => {
+    if (init && init.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    return { ok: true, status: 200, json: async () => payload };
+  });
+
+  it('renders the dictated headlines: price folded in, city from the payload', async () => {
+    const { container } = mountWithFetch(dataOnlyFetch());
+    expect(await screen.findByText('Keep your home in Parrish protected for just $114!')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Keep My Home Protected' })).toBeInTheDocument();
+    expect(screen.getByText('Know someone who could use Waves?')).toBeInTheDocument();
+    // Cut copy stays cut: no eyebrows, no cadence line, no fine print.
+    expect(screen.queryByText(/Complete your protection/i)).toBeNull();
+    expect(screen.queryByText(/applications a year/i)).toBeNull();
+    expect(screen.queryByText(/No charge today/i)).toBeNull();
+    // Headline-and-button-only ruling: no tier chip either, even when the
+    // priced option carries a WaveGuard tier. (Class-scoped: "WaveGuard"
+    // legitimately appears elsewhere on the report chrome.)
+    expect(container.querySelector('.cross-sell-chip')).toBeNull();
+    expect(container.querySelector('[data-section="cross-sell"]').textContent).not.toMatch(/WaveGuard/i);
+  });
+
+  it('the review ask names the technician and the customer (pest reports mount the top card)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (init && init.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ...pestReportV2, customerName: 'Casey Placeholder', technicianName: 'Adam' }),
+      };
+    }));
+    render(
+      <MemoryRouter initialEntries={[`/report/${CARD_TOKEN}-review`]}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('How did Adam do today, Casey?')).toBeInTheDocument();
+    expect(screen.getByText('Rate today’s visit')).toBeInTheDocument();
+  });
+
+  it('referral tap fetches the link on the TAP and reveals code + prefilled Text/Email', async () => {
+    const calls = [];
+    mountWithFetch(vi.fn(async (url, init) => {
+      const u = String(url);
+      if (u.includes('/referral-link')) {
+        calls.push(u);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            code: 'WAVES-TEST01',
+            link: 'https://wavespestcontrol.com/r/WAVES-TEST01',
+            smsBody: 'sms body WAVES-TEST01',
+            emailSubject: 'subject',
+            emailBody: 'email body',
+          }),
+        };
+      }
+      if (init && init.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      return { ok: true, status: 200, json: async () => payload };
+    }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send My Referral Link' }));
+    expect(await screen.findByText('WAVES-TEST01')).toBeInTheDocument();
+    expect(calls).toHaveLength(1);
+    const text = screen.getByRole('link', { name: 'Text it' });
+    const email = screen.getByRole('link', { name: 'Email it' });
+    expect(text.getAttribute('href')).toBe(`sms:?&body=${encodeURIComponent('sms body WAVES-TEST01')}`);
+    expect(email.getAttribute('href')).toContain('mailto:?subject=subject');
+  });
+
+  it('a failed referral-link fetch shows the retry line, never a fake module', async () => {
+    mountWithFetch(vi.fn(async (url, init) => {
+      if (String(url).includes('/referral-link')) return { ok: false, status: 503, json: async () => ({}) };
+      if (init && init.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      return { ok: true, status: 200, json: async () => payload };
+    }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send My Referral Link' }));
+    expect(await screen.findByText(/didn.t go through/i)).toBeInTheDocument();
+    expect(screen.queryByText(/WAVES-/)).toBeNull();
+  });
+
+  it('staff view never fetches the referral link — a QA tap must not enroll the customer', async () => {
+    localStorage.setItem('waves_admin_token', 'admin-jwt');
+    const referralCalls = [];
+    mountWithFetch(vi.fn(async (url, init) => {
+      if (String(url).includes('/referral-link')) { referralCalls.push(url); }
+      if (init && init.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      return { ok: true, status: 200, json: async () => ({ ...payload, staffViewer: true }) };
+    }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send My Referral Link' }));
+    expect(await screen.findByText(/Staff view/)).toBeInTheDocument();
+    expect(referralCalls).toHaveLength(0);
+    localStorage.removeItem('waves_admin_token');
   });
 });
