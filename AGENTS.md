@@ -1149,8 +1149,14 @@ violations at the severity noted.
   exist; (2) every upgrade is rejected (socket destroyed before handshake)
   unless it carries a PER-CALL TOKEN — `?callSid=<sid>&t=v1.<exp>.<hmac>`, an
   HMAC-SHA256 over that CallSid keyed by `VOICE_RELAY_WS_SECRET`, verified with a
-  constant-time compare, valid ~5 minutes, and accepted ONCE (a used token is
-  refused). **The raw secret is never put in a URL and is never accepted as a
+  constant-time compare, valid ~5 minutes, and accepted ONCE — the burn is an
+  `INSERT … ON CONFLICT DO NOTHING` on `voice_relay_token_burns` (hashed token),
+  i.e. SHARED storage, because a per-process claim is no claim at all here: a
+  second instance or a restart would take the replay. It fails closed, and the
+  CallSid the token authenticated is carried onto the socket — the setup frame
+  that follows is unverified input and may not rename the session (a mismatch
+  terminates it), or a token for call A would authenticate a session claiming
+  call B. **The raw secret is never put in a URL and is never accepted as a
   credential** — it stays server-side (Railway env, and the Twilio Function env
   that renders the sandbox TwiML), because a URL param is exactly what leaks:
   Twilio logs request URLs, and a reusable key in one would let anyone who saw it

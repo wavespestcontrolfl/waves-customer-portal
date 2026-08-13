@@ -824,7 +824,11 @@ async function executeTool(name, input = {}, ctx = {}) {
       // SMS consent classified as "no stop clause at all" and left the caller
       // fully text-eligible — the exact failure the TCPA/consent rule exists to
       // prevent.
-      const STOP = '(?:stop|no more|no longer|don\'?t|do not|quit|cease|remove'
+      // ⭐ "NEVER" IS A STOP VERB TOO — and it is the most emphatic one a caller
+      // has. "Never text me again" produced no stop clause at all, so the single
+      // clearest withdrawal in the list read as naming no channel and left the
+      // texts running.
+      const STOP = '(?:stop|no more|no longer|never|don\'?t|do not|quit|cease|remove'
         + '|unsubscribe|opt(?:\\s+(?:me|us))?\\s+out|take me off)';
       // The carve-out a caller attaches to a stop: "…except by text", "…only
       // text me". What follows one of these words is a channel they KEPT, and

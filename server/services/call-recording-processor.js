@@ -14059,4 +14059,12 @@ CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 CallRecordingProcessor.buildFailOpenRoutingContext = buildFailOpenRoutingContext;
 CallRecordingProcessor.demoteFailOpenOnV1AddressConflict = demoteFailOpenOnV1AddressConflict;
 
+// Production contract for the VOICE-RELAY booking path (NOT test-only): the
+// relay must decide WHICH PREMISE a voice booking lands on with the exact
+// resolver the call pipeline uses, or the two disagree about the same account.
+// It lived only under `_test`, where a mock in the voice-booking suite hid the
+// fact that production got `undefined` — every single-property account would
+// have fallen into the catch and had its booking refused.
+CallRecordingProcessor.resolveCallBookingPropertyLinkage = resolveCallBookingPropertyLinkage;
+
 module.exports = CallRecordingProcessor;

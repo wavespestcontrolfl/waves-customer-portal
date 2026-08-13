@@ -27,6 +27,22 @@ jest.mock('../models/db', () => {
 jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction: jest.fn() }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+// ⭐ THE MOCK BELOW IS NOT EVIDENCE THE REAL MODULE EXPORTS ANY OF THIS. It
+// once hid exactly that: `resolveCallBookingPropertyLinkage` lived only under
+// `_test`, so production got `undefined`, every single-property account fell
+// into the catch, and voice booking was refused for everyone — with this suite
+// green the whole time. This guard reads the REAL module (before the mock is
+// applied to anyone else's require) and pins the production surface the relay
+// depends on.
+describe('the mocked call-pipeline helpers exist in PRODUCTION, not just under _test', () => {
+  test('every helper relay-booking requires is on the real module surface', () => {
+    const real = jest.requireActual('../services/call-recording-processor');
+    for (const name of ['resolveCallBookingPropertyLinkage', 'summarizePriorCall', 'CONTACT_MATCH_PHONE_COLS']) {
+      expect(real[name]).toBeDefined();
+    }
+  });
+});
+
 jest.mock('../services/call-recording-processor', () => ({
   CONTACT_MATCH_PHONE_COLS: ['phone'],
   summarizePriorCall: jest.fn(),

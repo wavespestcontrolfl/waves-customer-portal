@@ -488,8 +488,13 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
   // and "no longer" are as explicit a withdrawal as "stop", and matched no stop
   // verb at all — so the request read as "no channel named" and the texts the
   // caller had just withdrawn kept sending.
-  test('"opt me out of texts" / "no longer want texts" suppress SMS', async () => {
-    for (const words of ['opt me out of texts', 'please opt out of your text messages', 'I no longer want texts']) {
+  test('"opt me out of texts" / "no longer want texts" / "never text me" suppress SMS', async () => {
+    for (const words of [
+      'opt me out of texts',
+      'please opt out of your text messages',
+      'I no longer want texts',
+      'never text me again',
+    ]) {
       jest.clearAllMocks();
       await executeTool('capture_lead', {
         call_summary: 'Asked to be taken off texts.',
