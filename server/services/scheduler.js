@@ -793,7 +793,7 @@ function initScheduledJobs() {
       const res = await runExclusive('permit-sync', () =>
         require('./property-lookup/manatee-permit-sync').syncPermits());
       if (res && !res.skipped) {
-        const part = (r) => (r ? `${r.mode} ${r.written}/${r.fetched}` : 'failed');
+        const part = (r) => (r ? `${r.written}/${r.fetched} rows` : 'failed');
         logger.info(`Permit sync: pool ${part(res.pool)}; construction ${part(res.construction)}${res.errors.length ? `; errors: ${res.errors.join(' | ')}` : ''}`);
       }
     } catch (err) {

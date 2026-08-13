@@ -326,6 +326,11 @@ async function syncPoolPermits({ timeoutMs } = {}) {
     const csv = await fetchPoolPermitCsv(from, to, timeoutMs);
     staged.push(...parsePoolPermitCsv(csv));
   }
+  // A full-range fetch that parses to ZERO rows is a schema break (renamed
+  // headers make normalizeRow drop every record), never a real result —
+  // years of history always contain permits. Failing loud beats a
+  // "successful" 0-row sync that lets evidence silently go stale.
+  if (!staged.length) throw new Error('pool report returned no parseable rows — schema change?');
   const allRows = dedupeByKey(staged, 'record_id');
   const fetched = allRows.length;
   const written = allRows.length
@@ -475,6 +480,11 @@ async function syncConstructionPermits({ timeoutMs } = {}) {
     for (const [from, to] of windows) {
       const csv = await fetchAcaReportCsv(REPORTS[reportKey], from, to, timeoutMs);
       staged[reportKey].push(...parseConstructionCsv(csv, reportKey));
+    }
+    // Same schema-break guard as the pool sync: a full-range report that
+    // parses to zero rows is a renamed-headers failure, not a result.
+    if (!staged[reportKey].length) {
+      throw new Error(`${reportKey} report returned no parseable rows — schema change?`);
     }
     staged[reportKey] = dedupeByKey(staged[reportKey], 'permit_no');
   }
