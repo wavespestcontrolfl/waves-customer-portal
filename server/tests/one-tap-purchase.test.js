@@ -633,6 +633,16 @@ describe('confirm', () => {
     expect(EstimateConverter.convertEstimate).toHaveBeenCalledTimes(1);
   });
 
+  test('qualifying membership cancelled between init and confirm → 409 + void (setup-fee waiver no longer applies)', async () => {
+    const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+    loadExistingQualifyingServiceKeys.mockResolvedValue([]);
+    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(db.__state.tables.one_tap_purchases[0].status).toBe('voided');
+    loadExistingQualifyingServiceKeys.mockResolvedValue(['pest_control']);
+  });
+
   test('no email on file: emailQueued false and the notification never promises an email', async () => {
     db.__state.tables.customers[0].email = null;
     const out = await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });

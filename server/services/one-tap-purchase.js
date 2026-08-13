@@ -636,6 +636,22 @@ async function assertTargetStillPurchasable(database, customer, serviceKey) {
   if (ownedVocab.has(serviceKey)) {
     throw httpError(409, 'This service is already on your account — nothing was purchased.', { code: 'OWNED_MEANWHILE' });
   }
+  // Membership must still hold at confirm time (P1): the frozen snapshot
+  // replays isExistingCustomer:true and skipSetupInvoice waives the $99
+  // setup fee — if the customer's last qualifying service was cancelled
+  // between init and confirm, that waiver (and member-tier pricing) no
+  // longer applies. Same qualifying-rows authority the snapshot froze from.
+  const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+  let qualifyingKeys;
+  try {
+    qualifyingKeys = await loadExistingQualifyingServiceKeys(database, customer.id);
+  } catch (err) {
+    logger.warn(`[one-tap-purchase] qualifying re-check failed, refusing (code=${err?.code || 'none'})`);
+    throw httpError(409, OFFER_CHANGED);
+  }
+  if (!qualifyingKeys.length) {
+    throw httpError(409, OFFER_CHANGED, { code: 'OWNED_MEANWHILE' });
+  }
 }
 
 async function voidPurchase(purchase) {
@@ -881,6 +897,17 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
 
   // ── Post-commit (best-effort — never roll back the purchase) ──────────
   const { conversion, committed } = txOut;
+
+  // Multi-property linkage — same standard step the public accept flow runs
+  // post-commit (gated internally on GATE_CUSTOMER_PROPERTIES): resolve the
+  // customer_properties row for the accepted address, link
+  // estimates.property_id, stamp the booked visits' service address. AWAITED
+  // like the accept route so a deploy right after the response can't strand
+  // the accept unlinked; the helper never throws — the purchase stands.
+  await require('./estimate-property-linkage').linkAcceptedEstimateProperty({
+    estimateId: purchase.estimate_id,
+    customerId,
+  });
   const serviceLabel = committed?.service_type
     || String(purchase.service_key || 'service').replace(/_/g, ' ');
   const firstVisit = committed ? {
