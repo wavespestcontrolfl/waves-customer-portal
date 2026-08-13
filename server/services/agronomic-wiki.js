@@ -894,6 +894,9 @@ ${JSON.stringify((data.outcomes || []).map((o) => ({
   days: o.days_between_assessments,
   grass: o.grass_type,
   products: o.products_applied,
+  // Photo-verified visual change: -100..100 delta scored by vision model from
+  // the tech's before/after photos; null = not photo-verified.
+  photo_verified_visual_change: o.vision_delta_score ?? null,
 })), null, 2)}
 
 Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve existing content that is still supported. Update statistics. Flag any contradictions.' : 'Generate a new wiki page from this data.'} Return the complete markdown page content.`;

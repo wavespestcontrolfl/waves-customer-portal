@@ -755,6 +755,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:40AM — Vision delta scoring sweep (before/after photo pairs on
+  // treatment_outcomes → VISION-tier visual-change verdict). Bounded (25/run),
+  // idempotent (vision_scored_at is terminal), and entirely inert unless
+  // GATE_VISION_DELTA === 'true' — the gate check lives inside the service
+  // (single source of truth), so this leg is a no-op beyond the gated early
+  // return. runExclusive: read-then-act — a deploy overlap must not
+  // double-score (and double-bill) the same photo pairs.
+  // =========================================================================
+  cron.schedule('40 3 * * *', async () => {
+    try {
+      const res = await runExclusive('vision-delta-sweep', () =>
+        require('./vision-delta').sweepUnscoredOutcomes());
+      if (res && !res.skipped) {
+        logger.info(`Vision delta sweep: ${res.scored}/${res.candidates} scored`);
+      }
+    } catch (err) {
+      logger.error(`Vision delta sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
   // renames from the unit-review queue only: "Gallons" -> gal at factor 1;
   // missing-unit and ambiguous-oz rows stay parked for review). Gate is
