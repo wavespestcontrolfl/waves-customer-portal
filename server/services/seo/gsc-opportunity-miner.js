@@ -1245,17 +1245,21 @@ function arbitrateCityServiceTargets(opportunities = [], { frozenTargets = new S
     byTarget.get(key).push(o);
   }
   for (const [targetKey, group] of byTarget.entries()) {
-    // A done/skipped row fences the whole TARGET, not just its own dedupe
-    // key (round-6 P1, superseding the round-5 key-level shape): a skipped
-    // city-service row is an operator's standing "no page for this pair" —
-    // a sibling bucket's candidate must not re-justify what the operator
-    // declined — and a done row means the page was JUST created, so a
-    // second bucket must not draft it again in the GSC-lag window before
-    // the own-page map starts excluding the pair. Dropping the entire
-    // group (single candidates included) is the point: persisting an
-    // unfrozen twin under a different key would bypass the frozen
-    // decision, which is exactly what the upsert's frozen-row guard
-    // exists to prevent.
+    // A RECENT done row fences the whole TARGET, not just its own dedupe
+    // key (rounds 6-7): the page was just created and GSC has not observed
+    // it yet, so a sibling bucket's candidate under a different key would
+    // draft the same page again inside that lag window. Once the own-page
+    // map covers the pair, mining excludes it naturally and the fence is
+    // moot — which is why the fence is TIME-BOUNDED to the mine window
+    // (see mineAll's frozen-target read) rather than permanent. Dropping
+    // the entire group (single candidates included) is the point.
+    //
+    // skipped rows deliberately do NOT fence the target (round-7 P1):
+    // opportunity_queue skips are RUNNER outcomes — router refusals, gate
+    // failures, protected-page bounces — not operator decisions, and one
+    // query's gate failure says nothing about unrelated future queries or
+    // the segment's local_gap evidence. A skipped row still freezes its
+    // OWN key via the upsert guard, unchanged.
     if (frozenTargets.has(targetKey)) continue;
     if (group.length === 1) { out.push(group[0]); continue; }
     // PERSISTABLE candidates first — the standing yield rule: a candidate
@@ -1728,9 +1732,15 @@ class GscOpportunityMiner {
     try {
       const preArbitration = [...minedOpportunities, ...buckets.link_boost];
       if (preArbitration.some((o) => o.action_type === 'create_or_refresh_city_service_page')) {
+        // done only, TIME-BOUNDED to the mine window: the fence covers the
+        // GSC-lag gap between page creation and the own-page map observing
+        // it, and must expire once that gap has passed — an old done row is
+        // not a standing veto ("create or refresh" of a long-existing page
+        // is legitimate work if the pair somehow re-emits). skipped rows
+        // are runner outcomes, never target vetoes (round-7 P1).
         const frozenRows = await db('opportunity_queue')
-          .where({ action_type: 'create_or_refresh_city_service_page' })
-          .whereIn('status', ['done', 'skipped'])
+          .where({ action_type: 'create_or_refresh_city_service_page', status: 'done' })
+          .where('updated_at', '>=', db.raw(`now() - interval '${GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS} days'`))
           .select('service', 'city');
         cityServiceFrozenTargets = new Set(frozenRows
           .filter((r) => r.service && r.city)
@@ -2454,14 +2464,17 @@ class GscOpportunityMiner {
     //
     // KEY SEMANTICS: the dedupe key is TARGET-STABLE (no query, no page —
     // `local_gap::svc::city::_`), and the upsert's frozen-row guard makes a
-    // done/skipped row permanent. That is CORRECT for this bucket, unlike
-    // the query buckets: once the page exists the own-page check above
-    // excludes the pair from ever mining again (done stays meaningful),
-    // and a skipped row is an operator's standing "no page for this pair"
-    // (a new query cannot re-justify what the operator declined). The known
-    // residue — page created then later DELETED reopens the pair but the
-    // frozen done row blocks re-emission — is accepted: page deletions are
-    // operator acts, and the operator can revive the row alongside.
+    // done/skipped row permanent FOR THIS KEY. That is CORRECT for this
+    // bucket, unlike the query buckets: once the page exists the own-page
+    // check above excludes the pair from ever mining again (done stays
+    // meaningful), and a runner skip of the aggregate row (router refusal,
+    // gate failure) reasonably retires this bucket's one shot at the pair —
+    // query-bearing buckets still mine the same target under their own
+    // keys, so demand is not silenced (a skip here is NOT a target veto;
+    // see arbitrateCityServiceTargets). The known residue — page created
+    // then later DELETED reopens the pair but the frozen done row blocks
+    // re-emission — is accepted: page deletions are operator acts, and the
+    // operator can revive the row alongside.
     //
     // FLOOR: rows ride the blog floor via persistFloorFor's city-service
     // exception — the bucket's ceiling is 69 against the global 75 (see
@@ -3593,19 +3606,24 @@ class GscOpportunityMiner {
   async _revalidateCityServiceBatch(trx, opportunities = []) {
     const CS = 'create_or_refresh_city_service_page';
     if (!opportunities.some((o) => o.action_type === CS)) return opportunities;
-    // done/skipped ride along as TARGET-level fences (round-6 P1): the
-    // arbitration already drops frozen targets, but that read ran outside
-    // the lock — this is the authoritative re-check. A skipped row is an
-    // operator's standing "no page for this pair"; a done row is a page
-    // just created that GSC has not observed yet. Either blocks EVERY
-    // candidate for the target, own-key included.
+    // RECENT done rows ride along as TARGET-level fences (rounds 6-7):
+    // the arbitration already drops frozen targets, but that read ran
+    // outside the lock — this is the authoritative re-check. A done row
+    // inside the mine window is a page just created that GSC has not
+    // observed yet; it blocks EVERY candidate for the target, own-key
+    // included. skipped rows are runner outcomes, never target vetoes —
+    // they freeze only their own key via the upsert guard.
     const inflight = await trx('opportunity_queue')
       .where({ action_type: CS })
-      .whereIn('status', ['pending', 'claimed', 'pending_review', 'done', 'skipped'])
+      .where((q) => q
+        .whereIn('status', ['pending', 'claimed', 'pending_review'])
+        .orWhere((qq) => qq
+          .where({ status: 'done' })
+          .where('updated_at', '>=', trx.raw(`now() - interval '${GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS} days'`))))
       .forUpdate()
       .select('dedupe_key', 'service', 'city', 'status', 'bucket', 'query');
     if (!inflight.length) return opportunities;
-    const FROZEN = new Set(['done', 'skipped']);
+    const FROZEN = new Set(['done']);
     const occupied = new Map();
     for (const r of inflight) {
       if (!r.service || !r.city) continue;

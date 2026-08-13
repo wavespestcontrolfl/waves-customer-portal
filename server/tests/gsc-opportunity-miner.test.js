@@ -2469,7 +2469,7 @@ describe('cross-bucket keys canonicalize service ALIASES (round-4 P1)', () => {
   });
 });
 
-describe('done/skipped fence the whole TARGET, not just their key (round-5/6 P1s)', () => {
+describe('RECENT done rows fence the whole TARGET; skipped never does (rounds 5-7)', () => {
   const { cityServiceTargetKey } = require('../services/seo/gsc-opportunity-miner')._internals;
   const row = (bucket, { query = null, score = 60, dedupe_key } = {}) => ({
     bucket,
@@ -2484,15 +2484,31 @@ describe('done/skipped fence the whole TARGET, not just their key (round-5/6 P1s
   });
 
   test('a frozen target drops EVERY candidate — no sibling-bucket bypass', () => {
-    // A skipped row is an operator's standing "no page for this pair";
-    // persisting an unfrozen twin under a different key would re-justify
-    // what the operator declined.
+    // A recent done row = the page was just created and GSC has not
+    // observed it yet; persisting a twin under a different key would
+    // draft the same page again inside the lag window.
     const ncy = row('no_content_yet', { query: 'termite inspection sarasota', score: 70, dedupe_key: 'k1' });
     const lg = row('local_gap', { score: 56, dedupe_key: 'k2' });
     const out = arbitrateCityServiceTargets([ncy, lg], {
       frozenTargets: new Set([cityServiceTargetKey('termite', 'sarasota')]),
     });
     expect(out).toHaveLength(0);
+  });
+
+  test('the frozen-target read is done-only and TIME-BOUNDED; skipped is a runner outcome', () => {
+    // One query's gate failure (a runner skip) must not permanently
+    // silence unrelated future queries or the segment's local_gap
+    // evidence — and an OLD done row is not a standing veto either.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    expect(src).toMatch(/\{ action_type: 'create_or_refresh_city_service_page', status: 'done' \}[\s\S]{0,200}CANONICAL_MINE_PERIOD_DAYS/);
+    // Scoped to the city-service reads: _arbitratedRefreshPages' KEY-level
+    // done/skipped lookup is correct and stays. Neither city-service fence
+    // may consult skipped rows.
+    const frozenRead = src.slice(src.indexOf('cityServiceFrozenTargets'), src.indexOf('arbitrateCityServiceTargets(\n'));
+    expect(frozenRead).not.toMatch(/'skipped'/);
+    const fenceSrc = src.slice(src.indexOf('async _revalidateCityServiceBatch'), src.indexOf('async _sweepStaleFamilyRows'));
+    expect(fenceSrc).not.toMatch(/'skipped'/);
   });
 
   test('a frozen target drops a SINGLE candidate too', () => {
@@ -2514,15 +2530,27 @@ describe('done/skipped fence the whole TARGET, not just their key (round-5/6 P1s
   test('mineAll reads frozen city-service TARGETS before arbitrating, fail-soft', () => {
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
-    expect(src).toMatch(/whereIn\('status', \['done', 'skipped'\]\)[\s\S]{0,300}cityServiceTargetKey\(r\.service, r\.city\)/);
+    expect(src).toMatch(/status: 'done' \}[\s\S]{0,300}cityServiceTargetKey\(r\.service, r\.city\)/);
     expect(src).toMatch(/frozen-target lookup failed[\s\S]{0,60}arbitration proceeds frozen-blind/);
     expect(src).toMatch(/arbitrateCityServiceTargets\(\n?\s*\[\.\.\.minedOpportunities, \.\.\.buckets\.link_boost\],\n?\s*\{ frozenTargets: cityServiceFrozenTargets \}/);
+  });
+
+  test('a SKIPPED occupant does not block the target in the fence', async () => {
+    const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+    const miner = new GscOpportunityMiner();
+    // The fence's own select excludes skipped rows; simulate a stray one
+    // arriving anyway — it must classify as non-frozen and, being
+    // pending-not, non-blocking is decided by the ordinary rules. Here we
+    // assert the FROZEN set itself: only 'done'.
+    const src = require('fs').readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    expect(src).toMatch(/const FROZEN = new Set\(\['done'\]\);/);
+    expect(miner).toBeTruthy();
   });
 
   test('the in-flight fence re-checks the frozen-target rule under the lock', async () => {
     const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
     const miner = new GscOpportunityMiner();
-    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::old', service: 'termite', city: 'sarasota', status: 'skipped', bucket: 'no_content_yet', query: 'old' }];
+    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::old', service: 'termite', city: 'sarasota', status: 'done', bucket: 'no_content_yet', query: 'old' }];
     const trx = jest.fn(() => ({
       where: jest.fn().mockReturnThis(),
       whereIn: jest.fn().mockReturnThis(),
