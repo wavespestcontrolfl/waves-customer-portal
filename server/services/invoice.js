@@ -4309,10 +4309,34 @@ const InvoiceService = {
       if (m) prepayIds.add(m[1]);
     }
     const restored = [];
+    // A switch prepay ABANDONED mid-tender (browser crash, tab eviction —
+    // Codex P0 r14) sits payment_pending forever: an unsent draft nobody can
+    // pay, with the superseded invoice void beside it. Any such draft older
+    // than this cutoff is expired here — voidInvoice cancels its pending
+    // term through the canonical sync, and the restore below re-mints the
+    // superseded AR in the same pass. Generous cutoff: a real tender ends in
+    // minutes; a day means no live flow can be yanked out from under.
+    const ABANDONED_SWITCH_PREPAY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
     for (const prepayId of prepayIds) {
-      const prepay = await conn("invoices").where({ id: prepayId }).first("id", "status");
-      const dead = !!prepay
+      const prepay = await conn("invoices")
+        .where({ id: prepayId })
+        .first("id", "status", "sent_at", "paid_at", "stripe_payment_intent_id", "created_at");
+      let dead = !!prepay
         && ["void", "cancelled", "canceled", "refunded"].includes(String(prepay.status || "").toLowerCase());
+      if (!dead && prepay
+        && String(prepay.status || "").toLowerCase() === "draft"
+        && !prepay.sent_at && !prepay.paid_at && !prepay.stripe_payment_intent_id
+        && prepay.created_at
+        && Date.now() - new Date(prepay.created_at).getTime() > ABANDONED_SWITCH_PREPAY_MAX_AGE_MS) {
+        try {
+          await this.voidInvoice(prepay.id);
+          dead = true;
+          logger.info(`[invoice] switch-restore sweep expired abandoned prepay ${prepay.id} — term cancelled, restoring superseded AR`);
+        } catch (err) {
+          logger.warn(`[invoice] switch-restore sweep could not expire abandoned prepay ${prepay.id}: ${err.message} — next sweep retries`);
+          continue;
+        }
+      }
       if (!dead) continue;
       try {
         restored.push(...await this.restoreSwitchSupersededInvoicesForPrepay(prepayId, conn));

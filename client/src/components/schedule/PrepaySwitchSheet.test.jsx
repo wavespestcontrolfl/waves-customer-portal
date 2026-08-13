@@ -206,6 +206,21 @@ describe('PrepaySwitchSheet', () => {
     expect(screen.queryByText('Annual prepay collected')).not.toBeInTheDocument();
   });
 
+  it('a PROCESSING prepay on abort is parked, never claimed collected or voided', async () => {
+    stubFetch({ freshStatus: 'processing' });
+    render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Collect \$512\.00 now/ }));
+    await screen.findByText('tender 512');
+    fireEvent.click(screen.getByRole('button', { name: 'tender-abort' }));
+
+    expect(await screen.findByText('Payment still processing')).toBeInTheDocument();
+    expect(screen.getByText(/do not charge again/)).toBeInTheDocument();
+    // In-flight: no void, no restore, no success claim.
+    expect(voidedPrepay()).toBe(false);
+    expect(didUndo()).toBe(false);
+    expect(screen.queryByText('Annual prepay collected')).not.toBeInTheDocument();
+  });
+
   it('renders the server blockReason instead of an offer when the switch is refused', async () => {
     stubFetch({ preview: { eligible: false, blockReason: 'already has an annual prepay invoice on this visit' } });
     render(<PrepaySwitchSheet service={SERVICE} onClose={vi.fn()} onSaved={vi.fn()} />);

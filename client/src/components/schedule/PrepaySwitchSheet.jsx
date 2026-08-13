@@ -61,7 +61,10 @@ function adminFetch(path, options = {}) {
 // allowlists (Codex P0 r3): "anything not draft/sent/overdue" wrongly read
 // void/refunded as a successful collection, which skipped the restore and
 // reported success over a customer who paid nothing.
-const PREPAY_SETTLED_STATUSES = ['paid', 'prepaid', 'processing'];
+const PREPAY_SETTLED_STATUSES = ['paid', 'prepaid'];
+// 'processing' is IN-FLIGHT, not settled (Codex P1 r14): the term is still
+// payment_pending and the charge may yet fail — it gets its own recovery
+// state, never a success claim.
 const PREPAY_TERMINAL_UNPAID_STATUSES = ['void', 'cancelled', 'canceled', 'refunded'];
 
 const money = (n) => `$${(Number(n) || 0).toFixed(2)}`;
@@ -224,6 +227,18 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
         if (fresh && PREPAY_SETTLED_STATUSES.includes(status)) {
           setCollecting(null);
           finish(invoice);
+          return;
+        }
+        if (fresh && status === 'processing') {
+          // In-flight: succeeding OR failing is still possible. Don't void,
+          // don't restore, don't claim success — park it with instructions.
+          setCollecting(null);
+          setRecovery({
+            title: 'Payment still processing',
+            message: `The ${money(Number(invoice.total) || 0)} charge is processing — do not charge again. If it settles, the prepaid year activates on its own and this visit completes covered. If it fails, void ${invoice.invoice_number || 'the prepay invoice'} from Invoices, then tap Restore to put the per-application invoice back.`,
+            voided,
+          });
+          setBusy('');
           return;
         }
         if (!(fresh && PREPAY_TERMINAL_UNPAID_STATUSES.includes(status))) {

@@ -210,6 +210,39 @@ describe('sweepOrphanedPrepaySwitchRestores — the durable repair job', () => {
     expect(restored).toEqual([]);
   });
 
+  test('an ABANDONED switch prepay (old unsent draft) is expired: voided, term cancelled, AR restored', async () => {
+    const voidSpy = jest.spyOn(InvoiceService, 'voidInvoice').mockResolvedValue({ status: 'void' });
+    const c = conn({
+      rows: [VOIDED_ROW],
+      byId: { 'inv-prepay': {
+        id: 'inv-prepay', status: 'draft', sent_at: null, paid_at: null,
+        stripe_payment_intent_id: null,
+        created_at: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+      } },
+    });
+    const restored = await InvoiceService.sweepOrphanedPrepaySwitchRestores(c);
+    expect(voidSpy).toHaveBeenCalledWith('inv-prepay');
+    expect(restoreSpy).toHaveBeenCalledWith('inv-prepay', c);
+    expect(restored).toHaveLength(1);
+    voidSpy.mockRestore();
+  });
+
+  test('a RECENT unsent draft is left alone — a live tender must never be yanked', async () => {
+    const voidSpy = jest.spyOn(InvoiceService, 'voidInvoice').mockResolvedValue({ status: 'void' });
+    const c = conn({
+      rows: [VOIDED_ROW],
+      byId: { 'inv-prepay': {
+        id: 'inv-prepay', status: 'draft', sent_at: null, paid_at: null,
+        stripe_payment_intent_id: null, created_at: new Date().toISOString(),
+      } },
+    });
+    const restored = await InvoiceService.sweepOrphanedPrepaySwitchRestores(c);
+    expect(voidSpy).not.toHaveBeenCalled();
+    expect(restoreSpy).not.toHaveBeenCalled();
+    expect(restored).toEqual([]);
+    voidSpy.mockRestore();
+  });
+
   test('a restore that fails is retried next sweep, never thrown to the cron', async () => {
     restoreSpy.mockRejectedValue(new Error('transient'));
     const c = conn({
