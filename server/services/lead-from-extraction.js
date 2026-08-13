@@ -95,6 +95,38 @@ async function surfaceContactInstructionForCustomer(customer, extracted = {}, op
   const instruction = contactPreferenceFields(extracted);
   if (!customer || !customer.id || !instruction) return false;
   const dnc = instruction.do_not_contact_request === true;
+  const surfaced = await fileContactInstructionNotification(customer, instruction, opts, dnc);
+  // ⭐ A FAILED COMPLIANCE ARTIFACT GETS A RETRY RAIL. This feed row is the
+  // ONLY structured artifact for a lifecycle customer's stated instruction —
+  // a notifyAdmin hiccup here silently lost a "stop texting me" with nothing
+  // left to find it. Same rail as the hot-alert page: a durable obligation
+  // marker on the call's own call_log row, recovered by the hourly sweep.
+  // The sweep's own retries never re-stamp (the marker is already there).
+  if (!surfaced && !opts.sweepRetry && opts.callSid) {
+    try {
+      await db('call_log')
+        .where({ twilio_call_sid: opts.callSid })
+        .update({
+          metadata: db.raw(
+            "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({
+              relay_contact_instruction_needed: 'true',
+              relay_contact_instruction: {
+                customerId: customer.id,
+                smsSuppressionApplied: opts.smsSuppressionApplied === true,
+                ...instruction,
+              },
+            })],
+          ),
+        });
+    } catch (stampErr) {
+      logger.error(`[voice-agent-lead] contact-instruction obligation stamp ALSO failed callSid=${opts.callSid}: ${stampErr.message}`);
+    }
+  }
+  return surfaced;
+}
+
+async function fileContactInstructionNotification(customer, instruction, opts, dnc) {
   try {
     const NotificationService = require('./notification-service');
     const notif = await NotificationService.notifyAdmin(
@@ -450,4 +482,75 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   return { leadId, customerId, created };
 }
 
-module.exports = { createLeadFromExtraction, findCustomerByPhone, resolveLeadSourceId, contactPreferenceFields };
+// How many hourly sweep attempts a stranded contact instruction gets before
+// the sweep stops retrying and demands a human (roughly one day). A row the
+// internal-test-customer gate suppresses on purpose would otherwise retry
+// forever; a real outage longer than this deserves eyes, not more retries.
+const CONTACT_INSTRUCTION_SWEEP_MAX_ATTEMPTS = 24;
+
+/**
+ * Hourly recovery for contact instructions whose ONLY artifact (the admin feed
+ * row) failed to persist on the live call. Mirrors sweepAbandonedHotAlerts:
+ * keyed on the durable obligation marker capture time stamped, cleared only on
+ * a proven re-file. Fail-open toward a duplicate feed row — a rare duplicate
+ * beats a silently lost "stop texting me".
+ */
+async function sweepUnsurfacedContactInstructions({ limit = 10 } = {}) {
+  const rows = await db('call_log')
+    .whereRaw("metadata->>'relay_contact_instruction_needed' = 'true'")
+    .orderBy('created_at', 'asc')
+    .limit(limit)
+    .select('id', 'twilio_call_sid', 'metadata');
+  let recovered = 0;
+  for (const row of rows) {
+    const meta = (row.metadata && typeof row.metadata === 'object') ? row.metadata : {};
+    const payload = (meta.relay_contact_instruction && typeof meta.relay_contact_instruction === 'object')
+      ? meta.relay_contact_instruction : {};
+    const clearMarker = () => db('call_log').where({ id: row.id }).update({
+      metadata: db.raw("metadata - 'relay_contact_instruction_needed' - 'relay_contact_instruction' - 'relay_contact_instruction_attempts'"),
+    }).catch((e) => logger.warn(`[voice-agent-lead] contact-instruction marker clear failed call_log=${row.id}: ${e.message}`));
+
+    const customer = payload.customerId
+      ? await db('customers').where({ id: payload.customerId }).whereNull('deleted_at').first().catch(() => null)
+      : null;
+    if (!customer) {
+      // Unresolvable obligation (customer gone / malformed payload): clear it
+      // loudly rather than retry a debt nobody can pay.
+      logger.error(`[voice-agent-lead] contact-instruction obligation unresolvable (customer ${payload.customerId || 'missing'}) call_log=${row.id} — clearing marker`);
+      await clearMarker();
+      continue;
+    }
+    const attempts = Number(meta.relay_contact_instruction_attempts || 0);
+    if (attempts >= CONTACT_INSTRUCTION_SWEEP_MAX_ATTEMPTS) {
+      logger.error(`[voice-agent-lead] contact-instruction for customer ${customer.id} STILL unsurfaced after ${attempts} sweep attempts call_log=${row.id} — giving up, needs a human`);
+      await clearMarker();
+      continue;
+    }
+    const ok = await surfaceContactInstructionForCustomer(customer, {
+      contact_preference: payload.contact_preference,
+      preferred_contact_method: payload.preferred_contact_method,
+      do_not_contact_request: payload.do_not_contact_request === true,
+    }, {
+      callSid: row.twilio_call_sid,
+      smsSuppressionApplied: payload.smsSuppressionApplied === true,
+      sweepRetry: true,
+    });
+    if (ok) {
+      await clearMarker();
+      recovered += 1;
+    } else {
+      await db('call_log').where({ id: row.id }).update({
+        metadata: db.raw(
+          "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ relay_contact_instruction_attempts: attempts + 1 })],
+        ),
+      }).catch(() => {});
+    }
+  }
+  return { scanned: rows.length, recovered };
+}
+
+module.exports = {
+  createLeadFromExtraction, findCustomerByPhone, resolveLeadSourceId, contactPreferenceFields,
+  sweepUnsurfacedContactInstructions,
+};

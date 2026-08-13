@@ -713,6 +713,9 @@ function initScheduledJobs() {
         // Same cadence, same rationale: a hot-lead page whose process died
         // between the claim and the send has no live-call retry left.
         await require('./voice-agent/relay-alert').sweepAbandonedHotAlerts();
+        // And a lifecycle customer's stated contact instruction whose ONLY
+        // artifact (the admin feed row) failed to persist on the live call.
+        await require('./lead-from-extraction').sweepUnsurfacedContactInstructions();
       });
     } catch (err) {
       logger.error(`[voice-reservice-alert-sweep] hourly sweep failed: ${err.message}`);

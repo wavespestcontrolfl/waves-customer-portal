@@ -485,6 +485,31 @@ describe('get_service_report', () => {
     expect(out).toContain('Ant trail at kitchen slab');
   });
 
+  // ⭐ THE SPOKEN CAP CUTS THE FILTERED LIST, NOT THE FETCH. Six synthesized
+  // title-only rows up front used to consume the query LIMIT, so a genuine
+  // structured finding behind them was never fetched and the report announced
+  // nothing was found.
+  test('a structured finding behind six title-only rows is still spoken', async () => {
+    const titleOnly = Array.from({ length: 6 }, (_, i) => (
+      { category: 'other', severity: 'info', title: `[found] raw note ${i}`, detail: '', recommendation: '' }
+    ));
+    primeDb({
+      scheduled_services: [],
+      service_records: [{ id: 'sr-9', service_date: '2026-08-01', service_type: 'Pest Control', technician_notes: null, structured_notes: null, status: 'completed' }],
+      service_findings: [
+        ...titleOnly,
+        { category: 'pest_activity', severity: 'info', title: 'Ant trail at kitchen slab', detail: 'Trail along the south wall', recommendation: 'Monitor at next visit' },
+      ],
+    });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).toContain('Ant trail at kitchen slab');
+    expect(out).not.toContain('raw note');
+    // The mock ignores LIMIT, so pin the overfetch bound itself: the query must
+    // fetch beyond the spoken cap or the filter has nothing left to keep.
+    const limitArgs = builders.service_findings.limit.mock.calls.map(([n]) => n);
+    expect(Math.max(...limitArgs)).toBeGreaterThan(6);
+  });
+
   // ⭐ PAPER-COMPLIANCE ARTIFACTS ARE NOT VOICE MATERIAL. A WDO inspection or a
   // pre-treat certificate is a regulated, signed document; an AI paraphrase of
   // it over the phone is a new compliance surface nothing reviews.

@@ -426,6 +426,89 @@ describe('existing-customer contact instructions still reach a human', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  // ⭐ A FAILED COMPLIANCE ARTIFACT GETS A RETRY RAIL. The feed row is the ONLY
+  // structured artifact on this no-lead path — when it fails to persist, a
+  // durable obligation marker lands on the call's own call_log row so the
+  // hourly sweep can re-file it; success stamps nothing.
+  const stampWrites = () => writes.filter((w) => w.table === 'call_log' && w.verb === 'update'
+    && JSON.stringify((w.payload && w.payload.metadata && w.payload.metadata.bindings) || '').includes('relay_contact_instruction_needed'));
+
+  test('a failed feed write stamps the durable obligation marker on the call row', async () => {
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    NotificationService.notifyAdmin.mockRejectedValue(new Error('bell down'));
+    await createLeadFromExtraction(
+      { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
+      { phone: CALLER, callSid: 'CA-dnc-stamp', smsSuppressionApplied: true },
+    );
+    const stamps = stampWrites();
+    expect(stamps).toHaveLength(1);
+    const payload = JSON.parse(stamps[0].payload.metadata.bindings[0]);
+    expect(payload.relay_contact_instruction_needed).toBe('true');
+    expect(payload.relay_contact_instruction).toMatchObject({
+      customerId: 'c-777', do_not_contact_request: true, smsSuppressionApplied: true,
+    });
+  });
+
+  test('the suppressed sentinel stamps the marker too — zero artifact either way', async () => {
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true, reason: 'bell_policy' });
+    await createLeadFromExtraction(
+      { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
+      { phone: CALLER, callSid: 'CA-dnc-stamp2' },
+    );
+    expect(stampWrites()).toHaveLength(1);
+  });
+
+  test('a SUCCESSFUL feed write stamps nothing', async () => {
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    await createLeadFromExtraction(
+      { call_summary: 'Asked us to stop texting.', do_not_contact_request: true },
+      { phone: CALLER, callSid: 'CA-dnc-ok' },
+    );
+    expect(stampWrites()).toHaveLength(0);
+  });
+
+  test('the hourly sweep re-files the instruction and clears the marker on success', async () => {
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const { sweepUnsurfacedContactInstructions } = require('../services/lead-from-extraction');
+    tables.call_log = makeBuilder('call_log', [{
+      id: 'cl-9', twilio_call_sid: 'CA-dnc-swept',
+      metadata: {
+        relay_contact_instruction_needed: 'true',
+        relay_contact_instruction: { customerId: 'c-777', do_not_contact_request: true, smsSuppressionApplied: false },
+      },
+    }]);
+    const out = await sweepUnsurfacedContactInstructions();
+    expect(out).toMatchObject({ scanned: 1, recovered: 1 });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const [, title] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toMatch(/DO-NOT-CONTACT request/i);
+    // Cleared via the jsonb key-removal raw — and NOT re-stamped.
+    const clears = writes.filter((w) => w.table === 'call_log' && w.verb === 'update'
+      && String((w.payload && w.payload.metadata && w.payload.metadata.sql) || '').includes("- 'relay_contact_instruction_needed'"));
+    expect(clears).toHaveLength(1);
+    expect(stampWrites()).toHaveLength(0);
+  });
+
+  test('a sweep retry that fails again bumps the attempt count instead of re-stamping', async () => {
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    NotificationService.notifyAdmin.mockRejectedValue(new Error('still down'));
+    const { sweepUnsurfacedContactInstructions } = require('../services/lead-from-extraction');
+    tables.call_log = makeBuilder('call_log', [{
+      id: 'cl-9', twilio_call_sid: 'CA-dnc-swept',
+      metadata: {
+        relay_contact_instruction_needed: 'true',
+        relay_contact_instruction: { customerId: 'c-777', do_not_contact_request: true },
+      },
+    }]);
+    const out = await sweepUnsurfacedContactInstructions();
+    expect(out).toMatchObject({ scanned: 1, recovered: 0 });
+    expect(stampWrites()).toHaveLength(0);
+    const bumps = writes.filter((w) => w.table === 'call_log' && w.verb === 'update'
+      && JSON.stringify((w.payload && w.payload.metadata && w.payload.metadata.bindings) || '').includes('relay_contact_instruction_attempts'));
+    expect(bumps).toHaveLength(1);
+  });
+
   test('a notification failure never surfaces to the caller (fail-open)', async () => {
     NotificationService.notifyAdmin.mockRejectedValue(new Error('bell down'));
     await expect(createLeadFromExtraction(
