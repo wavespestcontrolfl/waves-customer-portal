@@ -435,12 +435,38 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
     }
     return result;
   }
+  // A plain guard skip means the payout got reconciled by someone else
+  // between candidate validation and this echo. If its CONFIRMED banked
+  // amount no longer matches this row, the link is stale — finalizing it
+  // would block the credit's real explanation. Revert instead of clearing.
+  if (result && result.skipped && result.reason === 'guard') {
+    const payout = await db('stripe_payouts').where({ id: payoutId }).first('id', 'amount', 'reconciled');
+    if (payout) {
+      const effective = await effectivePayoutAmount(payout);
+      if (!withinCandidateTolerance(effective, amount)) {
+        const changed = await db('bank_transactions')
+          .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+          .update({
+            status: 'unmatched',
+            matched_payout_id: null,
+            match_method: null,
+            matched_at: null,
+            suggestion: suggestionMerge({
+              autoRevert: { at: new Date().toISOString(), payoutId, reason: 'payout was reconciled with a different banked amount after matching' },
+            }, ['reconcilePending']),
+            updated_at: new Date(),
+          });
+        if (changed) return { ...result, amountMismatchReverted: true };
+      }
+    }
+  }
   // Any other guard skip resolves the intent too — either the payout is
-  // already reconciled (nothing to echo) or the row is no longer linked
-  // (nothing to clear; the scoped CAS below no-ops). jsonb key-subtraction
-  // removes ONLY the flag, and the CAS scopes it to THIS link — if an
-  // unlink + re-match to a different payout landed since, the newer link
-  // keeps its own pending flag and the sweep still retries it.
+  // already reconciled with a still-matching amount (nothing to echo) or
+  // the row is no longer linked (nothing to clear; the scoped CAS below
+  // no-ops). jsonb key-subtraction removes ONLY the flag, and the CAS
+  // scopes it to THIS link — if an unlink + re-match to a different payout
+  // landed since, the newer link keeps its own pending flag and the sweep
+  // still retries it.
   await db('bank_transactions')
     .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
     .update({ suggestion: db.raw("suggestion - 'reconcilePending'"), updated_at: new Date() });
@@ -633,6 +659,9 @@ async function runDeterministicMatching({ limit } = {}) {
               if (echo && echo.skipped && echo.reason === 'human_rejected') {
                 summary.payoutsLinked--;
                 summary.humanRejected = (summary.humanRejected || 0) + 1;
+              } else if (echo && echo.amountMismatchReverted) {
+                summary.payoutsLinked--;
+                summary.amountMismatchReverted = (summary.amountMismatchReverted || 0) + 1;
               }
             } catch (reconErr) {
               // flag already persisted with the claim — the sweep retries

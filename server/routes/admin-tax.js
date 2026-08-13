@@ -2055,6 +2055,9 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
       if (result && result.skipped && result.reason === 'precondition') {
         return res.status(409).json({ error: 'row changed mid-flight — reload' });
       }
+      if (result && result.amountMismatchReverted) {
+        return res.status(409).json({ error: 'that payout was just reconciled with a different banked amount — the link was not kept' });
+      }
       reconciliation = result && result.skipped ? 'already_reconciled' : 'confirmed';
     } catch (err) {
       // pending flag persisted with the claim — the matching sweep retries

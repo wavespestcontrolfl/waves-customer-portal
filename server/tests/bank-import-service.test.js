@@ -576,6 +576,24 @@ describe('runDeterministicMatching', () => {
     expect(lockingBuilder).toBeDefined();
   });
 
+  test('a payout reconciled DISCREPANTLY mid-echo reverts the fresh link instead of finalizing it', async () => {
+    // validated as unreconciled/matching, then a human reconciles it with a
+    // different banked amount DURING the echo → guard skip + revalidation
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'DEPOSIT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: false }];
+    reconcilePayout.mockImplementationOnce(async () => {
+      state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: true }];
+      state.reconRows = [{ status: 'confirmed', actual_amount: '2400.00' }];
+      return { payout_id: 'po-1', skipped: true, reason: 'guard' };
+    });
+    const summary = await runDeterministicMatching();
+    expect(summary.amountMismatchReverted).toBe(1);
+    expect(summary.payoutsLinked).toBe(0); // decremented back
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
+    expect(sugOf(revert).autoRevert.reason).toContain('different banked amount');
+  });
+
   test('a reconciled payout with a DISCREPANT confirmed amount matches by its actual banked amount', async () => {
     // Stripe expected 2418.66, but a human confirmed 2400.00 actually landed
     state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: true }];
