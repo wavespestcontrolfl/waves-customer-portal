@@ -78,6 +78,7 @@ mockRestoreAssertDate.mockResolvedValue(FUTURE_DATE);
 // accept: a quarterly series at $128/visit, all rows carrying the estimate.
 const ACCEPTED_SERIES_VISIT = {
   id: 'svc-1',
+  status: 'on_site',
   customer_id: 'cust-1',
   service_type: 'Quarterly Pest Control',
   estimated_price: 128,
@@ -135,9 +136,11 @@ function stubTables({
   rootsCount = 1,
   casResult = 1,
   recordedPayment = undefined,
+  childRows = [],
 } = {}) {
   stubTables.casCalls = [];
   stubTables.updates = [];
+  stubTables.whereIns = [];
   db.transaction = jest.fn(async (cb) => cb(db));
   db.mockImplementation((table) => {
     const q = {};
@@ -149,7 +152,18 @@ function stubTables({
     let voidOnly = false;
     let whereId = null;
     let byVisit = false;
+    // knex-style grouped wheres: invoke callbacks against a NEUTRAL recorder
+    // that only captures whereIn nets — never the live chain, whose flags
+    // (notesLike/whereId/…) must not be perturbed by group internals.
+    const groupRecorder = new Proxy({}, {
+      get: (_t, prop) => {
+        if (prop === 'whereIn') return (col, vals) => { stubTables.whereIns.push({ table, col, vals }); return groupRecorder; };
+        // Any builder method: recurse into function args, self-chain.
+        return (...a) => { if (typeof a[0] === 'function') a[0].call(groupRecorder); return groupRecorder; };
+      },
+    });
     q.where = jest.fn((...args) => {
+      if (typeof args[0] === 'function') { args[0].call(groupRecorder); return q; }
       if (args[0] === 'notes') notesLike = true;
       if (args[0] && typeof args[0] === 'object') {
         if (args[0].status === 'void') voidOnly = true;
@@ -166,7 +180,10 @@ function stubTables({
       return q;
     });
     q.whereNotIn = jest.fn(() => q);
-    q.whereIn = jest.fn(() => q);
+    q.whereIn = jest.fn((col, vals) => {
+      stubTables.whereIns.push({ table, col, vals });
+      return q;
+    });
     q.orderBy = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
     q.update = jest.fn(async (patch) => {
@@ -182,6 +199,7 @@ function stubTables({
     q.insert = jest.fn(async () => [{}]);
     q.count = jest.fn(() => { isCount = true; return q; });
     q.select = jest.fn(async () => {
+      if (table === 'scheduled_services') return childRows;
       if (table === 'invoices') {
         if (invoices === 'throw') throw new Error('invoice read failed');
         // The undo's live-AR probe selects by scheduled_service_id and
@@ -570,6 +588,37 @@ describe('on-site prepay switch — the NON-ESTIMATE lane (prepay-on-book twin)'
     expect(body.voided).toEqual([]);
     expect(body.invoice.id).toBe('inv-prepay');
     termSpy.mockRestore();
+  });
+});
+
+describe('on-site prepay switch — series-wide nets and live statuses (PR r2)', () => {
+  let termSpy;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    mockLockOverlap.mockResolvedValue(undefined);
+    mockCreateInvoice.mockResolvedValue({ id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok', total: 512 });
+    termSpy = jest.spyOn(AnnualPrepayRenewals, 'createTermForAnnualPrepay').mockResolvedValue({ id: 'term-1' });
+  });
+  afterEach(() => termSpy.mockRestore());
+
+  test('the supersede/lock net spans EVERY series child, not just the tapped visit (Codex P0)', async () => {
+    stubTables({ childRows: [{ id: 'svc-child-1' }, { id: 'svc-child-2' }] });
+    const { status } = await post('/svc-1/prepay-switch');
+    expect(status).toBe(201);
+    const invoiceNets = stubTables.whereIns.filter((w) => w.table === 'invoices' && w.col === 'scheduled_service_id');
+    expect(invoiceNets.length).toBeGreaterThan(0);
+    for (const net of invoiceNets) {
+      expect(net.vals).toEqual(expect.arrayContaining(['svc-1', 'svc-child-1', 'svc-child-2']));
+    }
+  });
+
+  test('a COMPLETED visit refuses — coverage can never stamp it (Codex P1)', async () => {
+    stubTables({ visit: { ...ACCEPTED_SERIES_VISIT, status: 'completed' } });
+    const { status, body } = await post('/svc-1/prepay-switch');
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/already closed out/i);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 });
 

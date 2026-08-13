@@ -9267,6 +9267,20 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
   // nothing was accept-minted, so there is nothing to supersede — estimateId
   // null tells the switch to mint without retiring anything, and gives the
   // undo no provenance to match (so it restores nothing).
+  // The supersede/lock net must span the WHOLE series (Codex PR #3381 r2
+  // P0): an invoice can hang off any covered CHILD, not just the tapped
+  // visit or the root — miss one and the year collects while it stays
+  // payable. Fail closed on an unreadable children read.
+  let seriesIds;
+  try {
+    const children = await conn('scheduled_services')
+      .where({ recurring_parent_id: anchor.id })
+      .select('id');
+    seriesIds = [...new Set([visit.id, anchor.id, ...children.map((c) => c.id)].filter(Boolean).map(String))];
+  } catch (err) {
+    logger.warn(`[schedule:prepay-switch] series-children read failed for ${anchor.id}: ${err.message} — refusing`);
+    return { ok: false, status: 409, blockReason: 'couldn’t confirm the visits in this series — refresh and try again' };
+  }
   if (!anchor.source_estimate_id) {
     return {
       ok: true,
@@ -9274,7 +9288,7 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
       anchor,
       customerId: String(anchor.customer_id || visit.customer_id || ''),
       estimateId: null,
-      visitIds: [...new Set([visit.id, anchor.id].filter(Boolean).map(String))],
+      visitIds: seriesIds,
     };
   }
   // A multi-service accept mints ONE combined invoice for the whole
@@ -9317,7 +9331,7 @@ async function resolveAcceptedSwitchTarget(scheduledServiceId, conn = db) {
     anchor,
     customerId: String(anchor.customer_id || visit.customer_id || ''),
     estimateId: String(anchor.source_estimate_id),
-    visitIds: [...new Set([visit.id, anchor.id].filter(Boolean).map(String))],
+    visitIds: seriesIds,
   };
 }
 
@@ -9856,8 +9870,15 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           .where({ id: target.visit.id })
           .forUpdate()
           .first('id', 'status', 'customer_id');
-        if (!liveVisit || ['cancelled', 'canceled', 'rescheduled', 'no_show'].includes(String(liveVisit.status || ''))) {
-          const err = new Error('This visit is no longer live — refresh the schedule');
+        // Live-status ALLOWLIST (Codex PR #3381 r2 P1): coverage
+        // deliberately never stamps completed/skipped rows, so a terminal
+        // visit could collect a year that then reports visitCovered:false
+        // forever. Only a visit that can still be stamped may switch.
+        const LIVE_SWITCH_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+        if (!liveVisit || !LIVE_SWITCH_STATUSES.includes(String(liveVisit.status || ''))) {
+          const err = new Error(liveVisit && ['completed', 'skipped'].includes(String(liveVisit.status || ''))
+            ? 'This visit is already closed out — coverage can’t stamp it. Sell the prepay from Customer 360 instead'
+            : 'This visit is no longer live — refresh the schedule');
           err.switchConflict = true;
           throw err;
         }
