@@ -599,6 +599,15 @@ describe('stripe banking service', () => {
       expect(reconInserts).toHaveLength(1);
     });
 
+    test('a human DRAFT skips distinctly — automation never writes over deliberation', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      latestRecon = { status: 'draft', reconciled_by: 'adam' };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import:bt-1', 'confirmed', { onlyIfUnreconciled: true });
+      expect(result).toMatchObject({ skipped: true, reason: 'human_draft' });
+      expect(reconInserts).toHaveLength(0);
+      expect(payoutUpdate).toBeNull();
+    });
+
     test('opts.trx joins the external transaction instead of opening one', async () => {
       payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: true, reconciled_by: 'bank-import:bt-1' };
       const before = db.transaction.mock.calls.length;

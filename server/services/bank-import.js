@@ -488,6 +488,12 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
   //  - human rejection still stands → revert + exclude the payout for this row
   //  - payout reconciled with a non-matching banked amount → revert (stale link)
   //  - otherwise resolved benignly → clear the pending flag
+  // An active human DRAFT pauses everything: the link stays, the pending
+  // flag stays (the sweep retries after the draft resolves), and nothing is
+  // written over the deliberation.
+  if (result && result.skipped && result.reason === 'human_draft') {
+    return result;
+  }
   if (result && result.skipped && (result.reason === 'human_rejected' || result.reason === 'guard')) {
     let outcome = null;
     await db.transaction(async (trx) => {

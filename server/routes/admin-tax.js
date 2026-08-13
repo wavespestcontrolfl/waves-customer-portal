@@ -2162,7 +2162,13 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
       if (result && result.amountMismatchReverted) {
         return res.status(409).json({ error: 'that payout was just reconciled with a different banked amount — the link was not kept' });
       }
-      reconciliation = result && result.skipped ? 'already_reconciled' : 'confirmed';
+      if (result && result.skipped && result.reason === 'human_draft') {
+        // link stands, pending flag retained — the sweep finishes the echo
+        // after the human resolves their draft
+        reconciliation = 'pending';
+      } else {
+        reconciliation = result && result.skipped ? 'already_reconciled' : 'confirmed';
+      }
     } catch (err) {
       // pending flag persisted with the claim — the matching sweep retries
       logger.warn(`[bank-import] manual payout link ${row.id}→${payoutId} succeeded but reconciliation write failed (sweep will retry): ${err.message}`);

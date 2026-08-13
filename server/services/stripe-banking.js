@@ -1129,8 +1129,11 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
             .orderBy('created_at', 'desc')
             .orderBy('id', 'desc') // deterministic final tie-breaker
             .first('status', 'reconciled_by');
-          if (latest && latest.status === 'rejected' && !String(latest.reconciled_by || '').startsWith('bank-import')) {
-            skipped = 'human_rejected';
+          if (latest && ['rejected', 'draft'].includes(latest.status) && !String(latest.reconciled_by || '').startsWith('bank-import')) {
+            // rejected = the ruling stands (callers un-finalize their link);
+            // draft = active human deliberation (callers keep their retry
+            // marker and wait — automation never writes over a draft)
+            skipped = latest.status === 'rejected' ? 'human_rejected' : 'human_draft';
             return;
           }
         }

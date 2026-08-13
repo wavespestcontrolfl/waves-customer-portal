@@ -759,6 +759,16 @@ describe('runDeterministicMatching', () => {
     expect(sugOf(revert).autoRevert.reason).toContain('deleted');
   });
 
+  test('a human-DRAFT skip keeps the pending flag — the sweep waits for the human', async () => {
+    reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-1', skipped: true, reason: 'human_draft' });
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
+    state.payouts = [{ id: 'po-1', reconciled: false }];
+    const summary = await runDeterministicMatching();
+    expect(summary.reconcileRetried).toBe(0);
+    // no clear, no revert — the flag survives for the next pass
+    expect(state.updates).toHaveLength(0);
+  });
+
   test('a bounded pass reports moreRemaining instead of scanning everything', async () => {
     state.bankRows = [
       { id: 'bt-1', txn_date: '2026-08-09', description: 'A', amount: 1, direction: 'debit', suggestion: null },
