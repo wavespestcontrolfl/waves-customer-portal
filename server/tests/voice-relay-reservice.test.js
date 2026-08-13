@@ -494,6 +494,22 @@ describe('GATE ON', () => {
     expect(payloads.some((p) => p && 'owner_alert_claimed_at' in p && p.owner_alert_claimed_at === null)).toBe(true); // claim released
   });
 
+  // ⭐ SCRUBBED AT THE SOURCE. The caller's own words land on durable rows
+  // (service_requests.subject/description) and the admin feed — a spoken card
+  // number must never persist (AGENTS.md card-data rule; same doctrine as the
+  // transcript and contact-preference scrubs).
+  test('a spoken card number in the issue never reaches the ticket or the feed', async () => {
+    await executeTool('request_reservice', {
+      ...GOOD, issue: 'ants are back and my card 4111 1111 1111 1111 was charged twice',
+    }, CTX);
+    const inserted = builders.service_requests.insert.mock.calls[0][0];
+    expect(JSON.stringify(inserted)).not.toMatch(/4111[\s-]?1111[\s-]?1111[\s-]?1111/);
+    expect(JSON.stringify(inserted)).toContain('[card ending 1111]'); // scrubbed, not silently dropped
+    for (const call of NotificationService.notifyAdmin.mock.calls) {
+      expect(JSON.stringify(call)).not.toMatch(/4111[\s-]?1111[\s-]?1111[\s-]?1111/);
+    }
+  });
+
   // ⭐ THE CLAIM VALUE IS THE OWNERSHIP TOKEN. A stale claimant (its send ran
   // past the lease while a retry reclaimed) clearing owner_alert_claimed_at
   // unconditionally deleted the NEW claimant's live lease and let yet another

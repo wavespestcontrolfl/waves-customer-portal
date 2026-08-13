@@ -133,7 +133,20 @@ async function requestReserviceText(input = {}, ctx = {}) {
     return 'Which service is the problem with — pest control or lawn care? Ask the caller, then call '
       + 'request_reservice again with lane set to "pest" or "lawn".';
   }
-  const issue = promptSafe(input.issue, MAX_DESCRIPTION);
+  // ⭐ SCRUBBED AT THE SOURCE, FAIL CLOSED. `issue` is caller-authored text
+  // headed for durable rows (service_requests.subject/description) and the
+  // admin notification feed — a caller reading a card number aloud must never
+  // create a persisted PAN (the AGENTS.md card-data rule; same doctrine as the
+  // transcript and contact-preference scrubs). promptSafe flattens shape only;
+  // it does not redact. If the scrub itself cannot run, the field is dropped
+  // and the model simply asks again.
+  let issue = '';
+  try {
+    const { scrubPans } = require('../../utils/pan-scrub');
+    issue = promptSafe(scrubPans(String(input.issue == null ? '' : input.issue)), MAX_DESCRIPTION);
+  } catch {
+    issue = '';
+  }
   if (!issue) {
     return 'Ask the caller what exactly is happening (what they are seeing and where), then call '
       + 'request_reservice again with that in `issue`.';

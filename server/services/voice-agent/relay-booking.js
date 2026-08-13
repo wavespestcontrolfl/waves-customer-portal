@@ -773,7 +773,18 @@ async function requestBookingText(input = {}, ctx = {}) {
       : 'UNVERIFIED third-party requester — verify identity before confirming. The caller on '
         + `${maskPhone(ctx.from)} matched this account only on a secondary contact number `
         + '(spouse, tenant, or a previous occupant), NOT the account holder\'s own number.');
-  const requestedSummary = String(input.service || '').trim().slice(0, 160);
+  // ⭐ SCRUBBED AT THE SOURCE, FAIL CLOSED. The caller's own words for what
+  // they asked for land on scheduled_services.internal_notes — a durable row —
+  // so a spoken card number must be redacted before it is ever composed in
+  // (AGENTS.md card-data rule). The note line is optional; an unscrubbable
+  // summary is simply dropped.
+  let requestedSummary = '';
+  try {
+    const { scrubPans } = require('../../utils/pan-scrub');
+    requestedSummary = scrubPans(String(input.service || '')).trim().slice(0, 160);
+  } catch {
+    requestedSummary = '';
+  }
   const windowStart = slot.start_time || slot.startTime24;
   const insertData = {
     customer_id: customerId,
@@ -907,14 +918,19 @@ async function requestBookingText(input = {}, ctx = {}) {
 
   // Customer-facing arrival copy is the SHARED +120min range (AGENTS.md) —
   // never a point time. "Around 9:00 AM" reads as a promise the reminders and
-  // track page would then contradict with "9 to 11".
-  let spokenTime = slot.start_label || String(windowStart);
+  // track page would then contradict with "9 to 11". FAIL CLOSED: if the range
+  // cannot be derived, no time is spoken at all — a bare start labeled as "the
+  // arrival window" is exactly the point-time promise the rule forbids.
+  let spokenTime = null;
   try {
     const { arrivalWindowRange, formatSmsTimeRange } = require('../../utils/sms-time-format');
     const range = arrivalWindowRange(windowStart);
     if (range) spokenTime = formatSmsTimeRange(range);
-  } catch { /* the bare start remains the fallback */ }
-  return `Booking REQUEST submitted for ${catalogRow.name} on ${dateStr} with an arrival window of ${spokenTime}. `
+  } catch { /* fall through to the no-time copy */ }
+  return `Booking REQUEST submitted for ${catalogRow.name} on ${dateStr}`
+    + (spokenTime
+      ? ` with an arrival window of ${spokenTime}. `
+      : '. Do NOT state an arrival time — the office will confirm the window. ')
     + 'This is NOT a confirmed appointment: tell the caller a Waves team member will text or call '
     + 'to confirm the final time — set WHEN from the latest CLOCK DATA (never "shortly" while the '
     + 'office is closed). Do NOT say the time is locked in, booked, or guaranteed. '

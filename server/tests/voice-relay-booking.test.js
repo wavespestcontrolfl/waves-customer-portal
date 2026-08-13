@@ -488,6 +488,36 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(row.estimated_price).toBeNull();
   });
 
+  // ⭐ SCRUBBED AT THE SOURCE. The caller's ask is copied onto
+  // scheduled_services.internal_notes — a durable row — so a spoken card
+  // number must be redacted before it is ever composed in (AGENTS.md
+  // card-data rule).
+  test('a spoken card number in the service ask never reaches internal_notes', async () => {
+    await executeTool('request_booking', {
+      slot_ref: 'S1', service: 'pest control and my card 4111 1111 1111 1111 was charged',
+    }, slotCtx());
+    const row = trxBuilders.scheduled_services.insert.mock.calls[0][0];
+    expect(String(row.internal_notes)).not.toMatch(/4111[\s-]?1111[\s-]?1111[\s-]?1111/);
+    expect(String(row.internal_notes)).toContain('[card ending 1111]'); // scrubbed, not dropped
+  });
+
+  // ⭐ FAIL CLOSED ON THE ARRIVAL WINDOW. If the +120min range cannot be
+  // derived, the bare start must NOT be spoken as "the arrival window" — that
+  // is exactly the point-time promise the reminders and track page contradict.
+  test('an arrival-window derivation failure omits the time entirely (never a bare start)', async () => {
+    const smsTime = require('../utils/sms-time-format');
+    const spy = jest.spyOn(smsTime, 'arrivalWindowRange').mockReturnValue(null);
+    try {
+      const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+      expect(out).toMatch(/Booking REQUEST submitted/);
+      expect(out).not.toMatch(/arrival window of/);
+      expect(out).not.toMatch(/9:00 AM/); // the bare start is never labeled a window
+      expect(out).toMatch(/office will confirm the window/i);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('no bookable catalog at all → refused, nothing written', async () => {
     catalog.loadBookableCallServices.mockResolvedValue([]);
     const out = await executeTool('request_booking', GOOD_INPUT, CTX);
