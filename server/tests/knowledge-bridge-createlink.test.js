@@ -90,8 +90,9 @@ test('pointers are NOT written when the KB entry bridges to multiple wiki pages'
 
   await KnowledgeBridge.createLink(LINK_ARGS);
 
-  // kb-side pointer skipped (two distinct wiki targets); wiki-side pointer
-  // is unambiguous (one distinct kb source) and still writes.
-  expect(dbMock.state.updates.knowledge_base).toBeUndefined();
+  // kb-side pointer CLEARED (two distinct wiki targets — a stale arbitrary
+  // pointer is worse than null); wiki-side pointer is unambiguous (one
+  // distinct kb source) and still writes.
+  expect(dbMock.state.updates.knowledge_base).toEqual([{ wiki_entry_id: null }]);
   expect(dbMock.state.updates.knowledge_entries).toEqual([{ kb_entry_id: 'kb-1' }]);
 });

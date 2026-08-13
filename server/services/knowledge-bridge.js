@@ -567,27 +567,27 @@ const KnowledgeBridge = {
         created_by: createdBy || 'system',
       }).onConflict(['kb_entry_id', 'wiki_entry_id', 'link_type']).ignore().returning('*');
 
-      // Also set direct FK pointers for fast joins — but ONLY when the
-      // entry's links are unambiguous. autoLink's substring matching can
-      // bridge a broad KB entry ("Bifen") to several wiki pages; the weekly
-      // cron would otherwise overwrite these singular pointers with whichever
-      // unordered match was processed last. Ambiguous sets never write the
-      // pointer (existing values are left alone, never clobbered or cleared).
+      // Also maintain the direct FK pointers for fast joins. autoLink's
+      // substring matching can bridge a broad KB entry ("Bifen") to several
+      // wiki pages; a singular pointer is only meaningful while the link set
+      // is unambiguous. Exactly one distinct target → point at it; several →
+      // CLEAR the pointer (a stale arbitrary association is worse than null
+      // for direct-pointer consumers). Not transactional with the insert —
+      // the writers are a weekly locked cron and a manual admin route, and a
+      // lost race self-heals on the next autoLink pass.
       if (kbEntryId && wikiEntryId) {
         const kbSide = await db('knowledge_bridge')
           .where({ kb_entry_id: kbEntryId }).whereNotNull('wiki_entry_id')
           .select('wiki_entry_id');
         const kbTargets = [...new Set(kbSide.map((r) => r.wiki_entry_id))];
-        if (kbTargets.length === 1 || kbSide.length === 0) {
-          await db('knowledge_base').where({ id: kbEntryId }).update({ wiki_entry_id: wikiEntryId });
-        }
+        await db('knowledge_base').where({ id: kbEntryId })
+          .update({ wiki_entry_id: kbTargets.length === 1 ? kbTargets[0] : (kbSide.length === 0 ? wikiEntryId : null) });
         const wikiSide = await db('knowledge_bridge')
           .where({ wiki_entry_id: wikiEntryId }).whereNotNull('kb_entry_id')
           .select('kb_entry_id');
         const wikiTargets = [...new Set(wikiSide.map((r) => r.kb_entry_id))];
-        if (wikiTargets.length === 1 || wikiSide.length === 0) {
-          await db('knowledge_entries').where({ id: wikiEntryId }).update({ kb_entry_id: kbEntryId });
-        }
+        await db('knowledge_entries').where({ id: wikiEntryId })
+          .update({ kb_entry_id: wikiTargets.length === 1 ? wikiTargets[0] : (wikiSide.length === 0 ? kbEntryId : null) });
       }
 
       return link || null;
