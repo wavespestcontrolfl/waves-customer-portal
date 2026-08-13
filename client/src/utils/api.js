@@ -576,6 +576,12 @@ export class ApiClient {
     });
   }
 
+  // ---- Property alerts (GATE_PROPERTY_ALERTS; gate-off answers
+  // available:false) ----
+  getPropertyAlerts() {
+    return this.request('/property-alerts');
+  }
+
   getLawnHealthPhotos(customerId, assessmentId) {
     return this.request(`/lawn-health/${customerId}/photos/${assessmentId}`);
   }

@@ -464,6 +464,26 @@ Object.assign(api, {
   }),
   requestPropertyRecommendation: async () => ({ success: true }),
 
+  // property alerts (GATE_PROPERTY_ALERTS) — recent advisories from the
+  // daily sweep.
+  getPropertyAlerts: async () => ({
+    available: true,
+    alerts: [
+      {
+        id: 'al-1', ruleKey: 'rain_skip_irrigation',
+        title: 'Heavy rain in your area',
+        body: 'Your service area received about 2.1" of rain in the last 3 days. We recommend skipping your next irrigation cycle.',
+        firedAt: new Date().toISOString(),
+      },
+      {
+        id: 'al-2', ruleKey: 'lawn_inspection_reassurance',
+        title: 'Chinch bug conditions: elevated',
+        body: 'Summer heat favors chinch bug activity in Southwest Florida lawns. Your lawn was inspected 9 days ago — no chinch bug activity was found.',
+        firedAt: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
+      },
+    ],
+  }),
+
   // misc / catch-alls — PortalPage also calls api.request directly
   // ('/tracking/maps-key', '/ai/chat', AuthProvider's '/auth/logout').
   request: async (path) => {
