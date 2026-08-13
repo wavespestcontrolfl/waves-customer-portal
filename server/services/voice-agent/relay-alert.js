@@ -419,52 +419,52 @@ async function alertOwnerReservice(request = {}, ctx = {}) {
 }
 
 /**
- * Hourly backstop for the crash window the lease alone cannot cover: the lease
- * makes an abandoned claim RECLAIMABLE, but the only reclaimer was the live
- * capture_lead path — and after the socket died, Twilio sent the caller to
- * voicemail, so nothing on that call ever claimed again and the hot lead
- * stayed unpaged. This sweep finds claimed-unsent call_log rows past the
- * lease, recovers the lead by its own twilio_call_sid, and re-fires the page
- * through alertOwnerHotLead (which re-takes the expired lease atomically —
- * concurrent rails still cannot double-page).
+ * Hourly backstop for the crash windows the lease alone cannot cover. Two of
+ * them: a process that died AFTER claiming but before sending (claimed-unsent),
+ * and one that died BEFORE the claim existed at all — the lead committed, the
+ * page never started, and a claim-scanning sweep would never see it. So the
+ * sweep starts from the DURABLE artifact instead: recent URGENT leads
+ * (`leads.urgency = 'urgent'` is how a hot capture persists — leads carry no
+ * lead_quality column) joined to their own call_log row, kept only while the
+ * SENT receipt is missing. Each candidate re-enters through alertOwnerHotLead
+ * itself, whose atomic claim/lease and delivery-evidence probe keep concurrent
+ * rails from double-paging. Leads with no call row are skipped: without a row
+ * to receipt against, every run would page again forever.
  */
 async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
   const db = require('../../models/db');
   let rows = [];
   try {
-    rows = await db('call_log')
-      .whereRaw(`(metadata->>'${HOT_ALERT_KEY}') IS NOT NULL`)
-      .whereRaw(`(metadata->>'${HOT_ALERT_SENT_KEY}') IS NULL`)
-      .whereRaw(`(metadata->>'${HOT_ALERT_KEY}')::timestamptz < now() - ${HOT_ALERT_CLAIM_LEASE}`)
-      .orderBy('created_at', 'asc')
+    rows = await db('leads')
+      .join('call_log', 'call_log.twilio_call_sid', 'leads.twilio_call_sid')
+      .where('leads.urgency', 'urgent')
+      .whereNull('leads.deleted_at')
+      .whereNotNull('leads.twilio_call_sid')
+      // Recent only: this recovers crashed pages, it does not re-litigate history.
+      .where('leads.created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
+      .whereRaw(`(call_log.metadata->>'${HOT_ALERT_SENT_KEY}') IS NULL`)
+      .orderBy('leads.created_at', 'asc')
       .limit(limit)
-      .select('id', 'twilio_call_sid');
+      .select('leads.twilio_call_sid as call_sid', 'leads.first_name', 'leads.last_name',
+        'leads.phone', 'leads.city', 'leads.transcript_summary');
   } catch (err) {
     logger.error(`[voice-relay-alert] abandoned hot-alert sweep query failed: ${err.message}`);
     return 0;
   }
   let paged = 0;
   for (const row of rows) {
-    let lead = null;
-    try {
-       
-      lead = await db('leads')
-        .where({ twilio_call_sid: row.twilio_call_sid })
-        .whereNull('deleted_at')
-        .orderBy('created_at', 'desc')
-        .first('first_name', 'last_name', 'phone', 'city', 'lead_quality', 'transcript_summary');
-    } catch { /* fall through to release */ }
-    if (!lead || String(lead.lead_quality || '').toLowerCase() !== 'hot') {
-      // Nothing hot to page (or no lead at all — the bell rang new_lead
-      // regardless): release so the row leaves the sweep population.
-       
-      await releaseHotAlertClaim(row.twilio_call_sid).catch(() => {});
-      continue;
-    }
      
     const ok = await alertOwnerHotLead(
-      { ...lead, call_summary: lead.transcript_summary, urgency_reason: 'recovered by the hot-alert sweep' },
-      { callSid: row.twilio_call_sid },
+      {
+        first_name: row.first_name,
+        last_name: row.last_name,
+        phone: row.phone,
+        city: row.city,
+        lead_quality: 'hot', // reconstructed from urgency='urgent' — see the query
+        call_summary: row.transcript_summary,
+        urgency_reason: 'recovered by the hot-alert sweep',
+      },
+      { callSid: row.call_sid },
     ).catch(() => false);
     if (ok) paged += 1;
   }

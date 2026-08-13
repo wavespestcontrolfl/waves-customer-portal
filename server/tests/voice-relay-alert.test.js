@@ -190,6 +190,39 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
     expect(claimPredicate).toContain('relay_hot_alert_sent_at'); // …only when never sent
   });
 
+  // ⭐ THE SWEEP STARTS FROM THE LEAD, NOT THE CLAIM. A crash BEFORE the claim
+  // left a durable hot lead invisible to a claim-scanning sweep forever; and
+  // leads persist hotness as urgency='urgent' (there is no lead_quality
+  // column — selecting one THREW, and the empty catch read the throw as
+  // "no lead" and released the claim, permanently skipping the page).
+  test('the sweep selects urgent leads joined to their call row and re-pages via the normal path', async () => {
+    const rows = [{
+      call_sid: 'CA-swept-1', first_name: 'Pat', last_name: 'Rivera',
+      phone: CALLER, city: 'Bradenton', transcript_summary: 'Swarming termites in the living room.',
+    }];
+    const leadsBuilder = {};
+    for (const m of ['join', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'orderBy', 'limit']) {
+      leadsBuilder[m] = jest.fn(() => leadsBuilder);
+    }
+    leadsBuilder.select = jest.fn(async () => rows);
+    // alertOwnerHotLead's own claim path (call_log) + delivery probe (notifications).
+    const claimBuilder = {};
+    for (const m of ['where', 'whereRaw']) claimBuilder[m] = jest.fn(() => claimBuilder);
+    claimBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'cl-1' }]) }));
+    claimBuilder.first = jest.fn(async () => null);
+    db.mockImplementation((table) => (table === 'leads' ? leadsBuilder : claimBuilder));
+    db.raw = jest.fn((sql) => ({ __raw: sql }));
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+
+    const paged = await relayAlert.sweepAbandonedHotAlerts();
+    expect(paged).toBe(1);
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+    // The query keys on urgency (the real column) and the missing SENT receipt.
+    expect(leadsBuilder.where).toHaveBeenCalledWith('leads.urgency', 'urgent');
+    const raws = leadsBuilder.whereRaw.mock.calls.map(([sql]) => String(sql));
+    expect(raws.some((sql) => sql.includes('relay_hot_alert_sent_at'))).toBe(true);
+  });
+
   test('a claim ERROR pages anyway (fail-open: a duplicate beats a missed swarm)', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     const out = await relayAlert.alertOwnerHotLead(HOT_LEAD, { callSid: 'CA-db-down', markOwnerAlerted: jest.fn() });
