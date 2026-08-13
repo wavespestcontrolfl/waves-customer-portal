@@ -317,12 +317,25 @@ describe('create-expense (gate on)', () => {
     expect(mockDb.transaction).toHaveBeenCalled();
   });
 
-  test('non-debit and non-unmatched rows are refused', async () => {
+  test('bank credits and non-unmatched rows are refused', async () => {
     state.bankRow.direction = 'credit';
+    state.bankRow.account_type = 'bank'; // deposit/payout territory, never a refund
     expect((await post('/admin/tax/bank-import/bt-1/create-expense', {})).status).toBe(400);
+    state.bankRow.account_type = 'card';
     state.bankRow.direction = 'debit';
     state.bankRow.status = 'ignored';
     expect((await post('/admin/tax/bank-import/bt-1/create-expense', {})).status).toBe(409);
+  });
+
+  test('a card-statement credit records a NEGATIVE expense (refund) offsetting the purchase', async () => {
+    state.bankRow.direction = 'credit'; // account_type is already 'card'
+    const res = await post('/admin/tax/bank-import/bt-1/create-expense', {});
+    expect(res.status).toBe(200);
+    const exp = state.insertedExpenses[0];
+    expect(exp.amount).toBe(-58.12);
+    expect(exp.tax_deductible_amount).toBe(-29.06); // 50% meals policy applies to the refund too
+    expect(exp.notes).toContain('[Refund');
+    expect(state.bankUpdates[0].patch.status).toBe('created_expense');
   });
 
   test('unknown categoryId is a 400, not a silent uncategorized insert', async () => {

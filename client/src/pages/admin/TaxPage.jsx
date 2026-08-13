@@ -4401,22 +4401,6 @@ function BankImportTab() {
                         </option>
                       ))}
                     </select>
-                  ) : r.status === "unmatched" && r.direction === "debit" ? (
-                    <select
-                      style={{ ...inputStyle, maxWidth: 240 }}
-                      value={catPick[r.id] || ""}
-                      onChange={(e) => setCatPick((p) => ({ ...p, [r.id]: e.target.value }))}
-                      title="Category for Create — the AI suggestion is only a default; pick to override"
-                    >
-                      <option value="">
-                        {r.suggestion?.categoryName ? `AI: ${r.suggestion.categoryName}` : "Category…"}
-                      </option>
-                      {categories.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
                   ) : (
                     r.suggestion?.categoryName || ""
                   )}
@@ -4461,27 +4445,48 @@ function BankImportTab() {
                     </button>
                   )}
                   {/* transfer-flagged rows keep Create too — the flag is only a
-                      suggestion, and a legit vendor can trip the heuristic */}
-                  {r.status === "unmatched" && r.direction === "debit" && !linkPick[r.id] && (
-                    <button
-                      type="button"
-                      disabled={!!busy}
-                      style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginRight: 6 }}
-                      onClick={() =>
-                        // an operator-picked category overrides the AI
-                        // suggestion (and skips the AI-verify note)
-                        act("create", `/admin/tax/bank-import/${r.id}/create-expense`, catPick[r.id] ? { categoryId: catPick[r.id] } : {}).then((res) => {
-                          if (res)
-                            setCatPick((p) => {
-                              const next = { ...p };
-                              delete next[r.id];
-                              return next;
-                            });
-                        })
-                      }
-                    >
-                      Create expense
-                    </button>
+                      suggestion, and a legit vendor can trip the heuristic.
+                      Card-statement credits get "Record refund" (negative
+                      expense offsetting the original purchase). The category
+                      selector lives HERE so it stays reachable in every
+                      review state (transfer warning, parked candidates). */}
+                  {r.status === "unmatched" && (r.direction === "debit" || (r.direction === "credit" && r.account_type === "card")) && !linkPick[r.id] && (
+                    <>
+                      <select
+                        style={{ ...inputStyle, maxWidth: 170, marginRight: 6 }}
+                        value={catPick[r.id] || ""}
+                        onChange={(e) => setCatPick((p) => ({ ...p, [r.id]: e.target.value }))}
+                        title="Category — the AI suggestion is only a default; pick to override"
+                      >
+                        <option value="">
+                          {r.suggestion?.categoryName ? `AI: ${r.suggestion.categoryName}` : "Category…"}
+                        </option>
+                        {categories.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        disabled={!!busy}
+                        style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginRight: 6 }}
+                        onClick={() =>
+                          // an operator-picked category overrides the AI
+                          // suggestion (and skips the AI-verify note)
+                          act("create", `/admin/tax/bank-import/${r.id}/create-expense`, catPick[r.id] ? { categoryId: catPick[r.id] } : {}).then((res) => {
+                            if (res)
+                              setCatPick((p) => {
+                                const next = { ...p };
+                                delete next[r.id];
+                                return next;
+                              });
+                          })
+                        }
+                      >
+                        {r.direction === "credit" ? "Record refund" : "Create expense"}
+                      </button>
+                    </>
                   )}
                   {r.status === "unmatched" && (
                     <button

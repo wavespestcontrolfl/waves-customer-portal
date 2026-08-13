@@ -1903,21 +1903,30 @@ router.post('/bank-import/suggest', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Create a real expense from a staged debit. The insert and the bank-row
-// claim happen in ONE transaction with a CAS on status='unmatched' — a
-// double-click, a match landing mid-flight, or a crash between the two
-// statements can never leave an orphan expense feeding the P&L.
+// Create a real expense from a staged debit — or a NEGATIVE expense
+// (refund) from a card-statement credit, so returned money offsets the
+// original purchase instead of the ledger reporting the gross amount as
+// fully deductible. Bank-account credits stay excluded (they are payout/
+// deposit territory, never refunds of card spend). The insert and the
+// bank-row claim happen in ONE transaction with a CAS on
+// status='unmatched' — a double-click, a match landing mid-flight, or a
+// crash between the two statements can never leave an orphan expense
+// feeding the P&L.
 router.post('/bank-import/:id/create-expense', async (req, res, next) => {
   try {
     const row = await db('bank_transactions').where({ id: req.params.id }).first();
     if (!row) return res.status(404).json({ error: 'row not found' });
-    if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits become expenses' });
+    const isRefund = row.direction === 'credit' && row.account_type === 'card';
+    if (row.direction !== 'debit' && !isRefund) {
+      return res.status(400).json({ error: 'only debits (expenses) and card-statement credits (refunds) can enter the ledger' });
+    }
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
 
     const suggested = row.suggestion?.categoryId || null;
     const categoryId = req.body?.categoryId || suggested;
     const usedAi = !req.body?.categoryId && !!suggested;
-    let deductible = parseFloat(row.amount);
+    const signedAmount = isRefund ? -parseFloat(row.amount) : parseFloat(row.amount);
+    let deductible = signedAmount;
     if (categoryId) {
       const cat = await db('expense_categories').where({ id: categoryId }).first('name');
       if (!cat) return res.status(400).json({ error: 'unknown categoryId' });
@@ -1932,7 +1941,7 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
         const [inserted] = await trx('expenses').insert({
           category_id: categoryId,
           description: row.description.slice(0, 300),
-          amount: row.amount,
+          amount: signedAmount,
           tax_deductible_amount: deductible,
           expense_date: txnDate,
           vendor_name: row.description.slice(0, 200),
@@ -1940,7 +1949,7 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
           payment_method: row.account_type === 'card' ? 'card' : 'ach',
           tax_year: txnDate.slice(0, 4),
           quarter,
-          notes: `[Bank import ${row.account_label}]${usedAi ? ' [AI-categorized — verify]' : ''}`,
+          notes: `[Bank import ${row.account_label}]${isRefund ? ' [Refund — offsets the original purchase]' : ''}${usedAi ? ' [AI-categorized — verify]' : ''}`,
         }).returning('*');
         const claimed = await trx('bank_transactions')
           .where({ id: row.id, status: 'unmatched' })
