@@ -39,6 +39,7 @@ function stop(id, over = {}) {
 let stopsByDate;
 let ledgerInserts;
 let trxUpdates;
+let staleIds;
 
 function tableChain(table) {
   const c = { _table: table };
@@ -61,11 +62,26 @@ beforeEach(() => {
   dayStopsQuery.mockImplementation(async (_db, { dateStr }) => stopsByDate[dateStr] || []);
   routeTiers.loadReminderFreeze.mockResolvedValue({ failed: false, frozen: new Set() });
   db.mockImplementation((table) => tableChain(table));
+  staleIds = new Set();
   db.transaction.mockImplementation(async (cb) => {
-    const trx = () => ({
-      where: (w) => ({ update: async (u) => { trxUpdates.push({ ...w, ...u }); return 1; } }),
-    });
-    return cb(trx);
+    const attempted = [];
+    const trx = () => {
+      const filters = {};
+      const c = {
+        where: (a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[a] = b; return c; },
+        whereNotIn: () => c,
+        update: async (u) => {
+          if (staleIds.has(filters.id)) return 0; // stale row — placement re-assert fails
+          attempted.push({ id: filters.id, ...u });
+          return 1;
+        },
+      };
+      return c;
+    };
+    // Commit semantics: only surface the writes if the callback didn't throw.
+    const out = await cb(trx);
+    trxUpdates.push(...attempted);
+    return out;
   });
   RouteOptimizer.optimizeRoute.mockResolvedValue({
     orderedStops: [], totalDistanceMeters: 0, totalDurationSeconds: 0, unoptimizedDistanceMeters: 0, source: 'nearest_neighbor_fallback',
@@ -155,6 +171,43 @@ test('savings above the floor rewrite route_order transactionally in optimized o
   // (route_order asc, nulls last): h(1), g(2), i(null).
   const fed = RouteOptimizer.optimizeRoute.mock.calls[0][0].map((s) => s.id);
   expect(fed).toEqual(['h', 'g', 'i']);
+});
+
+test('an order violating window chronology is SKIPPED, never written', async () => {
+  // g holds a 09:00 window, h holds 13:00 — distance says h first, the
+  // promised windows say no. The tech-day must be skipped.
+  stopsByDate['2026-08-18'] = [stop('g', { window_start: '09:00' }), stop('h', { window_start: '13:00' })];
+  RouteOptimizer.optimizeRoute.mockResolvedValue({
+    orderedStops: [{ id: 'h' }, { id: 'g' }], totalDistanceMeters: 4000, totalDurationSeconds: 900, unoptimizedDistanceMeters: 9000, source: 'x',
+  });
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(db.transaction).not.toHaveBeenCalled();
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'WINDOW_ORDER_CONFLICT' }));
+});
+
+test('window-respecting order (ties + null windows) still applies', async () => {
+  stopsByDate['2026-08-18'] = [stop('g', { window_start: '09:00' }), stop('h', { window_start: '09:00' }), stop('i', { window_start: null })];
+  RouteOptimizer.optimizeRoute.mockResolvedValue({
+    orderedStops: [{ id: 'h' }, { id: 'i' }, { id: 'g' }], totalDistanceMeters: 4000, totalDurationSeconds: 900, unoptimizedDistanceMeters: 9000, source: 'x',
+  });
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(1);
+});
+
+test('a stop superseded mid-run rolls the whole tech-day back (STALE_TECH_DAY)', async () => {
+  stopsByDate['2026-08-18'] = [stop('g'), stop('h')];
+  staleIds = new Set(['h']); // staff moved/cancelled h while the optimizer ran
+  RouteOptimizer.optimizeRoute.mockResolvedValue({
+    orderedStops: [{ id: 'g' }, { id: 'h' }], totalDistanceMeters: 4000, totalDurationSeconds: 900, unoptimizedDistanceMeters: 9000, source: 'x',
+  });
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(res.failed).toBe(0); // a superseded day is a skip, not a failure
+  expect(trxUpdates).toEqual([]); // nothing committed
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
 });
 
 test('per-tech grouping: two techs on one day are reordered independently', async () => {

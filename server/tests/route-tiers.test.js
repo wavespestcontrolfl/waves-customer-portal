@@ -116,48 +116,71 @@ describe('tierMoveWindow — radius ∩ drift budget ∩ destination floor', () 
   });
 });
 
-// ── Anchor derivation ──────────────────────────────────────────────────────
-function auditDbStub(rows, { throwOnQuery = false } = {}) {
-  return () => {
+// ── Anchor derivation (durable move evidence, cumulative across writers) ───
+function anchorDbStub({ moveRows = [], auditRows = [], throwOn = null } = {}) {
+  return (table) => {
     const c = {};
     ['whereIn', 'where', 'orderBy'].forEach((m) => { c[m] = () => c; });
     c.select = async () => {
-      if (throwOnQuery) throw new Error('db down');
-      return rows;
+      if (throwOn === table) throw new Error('db down');
+      if (table === 'reschedule_log') return moveRows;
+      if (table === 'auto_dispatch_audit_logs') return auditRows;
+      return [];
     };
     return c;
   };
 }
 
 describe('anchor derivation', () => {
-  test('never-moved visit anchors at its current scheduled_date (no query needed)', async () => {
-    const map = await loadAnchorMap(auditDbStub([]), []);
+  test('never-moved visit (no evidence anywhere) anchors at its current scheduled_date', async () => {
+    const map = await loadAnchorMap(anchorDbStub(), ['s1']);
     const svc = { id: 's1', scheduled_date: '2026-09-02', auto_dispatch_change_count: 0 };
     expect(resolveAnchor(svc, map)).toBe('2026-09-02');
   });
 
-  test('moved visit anchors at the FIRST audit old_scheduled_date', async () => {
-    const map = await loadAnchorMap(auditDbStub([
-      { scheduled_service_id: 's1', old_scheduled_date: '2026-09-01', created_at: '2026-08-01' },
-      { scheduled_service_id: 's1', old_scheduled_date: '2026-09-03', created_at: '2026-08-05' },
-    ]), ['s1']);
+  test('moved visit anchors at the EARLIEST transactional reschedule_log original_date', async () => {
+    const map = await loadAnchorMap(anchorDbStub({
+      moveRows: [
+        { scheduled_service_id: 's1', original_date: '2026-09-01', created_at: '2026-08-01' },
+        { scheduled_service_id: 's1', original_date: '2026-09-03', created_at: '2026-08-05' },
+      ],
+    }), ['s1']);
     const svc = { id: 's1', scheduled_date: '2026-09-05', auto_dispatch_change_count: 2 };
     expect(resolveAnchor(svc, map)).toBe('2026-09-01');
   });
 
-  test('moved visit with NO audit trail is anchor-unknown ⇒ null (no move)', async () => {
-    const map = await loadAnchorMap(auditDbStub([]), ['s1']);
+  test('audit trail is a CUMULATIVE fallback when reschedule_log has no row', async () => {
+    const map = await loadAnchorMap(anchorDbStub({
+      auditRows: [{ scheduled_service_id: 's1', old_scheduled_date: '2026-09-02', created_at: '2026-08-02' }],
+    }), ['s1']);
+    const svc = { id: 's1', scheduled_date: '2026-09-04', auto_dispatch_change_count: 1 };
+    expect(resolveAnchor(svc, map)).toBe('2026-09-02');
+  });
+
+  test('a lost change_count stamp cannot reset the anchor — durable evidence wins', async () => {
+    // Move committed (reschedule_log row) but the best-effort counter stamp
+    // failed, so change_count is still 0. The anchor must stay the pre-move
+    // date, not the current one (codex pre-push P1).
+    const map = await loadAnchorMap(anchorDbStub({
+      moveRows: [{ scheduled_service_id: 's1', original_date: '2026-09-01', created_at: '2026-08-01' }],
+    }), ['s1']);
+    const svc = { id: 's1', scheduled_date: '2026-09-05', auto_dispatch_change_count: 0 };
+    expect(resolveAnchor(svc, map)).toBe('2026-09-01');
+  });
+
+  test('change_count>0 with NO durable evidence is anchor-unknown ⇒ null (no move)', async () => {
+    const map = await loadAnchorMap(anchorDbStub(), ['s1']);
     const svc = { id: 's1', scheduled_date: '2026-09-05', auto_dispatch_change_count: 1 };
     expect(resolveAnchor(svc, map)).toBeNull();
   });
 
-  test('audit query failure fails closed: loadAnchorMap null ⇒ every moved visit unknown', async () => {
-    const map = await loadAnchorMap(auditDbStub([], { throwOnQuery: true }), ['s1']);
-    expect(map).toBeNull();
-    const svc = { id: 's1', scheduled_date: '2026-09-05', auto_dispatch_change_count: 1 };
-    expect(resolveAnchor(svc, map)).toBeNull();
-    // ...but a never-moved visit still anchors at its own date.
-    expect(resolveAnchor({ id: 's2', scheduled_date: '2026-09-09', auto_dispatch_change_count: 0 }, map)).toBe('2026-09-09');
+  test('evidence query failure fails closed for EVERY visit', async () => {
+    for (const throwOn of ['reschedule_log', 'auto_dispatch_audit_logs']) {
+      const map = await loadAnchorMap(anchorDbStub({ throwOn }), ['s1']);
+      expect(map).toBeNull();
+      expect(resolveAnchor({ id: 's1', scheduled_date: '2026-09-05', auto_dispatch_change_count: 1 }, map)).toBeNull();
+      expect(resolveAnchor({ id: 's2', scheduled_date: '2026-09-09', auto_dispatch_change_count: 0 }, map)).toBeNull();
+    }
   });
 });
 

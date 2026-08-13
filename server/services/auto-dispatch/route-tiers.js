@@ -19,13 +19,19 @@
  *   - Cumulative drift budget: every candidate date must stay within ±5 days
  *     of the visit's recurrence ANCHOR (the date the series originally gave
  *     it), shared across tiers — a tier-2 move can only spend what tier 1
- *     left. Anchor derivation (existing data, no new columns):
- *       change_count 0/null  → the current scheduled_date IS the anchor
- *       change_count > 0     → the FIRST auto_dispatch_audit_logs
- *                              action='changed' row's old_scheduled_date
- *                              (append-only ledger of every applied move)
- *       change_count > 0 with no audit row → anchor UNKNOWN → NO MOVE
- *       (fail closed — never guess a budget).
+ *     left. Anchor derivation (existing data, no new columns), CUMULATIVE
+ *     across every durable auto-move record so a lost best-effort stamp can
+ *     never reset the budget (codex pre-push P1):
+ *       1. reschedule_log rows written INSIDE the rebooker's move
+ *          transaction with the auto-dispatch writer signature
+ *          (reason_code='auto_dispatch' AND initiated_by='auto_dispatch') —
+ *          atomic with the move itself, the primary source;
+ *       2. auto_dispatch_audit_logs action='changed' rows (append-only);
+ *       3. the auto_dispatch_change_count stamp.
+ *     Anchor = the EARLIEST recorded pre-move date across 1+2. No evidence
+ *     anywhere → the current scheduled_date IS the anchor (never moved).
+ *     change_count > 0 with no dated evidence, or an unreadable evidence
+ *     query → anchor UNKNOWN → NO MOVE (fail closed — never guess a budget).
  *   - Destination legality: no move may LAND a visit under
  *     MIN_DESTINATION_DAYS_OUT (5) days from today. Moving later is always
  *     fine; moving earlier only while the destination stays >= 5 days away.
@@ -97,22 +103,41 @@ function tierMoveWindow({ origDate, anchorDate, today, radius }) {
 }
 
 /**
- * Bulk-load recurrence anchors for a set of already-moved services.
- * Returns Map<serviceId, 'YYYY-MM-DD'>. Services with change_count 0/null are
- * NOT queried — their anchor is their current scheduled_date (resolveAnchor).
- * On query failure returns null (callers must then treat every moved visit as
- * anchor-unknown → no move; fail closed).
+ * Bulk-load durable auto-move evidence for ALL loaded services (never keyed
+ * off the best-effort change_count stamp alone — a stamp that failed after a
+ * committed move would otherwise reset the anchor and un-spend the drift
+ * budget). Returns Map<serviceId, earliest 'YYYY-MM-DD' pre-move date>; a
+ * service ABSENT from the map has no recorded auto-move. On query failure
+ * returns null (callers must treat EVERY visit as anchor-unknown → no move;
+ * fail closed).
  */
-async function loadAnchorMap(db, movedServiceIds) {
+async function loadAnchorMap(db, serviceIds) {
   const map = new Map();
-  if (!movedServiceIds || movedServiceIds.length === 0) return map;
+  if (!serviceIds || serviceIds.length === 0) return map;
   try {
-    const rows = await db('auto_dispatch_audit_logs')
-      .whereIn('scheduled_service_id', movedServiceIds)
+    // Primary: reschedule_log rows the rebooker writes INSIDE the move
+    // transaction — strict auto-dispatch writer signature on both columns.
+    const moveRows = await db('reschedule_log')
+      .whereIn('scheduled_service_id', serviceIds)
+      .where('reason_code', 'auto_dispatch')
+      .where('initiated_by', 'auto_dispatch')
+      .orderBy('created_at', 'asc')
+      .select('scheduled_service_id', 'original_date', 'created_at');
+    for (const r of moveRows) {
+      if (!map.has(r.scheduled_service_id)) {
+        const d = toDateStr(r.original_date);
+        if (d) map.set(r.scheduled_service_id, d);
+      }
+    }
+    // Secondary (cumulative): the append-only auto-dispatch audit trail. Only
+    // fills services the transactional log somehow missed; where both exist
+    // the reschedule_log row is at least as early (same move, same run).
+    const auditRows = await db('auto_dispatch_audit_logs')
+      .whereIn('scheduled_service_id', serviceIds)
       .where('action', 'changed')
       .orderBy('created_at', 'asc')
       .select('scheduled_service_id', 'old_scheduled_date', 'created_at');
-    for (const r of rows) {
+    for (const r of auditRows) {
       if (!map.has(r.scheduled_service_id)) {
         const d = toDateStr(r.old_scheduled_date);
         if (d) map.set(r.scheduled_service_id, d);
@@ -126,10 +151,13 @@ async function loadAnchorMap(db, movedServiceIds) {
 
 /** Resolve one visit's anchor date, or null when unknown (→ no move). */
 function resolveAnchor(service, anchorMap) {
-  const changeCount = service.auto_dispatch_change_count || 0;
-  if (changeCount === 0) return toDateStr(service.scheduled_date);
-  if (!anchorMap) return null; // bulk load failed — unknown, fail closed
-  return anchorMap.get(service.id) || null; // moved but no audit trail → unknown
+  if (!anchorMap) return null; // bulk load failed — unknown for everyone, fail closed
+  const evidenced = anchorMap.get(service.id);
+  if (evidenced) return evidenced; // earliest durable pre-move date
+  // change_count says moved but no durable record carries the original date —
+  // inconsistent history, never guess a budget.
+  if ((service.auto_dispatch_change_count || 0) > 0) return null;
+  return toDateStr(service.scheduled_date); // never moved — its date IS the anchor
 }
 
 /**

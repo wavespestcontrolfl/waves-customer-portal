@@ -224,10 +224,9 @@ async function runAutoDispatch(opts = {}) {
     let anchorMap = null;
     if (tiersOn) {
       reminderFreeze = await routeTiers.loadReminderFreeze(db, services.map((s) => s.id));
-      anchorMap = await routeTiers.loadAnchorMap(
-        db,
-        services.filter((s) => (s.auto_dispatch_change_count || 0) > 0).map((s) => s.id),
-      );
+      // ALL ids, not just change_count>0 — the durable move records (not the
+      // best-effort stamp) decide whether a visit has spent drift budget.
+      anchorMap = await routeTiers.loadAnchorMap(db, services.map((s) => s.id));
     }
 
     for (const service of services) {

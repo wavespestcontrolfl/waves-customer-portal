@@ -85,6 +85,24 @@ function currentOrder(stops) {
   });
 }
 
+/**
+ * True when the proposed stop order contradicts the stops' window_start
+ * chronology: any stop with a fixed window placed AFTER a stop whose window
+ * starts later. Stops without a window_start are unconstrained. Ties are fine
+ * (same window = same band, any order works).
+ */
+function violatesWindowChronology(orderedStops, sourceStops) {
+  const windowById = new Map(sourceStops.map((s) => [s.id, s.window_start ? String(s.window_start).slice(0, 5) : null]));
+  let lastWindow = null;
+  for (const stop of orderedStops) {
+    const win = windowById.get(stop.id);
+    if (!win) continue;
+    if (lastWindow != null && win < lastWindow) return true;
+    lastWindow = win;
+  }
+  return false;
+}
+
 /** True when the visit starts within FREEZE_HOURS of `now` (windowless visits
  *  freeze off the canonical 08:00 slot time the reminder system uses). */
 function withinFreezeClock(dateStr, windowStart, now) {
@@ -208,16 +226,46 @@ async function runRouteReorder(opts = {}) {
             continue;
           }
 
+          // Window chronology guard: the optimizer sees only coordinates, so a
+          // pure-distance order could put a later fixed window before an
+          // earlier one — an infeasible running order. If the optimized
+          // sequence would violate the stops' window_start chronology, skip
+          // the tech-day rather than write an order the tech cannot drive.
+          if (violatesWindowChronology(result.orderedStops, techStops)) {
+            summary.skipped.push({ ...entryBase, reason: 'WINDOW_ORDER_CONFLICT', ...metrics });
+            continue;
+          }
+
           // Same write as the trusted /optimize path (route_order = position),
-          // but transactional so a mid-write failure can't leave a half-
-          // reordered day.
-          await db.transaction(async (trx) => {
-            for (let i = 0; i < result.orderedStops.length; i++) {
-              await trx('scheduled_services')
-                .where({ id: result.orderedStops[i].id })
-                .update({ route_order: i + 1 });
+          // but transactional AND re-asserting the loaded placement (date,
+          // tech, live status) on every row — if staff rescheduled, cancelled,
+          // or reassigned any stop while the optimizer ran, the whole tech-day
+          // rolls back untouched instead of stamping route_order onto a
+          // different day's route.
+          try {
+            await db.transaction(async (trx) => {
+              for (let i = 0; i < result.orderedStops.length; i++) {
+                const updated = await trx('scheduled_services')
+                  .where({ id: result.orderedStops[i].id })
+                  .where('scheduled_date', dateStr)
+                  .where('technician_id', techId)
+                  .whereNotIn('status', EXCLUDE_STATUSES)
+                  .update({ route_order: i + 1 });
+                if (updated !== 1) {
+                  const stale = new Error(`stop ${result.orderedStops[i].id} changed during the run`);
+                  stale.code = 'STALE_TECH_DAY';
+                  throw stale; // rolls the whole tech-day back
+                }
+              }
+            });
+          } catch (writeErr) {
+            if (writeErr.code === 'STALE_TECH_DAY') {
+              summary.skipped.push({ ...entryBase, reason: 'STALE_TECH_DAY', detail: writeErr.message });
+              logger.warn(`[route-reorder] ${dateStr} tech ${techId}: superseded during the run — rolled back (${writeErr.message})`);
+              continue;
             }
-          });
+            throw writeErr;
+          }
           summary.applied.push({ ...entryBase, ...metrics });
           logger.info(`[route-reorder] ${dateStr} tech ${techId}: reordered ${withCoords.length} stops, saved ~${Math.round(savedMeters)} m (${metrics.source})`);
         } catch (techErr) {
@@ -322,5 +370,5 @@ module.exports = {
   runRouteReorder,
   runRouteReorderIfEnabled,
   getRouteReorderConfig,
-  _internals: { currentOrder, withinFreezeClock, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
+  _internals: { currentOrder, withinFreezeClock, violatesWindowChronology, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
 };
