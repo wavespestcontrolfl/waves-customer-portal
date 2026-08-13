@@ -911,9 +911,20 @@ async function executeTool(name, input = {}, ctx = {}) {
       // the STOP list, so it produced no clause and recorded nothing. It is its
       // own pattern; "no calls, text me instead" stays untouched (it negates
       // the CALL channel and keeps the texty one).
-      const BARE_NO_TEXTS_RE = /\bno\s+(?:more\s+)?(?:texts?|sms|text\s+messages?)\b/i;
+      // …and it must be IMPERATIVE, not descriptive: "I received no texts" and
+      // "no text messages came through" are complaints about absence, not
+      // withdrawals. The bare form counts only when it opens its own clause
+      // (optionally after "please") and is not narrating what arrived.
+      // Strict-tail on purpose: a trailing-verb LOOKAHEAD is bypassable by
+      // backtracking ("text messages came" re-matching as "text" + leftovers),
+      // so the imperative form is defined positively — the clause holds the
+      // negation and at most a courtesy tail, nothing else.
+      const BARE_NO_TEXTS_CLAUSE_RE = /^(?:please\s+)?no\s+(?:more\s+)?(?:texts?|sms|text\s+messages?)(?:\s+(?:please|thanks?|thank\s+you|anymore|at\s+all|to\s+(?:this|that|my)\s+number|to\s+me))?\s*$/i;
+      const bareNoTexts = preferenceText
+        .split(/[,;.!?—–]/)
+        .some((clause) => BARE_NO_TEXTS_CLAUSE_RE.test(clause.trim()));
       const statedSmsStop = stopClauses.some((c) => TEXTY.test(c.stopped) && !TEXTY.test(c.kept))
-        || BARE_NO_TEXTS_RE.test(preferenceText);
+        || bareNoTexts;
       // A total stop is any "stop <reaching me at all>" phrasing — and the
       // common ones do not say "contact": "remove my number", "don't bother me
       // anymore", "take me off your list". It is NOT total when the same clause

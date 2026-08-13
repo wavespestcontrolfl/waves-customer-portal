@@ -546,6 +546,25 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
 
   // ⭐ THE MIRROR CASE. Same words, different clauses, opposite meanings — an
   // explicit text withdrawal must survive whatever replacement channel follows.
+  // ⭐ DESCRIPTIVE ABSENCE IS NOT A WITHDRAWAL. "I received no texts" is a
+  // complaint that reminders did NOT arrive — suppressing on it would disable
+  // the very texts the caller wants.
+  test('complaints about ABSENT texts never suppress', async () => {
+    for (const words of [
+      'I received no texts about the appointment',
+      'no text messages came through yesterday',
+      'there were no texts, can you check',
+    ]) {
+      jest.clearAllMocks();
+      await executeTool('capture_lead', {
+        call_summary: 'Says reminders are not arriving.',
+        contact_preference: words,
+        do_not_contact_request: false,
+      }, CTX);
+      expect(recordSuppression).not.toHaveBeenCalled();
+    }
+  });
+
   test('"no calls, text me instead" negates the CALL channel only — no suppression', async () => {
     await executeTool('capture_lead', {
       call_summary: 'Prefers texts.',
@@ -645,10 +664,11 @@ describe('capture_lead honours an explicit do-not-contact request', () => {
       'please opt out of your text messages',
       'I no longer want texts',
       'never text me again',
-      // Bare channel negation — no stop verb at all.
+      // Bare channel negation — no stop verb at all (imperative position).
       'no texts',
       'no text messages please',
       'no SMS to this number',
+      'please no more texts',
     ]) {
       jest.clearAllMocks();
       await executeTool('capture_lead', {
