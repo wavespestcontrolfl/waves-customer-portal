@@ -3168,6 +3168,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // pre-transaction snapshot could overwrite an explicit lane a
     // concurrent save committed between our read and the lock.
     let impliedLaneStamp = null;
+    // Locked pre-save snapshot, hoisted for the post-commit contact audit:
+    // the timeline diff must describe the actual DB transition, and the
+    // pre-lock `before` can be stale if a concurrent edit committed first.
+    // (The audit only fires when slot fields are in `updates`, which
+    // guarantees the locking transaction below ran and reassigned this.)
+    let contactAuditBefore = before;
     const laneStampEligible = req.body.billingMode === undefined && updates.billing_mode === undefined;
     if (Object.keys(updates).length) {
       const contactConflict = await findCrossAccountContactConflict(
@@ -3210,6 +3216,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // editor would no longer match snapshots the first edit already
           // moved, stranding them.
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
+          contactAuditBefore = lockedBefore;
           // Implied-monthly stamp (#3140), decided from the LOCKED row: only
           // when this lane-less save still transitions the locked state into
           // the inferred-monthly shape — a concurrent explicit lane
@@ -3447,16 +3454,17 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 
     // Contact change events for the 360 timeline — post-commit, best-effort
     // (the recorder never throws). Compaction above puts every slot column in
-    // `updates` whenever any contact field was touched, so `{...before,
-    // ...updates}` is the full post-save slot state; diffing against the same
-    // `before` the compaction used keeps event identity consistent with the
-    // role-carry matching.
+    // `updates` whenever any contact field was touched, so merging `updates`
+    // over the locked pre-save row is the full post-save slot state, and
+    // diffing against that same locked row records the actual DB transition
+    // even when a concurrent edit committed between the pre-lock `before`
+    // read and this save's lock.
     if (SERVICE_CONTACT_SLOT_FIELDS.flat().some((field) => field in updates)) {
       const { recordServiceContactChanges } = require('../services/service-contact-events');
       recordServiceContactChanges({
         customerId: req.params.id,
-        before,
-        after: { ...before, ...updates },
+        before: contactAuditBefore,
+        after: { ...contactAuditBefore, ...updates },
         source: 'admin',
         adminUserId: req.technicianId || null,
       }).catch((err) => {

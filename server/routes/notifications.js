@@ -678,7 +678,13 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       } : null;
       const slotUpdates = serviceContactSlotUpdates(contacts, beforeRow);
       const consentUpdates = serviceContactConsentUpdates(contacts, updates.serviceContactsConsent);
+      let lockedBefore = beforeRow;
       await db.transaction(async (trx) => {
+        // Row lock + re-read: the audit diff below must describe the actual
+        // DB transition — a concurrent save may have moved the row since the
+        // unlocked beforeRow read, and diffing against that stale snapshot
+        // fabricates or drops timeline events.
+        lockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
         if (optinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           optinClaims = await claimRecipientOptins({ ...optinArgs, trx });
@@ -695,8 +701,8 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       // (the recorder never throws; a logging failure must not fail the save).
       recordServiceContactChanges({
         customerId: req.params.customerId,
-        before: beforeRow,
-        after: { ...beforeRow, ...slotUpdates, ...consentUpdates },
+        before: lockedBefore,
+        after: { ...lockedBefore, ...slotUpdates, ...consentUpdates },
         source: 'portal',
         actorCustomerId: req.customerId,
       }).catch((err) => {
@@ -749,7 +755,11 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         service_contact_role: slot1.service_contact_role,
       };
       const legacyConsentUpdates = serviceContactConsentUpdates(postSave, updates.serviceContactsConsent);
+      let legacyLockedBefore = beforeRow;
       await db.transaction(async (trx) => {
+        // Same row-lock re-read as the list save — the audit diff must
+        // describe the actual DB transition, not a possibly-stale snapshot.
+        legacyLockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
         if (legacyOptinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           legacyClaims = await claimRecipientOptins({ ...legacyOptinArgs, trx });
@@ -765,8 +775,8 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       // logging loophole either. Post-commit, best-effort.
       recordServiceContactChanges({
         customerId: req.params.customerId,
-        before: beforeRow,
-        after: { ...beforeRow, ...legacySlot1Updates, ...legacyConsentUpdates },
+        before: legacyLockedBefore,
+        after: { ...legacyLockedBefore, ...legacySlot1Updates, ...legacyConsentUpdates },
         source: 'portal',
         actorCustomerId: req.customerId,
       }).catch((err) => {
