@@ -2034,7 +2034,7 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
           match_method: 'manual',
           matched_at: new Date(),
           updated_at: new Date(),
-          suggestion: { ...(row.suggestion || {}), reconcilePending: true },
+          suggestion: bankImport.suggestionMerge({ reconcilePending: true }),
         });
     } catch (err) {
       if (err.code === '23505') return res.status(409).json({ error: 'that payout is already linked to another bank row' });
@@ -2104,8 +2104,7 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
     if (!['matched_expense', 'matched_payout'].includes(row.status)) {
       return res.status(409).json({ error: `only matched rows can be unlinked (row is ${row.status})` });
     }
-    // a stale confirm-pending flag makes no sense on an unlinked row
-    const { reconcilePending: _stalePending, ...baseSuggestion } = row.suggestion || {};
+    const baseSuggestion = row.suggestion || {};
     // rejections are CUMULATIVE: unlinking B after A must not let the
     // matcher re-propose A — every rejected id stays excluded forever
     const rejectedExpenseIds = [...new Set([
@@ -2116,8 +2115,9 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       ...(baseSuggestion.rejectedPayoutIds || []),
       ...(row.matched_payout_id ? [row.matched_payout_id] : []),
     ])];
-    const suggestion = {
-      ...baseSuggestion,
+    // atomic jsonb merge (stale confirm-pending flag subtracted): concurrent
+    // suggestion writers are appended to, never erased by a snapshot rebuild
+    const suggestion = bankImport.suggestionMerge({
       ...(rejectedExpenseIds.length ? { rejectedExpenseIds } : {}),
       ...(rejectedPayoutIds.length ? { rejectedPayoutIds } : {}),
       lastUnlink: {
@@ -2127,7 +2127,7 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
         ...(row.matched_expense_id ? { expenseId: row.matched_expense_id } : {}),
         ...(row.matched_payout_id ? { payoutId: row.matched_payout_id } : {}),
       },
-    };
+    }, ['reconcilePending']);
     // CAS on the status (and, for payouts, the exact payout id) so a
     // concurrent change 409s instead of being clobbered.
     const doUnlink = (dbOrTrx) => dbOrTrx('bank_transactions')

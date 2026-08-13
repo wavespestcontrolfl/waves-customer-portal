@@ -161,6 +161,15 @@ const post = (path, body) => fetch(`${baseUrl}${path}`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
 });
 
+// suggestionMerge writes are raws {sql, bindings:[json]} — unwrap the payload
+const sugOf = (u) => {
+  const s = u.patch.suggestion;
+  if (!s) return null;
+  if (typeof s === 'string') return null;
+  if (s.bindings) return JSON.parse(s.bindings[0]);
+  return s;
+};
+
 beforeEach(() => {
   state.bankRow = null;
   state.expenseRow = null;
@@ -518,7 +527,7 @@ describe('link-payout (gate on)', () => {
     const claim = state.bankUpdates[0];
     expect(claim.wheres).toContainEqual({ id: 'bt-1', status: 'unmatched' });
     expect(claim.patch).toMatchObject({ status: 'matched_payout', matched_payout_id: 'po-9', match_method: 'manual' });
-    expect(claim.patch.suggestion.reconcilePending).toBe(true);
+    expect(sugOf(claim).reconcilePending).toBe(true);
     expect(reconcilePayout).toHaveBeenCalledWith('po-9', 2418.66, expect.stringContaining('bt-1'), 'bank-import:bt-1', 'confirmed',
       expect.objectContaining({ onlyIfUnreconciled: true, precondition: expect.any(Function) }));
     // the flag clears (jsonb key-subtraction, scoped to this link)
@@ -532,7 +541,7 @@ describe('link-payout (gate on)', () => {
     const body = await res.json();
     expect(body.reconciliation).toBe('already_reconciled');
     // the flag always rides in the claim; a guard skip clears it too
-    expect(state.bankUpdates[0].patch.suggestion.reconcilePending).toBe(true);
+    expect(sugOf(state.bankUpdates[0]).reconcilePending).toBe(true);
     expect(state.bankUpdates[1].patch.suggestion).toContain("- 'reconcilePending'");
   });
 
@@ -566,7 +575,7 @@ describe('link-payout (gate on)', () => {
     expect(res.status).toBe(200);
     expect(body.reconciliation).toBe('pending');
     expect(state.bankUpdates).toHaveLength(1); // no clearing update
-    expect(state.bankUpdates[0].patch.suggestion.reconcilePending).toBe(true);
+    expect(sugOf(state.bankUpdates[0]).reconcilePending).toBe(true);
   });
 
   test('validates inputs: missing payoutId, debit row, card credit, non-unmatched, unknown payout', async () => {
@@ -630,8 +639,8 @@ describe('unlink (gate on)', () => {
     // CAS on the CURRENT status so a concurrent change 409s instead of clobbering
     expect(upd.wheres).toContainEqual({ id: 'bt-1', status: 'matched_expense' });
     expect(upd.patch).toMatchObject({ status: 'unmatched', matched_expense_id: null, matched_payout_id: null, match_method: null, matched_at: null });
-    expect(upd.patch.suggestion.lastUnlink).toMatchObject({ was: 'matched_expense', method: 'manual', expenseId: 'exp-9' });
-    expect(upd.patch.suggestion.categoryName).toBe('Fuel'); // prior suggestion survives
+    expect(sugOf(upd).lastUnlink).toMatchObject({ was: 'matched_expense', method: 'manual', expenseId: 'exp-9' });
+    // merge semantics: prior suggestion keys (e.g. categoryName) survive at the DB
     expect(reconcilePayout).not.toHaveBeenCalled();
   });
 
@@ -650,9 +659,9 @@ describe('unlink (gate on)', () => {
     const upd = state.bankUpdates[0];
     expect(upd.wheres).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
     expect(upd.patch).toMatchObject({ status: 'unmatched', matched_payout_id: null });
-    expect(upd.patch.suggestion.lastUnlink.payoutId).toBe('po-1');
+    expect(sugOf(upd).lastUnlink.payoutId).toBe('po-1');
     // rejections accumulate — a later unlink of a different target keeps this one excluded
-    expect(upd.patch.suggestion.rejectedPayoutIds).toEqual(['po-1']);
+    expect(sugOf(upd).rejectedPayoutIds).toEqual(['po-1']);
   });
 
   test("someone else's reconciliation is kept — unlink proceeds, banking side untouched", async () => {

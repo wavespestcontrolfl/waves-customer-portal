@@ -234,6 +234,16 @@ function isPlausiblePayoutLink(row, payout) {
     && arrival <= addDays(txnDate, PAYOUT_DATE_WINDOW_DAYS);
 }
 
+// Atomic suggestion patch: merge PATCH keys into the CURRENT jsonb value
+// (optionally subtracting keys first) so concurrent suggestion writers —
+// the matcher, /suggest's AI categorizer, unlink — can only append to each
+// other, never erase each other via a stale-snapshot rebuild.
+function suggestionMerge(patch, removeKeys = []) {
+  let expr = "coalesce(suggestion, '{}'::jsonb)";
+  for (const k of removeKeys) expr += ` - '${String(k).replace(/'/g, "''")}'`;
+  return db.raw(`${expr} || ?::jsonb`, [JSON.stringify(patch)]);
+}
+
 // The migration's partial unique indexes are the real double-claim guard;
 // a concurrent pass that loses the race surfaces here as a unique
 // violation, which just means "someone else claimed it" — skip, don't fail.
@@ -277,18 +287,17 @@ async function healUnreconciledLinks() {
           matched_payout_id: null,
           match_method: null,
           matched_at: null,
-          suggestion: {
-            ...rest,
+          suggestion: suggestionMerge({
             rejectedPayoutIds: [...new Set([...(rest.rejectedPayoutIds || []), row.matched_payout_id])],
             autoRevert: { at: new Date().toISOString(), payoutId: row.matched_payout_id, reason: 'reconciliation rejected by a human on the Banking page' },
-          },
+          }, ['reconcilePending']),
           updated_at: new Date(),
         });
       if (changed) reverted++;
     } else {
       const changed = await db('bank_transactions')
         .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
-        .update({ suggestion: { ...(row.suggestion || {}), reconcilePending: true }, updated_at: new Date() });
+        .update({ suggestion: suggestionMerge({ reconcilePending: true }), updated_at: new Date() });
       if (changed) remarked++;
     }
   }
@@ -393,11 +402,10 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
           matched_payout_id: null,
           match_method: null,
           matched_at: null,
-          suggestion: {
-            ...rest,
+          suggestion: suggestionMerge({
             rejectedPayoutIds: [...new Set([...(rest.rejectedPayoutIds || []), payoutId])],
             autoRevert: { at: new Date().toISOString(), payoutId, reason: 'reconciliation rejected by a human on the Banking page' },
-          },
+          }, ['reconcilePending']),
           updated_at: new Date(),
         });
     }
@@ -474,7 +482,7 @@ async function runDeterministicMatching({ limit } = {}) {
     }
     await db('bank_transactions')
       .where({ id: row.id, status: 'unmatched' })
-      .update({ suggestion: { ...(row.suggestion || {}), noMatch: true }, updated_at: new Date() });
+      .update({ suggestion: suggestionMerge({ noMatch: true }), updated_at: new Date() });
   };
   let unmatched;
   let moreRemaining = false;
@@ -520,7 +528,7 @@ async function runDeterministicMatching({ limit } = {}) {
       if (!row.suggestion || !row.suggestion.ignore) {
         // merged, not replaced — suggestion also carries durable identity
         // records (forceToken/forcedFor, lastUnlink) that must survive
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({ suggestion: { ...(row.suggestion || {}), ...transfer }, updated_at: new Date() });
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({ suggestion: suggestionMerge(transfer), updated_at: new Date() });
         summary.transferFlagged++;
       } else if (bounded) {
         // rotation bump — an already-flagged row rescanned by a bounded
@@ -572,7 +580,7 @@ async function runDeterministicMatching({ limit } = {}) {
               match_method: 'payout_amount_date',
               matched_at: new Date(),
               updated_at: new Date(),
-              suggestion: { ...(row.suggestion || {}), reconcilePending: true },
+              suggestion: suggestionMerge({ reconcilePending: true }),
             });
           if (changed) {
             summary.payoutsLinked++;
@@ -605,11 +613,10 @@ async function runDeterministicMatching({ limit } = {}) {
         // is permanently unmatched even when the right payout is obvious.
         summary.ambiguous++;
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-          suggestion: {
-            ...(row.suggestion || {}),
+          suggestion: suggestionMerge({
             payoutCandidates: candidates.map(c => ({ id: c.id, amount: Number(c.amount), arrival_date: toDateStr(c.arrival_date) })),
             payoutCandidatesTotal: candidates.length,
-          },
+          }),
           updated_at: new Date(),
         });
       } else if (candidates.length === 0) {
@@ -650,11 +657,10 @@ async function runDeterministicMatching({ limit } = {}) {
     } else if (candidates.length > 0) {
       summary.ambiguous++;
       await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-        suggestion: {
-          ...(row.suggestion || {}),
+        suggestion: suggestionMerge({
           candidates: candidates.slice(0, 20).map(c => ({ id: c.id, description: c.description, vendor_name: c.vendor_name, expense_date: toDateStr(c.expense_date) })),
           candidatesTotal: candidates.length,
-        },
+        }),
         updated_at: new Date(),
       });
     } else {
@@ -700,6 +706,7 @@ module.exports = {
   echoPayoutReconciliation,
   isPlausibleExpenseLink,
   isPlausiblePayoutLink,
+  suggestionMerge,
   ledgerCoverage,
   // exported for tests
   parseAmount,

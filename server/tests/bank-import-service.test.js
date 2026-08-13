@@ -72,7 +72,9 @@ function makeBuilder(table) {
 }
 
 const mockDb = jest.fn((table) => makeBuilder(table));
-mockDb.raw = jest.fn((sql) => sql);
+// raw with bindings returns both (suggestionMerge asserts); binding-less
+// raw stays a string (the jsonb key-subtraction clears assert on it)
+mockDb.raw = jest.fn((sql, bindings) => (bindings ? { sql, bindings } : sql));
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // A confirmed payout link must echo into the EXISTING reconciliation
@@ -85,6 +87,16 @@ const {
   runDeterministicMatching, parseDateCell, addDays, vendorEvidence,
   isPlausibleExpenseLink, isPlausiblePayoutLink,
 } = require('../services/bank-import');
+
+// suggestion writes go through suggestionMerge → a raw {sql, bindings:[json]};
+// this unwraps the merged payload (null for key-subtraction clears)
+const sugOf = (u) => {
+  const s = u.patch.suggestion;
+  if (!s) return null;
+  if (typeof s === 'string') return null;
+  if (s.bindings) return JSON.parse(s.bindings[0]);
+  return s;
+};
 
 beforeEach(() => {
   state.bankRows = [];
@@ -301,7 +313,7 @@ describe('runDeterministicMatching', () => {
     // CAS: the update is scoped to id AND status='unmatched'
     expect(link.where).toContainEqual({ id: 'bt-1', status: 'unmatched' });
     // reconciliation INTENT rides in the claim itself (crash-safe)…
-    expect(link.patch.suggestion.reconcilePending).toBe(true);
+    expect(sugOf(link).reconcilePending).toBe(true);
     // …the echo goes through the existing mechanism with a row-specific
     // author under the unreconciled guard plus a still-linked precondition…
     expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('bt-1'), 'bank-import:bt-1', 'confirmed',
@@ -323,7 +335,7 @@ describe('runDeterministicMatching', () => {
     const summary = await runDeterministicMatching();
     expect(summary.payoutsLinked).toBe(1);
     const link = state.updates.find(u => u.patch.status === 'matched_payout');
-    expect(link.patch.suggestion.reconcilePending).toBe(true);
+    expect(sugOf(link).reconcilePending).toBe(true);
     expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.any(String), 'bank-import:bt-1', 'confirmed',
       expect.objectContaining({ onlyIfUnreconciled: true }));
     // and the flag clears whether the echo wrote or was atomically skipped
@@ -339,7 +351,7 @@ describe('runDeterministicMatching', () => {
     expect(state.queried.filter(t => t === 'stripe_payouts')).toHaveLength(0);
     // the only write is the noMatch demotion — never a link or a park
     expect(state.updates).toHaveLength(1);
-    expect(state.updates[0].patch.suggestion).toEqual({ noMatch: true });
+    expect(sugOf(state.updates[0])).toEqual({ noMatch: true });
   });
 
   test('a debit with exactly one expense candidate links; two candidates park', async () => {
@@ -359,8 +371,8 @@ describe('runDeterministicMatching', () => {
     summary = await runDeterministicMatching();
     expect(summary.expensesLinked).toBe(0);
     expect(summary.ambiguous).toBe(1);
-    const parked = state.updates.find(u => u.patch.suggestion);
-    expect(parked.patch.suggestion.candidates).toHaveLength(2);
+    const parked = state.updates.find(u => sugOf(u));
+    expect(sugOf(parked).candidates).toHaveLength(2);
     expect(state.updates.find(u => u.patch.status)).toBeUndefined();
   });
 
@@ -373,7 +385,7 @@ describe('runDeterministicMatching', () => {
     expect(summary.expensesLinked).toBe(0);
     expect(summary.ambiguous).toBe(1);
     expect(state.updates.find(u => u.patch.status)).toBeUndefined();
-    expect(state.updates.find(u => u.patch.suggestion).patch.suggestion.candidates).toHaveLength(1);
+    expect(sugOf(state.updates.find(u => sugOf(u))).candidates).toHaveLength(1);
   });
 
   test('a second strong candidate anywhere in the set blocks auto-link (no cap can hide it)', async () => {
@@ -389,7 +401,7 @@ describe('runDeterministicMatching', () => {
     expect(summary.ambiguous).toBe(1);
     expect(state.updates.find(u => u.patch.status)).toBeUndefined();
     // full candidate set is parked with its true total for the operator
-    const parked = state.updates.find(u => u.patch.suggestion).patch.suggestion;
+    const parked = sugOf(state.updates.find(u => sugOf(u)));
     expect(parked.candidates).toHaveLength(8);
     expect(parked.candidatesTotal).toBe(8);
   });
@@ -425,7 +437,7 @@ describe('runDeterministicMatching', () => {
     expect(summary.transferFlagged).toBe(1);
     expect(summary.expensesLinked).toBe(0);
     expect(state.queried.filter(t => t === 'expenses')).toHaveLength(0);
-    expect(state.updates[0].patch.suggestion.ignore).toBe(true);
+    expect(sugOf(state.updates[0]).ignore).toBe(true);
   });
 
   test('a failed reconciliation echo flags the row and the next pass retries it', async () => {
@@ -438,8 +450,8 @@ describe('runDeterministicMatching', () => {
     // the flag was persisted IN the claim update (crash-safe), and the
     // failed echo adds no clearing update
     const link = state.updates.find(u => u.patch.status === 'matched_payout');
-    expect(link.patch.suggestion.reconcilePending).toBe(true);
-    expect(state.updates.find(u => typeof u.patch.suggestion === 'string')).toBeUndefined(); // no clearing update
+    expect(sugOf(link).reconcilePending).toBe(true);
+    expect(state.updates.find(u => typeof u.patch.suggestion === 'string')).toBeUndefined(); // no clearing update (raw-minus is a plain string)
 
     // Pass 2: the row is matched_payout + flagged → sweep retries and clears
     state.updates = [];
@@ -493,10 +505,10 @@ describe('runDeterministicMatching', () => {
     const summary = await runDeterministicMatching();
     expect(summary.payoutsLinked).toBe(0);
     expect(summary.ambiguous).toBe(1);
-    const parked = state.updates.find(u => u.patch.suggestion && u.patch.suggestion.payoutCandidates);
-    expect(parked.patch.suggestion.payoutCandidates).toHaveLength(2);
-    expect(parked.patch.suggestion.payoutCandidatesTotal).toBe(2);
-    expect(parked.patch.suggestion.payoutCandidates[0]).toEqual({ id: 'po-1', amount: 2418.66, arrival_date: '2026-08-10' });
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).payoutCandidates);
+    expect(sugOf(parked).payoutCandidates).toHaveLength(2);
+    expect(sugOf(parked).payoutCandidatesTotal).toBe(2);
+    expect(sugOf(parked).payoutCandidates[0]).toEqual({ id: 'po-1', amount: 2418.66, arrival_date: '2026-08-10' });
   });
 
   test('parked/flagged rows cannot starve fresh imports out of a bounded pass', async () => {
@@ -521,7 +533,7 @@ describe('runDeterministicMatching', () => {
     ];
     state.expenses = [];
     await runDeterministicMatching();
-    const marks = state.updates.filter(u => u.patch.suggestion && u.patch.suggestion.noMatch === true);
+    const marks = state.updates.filter(u => sugOf(u) && sugOf(u).noMatch === true);
     expect(marks.map(m => m.where[0].id).sort()).toEqual(['bt-1', 'bt-2']);
     // already-marked rows are not re-written
     state.updates = [];
@@ -541,9 +553,9 @@ describe('runDeterministicMatching', () => {
     expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
     expect(revert.patch.matched_payout_id).toBeNull();
     // the rejected payout joins the row's exclusion list and the revert is audited
-    expect(revert.patch.suggestion.rejectedPayoutIds).toEqual(['po-1']);
-    expect(revert.patch.suggestion.autoRevert.payoutId).toBe('po-1');
-    expect(revert.patch.suggestion.reconcilePending).toBeUndefined();
+    expect(sugOf(revert).rejectedPayoutIds).toEqual(['po-1']);
+    expect(sugOf(revert).autoRevert.payoutId).toBe('po-1');
+    expect(sugOf(revert).reconcilePending).toBeUndefined();
   });
 
   test('a LATER human rejection heals: the still-matched row is reverted next pass', async () => {
@@ -555,8 +567,8 @@ describe('runDeterministicMatching', () => {
     expect(summary.linksReverted).toBe(1);
     const revert = state.updates.find(u => u.patch.status === 'unmatched');
     expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
-    expect(revert.patch.suggestion.rejectedPayoutIds).toEqual(['po-1']);
-    expect(revert.patch.suggestion.autoRevert.payoutId).toBe('po-1');
+    expect(sugOf(revert).rejectedPayoutIds).toEqual(['po-1']);
+    expect(sugOf(revert).autoRevert.payoutId).toBe('po-1');
   });
 
   test('a linked-but-unreconciled row with NO human rejection gets its pending marker restored', async () => {
@@ -565,7 +577,7 @@ describe('runDeterministicMatching', () => {
     state.reconRows = []; // no rejection on record — this is a lost marker
     const summary = await runDeterministicMatching();
     expect(summary.linksRemarked).toBe(1);
-    const remark = state.updates.find(u => u.patch.suggestion && u.patch.suggestion.reconcilePending === true && !u.patch.status);
+    const remark = state.updates.find(u => sugOf(u) && sugOf(u).reconcilePending === true && !u.patch.status);
     expect(remark).toBeDefined();
   });
 
@@ -599,8 +611,9 @@ describe('runDeterministicMatching', () => {
   test('the transfer flag MERGES into suggestion — durable identity records survive', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', suggestion: { forceToken: 'tok-1', forcedFor: 'abc' } }];
     await runDeterministicMatching();
-    const flagged = state.updates.find(u => u.patch.suggestion && u.patch.suggestion.ignore);
-    expect(flagged.patch.suggestion).toMatchObject({ ignore: true, forceToken: 'tok-1', forcedFor: 'abc' });
+    const flagged = state.updates.find(u => sugOf(u) && sugOf(u).ignore);
+    // merge semantics: existing keys survive at the DB; the payload carries the flag
+    expect(sugOf(flagged)).toMatchObject({ ignore: true });
   });
 
   test('an already-flagged transfer row is not re-flagged (idempotent)', async () => {
