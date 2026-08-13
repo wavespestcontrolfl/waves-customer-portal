@@ -2193,12 +2193,24 @@ router.get('/', async (req, res, next) => {
           const methods = await db('payment_methods')
             .where({ customer_id: s.customer_id, processor: 'stripe' })
             .whereNotNull('stripe_payment_method_id')
-            .select('method_type', 'exp_month', 'exp_year');
-          hasChargeableMethod = methods.some((m) => (
-            isBankMethodType(m.method_type)
-              ? (!s.ach_status || s.ach_status === 'active')
-              : !isExpiredCardMethod(m)
-          ));
+            .select('method_type', 'ach_status', 'exp_month', 'exp_year');
+          hasChargeableMethod = methods.some((m) => {
+            if (isBankMethodType(m.method_type)) {
+              // Both ACH gates the collection paths enforce: the customer-
+              // level health block (billing-v2 default-swap) and the row's
+              // own unverified/failed state (customer-autopay).
+              if (s.ach_status && s.ach_status !== 'active') return false;
+              return !['pending_verification', 'verification_failed'].includes(m.ach_status);
+            }
+            // Legacy rows carry 2-digit years — normalize BEFORE the expiry
+            // check, as the default-swap route does, or a valid '12/32' card
+            // reads as year 32 and isExpiredCardMethod fails closed.
+            const rawYear = parseInt(m.exp_year, 10);
+            return !isExpiredCardMethod({
+              ...m,
+              exp_year: Number.isFinite(rawYear) && rawYear < 100 ? rawYear + 2000 : m.exp_year,
+            });
+          });
         } catch { hasChargeableMethod = true; }
         const noCardAlert = noCardOnFileAlert({
           hasChargeableMethod,
