@@ -111,6 +111,20 @@ function milesToDriveMinutes(miles) {
 }
 
 /**
+ * Straight-line miles to estimated ROAD meters.
+ *
+ * Distance keeps the legacy 1.4 road factor deliberately. The trip sample puts
+ * the real factor nearer 1.50, but distance feeds reported mileage, and the
+ * answer there is a real routed distance from the Routes API (already wired
+ * here as callGoogleRoutesAPI) rather than a better-tuned straight line. This
+ * gate covers TIME only; re-tuning distance is a separate change.
+ */
+function straightMilesToRoadMeters(miles) {
+  if (!Number.isFinite(miles) || miles <= 0) return 0;
+  return Math.round(miles * 1609.34 * ROAD_FACTOR);
+}
+
+/**
  * Drive minutes between two {lat,lng} points.
  */
 function driveMin(a, b) {
@@ -301,8 +315,9 @@ function nearestNeighborOptimize(stops, options = {}) {
     }
 
     const nearest = validStops.splice(nearestIdx, 1)[0];
-    const distMeters = nearestDist < Infinity ? Math.round(nearestDist * 1609.34 * 1.4) : 0; // 1.4x road factor
-    const durationMin = distMeters > 0 ? Math.round((distMeters / 1609.34 / 30) * 60) : 0; // 30 mph avg
+    const legMiles = nearestDist < Infinity ? nearestDist : 0;
+    const distMeters = straightMilesToRoadMeters(legMiles);
+    const durationMin = distMeters > 0 ? milesToDriveMinutes(legMiles) : 0;
 
     const fromName = ordered.length === 0
       ? 'HQ'
@@ -329,13 +344,13 @@ function nearestNeighborOptimize(stops, options = {}) {
   const lastStop = ordered[ordered.length - 1];
   if (lastStop) {
     const returnDist = haversine(current.lat, current.lng, origin.lat, origin.lng);
-    const returnMeters = Math.round(returnDist * 1609.34 * 1.4);
+    const returnMeters = straightMilesToRoadMeters(returnDist);
     totalDistanceMeters += returnMeters;
     legs.push({
       from: lastStop.customerName || lastStop.customer_name || `Stop ${ordered.length}`,
       to: 'HQ',
       distanceMeters: returnMeters,
-      durationMinutes: Math.round((returnMeters / 1609.34 / 30) * 60),
+      durationMinutes: milesToDriveMinutes(returnDist),
     });
   }
 
@@ -376,15 +391,23 @@ async function optimizeRoute(stops, options = {}) {
   if (stops.length === 1) {
     const s = stops[0];
     const distToStop = haversine(HQ.lat, HQ.lng, parseFloat(s.lat) || HQ.lat, parseFloat(s.lng) || HQ.lng);
-    const distMeters = Math.round(distToStop * 1609.34 * 2); // round trip
+    // One-way road metres, doubled for the round trip. This path previously
+    // omitted the road factor that every other fallback leg applies, so its
+    // distance and duration both ran low relative to the multi-stop path for
+    // the same geometry; deriving both from the shared helpers fixes that
+    // alongside putting duration on the shared model.
+    const legMeters = straightMilesToRoadMeters(distToStop);
+    const legMinutes = milesToDriveMinutes(distToStop);
+    const distMeters = legMeters * 2;
+    const stopName = s.customerName || s.customer_name || 'Stop 1';
     return {
       orderedStops: stops,
       totalDistanceMeters: distMeters,
-      totalDurationSeconds: Math.round((distMeters / 1609.34 / 30) * 60) * 60,
+      totalDurationSeconds: legMinutes * 2 * 60,
       unoptimizedDistanceMeters: distMeters,
       legs: [
-        { from: 'HQ', to: s.customerName || s.customer_name || 'Stop 1', distanceMeters: Math.round(distMeters / 2), durationMinutes: Math.round((distMeters / 2 / 1609.34 / 30) * 60) },
-        { from: s.customerName || s.customer_name || 'Stop 1', to: 'HQ', distanceMeters: Math.round(distMeters / 2), durationMinutes: Math.round((distMeters / 2 / 1609.34 / 30) * 60) },
+        { from: 'HQ', to: stopName, distanceMeters: legMeters, durationMinutes: legMinutes },
+        { from: stopName, to: 'HQ', distanceMeters: legMeters, durationMinutes: legMinutes },
       ],
       source: 'single_stop',
     };

@@ -158,6 +158,49 @@ describe('drive-time estimator', () => {
     );
   });
 
+  /**
+   * The optimizer's own fallback (used whenever Google Routes is unavailable)
+   * and its single-stop shortcut used to derive minutes from a hardcoded
+   * 30 mph. They now go through the shared model, so a gate flip moves every
+   * scheduling surface together rather than leaving admin route metrics behind.
+   */
+  describe('route-optimizer fallback paths use the shared model', () => {
+    const stopsFor = () => ([
+      { lat: 27.0998, lng: -82.4543, customerName: 'A' },
+      { lat: 27.3364, lng: -82.5307, customerName: 'B' },
+    ]);
+
+    test('nearest-neighbour legs move with the gate', async () => {
+      delete process.env[GATE];
+      const legacy = routeOptimizer.nearestNeighborOptimize(stopsFor());
+      process.env[GATE] = 'true';
+      const calibrated = routeOptimizer.nearestNeighborOptimize(stopsFor());
+
+      expect(legacy.totalDurationSeconds).toBeGreaterThan(0);
+      expect(calibrated.totalDurationSeconds).not.toBe(legacy.totalDurationSeconds);
+      // Distance is deliberately NOT gated — this gate covers time only.
+      expect(calibrated.totalDistanceMeters).toBe(legacy.totalDistanceMeters);
+    });
+
+    test('single-stop shortcut moves with the gate and stays internally consistent', async () => {
+      const one = () => ([{ lat: 27.0998, lng: -82.4543, customerName: 'Solo' }]);
+      delete process.env[GATE];
+      const legacy = await routeOptimizer.optimizeRoute(one());
+      process.env[GATE] = 'true';
+      const calibrated = await routeOptimizer.optimizeRoute(one());
+
+      expect(legacy.source).toBe('single_stop');
+      expect(calibrated.totalDurationSeconds).not.toBe(legacy.totalDurationSeconds);
+      for (const r of [legacy, calibrated]) {
+        // Out and back are the same leg, and the legs must sum to the total.
+        expect(r.legs[0].durationMinutes).toBe(r.legs[1].durationMinutes);
+        expect(r.legs[0].distanceMeters).toBe(r.legs[1].distanceMeters);
+        expect(r.totalDistanceMeters).toBe(r.legs[0].distanceMeters * 2);
+        expect(r.totalDurationSeconds).toBe(r.legs[0].durationMinutes * 2 * 60);
+      }
+    });
+  });
+
   test('gate is honoured at call time, with no module reload', () => {
     delete process.env[GATE];
     const legacy = milesToDriveMinutes(5);
