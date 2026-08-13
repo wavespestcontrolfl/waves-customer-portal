@@ -287,6 +287,13 @@ function optionIsPriceable(option) {
   // carry (r7 ruling), so a termite-basic dueAtStart would price-lock an
   // undisclosed charge — demote to the quote CTA instead.
   if (Number(option.dueAtStart) > 0 || Number(option.oneTime) > 0) return false;
+  // Deliberately NOT demoted here: the pest line's standing initialFee
+  // (option.setupFee). Priced pest cards are live, owner-verified behavior,
+  // and the fee is the standard membership fee every estimate page itemizes
+  // BEFORE acceptance — the owner's copy ruling names the estimate page as
+  // the disclosure surface. The click-to-estimate mint's belt check permits
+  // exactly that line-declared fee and refuses any OTHER one-time charge
+  // (GitHub #3391 P1).
   return Number(option.perVisit) > 0;
 }
 
@@ -939,10 +946,12 @@ async function buildReportCrossSell(service, database, {
     const fingerprinted = { ...payload, fingerprint: offerFingerprint(payload) };
     if (includeEngineContext && priced && option?.engineContext) {
       // The customer row rides along so the mint persists identity/address
-      // from the SAME row every pricing frame above was anchored to — the
-      // click path never re-reads it and cannot race a concurrent edit into
-      // a different premises than the one that was priced.
-      fingerprinted.engineContext = { ...option.engineContext, customer };
+      // from the SAME row every pricing frame above was anchored to (the
+      // mint re-reads under its lock and treats premises drift as a 409).
+      // primaryStreet is the SAME normalized scope key every frame above
+      // anchored to — the mint's membership snapshot must be bounded by it
+      // or account-wide rows inflate the accepted tier (GitHub #3391 P1).
+      fingerprinted.engineContext = { ...option.engineContext, customer, primaryStreet };
     }
     return fingerprinted;
   } catch (err) {

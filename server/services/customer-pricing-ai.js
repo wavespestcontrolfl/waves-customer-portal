@@ -1025,6 +1025,11 @@ function buildQuoteOption({
     annual: amount.annual || null,
     oneTime: amount.oneTime || null,
     dueAtStart: amount.dueAtStart || null,
+    // Line-level standing setup fee (pest initialFee), SEPARATE from
+    // installation-driven dueAtStart — surfaced so mint-side belts can
+    // distinguish the disclosed membership fee from an undisclosed charge
+    // (GitHub #3391 P1).
+    setupFee: positiveNumber(line?.initialFee) || null,
     perVisit: amount.perVisit || null,
     estimatedPlanMonthly: showEstimatedPlanMonthly ? planMonthly || null : null,
     estimatedAdditionalMonthly: amount.monthly ? incrementalMonthly : null,

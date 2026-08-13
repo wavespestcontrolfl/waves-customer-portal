@@ -128,11 +128,37 @@ async function hasRepliedRecently(est, days = 14, { throwOnError = false } = {})
   }
 }
 
+// estimate_data.noEngagementAutomation — the durable per-estimate opt-out
+// stamped by publish-without-delivery mints. Deliberately the SAME key the
+// engagement engine honors (estimateOptedOutOfEngagement there); duplicated
+// rather than imported because that module requires this one, and a require
+// cycle would hand one of them a partially initialized export.
+function estimateOptedOutOfFollowups(est) {
+  try {
+    const data = typeof est.estimate_data === 'string'
+      ? JSON.parse(est.estimate_data)
+      : est.estimate_data;
+    return data?.noEngagementAutomation === true;
+  } catch {
+    return false;
+  }
+}
+
 // Unified gate. Returns { skip: true, reason } if the send should be
 // blocked, else { skip: false }. Keeps the per-stage loops readable.
 async function safetyGate(est, now = new Date(), { replay = false } = {}) {
   if (TERMINAL_STATUSES.has(est.status))
     return { skip: true, reason: `terminal-status:${est.status}` };
+  // Durable zero-comms opt-out (out-of-band audit P1 on #3391): publish-
+  // without-delivery mints (report click-to-estimate) pre-burn the four
+  // followup_* flags, but flags are resettable — an expiry extension
+  // clears followup_expiring_sent and this cron would then message a
+  // customer that lane promises ZERO comms. The estimate_data marker is
+  // permanent; the engagement engine enforces the same key at its own
+  // choke points (estimate-engagement-engine.js, kept in lockstep by a
+  // contract test).
+  if (estimateOptedOutOfFollowups(est))
+    return { skip: true, reason: 'engagement-opted-out' };
   if (wasRecentlyOpened(est, 2, now.getTime()))
     return { skip: true, reason: "recently-opened" };
   // Conversion guard: the customer already paid an invoice, booked an

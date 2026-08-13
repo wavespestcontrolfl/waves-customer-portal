@@ -53,12 +53,24 @@ function priorMintStillLive(row, now) {
 // mintReportClickEstimate(trx, args) → { estimateId, token, url, reused }
 // Runs INSIDE the CTA writer's transaction — a throw rolls back the request
 // row, the analytics event, and every estimate write together.
+// Parse a stored estimates row's mint marker (jsonb hydrates as object,
+// legacy text columns as string).
+function reportCtaMintOf(row) {
+  try {
+    const data = typeof row.estimate_data === 'string'
+      ? JSON.parse(row.estimate_data)
+      : row.estimate_data;
+    return data?.reportCtaMint || null;
+  } catch {
+    return null;
+  }
+}
+
 async function mintReportClickEstimate(trx, {
   customer,
   service,
   crossSell,
   requestRow,
-  priorPricingRevision,
   deduped,
   revisionSnapshot,
   now = () => new Date(),
@@ -83,25 +95,41 @@ async function mintReportClickEstimate(trx, {
 
   const nowDate = now();
 
-  // ── Reuse: identical offer, estimate already minted and still live ──────
-  const prior = priorPricingRevision?.mintedEstimate || null;
-  let priorRow = null;
-  if (prior?.id) {
-    priorRow = await trx('estimates').where({ id: prior.id }).forUpdate().first();
-  }
-  if (deduped && priorMintStillLive(priorRow, nowDate)) {
-    return {
-      estimateId: priorRow.id,
-      token: priorRow.token,
-      url: estimateViewUrl(priorRow.token),
-      reused: true,
-    };
+  // ── Prior-mint lineage, from the ESTIMATES table itself ─────────────────
+  // The open request row is NOT a reliable pointer (out-of-band audit P0):
+  // staff can terminalize the request — and acceptance resolves it — after
+  // which a fresh tap gets a fresh row with no linkage and would mint a
+  // second live estimate at a possibly different honorable price. Every
+  // mint stamps estimate_data.reportCtaMint.serviceKey, so the durable
+  // lineage is a direct query: every live CTA mint for this customer +
+  // service, found and LOCKED here, is either reused (identical offer) or
+  // superseded before a new one may exist.
+  const priorMintRows = await trx('estimates')
+    .where({ customer_id: customer.id, source: 'service_report_cta' })
+    .whereNull('archived_at')
+    .whereRaw("estimate_data->'reportCtaMint'->>'serviceKey' = ?", [String(crossSell?.serviceKey || '')])
+    .forUpdate();
+  const liveMints = (priorMintRows || []).filter((row) => priorMintStillLive(row, nowDate));
+  if (deduped) {
+    const match = liveMints.find((row) => {
+      const mark = reportCtaMintOf(row);
+      return mark?.fingerprint && crossSell?.fingerprint && mark.fingerprint === crossSell.fingerprint;
+    });
+    if (match) {
+      return {
+        estimateId: match.id,
+        token: match.token,
+        url: estimateViewUrl(match.token),
+        reused: true,
+      };
+    }
   }
 
   // ── Mint ────────────────────────────────────────────────────────────────
   const context = crossSell?.engineContext;
   const option = crossSell?.option;
-  if (!context?.propertyInput || !context?.targetOnlyServices || !option?.perVisit) {
+  if (!context?.propertyInput || !context?.targetOnlyServices || !option?.perVisit
+    || !context?.primaryStreet) {
     throw new Error('click-to-estimate mint called without engine context');
   }
   const priorQualifyingServices = Array.isArray(context.currentServiceKeys)
@@ -145,12 +173,15 @@ async function mintReportClickEstimate(trx, {
     // ZERO comms. Enforced centrally in estimate-engagement-engine.
     noEngagementAutomation: true,
     reportCtaMint: {
+      // serviceKey is the durable lineage key the prior-mint query above
+      // resolves supersession through — the request row is advisory only.
+      serviceKey: crossSell.serviceKey,
       serviceRecordId: service.id,
       requestId: requestRow.id,
       fingerprint: crossSell.fingerprint || null,
       shownPerApplication: option.perVisit,
       mintedAt: nowDate.toISOString(),
-      ...(priorRow ? { supersededEstimateId: priorRow.id } : {}),
+      ...(liveMints.length ? { supersededEstimateIds: liveMints.map((r) => r.id) } : {}),
     },
   };
 
@@ -177,9 +208,28 @@ async function mintReportClickEstimate(trx, {
   }
   const serverTier = recomputed.rawEngineResult?.waveGuard?.tier
     || recomputed.rawEngineResult?.waveGuard?.label || null;
-  if (option.waveguardTier && serverTier && option.waveguardTier !== serverTier) {
+  // A tiered card must recompute to the SAME tier — a missing recomputed
+  // tier is a mismatch too, not a pass (codex cloud-task tightening): the
+  // card promised combined-tier terms this estimate would not carry.
+  if (option.waveguardTier && option.waveguardTier !== serverTier) {
     throw new ClickEstimateDriftError(
       `minted WaveGuard tier would not match the card (card=${option.waveguardTier} server=${serverTier})`,
+    );
+  }
+  // One-time-charge belt (GitHub round P1): the card is a per-application
+  // promise, so the minted estimate may not carry a one-time charge the
+  // customer can't see before accepting. The ONE permitted component is the
+  // line-declared initialFee (the standing membership fee): the estimate
+  // page itemizes it before acceptance — the owner's copy ruling names that
+  // page as the disclosure surface — and priced pest cards are live,
+  // owner-verified behavior. Anything BEYOND the declared fee is money the
+  // flow never surfaces: refuse.
+  const declaredSetupFees = (recomputed.rawEngineResult?.lineItems || [])
+    .reduce((sum, li) => sum + (Number(li?.initialFee) > 0 ? Number(li.initialFee) : 0), 0);
+  const beltOneTime = Number(recomputed.serverTotals?.onetimeTotal || 0);
+  if (beltOneTime > declaredSetupFees + 0.005) {
+    throw new ClickEstimateDriftError(
+      `minted estimate carries an undisclosed one-time total (${beltOneTime} > declared ${declaredSetupFees})`,
     );
   }
 
@@ -198,8 +248,18 @@ async function mintReportClickEstimate(trx, {
   // minting an estimate with the wrong terms.
   let membershipSnapshot = null;
   try {
+    // Same primary-property street scope the card's pricing frames used
+    // (GitHub round P1): an unscoped snapshot loads qualifying rows
+    // account-wide, and the converter trusts those keys at acceptance — a
+    // secondary property's services would inflate the accepted WaveGuard
+    // tier beyond what the displayed price modeled.
     membershipSnapshot = await computeMembershipContext(trx, {
       customerId: customer.id,
+      streetScope: {
+        estimateStreet: context.primaryStreet,
+        customerPrimaryStreet: context.primaryStreet,
+        requireSharedLocality: true,
+      },
       estData: {
         lineItems: recomputed.rawEngineResult?.lineItems || [],
         recurring: {
@@ -258,6 +318,12 @@ async function mintReportClickEstimate(trx, {
     category: 'RESIDENTIAL',
     pricing_authority: 'SERVER',
     server_computed_price: annualTotal > 0 ? annualTotal : null,
+    // The engine version that actually priced this row (GitHub round P2):
+    // the column default is the legacy 'v4.2', and audit/metadata readers
+    // prefer the column — same stamp rule as buildEstimatePersistenceFields.
+    ...(typeof recomputed.serverResult?.engineVersion === 'string'
+      ? { pricing_version: recomputed.serverResult.engineVersion.slice(0, 80) }
+      : {}),
   }).returning('*');
 
   // Freeze the send snapshot — the same builder the send/sibling paths use,
@@ -277,13 +343,14 @@ async function mintReportClickEstimate(trx, {
     updated_at: nowDate,
   });
 
-  // Supersede a prior mint the customer may still hold: two live links at
-  // two honorable prices for one offer is the exact ambiguity the
-  // price-lock ruling exists to prevent. Accepted/locked rows are never
-  // touched (acceptance already spun up downstream records).
-  if (priorRow && !priorRow.archived_at && priorRow.status !== 'accepted' && !priorRow.price_locked_at) {
+  // Supersede EVERY live prior mint for this offer (locked above): two live
+  // links at two honorable prices is the exact ambiguity the price-lock
+  // ruling exists to prevent. Accepted/locked rows are never touched
+  // (acceptance already spun up downstream records).
+  for (const row of liveMints) {
+    if (row.status === 'accepted' || row.price_locked_at) continue;
     await trx('estimates')
-      .where({ id: priorRow.id })
+      .where({ id: row.id })
       .whereNull('archived_at')
       .whereNull('price_locked_at')
       .whereNot({ status: 'accepted' })

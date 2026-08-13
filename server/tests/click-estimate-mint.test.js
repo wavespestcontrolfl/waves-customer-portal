@@ -21,7 +21,7 @@ const CUSTOMER = {
   address_line1: '12 Invented Way', city: 'Parrish', zip: '34219',
 };
 
-function fakeTrx({ priorEstimateRow = null, customerRow = CUSTOMER } = {}) {
+function fakeTrx({ priorEstimateRows = [], customerRow = CUSTOMER } = {}) {
   const ops = { inserts: [], updates: [], selects: [] };
   const trx = (table) => {
     const q = {
@@ -29,9 +29,14 @@ function fakeTrx({ priorEstimateRow = null, customerRow = CUSTOMER } = {}) {
       where(criteria) { q._criteria = criteria; ops.selects.push({ table, criteria }); return q; },
       whereNull() { return q; },
       whereNot() { return q; },
+      whereRaw() { return q; },
       forUpdate() { return q; },
+      // Awaiting the bare chain (the prior-mint lineage query) resolves the
+      // row LIST for estimates.
+      then(resolve, reject) {
+        return Promise.resolve(table === 'estimates' ? priorEstimateRows : []).then(resolve, reject);
+      },
       first: async () => {
-        if (table === 'estimates') return priorEstimateRow;
         if (table === 'customers') return customerRow;
         return null;
       },
@@ -93,10 +98,10 @@ function baseArgs(overrides = {}) {
         propertyInput: PROPERTY_INPUT,
         targetOnlyServices: { pest: { frequency: 'quarterly' } },
         currentServiceKeys: ['lawn'],
+        primaryStreet: '12 invented way|parrish|34219',
       },
     },
     requestRow: { id: 'req-3' },
-    priorPricingRevision: null,
     deduped: false,
     revisionSnapshot: { source: 'service_report', serviceRecordId: 'sr-7', crossSell: {} },
     now: () => new Date('2026-08-13T12:00:00Z'),
@@ -150,17 +155,19 @@ describe('mintReportClickEstimate', () => {
     });
   });
 
-  test('repeat tap on an unchanged offer REUSES the live estimate and writes nothing', async () => {
-    const { trx, ops } = fakeTrx({
-      priorEstimateRow: {
-        id: 'est-old', token: 'tok-old', status: 'viewed',
-        expires_at: new Date('2026-08-19T00:00:00Z'), archived_at: null,
-      },
-    });
-    const out = await mintReportClickEstimate(trx, baseArgs({
-      deduped: true,
-      priorPricingRevision: { mintedEstimate: { id: 'est-old', token: 'tok-old' } },
-    }));
+  // Prior mints are resolved DURABLY from the estimates table (out-of-band
+  // audit P0): the request row's pointer dies when staff terminalize the
+  // row or acceptance resolves it, so lineage never depends on it.
+  const priorMint = (over = {}) => ({
+    id: 'est-old', token: 'tok-old', status: 'viewed',
+    expires_at: new Date('2026-08-19T00:00:00Z'), archived_at: null, price_locked_at: null,
+    estimate_data: { reportCtaMint: { serviceKey: 'pest_control', fingerprint: 'fp-1' } },
+    ...over,
+  });
+
+  test('repeat tap on an unchanged offer REUSES the live estimate (found by lineage, not the request row) and writes nothing', async () => {
+    const { trx, ops } = fakeTrx({ priorEstimateRows: [priorMint()] });
+    const out = await mintReportClickEstimate(trx, baseArgs({ deduped: true }));
     expect(out.reused).toBe(true);
     expect(out.url).toContain('tok-old');
     expect(ops.inserts).toHaveLength(0);
@@ -169,45 +176,40 @@ describe('mintReportClickEstimate', () => {
 
   test('a dead prior link (expired) re-mints even on a dedupe tap', async () => {
     const { trx, ops } = fakeTrx({
-      priorEstimateRow: {
-        id: 'est-old', token: 'tok-old', status: 'sent',
-        expires_at: new Date('2026-08-01T00:00:00Z'), archived_at: null,
-      },
+      priorEstimateRows: [priorMint({ status: 'sent', expires_at: new Date('2026-08-01T00:00:00Z') })],
     });
-    const out = await mintReportClickEstimate(trx, baseArgs({
-      deduped: true,
-      priorPricingRevision: { mintedEstimate: { id: 'est-old', token: 'tok-old' } },
-    }));
+    const out = await mintReportClickEstimate(trx, baseArgs({ deduped: true }));
     expect(out.reused).toBe(false);
     expect(ops.inserts).toHaveLength(1);
   });
 
-  test('a changed offer supersedes (archives) the prior unaccepted estimate', async () => {
+  test('a dedupe tap whose live prior carries a DIFFERENT fingerprint re-mints and supersedes it', async () => {
     const { trx, ops } = fakeTrx({
-      priorEstimateRow: {
-        id: 'est-old', token: 'tok-old', status: 'viewed',
-        expires_at: new Date('2026-08-19T00:00:00Z'), archived_at: null, price_locked_at: null,
-      },
+      priorEstimateRows: [priorMint({ estimate_data: { reportCtaMint: { serviceKey: 'pest_control', fingerprint: 'fp-stale' } } })],
     });
-    await mintReportClickEstimate(trx, baseArgs({
-      deduped: false,
-      priorPricingRevision: { mintedEstimate: { id: 'est-old', token: 'tok-old' } },
-    }));
+    const out = await mintReportClickEstimate(trx, baseArgs({ deduped: true }));
+    expect(out.reused).toBe(false);
     const archive = ops.updates.find((u) => u.table === 'estimates' && u.patch.archived_at && u.criteria?.id === 'est-old');
     expect(archive).toBeTruthy();
   });
 
+  test('a changed offer supersedes (archives) EVERY live unaccepted prior mint', async () => {
+    const { trx, ops } = fakeTrx({
+      priorEstimateRows: [priorMint(), priorMint({ id: 'est-old-2', token: 'tok-old-2' })],
+    });
+    await mintReportClickEstimate(trx, baseArgs({ deduped: false }));
+    const archived = ops.updates.filter((u) => u.table === 'estimates' && u.patch.archived_at).map((u) => u.criteria?.id);
+    expect(archived.sort()).toEqual(['est-old', 'est-old-2']);
+    const data = JSON.parse(ops.inserts[0].row.estimate_data);
+    expect(data.reportCtaMint.supersededEstimateIds.sort()).toEqual(['est-old', 'est-old-2']);
+    expect(data.reportCtaMint.serviceKey).toBe('pest_control');
+  });
+
   test('an ACCEPTED prior estimate is never archived', async () => {
     const { trx, ops } = fakeTrx({
-      priorEstimateRow: {
-        id: 'est-old', token: 'tok-old', status: 'accepted',
-        archived_at: null, price_locked_at: new Date('2026-08-12T00:00:00Z'),
-      },
+      priorEstimateRows: [priorMint({ status: 'accepted', price_locked_at: new Date('2026-08-12T00:00:00Z') })],
     });
-    await mintReportClickEstimate(trx, baseArgs({
-      deduped: false,
-      priorPricingRevision: { mintedEstimate: { id: 'est-old', token: 'tok-old' } },
-    }));
+    await mintReportClickEstimate(trx, baseArgs({ deduped: false }));
     const archive = ops.updates.find((u) => u.table === 'estimates' && u.patch.archived_at);
     expect(archive).toBeUndefined();
   });
@@ -292,6 +294,87 @@ describe('mintReportClickEstimate', () => {
     const args = baseArgs();
     args.deps.recompute = jest.fn(async () => ({ recomputed: false, reason: 'ENGINE_ERROR' }));
     await expect(mintReportClickEstimate(trx, args)).rejects.toThrow(/recompute failed/);
+  });
+
+  test('a one-time total with NO declared line fee refuses the mint (undisclosed charge)', async () => {
+    const { trx, ops } = fakeTrx();
+    const args = baseArgs();
+    args.deps.recompute = jest.fn(async () => ({
+      recomputed: true,
+      serverResult: { engineVersion: 'v4.2-test', recurring: {} },
+      serverTotals: { monthlyTotal: 38, annualTotal: 456, onetimeTotal: 99 },
+      pestPricingVersion: null,
+      rawEngineResult: RAW_RESULT,
+    }));
+    await expect(mintReportClickEstimate(trx, args)).rejects.toThrow(ClickEstimateDriftError);
+    expect(ops.inserts).toHaveLength(0);
+  });
+
+  test('the line-declared standing setup fee is PERMITTED (the estimate page itemizes it before acceptance)', async () => {
+    const { trx, ops } = fakeTrx();
+    const args = baseArgs();
+    args.deps.recompute = jest.fn(async () => ({
+      recomputed: true,
+      serverResult: { engineVersion: 'v4.2-test', recurring: {} },
+      serverTotals: { monthlyTotal: 38, annualTotal: 456, onetimeTotal: 99 },
+      pestPricingVersion: null,
+      rawEngineResult: {
+        ...RAW_RESULT,
+        lineItems: [{ ...RAW_RESULT.lineItems[0], initialFee: 99 }],
+      },
+    }));
+    const out = await mintReportClickEstimate(trx, args);
+    expect(out.reused).toBe(false);
+    expect(ops.inserts).toHaveLength(1);
+  });
+
+  test('a one-time total EXCEEDING the declared fee refuses the mint', async () => {
+    const { trx } = fakeTrx();
+    const args = baseArgs();
+    args.deps.recompute = jest.fn(async () => ({
+      recomputed: true,
+      serverResult: { engineVersion: 'v4.2-test', recurring: {} },
+      serverTotals: { monthlyTotal: 38, annualTotal: 456, onetimeTotal: 148 },
+      pestPricingVersion: null,
+      rawEngineResult: {
+        ...RAW_RESULT,
+        lineItems: [{ ...RAW_RESULT.lineItems[0], initialFee: 99 }],
+      },
+    }));
+    await expect(mintReportClickEstimate(trx, args)).rejects.toThrow(ClickEstimateDriftError);
+  });
+
+  test('a tiered card whose recompute has NO tier refuses the mint', async () => {
+    const { trx } = fakeTrx();
+    const args = baseArgs();
+    args.deps.recompute = jest.fn(async () => ({
+      recomputed: true,
+      serverResult: { engineVersion: 'v4.2-test', recurring: {} },
+      serverTotals: { monthlyTotal: 38, annualTotal: 456, onetimeTotal: 0 },
+      pestPricingVersion: null,
+      rawEngineResult: { ...RAW_RESULT, waveGuard: undefined },
+    }));
+    await expect(mintReportClickEstimate(trx, args)).rejects.toThrow(ClickEstimateDriftError);
+  });
+
+  test('the membership snapshot is bounded to the card\'s primary-property street scope', async () => {
+    const { trx } = fakeTrx();
+    const args = baseArgs();
+    await mintReportClickEstimate(trx, args);
+    expect(args.deps.computeMembershipContext).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      customerId: 'cust-9',
+      streetScope: {
+        estimateStreet: '12 invented way|parrish|34219',
+        customerPrimaryStreet: '12 invented way|parrish|34219',
+        requireSharedLocality: true,
+      },
+    }));
+  });
+
+  test('the minted row stamps the engine version that actually priced it', async () => {
+    const { trx, ops } = fakeTrx();
+    await mintReportClickEstimate(trx, baseArgs());
+    expect(ops.inserts[0].row.pricing_version).toBe('v4.2-test');
   });
 });
 

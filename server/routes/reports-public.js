@@ -1229,14 +1229,16 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
               if (!recorded) throw new Error('event insert failed');
             },
             ...(mintEligible ? {
-              withRow: async (trx, { row, deduped, priorPricingRevision }) => {
+              withRow: async (trx, { row, deduped }) => {
                 const { mintReportClickEstimate } = require('../services/service-report/click-estimate-mint');
+                // Prior-mint lineage is resolved DURABLY inside the mint
+                // (estimates query under lock) — the request row's
+                // pricing_revision pointer is advisory display linkage only.
                 mintedEstimate = await mintReportClickEstimate(trx, {
                   customer: crossSell.engineContext.customer,
                   service,
                   crossSell,
                   requestRow: row,
-                  priorPricingRevision,
                   deduped,
                   revisionSnapshot,
                 });

@@ -2980,11 +2980,19 @@ function CrossSellCard({ data, token, mode }) {
     // into the estimate page (slot pick + acceptance). The 'sent'
     // confirmation above stays rendered behind the navigation, so a blocked
     // redirect still shows the recorded-request copy, never a dead card.
-    // Same-origin only (belt-and-braces on a server-composed value): the
-    // estimate link is always a portal URL.
+    // SAME-ORIGIN only, against the browser's actual origin (belt-and-
+    // braces on a server-composed value): the report and estimate pages are
+    // one SPA, so a legitimate link always shares this page's origin — in
+    // prod and in preview/dev environments alike — and anything
+    // cross-origin or unparsable never navigates.
     const estimateUrl = result.ok ? result.body?.estimateUrl : null;
-    if (typeof estimateUrl === 'string' && /^https:\/\/portal\.wavespestcontrol\.com\//.test(estimateUrl)) {
-      window.location.assign(estimateUrl);
+    if (typeof estimateUrl === 'string' && estimateUrl) {
+      try {
+        const parsed = new URL(estimateUrl, window.location.origin);
+        if (parsed.origin === window.location.origin) {
+          window.location.assign(parsed.href);
+        }
+      } catch { /* unparsable URL: keep the confirmation, never navigate */ }
     }
   };
   return (

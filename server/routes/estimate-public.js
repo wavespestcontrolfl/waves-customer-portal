@@ -9649,6 +9649,23 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         throw err;
       }
 
+      // Click-to-estimate mints only (GitHub #3391 P1): acceptance is the
+      // customer self-booking the very thing the CTA request row asked
+      // staff to follow up on — leaving it open pages staff after 24h
+      // (unworked-comms-watcher) and invites duplicate outreach. Resolve
+      // the linked request in the SAME transaction; the row survives as
+      // the audit trail. Scoped to this source so no other accept path
+      // changes behavior.
+      if (estimate.source === 'service_report_cta' && estimate.customer_id) {
+        const { OPEN_REQUEST_TERMINAL_STATUSES } = require('../services/estimate-add-service-request');
+        await trx('service_requests')
+          .where({ customer_id: estimate.customer_id })
+          .whereIn('source', ['service_report', 'portal_home'])
+          .whereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES)
+          .whereRaw("pricing_revision->'mintedEstimate'->>'id' = ?", [String(estimate.id)])
+          .update({ status: 'resolved', updated_at: trx.fn.now() });
+      }
+
       let customerId = estimate.customer_id;
       // Grouped multi-property accept: a sibling estimate in the same group
       // that already resolved its customer is the DETERMINISTIC owner of this

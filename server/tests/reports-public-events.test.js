@@ -447,6 +447,19 @@ describe('click-to-estimate mint (GATE_REPORT_CLICK_TO_ESTIMATE)', () => {
     expect(res.body.error).toMatch(/no longer available/);
   });
 
+  test('acceptance terminalizes the linked CTA request, scoped to click-mints only (source contract)', () => {
+    // The accept transaction lives in estimate-public.js behind the full
+    // acceptance harness — this pins the load-bearing structure the same
+    // way the composeOffers contract tests do: scoped to the mint source,
+    // matched on the pricing_revision linkage, resolved not deleted.
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    expect(src).toMatch(/estimate\.source === 'service_report_cta' && estimate\.customer_id/);
+    expect(src).toMatch(/pricing_revision->'mintedEstimate'->>'id' = \?/);
+    const block = src.split("estimate.source === 'service_report_cta'")[1].slice(0, 700);
+    expect(block).toMatch(/whereNotIn\('status', OPEN_REQUEST_TERMINAL_STATUSES\)/);
+    expect(block).toMatch(/status: 'resolved'/);
+  });
+
   test('a non-drift mint failure is a retryable 503 — the card may only confirm durable state', async () => {
     mintReportClickEstimate.mockRejectedValue(new Error('snapshot did not freeze'));
     const { q } = clickDb();
