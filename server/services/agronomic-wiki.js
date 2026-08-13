@@ -1380,9 +1380,14 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
   // stale_flag=true (its 60-day rule only ADDS flags), so a flagged page is
   // picked up on the next weekly run regardless of age. Used by the
   // vision-delta scorer so a newly photo-verified outcome doesn't wait out
-  // the 60-day staleness window. Never throws.
+  // the 60-day staleness window. Never throws unless opts.rethrow — the
+  // scorer's calls stay best-effort (its own weekly reconcile is the retry),
+  // but that reconcile itself must NOT be best-effort: a swallowed failure
+  // there lets the weekly_cron success marker stamp, and the 8-day scan
+  // window minus the 6-day guard leaves only ~2 days of margin — rows scored
+  // early in the window age out permanently instead of retrying tomorrow.
   // ────────────────────────────────────────────────────────────
-  async markOutcomePagesStale(outcome) {
+  async markOutcomePagesStale(outcome, opts = {}) {
     try {
       if (!outcome) return 0;
       const slugs = new Set();
@@ -1452,6 +1457,7 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       return flagged;
     } catch (err) {
       logger.error(`[agronomic-wiki] markOutcomePagesStale failed for outcome ${outcome?.id}: ${err.message}`);
+      if (opts.rethrow) throw err;
       return 0;
     }
   },
@@ -1469,6 +1475,15 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
       // recently scored outcomes here. 8-day window = one weekly cycle plus
       // margin; already-regenerated pages skip cheaply via the fingerprint
       // token and the skip branch clears the flag again.
+      // Failures here must withhold the weekly success marker like any
+      // stale-loop failure: markOutcomePagesStale returns 0 on error and
+      // this block used to swallow scan errors too, so a failed reconcile
+      // recorded a healthy run and suppressed the retry for six days —
+      // past the scan window's ~2-day margin, permanently dropping rows
+      // scored early in the window (codex P2). Count per-outcome and
+      // whole-scan failures; a non-zero count joins the failed>0 path
+      // below (no marker, { error } to job_health, retry tomorrow).
+      let reconcileFailed = 0;
       try {
         // Select on the terminal stamp (vision_scored_at), NOT a non-null
         // score: a cleared-then-replaced pair whose replacement scores null
@@ -1506,7 +1521,12 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
             .orderBy('id', 'asc')
             .limit(100);
           for (const outcome of batch) {
-            await AgronomicWiki.markOutcomePagesStale(outcome);
+            try {
+              await AgronomicWiki.markOutcomePagesStale(outcome, { rethrow: true });
+            } catch {
+              // Already logged inside; keep flagging the rest of the batch.
+              reconcileFailed++;
+            }
           }
           if (batch.length < 100) break;
           const last = batch[batch.length - 1];
@@ -1514,6 +1534,7 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
           cursorId = last.id;
         }
       } catch (err) {
+        reconcileFailed++;
         logger.error(`[agronomic-wiki] Vision-score stale reconcile failed: ${err.message}`);
       }
 
@@ -1591,14 +1612,18 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         logger.error(`[agronomic-wiki] Current-month seasonal refresh failed: ${err.message}`);
       }
 
-      if (failed > 0) {
+      if (failed > 0 || reconcileFailed > 0) {
         // Partial failure: no weekly_cron success marker — weeklyRefreshIfDue
         // retries tomorrow, and the scheduler wrapper surfaces the error to
         // job_health via the returned { error }.
-        await logUpdate('error', null, `Weekly refresh: ${failed} page refresh(es) failed (${refreshed} succeeded)`, {
+        const parts = [];
+        if (failed > 0) parts.push(`${failed} page refresh(es) failed`);
+        if (reconcileFailed > 0) parts.push(`${reconcileFailed} vision-score reconcile failure(s)`);
+        const error = parts.join('; ');
+        await logUpdate('error', null, `Weekly refresh: ${error} (${refreshed} refreshed)`, {
           triggerType: 'weekly_cron_error',
         });
-        return { refreshed, failed, staleFound: stalePages.length, error: `${failed} page refresh(es) failed` };
+        return { refreshed, failed, reconcileFailed, staleFound: stalePages.length, error };
       }
 
       await logUpdate('lint', null, `Weekly refresh: ${refreshed} stale pages refreshed, seasonal page updated for month ${currentMonth}`, {

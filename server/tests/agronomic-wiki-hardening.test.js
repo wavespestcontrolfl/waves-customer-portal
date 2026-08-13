@@ -424,6 +424,17 @@ describe('generatePage', () => {
     await expect(wiki.markOutcomePagesStale(null)).resolves.toBe(0);
   });
 
+  test('markOutcomePagesStale rethrows on failure when opts.rethrow is set (weekly reconcile path)', async () => {
+    useDb({ knowledge_entries: () => { throw new Error('db down'); } });
+    // customer_id forces the condition-page SELECT, where the mock throws
+    // (the harness's update() cannot fail — selects are the failure surface).
+    const outcome = { id: 'out-3', products_applied: [], grass_track: 'a', treatment_date: null, customer_id: 'c-1' };
+    // Default contract stays best-effort for the vision-delta scorer…
+    await expect(wiki.markOutcomePagesStale(outcome)).resolves.toBe(0);
+    // …but the weekly reconcile opts in so its failures reach job_health.
+    await expect(wiki.markOutcomePagesStale(outcome, { rethrow: true })).rejects.toThrow('db down');
+  });
+
   test('placeholder stubs are always retried, never treated as unchanged', async () => {
     const existing = {
       id: 'ke-1',
@@ -741,13 +752,66 @@ describe('weeklyRefreshIfDue', () => {
     // every row across both pages gets reconciled.
     expect(reconcileCalls).toBe(2);
     expect(spy).toHaveBeenCalledTimes(101);
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'o-final' }));
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'o-final' }), { rethrow: true });
     // Page 2 uses the composite (vision_scored_at, id) cursor so rows tied on
     // the boundary timestamp are never skipped.
     const page2 = state.calls.treatment_outcomes.filter((rec) =>
       rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_scored_at'))[1];
     expect(page2.ops).toContainEqual(['andWhere', ['id', '>', 'o99']]);
     spy.mockRestore();
+  });
+
+  test('a vision-score reconcile failure withholds the weekly success marker instead of recording a healthy run', async () => {
+    const state = useDb({
+      knowledge_entries: [],
+      knowledge_update_log: [],
+      treatment_outcomes: (rec) => {
+        if (rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_scored_at')) {
+          return [
+            { id: 'o1', vision_scored_at: new Date() },
+            { id: 'o2', vision_scored_at: new Date() },
+          ];
+        }
+        return [];
+      },
+    });
+    const spy = jest.spyOn(wiki, 'markOutcomePagesStale')
+      .mockRejectedValueOnce(new Error('flagging exploded'))
+      .mockResolvedValue(1);
+
+    const result = await wiki.weeklyRefresh();
+
+    // One outcome failed, the other was still flagged (no batch abort) —
+    // but the run must return { error } so weeklyRefreshIfDue withholds the
+    // weekly_cron marker (daily retry keeps the 8-day scan window covering
+    // the failed rows) and the scheduler wrapper rethrows into job_health.
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(result.error).toMatch(/vision-score reconcile/);
+    expect(result.reconcileFailed).toBe(1);
+    const errorLog = (state.inserts.knowledge_update_log || []).find((r) => r.trigger_type === 'weekly_cron_error');
+    expect(errorLog).toBeTruthy();
+    const successLog = (state.inserts.knowledge_update_log || []).find((r) => r.trigger_type === 'weekly_cron');
+    expect(successLog).toBeFalsy();
+    spy.mockRestore();
+  });
+
+  test('a whole-scan reconcile failure also returns { error } rather than a silent success', async () => {
+    const state = useDb({
+      knowledge_entries: [],
+      knowledge_update_log: [],
+      treatment_outcomes: (rec) => {
+        if (rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_scored_at')) {
+          throw new Error('scan query died');
+        }
+        return [];
+      },
+    });
+
+    const result = await wiki.weeklyRefresh();
+
+    expect(result.error).toMatch(/vision-score reconcile/);
+    const successLog = (state.inserts.knowledge_update_log || []).find((r) => r.trigger_type === 'weekly_cron');
+    expect(successLog).toBeFalsy();
   });
 
   test('stale refresh only selects categories that have a refresh path', async () => {
