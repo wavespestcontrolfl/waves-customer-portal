@@ -18,6 +18,7 @@ jest.mock('../services/lawn-grass-context', () => ({
 }));
 jest.mock('../services/agronomic-wiki', () => ({
   recomputeEntryReviewGate: jest.fn(async () => {}),
+  escapeLike: (text) => String(text).replace(/[\\%_]/g, (c) => `\\${c}`),
 }));
 
 const analytics = require('../services/assessment-analytics');

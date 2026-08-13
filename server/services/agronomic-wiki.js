@@ -565,13 +565,22 @@ const AgronomicWiki = {
           const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
           if (!weather && etCalendarDayOf(treatmentDate) === etDateString()) {
             const fawn = await require('./fawn-weather').getCurrent();
-            // On fetch failure getCurrent() serves its cached _lastSnapshot,
-            // which has no expiry — require a fresh observation (≤6h) so a
-            // days-old cache can't be persisted as treatment-day conditions.
+            // Require a fresh reading (≤6h) before persisting: getCurrent()
+            // serves its unexpired cached _lastSnapshot on fetch failure, and
+            // even a successful fetch can carry a stale station payload. The
+            // STATION's observation_time is authoritative when present
+            // (naive strings are ET wall-clock — parseETDateTime handles
+            // that); fetch-time `timestamp` is only a cache-age fallback.
+            // Present-but-unparseable observation_time fails closed.
             const FRESH_MS = 6 * 60 * 60 * 1000;
-            const fresh = fawn?.timestamp
-              && Number.isFinite(new Date(fawn.timestamp).getTime())
-              && Date.now() - new Date(fawn.timestamp).getTime() < FRESH_MS;
+            const { parseETDateTime } = require('../utils/datetime-et');
+            const freshMoment = (value) => {
+              if (value == null) return null;
+              const ms = parseETDateTime(String(value))?.getTime?.();
+              return Number.isFinite(ms) ? Date.now() - ms < FRESH_MS : false;
+            };
+            const obsFresh = freshMoment(fawn?.observation_time);
+            const fresh = obsFresh !== null ? obsFresh : freshMoment(fawn?.timestamp) === true;
             if (fawn && fawn.station !== 'unavailable' && fresh) weather = fawn;
           }
           if (weather) {

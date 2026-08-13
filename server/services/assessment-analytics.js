@@ -16,7 +16,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { loadCustomerGrassContext, normalizeGrassType } = require('./lawn-grass-context');
-const { recomputeEntryReviewGate } = require('./agronomic-wiki');
+const { recomputeEntryReviewGate, escapeLike } = require('./agronomic-wiki');
 
 function slugify(t) {
   return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
@@ -749,7 +749,8 @@ async function detectContradictions() {
             // Check if already flagged
             const existing = await db('knowledge_contradictions')
               .where({ kb_entry_id: kbEntry.id, contradiction_type: 'claim_vs_data' })
-              .whereRaw("kb_claim ILIKE ?", [`%${eff.product_name}%`])
+              // Same LIKE-metacharacter hazard as the seasonal dedupe below.
+              .whereRaw("kb_claim ILIKE ? ESCAPE '\\'", [`%${escapeLike(eff.product_name)}%`])
               .where({ status: 'open' })
               .first();
 
@@ -804,9 +805,12 @@ async function detectContradictions() {
               // Dedupe scoped to THIS product — a broad KB entry can match
               // several efficacy products, and a product-blind predicate
               // would collapse them all onto the first inserted row.
+              // escapeLike: catalog names carry LIKE metacharacters
+              // ("Prodiamine 65%") that would otherwise match other
+              // products' rows and suppress/misattribute this one.
               const existing = await db('knowledge_contradictions')
                 .where({ kb_entry_id: kbEntry.id, contradiction_type: 'claim_vs_data' })
-                .whereRaw("description ILIKE ?", [`%${eff.product_name}%peak season%shoulder%`])
+                .whereRaw("description ILIKE ? ESCAPE '\\'", [`%${escapeLike(eff.product_name)}%peak season%shoulder%`])
                 .where({ status: 'open' })
                 .first();
 
