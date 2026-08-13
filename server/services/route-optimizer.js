@@ -391,19 +391,40 @@ async function optimizeRoute(stops, options = {}) {
   if (stops.length === 1) {
     const s = stops[0];
     const distToStop = haversine(HQ.lat, HQ.lng, parseFloat(s.lat) || HQ.lat, parseFloat(s.lng) || HQ.lng);
-    // One-way road metres, doubled for the round trip. This path previously
-    // omitted the road factor that every other fallback leg applies, so its
-    // distance and duration both ran low relative to the multi-stop path for
-    // the same geometry; deriving both from the shared helpers fixes that
-    // alongside putting duration on the shared model.
-    const legMeters = straightMilesToRoadMeters(distToStop);
-    const legMinutes = milesToDriveMinutes(distToStop);
-    const distMeters = legMeters * 2;
     const stopName = s.customerName || s.customer_name || 'Stop 1';
+
+    // This path is the one fallback leg that never applied the road factor
+    // every other leg applies, so for identical geometry it reported both a
+    // shorter distance and a shorter time than the multi-stop path. Correcting
+    // that rides the gate rather than landing unconditionally: the gate's
+    // contract is that OFF reproduces legacy output exactly, so a revert has to
+    // restore these metrics too. Note this is not a re-tuning of the distance
+    // model — the factor is the same 1.4 used everywhere else; the fix is that
+    // this path starts applying it.
+    let distMeters;
+    let totalDurationSeconds;
+    let legMeters;
+    let legMinutes;
+    if (gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
+      legMeters = straightMilesToRoadMeters(distToStop);
+      legMinutes = milesToDriveMinutes(distToStop);
+      distMeters = legMeters * 2;
+      totalDurationSeconds = legMinutes * 2 * 60;
+    } else {
+      // Reproduced verbatim, including the rounding: the round trip is rounded
+      // once and the legs are halves of THAT, and the total duration is rounded
+      // over the round-trip distance rather than doubling a rounded leg. Those
+      // are not the same number for every input, so neither can be re-derived
+      // from the other without moving output the gate promises not to move.
+      distMeters = Math.round(distToStop * 1609.34 * 2);
+      totalDurationSeconds = Math.round((distMeters / 1609.34 / 30) * 60) * 60;
+      legMeters = Math.round(distMeters / 2);
+      legMinutes = Math.round((distMeters / 2 / 1609.34 / 30) * 60);
+    }
     return {
       orderedStops: stops,
       totalDistanceMeters: distMeters,
-      totalDurationSeconds: legMinutes * 2 * 60,
+      totalDurationSeconds,
       unoptimizedDistanceMeters: distMeters,
       legs: [
         { from: 'HQ', to: stopName, distanceMeters: legMeters, durationMinutes: legMinutes },

@@ -182,7 +182,7 @@ describe('drive-time estimator', () => {
       expect(calibrated.totalDistanceMeters).toBe(legacy.totalDistanceMeters);
     });
 
-    test('single-stop shortcut moves with the gate and stays internally consistent', async () => {
+    test('single-stop shortcut moves with the gate', async () => {
       const one = () => ([{ lat: 27.0998, lng: -82.4543, customerName: 'Solo' }]);
       delete process.env[GATE];
       const legacy = await routeOptimizer.optimizeRoute(one());
@@ -190,13 +190,34 @@ describe('drive-time estimator', () => {
       const calibrated = await routeOptimizer.optimizeRoute(one());
 
       expect(legacy.source).toBe('single_stop');
+      expect(calibrated.source).toBe('single_stop');
       expect(calibrated.totalDurationSeconds).not.toBe(legacy.totalDurationSeconds);
-      for (const r of [legacy, calibrated]) {
-        // Out and back are the same leg, and the legs must sum to the total.
-        expect(r.legs[0].durationMinutes).toBe(r.legs[1].durationMinutes);
-        expect(r.legs[0].distanceMeters).toBe(r.legs[1].distanceMeters);
-        expect(r.totalDistanceMeters).toBe(r.legs[0].distanceMeters * 2);
-        expect(r.totalDurationSeconds).toBe(r.legs[0].durationMinutes * 2 * 60);
+      expect(calibrated.legs[0].durationMinutes).toBe(calibrated.legs[1].durationMinutes);
+      expect(calibrated.legs[0].distanceMeters).toBe(calibrated.legs[1].distanceMeters);
+    });
+
+    /**
+     * The single-stop path was the one fallback leg that never applied the 1.4
+     * road factor. Correcting that rides the gate, so OFF must still reproduce
+     * the ORIGINAL arithmetic exactly — otherwise flipping the gate back would
+     * not restore prior metrics, and the kill switch would be a lie. Pinned
+     * against the formulas as they were written, not against the new helpers.
+     */
+    test('gate off reproduces the original single-stop arithmetic exactly', async () => {
+      delete process.env[GATE];
+      const stop = { lat: 27.0998, lng: -82.4543, customerName: 'Solo' };
+      const r = await routeOptimizer.optimizeRoute([{ ...stop }]);
+
+      const d = routeOptimizer.haversine(
+        routeOptimizer.HQ.lat, routeOptimizer.HQ.lng, stop.lat, stop.lng,
+      );
+      const expectedMeters = Math.round(d * 1609.34 * 2);
+      expect(r.totalDistanceMeters).toBe(expectedMeters);
+      expect(r.unoptimizedDistanceMeters).toBe(expectedMeters);
+      expect(r.totalDurationSeconds).toBe(Math.round((expectedMeters / 1609.34 / 30) * 60) * 60);
+      for (const leg of r.legs) {
+        expect(leg.distanceMeters).toBe(Math.round(expectedMeters / 2));
+        expect(leg.durationMinutes).toBe(Math.round((expectedMeters / 2 / 1609.34 / 30) * 60));
       }
     });
   });
