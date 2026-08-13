@@ -4116,7 +4116,12 @@ function BankImportTab() {
     const payload = { ...dupUpload, forceDuplicates: true };
     setDupUpload(null);
     act("upload", "/admin/tax/bank-import/upload", payload).then((r) => {
-      if (r) setNotice({ text: `Force-imported ${r.forced} duplicate row${r.forced === 1 ? "" : "s"}` });
+      if (r)
+        setNotice({
+          text:
+            `Force-imported ${r.forced} duplicate row${r.forced === 1 ? "" : "s"}` +
+            (r.forceAlreadyPresent ? ` (${r.forceAlreadyPresent} already force-imported earlier — nothing re-added)` : ""),
+        });
     });
   };
 

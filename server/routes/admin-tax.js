@@ -1657,6 +1657,13 @@ router.post('/bank-import/upload', async (req, res, next) => {
     if (Buffer.byteLength(csv, 'utf8') > MAX_STATEMENT_BYTES) {
       return res.status(400).json({ error: 'statement too large (2MB max)' });
     }
+    // Force options are validated BEFORE any insert — a 400 must mean
+    // "nothing changed", never "your rows imported but the force was ignored".
+    if (forceDuplicates === true
+      && (!Array.isArray(forceRowHashes) || forceRowHashes.length === 0 || forceRowHashes.length > 10000
+        || !forceRowHashes.every(h => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h)))) {
+      return res.status(400).json({ error: 'forceDuplicates requires forceRowHashes: the duplicateHashes array from the original upload response' });
+    }
     const { rows, skipped } = bankImport.parseStatementCsv(csv);
     if (rows.length === 0) {
       return res.status(400).json({ error: 'no usable rows in that CSV', skipped });
@@ -1693,38 +1700,36 @@ router.post('/bank-import/upload', async (req, res, next) => {
     const duplicateRows = hashed.filter(r => !insertedHashes.has(r.row_hash));
     // Force path for the split-across-uploads case: a genuinely distinct
     // identical transaction in a SEPARATE file hashes like a re-upload and
-    // is skipped above. When the operator confirms these are real, continue
-    // each row's ordinal past the stored copies until a hash inserts.
+    // is skipped above. When the operator confirms these are real, insert
+    // EXACTLY ordinal+1 for each confirmed hash — a single deterministic
+    // target makes a replayed confirmation (double-click, network retry)
+    // idempotent: the retry conflicts and reports alreadyPresent instead of
+    // walking to ordinal+2, +3, … forever.
     // ⛔ Force is scoped to EXPLICIT row hashes from the FIRST response's
     // duplicate set: on the confirming re-post every previously inserted row
     // conflicts too, so an unscoped force would duplicate the whole
     // statement, not just the skipped rows.
     let forced = 0;
+    let forceAlreadyPresent = 0;
     if (forceDuplicates === true) {
-      if (!Array.isArray(forceRowHashes) || forceRowHashes.length === 0 || forceRowHashes.length > 10000
-        || !forceRowHashes.every(h => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h))) {
-        return res.status(400).json({ error: 'forceDuplicates requires forceRowHashes: the duplicateHashes array from the original upload response' });
-      }
       const forceSet = new Set(forceRowHashes);
       for (const r of duplicateRows.filter(d => forceSet.has(d.row_hash))) {
-        for (let ord = r.ordinal + 1; ord <= r.ordinal + 25; ord++) {
-          const [ins] = await db('bank_transactions')
-            .insert({
-              account_label: accountLabel.trim(),
-              account_type: accountType,
-              txn_date: r.txn_date,
-              description: r.description,
-              amount: r.amount,
-              direction: r.direction,
-              source: 'csv',
-              source_file: String(filename || '').slice(0, 300) || null,
-              row_hash: bankImport.hashRow(accountLabel.trim(), r, ord),
-            })
-            .onConflict('row_hash')
-            .ignore()
-            .returning(['id']);
-          if (ins) { forced++; break; }
-        }
+        const [ins] = await db('bank_transactions')
+          .insert({
+            account_label: accountLabel.trim(),
+            account_type: accountType,
+            txn_date: r.txn_date,
+            description: r.description,
+            amount: r.amount,
+            direction: r.direction,
+            source: 'csv',
+            source_file: String(filename || '').slice(0, 300) || null,
+            row_hash: bankImport.hashRow(accountLabel.trim(), r, r.ordinal + 1),
+          })
+          .onConflict('row_hash')
+          .ignore()
+          .returning(['id']);
+        if (ins) forced++; else forceAlreadyPresent++;
       }
     }
     const matching = await bankImport.runDeterministicMatching();
@@ -1733,6 +1738,7 @@ router.post('/bank-import/upload', async (req, res, next) => {
       parsed: rows.length,
       imported: inserted.length + forced,
       forced,
+      forceAlreadyPresent,
       duplicates: duplicateRows.length,
       duplicateHashes: duplicateRows.map(r => r.row_hash),
       duplicateSamples: duplicateRows.slice(0, 10).map(r => ({ txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),

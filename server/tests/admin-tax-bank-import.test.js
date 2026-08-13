@@ -342,10 +342,24 @@ describe('force-duplicates upload (gate on)', () => {
     expect(state.insertedBank).toHaveLength(1); // only the bulk attempt
   });
 
-  test('forceDuplicates without the hash scope is rejected — an unscoped force would duplicate the whole statement', async () => {
+  test('forceDuplicates without the hash scope is rejected BEFORE any insert — 400 means nothing changed', async () => {
     state.insertReturningQueue = [[]];
     const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true });
     expect(res.status).toBe(400);
+    expect(state.insertedBank).toHaveLength(0); // validated before the bulk insert
+  });
+
+  test('a replayed force confirmation is idempotent — the single target ordinal conflicts instead of minting more copies', async () => {
+    state.insertReturningQueue = [
+      [], // bulk insert: everything conflicts (replay)
+      [], // the ONE force attempt at ordinal+1 also conflicts (already forced earlier)
+    ];
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv, forceDuplicates: true, forceRowHashes: [hdSupplyHash] });
+    const body = await res.json();
+    expect(body.forced).toBe(0);
+    expect(body.forceAlreadyPresent).toBe(1);
+    // exactly one force attempt was made — no ordinal walk to +2, +3, …
+    expect(state.insertedBank).toHaveLength(2); // 1 bulk attempt + 1 force attempt
   });
 
   test('with forceDuplicates + its hash, the skipped row re-inserts under the NEXT ordinal hash', async () => {
