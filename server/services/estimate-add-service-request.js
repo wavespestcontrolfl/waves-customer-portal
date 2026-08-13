@@ -306,6 +306,12 @@ function buildEstimateServiceRevisionDraft(estimate = {}, requestedService) {
 // reflects the actual entry point (codex #3376).
 async function resolveEstimateCustomer(database, estimate = {}, opts = {}) {
   const sourceDetail = opts.sourceDetail || 'estimate_add_service_request';
+  // The measurement-review flow's contract says the estimate row is NEVER
+  // mutated (codex #3376 P1) — it resolves/creates the customer for the
+  // request row only and skips the customer_id backfill both here and on
+  // the created-profile path. Add-service keeps the backfill (its draft
+  // revision flow depends on the linkage).
+  const skipBackfill = opts.skipEstimateBackfill === true;
   if (estimate.customer_id) {
     const customer = await database('customers')
       .where({ id: estimate.customer_id })
@@ -316,7 +322,7 @@ async function resolveEstimateCustomer(database, estimate = {}, opts = {}) {
 
   const customer = await findSafeExistingCustomerForEstimate(database, estimate);
   if (customer) {
-    if (!estimate.customer_id) {
+    if (!estimate.customer_id && !skipBackfill) {
       await database('estimates').where({ id: estimate.id }).update({ customer_id: customer.id });
     }
     return customer;
@@ -376,7 +382,9 @@ async function resolveEstimateCustomer(database, estimate = {}, opts = {}) {
     throw conflict;
   }
 
-  await database('estimates').where({ id: estimate.id }).update({ customer_id: created.id });
+  if (!skipBackfill) {
+    await database('estimates').where({ id: estimate.id }).update({ customer_id: created.id });
+  }
   await database('property_preferences').insert({ customer_id: created.id }).catch((err) => {
     logger.warn(`[estimate-add-service-request] property_preferences create skipped for ${created.id}: ${err.message}`);
   });

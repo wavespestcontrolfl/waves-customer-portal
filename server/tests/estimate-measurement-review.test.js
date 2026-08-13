@@ -63,6 +63,7 @@ function mockDb({ estimate = ESTIMATE_ROW, insertResult, insertError, dupeRow } 
         }),
         where: () => ({
           whereNotIn: () => ({ first: async () => (typeof dupeRow === 'function' ? dupeRow() : dupeRow) }),
+          update: async () => 1,
         }),
       };
     }
@@ -377,10 +378,12 @@ describe('createEstimateMeasurementReview', () => {
     expect(JSON.parse(database.inserts[0].pricing_revision).reasons).toEqual([]);
   });
 
-  test('a duplicate open request dedupes via the PRE-CHECK (authoritative under the row lock)', async () => {
+  test('a duplicate open request dedupes via the PRE-CHECK and RE-ARMS an undelivered handoff (codex P2)', async () => {
     const err = new Error('duplicate key');
     err.code = '23505';
-    const database = mockDb({ insertError: err, dupeRow: { id: 'req-existing' } });
+    // The dupe row has NO notifiedAt stamp — both original attempts failed,
+    // so this customer retry must re-send the office notification.
+    const database = mockDb({ insertError: err, dupeRow: { id: 'req-existing', subject: 'Re-measure', description: 'd', customer_id: 'cust-1', pricing_revision: '{}' } });
     const result = await createEstimateMeasurementReview({
       estimateToken: 'tok-1',
       reasons: ['bigger'],
@@ -389,8 +392,22 @@ describe('createEstimateMeasurementReview', () => {
       basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     });
     expect(result).toEqual({ success: true, deduped: true });
-    // Pre-check dedupe: no insert is even attempted.
+    // Pre-check dedupe: no insert is even attempted — but the UNDELIVERED
+    // handoff is re-sent so the office cannot permanently miss a challenge.
     expect(database.inserts).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('a dedupe against a DELIVERED request never double-rings the office', async () => {
+    const database = mockDb({ dupeRow: { id: 'req-existing', pricing_revision: JSON.stringify({ notifiedAt: '2026-08-13' }) } });
+    const result = await createEstimateMeasurementReview({
+      estimateToken: 'tok-1',
+      reasons: ['bigger'],
+      database,
+      viewabilityCheck: viewable,
+      basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
+    });
+    expect(result).toEqual({ success: true, deduped: true });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
@@ -408,7 +425,8 @@ describe('createEstimateMeasurementReview', () => {
       basisFor: () => ({ sqft: 7500, source: 'AI satellite measurement' }),
     });
     expect(result).toEqual({ success: true, deduped: true });
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // The catch-path dupe row carries no notifiedAt → handoff re-armed.
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
   test('a failed admin notification never loses the parked request', async () => {

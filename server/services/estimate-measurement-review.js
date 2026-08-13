@@ -188,7 +188,7 @@ async function createEstimateMeasurementReview({
   // pointing at a rolled-back request, and notifyAdmin's own DB/network
   // round-trips would hold the estimate row lock for their duration.
   if (outcome && outcome.notify) {
-    await sendOfficeNotification(outcome.notify);
+    await sendOfficeNotification(database, outcome.notify);
     delete outcome.notify;
   }
   return outcome;
@@ -198,7 +198,7 @@ async function createEstimateMeasurementReview({
 // rather than rejecting, and this is the flow's ONLY handoff — retry once,
 // then log LOUDLY; the request row stands either way (extension-route
 // pattern).
-async function sendOfficeNotification({ subject, description, customerId, estimateId, requestId }) {
+async function sendOfficeNotification(database, { subject, description, customerId, estimateId, requestId }) {
   const attempt = () => NotificationService.notifyAdmin(
     'estimate_measurement_review',
     subject,
@@ -213,18 +213,65 @@ async function sendOfficeNotification({ subject, description, customerId, estima
     logger.error(`[estimate-measurement-review] admin notification threw for request ${requestId}: ${err.message}`);
     return null;
   });
+  // Delivery (or policy suppression) stamps notifiedAt into the request's
+  // pricing_revision — the durable marker the dedupe path checks so a later
+  // customer retry re-arms an UNDELIVERED handoff (codex #3376 P2) without
+  // ever double-ringing a delivered one.
+  const stampDelivered = async () => {
+    try {
+      await database('service_requests')
+        .where({ id: requestId })
+        .update({
+          pricing_revision: database.raw(
+            "jsonb_set(COALESCE(pricing_revision, '{}'::jsonb), '{notifiedAt}', to_jsonb(NOW()::text))"
+          ),
+        });
+    } catch (err) {
+      // Stamp failure just means a future retry re-sends — the notification
+      // itself is idempotent enough for the office (same deep-link).
+      logger.warn(`[estimate-measurement-review] notifiedAt stamp failed for request ${requestId}: ${err.message}`);
+    }
+  };
+
   const first = await attempt();
   // suppressed:true is POLICY (internal/demo accounts must not ring the
   // bell), not an outage — terminal success, no retry, no loud error
   // (codex #3376 final head P3).
   if (first?.suppressed) {
     logger.info(`[estimate-measurement-review] admin notification suppressed by policy for request ${requestId}`);
+    await stampDelivered();
     return;
   }
-  if (first?.id) return;
+  if (first?.id) { await stampDelivered(); return; }
   const second = await attempt();
-  if (second?.suppressed || second?.id) return;
-  logger.error(`[estimate-measurement-review] admin notification FAILED TWICE for request ${requestId} — request row stands, office unnotified; surface via the requests panel sweep`);
+  if (second?.suppressed || second?.id) { await stampDelivered(); return; }
+  logger.error(`[estimate-measurement-review] admin notification FAILED TWICE for request ${requestId} — request row stands, office unnotified; customer retries will re-arm the send`);
+}
+
+
+// Outcome for a deduped submission: success, plus a re-armed notification
+// payload when the existing open request has NO delivery stamp — both
+// original attempts failed and the deep-link notification is the office's
+// only route to the request (codex #3376 P2).
+function dedupedOutcome(existingRow, estimateId) {
+  let revision = null;
+  try {
+    revision = typeof existingRow.pricing_revision === 'string'
+      ? JSON.parse(existingRow.pricing_revision)
+      : (existingRow.pricing_revision || null);
+  } catch { revision = null; }
+  if (revision?.notifiedAt) return { success: true, deduped: true };
+  return {
+    success: true,
+    deduped: true,
+    notify: {
+      subject: existingRow.subject,
+      description: existingRow.description,
+      customerId: existingRow.customer_id,
+      estimateId,
+      requestId: existingRow.id,
+    },
+  };
 }
 
 async function createReviewRow({ database, estimate, reasonKeys, cleanNote, shownSqFt, shownSource, serialized = false }) {
@@ -237,12 +284,16 @@ async function createReviewRow({ database, estimate, reasonKeys, cleanNote, show
     .where({ estimate_id: estimate.id, requested_service: MEASUREMENT_REVIEW_SERVICE_KEY })
     .whereNotIn(database.raw("COALESCE(status, 'new')"), OPEN_REQUEST_TERMINAL_STATUSES)
     .first();
-  if (existingOpen) return { success: true, deduped: true };
+  if (existingOpen) return dedupedOutcome(existingOpen, estimate.id);
 
   const customer = await resolveEstimateCustomer(database, estimate, {
     // Attribution reflects the actual entry point, not the add-service flow
     // this resolver was born in (codex #3376).
     sourceDetail: 'estimate_measurement_review',
+    // Route contract: the estimate row is NEVER mutated — the shared
+    // resolver's customer_id backfill is an estimate write, so this flow
+    // skips it (codex #3376 P1). The request row still links the customer.
+    skipEstimateBackfill: true,
   });
 
   const estimateNumber = estimate.estimate_number || estimate.id;
@@ -294,7 +345,7 @@ async function createReviewRow({ database, estimate, reasonKeys, cleanNote, show
         .where({ estimate_id: estimate.id, requested_service: MEASUREMENT_REVIEW_SERVICE_KEY })
         .whereNotIn(database.raw("COALESCE(status, 'new')"), OPEN_REQUEST_TERMINAL_STATUSES)
         .first();
-      if (dupe) return { success: true, deduped: true };
+      if (dupe) return dedupedOutcome(dupe, estimate.id);
     }
     throw err;
   }
