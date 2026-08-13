@@ -22,7 +22,7 @@ const CUSTOMER = {
 };
 
 function fakeTrx({ priorEstimateRows = [], customerRow = CUSTOMER } = {}) {
-  const ops = { inserts: [], updates: [], selects: [] };
+  const ops = { inserts: [], updates: [], selects: [], noWaitLocks: [] };
   const trx = (table) => {
     const q = {
       _criteria: null,
@@ -30,7 +30,8 @@ function fakeTrx({ priorEstimateRows = [], customerRow = CUSTOMER } = {}) {
       whereNull() { return q; },
       whereNot() { return q; },
       whereRaw() { return q; },
-      forUpdate() { return q; },
+      forUpdate() { q._forUpdate = true; return q; },
+      noWait() { q._noWait = true; ops.noWaitLocks.push({ table, forUpdate: !!q._forUpdate }); return q; },
       // Awaiting the bare chain (the prior-mint lineage query) resolves the
       // row LIST for estimates.
       then(resolve, reject) {
@@ -112,6 +113,16 @@ function baseArgs(overrides = {}) {
 }
 
 describe('mintReportClickEstimate', () => {
+  test('the prior-mint lineage lock is FOR UPDATE NOWAIT — never waits while holding the customer lock (audit r6 P1)', async () => {
+    // Both lock orders exist in the repo (accept: estimates→customer;
+    // admin edits: customer→estimates), so the mint must not WAIT on an
+    // estimate lock while the CTA writer's customer lock is held — a held
+    // lineage row 55P03s immediately into the route's retryable 503.
+    const { trx, ops } = fakeTrx();
+    await mintReportClickEstimate(trx, baseArgs());
+    expect(ops.noWaitLocks).toContainEqual({ table: 'estimates', forUpdate: true });
+  });
+
   test('mints the publish-without-delivery shape: sent + all four follow-up flags burned + server authority', async () => {
     const { trx, ops } = fakeTrx();
     const out = await mintReportClickEstimate(trx, baseArgs());

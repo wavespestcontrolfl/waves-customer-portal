@@ -1229,17 +1229,6 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
               if (!recorded) throw new Error('event insert failed');
             },
             ...(mintEligible ? {
-              // Estimate lineage locks BEFORE the writer's customer lock
-              // (in-hook audit r5 P1) — the accept path's order is
-              // estimates → customer, and inverting it here can deadlock a
-              // concurrent acceptance against a re-mint.
-              preLock: async (trx) => {
-                const { lockPriorMintLineage } = require('../services/service-report/click-estimate-mint');
-                await lockPriorMintLineage(trx, {
-                  customerId: joined.customer_id,
-                  serviceKey: crossSell.serviceKey,
-                });
-              },
               withRow: async (trx, { row, deduped }) => {
                 const { mintReportClickEstimate } = require('../services/service-report/click-estimate-mint');
                 // Prior-mint lineage is resolved DURABLY inside the mint

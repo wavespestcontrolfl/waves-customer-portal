@@ -64,19 +64,24 @@ function estimatePathFor(token) {
   return `/estimate/${token}`;
 }
 
-// Lock every prior CTA-mint estimate row for this customer + service.
-// MUST run BEFORE the transaction takes the customer row lock (in-hook
-// audit r5 P1): the acceptance path locks estimates → customer
-// (EstimateConverter), so the mint path has to acquire its estimate locks
-// in the same order — the route passes this as the CTA writer's preLock.
-// The mint re-runs the same query later; the locks are already held by
-// this transaction, so the re-acquire cannot block or invert the order.
+// Lock every prior CTA-mint estimate row for this customer + service —
+// NOWAIT, because this transaction already holds the CTA writer's
+// customer-row lock. Both lock orders exist in the repo (acceptance:
+// estimates → customer via EstimateConverter; admin customer edits:
+// customer → estimates), so no ordering can avoid every cycle (in-hook
+// audits r5+r6). What removes the deadlock is never WAITING on an
+// estimate lock while holding the customer lock: a held lineage row means
+// the customer is concurrently accepting (or staff is editing) that very
+// estimate — PG answers 55P03 immediately, the transaction rolls back
+// whole, and the route's non-drift mint-failure path returns the
+// retryable 503 the card already handles. No cycle can include this edge.
 async function lockPriorMintLineage(trx, { customerId, serviceKey }) {
   return trx('estimates')
     .where({ customer_id: customerId, source: 'service_report_cta' })
     .whereNull('archived_at')
     .whereRaw("estimate_data->'reportCtaMint'->>'serviceKey' = ?", [String(serviceKey || '')])
-    .forUpdate();
+    .forUpdate()
+    .noWait();
 }
 
 // Parse a stored estimates row's mint marker (jsonb hydrates as object,
@@ -392,6 +397,4 @@ async function mintReportClickEstimate(trx, {
   return { estimateId: created.id, token, url: estimatePathFor(token), reused: false };
 }
 
-module.exports = {
-  mintReportClickEstimate, ClickEstimateDriftError, priorMintStillLive, lockPriorMintLineage,
-};
+module.exports = { mintReportClickEstimate, ClickEstimateDriftError, priorMintStillLive };

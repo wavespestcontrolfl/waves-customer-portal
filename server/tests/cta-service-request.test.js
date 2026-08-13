@@ -41,22 +41,6 @@ describe('writeOrRefreshCtaRequest', () => {
     expect(CTA_REQUEST_SOURCES).toEqual(expect.arrayContaining(['service_report', 'portal_home']));
   });
 
-  test('preLock runs BEFORE the customer serialization lock (accept-path lock order, audit r5 P1)', async () => {
-    // The acceptance transaction locks estimates → customer; a hook that
-    // needs estimate locks must take them before this writer locks the
-    // customer row, or a concurrent accept + re-mint can deadlock.
-    const { db, ops } = fakeDb();
-    let customerLookupsAtPreLock = null;
-    await writeOrRefreshCtaRequest(db, {
-      ...ARGS,
-      preLock: async () => {
-        customerLookupsAtPreLock = ops.lookups.filter((l) => l.table === 'customers').length;
-      },
-    });
-    expect(customerLookupsAtPreLock).toBe(0);
-    expect(ops.lookups.some((l) => l.table === 'customers')).toBe(true);
-  });
-
   test('no open row → inserts with the tapping surface as source', async () => {
     const { db, ops } = fakeDb();
     const outcome = await writeOrRefreshCtaRequest(db, ARGS);

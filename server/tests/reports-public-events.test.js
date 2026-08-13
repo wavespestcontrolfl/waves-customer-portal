@@ -9,10 +9,7 @@ jest.mock('../models/db', () => {
 // the cross-sell click tests turn it on for themselves.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../services/service-report/cross-sell', () => ({ buildReportCrossSell: jest.fn() }));
-jest.mock('../services/service-report/click-estimate-mint', () => ({
-  mintReportClickEstimate: jest.fn(),
-  lockPriorMintLineage: jest.fn(async () => []),
-}));
+jest.mock('../services/service-report/click-estimate-mint', () => ({ mintReportClickEstimate: jest.fn() }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn().mockResolvedValue(null) }));
 jest.mock('../config', () => ({
   s3: { bucket: 'test-bucket', region: 'us-east-1' },
@@ -298,7 +295,7 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
 describe('click-to-estimate mint (GATE_REPORT_CLICK_TO_ESTIMATE)', () => {
   const { isEnabled } = require('../config/feature-gates');
   const { buildReportCrossSell } = require('../services/service-report/cross-sell');
-  const { mintReportClickEstimate, lockPriorMintLineage } = require('../services/service-report/click-estimate-mint');
+  const { mintReportClickEstimate } = require('../services/service-report/click-estimate-mint');
 
   const ENGINE_CONTEXT = {
     propertyInput: { homeSqFt: 2100 },
@@ -390,13 +387,6 @@ describe('click-to-estimate mint (GATE_REPORT_CLICK_TO_ESTIMATE)', () => {
     const [, mintArgs] = mintReportClickEstimate.mock.calls[0];
     expect(mintArgs.customer).toBe(ENGINE_CONTEXT.customer);
     expect(mintArgs.crossSell).toBe(PRICED_OFFER);
-    // Deadlock-order preLock (audit r5 P1): the mint path pre-locks its
-    // estimate lineage before the CTA writer takes the customer lock —
-    // the writer's own suite pins the preLock-before-customer-lock order.
-    expect(lockPriorMintLineage).toHaveBeenCalledWith(expect.anything(), {
-      customerId: 'cust-1',
-      serviceKey: PRICED_OFFER.serviceKey,
-    });
     // The stored request snapshot must NOT embed the server-internal engine
     // context: the customer row's incidental fields move between taps, so
     // embedding it would turn every identical tap into a "material refresh"

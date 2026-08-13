@@ -73,17 +73,9 @@ const CTA_REQUEST_SOURCES = ['service_report', 'portal_home'];
 // rolls back the whole outcome, row write included.
 async function writeOrRefreshCtaRequest(db, {
   customerId, requestedService, source, subject, description, revisionSnapshot,
-  onWrite = null, withRow = null, preLock = null,
+  onWrite = null, withRow = null,
 }) {
   return db.transaction(async (trx) => {
-    // preLock(trx) runs BEFORE the customer serialization lock (in-hook
-    // audit r5 P1): the acceptance transaction locks the ESTIMATE row
-    // first and reaches the customer row later (EstimateConverter), so any
-    // estimate-row locks this writer's hooks will need must be acquired
-    // first too — customer-then-estimates here against estimates-then-
-    // customer there is a deadlock. The click-to-estimate path locks its
-    // prior-mint lineage rows in this seam.
-    if (preLock) await preLock(trx);
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
     const existing = await trx('service_requests')
       .where({ customer_id: customerId, requested_service: requestedService })
