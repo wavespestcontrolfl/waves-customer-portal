@@ -501,6 +501,30 @@ describe('freshness + split-collapse contracts (source shape)', () => {
     expect(ncy).toMatch(/if \(opp\.action_type !== 'create_or_refresh_city_service_page'\) \{[\s\S]{0,80}collapsed\.push\(opp\)/);
   });
 
+  test('no_content_yet carries the specialty topic behind broad canonicalization', () => {
+    // 'wasp'/'bed bug' canonicalize to broad 'pest' and 'aeration' to
+    // 'lawn', but those narrow topics are individually FAQ-blocked while the
+    // broad service is not. Without the field the brief keeps its default
+    // FAQ mandate and guardrail-options passes only the broad service, so
+    // the draft earns an FAQ the repo treats as policy-blocked.
+    const ncy = src.slice(src.indexOf('async mineNoContentYet'), src.indexOf('// ── persistence'));
+    expect(ncy).toMatch(/specialty_topic: extractSpecialtyTopic\(\[q\.query\]\)/);
+    // …and the collapse recomputes across the group.
+    expect(ncy).toMatch(/winner\.signal_metadata\.specialty_topic = extractSpecialtyTopic\(\[/);
+  });
+
+  test('a blocked topic on a LOSING query survives the target collapse', () => {
+    const { extractSpecialtyTopic } = require('../services/seo/gsc-opportunity-miner')._internals;
+    // The coverage section makes the draft address every collapsed
+    // phrasing, so a generic winner beside a blocked sibling must still
+    // lose its FAQ mandate — otherwise the page FAQs a blocked topic.
+    expect(extractSpecialtyTopic(['pest control sarasota', 'wasp nest removal sarasota'])).toBe('wasp');
+    // Winner-first ordering: its own topic still wins when it has one.
+    expect(extractSpecialtyTopic(['bed bug treatment sarasota', 'wasp nest removal sarasota'])).toBe('bed-bug');
+    // A wholly generic segment stays null rather than inventing a topic.
+    expect(extractSpecialtyTopic(['pest control sarasota', 'exterminator sarasota'])).toBeNull();
+  });
+
   test('the collapse winner keeps a QUERY-derived key, never a target key', () => {
     // A target-keyed row would dedupe just as well but be stable forever,
     // and the upsert's frozen-row guard skips done/skipped rows ENTIRELY —

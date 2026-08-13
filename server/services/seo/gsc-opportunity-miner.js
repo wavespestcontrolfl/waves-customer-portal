@@ -3590,6 +3590,17 @@ class GscOpportunityMiner {
           impressions: parseInt(q.impressions, 10),
           avg_position: parseFloat(q.avg_position),
           intent_type: q.intent_type,
+          // The specific topic behind specialty→broad canonicalization.
+          // 'wasp' and 'bed bug' canonicalize to 'pest', 'aeration' to
+          // 'lawn' — and those narrow topics are individually FAQ-blocked
+          // while the broad service is not. Without this the brief keeps
+          // its default FAQ mandate (isFaqBlockedService reads this field)
+          // and guardrail-options passes only the broad service to the
+          // publish guard, so the draft earns an FAQ the repo treats as
+          // policy-blocked and parks on FAQ_BLOCKED_SERVICE. The listicle
+          // lane already solved this; the newly-emitting bucket has to
+          // call the same helper (Codex P1).
+          specialty_topic: extractSpecialtyTopic([q.query]),
         },
       };
       const { total, breakdown } = scoreOpportunity(opp, {
@@ -3650,6 +3661,16 @@ class GscOpportunityMiner {
           .sort();
         winner.signal_metadata.contributing_impressions = group
           .reduce((sum, o) => sum + (o.signal_metadata.impressions || 0), 0);
+        // A blocked topic on a LOSING query still binds the page, because
+        // the brief's coverage section makes the draft address every
+        // collapsed phrasing — so a generic winner beside a 'wasp' or
+        // 'bed bug' sibling would otherwise keep its FAQ mandate and park
+        // on FAQ_BLOCKED_SERVICE. Winner first: the helper returns the
+        // first match, so its own topic still wins when it has one.
+        winner.signal_metadata.specialty_topic = extractSpecialtyTopic([
+          winner.query,
+          ...group.filter((o) => o !== winner).map((o) => o.query),
+        ]);
       }
       collapsed.push(winner);
     }
