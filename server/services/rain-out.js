@@ -861,13 +861,15 @@ async function getOptions(serviceId) {
 
   // Overlap advisory on the same-day presets: +2h/+4h are pure clock
   // offsets with no occupancy input, so they can land on a booked stop.
-  // Day options above skip the probe — findRescheduleOptions already
+  // Day options skip the ANCHOR probe — findRescheduleOptions already
   // filters its candidates against the same predicate (rebooker.js
-  // candidate clash check), so they arrive conflict-free. Route siblings
-  // are flagged, not dropped — the sheet filters by its scope toggle
-  // (a route-scope same-day push shifts them too). Best-effort: a probe
-  // failure renders the pill without a badge, never blocks the sheet
-  // (same fail-open posture as the rain badges).
+  // candidate clash check), so the anchor's own window arrives
+  // conflict-free — but that check only ever saw the anchor, so they still
+  // need the route-scope probe below. Route siblings are flagged, not
+  // dropped — the sheet filters by its scope toggle (a route-scope
+  // same-day push shifts them too). Best-effort: a probe failure renders
+  // the pill without a badge, never blocks the sheet (same fail-open
+  // posture as the rain badges).
   const routeSiblingIds = new Set(route.map((j) => String(j.id)));
   for (const opt of sameDay) {
     try {
@@ -896,6 +898,29 @@ async function getOptions(serviceId) {
       opt.routeConflicts = [];
     }
   }
+
+  // Day options need the route-scope probe too (codex #3375 P1): the
+  // rebooker's candidate filter cleared the ANCHOR's window on that date
+  // and nothing else, but a route-scope day move carries every remaining
+  // stop onto the same date keeping its own window — and that date is a
+  // different day's schedule the candidate check never looked at. Without
+  // this the tech picks a "clean" Thursday, commit moves and texts the
+  // early stops, then SLOT_TAKENs on the sibling. Probed concurrently:
+  // one batch per option instead of days × route round-trips.
+  await Promise.all(days.map(async (opt) => {
+    try {
+      opt.routeConflicts = await routeScopeConflicts({
+        serviceId,
+        service,
+        route,
+        target: { date: opt.date, window: opt.window },
+        nameScope: service.technician_id || null,
+      });
+    } catch (err) {
+      logger.info(`[rain-out] route-scope probe failed for ${serviceId} ${opt.date}: ${err.message}`);
+      opt.routeConflicts = [];
+    }
+  }));
 
   // Custom-reason availability for the sheet: the option renders only when
   // the gate is on AND the template row is live — a missing/disabled row

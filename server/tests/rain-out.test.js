@@ -1843,6 +1843,45 @@ describe('rain-out service', () => {
       }
     });
 
+    test('day options carry a route-scope probe even though their anchor window is pre-filtered', async () => {
+      const { findConflictingVisits } = require('../services/scheduling/occupancy');
+      jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
+      try {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([
+          { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120 },
+        ]);
+        // The rebooker cleared the anchor's 08:00 slot on the 12th, but a
+        // route-scope move also carries the 10:00 sibling onto that date —
+        // and THAT window is taken there.
+        findConflictingVisits.mockImplementation(async ({ date, windowStart }) => (
+          date === '2026-06-12' && windowStart === '10:00'
+            ? [{
+              id: 'svc-blocker', customer_id: null, technician_id: 'tech-1', status: 'confirmed',
+              service_type: 'Estimate', window_start: '10:00:00', window_end: '11:00:00',
+              estimated_duration_minutes: 60, reservation_expires_at: '2026-06-12T10:00:00Z',
+            }]
+            : []
+        ));
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+            chain({ rows: [{ id: 'svc-2', window_start: '10:00:00', window_end: '11:00:00' }] }),
+          ],
+        });
+
+        const options = await RainOut.getOptions('svc-1');
+
+        expect(options.days[0].conflicts).toBeUndefined();
+        expect(options.days[0].routeConflicts).toEqual([
+          expect.objectContaining({ id: 'svc-blocker', isHold: true, customerName: null }),
+        ]);
+      } finally {
+        jest.useRealTimers();
+        findConflictingVisits.mockReset();
+        findConflictingVisits.mockResolvedValue([]);
+      }
+    });
+
     test('a conflict-probe failure renders the preset without a badge, never blocks the sheet', async () => {
       const { findConflictingVisits } = require('../services/scheduling/occupancy');
       jest.useFakeTimers({ now: new Date('2026-06-11T13:00:00Z') });
