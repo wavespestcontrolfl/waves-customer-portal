@@ -647,10 +647,18 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   const LOT_DRIVEN_SERVICES = ['lawn', 'oneTimeLawn', 'lawnPestControl', 'mosquito', 'oneTimeMosquito', 'treeShrub'];
   const usesLot = LOT_DRIVEN_SERVICES.some((s) => intent.services?.[s])
     || lines.some((l) => l.turfSf || l.turfSqFt || l.treatableArea);
+  // A measured TURF area validates only the services that price from turf
+  // (the lawn family). Mosquito and tree & shrub derive their treatable
+  // area from the LOT, so a unit with measured lawn turf plus a mosquito
+  // request still has nothing real behind the mosquito line — the measured
+  // turf must not silence the no-lot review for it (codex r54 P1).
+  const TURF_PRICED_SERVICES = new Set(['lawn', 'oneTimeLawn', 'lawnPestControl']);
+  const requestsNonTurfLotService = LOT_DRIVEN_SERVICES
+    .some((s) => !TURF_PRICED_SERVICES.has(s) && intent.services?.[s]);
   if (usesLot && FALLBACK_SQFT_SOURCES.has(propertyFacts?.lot?.source)) {
     reasons.push(`lot sqft from fallback source (${propertyFacts.lot.source})`);
   } else if (usesLot && String(propertyFacts?.lot?.source || '').startsWith('not_applicable:')
-    && !turfAreaFullyMeasured(lines, engineInput)) {
+    && (requestsNonTurfLotService || !turfAreaFullyMeasured(lines, engineInput))) {
     // A unit/suite scope has NO individual lot by design — but a
     // lot-driven service (lawn/mosquito/T&S) on that scope has nothing to
     // price from: the engine's zero-area fallback returns a minimum-priced

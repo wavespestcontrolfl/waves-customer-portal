@@ -1165,6 +1165,23 @@ describe('a profile measurement cannot silence the unit no-lot review (r19)', ()
     });
   });
 
+  test('measured turf never validates a mosquito request — it prices from the lot (r54)', () => {
+    // Mosquito's treatable area derives from the LOT, which a unit scope
+    // does not have; the measured LAWN turf says nothing about it, so the
+    // no-lot review must stand even with a verified turf measurement.
+    withGate('true', () => {
+      const out = classifyLane({
+        ...unitLawnArgs,
+        intent: {
+          ...unitLawnArgs.intent,
+          services: { lawn: { frequency: 'monthly' }, mosquito: {} },
+        },
+        engineInput: { measuredTurfSf: 4000, measuredTurfUnitVerified: true },
+      });
+      expect(noLotReason(out)).toBe(true);
+    });
+  });
+
   test('buildEngineInput stamps the profile area as unverified unless the unit matched exactly', () => {
     const args = {
       intent: { is_commercial: false, services: {} },
