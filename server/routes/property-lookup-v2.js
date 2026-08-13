@@ -278,8 +278,11 @@ async function performPropertyLookupCore(address, options = {}) {
               poolPermit: synced || (syncSourced ? null : cachedPermits.poolPermit),
             };
           }
-          const construction = await findConstructionActivity({ parcelPin, looseKey });
-          if (construction) cached.property_record._constructionActivity = construction;
+          // Unconditional assign: null CLEARS evidence a prior hit
+          // attached whose signals have since expired (CO'd long ago,
+          // permit vanished) — stale construction evidence must not
+          // outlive the facts.
+          cached.property_record._constructionActivity = await findConstructionActivity({ parcelPin, looseKey });
         } catch { /* fail-open: table missing or DB blip = no signal */ }
       }
       // House-number-audit backfill, same pattern: record-bearing rows cached

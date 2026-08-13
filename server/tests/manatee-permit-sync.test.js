@@ -285,6 +285,8 @@ describe('findConstructionActivity', () => {
     const activity = await findConstructionActivity({ parcelPin: '4567890123' });
     expect(activity.underConstruction).toBe(true);
     expect(activity.newBuild).toBe(false);
+    expect(activity.activePermit.permitNo).toBe('BLD9902-0001');
+    expect(activity.newBuildPermit).toBeNull();
   });
 
   test('recent new-construction CO → newBuild, not underConstruction', async () => {
@@ -299,6 +301,8 @@ describe('findConstructionActivity', () => {
     const activity = await findConstructionActivity({ looseKey: '200sample34219' });
     expect(activity.newBuild).toBe(true);
     expect(activity.underConstruction).toBe(false);
+    expect(activity.newBuildPermit.permitNo).toBe('BLD9902-0001');
+    expect(activity.activePermit).toBeNull();
   });
 
   test('no signal rows (vanished/stale/alteration-only permits) → null, no evidence attached', async () => {

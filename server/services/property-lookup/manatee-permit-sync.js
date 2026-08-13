@@ -567,16 +567,21 @@ async function findConstructionActivity({ parcelPin, looseKey } = {}) {
       .orderBy('co_date', 'desc')
       .first();
     if (ucRow || nbRow) {
-      const top = ucRow || nbRow;
+      // Per-signal permit detail — one flat permitNo next to two flags let
+      // a reader attribute the wrong permit to a signal when both fire.
+      const shape = (row) => (row ? {
+        permitNo: row.permit_no,
+        status: row.status || null,
+        permitType: row.permit_type || null,
+        typeOfWork: row.type_of_work || null,
+        issuedAt: toIso(row.issued_date),
+        coIssuedAt: toIso(row.co_date),
+      } : null);
       return {
-        permitNo: top.permit_no,
-        status: top.status || null,
-        permitType: top.permit_type || null,
-        typeOfWork: top.type_of_work || null,
-        issuedAt: toIso(top.issued_date),
-        coIssuedAt: toIso(top.co_date),
         underConstruction: Boolean(ucRow),
         newBuild: Boolean(nbRow),
+        activePermit: shape(ucRow),
+        newBuildPermit: shape(nbRow),
       };
     }
   }
