@@ -50,6 +50,7 @@ const VOIDED_ROW = {
 function conn({
   rows = [VOIDED_ROW], replacement = undefined, liveOnVisit = undefined,
   byId = {}, visitDate = undefined, seriesDates = [], paymentRow = undefined,
+  termRow = undefined,
 } = {}) {
   const fn = jest.fn((table) => {
     const q = {};
@@ -67,7 +68,9 @@ function conn({
     q.whereNot = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
-    if (table === 'payments') {
+    if (table === 'annual_prepay_terms') {
+      q.first = jest.fn(async () => termRow);
+    } else if (table === 'payments') {
       // The real lookup rides metadata->>'invoice_id' via whereRaw — a
       // column-shaped where({invoice_id}) would throw in prod (Codex P0
       // r16), so the stub only answers the raw form.
@@ -297,6 +300,29 @@ describe('sweepOrphanedPrepaySwitchRestores — the durable repair job', () => {
     expect(voidSpy).not.toHaveBeenCalled();
     expect(restoreSpy).not.toHaveBeenCalled();
     voidSpy.mockRestore();
+  });
+
+  test('a REFUND-CANCELLED term makes a still-"paid" prepay dead — the refund case repairs (Codex P0 r22)', async () => {
+    const c = conn({
+      rows: [VOIDED_ROW],
+      byId: { 'inv-prepay': { id: 'inv-prepay', status: 'paid' } },
+      termRow: { status: 'cancelled', renewal_decision: null },
+    });
+    const restored = await InvoiceService.sweepOrphanedPrepaySwitchRestores(c);
+    expect(mockTermSync).toHaveBeenCalledWith('inv-prepay', c);
+    expect(restoreSpy).toHaveBeenCalledWith('inv-prepay', c);
+    expect(restored).toHaveLength(1);
+  });
+
+  test('a DECIDED renewal lapse is NOT dead — its paid year still covers, restoring would double-bill', async () => {
+    const c = conn({
+      rows: [VOIDED_ROW],
+      byId: { 'inv-prepay': { id: 'inv-prepay', status: 'paid' } },
+      termRow: { status: 'cancelled', renewal_decision: 'cancel' },
+    });
+    const restored = await InvoiceService.sweepOrphanedPrepaySwitchRestores(c);
+    expect(restoreSpy).not.toHaveBeenCalled();
+    expect(restored).toEqual([]);
   });
 
   test('a LIVE superseding prepay is left alone — nothing to repair yet', async () => {

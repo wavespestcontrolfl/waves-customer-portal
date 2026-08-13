@@ -4343,6 +4343,19 @@ const InvoiceService = {
         .first("id", "status", "sent_at", "paid_at", "stripe_payment_intent_id", "created_at");
       let dead = !!prepay
         && ["void", "cancelled", "canceled", "refunded"].includes(String(prepay.status || "").toLowerCase());
+      // A FULL Stripe refund cancels the TERM through the payment sync while
+      // the invoice itself commonly stays 'paid' (Codex P0 r22) — deadness
+      // must also read the canonical term state. Only a TRUE void/refund
+      // cancel counts (renewal_decision NULL): a decided renewal lapse keeps
+      // its paid, covered year, and restoring beside it would double-bill.
+      if (!dead && prepay) {
+        const term = await conn("annual_prepay_terms")
+          .where({ prepay_invoice_id: prepayId })
+          .first("status", "renewal_decision");
+        if (term && String(term.status || "") === "cancelled" && !term.renewal_decision) {
+          dead = true;
+        }
+      }
       if (!dead && prepay
         && String(prepay.status || "").toLowerCase() === "draft"
         && !prepay.sent_at && !prepay.paid_at
