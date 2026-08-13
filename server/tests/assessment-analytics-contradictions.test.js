@@ -188,6 +188,34 @@ test('peak-vs-shoulder rule attributes the bridged wiki entry and gates it', asy
   }));
 });
 
+test('peak-vs-shoulder uses the slug fallback when no exact bridge match exists', async () => {
+  const dbMock = makeDb({
+    product_efficacy: [{
+      product_name: 'Celsius WG',
+      avg_delta_overall: 2, // rule 1 must NOT fire
+      application_count: 6,
+      peak_stats: JSON.stringify({ count: 6, avgDelta: -5 }),
+      shoulder_stats: JSON.stringify({ count: 5, avgDelta: 9 }),
+      dormant_stats: null,
+    }],
+    knowledge_base: [{ ...KB_PRODUCT, content: 'Apply Celsius WG in summer peak season.' }],
+    knowledge_bridge: [], // no bridge — the seasonal rule must still attribute
+    knowledge_entries: [{ id: 'wiki-slug-match' }],
+    knowledge_contradictions: [],
+  });
+  global.__analyticsDbMock = dbMock;
+
+  const result = await analytics.detectContradictions();
+
+  expect(result.contradictions).toBe(1);
+  const inserted = dbMock.state.inserts.knowledge_contradictions[0];
+  expect(inserted.description).toContain('peak season');
+  expect(inserted.wiki_entry_id).toBe('wiki-slug-match');
+  expect(recomputeEntryReviewGate).toHaveBeenCalledWith('wiki-slug-match', expect.objectContaining({
+    assumeOpenIds: expect.any(Array),
+  }));
+});
+
 test('an existing open row with null attribution is backfilled and gated when the bridge resolves', async () => {
   const updates = [];
   const dbMock = makeDb({

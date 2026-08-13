@@ -567,10 +567,27 @@ const KnowledgeBridge = {
         created_by: createdBy || 'system',
       }).onConflict(['kb_entry_id', 'wiki_entry_id', 'link_type']).ignore().returning('*');
 
-      // Also set direct FK pointers for fast joins
+      // Also set direct FK pointers for fast joins — but ONLY when the
+      // entry's links are unambiguous. autoLink's substring matching can
+      // bridge a broad KB entry ("Bifen") to several wiki pages; the weekly
+      // cron would otherwise overwrite these singular pointers with whichever
+      // unordered match was processed last. Ambiguous sets never write the
+      // pointer (existing values are left alone, never clobbered or cleared).
       if (kbEntryId && wikiEntryId) {
-        await db('knowledge_base').where({ id: kbEntryId }).update({ wiki_entry_id: wikiEntryId });
-        await db('knowledge_entries').where({ id: wikiEntryId }).update({ kb_entry_id: kbEntryId });
+        const kbSide = await db('knowledge_bridge')
+          .where({ kb_entry_id: kbEntryId }).whereNotNull('wiki_entry_id')
+          .select('wiki_entry_id');
+        const kbTargets = [...new Set(kbSide.map((r) => r.wiki_entry_id))];
+        if (kbTargets.length === 1 || kbSide.length === 0) {
+          await db('knowledge_base').where({ id: kbEntryId }).update({ wiki_entry_id: wikiEntryId });
+        }
+        const wikiSide = await db('knowledge_bridge')
+          .where({ wiki_entry_id: wikiEntryId }).whereNotNull('kb_entry_id')
+          .select('kb_entry_id');
+        const wikiTargets = [...new Set(wikiSide.map((r) => r.kb_entry_id))];
+        if (wikiTargets.length === 1 || wikiSide.length === 0) {
+          await db('knowledge_entries').where({ id: wikiEntryId }).update({ kb_entry_id: kbEntryId });
+        }
       }
 
       return link || null;

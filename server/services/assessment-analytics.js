@@ -713,6 +713,23 @@ async function detectContradictions() {
         if (!eff.product_name.toLowerCase().includes(kbName) && !kbName.includes(eff.product_name.toLowerCase())) continue;
 
         const bridged = bridgeFor(eff.product_name);
+        // One wiki resolution per efficacy row, shared by BOTH rules (the
+        // seasonal rule previously skipped the slug fallback and stayed
+        // unattributed whenever no exact bridge existed). Memoized so the
+        // fallback query runs at most once per row.
+        let resolvedWikiEntryId;
+        const resolveWikiEntryId = async () => {
+          if (resolvedWikiEntryId !== undefined) return resolvedWikiEntryId;
+          if (bridged) {
+            resolvedWikiEntryId = bridged.wiki_entry_id;
+          } else {
+            const wikiEntry = await db('knowledge_entries')
+              .where('slug', 'ilike', `%${slugify(eff.product_name)}%`)
+              .first();
+            resolvedWikiEntryId = wikiEntry?.id ?? null;
+          }
+          return resolvedWikiEntryId;
+        };
 
         // Check: KB claims "best for" or "effective" but data shows negative delta
         if (eff.avg_delta_overall != null && eff.avg_delta_overall < -5 && eff.application_count >= 5) {
@@ -727,14 +744,7 @@ async function detectContradictions() {
             };
 
             // Find linked wiki entry — bridge pair first, slug fallback
-            if (bridged) {
-              contradiction.wiki_entry_id = bridged.wiki_entry_id;
-            } else {
-              const wikiEntry = await db('knowledge_entries')
-                .where('slug', 'ilike', `%${slugify(eff.product_name)}%`)
-                .first();
-              if (wikiEntry) contradiction.wiki_entry_id = wikiEntry.id;
-            }
+            contradiction.wiki_entry_id = await resolveWikiEntryId();
 
             // Check if already flagged
             const existing = await db('knowledge_contradictions')
@@ -779,10 +789,11 @@ async function detectContradictions() {
             if (shoulderStats?.avgDelta != null && shoulderStats.avgDelta > peakStats.avgDelta + 10) {
               const contradiction = {
                 kb_entry_id: kbEntry.id,
-                // Bridge attribution so the wiki page re-gates and the
-                // Field Intelligence queue surfaces it — a null wiki_entry_id
-                // row was invisible to the review-tier machinery.
-                wiki_entry_id: bridged?.wiki_entry_id || null,
+                // Same resolution as the rule above (bridge → slug fallback)
+                // so the wiki page re-gates and the Field Intelligence queue
+                // surfaces it — a null wiki_entry_id row is invisible to the
+                // review-tier machinery.
+                wiki_entry_id: await resolveWikiEntryId(),
                 contradiction_type: 'claim_vs_data',
                 kb_claim: `Claudeopedia associates ${eff.product_name} with summer/peak season`,
                 wiki_evidence: `Peak season avg delta: ${peakStats.avgDelta} (${peakStats.count} apps) vs shoulder: ${shoulderStats.avgDelta}`,
