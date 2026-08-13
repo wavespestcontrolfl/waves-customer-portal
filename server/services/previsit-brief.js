@@ -789,6 +789,17 @@ const COMMON_PROSE_WORDS = new Set([
   'weeks', 'weekly', 'window', 'windows', 'within', 'worth', 'yesterday', 'trail', 'trails', 'chemical', 'chemicals', 'across', 'during', 'under', 'beside', 'beneath', 'against',
   'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november',
   'december', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+  // 4-letter prose words (threshold dropped to 4 so short organism names
+  // like mice/rats are scanned; ordinary short words must stay known).
+  'have', 'been', 'will', 'must', 'then', 'than', 'they', 'them', 'when', 'each',
+  'only', 'also', 'some', 'more', 'most', 'done', 'sure', 'fine', 'good', 'open',
+  'next', 'last', 'line', 'side', 'gate', 'note', 'call', 'text', 'week', 'days',
+  'date', 'time', 'door', 'wall', 'lawn', 'turf', 'tree', 'were', 'work', 'both',
+  'here', 'there', 'keep', 'left', 'high', 'look', 'like', 'plan', 'stop', 'take',
+  'told', 'used', 'want', 'well', 'your', 'their', 'after', 'need', 'needs', 'ask',
+  'asks', 'same', 'soon', 'once', 'twice', 'edge', 'best', 'back', 'full', 'half',
+  'away', 'near', 'upon', 'very', 'much', 'many', 'wear', 'shoe', 'shoes', 'rain',
+  'wind', 'heat', 'cold', 'warm', 'soil', 'seed', 'grub', 'grubs', 'weed', 'weeds', 'file', 'card', 'paid', 'owed', 'owes', 'due', 'dues', 'crew', 'team', 'unit', 'step', 'path', 'walk', 'tarp', 'hose', 'pump', 'tank', 'mask', 'kit',
 ]);
 
 // Light stemming for the rare-word pass — plurals/participles of known or
@@ -989,13 +1000,16 @@ function findUngroundedClaim(body, grounding) {
     || groundedText.includes(v)
   ));
   for (const field of outputFields) {
-    for (const m of String(field).toLowerCase().matchAll(/[a-z][a-z'-]{4,}/g)) {
+    // 4+ characters: 'mice'/'rats'/'tick'/'flea'-length organisms must
+    // not slip under the scan (3-letter singulars are covered in practice
+    // by substring grounding — 'ant' grounds on 'ants').
+    for (const m of String(field).toLowerCase().matchAll(/[a-z][a-z'-]{3,}/g)) {
       const word = m[0];
       // Hyphenated prose ("re-check", "walk-through"): known when every
       // part is known; short parts are below the rare-word threshold.
       const parts = word.split('-').filter(Boolean);
       const known = parts.length > 1
-        ? parts.every((part) => part.length < 5 || wordKnown(part))
+        ? parts.every((part) => part.length < 4 || wordKnown(part))
         : wordKnown(word);
       if (!known) return { kind: 'novel_term', term: word };
     }

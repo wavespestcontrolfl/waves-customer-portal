@@ -561,6 +561,14 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
     expect(rejected.reason).toMatch(/^ungrounded_novel_product:/);
   });
 
+  test('a short hallucinated organism (4 letters) is caught by the rare-word pass', () => {
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Inspect mice near the garage'] },
+      GROUNDING,
+    );
+    expect(verdict.reason).toMatch(/^ungrounded_novel_term:mice/);
+  });
+
   test('a clean response yields the sanitized body', () => {
     const verdict = validateBriefJson({ ...CLEAN_LLM_JSON }, GROUNDING);
     expect(verdict.reason).toBeUndefined();
