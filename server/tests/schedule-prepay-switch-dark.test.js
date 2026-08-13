@@ -51,6 +51,23 @@ describe('on-site prepay switch — both gates dark', () => {
     expect(status).toBe(404);
   });
 
+  test('the atomic switch and undo endpoints are unobservable too', async () => {
+    const post = async (path) => {
+      const app = express();
+      app.use(express.json());
+      app.use('/admin/schedule', router);
+      const server = app.listen(0);
+      try {
+        const res = await fetch(`http://127.0.0.1:${server.address().port}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        return res.status;
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    };
+    expect(await post('/admin/schedule/svc-1/prepay-switch')).toBe(404);
+    expect(await post('/admin/schedule/svc-1/prepay-switch/undo')).toBe(404);
+  });
+
   test('availability answers false on both lanes', async () => {
     const { body } = await get('/admin/schedule/annual-prepay-availability');
     expect(body).toEqual({ enabled: false, switchEnabled: false });

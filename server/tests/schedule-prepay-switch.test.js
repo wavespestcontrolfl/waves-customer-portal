@@ -33,9 +33,17 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 const mockVoidInvoice = jest.fn(async () => ({ status: 'void' }));
 const mockCreateInvoice = jest.fn(async () => ({ id: 'inv-new', invoice_number: 'WPC-2026-0401' }));
+const mockSendInvoice = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/invoice', () => ({
   voidInvoice: (...args) => mockVoidInvoice(...args),
   create: (...args) => mockCreateInvoice(...args),
+  sendViaSMSAndEmail: (...args) => mockSendInvoice(...args),
+}));
+// The atomic switch borrows the Customer 360 advisory-lock + overlap assert;
+// the real admin-customers module is far too heavy for this harness.
+const mockLockOverlap = jest.fn(async () => {});
+jest.mock('../routes/admin-customers', () => ({
+  _private: { lockAndAssertNoAnnualPrepayOverlap: (...args) => mockLockOverlap(...args) },
 }));
 const mockResolveForInvoice = jest.fn(async () => ({ payerId: null }));
 jest.mock('../services/payer', () => ({
@@ -109,7 +117,9 @@ function stubTables({
   term = undefined,
   addonCount = 0,
   seriesCount = 4,
+  casResult = 1,
 } = {}) {
+  stubTables.casCalls = [];
   db.transaction = jest.fn(async (cb) => cb(db));
   db.mockImplementation((table) => {
     const q = {};
@@ -129,6 +139,11 @@ function stubTables({
     q.whereIn = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
+    q.update = jest.fn(async () => {
+      if (table === 'invoices') { stubTables.casCalls.push(true); return casResult; }
+      return 1;
+    });
+    q.insert = jest.fn(async () => [{}]);
     q.count = jest.fn(() => { isCount = true; return q; });
     q.select = jest.fn(async () => {
       if (table === 'invoices') {
@@ -424,9 +439,9 @@ describe('on-site prepay switch — gate surface', () => {
 });
 
 // ── The write endpoints ───────────────────────────────────────────────────
-// The preview only DISPLAYS the supersede set; these are what actually retire
-// and restore the per-application invoice, and they must enforce the same
-// rules against the live DB (the client's list is never trusted).
+// POST /:id/prepay-switch is the WHOLE switch in one transaction: CAS-void
+// the accept-minted draft + mint the prepay invoice and term together. The
+// preview only displays; these enforce.
 async function post(path, body = {}) {
   const app = express();
   app.use(express.json());
@@ -445,69 +460,86 @@ async function post(path, body = {}) {
   }
 }
 
-describe('on-site prepay switch — supersede (retire before the tender)', () => {
+const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+
+describe('on-site prepay switch — the atomic switch endpoint', () => {
+  let termSpy;
   beforeEach(() => {
     jest.clearAllMocks();
-    mockVoidInvoice.mockResolvedValue({ status: 'void' });
     mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    mockLockOverlap.mockResolvedValue(undefined);
+    // The mint's total must equal the server-quoted amount to the cent.
+    mockCreateInvoice.mockResolvedValue({ id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok', total: 512 });
+    termSpy = jest.spyOn(AnnualPrepayRenewals, 'createTermForAnnualPrepay')
+      .mockResolvedValue({ id: 'term-1' });
     stubTables();
   });
+  afterEach(() => termSpy.mockRestore());
 
-  test('voids the accept-minted invoice through the canonical void path', async () => {
-    const { status, body } = await post('/svc-1/prepay-switch/supersede');
-    expect(status).toBe(200);
+  test('voids the draft and mints invoice + term in one transaction, all server-derived', async () => {
+    const { status, body } = await post('/svc-1/prepay-switch', { chargeInPerson: true, amount: 1 /* ignored */ });
+    expect(status).toBe(201);
+    expect(body.invoice).toMatchObject({ id: 'inv-prepay', invoice_number: 'WPC-2026-0400' });
     expect(body.voided).toEqual([{ id: 'inv-1', invoiceNumber: 'WPC-2026-0345', total: 227 }]);
-    expect(mockVoidInvoice).toHaveBeenCalledWith('inv-1');
-  });
-
-  test('re-derives the set server-side — a client-supplied id is ignored', async () => {
-    const { body } = await post('/svc-1/prepay-switch/supersede', { invoiceIds: ['inv-someone-elses'] });
-    expect(body.voided.map((v) => v.id)).toEqual(['inv-1']);
-    expect(mockVoidInvoice).toHaveBeenCalledTimes(1);
-    expect(mockVoidInvoice).toHaveBeenCalledWith('inv-1');
-  });
-
-  test('refuses a delivered invoice and voids NOTHING', async () => {
-    stubTables({ invoices: [{ ...ACCEPT_INVOICE, sent_at: '2026-08-11T12:00:00Z' }] });
-    const { status, body } = await post('/svc-1/prepay-switch/supersede');
-    expect(status).toBe(409);
-    expect(body.error).toMatch(/already gone out to the customer/i);
+    // CAS void inside the trx — never the standalone voidInvoice.
+    expect(stubTables.casCalls.length).toBe(1);
     expect(mockVoidInvoice).not.toHaveBeenCalled();
-  });
-
-  test('refuses when the estimate is not accepted', async () => {
-    stubTables({ estimate: { id: 'est-1', status: 'sent', accepted_at: null } });
-    const { status } = await post('/svc-1/prepay-switch/supersede');
-    expect(status).toBe(409);
-    expect(mockVoidInvoice).not.toHaveBeenCalled();
-  });
-
-  test('a void that fails reports what did retire so the caller stops', async () => {
-    mockVoidInvoice.mockRejectedValueOnce(new Error('ACH in flight'));
-    const { status, body } = await post('/svc-1/prepay-switch/supersede');
-    expect(status).toBe(409);
-    expect(body.error).toMatch(/Nothing was charged/i);
-    expect(body.voided).toEqual([]);
-  });
-
-  test('a RETRY after a lost response re-reports the already-voided invoice without re-voiding', async () => {
-    // The first call voided it; the response never arrived. The retry finds
-    // the void, accept-provenance, not-yet-restored row and hands it back so
-    // the client still has something to restore on abort.
-    stubTables({ invoices: [{ ...ACCEPT_INVOICE, status: 'void' }] });
-    const { status, body } = await post('/svc-1/prepay-switch/supersede');
-    expect(status).toBe(200);
-    expect(body.voided).toEqual([{ id: 'inv-1', invoiceNumber: 'WPC-2026-0345', total: 227 }]);
-    expect(mockVoidInvoice).not.toHaveBeenCalled();
-  });
-
-  test('a retry does NOT re-report a void the undo already replaced', async () => {
-    stubTables({
-      invoices: [{ ...ACCEPT_INVOICE, status: 'void' }],
-      replacementRow: { id: 'inv-new', invoice_number: 'WPC-2026-0401' },
+    // Server-derived money: $512, never the client's number.
+    expect(mockCreateInvoice.mock.calls[0][0].lineItems[0].unit_price).toBe(512);
+    // Term carries the estimate provenance so a refund restores per_application.
+    expect(termSpy.mock.calls[0][0]).toMatchObject({
+      sourceEstimateId: 'est-1',
+      prepayInvoiceId: 'inv-prepay',
+      coverageVisitCount: 4,
+      coverageCadence: 'quarterly',
     });
-    const { body } = await post('/svc-1/prepay-switch/supersede');
-    expect(body.voided).toEqual([]);
+    // Collect path: no delivery attempted.
+    expect(mockSendInvoice).not.toHaveBeenCalled();
+    expect(body.delivery).toBeNull();
+  });
+
+  test('a CAS conflict (invoice changed under the lock) aborts before anything is minted', async () => {
+    stubTables({ casResult: 0 });
+    const { status, body } = await post('/svc-1/prepay-switch', { chargeInPerson: true });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/changed while switching/i);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+    expect(termSpy).not.toHaveBeenCalled();
+  });
+
+  test('a minted total that differs from the quoted total aborts the whole switch', async () => {
+    mockCreateInvoice.mockResolvedValue({ id: 'inv-prepay', invoice_number: 'WPC-2026-0400', total: 561 });
+    const { status, body } = await post('/svc-1/prepay-switch', { chargeInPerson: true });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/did not match the quoted total/i);
+    expect(termSpy).not.toHaveBeenCalled();
+  });
+
+  test('the overlap assert makes a RETRY of a committed switch a 409, never a second year', async () => {
+    const overlapErr = new Error('Customer already has an annual prepay term through 2027-08-11.');
+    overlapErr.annualPrepayOverlap = { error: overlapErr.message, activeTermId: 'term-1', activeTermEnd: '2027-08-11' };
+    mockLockOverlap.mockRejectedValue(overlapErr);
+    const { status, body } = await post('/svc-1/prepay-switch', { chargeInPerson: true });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/already has an annual prepay term/i);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
+
+  test('send path: delivery runs AFTER commit and a failure reports delivery.ok=false', async () => {
+    mockSendInvoice.mockRejectedValue(new Error('SMS gateway rejected'));
+    const { status, body } = await post('/svc-1/prepay-switch', { chargeInPerson: false });
+    expect(status).toBe(201);
+    expect(body.delivery).toEqual({ ok: false, error: 'SMS gateway rejected' });
+    // The commit stood — the client compensation (void + restore) owns it.
+    expect(body.invoice.id).toBe('inv-prepay');
+  });
+
+  test('an ineligible visit refuses with the preview blockReason and mints nothing', async () => {
+    stubTables({ estimate: { id: 'est-1', status: 'sent', accepted_at: null } });
+    const { status, body } = await post('/svc-1/prepay-switch', { chargeInPerson: true });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/handled by the linked quote/i);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 });
 
@@ -526,7 +558,7 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     title: 'WaveGuard Membership Setup + First Application',
   };
 
-  test('re-mints from the VOIDED ROW\'s own amounts, never the request body', async () => {
+  test("re-mints from the VOIDED ROW's own amounts, never the request body", async () => {
     stubTables({ invoices: [VOIDED_ROW] });
     const { status, body } = await post('/svc-1/prepay-switch/undo', {
       voidedInvoiceIds: ['inv-1'],
@@ -553,6 +585,21 @@ describe('on-site prepay switch — undo (put the invoice back)', () => {
     });
     const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
     expect(body.restored).toEqual([{ replacedInvoiceId: 'inv-1', invoiceId: 'inv-new', invoiceNumber: 'WPC-2026-0401' }]);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
+
+  test('REFUSES while a live prepay term stands — a stale abort must not double-bill', async () => {
+    stubTables({ invoices: [VOIDED_ROW], term: { id: 'term-1', status: 'payment_pending' } });
+    const { status, body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/would bill them twice/i);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
+  });
+
+  test("a void row WITHOUT this estimate's accept stamp restores nothing (crafted ids are inert)", async () => {
+    stubTables({ invoices: [{ ...VOIDED_ROW, notes: 'Some unrelated historical invoice' }] });
+    const { body } = await post('/svc-1/prepay-switch/undo', { voidedInvoiceIds: ['inv-1'] });
+    expect(body.restored).toEqual([]);
     expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 

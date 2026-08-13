@@ -13,19 +13,21 @@
 // invoice for this series (setup fee + first application); the owner's
 // 2026-08-12 ruling waives that fee, so the prepaid year SUPERSEDES it.
 //
-// That retirement happens FIRST, server-side, before any prepay invoice
-// exists (Codex P0: voiding after the tender leaves a minutes-long window
-// where BOTH invoices are payable and the customer could pay each):
-//   1. POST …/prepay-switch/supersede — re-derives the set server-side and
-//      voids it. A refusal here has changed nothing and charged nothing.
-//   2. mint the prepay invoice, then collect it (or send the pay link).
-//   3. If the mint fails, or the operator backs out of the tender, POST
-//      …/prepay-switch/undo re-mints an equivalent draft from the voided
-//      row's own line items — the visit bills what it billed before, under a
-//      new invoice number — and the uncollected prepay invoice is voided so
-//      its payment_pending term can't suppress billing.
-// A failed undo is loud: the operator must know this visit currently has no
-// invoice behind it.
+// The switch itself is ONE server transaction (POST …/prepay-switch): the
+// per-application draft is CAS-voided and the prepay invoice + term minted
+// atomically, so there is no instant where the old invoice is void without
+// the prepay existing, and none where both are payable. This sheet only
+// decides what happens AROUND that commit:
+//   • collect path — hand the minted invoice to the tender sheet; backing
+//     out voids the prepay (cancelling its payment_pending term) and then
+//     POST …/prepay-switch/undo re-mints the per-application draft from the
+//     voided row's own line items (new number). The undo is idempotent and
+//     refuses while a live prepay term stands, so a stale abort can never
+//     double-bill.
+//   • send path — the server delivers after commit; delivery.ok=false runs
+//     the same void-then-restore compensation.
+// A failed restore is loud: the operator must know this visit currently has
+// no invoice behind it.
 
 import { useEffect, useState } from 'react';
 import MobilePaymentSheet from './MobilePaymentSheet';
@@ -137,21 +139,10 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
 
   const supersedes = preview?.supersedes || [];
 
-  // Step 1 — retire the per-application invoice SERVER-side. The server
-  // re-derives the set itself (the client's list is display only) and refuses
-  // as a whole if anything changed since the preview. Returns the voided rows
-  // so the undo can restore them; throws with the server's reason otherwise.
-  const supersedeFirst = async () => {
-    if (supersedes.length === 0) return [];
-    const result = await adminFetch(`/admin/schedule/${visitId}/prepay-switch/supersede`, {
-      method: 'POST',
-      body: JSON.stringify({}),
-    });
-    return Array.isArray(result?.voided) ? result.voided : [];
-  };
-
-  // Step 3 — the switch didn't complete: put the per-application invoice back
+  // Restore the per-application invoice after a switch that didn't complete
   // (re-minted server-side from the voided row's own amounts, new number).
+  // Idempotent, provenance-bound, and refused while a live prepay term
+  // stands — safe to offer even when the state is uncertain.
   const undoSupersede = async (voided) => {
     if (!voided || voided.length === 0) return { ok: true, failed: [] };
     try {
@@ -175,21 +166,28 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
     if (!preview?.eligible || !customerId) return;
     setBusy(chargeInPerson ? 'charge' : 'send');
     setActionError('');
-    let voided = [];
+    let result;
     try {
-      voided = await supersedeFirst();
+      // ONE atomic server operation: CAS-void the superseded draft + mint
+      // the prepay invoice and term, all recomputed server-side — the only
+      // thing this client decides is how the money gets collected.
+      result = await adminFetch(`/admin/schedule/${visitId}/prepay-switch`, {
+        method: 'POST',
+        body: JSON.stringify({ chargeInPerson }),
+      });
     } catch (e) {
       if (e.status) {
-        // The server answered: nothing was voided, nothing minted, nothing
-        // charged — the visit still bills as it did. Surface the reason.
-        setActionError(e.message || 'Could not retire the per-application invoice');
+        // The server answered: the transaction did not commit, so nothing
+        // was voided and nothing minted. The visit still bills as it did.
+        setActionError(e.message || 'Could not switch this visit to annual prepay');
       } else {
-        // Network drop: the void may or may not have committed. The
-        // supersede endpoint is idempotent (a retry re-reports already-voided
-        // rows without re-voiding), so a Restore here is safe either way.
+        // Network drop: the atomic commit may or may not have landed. A
+        // RETRY is safe (a committed first attempt fails the server's
+        // overlap assert instead of minting twice), and Restore is safe
+        // (the undo refuses while a live prepay term stands).
         setRecovery({
           title: 'Connection dropped mid-switch',
-          message: `The request to retire the per-application invoice didn\u2019t come back \u2014 it may or may not have gone through. Nothing was charged. Tap Restore to put ${customerName}\u2019s invoice back (safe either way), then try the switch again.`,
+          message: 'The switch request didn\u2019t come back. Close this and try again \u2014 if it then reports an annual prepay already exists, the switch DID go through: find the prepay invoice in Invoices. Restore below puts the per-application invoice back, and is automatically refused if the prepay is live.',
           detail: e.message,
           voided: supersedes,
         });
@@ -197,42 +195,9 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
       setBusy('');
       return;
     }
-    let result;
-    try {
-      result = await adminFetch(`/admin/customers/${customerId}/annual-prepay-invoice`, {
-        method: 'POST',
-        body: JSON.stringify({ ...preview.mintPayload, chargeInPerson }),
-      });
-    } catch (e) {
-      if (e.status) {
-        // Definite server rejection — the mint did not commit. Put the
-        // per-application invoice back.
-        const undo = await undoSupersede(voided);
-        setActionError(
-          `${e.message || 'Could not create the prepay invoice'}.`
-          + (voided.length === 0
-            ? ''
-            : undo.ok
-              ? ' The per-application invoice was restored \u2014 nothing changed.'
-              : ' The per-application invoice could NOT be restored \u2014 this visit has no invoice behind it. Rebuild it from Invoices.'),
-        );
-      } else {
-        // AMBIGUOUS: the mint may have committed server-side (Codex P0 r3).
-        // Auto-restoring here could park a fresh per-application invoice
-        // beside a live prepay invoice — the exact both-payable state this
-        // flow exists to prevent. Hand it to the operator instead.
-        setRecovery({
-          title: 'Connection dropped mid-switch',
-          message: `The prepay invoice request didn\u2019t come back \u2014 it may exist in Invoices. Check there first: if a ${money(preview.prepayTotal)} prepay invoice was created, void or collect it from Invoices; if not, tap Restore to put ${customerName}\u2019s per-application invoice back.`,
-          detail: e.message,
-          voided,
-        });
-      }
-      setBusy('');
-      return;
-    }
     try {
       const invoice = result?.invoice;
+      const voided = Array.isArray(result?.voided) ? result.voided : [];
       if (!invoice?.id) {
         setActionError('The prepay invoice did not come back in the response \u2014 check Invoices before retrying.');
         return;
@@ -241,11 +206,12 @@ export default function PrepaySwitchSheet({ service, onClose, onSaved }) {
         setCollecting({ invoice, voided });
         return;
       }
-      // The mint returns 201 even when the SMS/email leg failed. A prepay
-      // invoice the customer never received, with their per-application one
-      // already retired, would leave them with no bill at all. Order matters
-      // (Codex P0 r3): void the undelivered prepay FIRST — restoring before
-      // that void would put two live invoices on the account.
+      // Delivery ran after the commit. A prepay invoice the customer never
+      // received, with their per-application one already retired, would
+      // leave them with no bill at all. Order matters: void the undelivered
+      // prepay FIRST \u2014 restoring before that void would put two live
+      // invoices on the account (and the undo would refuse anyway while the
+      // prepay term stands).
       if (result?.delivery && result.delivery.ok === false) {
         try {
           await adminFetch(`/admin/invoices/${invoice.id}/void`, { method: 'POST' });
