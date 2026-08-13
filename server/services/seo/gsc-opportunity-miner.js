@@ -78,6 +78,13 @@ const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES, minScoreToActFor, isTrans
 // The SAME list-shape grammar the brief-builder's listicle overlay uses —
 // guarantees a listicle_family opportunity actually receives the overlay.
 const { isListicleQuery } = require('../content/listicle-query');
+// Lazy: sitemap-manager pulls fetch plumbing this module doesn't need at
+// load time, and tests stub it via the getter seam.
+let _sitemapManager = null;
+function getSitemapManager() {
+  if (!_sitemapManager) _sitemapManager = require('./sitemap-manager');  
+  return _sitemapManager;
+}
 
 // ── normalization helpers (pure, test-friendly) ─────────────────────
 
@@ -1175,7 +1182,18 @@ function persistFloorFor(o) {
   // 75 floor, could never persist (audit P1). Same exception, same
   // reasoning as listicle_family above: identical demand must not be
   // discarded for taking the SAFER page route instead of a blog post.
-  if (o.bucket === 'no_content_yet' && o.action_type === 'create_or_refresh_city_service_page') {
+  //
+  // local_gap is the same unreachability one bucket over: its ceiling is
+  // 69 — gscOpportunity round(35 × 0.8 × 1.0) = 28 at max impressionsBoost,
+  // + localRevenue 20 (termite 1.0 tops REVENUE_PRIORITY), + conversionIntent
+  // 6 (query is null for this bucket by construction), + contentGap 15 —
+  // against the same 75 floor. Verified in prod 2026-08-12: 2 rows ALL-TIME,
+  // both add_internal_links from an older routing, zero city-service rows
+  // ever. A city+service pair with impression demand and NO OWN PAGE is the
+  // most revenue-direct content gap the miner detects, and the bucket was
+  // structurally silent (owner ruling 2026-08-13: fix lane).
+  if ((o.bucket === 'no_content_yet' || o.bucket === 'local_gap')
+    && o.action_type === 'create_or_refresh_city_service_page') {
     return minScoreToActFor('new_supporting_blog');
   }
   if (o.bucket === 'link_boost' && o.signal_metadata?.source_bucket === 'ctr_rewrite') {
@@ -1186,6 +1204,186 @@ function persistFloorFor(o) {
 
 function isPersistable(o) {
   return (o?.score ?? 0) >= persistFloorFor(o || {});
+}
+
+// ONE city-service row per (service, city) target ACROSS buckets. Four
+// buckets can route to create_or_refresh_city_service_page (local_gap
+// always; no_content_yet / striking_distance / aeo_gap when city+service
+// resolve without a page), and their dedupe keys differ by construction —
+// bucket is the first key segment and local_gap carries no query at all —
+// so persistAll's per-key collapse cannot see the collision and the runner
+// would draft one page once per bucket. This was a documented residual on
+// PR #3372, deferred until a lane decision activated a second producer;
+// reviving local_gap (owner ruling 2026-08-13) is that activation.
+//
+// Winner rule: a QUERY-BEARING candidate beats query-less local_gap even at
+// a lower score — the query drives the brief's target_keyword, coverage
+// section, and specialty-topic derivation, so a leaner local_gap brief must
+// not shadow a richer one. Among query-bearing candidates the highest score
+// wins (same rule as every other collapse). A dropped local_gap twin's
+// segment impressions ride the winner as signal_metadata.segment_impressions
+// so the whole-segment demand evidence isn't lost with the row.
+//
+// The loser's PENDING row from an earlier mine is retired by the recovered-
+// query sweep (its query stops being emitted), so arbitration and sweep
+// compose to one claimable row per target. In-flight (claimed /
+// pending_review) predecessors are handled under the persist transaction —
+// see _revalidateCityServiceBatch.
+// A skipped row that represents an explicit HUMAN dismissal of the
+// target's draft — autonomous-review-queue's `manual_dismiss[:note]` — a
+// standing "no" for the TARGET (cloud P1 on #3378, correcting the round-7
+// assumption that no human writer of `skipped` existed). Deliberately
+// EXCLUDED: `astro_pr_closed_unmerged` — closing one generated PR rejects
+// THAT draft, not every future page for the pair, so it stays key-level
+// via the upsert guard like every runner outcome (cloud P1, next round).
+function isHumanTerminalSkip(status, skipReason) {
+  if (status !== 'skipped') return false;
+  const r = String(skipReason || '');
+  return r === 'manual_dismiss' || r.startsWith('manual_dismiss:');
+}
+
+// Parse a hub path as an EXACT canonical city-service route — the only
+// URL shape that counts as coverage for the local_gap bucket (cloud P1:
+// token classification is too broad; a blog like
+// /termite/termite-damage-sarasota-fl/ carries service and city tokens
+// but is NOT the city-service page, and counting it suppresses the
+// genuinely missing /termite-control-sarasota-fl/). Uses the
+// brief-builder's SERVICE_CITY_SLUG — the one slug map — lazily.
+function exactCityServiceRoutePair(path) {
+  try {
+    const { SERVICE_CITY_SLUG } = require('../content/content-brief-builder')._internals;  
+    const clean = String(path || '').replace(/^https?:\/\/[^/]+/i, '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '').toLowerCase();
+    for (const [service, slug] of Object.entries(SERVICE_CITY_SLUG || {})) {
+      const m = clean.match(new RegExp(`^${slug}-([a-z0-9-]+)-fl$`));
+      if (m) {
+        const city = normalizeCity(m[1].replace(/-/g, ' '));
+        if (city) return { service, city };
+      }
+    }
+  } catch (_) { /* fail-open to "not a route" — coverage just not granted */ }
+  return null;
+}
+
+// Does the (service, city) pair derive a money-family path the runner's
+// protected-page guard would block unconditionally? Uses the
+// brief-builder's SERVICE_CITY_SLUG (the ONE slug map) and protected-pages'
+// own pattern test — lazy requires to keep module load acyclic.
+function localGapMoneyFamilyPair(service, city) {
+  try {
+     
+    const { SERVICE_CITY_SLUG } = require('../content/content-brief-builder')._internals;
+    const { isProtectedByPattern } = require('../content/protected-pages');
+     
+    const slug = SERVICE_CITY_SLUG?.[service];
+    if (!slug) return false;
+    const citySlug = String(city || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    if (!citySlug) return false;
+    const verdict = isProtectedByPattern(`${slug}-${citySlug}-fl`);
+    return !!verdict?.protected;
+  } catch (err) {
+    // Fail CLOSED: if we cannot tell, treat the pair as money-family —
+    // skipping a mine beat freezing a key on a guaranteed protected skip.
+    logger.warn(`[gsc-opp-miner] money-family check failed (${err.message}) — pair treated as protected`);
+    return true;
+  }
+}
+
+// The CANONICAL identity of a city-service target, shared by the
+// arbitration and the in-flight fence. Buckets disagree on service
+// spelling — local_gap emits canonical 'tree-shrub'/'pest' while
+// striking_distance and aeo_gap pass the sync's raw 'tree_shrub'/
+// 'specialty' through — and a raw-keyed comparison reads those as two
+// different targets, letting both rows persist for one page (pre-push
+// P1). An uncanonicalizable service keeps its own spelling rather than
+// collapsing into a shared null bucket.
+function cityServiceTargetKey(service, city) {
+  return ownPageKey(canonicalizeServiceCategory(service) || service, city);
+}
+
+function arbitrateCityServiceTargets(opportunities = [], { frozenTargets = new Set(), frozenKeys = new Set() } = {}) {
+  const CS = 'create_or_refresh_city_service_page';
+  const byTarget = new Map();
+  const out = [];
+  for (const o of opportunities) {
+    if (o.action_type !== CS || !o.service || !o.city) { out.push(o); continue; }
+    const key = cityServiceTargetKey(o.service, o.city);
+    if (!byTarget.has(key)) byTarget.set(key, []);
+    byTarget.get(key).push(o);
+  }
+  for (const [targetKey, group] of byTarget.entries()) {
+    // A RECENT done row fences the whole TARGET, not just its own dedupe
+    // key (rounds 6-7): the page was just created and GSC has not observed
+    // it yet, so a sibling bucket's candidate under a different key would
+    // draft the same page again inside that lag window. Once the own-page
+    // map covers the pair, mining excludes it naturally and the fence is
+    // moot — which is why the fence is TIME-BOUNDED to the mine window
+    // (see mineAll's frozen-target read) rather than permanent. Dropping
+    // the entire group (single candidates included) is the point.
+    //
+    // skipped rows deliberately do NOT fence the target (round-7 P1):
+    // opportunity_queue skips are RUNNER outcomes — router refusals, gate
+    // failures, protected-page bounces — not operator decisions, and one
+    // query's gate failure says nothing about unrelated future queries or
+    // the segment's local_gap evidence. A skipped row still freezes its
+    // OWN key via the upsert guard, unchanged.
+    if (frozenTargets.has(targetKey)) continue;
+    if (group.length === 1) { out.push(group[0]); continue; }
+    // Narrowing order (rounds 5-8, the complete shape):
+    // 1. UNFROZEN KEY — a candidate whose own dedupe key already has a
+    //    done/skipped row cannot land (the upsert guard is unconditional
+    //    and key-level), so electing it silences the target every mine
+    //    while the fence expires actionable twins on its behalf. Electing
+    //    the sibling instead bypasses no decision: skipped freezes only
+    //    its key, and an OLD done is not a veto (recent done already
+    //    fenced the whole target above).
+    // 2. PERSISTABLE — the standing yield rule: a candidate that will not
+    //    clear its own floor must never displace one that will.
+    // 3. QUERY-BEARING, then score.
+    // Each narrowing falls back a level when it empties, so calibration
+    // still sees the best candidate (persistAll drops or no-ops it).
+    const unfrozen = group.filter((o) => !frozenKeys.has(o.dedupe_key));
+    const landable = unfrozen.length ? unfrozen : group;
+    // MAPPABLE next (cloud P1): a raw-service candidate ('tree_shrub',
+    // 'specialty') groups into the canonical target but parks downstream
+    // as facts_unmappable — electing it discards the viable canonical
+    // twin on every mine. Its own key and lifecycle stay untouched; it
+    // just loses the arbitration to a sibling the runner can execute.
+    const mappable = landable.filter((o) => canonicalizeServiceCategory(o.service) === o.service);
+    const runnable = mappable.length ? mappable : landable;
+    const persistable = runnable.filter((o) => isPersistable(o));
+    const eligible = persistable.length ? persistable : runnable;
+    const queryBearing = eligible.filter((o) => o.query);
+    const pool = queryBearing.length ? queryBearing : eligible;
+    const winner = pool.reduce((best, o) => (o.score > best.score ? o : best), pool[0]);
+    const localTwin = group.find((o) => o !== winner && o.bucket === 'local_gap');
+    if (localTwin) {
+      winner.signal_metadata = winner.signal_metadata || {};
+      const twinMeta = localTwin.signal_metadata || {};
+      winner.signal_metadata.segment_impressions = twinMeta.impressions ?? null;
+      // The twin's query coverage and specialty evidence ride along too
+      // (cloud P1): its contributing queries helped the pair clear
+      // admission and the brief must bind them, and a blocked topic on a
+      // twin query ('wasp' under broad pest) must still strip the FAQ
+      // mandate — winner's own evidence stays first.
+      const mergedQueries = new Set([
+        ...(Array.isArray(winner.signal_metadata.contributing_queries) ? winner.signal_metadata.contributing_queries : []),
+        ...(winner.query ? [winner.query] : []),
+        ...(Array.isArray(twinMeta.contributing_queries) ? twinMeta.contributing_queries : []),
+        ...(twinMeta.representative_query ? [twinMeta.representative_query] : []),
+      ]);
+      if (mergedQueries.size > 1) {
+        winner.signal_metadata.contributing_queries = [...mergedQueries].sort();
+        winner.signal_metadata.contributing_impressions =
+          (winner.signal_metadata.contributing_impressions ?? winner.signal_metadata.impressions ?? 0)
+          + (twinMeta.impressions ?? 0);
+      }
+      if (!winner.signal_metadata.specialty_topic && twinMeta.specialty_topic) {
+        winner.signal_metadata.specialty_topic = twinMeta.specialty_topic;
+      }
+    }
+    out.push(winner);
+  }
+  return out;
 }
 
 // Companion dedupe keys the CURRENT batch still stands behind. A link_boost
@@ -1626,7 +1824,57 @@ class GscOpportunityMiner {
       buckets.link_boost = [];
     }
 
-    const allOpportunities = [...minedOpportunities, ...buckets.link_boost];
+    // Cross-bucket city-service arbitration BEFORE assembly — see
+    // arbitrateCityServiceTargets. link_boost companions never carry the
+    // city-service action, so deriving them first is order-safe. Frozen
+    // TARGETS are read first (a done/skipped row fences the whole
+    // (service, city) pair, not just its own key — see the arbitration
+    // comment; mirroring _arbitratedRefreshPages' fail-soft posture, and
+    // the in-txn fence re-checks under the lock).
+    let cityServiceFrozenTargets = new Set();
+    let cityServiceFrozenKeys = new Set();
+    try {
+      const preArbitration = [...minedOpportunities, ...buckets.link_boost];
+      if (preArbitration.some((o) => o.action_type === 'create_or_refresh_city_service_page')) {
+        // ONE read, two sets. TARGETS: done only, TIME-BOUNDED to the mine
+        // window — the fence covers the GSC-lag gap between page creation
+        // and the own-page map observing it, and expires once that gap has
+        // passed (an old done row is not a standing veto; skipped rows are
+        // runner outcomes, never target vetoes — round-7 P1). KEYS: every
+        // done/skipped row, unbounded — the upsert guard is unconditional,
+        // so a candidate aimed at such a key can never land and must not
+        // win the arbitration (round-8 P1, same rule as
+        // _arbitratedRefreshPages).
+        const frozenRows = await db('opportunity_queue')
+          .where({ action_type: 'create_or_refresh_city_service_page' })
+          .whereIn('status', ['done', 'skipped'])
+          .select('dedupe_key', 'service', 'city', 'status', 'skip_reason', 'updated_at');
+        cityServiceFrozenKeys = new Set(frozenRows.map((r) => r.dedupe_key));
+        const lagCutoff = Date.now() - GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS * 86400_000;
+        cityServiceFrozenTargets = new Set(frozenRows
+          .filter((r) => r.service && r.city && (
+            // Recent done: the GSC-lag window (time-bounded).
+            (r.status === 'done'
+              && r.updated_at && new Date(r.updated_at).getTime() >= lagCutoff)
+            // Human-terminal skip: a standing "no" for the target,
+            // UNBOUNDED — a person said don't build this page, and time
+            // passing does not reverse them. Runner skips stay key-only.
+            || isHumanTerminalSkip(r.status, r.skip_reason)))
+          .map((r) => cityServiceTargetKey(r.service, r.city)));
+      }
+      runState.cityServiceFrozenLookupFailed = false;
+    } catch (err) {
+      // Frozen-blind arbitration risks only a no-op upsert — but the
+      // local_gap SWEEP must not run off an untrusted snapshot: it could
+      // expire the very pending row whose elected replacement then fails
+      // the upsert guard (cloud P1).
+      runState.cityServiceFrozenLookupFailed = true;
+      logger.warn(`[gsc-opp-miner] city-service frozen-target lookup failed (${err.message}) — arbitration proceeds frozen-blind, local_gap sweep suppressed`);
+    }
+    const allOpportunities = arbitrateCityServiceTargets(
+      [...minedOpportunities, ...buckets.link_boost],
+      { frozenTargets: cityServiceFrozenTargets, frozenKeys: cityServiceFrozenKeys }
+    );
 
     const counts = Object.fromEntries(
       Object.entries(buckets).map(([k, v]) => [k, v.length])
@@ -1645,12 +1893,28 @@ class GscOpportunityMiner {
           && !runState.familyRefreshStateFailed
           && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS
           && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs');
+        // The local_gap sweep needs the advisory lock for the same reason
+        // the family sweep does — expiring pending rows unlocked races a
+        // concurrent mine's insert/revive (cloud P1: with ZERO city-service
+        // candidates in the batch, neither revalidation takes the lock,
+        // yet the sweep still expires every pending local_gap row).
+        const localGapSweepWillRun = !errors.local_gap
+          && !runState.cityServiceFrozenLookupFailed
+          && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS;
         // Lock + revalidate family predecessors FIRST — see
         // _revalidateFamilyBatch (a claim between the mine's reads and
         // this transaction defers the transition instead of racing it).
         // The lock is taken even for an empty family batch when the sweep
         // will run.
-        const revalidated = await this._revalidateFamilyBatch(trx, allOpportunities, { lockEvenIfEmpty: sweepWillRun });
+        const familyChecked = await this._revalidateFamilyBatch(trx, allOpportunities, { lockEvenIfEmpty: sweepWillRun || localGapSweepWillRun });
+        // City-service targets recheck under the SAME advisory lock (held
+        // for the rest of the transaction) — one in-flight row per
+        // (service, city) target across buckets and across mines.
+        // The sweep's frozen-target set starts from the pre-transaction
+        // snapshot and is EXTENDED by whatever the fence discovers under
+        // the lock — a target frozen mid-mine reaches the sweep too.
+        const sweepFrozenTargets = new Set(cityServiceFrozenTargets);
+        const revalidated = await this._revalidateCityServiceBatch(trx, familyChecked, { frozenKeys: cityServiceFrozenKeys, collectFrozenTargets: sweepFrozenTargets });
         persisted = await this.persistAll(revalidated, trx);
         // Family-lane sweep ONLY after the upserts land, only when the
         // lane actually ran (gates on, no miner error — an empty bucket
@@ -1697,6 +1961,28 @@ class GscOpportunityMiner {
               revalidated,
               sweepExemptQueries[bucket],
               since
+            );
+          }
+          // local_gap shares the disappearing-signal lifecycle but not the
+          // sweep: its rows are QUERYLESS, so the recovered-QUERY sweep
+          // cannot see them, and a pending row would stay claimable for
+          // the full 14 days after a hub page appeared or demand fell
+          // below the merged floor (cloud P1). Key-matching is exact here
+          // because the keys are target-stable. Same guards: canonical
+          // window + no bucket error (the fail-closed map guard throws
+          // into errors.local_gap, which suppresses this).
+          if (localGapSweepWillRun) {
+            // PRE-arbitration keys (cloud P1): the sweep's semantic is
+            // "signal gone", and arbitration/fence drops are not that — a
+            // pending local_gap row whose candidate lost the target to a
+            // deferred queryless sibling (e.g. a higher-scoring aeo_gap
+            // row) must survive the mine. Retirement-by-supersession is
+            // explicit in the fence; the sweep only retires pairs the
+            // MINE no longer emitted.
+            await this._sweepStaleLocalGapRows(
+              (buckets.local_gap || []),
+              sweepFrozenTargets,
+              trx
             );
           }
         }
@@ -1801,6 +2087,35 @@ class GscOpportunityMiner {
       if (!service && !city) continue; // can't classify — skip rather than pollute generic bucket
       const key = ownPageKey(service, city);
       if (!map.has(key)) map.set(key, r.page_url); // first wins (orderBy impressions desc)
+      // ALSO key under the CANONICAL service, additively. mineLocalGap now
+      // keys candidates canonically ('tree-shrub', specialty→'pest'), so a
+      // page classified with the sync's raw value ('tree_shrub',
+      // 'specialty') must still be found or the bucket enqueues a
+      // duplicate city-service draft for a pair that HAS a page (pre-push
+      // P1). Additive on purpose: consumers that look up with raw values
+      // (striking_distance, aeo_gap) keep hitting the raw key unchanged.
+      const canon = canonicalizeServiceCategory(service);
+      if (canon && canon !== service) {
+        const canonKey = ownPageKey(canon, city);
+        if (!map.has(canonKey)) map.set(canonKey, r.page_url);
+      }
+      // AND under a hub-scoped namespace, first-wins among HUB pages only.
+      // The plain keys are first-wins ACROSS domains, so a spoke page that
+      // outranks the hub page hides the hub page's existence — a consumer
+      // asking "does a HUB page exist for this pair" (local_gap coverage)
+      // would read the pair as uncovered and queue a duplicate hub draft
+      // (cloud P1). Keys are granted ONLY for EXACT canonical city-service
+      // routes — classification-based tokens would let a blog URL vouch
+      // for the page (cloud P1, next round). Additive: nothing else
+      // changes.
+      const host = String(routeIdentity(r.page_url) || '').split('::')[0];
+      if (host === HUB_DOMAIN) {
+        const routePair = exactCityServiceRoutePair(r.page_url);
+        if (routePair) {
+          const hubKey = `hub::${ownPageKey(routePair.service, routePair.city)}`;
+          if (!map.has(hubKey)) map.set(hubKey, r.page_url);
+        }
+      }
     }
     return map;
   }
@@ -2319,22 +2634,136 @@ class GscOpportunityMiner {
   async mineLocalGap(since, ownPagesByServiceCity = new Map()) {
     // {city, service} pairs with impression demand but no own page in
     // gsc_pages matching that pair.
+    //
+    // KEY SEMANTICS: the dedupe key is TARGET-STABLE (no query, no page —
+    // `local_gap::svc::city::_`), and the upsert's frozen-row guard makes a
+    // done/skipped row permanent FOR THIS KEY. That is CORRECT for this
+    // bucket, unlike the query buckets: once the page exists the own-page
+    // check above excludes the pair from ever mining again (done stays
+    // meaningful), and a runner skip of the aggregate row (router refusal,
+    // gate failure) reasonably retires this bucket's one shot at the pair —
+    // query-bearing buckets still mine the same target under their own
+    // keys, so demand is not silenced (a skip here is NOT a target veto;
+    // see arbitrateCityServiceTargets). The known residue — page created
+    // then later DELETED reopens the pair but the frozen done row blocks
+    // re-emission — is accepted: page deletions are operator acts, and the
+    // operator can revive the row alongside.
+    //
+    // FLOOR: rows ride the blog floor via persistFloorFor's city-service
+    // exception — the bucket's ceiling is 69 against the global 75 (see
+    // persistFloorFor), which kept it at zero city-service rows for its
+    // entire life. Cross-bucket target collisions are arbitrated at mine
+    // time (arbitrateCityServiceTargets) and in-flight twins deferred
+    // under the persist lock (_revalidateCityServiceBatch).
+    // FAIL CLOSED on a missing own-page map: mineAll degrades a loader
+    // failure to an empty Map (fine for the buckets where the map only
+    // upgrades a blog into a refresh), but for THIS bucket an empty map
+    // reads as "no pair has a page" and — now that rows clear the floor —
+    // would enqueue a city-service draft for EVERY qualifying pair,
+    // covered ones included (cloud P1). Throwing makes mineAll record
+    // errors.local_gap, which also suppresses this lane's sweep, per the
+    // degraded-bucket doctrine from #3372.
+    if (!ownPagesByServiceCity || !ownPagesByServiceCity.size) {
+      throw new Error('own-pages map unavailable or empty — refusing to treat every city-service pair as uncovered');
+    }
+    // …and FRESH, not merely nonempty (cloud P1): syncQueries and
+    // syncPages fail independently, so historical gsc_pages rows keep the
+    // map nonempty while a recently created or reclassified hub page is
+    // absent from the stale snapshot — which this bucket would then treat
+    // as missing and draft again. Same two-sided check as
+    // _queryPageMapCoveredDomains: the hub pages leg must track the hub
+    // queries leg (relative, with the same grace) AND carry an absolute
+    // recency bound so a whole-sync outage cannot vacuously pass.
+    const freshness = await db.raw(`
+      SELECT
+        (SELECT max(date) FROM gsc_pages   WHERE page_url LIKE '%wavespestcontrol.com/%') AS pages_max,
+        (SELECT max(date) FROM gsc_queries WHERE domain = ?) AS queries_max
+    `, [HUB_DOMAIN]);
+    const fr = freshness?.rows?.[0] || {};
+    const graceMs = GscOpportunityMiner.QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS * 86400_000;
+    const absMs = GscOpportunityMiner.MAP_ABSOLUTE_STALENESS_DAYS * 86400_000;
+    const pagesMax = fr.pages_max ? new Date(fr.pages_max).getTime() : 0;
+    const queriesMax = fr.queries_max ? new Date(fr.queries_max).getTime() : 0;
+    // BOTH legs must be present and inside the absolute bound (cloud P1:
+    // the guard was one-sided — a dead QUERY sync with fresh pages passed
+    // the conditional relative check, mined an empty/incomplete batch,
+    // and the sweep then expired valid pending rows as "signal gone").
+    if (!pagesMax || !queriesMax
+      || pagesMax < queriesMax - graceMs
+      || pagesMax < Date.now() - absMs
+      || queriesMax < Date.now() - absMs) {
+      throw new Error('gsc_pages/gsc_queries hub snapshot is missing or stale — refusing to mine city-service coverage or run its sweep');
+    }
+
+    // LIVE INVENTORY, classified with the miner's own helpers (cloud P1:
+    // gsc_pages only proves a page RANKED — Search Analytics omits live
+    // pages with no recent impressions, so a zero-traffic hub page would
+    // read as missing and be drafted again). The sitemap is the existence
+    // truth: every hub URL is classified to a (service, city) pair and
+    // any pair present is COVERED regardless of traffic. Fail closed,
+    // same as the competitor-gap miner's sitemap read.
+    const sitemapUrls = await getSitemapManager().listUrls();
+    if (!Array.isArray(sitemapUrls) || !sitemapUrls.length) {
+      throw new Error('live sitemap parsed to zero URLs — refusing to judge city-service coverage without inventory');
+    }
+    const livePairs = new Set();
+    for (const u of sitemapUrls) {
+      // EXACT canonical routes only — a blog URL carrying service+city
+      // tokens must not vouch for the city-service page (cloud P1).
+      const pair = exactCityServiceRoutePair(u);
+      if (pair) livePairs.add(ownPageKey(pair.service, pair.city));
+    }
+
+    // PER-QUERY rows, not pre-aggregated pairs: the classifier label must
+    // be validated against each query's own text before its impressions
+    // count toward a pair (cloud P1 — the sync's SERVICE_PATTERNS are
+    // unbounded substring tests, so "mortgage rates north port" arrives
+    // labelled 'rodent' via 'rat' inside 'rates'; aggregate-first trusted
+    // that and could queue an unrelated city-service draft), and the top
+    // validated query doubles as the pair's representative keyword for the
+    // brief (cloud P1: a query-less AND page-less row cannot be SERP-
+    // profiled, persists a null target_keyword, and hard-fails the quality
+    // gate's no_serp_signal on every draft attempt).
     const queries = await db('gsc_queries')
       .where('date', '>=', since)
       .where('is_branded', false)
+      // HUB-ONLY, exactly as mineNoContentYet and for the same reason:
+      // city-service pages publish to the hub only (see the module
+      // invariant at HUB_DOMAIN), so spoke-observed demand would justify
+      // a hub page the hub has no demand for (cloud P1). Cross-domain
+      // aggregation is right for judging whether a page RANKS; it is
+      // wrong for deciding where to PUBLISH.
+      .where('domain', HUB_DOMAIN)
       .whereNotNull('city_target')
       .whereNot('city_target', 'local_intent')
       .whereNotNull('service_category')
-      .select('city_target', 'service_category')
+      .select('query', 'city_target', 'service_category')
       .sum('impressions as impressions')
-      .groupBy('city_target', 'service_category')
-      .havingRaw('sum(impressions) >= ?', [THRESHOLDS.minImpressionsToScore]);
+      .groupBy('query', 'city_target', 'service_category');
+    // NO per-group HAVING: the impressions floor applies to the MERGED
+    // canonical pair below. A raw-group floor would discard alias demand
+    // before the merge could sum it — 30 'specialty' + 30 'pest'
+    // impressions in one city is an eligible 60-impression pest target,
+    // and a per-group floor drops both halves (pre-push P1).
 
-    const out = [];
+    // VALIDATE, CANONICALIZE, then MERGE by canonical pair, BEFORE
+    // scoring. Same validator chain as no_content_yet: a stored label
+    // counts only with boundary-safe query evidence, otherwise fall
+    // through to contextual inference; a query supporting neither is
+    // skipped (fail closed). 'specialty' + 'pest' rows for one city merge
+    // into ONE pest pair, impressions summed — same demand, one target.
+    // The pair's REPRESENTATIVE query — its highest-impression validated
+    // query — rides signal_metadata so the brief has a real, observed
+    // keyword while the row's own `query` stays null and the dedupe key
+    // stays target-stable (see KEY SEMANTICS above).
+    const byPair = new Map();
     for (const q of queries) {
       const city = normalizeCity(q.city_target);
-      const service = q.service_category;
-      if (!city || !service) continue;
+      if (!city) continue;
+      const canon = canonicalizeServiceCategory(q.service_category);
+      const service = (canon && classifierQuerySupported(q.service_category, canon, q.query) ? canon : null)
+        || inferServiceFromQuery(q.query);
+      if (!service) continue;
 
       // Use the normalized own-page map. Earlier iteration queried
       // gsc_pages with raw classifier values, missing pages where the
@@ -2343,16 +2772,78 @@ class GscOpportunityMiner {
       // the RIGHT granularity here (unlike per-query no_content_yet): the
       // bucket asks "does a page exist for this city+service pair", so
       // any page classified to the pair genuinely answers it.
-      if (ownPagesByServiceCity.get(ownPageKey(service, city))) continue;
+      // Coverage is judged on HUB pages only, mirroring the demand scope:
+      // a SPOKE page serving the pair must not suppress a genuinely
+      // missing HUB page — the output of this bucket is a hub page, so
+      // only a hub page answers it. The hub:: namespace is first-wins
+      // among hub pages alone, so a spoke page outranking the hub page
+      // cannot hide it (cloud P1 ×2).
+      if (ownPagesByServiceCity.get(`hub::${ownPageKey(service, city)}`)) continue;
+      const key = ownPageKey(service, city);
+      const imp = parseInt(q.impressions, 10) || 0;
+      const prev = byPair.get(key);
+      if (prev) {
+        prev.impressions += imp;
+        prev.queries.push(q.query);
+        if (imp > prev.repImpressions) { prev.representative = q.query; prev.repImpressions = imp; }
+      } else {
+        byPair.set(key, {
+          service, city, impressions: imp, representative: q.query, repImpressions: imp, queries: [q.query],
+        });
+      }
+    }
 
+    const out = [];
+    for (const pair of byPair.values()) {
+      // The impressions floor, applied to the canonical MERGED total.
+      if (pair.impressions < THRESHOLDS.minImpressionsToScore) continue;
+      // Live-inventory coverage: the page EXISTS, traffic or not.
+      if (livePairs.has(ownPageKey(pair.service, pair.city))) continue;
+      // MONEY-FAMILY exclusion (cloud P1): the runner's protected-page
+      // guard pattern-blocks the pest-control city family UNCONDITIONALLY
+      // — emitting such a pair guarantees a claim → protected skip that
+      // freezes the target-stable key forever. A MISSING money page is
+      // operator territory, not an autonomous lane; log it loudly (pair
+      // only, no query text) and leave the pair unmined. Path derivation
+      // reuses the brief-builder's SERVICE_CITY_SLUG (lazy require — one
+      // slug map, never a copy) and protected-pages' own pattern test.
+      if (localGapMoneyFamilyPair(pair.service, pair.city)) {
+        logger.info(`[gsc-opp-miner] local_gap: ${pair.service}/${pair.city} (${pair.impressions} imp) is a MISSING money-family page — operator decision, not auto-mined`);
+        continue;
+      }
       const opp = {
         bucket: 'local_gap',
         query: null,
         page_url: null,
-        service,
-        city,
+        service: pair.service,
+        city: pair.city,
         signal_metadata: {
-          impressions: parseInt(q.impressions, 10),
+          impressions: pair.impressions,
+          // The brief's keyword. content-brief-builder falls back to this
+          // when `query` is null, so SERP profiling runs and the quality
+          // gate's no_serp_signal check has evidence to judge — without it
+          // every draft of this lane hard-fails (cloud P1). Kept OUT of
+          // `query` itself so the dedupe key stays target-stable.
+          representative_query: pair.representative || null,
+          // EVERY validated query that helped the pair clear admission,
+          // exactly as the no_content_yet collapse carries them (cloud
+          // P1): the brief-builder's segment-coverage section binds the
+          // draft to each phrasing, so the one target-stable page
+          // addresses the whole segment's demand, not just the
+          // representative's wording.
+          contributing_queries: pair.queries.length > 1 ? [...pair.queries].sort() : null,
+          contributing_impressions: pair.queries.length > 1 ? pair.impressions : null,
+          // The specific topic behind specialty→pest canonicalization,
+          // judged across EVERY contributing query, representative first —
+          // same rule as the other emitting buckets: 'wasp'/'bed bug' are
+          // individually FAQ-blocked while broad 'pest' is not, and without
+          // this the brief keeps its default FAQ mandate and the publish
+          // guard only sees the broad service (cloud P1, the exact
+          // no_content_yet lesson from #3372 applied to this new emitter).
+          specialty_topic: extractSpecialtyTopic([
+            pair.representative,
+            ...pair.queries.filter((x) => x !== pair.representative),
+          ]),
         },
       };
       const { total, breakdown } = scoreOpportunity(opp, {
@@ -3318,7 +3809,16 @@ class GscOpportunityMiner {
     // and its insert — so every page-edit persist serializes here, gated
     // or not.
     const hasPageEdit = opportunities.some((o) => GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type));
-    if (!hasFamily && !hasPageEdit && !lockEvenIfEmpty) return opportunities;
+    // City-service rows serialize here too: _revalidateCityServiceBatch's
+    // recheck-under-lock (one in-flight row per target) is only sound if a
+    // concurrent miner persist of city-service rows cannot commit between
+    // that recheck and this transaction's inserts — same reasoning as the
+    // r34 page-edit extension above. Deliberately NOT added to
+    // PAGE_EDITING_ACTIONS: that set is shared with refresh-audit's
+    // conflict predicate, where a city-service creation is not an edit of
+    // an existing page.
+    const hasCityService = opportunities.some((o) => o.action_type === 'create_or_refresh_city_service_page');
+    if (!hasFamily && !hasPageEdit && !hasCityService && !lockEvenIfEmpty) return opportunities;
     // Advisory transaction lock FIRST (Codex r27): FOR UPDATE only locks
     // rows that exist, so two overlapping mines could both see no row for
     // a fresh page and insert competing first refreshes. Every family
@@ -3392,6 +3892,169 @@ class GscOpportunityMiner {
       }
       return true;
     });
+  }
+
+  // TOCTOU guard for city-service targets, mirroring _revalidateFamilyBatch:
+  // mine-time arbitration (arbitrateCityServiceTargets) sees only the BATCH,
+  // and the queue can already hold an in-flight row for the same (service,
+  // city) under a DIFFERENT dedupe key — the winning query changed between
+  // mines, or another bucket owned the target last time. Persisting the new
+  // winner beside it would give the runner two drafts of one page (the
+  // residual documented on PR #3372). Under the advisory lock taken by
+  // _revalidateFamilyBatch, re-read every in-flight city-service row FOR
+  // UPDATE (claimNext's FOR UPDATE SKIP LOCKED then cannot grab one
+  // mid-decision) and DEFER any candidate whose target is occupied by a
+  // different key. Deferral self-heals: a superseded PENDING twin is
+  // retired by the recovered-query sweep, freeing the target for the next
+  // mine; claimed/pending_review twins free it when their run completes.
+  async _revalidateCityServiceBatch(trx, opportunities = [], { frozenKeys = new Set(), collectFrozenTargets = null } = {}) {
+    const CS = 'create_or_refresh_city_service_page';
+    if (!opportunities.some((o) => o.action_type === CS)) return opportunities;
+    // RECENT done rows ride along as TARGET-level fences (rounds 6-7):
+    // the arbitration already drops frozen targets, but that read ran
+    // outside the lock — this is the authoritative re-check. A done row
+    // inside the mine window is a page just created that GSC has not
+    // observed yet; it blocks EVERY candidate for the target, own-key
+    // included. skipped rows are runner outcomes, never target vetoes —
+    // they freeze only their own key via the upsert guard.
+    const inflight = await trx('opportunity_queue')
+      .where({ action_type: CS })
+      .where((q) => q
+        .whereIn('status', ['pending', 'claimed', 'pending_review'])
+        .orWhere((qq) => qq
+          .where({ status: 'done' })
+          .where('updated_at', '>=', trx.raw(`now() - interval '${GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS} days'`)))
+        // Human-terminal skips (manual dismissals only — see
+        // isHumanTerminalSkip for why closed-unmerged PRs stay key-level)
+        // are standing target vetoes, unbounded. Runner skips are
+        // deliberately NOT selected: key-only.
+        .orWhere((qq) => qq
+          .where({ status: 'skipped' })
+          .where((r) => r
+            .where('skip_reason', 'manual_dismiss')
+            .orWhere('skip_reason', 'like', 'manual_dismiss:%'))))
+      .forUpdate()
+      .select('dedupe_key', 'service', 'city', 'status', 'skip_reason', 'bucket', 'query');
+    // Re-read candidate keys' frozen state UNDER the lock (cloud P1): the
+    // arbitration's frozenKeys came from an unlocked read, and a runner can
+    // flip an elected row pending→skipped in between — the in-flight select
+    // above excludes runner-skipped rows, so the candidate would pass here
+    // and then no-op at the upsert, after arbitration already discarded its
+    // sibling. Any candidate whose own key is frozen NOW is dropped: it
+    // cannot land, and the pair self-heals next mine. (A claimed→skipped
+    // flip mid-fence is impossible to miss: a claimed row already defers
+    // the candidate.)
+    const csKeys = opportunities
+      .filter((o) => o.action_type === CS && o.dedupe_key)
+      .map((o) => o.dedupe_key);
+    let lockedFrozen = new Set(frozenKeys);
+    if (csKeys.length) {
+      const frozenNow = await trx('opportunity_queue')
+        .whereIn('dedupe_key', csKeys)
+        .whereIn('status', ['done', 'skipped'])
+        .select('dedupe_key');
+      for (const r of frozenNow) lockedFrozen.add(r.dedupe_key);
+    }
+    if (!inflight.length && !lockedFrozen.size) return opportunities;
+    const isFrozenRow = (r) => r.status === 'done' || isHumanTerminalSkip(r.status, r.skip_reason);
+    const occupied = new Map();
+    for (const r of inflight) {
+      if (!r.service || !r.city) continue;
+      const key = cityServiceTargetKey(r.service, r.city);
+      if (!occupied.has(key)) occupied.set(key, []);
+      occupied.get(key).push(r);
+      // Share the IN-LOCK frozen-target knowledge with the caller (cloud
+      // P1): the pre-transaction snapshot cannot see a target completed
+      // or human-dismissed since it was read, and the sweep must not
+      // leave that target's pending twin claimable.
+      if (collectFrozenTargets && isFrozenRow(r)) collectFrozenTargets.add(key);
+    }
+    let deferred = 0;
+    const supersede = [];
+    const out = opportunities.filter((o) => {
+      if (o.action_type !== CS || !o.service || !o.city) return true;
+      // Key frozen NOW (in-lock re-read) ⇒ the upsert guard will no-op
+      // this candidate regardless of target occupancy — drop it before
+      // any occupancy/supersession reasoning.
+      if (lockedFrozen.has(o.dedupe_key)) { deferred += 1; return false; }
+      const allRows = occupied.get(cityServiceTargetKey(o.service, o.city)) || [];
+      if (allRows.some(isFrozenRow)) { deferred += 1; return false; }
+      const rows = allRows.filter((r) => r.dedupe_key !== o.dedupe_key);
+      // The candidate's OWN (non-frozen) row does not occupy its target —
+      // that is the ordinary upsert-refresh path.
+      if (!rows.length) return true;
+      // A PENDING queryless local_gap twin is SUPERSEDED by a query-bearing
+      // winner — but ONLY by one that can actually LAND: the replacement
+      // must clear its own floor and its key must not be frozen, or the
+      // supersession expires viable work and then persists nothing
+      // (cloud P1). An unlandable candidate defers instead, leaving the
+      // twin claimable. The rows are FOR UPDATE-locked, so claimNext
+      // cannot grab one mid-supersession; 'expired' is revivable per the
+      // retirement doctrine.
+      const canSupersede = o.query && isPersistable(o) && !lockedFrozen.has(o.dedupe_key);
+      const blocking = rows.filter((r) => !(
+        r.status === 'pending' && r.bucket === 'local_gap' && !r.query && canSupersede
+      ));
+      if (blocking.length) { deferred += 1; return false; }
+      supersede.push(...rows.map((r) => r.dedupe_key));
+      return true;
+    });
+    if (supersede.length) {
+      await trx('opportunity_queue')
+        .whereIn('dedupe_key', supersede)
+        .where({ status: 'pending' })
+        .update({ status: 'expired', skip_reason: 'city_service_superseded', updated_at: new Date() });
+      logger.info(`[gsc-opp-miner] city-service revalidation: ${supersede.length} pending queryless twin(s) superseded by query-bearing winners`);
+    }
+    if (deferred) {
+      logger.info(`[gsc-opp-miner] city-service revalidation: ${deferred} candidate(s) deferred — target already in flight under a different key`);
+    }
+    return out;
+  }
+
+  // Retire pending local_gap rows the mine no longer stands behind. The
+  // recovered-query sweep is query-keyed and cannot see this bucket's
+  // queryless rows; target-stable keys make key-matching exact instead. A
+  // single UPDATE with the status predicate is race-safe against claimNext
+  // (a concurrently-claimed row stops matching status='pending'), and the
+  // caller gates on the canonical window + no bucket error, so an empty
+  // batch here means "mine ran, signals gone" — expire everything pending.
+  // 'expired' is revivable: the next mine re-emits any pair that still
+  // qualifies and the upsert revives the row.
+  async _sweepStaleLocalGapRows(localGapOpps = [], frozenTargets = new Set(), trx = null) {
+    const runner = trx || db;
+    // A pre-arbitration key only DEFENDS its row when the target is not
+    // frozen (cloud P1): a candidate dropped by the frozen-target fence
+    // never reaches _revalidateCityServiceBatch, so nothing else fences
+    // or expires its pending twin — leaving it claimable would draft the
+    // page again inside the done-lag window or bypass a human dismissal.
+    // SELECT FOR UPDATE then update by locked key (the #3372 sweep-lock
+    // shape) so claimNext cannot grab a row mid-classification.
+    const liveKeys = new Set(localGapOpps
+      .filter((o) => isPersistable(o)
+        && o.service && o.city
+        && !frozenTargets.has(cityServiceTargetKey(o.service, o.city)))
+      .map((o) => o.dedupe_key));
+    const rows = await runner('opportunity_queue')
+      .where({ bucket: 'local_gap', status: 'pending' })
+      .forUpdate()
+      .select('dedupe_key', 'service', 'city');
+    const gone = [];
+    const frozen = [];
+    for (const r of rows) {
+      if (liveKeys.has(r.dedupe_key)) continue;
+      const frozenTarget = r.service && r.city
+        && frozenTargets.has(cityServiceTargetKey(r.service, r.city));
+      (frozenTarget ? frozen : gone).push(r.dedupe_key);
+    }
+    for (const [keys, reason] of [[gone, 'local_gap_signal_gone'], [frozen, 'city_service_target_frozen']]) {
+      if (!keys.length) continue;
+      await runner('opportunity_queue')
+        .whereIn('dedupe_key', keys)
+        .where({ status: 'pending' })
+        .update({ status: 'expired', skip_reason: reason, updated_at: new Date() });
+      logger.info(`[gsc-opp-miner] local_gap sweep: ${keys.length} pending row(s) expired (${reason})`);
+    }
   }
 
   async _sweepStaleFamilyRows(familyOpps = [], batch = [], trx = null, exemptions = { pages: new Set(), blogKeys: new Set(), familyKeys: new Set() }) {
@@ -4104,6 +4767,12 @@ module.exports = new GscOpportunityMiner();
 module.exports.GscOpportunityMiner = GscOpportunityMiner;
 // Exposed for unit tests — pure functions, no DB.
 module.exports._internals = {
+  arbitrateCityServiceTargets,
+  cityServiceTargetKey,
+  exactCityServiceRoutePair,
+  isHumanTerminalSkip,
+  persistFloorFor,
+  isPersistable,
   normalizeCity,
   inferServiceFromQuery,
   inferServiceFromUrl,

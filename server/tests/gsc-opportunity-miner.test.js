@@ -13,6 +13,10 @@ jest.mock('../services/logger', () => ({
 }));
 
 const {
+  arbitrateCityServiceTargets,
+  persistFloorFor,
+  isPersistable,
+  ownPageKey,
   normalizeCity,
   inferServiceFromQuery,
   inferServiceFromUrl,
@@ -1829,7 +1833,9 @@ describe('listicle_family scoring + action mapping', () => {
     // action (refresh-audit's recheck-under-lock is only sound then), and
     // refresh-audit's in-flight check matches the miner's page-edit
     // conflict class, not refresh alone.
-    expect(src).toMatch(/if \(!hasFamily && !hasPageEdit && !lockEvenIfEmpty\) return opportunities;/);
+    // hasCityService joined the guard with the local_gap revival: the
+    // city-service in-flight fence rechecks under this same advisory lock.
+    expect(src).toMatch(/if \(!hasFamily && !hasPageEdit && !hasCityService && !lockEvenIfEmpty\) return opportunities;/);
     expect(src).toMatch(/const hasPageEdit = opportunities\.some\(\(o\) => GscOpportunityMiner\.PAGE_EDITING_ACTIONS\.includes\(o\.action_type\)\)/);
     expect(auditSrc).toMatch(/\.whereIn\('action_type', miner\.PAGE_EDITING_ACTIONS\)/);
     const gateSrc = require('fs').readFileSync(require.resolve('../services/content/content-quality-gate'), 'utf8');
@@ -2026,7 +2032,9 @@ describe('listicle_family scoring + action mapping', () => {
     // Transactional (r22 audit): lock+revalidate predecessors, then upserts,
     // then sweep — all one transaction so concurrent claimNext can neither
     // race the transition nor observe it halfway.
-    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,900}_revalidateFamilyBatch\(trx, allOpportunities, \{ lockEvenIfEmpty: sweepWillRun \}\)[\s\S]{0,200}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1200}_sweepStaleFamilyRows\([\s\S]{0,300}familyExemptions[\s\S]{0,20}\)/);
+    // …with the city-service target fence BETWEEN the family revalidation
+    // and the upserts, under the same advisory lock (local_gap revival).
+    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,1800}_revalidateFamilyBatch\(trx, allOpportunities, \{ lockEvenIfEmpty: sweepWillRun \|\| localGapSweepWillRun \}\)[\s\S]{0,900}_revalidateCityServiceBatch\(trx, familyChecked, \{ frozenKeys: cityServiceFrozenKeys, collectFrozenTargets: sweepFrozenTargets \}\)[\s\S]{0,300}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1200}_sweepStaleFamilyRows\([\s\S]{0,300}familyExemptions[\s\S]{0,20}\)/);
     expect(src).toMatch(/\.forUpdate\(\)/);
     // Non-family conflicts re-read INSIDE the transaction (audit r24) —
     // the pre-mine fence query alone left a producer race window.
@@ -2140,5 +2148,882 @@ describe('vendor synonyms excluded from listicle families (Codex r7 on #3255)', 
     expect(isListicleQuery('10-step termite prevention checklist')).toBe(true);
     // Noun fallback without a leading count is untouched.
     expect(isListicleQuery('termite treatment checklist')).toBe(true);
+  });
+});
+
+// ── local_gap revival: floor exception + cross-bucket city-service arbitration ──
+
+describe('local_gap rides the blog floor on the city-service route (owner ruling 2026-08-13)', () => {
+  const cityServiceRow = (bucket, score, query = null) => ({
+    bucket,
+    action_type: 'create_or_refresh_city_service_page',
+    query,
+    page_url: null,
+    service: 'termite',
+    city: 'sarasota',
+    score,
+    signal_metadata: { impressions: 120 },
+  });
+
+  test('the bucket ceiling really is below the global floor — the structural silence', () => {
+    // gscOpportunity round(35 × 0.8 × 1.0) + localRevenue(termite 1.0) +
+    // conversionIntent(null query) + contentGap = 28 + 20 + 6 + 15 = 69 < 75.
+    const { total } = scoreOpportunity(
+      { bucket: 'local_gap', query: null, service: 'termite', city: 'sarasota' },
+      { position: 25, impressions: 500 }
+    );
+    expect(total).toBe(69);
+    expect(total).toBeLessThan(75);
+  });
+
+  test('city-service local_gap rows ride the blog floor and persist', () => {
+    const row = cityServiceRow('local_gap', 69);
+    expect(persistFloorFor(row)).toBe(45);
+    expect(isPersistable(row)).toBe(true);
+    expect(isPersistable(cityServiceRow('local_gap', 44))).toBe(false);
+  });
+
+  test('the exception does NOT leak to local_gap rows with other actions', () => {
+    // The 2 all-time prod rows were add_internal_links from an older
+    // routing — those keep the global floor.
+    const linkRow = { bucket: 'local_gap', action_type: 'add_internal_links', score: 69, signal_metadata: {} };
+    expect(persistFloorFor(linkRow)).toBe(75);
+    expect(isPersistable(linkRow)).toBe(false);
+  });
+});
+
+describe('arbitrateCityServiceTargets — one row per (service, city) across buckets', () => {
+  const row = (bucket, { query = null, service = 'termite', city = 'sarasota', score = 60, impressions = 120 } = {}) => ({
+    bucket,
+    action_type: 'create_or_refresh_city_service_page',
+    query,
+    page_url: null,
+    service,
+    city,
+    score,
+    signal_metadata: { impressions },
+  });
+
+  test('a query-bearing row beats query-less local_gap even at a LOWER score', () => {
+    // The query drives target_keyword, the coverage section, and
+    // specialty-topic derivation — a leaner local_gap brief must not
+    // shadow a richer one.
+    const lg = row('local_gap', { score: 68, impressions: 500 });
+    const ncy = row('no_content_yet', { query: 'termite inspection sarasota fl', score: 55 });
+    const out = arbitrateCityServiceTargets([lg, ncy]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('no_content_yet');
+    // …and the dropped twin's whole-segment evidence rides along.
+    expect(out[0].signal_metadata.segment_impressions).toBe(500);
+  });
+
+  test('among PERSISTABLE query-bearing candidates the highest score wins', () => {
+    // striking_distance city-service rows keep the GLOBAL 75 floor (the
+    // blog-floor exception covers only no_content_yet and local_gap), so
+    // it must clear 75 to enter the persistable pool at all.
+    const sd = row('striking_distance', { query: 'termite treatment sarasota', score: 80 });
+    const ncy = row('no_content_yet', { query: 'termite inspection sarasota fl', score: 55 });
+    const out = arbitrateCityServiceTargets([sd, ncy]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('striking_distance');
+    // No local_gap twin in the group — no segment_impressions invented.
+    expect(out[0].signal_metadata.segment_impressions).toBeUndefined();
+  });
+
+  test('a query-bearing candidate BELOW its own floor loses to a persistable one', () => {
+    // The same pair at sd=62: striking_distance faces 75 and would be
+    // dropped by persistAll — the no_content_yet row (blog floor 45) is
+    // the one that actually lands.
+    const sd = row('striking_distance', { query: 'termite treatment sarasota', score: 62 });
+    const ncy = row('no_content_yet', { query: 'termite inspection sarasota fl', score: 55 });
+    const out = arbitrateCityServiceTargets([sd, ncy]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('no_content_yet');
+  });
+
+  test('different targets never collapse; non-city-service rows pass through', () => {
+    const a = row('local_gap', { city: 'sarasota' });
+    const b = row('local_gap', { city: 'venice' });
+    const blog = { bucket: 'no_content_yet', action_type: 'new_supporting_blog', query: 'x', service: 'termite', city: null, score: 50, signal_metadata: {} };
+    const out = arbitrateCityServiceTargets([a, b, blog]);
+    expect(out).toHaveLength(3);
+  });
+
+  test('an uncontested local_gap row survives on its own', () => {
+    const out = arbitrateCityServiceTargets([row('local_gap', { score: 56 })]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('local_gap');
+  });
+});
+
+describe('_revalidateCityServiceBatch — in-flight target fence under the persist lock', () => {
+  const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+  const candidate = (bucket, dedupe_key, { service = 'termite', city = 'sarasota' } = {}) => ({
+    bucket,
+    action_type: 'create_or_refresh_city_service_page',
+    dedupe_key,
+    service,
+    city,
+    score: 60,
+    signal_metadata: {},
+  });
+  const fakeTrx = (inflightRows) => {
+    const updates = [];
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn((col, vals) => { chain._inKeys = vals; return chain; }),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        // The in-flight read is the FOR UPDATE one; the in-lock frozen
+        // re-read (no forUpdate) sees no done/skipped rows by default.
+        select: jest.fn(() => Promise.resolve(chain._locked ? inflightRows : [])),
+        update: jest.fn((patch) => { updates.push({ keys: chain._inKeys, patch }); return Promise.resolve(chain._inKeys?.length || 0); }),
+      };
+      return chain;
+    });
+    trx._updates = updates;
+    return trx;
+  };
+
+  test('a claimed target under a DIFFERENT key defers the new winner', async () => {
+    const miner = new GscOpportunityMiner();
+    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::old query', service: 'termite', city: 'sarasota', status: 'claimed', bucket: 'no_content_yet', query: 'old query' }];
+    const out = await miner._revalidateCityServiceBatch(
+      fakeTrx(inflight),
+      [candidate('local_gap', 'local_gap::termite::sarasota::_')]
+    );
+    expect(out).toHaveLength(0);
+  });
+
+  test('a PENDING queryless local_gap twin is SUPERSEDED by a query-bearing winner, not deferred to', async () => {
+    // No sweep covers local_gap (queryless; the recovered-query sweep only
+    // walks ctr_rewrite + no_content_yet) — deferring would let the lean
+    // row block the rich one until expiry while itself staying claimable.
+    const miner = new GscOpportunityMiner();
+    const inflight = [{ dedupe_key: 'local_gap::termite::sarasota::_', service: 'termite', city: 'sarasota', status: 'pending', bucket: 'local_gap', query: null }];
+    const trx = fakeTrx(inflight);
+    const ncy = { ...candidate('no_content_yet', 'no_content_yet::termite::sarasota::termite inspection'), query: 'termite inspection sarasota' };
+    const out = await miner._revalidateCityServiceBatch(trx, [ncy]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('no_content_yet');
+    expect(trx._updates).toHaveLength(1);
+    expect(trx._updates[0].keys).toEqual(['local_gap::termite::sarasota::_']);
+    expect(trx._updates[0].patch.status).toBe('expired');
+    expect(trx._updates[0].patch.skip_reason).toBe('city_service_superseded');
+  });
+
+  test('the supersession NEVER runs in reverse — a queryless candidate defers to a pending query-bearing row', async () => {
+    const miner = new GscOpportunityMiner();
+    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::q', service: 'termite', city: 'sarasota', status: 'pending', bucket: 'no_content_yet', query: 'q' }];
+    const trx = fakeTrx(inflight);
+    const out = await miner._revalidateCityServiceBatch(
+      trx, [candidate('local_gap', 'local_gap::termite::sarasota::_')]
+    );
+    expect(out).toHaveLength(0);
+    expect(trx._updates).toHaveLength(0);
+  });
+
+  test('a candidate refreshing its OWN row passes — the ordinary upsert path', async () => {
+    const miner = new GscOpportunityMiner();
+    const inflight = [{ dedupe_key: 'local_gap::termite::sarasota::_', service: 'termite', city: 'sarasota', status: 'pending', bucket: 'local_gap', query: null }];
+    const out = await miner._revalidateCityServiceBatch(
+      fakeTrx(inflight),
+      [candidate('local_gap', 'local_gap::termite::sarasota::_')]
+    );
+    expect(out).toHaveLength(1);
+  });
+
+  test('an unrelated in-flight target defers nothing; non-CS rows are untouched', async () => {
+    const miner = new GscOpportunityMiner();
+    const inflight = [{ dedupe_key: 'local_gap::pest::venice::_', service: 'pest', city: 'venice', status: 'pending', bucket: 'local_gap', query: null }];
+    const blog = { bucket: 'no_content_yet', action_type: 'new_supporting_blog', dedupe_key: 'x', query: 'q', service: 'termite', city: null, score: 50, signal_metadata: {} };
+    const out = await miner._revalidateCityServiceBatch(
+      fakeTrx(inflight),
+      [candidate('local_gap', 'local_gap::termite::sarasota::_'), blog]
+    );
+    expect(out).toHaveLength(2);
+  });
+
+  test('mineLocalGap canonicalizes and MERGES specialty into pest before keying', () => {
+    // Raw 'tree_shrub'/'specialty' would park as facts_unmappable AND mint
+    // a different ownPageKey that slips past the cross-bucket arbitration.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+    expect(lg).toMatch(/canonicalizeServiceCategory\(q\.service_category\)/);
+    expect(lg).toMatch(/prev\.impressions \+= imp;/);
+  });
+
+  test('a batch with no city-service rows never touches the queue', async () => {
+    const miner = new GscOpportunityMiner();
+    const trx = fakeTrx([]);
+    const blog = { bucket: 'seasonal_rising', action_type: 'new_supporting_blog', dedupe_key: 'y', score: 50, signal_metadata: {} };
+    const out = await miner._revalidateCityServiceBatch(trx, [blog]);
+    expect(out).toHaveLength(1);
+    expect(trx).not.toHaveBeenCalled();
+  });
+});
+
+describe('local_gap canonical merge details (round-2 P1s)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+
+  test('the impressions floor applies to the MERGED canonical total, not raw groups', () => {
+    const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+    // 30 specialty + 30 pest in one city = an eligible 60-imp pest target;
+    // a per-raw-group HAVING would drop both halves before the merge.
+    expect(lg).not.toMatch(/havingRaw/);
+    expect(lg).toMatch(/pair\.impressions < THRESHOLDS\.minImpressionsToScore/);
+  });
+
+  test('the own-pages map is ALSO keyed under the canonical service, additively', () => {
+    const loader = src.slice(src.indexOf('async _loadOwnPagesByServiceCity'), src.indexOf('QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS'));
+    // A page classified 'tree_shrub' must be found by a canonical
+    // 'tree-shrub' lookup, or local_gap enqueues a duplicate draft for a
+    // pair that HAS a page. Raw keys stay for the raw-value consumers.
+    expect(loader).toMatch(/const canon = canonicalizeServiceCategory\(service\);/);
+    expect(loader).toMatch(/if \(canon && canon !== service\)/);
+    expect(loader).toMatch(/if \(!map\.has\(key\)\) map\.set\(key, r\.page_url\)/);
+  });
+});
+
+describe('arbitration yields only to FLOOR-CLEARING candidates (round-3 P1)', () => {
+  const row = (bucket, { query = null, score = 60 } = {}) => ({
+    bucket,
+    action_type: 'create_or_refresh_city_service_page',
+    query,
+    page_url: null,
+    service: 'termite',
+    city: 'sarasota',
+    score,
+    signal_metadata: { impressions: 120 },
+  });
+
+  test('a below-floor query-bearing candidate must NOT displace a persistable local_gap row', () => {
+    // Both ride the blog floor (45). The striking_distance twin at 40
+    // would be dropped by persistAll — letting it win would leave the
+    // target with NOTHING this mine.
+    const lg = row('local_gap', { score: 56 });
+    const sd = row('striking_distance', { query: 'termite treatment sarasota', score: 40 });
+    const out = arbitrateCityServiceTargets([lg, sd]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('local_gap');
+  });
+
+  test('a persistable query-bearing candidate still beats persistable local_gap at any score', () => {
+    const lg = row('local_gap', { score: 68 });
+    const ncy = row('no_content_yet', { query: 'termite inspection sarasota fl', score: 55 });
+    const out = arbitrateCityServiceTargets([lg, ncy]);
+    expect(out[0].bucket).toBe('no_content_yet');
+  });
+
+  test('when NOTHING clears the floor, the best candidate survives for calibration', () => {
+    const lg = row('local_gap', { score: 30 });
+    const sd = row('striking_distance', { query: 'q', score: 40 });
+    const out = arbitrateCityServiceTargets([lg, sd]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('striking_distance');
+  });
+});
+
+describe('cross-bucket keys canonicalize service ALIASES (round-4 P1)', () => {
+  const { cityServiceTargetKey } = require('../services/seo/gsc-opportunity-miner')._internals;
+
+  test('raw and canonical spellings resolve to ONE target key', () => {
+    expect(cityServiceTargetKey('tree_shrub', 'sarasota')).toBe(cityServiceTargetKey('tree-shrub', 'sarasota'));
+    expect(cityServiceTargetKey('specialty', 'venice')).toBe(cityServiceTargetKey('pest', 'venice'));
+    // Unknown spellings keep their identity rather than collapsing into a
+    // shared null bucket.
+    expect(cityServiceTargetKey('mystery', 'venice')).not.toBe(cityServiceTargetKey('pest', 'venice'));
+  });
+
+  test('a raw-service striking_distance row still GROUPS with a canonical local_gap twin', () => {
+    // One row out — the grouping is the point of the canonical key. Since
+    // the mappable narrowing (round-6 cloud P1), the RUNNABLE canonical
+    // twin wins: the raw-service row would park as facts_unmappable.
+    const lg = {
+      bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', query: null,
+      page_url: null, service: 'tree-shrub', city: 'sarasota', score: 56, signal_metadata: { impressions: 200 },
+    };
+    const sd = {
+      bucket: 'striking_distance', action_type: 'create_or_refresh_city_service_page',
+      query: 'tree trimming sarasota', page_url: null, service: 'tree_shrub', city: 'sarasota',
+      score: 80, signal_metadata: { impressions: 120 },
+    };
+    const out = arbitrateCityServiceTargets([lg, sd]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('local_gap');
+  });
+
+  test('the in-flight fence sees a raw-service pending row as occupying the canonical target', async () => {
+    const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+    const miner = new GscOpportunityMiner();
+    const inflight = [{ dedupe_key: 'striking_distance::tree_shrub::sarasota::q', service: 'tree_shrub', city: 'sarasota', status: 'claimed', bucket: 'striking_distance', query: 'q' }];
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        select: jest.fn(() => Promise.resolve(chain._locked ? inflight : [])),
+      };
+      return chain;
+    });
+    const out = await miner._revalidateCityServiceBatch(trx, [{
+      bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::tree-shrub::sarasota::_',
+      service: 'tree-shrub', city: 'sarasota', score: 56, signal_metadata: {},
+    }]);
+    expect(out).toHaveLength(0);
+  });
+});
+
+describe('RECENT done rows fence the whole TARGET; skipped never does (rounds 5-7)', () => {
+  const { cityServiceTargetKey } = require('../services/seo/gsc-opportunity-miner')._internals;
+  const row = (bucket, { query = null, score = 60, dedupe_key } = {}) => ({
+    bucket,
+    action_type: 'create_or_refresh_city_service_page',
+    query,
+    dedupe_key,
+    page_url: null,
+    service: 'termite',
+    city: 'sarasota',
+    score,
+    signal_metadata: { impressions: 120 },
+  });
+
+  test('a frozen target drops EVERY candidate — no sibling-bucket bypass', () => {
+    // A recent done row = the page was just created and GSC has not
+    // observed it yet; persisting a twin under a different key would
+    // draft the same page again inside the lag window.
+    const ncy = row('no_content_yet', { query: 'termite inspection sarasota', score: 70, dedupe_key: 'k1' });
+    const lg = row('local_gap', { score: 56, dedupe_key: 'k2' });
+    const out = arbitrateCityServiceTargets([ncy, lg], {
+      frozenTargets: new Set([cityServiceTargetKey('termite', 'sarasota')]),
+    });
+    expect(out).toHaveLength(0);
+  });
+
+  test('the frozen-target read is done-only and TIME-BOUNDED; skipped is a runner outcome', () => {
+    // One query's gate failure (a runner skip) must not permanently
+    // silence unrelated future queries or the segment's local_gap
+    // evidence — and an OLD done row is not a standing veto either.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    // TARGET derivation is done-only + lag-bounded (JS-side, from the
+    // combined read — see the round-8 test for the read itself)…
+    const read = src.slice(src.indexOf('let cityServiceFrozenTargets'), src.indexOf('const allOpportunities'));
+    expect(read).toMatch(/r\.status === 'done'[\s\S]{0,160}lagCutoff/);
+    // …and the in-lock fence consults skipped rows ONLY for the
+    // human-terminal reasons — runner skips stay key-only.
+    const fenceSrc = src.slice(src.indexOf('async _revalidateCityServiceBatch'), src.indexOf('async _sweepStaleFamilyRows'));
+    expect(fenceSrc).not.toMatch(/'astro_pr_closed_unmerged'/);
+    expect(fenceSrc).toMatch(/'manual_dismiss:%'/);
+    expect(fenceSrc).toMatch(/CANONICAL_MINE_PERIOD_DAYS/);
+  });
+
+  test('a frozen target drops a SINGLE candidate too', () => {
+    const lg = row('local_gap', { score: 56, dedupe_key: 'k2' });
+    const out = arbitrateCityServiceTargets([lg], {
+      frozenTargets: new Set([cityServiceTargetKey('termite', 'sarasota')]),
+    });
+    expect(out).toHaveLength(0);
+  });
+
+  test('with NO frozen targets the query-bearing winner rule is unchanged', () => {
+    const ncy = row('no_content_yet', { query: 'termite inspection sarasota', score: 55, dedupe_key: 'k1' });
+    const lg = row('local_gap', { score: 68, dedupe_key: 'k2' });
+    const out = arbitrateCityServiceTargets([ncy, lg]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('no_content_yet');
+  });
+
+  test('mineAll reads frozen city-service TARGETS before arbitrating, fail-soft', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    expect(src).toMatch(/cityServiceTargetKey\(r\.service, r\.city\)/);
+    expect(src).toMatch(/frozen-target lookup failed[\s\S]{0,60}arbitration proceeds frozen-blind/);
+    expect(src).toMatch(/arbitrateCityServiceTargets\(\n?\s*\[\.\.\.minedOpportunities, \.\.\.buckets\.link_boost\],\n?\s*\{ frozenTargets: cityServiceFrozenTargets, frozenKeys: cityServiceFrozenKeys \}/);
+  });
+
+  test('HUMAN skips fence the target; RUNNER skips never do (Codex P1 on #3378)', () => {
+    const { isHumanTerminalSkip } = require('../services/seo/gsc-opportunity-miner')._internals;
+    // autonomous-review-queue writes manual_dismiss[:note]; the PR poller
+    // writes astro_pr_closed_unmerged when a human closes the PR unmerged.
+    expect(isHumanTerminalSkip('skipped', 'manual_dismiss')).toBe(true);
+    expect(isHumanTerminalSkip('skipped', 'manual_dismiss:not this market')).toBe(true);
+    // Closing ONE generated PR rejects that draft, not every future page
+    // for the pair — key-level via the upsert guard, never a target veto.
+    expect(isHumanTerminalSkip('skipped', 'astro_pr_closed_unmerged')).toBe(false);
+    // Runner outcomes — query-specific, key-only.
+    expect(isHumanTerminalSkip('skipped', 'gate_fail')).toBe(false);
+    expect(isHumanTerminalSkip('skipped', 'protected_page:money_page')).toBe(false);
+    expect(isHumanTerminalSkip('skipped', null)).toBe(false);
+    expect(isHumanTerminalSkip('done', 'manual_dismiss')).toBe(false);
+  });
+
+  test('a human-dismissed occupant blocks the target for every sibling key', async () => {
+    const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+    const miner = new GscOpportunityMiner();
+    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::old', service: 'termite', city: 'sarasota', status: 'skipped', skip_reason: 'manual_dismiss:no page for this pair', bucket: 'no_content_yet', query: 'old' }];
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        select: jest.fn(() => Promise.resolve(chain._locked ? inflight : [])),
+      };
+      return chain;
+    });
+    const out = await miner._revalidateCityServiceBatch(trx, [
+      { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::termite::sarasota::_', service: 'termite', city: 'sarasota', score: 56, signal_metadata: {} },
+    ]);
+    expect(out).toHaveLength(0);
+  });
+
+  test('the in-flight fence re-checks the frozen-target rule under the lock', async () => {
+    const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+    const miner = new GscOpportunityMiner();
+    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::old', service: 'termite', city: 'sarasota', status: 'done', bucket: 'no_content_yet', query: 'old' }];
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        select: jest.fn(() => Promise.resolve(chain._locked ? inflight : [])),
+      };
+      return chain;
+    });
+    // Even the frozen row's OWN key is blocked — a skipped target admits
+    // nothing, upsert-refresh path included.
+    const out = await miner._revalidateCityServiceBatch(trx, [
+      { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::termite::sarasota::_', service: 'termite', city: 'sarasota', score: 56, signal_metadata: {} },
+      { bucket: 'no_content_yet', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'no_content_yet::termite::sarasota::old', service: 'termite', city: 'sarasota', score: 70, query: 'old', signal_metadata: {} },
+    ]);
+    expect(out).toHaveLength(0);
+  });
+});
+
+describe('key-level frozen exclusion INSIDE the winner pool (round-8 P1)', () => {
+  const row = (bucket, { query = null, score = 60, dedupe_key } = {}) => ({
+    bucket,
+    action_type: 'create_or_refresh_city_service_page',
+    query,
+    dedupe_key,
+    page_url: null,
+    service: 'termite',
+    city: 'sarasota',
+    score,
+    signal_metadata: { impressions: 120 },
+  });
+
+  test('a winner aimed at a skipped/old-done KEY yields to an actionable sibling', () => {
+    // The upsert guard is unconditional and key-level: electing the frozen
+    // key lands nothing every mine while the fence expires actionable
+    // twins on its behalf. The sibling landing bypasses no decision —
+    // skipped freezes only its key, and recent done already fences the
+    // whole target separately.
+    const frozenNcy = row('no_content_yet', { query: 'termite inspection sarasota', score: 70, dedupe_key: 'kf' });
+    const lg = row('local_gap', { score: 56, dedupe_key: 'kl' });
+    const out = arbitrateCityServiceTargets([frozenNcy, lg], { frozenKeys: new Set(['kf']) });
+    expect(out).toHaveLength(1);
+    expect(out[0].dedupe_key).toBe('kl');
+  });
+
+  test('an all-frozen-key group keeps its best for calibration', () => {
+    const a = row('no_content_yet', { query: 'q', score: 70, dedupe_key: 'ka' });
+    const b = row('local_gap', { score: 56, dedupe_key: 'kb' });
+    const out = arbitrateCityServiceTargets([a, b], { frozenKeys: new Set(['ka', 'kb']) });
+    expect(out).toHaveLength(1);
+    expect(out[0].dedupe_key).toBe('ka');
+  });
+
+  test('mineAll derives BOTH sets from one read: unbounded keys, lag-bounded done targets', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    const read = src.slice(src.indexOf('let cityServiceFrozenTargets'), src.indexOf('const allOpportunities'));
+    expect(read).toMatch(/whereIn\('status', \['done', 'skipped'\]\)/);
+    expect(read).toMatch(/cityServiceFrozenKeys = new Set\(frozenRows\.map\(\(r\) => r\.dedupe_key\)\)/);
+    expect(read).toMatch(/r\.status === 'done'[\s\S]{0,160}lagCutoff/);
+  });
+});
+
+describe('local_gap representative query + label validation (Codex P1s on #3378)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+  const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+
+  test('every query validates its label before its impressions count', () => {
+    // "mortgage rates north port" arrives labelled 'rodent' ('rat' inside
+    // 'rates'); boundary-safe evidence or contextual inference, else skip.
+    expect(lg).toMatch(/classifierQuerySupported\(q\.service_category, canon, q\.query\)/);
+    expect(lg).toMatch(/\|\| inferServiceFromQuery\(q\.query\)/);
+  });
+
+  test('the pair carries its top validated query as representative_query', () => {
+    expect(lg).toMatch(/representative_query: pair\.representative \|\| null/);
+    // …while the row's own query stays null (target-stable dedupe key).
+    expect(lg).toMatch(/query: null,/);
+  });
+
+  test('the brief builder falls back to representative_query for SERP + target_keyword', () => {
+    const bb = fs.readFileSync(require.resolve('../services/content/content-brief-builder'), 'utf8');
+    expect(bb).toMatch(/const serpKeyword = opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null;/);
+    expect(bb).toMatch(/target_keyword: opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null,/);
+  });
+});
+
+describe('local_gap specialty topic + log hygiene (round-2 cloud P1s)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+  const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+
+  test('the pair derives specialty_topic across ALL queries, representative first', () => {
+    // "wasp control sarasota" canonicalizes to broad pest; without the
+    // topic the brief keeps its FAQ mandate and the publish guard never
+    // sees the blocked topic — the exact no_content_yet lesson.
+    expect(lg).toMatch(/specialty_topic: extractSpecialtyTopic\(\[\s*pair\.representative,/);
+    expect(lg).toMatch(/prev\.queries\.push\(q\.query\)/);
+  });
+
+  test('the brief-builder SERP failure log carries a digest, never the raw keyword', () => {
+    const bb = fs.readFileSync(require.resolve('../services/content/content-brief-builder'), 'utf8');
+    expect(bb).toMatch(/sha256'\)\.update\(String\(serpKeyword\)\)/);
+    expect(bb).not.toMatch(/SERP profile failed for "\$\{serpKeyword\}"/);
+    expect(bb).not.toMatch(/SERP profile failed for "\$\{opportunity\.query\}"/);
+  });
+});
+
+describe('local_gap is HUB-scoped on both legs (round-3 cloud P1)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+  const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+
+  test('demand counts HUB impressions only', () => {
+    // Spoke-observed demand must not justify a hub page the hub has no
+    // demand for — same invariant as mineNoContentYet.
+    expect(lg).toMatch(/\.where\('domain', HUB_DOMAIN\)/);
+  });
+
+  test('coverage is satisfied only by a HUB page on the EXACT canonical route', () => {
+    // Two rules at once: a spoke page must not vouch for the hub, and a
+    // blog URL carrying service+city tokens must not vouch for the
+    // city-service page — hub:: keys are granted only for exact routes.
+    expect(lg).toMatch(/ownPagesByServiceCity\.get\(`hub::\$\{ownPageKey\(service, city\)\}`\)/);
+    const loader = src.slice(src.indexOf('async _loadOwnPagesByServiceCity'), src.indexOf('QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS'));
+    expect(loader).toMatch(/host === HUB_DOMAIN/);
+    expect(loader).toMatch(/exactCityServiceRoutePair\(r\.page_url\)/);
+    expect(loader).toMatch(/`hub::\$\{ownPageKey\(routePair\.service, routePair\.city\)\}`/);
+  });
+
+  test('the serp-profiler no-data log carries a digest, never the raw query', () => {
+    const sp = fs.readFileSync(require.resolve('../services/seo/serp-profiler'), 'utf8');
+    expect(sp).not.toMatch(/no SERP data for "\$\{query\}"/);
+    expect(sp).toMatch(/no SERP data for query#\$\{qDigest\}/);
+  });
+});
+
+describe('local_gap lifecycle guards (round-4 cloud P1s)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+  const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+
+  test('an empty own-page map THROWS instead of reading as "nothing covered"', () => {
+    // mineAll degrades a loader failure to an empty Map; for this bucket
+    // that would enqueue a draft for EVERY qualifying pair. The throw
+    // lands in errors.local_gap, which also suppresses the lane sweep.
+    const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+    expect(lg).toMatch(/if \(!ownPagesByServiceCity \|\| !ownPagesByServiceCity\.size\) \{[\s\S]{0,120}throw new Error\('own-pages map unavailable or empty/);
+  });
+
+  test('stale pending local_gap rows are swept key-exactly after a clean canonical mine', async () => {
+    const updates = [];
+    const pending = [
+      { dedupe_key: 'local_gap::pest::venice::_', service: 'pest', city: 'venice' },
+      { dedupe_key: 'local_gap::pest::parrish::_', service: 'pest', city: 'parrish' },
+      { dedupe_key: 'local_gap::termite::venice::_', service: 'termite', city: 'venice' },
+    ];
+    const runner = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn((col, vals) => { chain._in = vals; return chain; }),
+        forUpdate: jest.fn().mockReturnThis(),
+        select: jest.fn().mockResolvedValue(pending),
+        update: jest.fn((patch) => { updates.push({ keys: chain._in, patch }); return Promise.resolve(chain._in.length); }),
+      };
+      return chain;
+    });
+    const miner = new GscOpportunityMiner();
+    await miner._sweepStaleLocalGapRows([
+      { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::pest::venice::_', service: 'pest', city: 'venice', score: 56, signal_metadata: {} },
+      { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::pest::parrish::_', service: 'pest', city: 'parrish', score: 30, signal_metadata: {} },
+      { bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::termite::venice::_', service: 'termite', city: 'venice', score: 60, signal_metadata: {} },
+    ], new Set([require('../services/seo/gsc-opportunity-miner')._internals.cityServiceTargetKey('termite', 'venice')]), runner);
+    // pest/venice (persistable, unfrozen) survives; pest/parrish
+    // (below-floor) expires as signal-gone; termite/venice (persistable
+    // but target FROZEN — recent done or human dismissal) expires under
+    // its own reason so a claimable twin cannot bypass the freeze.
+    expect(updates).toHaveLength(2);
+    const gone = updates.find((u) => u.patch.skip_reason === 'local_gap_signal_gone');
+    const froz = updates.find((u) => u.patch.skip_reason === 'city_service_target_frozen');
+    expect(gone.keys).toEqual(['local_gap::pest::parrish::_']);
+    expect(froz.keys).toEqual(['local_gap::termite::venice::_']);
+    expect(gone.patch.status).toBe('expired');
+    // Wired in mineAll under the canonical-window + no-error guards.
+    expect(src).toMatch(/if \(localGapSweepWillRun\) \{[\s\S]{0,700}_sweepStaleLocalGapRows\(/);
+  });
+
+  test('an UNLANDABLE candidate cannot supersede a pending local_gap twin', async () => {
+    const updates = [];
+    const inflight = [{ dedupe_key: 'local_gap::termite::sarasota::_', service: 'termite', city: 'sarasota', status: 'pending', bucket: 'local_gap', query: null }];
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        select: jest.fn(() => Promise.resolve(chain._locked ? inflight : [])),
+        update: jest.fn((patch) => { updates.push(patch); return Promise.resolve(1); }),
+      };
+      return chain;
+    });
+    const miner = new GscOpportunityMiner();
+    // Below its floor: score 40 < 45 — expiring the twin would persist
+    // nothing. It must DEFER, twin untouched.
+    const belowFloor = { bucket: 'no_content_yet', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'k1', query: 'q', service: 'termite', city: 'sarasota', score: 40, signal_metadata: {} };
+    const out1 = await miner._revalidateCityServiceBatch(trx, [belowFloor]);
+    expect(out1).toHaveLength(0);
+    // Frozen-key winner: same deferral.
+    const frozenKey = { ...belowFloor, score: 60 };
+    const out2 = await miner._revalidateCityServiceBatch(trx, [frozenKey], { frozenKeys: new Set(['k1']) });
+    expect(out2).toHaveLength(0);
+    expect(updates).toHaveLength(0);
+    // A landable one still supersedes.
+    const landable = { ...belowFloor, score: 60 };
+    const out3 = await miner._revalidateCityServiceBatch(trx, [landable]);
+    expect(out3).toHaveLength(1);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].skip_reason).toBe('city_service_superseded');
+  });
+});
+
+describe('in-lock frozen re-read + untrusted-snapshot sweep guard (round-5 cloud P1)', () => {
+  const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+
+  test('a candidate whose key froze AFTER arbitration is dropped under the lock', async () => {
+    // A runner flipped the elected row pending→skipped between the
+    // unlocked frozen read and the fence: the in-flight select excludes
+    // runner skips, but the in-lock re-read catches the key — the
+    // candidate cannot land and must not pass to a no-op upsert.
+    const frozenNow = [{ dedupe_key: 'k1' }];
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        select: jest.fn(() => Promise.resolve(chain._locked ? [] : frozenNow)),
+      };
+      return chain;
+    });
+    const miner = new GscOpportunityMiner();
+    const out = await miner._revalidateCityServiceBatch(trx, [{
+      bucket: 'no_content_yet', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'k1',
+      query: 'q', service: 'termite', city: 'sarasota', score: 60, signal_metadata: {},
+    }]);
+    expect(out).toHaveLength(0);
+  });
+
+  test('a failed frozen lookup suppresses the local_gap sweep, not just arbitration', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    expect(src).toMatch(/runState\.cityServiceFrozenLookupFailed = true;/);
+    expect(src).toMatch(/const localGapSweepWillRun = !errors\.local_gap[\s\S]{0,80}!runState\.cityServiceFrozenLookupFailed/);
+    // …and the sweep's advisory-lock guarantee survives an EMPTY batch:
+    // the lock is taken whenever the sweep will run, not only when the
+    // family sweep will (cloud P1 — an unlocked expiry races a concurrent
+    // mine's insert/revive).
+    expect(src).toMatch(/lockEvenIfEmpty: sweepWillRun \|\| localGapSweepWillRun/);
+    expect(src).toMatch(/if \(localGapSweepWillRun\) \{[\s\S]{0,700}_sweepStaleLocalGapRows\(/);
+  });
+});
+
+describe('pages-leg freshness + mappable winners (round-6 cloud P1s)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+  const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+
+  test('a nonempty-but-STALE own-page map throws before mining', () => {
+    // syncQueries and syncPages fail independently — historical rows keep
+    // the map nonempty while a new hub page is missing from the snapshot.
+    expect(lg).toMatch(/pagesMax < queriesMax - graceMs/);
+    expect(lg).toMatch(/pagesMax < Date\.now\(\) - absMs/);
+    // …and the guard is TWO-SIDED: a dead query sync with fresh pages
+    // must fail too, or an empty mine sweeps valid rows as signal-gone.
+    expect(lg).toMatch(/if \(!pagesMax \|\| !queriesMax/);
+    expect(lg).toMatch(/queriesMax < Date\.now\(\) - absMs/);
+    expect(lg).toMatch(/hub snapshot is missing or stale/);
+    // Same knobs as the query-page-map freshness mechanism — no new ones.
+    expect(lg).toMatch(/QUERY_PAGE_MAP_FRESHNESS_GRACE_DAYS/);
+    expect(lg).toMatch(/MAP_ABSOLUTE_STALENESS_DAYS/);
+  });
+
+  test('a raw-service candidate loses the arbitration to a runnable canonical twin', () => {
+    // 'tree_shrub' groups into the canonical target but parks downstream
+    // as facts_unmappable — electing it would discard the viable twin on
+    // every mine. Keys and lifecycles untouched; it just loses.
+    const rawSd = {
+      bucket: 'striking_distance', action_type: 'create_or_refresh_city_service_page',
+      query: 'tree trimming sarasota', dedupe_key: 'sd-raw', page_url: null,
+      service: 'tree_shrub', city: 'sarasota', score: 80, signal_metadata: { impressions: 120 },
+    };
+    const lgRow = {
+      bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page',
+      query: null, dedupe_key: 'lg-canon', page_url: null,
+      service: 'tree-shrub', city: 'sarasota', score: 56, signal_metadata: { impressions: 200 },
+    };
+    const out = arbitrateCityServiceTargets([rawSd, lgRow]);
+    expect(out).toHaveLength(1);
+    expect(out[0].dedupe_key).toBe('lg-canon');
+  });
+
+  test('an all-raw group still keeps its best for calibration', () => {
+    const rawSd = {
+      bucket: 'striking_distance', action_type: 'create_or_refresh_city_service_page',
+      query: 'q', dedupe_key: 'sd-raw', page_url: null,
+      service: 'tree_shrub', city: 'sarasota', score: 80, signal_metadata: {},
+    };
+    const rawAeo = {
+      bucket: 'aeo_gap', action_type: 'create_or_refresh_city_service_page',
+      query: 'q2', dedupe_key: 'aeo-raw', page_url: null,
+      service: 'tree_shrub', city: 'sarasota', score: 60, signal_metadata: {},
+    };
+    const out = arbitrateCityServiceTargets([rawSd, rawAeo]);
+    expect(out).toHaveLength(1);
+    expect(out[0].dedupe_key).toBe('sd-raw');
+  });
+});
+
+describe('local_gap anchoring + sweep provenance + segment coverage (round-8 cloud P1s)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+
+  test('local_gap is PAGE-ANCHORED — the router cannot reroute it to an article', () => {
+    const dr = fs.readFileSync(require.resolve('../services/content/decision-router'), 'utf8');
+    expect(dr).toMatch(/PAGE_ANCHORED_BUCKETS = new Set\(\['answer_gap', 'listicle_family', 'local_gap'\]\)/);
+  });
+
+  test('the sweep consumes PRE-arbitration keys — an arbitration loss is not "signal gone"', () => {
+    expect(src).toMatch(/_sweepStaleLocalGapRows\(\n\s*\(buckets\.local_gap \|\| \[\]\),/);
+    expect(src).not.toMatch(/_sweepStaleLocalGapRows\(\n\s*revalidated\.filter/);
+  });
+
+  test('a multi-query pair carries contributing_queries and total impressions', () => {
+    const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+    expect(lg).toMatch(/contributing_queries: pair\.queries\.length > 1 \? \[\.\.\.pair\.queries\]\.sort\(\) : null/);
+    expect(lg).toMatch(/contributing_impressions: pair\.queries\.length > 1 \? pair\.impressions : null/);
+  });
+
+  test('the brief binds segment coverage for local_gap exactly as for no_content_yet', () => {
+    const bb = fs.readFileSync(require.resolve('../services/content/content-brief-builder'), 'utf8');
+    expect(bb).toMatch(/opportunity\.bucket === 'no_content_yet' \|\| opportunity\.bucket === 'local_gap'/);
+  });
+});
+
+describe('inventory truth + money-family exclusion + full twin merge (round-9 cloud P1s)', () => {
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+  const lg = src.slice(src.indexOf('async mineLocalGap'), src.indexOf('async mineAeoGaps'));
+
+  test('coverage consults the LIVE sitemap, fail-closed, classified with own helpers', () => {
+    // gsc_pages only proves a page RANKED — a zero-traffic live hub page
+    // must still count as covered.
+    expect(lg).toMatch(/getSitemapManager\(\)\.listUrls\(\)/);
+    expect(lg).toMatch(/live sitemap parsed to zero URLs/);
+    expect(lg).toMatch(/livePairs\.has\(ownPageKey\(pair\.service, pair\.city\)\)/);
+    // EXACT routes only — token classification let a blog URL cover the pair.
+    expect(lg).toMatch(/exactCityServiceRoutePair\(u\)/);
+  });
+
+  test('exactCityServiceRoutePair accepts only the canonical route shape', () => {
+    const { exactCityServiceRoutePair } = require('../services/seo/gsc-opportunity-miner')._internals;
+    expect(exactCityServiceRoutePair('https://wavespestcontrol.com/termite-control-sarasota-fl/'))
+      .toEqual({ service: 'termite', city: 'Sarasota' });
+    expect(exactCityServiceRoutePair('/tree-and-shrub-care-north-port-fl/'))
+      .toEqual({ service: 'tree-shrub', city: 'North Port' });
+    // A blog carrying the tokens is NOT the page.
+    expect(exactCityServiceRoutePair('https://wavespestcontrol.com/termite/termite-damage-sarasota-fl/')).toBeNull();
+    expect(exactCityServiceRoutePair('/blog/pest-control-sarasota-fl-tips/')).toBeNull();
+  });
+
+  test('a missing money-family page is EXCLUDED at mine time, single-source slug map', () => {
+    // The runner pattern-blocks /pest-control-{city}-fl/ unconditionally —
+    // emitting the pair guarantees a protected skip that freezes the
+    // target-stable key forever.
+    expect(lg).toMatch(/localGapMoneyFamilyPair\(pair\.service, pair\.city\)/);
+    expect(src).toMatch(/require\('\.\.\/content\/content-brief-builder'\)\._internals/);
+    expect(src).toMatch(/require\('\.\.\/content\/protected-pages'\)/);
+    // Fail CLOSED: an unanswerable check treats the pair as protected.
+    expect(src).toMatch(/money-family check failed[\s\S]{0,60}pair treated as protected/);
+  });
+
+  test('a dropped local twin donates queries, impressions, AND specialty topic', () => {
+    const winner = {
+      bucket: 'no_content_yet', action_type: 'create_or_refresh_city_service_page',
+      query: 'pest control sarasota', dedupe_key: 'w', page_url: null,
+      service: 'pest', city: 'sarasota', score: 60,
+      signal_metadata: { impressions: 80 },
+    };
+    const twin = {
+      bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page',
+      query: null, dedupe_key: 't', page_url: null,
+      service: 'pest', city: 'sarasota', score: 56,
+      signal_metadata: {
+        impressions: 300,
+        representative_query: 'wasp removal sarasota',
+        contributing_queries: ['wasp removal sarasota', 'wasp nest sarasota'],
+        specialty_topic: 'wasp',
+      },
+    };
+    const out = arbitrateCityServiceTargets([winner, twin]);
+    expect(out).toHaveLength(1);
+    expect(out[0].bucket).toBe('no_content_yet');
+    expect(out[0].signal_metadata.segment_impressions).toBe(300);
+    expect(out[0].signal_metadata.contributing_queries).toEqual([
+      'pest control sarasota', 'wasp nest sarasota', 'wasp removal sarasota',
+    ]);
+    // The twin's blocked topic survives — the merged brief covers wasp
+    // phrasings, so the FAQ mandate must strip.
+    expect(out[0].signal_metadata.specialty_topic).toBe('wasp');
+  });
+});
+
+describe('in-lock frozen targets reach the sweep (round-12 cloud P1)', () => {
+  test('the fence reports a target frozen mid-mine into the caller set', async () => {
+    const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+    const { cityServiceTargetKey } = require('../services/seo/gsc-opportunity-miner')._internals;
+    const inflight = [{ dedupe_key: 'no_content_yet::termite::sarasota::q', service: 'termite', city: 'sarasota', status: 'done', bucket: 'no_content_yet', query: 'q' }];
+    const trx = jest.fn(() => {
+      const chain = {
+        where: jest.fn().mockReturnThis(),
+        whereIn: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn(() => { chain._locked = true; return chain; }),
+        select: jest.fn(() => Promise.resolve(chain._locked ? inflight : [])),
+      };
+      return chain;
+    });
+    const miner = new GscOpportunityMiner();
+    const collected = new Set();
+    await miner._revalidateCityServiceBatch(trx, [{
+      bucket: 'local_gap', action_type: 'create_or_refresh_city_service_page', dedupe_key: 'local_gap::termite::sarasota::_',
+      service: 'termite', city: 'sarasota', score: 56, signal_metadata: {},
+    }], { collectFrozenTargets: collected });
+    // The pre-transaction snapshot never saw this done row — the fence
+    // did, under the lock, and the sweep must too.
+    expect(collected.has(cityServiceTargetKey('termite', 'sarasota'))).toBe(true);
+  });
+
+  test('mineAll unions the fence discoveries into the sweep set', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    expect(src).toMatch(/const sweepFrozenTargets = new Set\(cityServiceFrozenTargets\)/);
+    expect(src).toMatch(/collectFrozenTargets: sweepFrozenTargets/);
+    expect(src).toMatch(/_sweepStaleLocalGapRows\(\n\s*\(buckets\.local_gap \|\| \[\]\),\n\s*sweepFrozenTargets,/);
   });
 });

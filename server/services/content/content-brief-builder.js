@@ -13,6 +13,7 @@
  * what brief #1 would look like" without writing anything.
  */
 
+const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
@@ -477,19 +478,30 @@ class ContentBriefBuilder {
     const out = { serp_profile: null, customer_signal: null, conversion_feedback: null };
 
     // SERP profile — keyword-driven. Skip when no query (page-only
-    // buckets like decay_refresh don't need SERP profile).
-    if (!skipSerp && opportunity.query) {
+    // buckets like decay_refresh don't need SERP profile). local_gap rows
+    // carry their keyword in signal_metadata.representative_query — the
+    // pair's highest-impression validated query — because their `query` is
+    // null BY DESIGN (target-stable dedupe key). Without this fallback the
+    // brief has no SERP evidence and no target_keyword, and the quality
+    // gate hard-fails every draft with no_serp_signal (Codex P1 on #3378).
+    const serpKeyword = opportunity.query || opportunity.signal_metadata?.representative_query || null;
+    if (!skipSerp && serpKeyword) {
       const serpProfiler = getSerpProfiler();
       if (serpProfiler) {
         try {
           out.serp_profile = await serpProfiler.profile({
-            query: opportunity.query,
+            query: serpKeyword,
             city: opportunity.city || null,
             device: 'mobile',
             persist: false,
           });
         } catch (err) {
-          logger.warn(`[brief-builder] SERP profile failed for "${opportunity.query}": ${err.message}`);
+          // Digest, never the raw keyword: GSC queries are arbitrary
+          // external text (names, addresses, phone numbers all appear in
+          // real exports) and non-card PII must not reach the logs —
+          // same sha256-12 convention as the miner's queryDigest.
+          const kwDigest = crypto.createHash('sha256').update(String(serpKeyword)).digest('hex').slice(0, 12);
+          logger.warn(`[brief-builder] SERP profile failed for query#${kwDigest} (opp ${opportunity.id || '?'}): ${err.message}`);
         }
       }
     }
@@ -541,7 +553,7 @@ class ContentBriefBuilder {
     // → create_customer_question_page on a mismatched question.
     const rows = await q.limit(20).select('*');
     if (!rows.length) return null;
-    const opportunityKeywords = extractKeywords(opportunity.query || opportunity.target_keyword || '');
+    const opportunityKeywords = extractKeywords(opportunity.query || opportunity.signal_metadata?.representative_query || opportunity.target_keyword || '');
 
     let chosen = null;
     if (opportunityKeywords.size > 0) {
@@ -720,7 +732,7 @@ class ContentBriefBuilder {
     // to this one target. Gating on the original action would silently
     // discard their demand exactly when the reroute makes the winner's
     // phrasing least representative (Codex P1).
-    if (opportunity.bucket === 'no_content_yet'
+    if ((opportunity.bucket === 'no_content_yet' || opportunity.bucket === 'local_gap')
       && contributingQueries.length > 1) {
       // The noun has to follow the REROUTED action, or a blog brief would be
       // told it is a city-service page.
@@ -763,7 +775,10 @@ class ContentBriefBuilder {
       version: existingBriefVersions + 1,
       action_type: decision.action_type,
       target_url: opportunity.page_url || null,
-      target_keyword: opportunity.query || null,
+      // representative_query fallback: local_gap's keyword lives in
+      // signal_metadata (see _gatherSignals) — a null target_keyword here
+      // is what made the lane hard-fail no_serp_signal.
+      target_keyword: opportunity.query || opportunity.signal_metadata?.representative_query || null,
       city: opportunity.city || null,
       service: opportunity.service || null,
       page_type: pageType,
