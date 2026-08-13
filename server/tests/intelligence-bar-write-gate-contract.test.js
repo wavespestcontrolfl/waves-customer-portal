@@ -47,6 +47,18 @@ jest.mock('../services/route-optimizer', () => ({
 
 const TOOLS_DIR = path.join(__dirname, '..', 'services', 'intelligence-bar');
 
+// These assertions assume LEGACY drive times (see the mocked haversine above),
+// and the mock deliberately pulls the REAL gate-sensitive estimator. Pin the
+// gate off so the suite does not depend on the ambient environment; the
+// calibrated model is covered by drive-time-calibration.test.js.
+const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
+beforeAll(() => { delete process.env.GATE_DRIVE_TIME_CALIBRATION; });
+afterAll(() => {
+  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+  else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
+});
+
+
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
