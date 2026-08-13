@@ -918,6 +918,24 @@ describe('getPurchaseState / sweepStaleOneTapDrafts', () => {
     expect(db.__state.tables.one_tap_purchases.find((p) => p.id === 'p-x').status).toBe('voided');
     expect(db.__state.tables.estimates.find((e) => e.id === 'est-x').archived_at).toBeTruthy();
   });
+
+  test('the sweep also retires one-tap estimates ALREADY flipped to expired (GH r9 P1)', async () => {
+    // The generic 06:00 expiration sweep used to flip past-due one-tap
+    // drafts to 'expired' before this sweep ran — a draft-only predicate
+    // excluded them permanently (open ledger, unarchived estimate).
+    db.__state.tables.one_tap_purchases.push({
+      id: 'p-y', customer_id: 'cust-1', estimate_id: 'est-y', status: 'reserved',
+      service_key: 'lawn_care', per_visit: 84,
+    });
+    db.__state.tables.estimates.push({
+      id: 'est-y', customer_id: 'cust-1', status: 'expired', source: 'one_tap_purchase',
+      archived_at: null, expires_at: new Date(Date.now() - 60000).toISOString(),
+    });
+    const swept = await oneTap.sweepStaleOneTapDrafts();
+    expect(swept.voided).toBe(1);
+    expect(db.__state.tables.one_tap_purchases.find((p) => p.id === 'p-y').status).toBe('voided');
+    expect(db.__state.tables.estimates.find((e) => e.id === 'est-y').archived_at).toBeTruthy();
+  });
 });
 
 // ── route contracts (gate + status mapping) ──────────────────────────────

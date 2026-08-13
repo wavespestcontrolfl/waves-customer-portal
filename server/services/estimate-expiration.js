@@ -72,6 +72,12 @@ async function runEstimateExpiration() {
     .whereNull('archived_at')
     .where('expires_at', '<', now)
     .whereNotIn('status', ['expired', 'accepted', 'declined'])
+    // One-tap purchase drafts are synthesized, never sent — their lifecycle
+    // (void ledger + archive) belongs to sweepStaleOneTapDrafts. Flipping
+    // one here stranded its open ledger row (that sweep matched drafts
+    // only) and put a phantom "walked away" line in the 6am bell for an
+    // estimate no customer ever received (Codex #3395 r9 P1).
+    .whereNot({ source: 'one_tap_purchase' })
     // Same first-booking hold as Rule 1 — an explicit expires_at date set
     // before the customer booked doesn't make expiring their live courtship
     // any less wrong.

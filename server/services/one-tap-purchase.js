@@ -588,8 +588,15 @@ async function getPurchaseState({ customerId, purchaseId }) {
 // archive those drafts so they age out of the admin pipeline. Runs from the
 // scheduler beside the slot-reservation hold cleanup.
 async function sweepStaleOneTapDrafts() {
+  // 'expired' included alongside 'draft' (Codex r9 P1): the generic 06:00
+  // runEstimateExpiration sweep used to flip past-due one-tap drafts to
+  // 'expired' before this sweep saw them, permanently excluding them here
+  // (open ledger, unarchived estimate). That sweep now skips one-tap rows,
+  // but any row it already flipped — or any other path that expires one —
+  // must still age out.
   const staleEstimates = await db('estimates')
-    .where({ source: 'one_tap_purchase', status: 'draft' })
+    .where({ source: 'one_tap_purchase' })
+    .whereIn('status', ['draft', 'expired'])
     .whereNull('archived_at')
     .where('expires_at', '<', new Date())
     .select('id');
@@ -599,13 +606,13 @@ async function sweepStaleOneTapDrafts() {
     .whereIn('estimate_id', ids)
     .whereIn('status', ['initiated', 'reserved'])
     .update({ status: 'voided', scheduled_service_id: null, slot_id: null, updated_at: db.fn.now() });
-  // Re-assert draft status inside the UPDATE (P2): a confirm that started
-  // just before expiry can convert one of the selected drafts to accepted
-  // while this sweep runs — the status CAS keeps a successfully accepted
-  // estimate out of the archive.
+  // Re-assert non-terminal status inside the UPDATE (P2): a confirm that
+  // started just before expiry can convert one of the selected drafts to
+  // accepted while this sweep runs — the status CAS keeps a successfully
+  // accepted estimate out of the archive.
   const archived = await db('estimates')
     .whereIn('id', ids)
-    .where({ status: 'draft' })
+    .whereIn('status', ['draft', 'expired'])
     .whereNull('archived_at')
     .update({ archived_at: db.fn.now() });
   logger.info(`[one-tap-purchase] stale-draft sweep archived ${archived} draft(s), voided ${voided} purchase(s)`);

@@ -1211,6 +1211,9 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   // overlay is already gone). Ref so the modal-focus escape handler sees
   // the live value without re-binding.
   const confirmingRef = useRef(false);
+  // True once the overlay's unmount cleanup has run — in-flight responses
+  // (a late reserve) check it before acting on a dead overlay.
+  const closedRef = useRef(false);
   const guardedClose = () => { if (confirmingRef.current) return; onClose(); };
   const dialogRef = useModalFocus(open, guardedClose);
   const compact = useIsMobile(760);
@@ -1319,7 +1322,9 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   // Release the hold when the overlay closes without a completed purchase.
   useEffect(() => {
     if (!open) return undefined;
+    closedRef.current = false;
     return () => {
+      closedRef.current = true;
       const { purchaseId, done } = releaseRef.current;
       if (purchaseId && !done) api.oneTapRelease(purchaseId).catch(() => {});
       paymentElementRef.current = null;
@@ -1347,6 +1352,14 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
     setStepError('');
     try {
       await api.oneTapReserve(init.purchaseId, slot.slotId);
+      if (closedRef.current) {
+        // The overlay closed while the reserve was in flight: the unmount
+        // release ran BEFORE the hold attached (its null-identity CAS
+        // missed), so this response is the only holder of the live hold —
+        // release again now that the row carries it.
+        api.oneTapRelease(init.purchaseId).catch(() => {});
+        return;
+      }
       setSelectedSlot(slot);
       setStep('confirm');
     } catch (err) {

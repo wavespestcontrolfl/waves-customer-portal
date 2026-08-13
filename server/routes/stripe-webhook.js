@@ -3716,6 +3716,38 @@ async function handleSetupIntentSucceeded(setupIntent) {
         });
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
+      // Payer routing BEFORE enrollment (Codex #3395 r9 P1) — same fence as
+      // POST /billing-v2/cards: this webhook fires independently of the
+      // browser POST (before or after it), so without its own check a payer
+      // assigned mid-flow still got the homeowner's card enrolled through
+      // this path. Payer-billed OR an unknowable payer picture (fail
+      // closed) keeps the method saved with consent recorded, skips
+      // enrollment, and parks a billing office exception — no rethrow,
+      // matching this branch's existing webhook-retry doctrine.
+      let payerBlocked = false;
+      let payerCheckFailed = false;
+      try {
+        const resolvedPayer = await require('../services/payer')
+          .resolveForInvoice({ customerId: wavesCustomerId, throwOnError: true });
+        payerBlocked = !!resolvedPayer?.payerId;
+      } catch (payerErr) {
+        payerBlocked = true;
+        payerCheckFailed = true;
+        logger.warn(`[stripe-webhook] payer check failed before portal-add-method enrollment — skipping (fail closed): ${payerErr.message}`);
+      }
+      if (payerBlocked) {
+        await require('../services/notification-service').notifyAdmin(
+          'billing',
+          payerCheckFailed
+            ? 'Card saved without Auto Pay (payer check failed)'
+            : 'Card saved without Auto Pay (payer-billed)',
+          payerCheckFailed
+            ? 'A portal card save (webhook completion) skipped Auto Pay enrollment because the payer-routing check failed (fail closed) — review the account and enroll manually if it is self-pay.'
+            : 'A portal card save (webhook completion) skipped Auto Pay enrollment because this account’s invoices route to a third-party payer — enrolling the saved card would charge the wrong party on self-pay invoices.',
+          { link: `/admin/customers/${wavesCustomerId}`, metadata: { customerId: wavesCustomerId, paymentMethodId: saved.id } },
+        ).catch(() => {});
+        return;
+      }
       const { enrollConsentedMethod } = require('../services/autopay-enrollment');
       // authorizedAt: for the micro-deposit deferred save this webhook fires
       // days after the portal add — a customer who disabled Auto Pay in the
@@ -5534,3 +5566,4 @@ module.exports.sweepUnacknowledgedAchProcessingAcks = sweepUnacknowledgedAchProc
 module.exports._handleAchFailure = handleAchFailure;
 module.exports._armMonthlyAutopayRetryForAsyncFailure = armMonthlyAutopayRetryForAsyncFailure;
 module.exports._handlePaymentIntentSucceeded = handlePaymentIntentSucceeded;
+module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;

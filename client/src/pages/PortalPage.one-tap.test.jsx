@@ -247,6 +247,33 @@ describe('one-tap purchase CTA gating', () => {
     expect(api.oneTapRelease).not.toHaveBeenCalled();
   });
 
+  it('a reserve that resolves after the overlay closed releases the just-attached hold (GH r9 P2)', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(recommendations());
+    api.oneTapInit.mockResolvedValue({
+      purchaseId: 'p-1', estimateId: 'est-1', serviceKey: 'lawn_care', label: 'Lawn Care',
+      perVisit: 84, cadenceLabel: '9 applications/yr', visitsPerYear: 9,
+      terms: { version: 'v1', text: 'Server terms text.' }, hasCardOnFile: true, holdMinutes: 15,
+      slots: {
+        primary: [{ slotId: 'slot-1', date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00', techFirstName: 'Adam', routeOptimal: true }],
+        expander: [], nearby: true,
+      },
+    });
+    let resolveReserve;
+    api.oneTapReserve.mockReturnValue(new Promise((resolve) => { resolveReserve = resolve; }));
+    api.oneTapRelease.mockResolvedValue({ released: true });
+    const view = renderDashboard();
+    fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
+    fireEvent.click(await screen.findByText('Agree and choose a time'));
+    fireEvent.click(await screen.findByText(/Arrival 8:00 AM–10:00 AM/));
+    expect(api.oneTapReserve).toHaveBeenCalledWith('p-1', 'slot-1');
+    // Overlay unmounts while the reserve is in flight — the unmount release
+    // ran before the hold attached, so the late response must release again.
+    view.unmount();
+    api.oneTapRelease.mockClear();
+    resolveReserve({ scheduledServiceId: 'ss-1', expiresAt: new Date(Date.now() + 900000).toISOString(), holdMinutes: 15 });
+    await vi.waitFor(() => expect(api.oneTapRelease).toHaveBeenCalledWith('p-1'));
+  });
+
   it('a 409 at init renders the offer-changed refresh state, never a dead retry', async () => {
     api.getPropertyRecommendations.mockResolvedValue(recommendations());
     const stale = Object.assign(new Error('offer changed'), { status: 409 });
