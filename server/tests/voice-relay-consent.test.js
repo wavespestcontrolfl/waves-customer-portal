@@ -67,7 +67,7 @@ const SUPPRESSION_COLUMNS = [
 const writes = [];
 function makeBuilder(table, rows) {
   const b = {};
-  for (const m of ['where', 'whereNull', 'whereIn', 'whereNot', 'orderBy', 'select', 'limit', 'whereRaw', 'orWhereRaw']) b[m] = jest.fn(() => b);
+  for (const m of ['where', 'whereNull', 'whereIn', 'whereNot', 'orderBy', 'select', 'limit', 'whereRaw', 'orWhereRaw', 'forUpdate']) b[m] = jest.fn(() => b);
   b.first = jest.fn(() => Promise.resolve(rows[0] || null));
   b.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   b.insert = jest.fn((payload) => { writes.push({ table, verb: 'insert', payload }); return b; });
