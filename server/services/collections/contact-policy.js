@@ -12,6 +12,7 @@
  *   unknown_channel, unknown_purpose, customer_not_found, customer_archived,
  *   no_eligible_balance,
  *   flag_<flag> (one per active collections_flags row covering the channel),
+ *   suppression_<reason> (canonical messaging_suppression row covering the channel),
  *   contact_within_24h, voice_contact_within_7d, live_conversation_within_7d,
  *   outside_call_window,
  *   pilot_requires_single_invoice, pilot_balance_below_minimum,
@@ -114,6 +115,22 @@ async function deliveredDunningTouches(invoice) {
     .whereRaw("metadata->>'invoiceId' = ?", [String(invoice.id)])
     .count('* as count');
   touches += parseInt(row?.count || 0, 10);
+
+  // The balance-reminder WORKFLOW's touches live only in the collections
+  // ledger (codex gh-r1) — without this arm, customers it dunned can never
+  // satisfy the floor. Sources are restricted to that workflow because the
+  // checker (activity_log) and followups engine (touches_sent) are already
+  // counted above — a wider source set would count one real touch twice and
+  // let a single reminder satisfy the two-touch floor. send_failed rows are
+  // not deliveries.
+  const [led] = await db('collections_contact_ledger')
+    .whereRaw('invoice_ids @> ?::jsonb', [JSON.stringify([invoice.id])])
+    .whereIn('channel', ['sms', 'email'])
+    .where({ purpose: 'late_payment' })
+    .whereIn('source', ['balance_reminder_workflow', 'balance_reminder_late_payment_check'])
+    .whereRaw("COALESCE(metadata->>'send_failed', '') <> 'true'")
+    .count('* as count');
+  touches += parseInt(led?.count || 0, 10);
   return touches;
 }
 
@@ -205,6 +222,36 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), aggreg
       if (!blocked || blocked.includes(channel)) deny(`flag_${row.flag}`);
     }
 
+    // ── Canonical suppression list (codex gh-r1) ────────────────────────
+    // messaging_suppression is the application-wide DNC store (STOP
+    // keywords, natural-language opt-outs, wrong_number, manual_dnc) and
+    // its own doc declares suppression HARD across channels. The new
+    // collections_flags table does not replace it — a customer with a
+    // canonical DNC and no duplicate flag must still be denied. Phone-keyed
+    // (one row per E.164). Mapping: manual_dnc and unknown reasons deny
+    // every channel; opt-outs and wrong_number deny the phone-based
+    // channels; non_mobile is an SMS-deliverability fact only (voice
+    // line-type has its own pilot check). A read failure propagates into
+    // evaluate's fail-closed catch.
+    if (customer.phone) {
+      const { toE164 } = require('../../utils/phone');
+      const e164 = toE164(customer.phone) || customer.phone;
+      const sup = await db('messaging_suppression')
+        .where({ phone: e164, active: true })
+        .first('reason');
+      if (sup) {
+        const reason = sup.reason || 'unknown';
+        const PHONE_CHANNELS = ['sms', 'voice', 'manual_call'];
+        let deniedChannels;
+        if (reason === 'manual_dnc') deniedChannels = ALL_CHANNELS;
+        else if (reason === 'non_mobile') deniedChannels = ['sms'];
+        else if (['opt_out_keyword', 'opt_out_natural_language', 'wrong_number'].includes(reason)) {
+          deniedChannels = PHONE_CHANNELS;
+        } else deniedChannels = ALL_CHANNELS; // unknown reason = fail closed
+        if (deniedChannels.includes(channel)) deny(`suppression_${reason}`);
+      }
+    }
+
     // ── Rolling frequency windows (collections ledger) ──────────────────
     const windowStart = new Date(now.getTime() - 7 * DAY_MS);
     const recent = await db('collections_contact_ledger')
@@ -212,6 +259,25 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), aggreg
       .where('occurred_at', '>', windowStart)
       .orderBy('occurred_at', 'desc')
       .select('*');
+    // Real phone conversations live in call_log, not the collections
+    // ledger (codex gh-r1): a customer who spoke with the office yesterday
+    // must hit the same voice-spacing / live-conversation windows as a
+    // ledger voice row. Predicate is deliberately generous (over-suppression
+    // is the safe direction): completed status, not a voicemail/missed/spam
+    // outcome, not machine-answered; NULL outcome/duration rows count. ⭐
+    // NULL legs are explicit — bare whereNot skips NULL (SQL three-valued
+    // logic, the #2177 voicemail-guard lesson).
+    const liveCall = await db('call_log')
+      .where({ customer_id: customerId, status: 'completed' })
+      .where('created_at', '>', windowStart)
+      .whereRaw("(call_outcome IS NULL OR call_outcome NOT IN ('voicemail', 'missed', 'spam'))")
+      .whereRaw("(answered_by IS NULL OR answered_by <> 'voicemail')")
+      .whereRaw('(duration_seconds IS NULL OR duration_seconds >= 30)')
+      .orderBy('created_at', 'desc')
+      .first('created_at');
+    if (liveCall) {
+      recent.push({ channel: 'voice', occurred_at: liveCall.created_at, source: 'call_log' });
+    }
     result.recentContacts = recent;
     const within = (row, ms) => now.getTime() - new Date(row.occurred_at).getTime() < ms;
     // Voice frequency spacing applies to BOTH voice and manual_call (codex

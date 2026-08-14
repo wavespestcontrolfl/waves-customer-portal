@@ -101,7 +101,7 @@ async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, daysOve
   });
 
   const NotificationService = require('../notification-service');
-  await NotificationService.notifyAdmin(
+  const notified = await NotificationService.notifyAdmin(
     'billing',
     `Billing follow-up proposal - $${amountDollars} open balance`,
     [
@@ -121,7 +121,11 @@ async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, daysOve
       },
     },
   );
-  return true;
+  // notifyAdmin returns null when the insert failed (codex gh-r1): the card
+  // is the proposal's only surface, so a failed insert must NOT read as
+  // filed — the unchanged-case probe above re-files it next sweep. A
+  // bell-policy-suppressed result was a deliberate silence and counts.
+  return Boolean(notified && (notified.id || notified.suppressed));
 }
 
 async function runShadowSweep({ now = new Date() } = {}) {
@@ -163,7 +167,28 @@ async function runShadowSweep({ now = new Date() } = {}) {
       const unchanged = existing
         && Number(existing.eligible_balance_snapshot) === verdict.eligibleBalanceCents
         && JSON.stringify(normalizedIdSet(existing.eligible_invoice_ids)) === JSON.stringify(invoiceIds);
-      if (unchanged) continue; // idempotent re-run — same proposal, no new row/card
+      if (unchanged) {
+        // The card is the case's ONLY surface (codex gh-r1): if last
+        // sweep's notifyAdmin insert failed after the case row persisted,
+        // "unchanged" would bury the proposal forever. Probe for delivery
+        // evidence by dedupe key and re-file when it's missing — the
+        // voice-lane probe-notifications pattern.
+        const cardExists = await db('notifications')
+          .whereRaw("metadata->>'dedupeKey' = ?", [existing.idempotency_key])
+          .first('id');
+        if (!cardExists) {
+          const refiled = await fileProposalCard({
+            dedupeKey: existing.idempotency_key,
+            customer,
+            caseRow: existing,
+            invoice,
+            daysOverdue,
+            verdict,
+          });
+          if (refiled) cardsFiled++;
+        }
+        continue; // idempotent re-run — same proposal, no new row
+      }
 
       const caseVersion = existing ? existing.case_version + 1 : 1;
       const idempotencyKey = `collections:${customerId}:${caseVersion}:${tier}`;

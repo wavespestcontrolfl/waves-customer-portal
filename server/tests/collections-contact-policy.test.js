@@ -104,6 +104,8 @@ function armAllowedBaseline({
     collections_contact_ledger: chain({ result: ledger }),
     invoice_followup_sequences: chain({ first: { touches_sent: touchesSent } }),
     activity_log: chain({ result: [{ count: String(activityCount) }] }),
+    messaging_suppression: chain({ first: undefined }),
+    call_log: chain({ first: undefined }),
   });
   openBalanceInvoices.mockResolvedValue(invoices);
   readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'mobile' });
@@ -176,9 +178,12 @@ describe('structural denials', () => {
     setDbTables({
       customers: chain({ first: customerRow() }),
       collections_flags: chain({ result: [] }),
-      collections_contact_ledger: chain({ result: [] }),
+      // queue: frequency-window read, then the touch-count read
+      collections_contact_ledger: [chain({ result: [] }), chain({ result: [{ count: '0' }] })],
       invoice_followup_sequences: chain({ first: { touches_sent: 0 } }),
       activity_log: activityChain,
+      messaging_suppression: chain({ first: undefined }),
+      call_log: chain({ first: undefined }),
     });
     openBalanceInvoices.mockResolvedValue([invoiceRow()]);
     readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'mobile' });
@@ -364,6 +369,8 @@ describe('rolling frequency windows', () => {
       collections_contact_ledger: ledgerChain,
       invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
       activity_log: chain({ result: [{ count: '0' }] }),
+      messaging_suppression: chain({ first: undefined }),
+      call_log: chain({ first: undefined }),
     });
     await evalVoice();
     expect(ledgerChain.where).toHaveBeenCalledWith(
@@ -623,5 +630,146 @@ describe('consent provenance + reassigned-number staleness', () => {
     const result = await evalVoice();
     expect(result.allowed).toBe(false);
     expect(result.denialReasons).toContain('policy_evaluation_error');
+  });
+});
+
+// gh-r1 (2026-08-14): the canonical messaging_suppression list, real phone
+// conversations from call_log, and the balance-reminder workflow's ledger
+// touches all bind the policy.
+describe('canonical suppression list', () => {
+  function armWithSuppression(reason) {
+    armAllowedBaseline();
+    setDbTables({
+      customers: chain({ first: customerRow() }),
+      collections_flags: chain({ result: [] }),
+      collections_contact_ledger: chain({ result: [] }),
+      invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
+      activity_log: chain({ result: [{ count: '0' }] }),
+      messaging_suppression: chain({ first: { reason } }),
+      call_log: chain({ first: undefined }),
+    });
+  }
+
+  test('manual_dnc denies EVERY channel, email included', async () => {
+    for (const ch of ['voice', 'manual_call', 'sms', 'email']) {
+      armWithSuppression('manual_dnc');
+      const purpose = ch === 'email' || ch === 'sms' ? 'late_payment' : 'late_payment';
+      const result = await ContactPolicy.evaluate('cust-1', { channel: ch, purpose, now: WED_11AM_EDT });
+      expect(result.allowed).toBe(false);
+      expect(result.denialReasons).toContain('suppression_manual_dnc');
+    }
+  });
+
+  test('STOP-style opt-outs and wrong_number deny the phone channels but not email', async () => {
+    for (const reason of ['opt_out_keyword', 'opt_out_natural_language', 'wrong_number']) {
+      for (const ch of ['voice', 'manual_call', 'sms']) {
+        armWithSuppression(reason);
+        const result = await ContactPolicy.evaluate('cust-1', { channel: ch, purpose: 'late_payment', now: WED_11AM_EDT });
+        expect(result.denialReasons).toContain(`suppression_${reason}`);
+      }
+      armWithSuppression(reason);
+      const email = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT });
+      expect(email.denialReasons).not.toContain(`suppression_${reason}`);
+    }
+  });
+
+  test('non_mobile is a deliverability fact: denies sms only', async () => {
+    armWithSuppression('non_mobile');
+    const sms = await ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'late_payment', now: WED_11AM_EDT });
+    expect(sms.denialReasons).toContain('suppression_non_mobile');
+    armWithSuppression('non_mobile');
+    const voice = await evalVoice();
+    expect(voice.denialReasons).not.toContain('suppression_non_mobile');
+  });
+
+  test('an unrecognized suppression reason fails closed on every channel', async () => {
+    armWithSuppression('mystery_reason');
+    const email = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT });
+    expect(email.denialReasons).toContain('suppression_mystery_reason');
+  });
+});
+
+describe('call_log live conversations', () => {
+  function armWithCall(callRow) {
+    armAllowedBaseline();
+    setDbTables({
+      customers: chain({ first: customerRow() }),
+      collections_flags: chain({ result: [] }),
+      collections_contact_ledger: chain({ result: [] }),
+      invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
+      activity_log: chain({ result: [{ count: '0' }] }),
+      messaging_suppression: chain({ first: undefined }),
+      call_log: chain({ first: callRow }),
+    });
+  }
+  const TWO_DAYS_AGO = new Date(WED_11AM_EDT.getTime() - 2 * 24 * 3600 * 1000).toISOString();
+
+  test('a completed human call within 7d denies voice (spacing) and sms/email (live conversation)', async () => {
+    armWithCall({ created_at: TWO_DAYS_AGO });
+    const voice = await evalVoice();
+    expect(voice.denialReasons).toContain('voice_contact_within_7d');
+    armWithCall({ created_at: TWO_DAYS_AGO });
+    const sms = await ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'late_payment', now: WED_11AM_EDT });
+    expect(sms.denialReasons).toContain('live_conversation_within_7d');
+    armWithCall({ created_at: TWO_DAYS_AGO });
+    const email = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT });
+    expect(email.denialReasons).toContain('live_conversation_within_7d');
+  });
+
+  test('the call predicate keeps its NULL legs explicit (voicemail/missed/spam excluded in SQL, not by whereNot)', async () => {
+    // Pin the raw predicates so a refactor to bare whereNot (which skips
+    // NULL rows — SQL three-valued logic) fails loudly.
+    const callChain = chain({ first: undefined });
+    armAllowedBaseline();
+    setDbTables({
+      customers: chain({ first: customerRow() }),
+      collections_flags: chain({ result: [] }),
+      collections_contact_ledger: chain({ result: [] }),
+      invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
+      activity_log: chain({ result: [{ count: '0' }] }),
+      messaging_suppression: chain({ first: undefined }),
+      call_log: callChain,
+    });
+    await evalVoice();
+    expect(callChain.whereRaw).toHaveBeenCalledWith("(call_outcome IS NULL OR call_outcome NOT IN ('voicemail', 'missed', 'spam'))");
+    expect(callChain.whereRaw).toHaveBeenCalledWith("(answered_by IS NULL OR answered_by <> 'voicemail')");
+    expect(callChain.whereRaw).toHaveBeenCalledWith('(duration_seconds IS NULL OR duration_seconds >= 30)');
+  });
+});
+
+describe('ledger-based dunning touches (balance-reminder workflow)', () => {
+  test('two delivered workflow ledger rows alone satisfy the two-touch floor', async () => {
+    armAllowedBaseline();
+    setDbTables({
+      customers: chain({ first: customerRow() }),
+      collections_flags: chain({ result: [] }),
+      // queue: frequency read, then the touch-count read
+      collections_contact_ledger: [chain({ result: [] }), chain({ result: [{ count: '2' }] })],
+      invoice_followup_sequences: chain({ first: { touches_sent: 0 } }),
+      activity_log: chain({ result: [{ count: '0' }] }),
+      messaging_suppression: chain({ first: undefined }),
+      call_log: chain({ first: undefined }),
+    });
+    const result = await evalVoice();
+    expect(result.allowed).toBe(true);
+    expect(result.denialReasons).toEqual([]);
+  });
+
+  test('the ledger arm is source-restricted and excludes send_failed rows (query pins)', async () => {
+    const countChain = chain({ result: [{ count: '0' }] });
+    armAllowedBaseline();
+    setDbTables({
+      customers: chain({ first: customerRow() }),
+      collections_flags: chain({ result: [] }),
+      collections_contact_ledger: [chain({ result: [] }), countChain],
+      invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
+      activity_log: chain({ result: [{ count: '0' }] }),
+      messaging_suppression: chain({ first: undefined }),
+      call_log: chain({ first: undefined }),
+    });
+    await evalVoice();
+    expect(countChain.whereIn).toHaveBeenCalledWith('source', ['balance_reminder_workflow', 'balance_reminder_late_payment_check']);
+    expect(countChain.whereRaw).toHaveBeenCalledWith("COALESCE(metadata->>'send_failed', '') <> 'true'");
+    expect(countChain.whereRaw).toHaveBeenCalledWith('invoice_ids @> ?::jsonb', ['["inv-1"]']);
   });
 });

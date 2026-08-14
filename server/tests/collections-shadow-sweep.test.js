@@ -297,3 +297,53 @@ describe('script text', () => {
     expect(script).not.toMatch(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
   });
 });
+
+// gh-r1 (2026-08-14): the card is the case's ONLY surface — a failed
+// notifyAdmin insert must not read as filed, and an unchanged case whose
+// card is missing re-files it (probe-notifications pattern).
+describe('card durability', () => {
+  const EXISTING_CASE = {
+    id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800,
+    eligible_invoice_ids: JSON.stringify(['inv-1']), idempotency_key: 'collections:cust-1:1:14',
+  };
+
+  test('a failed notifyAdmin insert is NOT counted as a filed card', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce(null);
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      customers: [chain({ first: CUSTOMER })],
+      collection_cases: [chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800 }] })],
+      notifications: [chain({ first: null })],
+    });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result.cardsFiled).toBe(0);
+    expect(result.casesCreated).toBe(1);
+  });
+
+  test('an unchanged case with NO standing card re-files it; with a card it stays a pure no-op', async () => {
+    // Missing card ⇒ refile (probe null, then fileProposalCard's own probe null).
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      customers: [chain({ first: CUSTOMER })],
+      collection_cases: [chain({ first: EXISTING_CASE })],
+      notifications: [chain({ first: null }), chain({ first: null })],
+    });
+    const refiled = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(refiled).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 0, cardsFiled: 1 });
+
+    // Standing card ⇒ untouched no-op.
+    jest.clearAllMocks();
+    ContactPolicy.evaluate.mockResolvedValue(ALLOWED_VERDICT);
+    NotificationService.notifyAdmin.mockResolvedValue({ id: 'notif-1' });
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      customers: [chain({ first: CUSTOMER })],
+      collection_cases: [chain({ first: EXISTING_CASE })],
+      notifications: [chain({ first: { id: 'notif-1' } })],
+    });
+    const noop = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(noop.cardsFiled).toBe(0);
+  });
+});
