@@ -151,6 +151,46 @@ describe('structural denials', () => {
     expect(result.denialReasons).toEqual(['unknown_channel']);
   });
 
+  test('unknown purpose on a known channel denies before any read', async () => {
+    // Before the allowlist, any voice purpose other than late_payment
+    // skipped the pilot caps entirely and returned allowed.
+    const result = await ContactPolicy.evaluate('cust-1', { channel: 'voice', purpose: 'promo_call', now: WED_11AM_EDT });
+    expect(result.allowed).toBe(false);
+    expect(result.denialReasons).toEqual(['unknown_purpose']);
+  });
+
+  test('balance_reminder is a known purpose for sms/email but NOT for the call channels', async () => {
+    armAllowedBaseline();
+    const sms = await ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'balance_reminder', now: WED_11AM_EDT });
+    expect(sms.denialReasons).not.toContain('unknown_purpose');
+    const voice = await ContactPolicy.evaluate('cust-1', { channel: 'voice', purpose: 'balance_reminder', now: WED_11AM_EDT });
+    expect(voice.allowed).toBe(false);
+    expect(voice.denialReasons).toEqual(['unknown_purpose']);
+  });
+
+  test('legacy activity_log touches are counted via the JSONB operator, not a text LIKE', async () => {
+    // metadata is JSONB — Postgres renders its text with a space after each
+    // colon, so the old '"invoiceId":"..."' LIKE never matched and real
+    // touches were invisible. Pin the parameterized ->> predicate.
+    const activityChain = chain({ result: [{ count: '2' }] });
+    setDbTables({
+      customers: chain({ first: customerRow() }),
+      collections_flags: chain({ result: [] }),
+      collections_contact_ledger: chain({ result: [] }),
+      invoice_followup_sequences: chain({ first: { touches_sent: 0 } }),
+      activity_log: activityChain,
+    });
+    openBalanceInvoices.mockResolvedValue([invoiceRow()]);
+    readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'mobile' });
+    ConsentProvenance.resolve.mockResolvedValue({
+      source: 'inbound_sms', evidenceRef: 'sms-9', evidenceAt: '2026-08-01T12:00:00.000Z',
+    });
+    ConsentProvenance.freshness.mockResolvedValue(new Date('2026-08-01T12:00:00.000Z'));
+    const result = await evalVoice();
+    expect(result.allowed).toBe(true); // the 2 legacy rows alone satisfy the floor
+    expect(activityChain.whereRaw).toHaveBeenCalledWith("metadata->>'invoiceId' = ?", ['inv-1']);
+  });
+
   test('missing customer → customer_not_found', async () => {
     armAllowedBaseline({ customer: undefined });
     setDbTables({ customers: chain({ first: undefined }) });

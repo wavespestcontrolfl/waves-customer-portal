@@ -9,7 +9,7 @@
  * DB blip must read as "no", never as "yes".
  *
  * Denial reasons are stable identifiers (tests pin them):
- *   unknown_channel, customer_not_found, customer_archived,
+ *   unknown_channel, unknown_purpose, customer_not_found, customer_archived,
  *   no_eligible_balance,
  *   flag_<flag> (one per active collections_flags row covering the channel),
  *   contact_within_24h, voice_contact_within_7d, live_conversation_within_7d,
@@ -30,6 +30,19 @@ const { etParts, etDateString, etCalendarDayOf } = require('../../utils/datetime
 const ConsentProvenance = require('./consent-provenance');
 
 const CHANNELS = new Set(['sms', 'email', 'voice', 'manual_call']);
+
+// Strict purpose allowlist (codex 2026-08-14 r2 ruling): an unknown purpose
+// on ANY channel is a denial, never an unrestricted allow — before this, any
+// voice purpose other than 'late_payment' skipped the pilot caps entirely
+// and returned allowed. Call-shaped channels know ONLY 'late_payment' today;
+// sms/email additionally know 'balance_reminder' (the balance-reminder and
+// previsit rails). Adding a purpose here is a deliberate policy decision.
+const KNOWN_PURPOSES_BY_CHANNEL = {
+  voice: ['late_payment'],
+  manual_call: ['late_payment'],
+  sms: ['late_payment', 'balance_reminder'],
+  email: ['late_payment', 'balance_reminder'],
+};
 
 // Which channels each active flag blocks. Absolute flags block everything —
 // including manual_call, so even a human dial-sheet consumer sees the denial.
@@ -90,9 +103,15 @@ async function deliveredDunningTouches(invoice) {
     .first('touches_sent');
   if (seq) touches += Number(seq.touches_sent) || 0;
 
+  // JSON operator, NOT a ::text LIKE (codex 2026-08-14 r2 P1): activity_log
+  // .metadata is JSONB, and Postgres renders JSONB text with a space after
+  // each colon ('{"invoiceId": "..."}'), so a '"invoiceId":"..."' substring
+  // match never hits — legitimate touches would be ignored and voice cases
+  // wrongly denied pilot_insufficient_dunning_history. Parameterized binding
+  // (knex.raw eats bare ?s — always the bindings array).
   const [row] = await db('activity_log')
     .where({ action: 'late_payment_reminder' })
-    .whereRaw('metadata::text LIKE ?', [`%"invoiceId":"${invoice.id}"%`])
+    .whereRaw("metadata->>'invoiceId' = ?", [String(invoice.id)])
     .count('* as count');
   touches += parseInt(row?.count || 0, 10);
   return touches;
@@ -124,6 +143,10 @@ async function evaluate(customerId, { channel, purpose, now = new Date() } = {})
   try {
     if (!CHANNELS.has(channel)) {
       deny('unknown_channel');
+      return result;
+    }
+    if (!KNOWN_PURPOSES_BY_CHANNEL[channel].includes(purpose)) {
+      deny('unknown_purpose');
       return result;
     }
 
