@@ -871,6 +871,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                 metadata: JSON.stringify({
                   entry_point: 'invoice_followup_deferred',
                   invoice_id: row.invoice_id,
+                  customer_id: customer.id,
                   followup_sequence_id: row.id,
                   original_block_code: sendResult.code,
                   replay_purpose: 'payment_link',
