@@ -398,23 +398,39 @@ async function enrichPropertyById(propertyId) {
 // nightly sweep catches leftovers.
 const IN_FLIGHT_RETRY_DELAYS_MS = [3 * 60 * 1000, 8 * 60 * 1000];
 
+// ONE bounded retry after a thrown error or a no-profile result: a brief
+// provider/DB blip at call time otherwise left the row unenriched forever
+// when the (independently gated) backfill is off. Ten minutes clears
+// transient outages; exactly one re-buy because enriched:false can also be
+// deterministic (no discoverable profile) and each attempt is paid spend.
+// Deterministic skips (gated/missing/complete/bad address) never retry.
+const FAILURE_RETRY_MS = 10 * 60 * 1000;
+
 function enqueueCallPropertyLookup({ propertyId, retryAttempt = 0 } = {}) {
   if (!gateEnvValue('GATE_CALL_PROPERTY_LOOKUP')) return;
   if (!propertyId) return;
+  const scheduleRetry = (delayMs) => {
+    // unref() so a retry timer never holds a shutting-down process open.
+    const timer = setTimeout(
+      () => enqueueCallPropertyLookup({ propertyId, retryAttempt: retryAttempt + 1 }),
+      delayMs,
+    );
+    if (typeof timer.unref === 'function') timer.unref();
+  };
   setImmediate(() => {
     runCallPropertyLookup({ propertyId })
       .then((res) => {
-        // unref() so a retry timer never holds a shutting-down process open.
         if (res?.skipped === 'lookup_in_flight' && retryAttempt < IN_FLIGHT_RETRY_DELAYS_MS.length) {
-          const timer = setTimeout(
-            () => enqueueCallPropertyLookup({ propertyId, retryAttempt: retryAttempt + 1 }),
-            IN_FLIGHT_RETRY_DELAYS_MS[retryAttempt],
-          );
-          if (typeof timer.unref === 'function') timer.unref();
+          scheduleRetry(IN_FLIGHT_RETRY_DELAYS_MS[retryAttempt]);
+        } else if (res?.enriched === false && retryAttempt < 1) {
+          scheduleRetry(FAILURE_RETRY_MS);
         }
       })
       .catch((err) => {
         logger.warn('[call-property-lookup] failed', { propertyId, error: errId(err) });
+        // retryAttempt is shared with the in-flight ladder — a failure after
+        // in-flight retries doesn't get its own; the bound is the point.
+        if (retryAttempt < 1) scheduleRetry(FAILURE_RETRY_MS);
       });
   });
 }
@@ -575,6 +591,43 @@ async function attemptedRecently(address) {
 const RECONCILE_VISIT_PAGE = 200;
 const RECONCILE_VISIT_MAX_PAGES = 20;
 
+// Durable scan cursors (system_settings, the portal's generic KV): a night
+// that exhausts MAX_PAGES persists where it stopped, so the next night
+// resumes PAST the scanned prefix instead of restarting at id=null — a
+// permanent residue of unreconcilable rows (canonical mismatches the SQL
+// prefilter can't express) larger than one night's budget would otherwise
+// pin every scan to the same head and the tail would never be examined.
+// A completed scan clears the cursor (wrap to the top). Best-effort +
+// fail-open: a KV error just means one night rescans from the top.
+const RECONCILE_VISIT_CURSOR_KEY = 'call_property_lookup.reconcile_visit_cursor';
+const RECONCILE_CUSTOMER_CURSOR_KEY = 'call_property_lookup.reconcile_customer_cursor';
+
+async function readReconcileCursor(key) {
+  try {
+    const row = await db('system_settings').where({ key }).first();
+    return (row && row.value) || null;
+  } catch (err) {
+    logger.warn('[call-property-lookup] cursor read failed', { key, error: errId(err) });
+    return null;
+  }
+}
+
+async function writeReconcileCursor(key, value) {
+  try {
+    await db('system_settings')
+      .insert({
+        key,
+        value: value == null ? null : String(value),
+        category: 'call_property_lookup',
+        description: 'Nightly reconciliation keyset resume point (null = start from top)',
+      })
+      .onConflict('key')
+      .merge({ value: value == null ? null : String(value), updated_at: db.fn.now() });
+  } catch (err) {
+    logger.warn('[call-property-lookup] cursor write failed', { key, error: errId(err) });
+  }
+}
+
 async function reconcileVisitCoordinates() {
   let filled = 0;
   try {
@@ -585,9 +638,12 @@ async function reconcileVisitCoordinates() {
     // mirrors the cheap canonical-key components: unstamped rows (key '')
     // and different-zip5 stamps can never key-match, so the permanent
     // residue the JS filter would re-skip nightly mostly never leaves the
-    // database. MAX_PAGES bounds a pathological night at 4k rows; the set
-    // shrinks as fills land, so the tail is reached on later nights.
-    let lastId = null;
+    // database. MAX_PAGES bounds a night at 4k rows; the DURABLE CURSOR
+    // makes successive nights cover the whole set even when the residue
+    // exceeds one night's budget (see cursor comment above).
+    let lastId = await readReconcileCursor(RECONCILE_VISIT_CURSOR_KEY);
+    let resumed = Boolean(lastId);
+    let exhausted = false;
     for (let page = 0; page < RECONCILE_VISIT_MAX_PAGES; page += 1) {
       const q = db('scheduled_services as ss')
         .join('customer_properties as cp', 'cp.id', 'ss.property_id')
@@ -609,7 +665,18 @@ async function reconcileVisitCoordinates() {
         .limit(RECONCILE_VISIT_PAGE);
       if (lastId) q.where('ss.id', '>', lastId);
       const rows = (await q) || [];
-      if (!rows.length) break;
+      if (!rows.length) {
+        // A resumed cursor past the current tail wraps to the top ONCE so
+        // the night isn't wasted; an empty page from the top means done.
+        if (resumed) {
+          resumed = false;
+          lastId = null;
+          page -= 1;
+          continue;
+        }
+        exhausted = true;
+        break;
+      }
       lastId = rows[rows.length - 1].visit_id;
       for (const r of rows) {
         const propKey = addressKey(r);
@@ -631,8 +698,14 @@ async function reconcileVisitCoordinates() {
           .update({ lat, lng });
         filled += 1;
       }
-      if (rows.length < RECONCILE_VISIT_PAGE) break;
+      if (rows.length < RECONCILE_VISIT_PAGE) {
+        exhausted = true;
+        break;
+      }
     }
+    // Completed the set → next night starts from the top; page-capped →
+    // resume past tonight's prefix.
+    await writeReconcileCursor(RECONCILE_VISIT_CURSOR_KEY, exhausted ? null : lastId);
   } catch (err) {
     logger.warn('[call-property-lookup] visit reconciliation failed', { error: errId(err) });
   }
@@ -652,7 +725,12 @@ async function reconcileCustomerMirrors() {
   let filled = 0;
   try {
     const { addressKey } = require('./customer-properties');
-    let lastId = null;
+    // Same durable-cursor shape as the visit sweep: a permanent residue
+    // (JS-fenced mismatches, commercial-type skips) larger than one
+    // night's page budget must not pin the scan head forever.
+    let lastId = await readReconcileCursor(RECONCILE_CUSTOMER_CURSOR_KEY);
+    let resumed = Boolean(lastId);
+    let exhausted = false;
     for (let page = 0; page < RECONCILE_VISIT_MAX_PAGES; page += 1) {
       const q = db('customers as c')
         .join('customer_properties as cp', 'cp.customer_id', 'c.id')
@@ -673,7 +751,16 @@ async function reconcileCustomerMirrors() {
         .limit(RECONCILE_VISIT_PAGE);
       if (lastId) q.where('c.id', '>', lastId);
       const rows = (await q) || [];
-      if (!rows.length) break;
+      if (!rows.length) {
+        if (resumed) {
+          resumed = false;
+          lastId = null;
+          page -= 1;
+          continue;
+        }
+        exhausted = true;
+        break;
+      }
       lastId = rows[rows.length - 1].customer_id;
       for (const r of rows) {
         const propKey = addressKey(r);
@@ -705,8 +792,12 @@ async function reconcileCustomerMirrors() {
           .update(mirror);
         filled += 1;
       }
-      if (rows.length < RECONCILE_VISIT_PAGE) break;
+      if (rows.length < RECONCILE_VISIT_PAGE) {
+        exhausted = true;
+        break;
+      }
     }
+    await writeReconcileCursor(RECONCILE_CUSTOMER_CURSOR_KEY, exhausted ? null : lastId);
   } catch (err) {
     logger.warn('[call-property-lookup] customer mirror reconciliation failed', { error: errId(err) });
   }

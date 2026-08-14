@@ -54,7 +54,7 @@ function mockRowDb(row, updateBuilder, extra = {}) {
 
 function builder(result) {
   const b = {};
-  for (const m of ['where', 'first', 'update', 'join', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'orWhereNull', 'select', 'orderBy', 'limit', 'offset']) b[m] = jest.fn(() => b);
+  for (const m of ['where', 'first', 'update', 'join', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'orWhereNull', 'select', 'orderBy', 'limit', 'offset', 'insert', 'onConflict', 'merge']) b[m] = jest.fn(() => b);
   b.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return b;
 }
@@ -423,6 +423,40 @@ describe('enqueueCallPropertyLookup', () => {
     expect(logger.warn).toHaveBeenCalledWith('[call-property-lookup] failed', expect.objectContaining({ propertyId: 'p1' }));
   });
 
+  test('transient failure retries ONCE at 10m, then leaves the row to the nightly sweep', async () => {
+    // A brief provider/DB blip at call time must not strand the row
+    // unenriched when the separately gated backfill is off — but each
+    // attempt is paid spend and a no-profile result can be deterministic,
+    // so exactly one re-buy.
+    process.env.GATE_CALL_PROPERTY_LOOKUP = 'true';
+    const timeouts = [];
+    const spy = jest.spyOn(global, 'setTimeout')
+      .mockImplementation((cb, ms) => { timeouts.push({ cb, ms }); return { unref: () => {} }; });
+    db.mockImplementation((table) => {
+      if (table === 'property_lookups') return builder(undefined);
+      if (table === 'customer_properties') {
+        return builder({
+          id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
+          address_line1: '123 Sample Cove', city: 'Bradenton', state: 'FL', zip: '34212',
+        });
+      }
+      return builder(1);
+    });
+    performPropertyLookup.mockRejectedValue(new Error('provider blip'));
+    enqueueCallPropertyLookup({ propertyId: 'p1' });
+    await flushImmediates();
+    await flushImmediates();
+    await flushImmediates();
+    expect(timeouts.map((t) => t.ms)).toEqual([10 * 60 * 1000]);
+    timeouts[0].cb();
+    await flushImmediates();
+    await flushImmediates();
+    await flushImmediates();
+    expect(timeouts).toHaveLength(1);
+    performPropertyLookup.mockReset();
+    spy.mockRestore();
+  });
+
   test('in-flight retry ladder: 3m then 8m (outlasting the 10m pending window), then stops', async () => {
     // A killed process leaves a stale 'pending' ledger stamp; a single
     // 3-minute retry landed inside the 10-minute pending window and skipped
@@ -653,6 +687,35 @@ describe('reconcileVisitCoordinates', () => {
     expect(upd.where).toHaveBeenCalledTimes(1);
     expect(upd.where).toHaveBeenCalledWith({ id: 'v1' });
     expect(upd.update).toHaveBeenCalledWith({ lat: 27.5, lng: -82.4 });
+  });
+
+  test('durable cursor: resumes past the scanned prefix, wraps once, clears on a completed scan', async () => {
+    // A permanent residue of unreconcilable rows bigger than one night's
+    // page budget must not pin every scan to the same head — the cursor
+    // stored in system_settings makes successive nights cover the tail.
+    const settingsRead = builder({ value: 'v-500' });
+    const settingsWrite = builder(1);
+    let settingsCalls = 0;
+    const joinedResumed = builder([]);
+    const joinedFromTop = builder([]);
+    let joinCalls = 0;
+    db.mockImplementation((table) => {
+      if (String(table).startsWith('scheduled_services as ss')) {
+        return [joinedResumed, joinedFromTop][Math.min(joinCalls++, 1)];
+      }
+      if (table === 'system_settings') return settingsCalls++ === 0 ? settingsRead : settingsWrite;
+      return builder(1);
+    });
+    await _private.reconcileVisitCoordinates();
+    // Resumed from the stored cursor…
+    expect(joinedResumed.where).toHaveBeenCalledWith('ss.id', '>', 'v-500');
+    // …an empty page past the cursor wraps to the top ONCE (no keyset)…
+    expect(joinedFromTop.where).not.toHaveBeenCalledWith('ss.id', '>', expect.anything());
+    // …and the completed scan clears the cursor for the next night.
+    expect(settingsWrite.insert).toHaveBeenCalledWith(expect.objectContaining({
+      key: 'call_property_lookup.reconcile_visit_cursor', value: null,
+    }));
+    expect(settingsWrite.merge).toHaveBeenCalledWith(expect.objectContaining({ value: null }));
   });
 });
 
