@@ -2493,8 +2493,12 @@ router.get('/bank-import/:id/expense-candidates', async (req, res, next) => {
     const row = await db('bank_transactions').where({ id: req.params.id }).first();
     if (!row) return res.status(404).json({ error: 'row not found' });
     if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits have expense candidates' });
-    const rejected = bankImport.rejectedTargets(row.suggestion);
-    const list = await bankImport.surveyExpenseCandidatesForRow(row, rejected);
+    // NO unlink-rejection filter here: rejections stop AUTOMATIC
+    // re-proposal, but manual re-linking is allowed by design
+    // (link-expense accepts these ids) — hiding a previously unlinked
+    // target from the operator's only row-specific picker would make a
+    // valid restore unreachable
+    const list = await bankImport.surveyExpenseCandidatesForRow(row, { expenseIds: [], payoutIds: [], bankingPayoutIds: [] });
     list.sort((a, b) => String(dateCellStr(b.expense_date)).localeCompare(String(dateCellStr(a.expense_date))) || String(a.id).localeCompare(String(b.id)));
     res.json({
       candidates: list.slice(0, 500).map(c => ({ id: c.id, amount: c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: dateCellStr(c.expense_date) })),
@@ -2514,8 +2518,12 @@ router.get('/bank-import/:id/payout-candidates', async (req, res, next) => {
     if (row.direction !== 'credit' || row.account_type !== 'bank') {
       return res.status(400).json({ error: 'only bank-account credits have payout candidates' });
     }
+    // explicit-unlink rejections are lifted for the MANUAL picker (same
+    // rationale as expense candidates: link-payout accepts them); the
+    // Banking-derived human-rejection exclusion stays — that ruling stands
+    // until a corrected confirmed reconciliation lifts it
     const rejected = bankImport.rejectedTargets(row.suggestion);
-    const { candidates, overflow } = await bankImport.surveyPayoutCandidatesForRow(row, rejected);
+    const { candidates, overflow } = await bankImport.surveyPayoutCandidatesForRow(row, { expenseIds: [], payoutIds: [], bankingPayoutIds: rejected.bankingPayoutIds });
     const txnMs = new Date(`${dateCellStr(row.txn_date)}T00:00:00Z`).getTime();
     candidates.sort((a, b) => (Math.abs(new Date(`${dateCellStr(a.arrival_date)}T00:00:00Z`).getTime() - txnMs)
       - Math.abs(new Date(`${dateCellStr(b.arrival_date)}T00:00:00Z`).getTime() - txnMs))

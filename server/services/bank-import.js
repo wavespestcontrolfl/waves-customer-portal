@@ -934,7 +934,9 @@ async function healEditedExpenseLinks() {
           matched_at: null,
           suggestion: suggestionMerge({
             autoRevert: { at: new Date().toISOString(), expenseId: link.expense_id, reason: 'the linked expense was edited and no longer matches this bank row (amount/date/vendor/method)' },
-          }),
+            // verifyPending stripped: a crash-leftover marker on the healed
+            // claim must not survive into the operator's next manual link
+          }, ['verifyPending']),
           updated_at: new Date(),
         });
       if (changed) reverted++;

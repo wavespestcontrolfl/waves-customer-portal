@@ -625,6 +625,9 @@ describe('refund-candidates on demand (gate on)', () => {
     state.bankRow = { id: 'bt-1', amount: '58.12', txn_date: '2026-08-09', description: 'WAWA', direction: 'debit', account_type: 'card', status: 'unmatched', suggestion: null };
     const res = await get('/admin/tax/bank-import/bt-1/expense-candidates');
     expect(res.status).toBe(200);
+    // the MANUAL picker lifts unlink rejections — link-expense accepts
+    // those ids, so a previously unlinked target stays restorable
+    expect(surveyExpenseCandidatesForRow).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ expenseIds: [] }));
     const body = await res.json();
     expect(body.total).toBe(2);
     // newest-first deterministic order; gross reading surfaces for the
