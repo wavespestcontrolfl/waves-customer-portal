@@ -66,7 +66,6 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
       .where({ id: serviceId })
       .first(
         'id', 'technician_id', 'scheduled_date', 'status', 'track_state',
-        'route_order', 'window_start', 'created_at',
         'stops_ahead_min_shown', 'stops_ahead_shown_date'
       );
     if (!svc || !svc.technician_id) return null;
@@ -84,26 +83,40 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     const svcDate = dateOnly(svc.scheduled_date);
     if (!svcDate || svcDate !== today) return null;
 
-    const countRows = await db('scheduled_services')
-      .where({ technician_id: svc.technician_id })
-      .where('scheduled_date', svcDate)
-      .whereNot('id', svc.id)
-      .whereNotIn('status', NOT_A_STOP_STATUSES)
-      // Dead estimate-slot holds linger until the cleanup cron deletes
-      // them — same live-hold predicate as route-reorder LIVE_HOLD_SQL.
-      .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())')
-      // track_state can lead or permanently diverge from status (e.g.
-      // markComplete leaves status='confirmed' with track_state='complete'),
-      // so tracker-terminal rows must drop out by track_state too.
-      // NULL-safe: NOT IN alone would silently drop NULL-track_state rows.
-      .whereRaw("(track_state IS NULL OR track_state NOT IN ('complete', 'cancelled'))")
-      .whereRaw(
-        `(COALESCE(route_order, 999), COALESCE(window_start, '23:59'::time), created_at, id)
-           < (COALESCE(?::int, 999), COALESCE(?::time, '23:59'::time), ?::timestamptz, ?::uuid)`,
-        [svc.route_order, svc.window_start, svc.created_at, svc.id]
-      )
-      .count('id as n');
-    const raw = Number(countRows?.[0]?.n);
+    // Target sort tuple and preceding count come from ONE statement (one
+    // READ COMMITTED snapshot): a route reorder committing between two
+    // separate queries would compare the new route against the target's
+    // OLD tuple and could persist a false "You're next". Predicates on the
+    // candidate rows:
+    //  - status: not terminal and not a rescheduled phantom
+    //  - live-hold: dead estimate-slot holds linger until the cleanup cron
+    //    deletes them (same predicate as route-reorder LIVE_HOLD_SQL)
+    //  - track_state: can lead or permanently diverge from status (e.g.
+    //    markComplete leaves status='confirmed' + track_state='complete'),
+    //    so tracker-terminal rows drop out by track_state too — NULL-safe,
+    //    since NOT IN alone silently drops NULL-track_state rows.
+    // Ordering matches the dispatch day-plan (route_order, window, created)
+    // with id as deterministic tiebreak.
+    const statusPlaceholders = NOT_A_STOP_STATUSES.map(() => '?').join(', ');
+    const countRes = await db.raw(
+      `WITH target AS (
+         SELECT id, technician_id, scheduled_date, route_order, window_start, created_at
+           FROM scheduled_services
+          WHERE id = ?::uuid
+       )
+       SELECT COUNT(*)::int AS n
+         FROM scheduled_services s, target t
+        WHERE s.technician_id = t.technician_id
+          AND s.scheduled_date = t.scheduled_date
+          AND s.id <> t.id
+          AND s.status NOT IN (${statusPlaceholders})
+          AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())
+          AND (s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))
+          AND (COALESCE(s.route_order, 999), COALESCE(s.window_start, '23:59'::time), s.created_at, s.id)
+              < (COALESCE(t.route_order, 999), COALESCE(t.window_start, '23:59'::time), t.created_at, t.id)`,
+      [svc.id, ...NOT_A_STOP_STATUSES]
+    );
+    const raw = Number(countRes?.rows?.[0]?.n);
     if (!Number.isFinite(raw)) return null;
 
     // Clamp against the persisted floor — valid only for today's display.

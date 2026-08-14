@@ -25,11 +25,13 @@ function baseSvc(overrides = {}) {
   };
 }
 
-// db mock: builder calls fetch the visit row / serve the day-plan count;
-// db.raw serves the atomic floor UPDATE … RETURNING. By default the raw
-// mock echoes back the bound clamped value (the ELSE / no-prior-floor
-// branch of the real statement); tests override `rawFloor` to emulate a
-// concurrent racer having stored a smaller floor.
+// db mock: builder calls fetch the visit row (and the fallback floor
+// re-read); db.raw serves BOTH the single-snapshot CTE count and the
+// atomic floor UPDATE … RETURNING, dispatched on the SQL text. By default
+// the UPDATE mock echoes back the bound clamped value (the ELSE /
+// no-prior-floor branch of the real statement); tests override `rawFloor`
+// to emulate a concurrent racer having stored a smaller floor, or set it
+// to null to emulate the guarded no-op write.
 function makeDb({ svcRow, countN = 0, rawFloor, rawError = null } = {}) {
   const queries = [];
   const dbFn = jest.fn(() => {
@@ -39,17 +41,21 @@ function makeDb({ svcRow, countN = 0, rawFloor, rawError = null } = {}) {
       whereNotIn: jest.fn().mockReturnThis(),
       whereRaw: jest.fn().mockReturnThis(),
       first: jest.fn().mockResolvedValue(svcRow),
-      count: jest.fn().mockResolvedValue([{ n: countN }]),
     };
     queries.push(q);
     return q;
   });
   dbFn.raw = jest.fn((sql, bindings) => {
+    if (/WITH target/.test(sql)) {
+      return Promise.resolve({ rows: [{ n: countN }] });
+    }
     if (rawError) return Promise.reject(rawError);
     if (rawFloor === null) return Promise.resolve({ rows: [] }); // guarded no-op write
     const stored = rawFloor !== undefined ? rawFloor : bindings[1];
     return Promise.resolve({ rows: [{ stops_ahead_min_shown: stored }] });
   });
+  dbFn.countCall = () => dbFn.raw.mock.calls.find(([sql]) => /WITH target/.test(sql));
+  dbFn.updateCalls = () => dbFn.raw.mock.calls.filter(([sql]) => /UPDATE scheduled_services/.test(sql));
   dbFn.queries = queries;
   return dbFn;
 }
@@ -74,30 +80,26 @@ describe('computeStopsAhead', () => {
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBe(2);
     // Single conditional UPDATE — (today, clamped, clamped, today, id) for
     // the SET, plus (today, clamped) for the skip-unchanged-write guard.
-    expect(db.raw).toHaveBeenCalledTimes(1);
-    expect(db.raw.mock.calls[0][1]).toEqual([TODAY, 2, 2, TODAY, 'svc-self', TODAY, 2]);
-    // The count query must exclude terminal + rescheduled-phantom statuses
-    // and the visit itself (hook P1: rescheduled placeholders are not stops).
-    const countQ = db.queries[1];
-    expect(countQ.whereNotIn).toHaveBeenCalledWith('status', NOT_A_STOP_STATUSES);
+    expect(db.updateCalls()).toHaveLength(1);
+    expect(db.updateCalls()[0][1]).toEqual([TODAY, 2, 2, TODAY, 'svc-self', TODAY, 2]);
+    // Single-snapshot CTE count (hook P1 r6): target tuple and preceding
+    // count in ONE statement, bound to (target id, excluded statuses).
+    const [countSql, countBindings] = db.countCall();
+    expect(countBindings).toEqual(['svc-self', ...NOT_A_STOP_STATUSES]);
     expect(NOT_A_STOP_STATUSES).toEqual(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled']);
-    expect(countQ.whereNot).toHaveBeenCalledWith('id', 'svc-self');
+    expect(countSql).toContain('s.id <> t.id');
     // Dead estimate-slot holds must not count (hook P1: live-hold predicate).
-    expect(countQ.whereRaw).toHaveBeenCalledWith(
-      '(reservation_expires_at IS NULL OR reservation_expires_at > NOW())'
-    );
+    expect(countSql).toContain('(s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())');
     // track_state can diverge from status (markComplete can leave
     // status='confirmed' + track_state='complete') — tracker-terminal rows
     // must drop out too, NULL-safely.
-    expect(countQ.whereRaw).toHaveBeenCalledWith(
-      "(track_state IS NULL OR track_state NOT IN ('complete', 'cancelled'))"
-    );
+    expect(countSql).toContain("(s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))");
   });
 
   test(`raw count above the cap (${STOPS_AHEAD_DISPLAY_CAP}) → null and nothing persists`, async () => {
     const db = makeDb({ svcRow: baseSvc(), countN: STOPS_AHEAD_DISPLAY_CAP + 1 });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
-    expect(db.raw).not.toHaveBeenCalled();
+    expect(db.updateCalls()).toHaveLength(0);
   });
 
   test('clamp: a same-day floor caps a count that grew (2 shown, truth now 4 → 2) with no write', async () => {
@@ -119,7 +121,7 @@ describe('computeStopsAhead', () => {
     // Stale-date floor is ignored for clamping; the atomic UPDATE's CASE
     // resets it (mock echoes the ELSE branch).
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBe(3);
-    expect(db.raw.mock.calls[0][1]).toEqual([TODAY, 3, 3, TODAY, 'svc-self', TODAY, 3]);
+    expect(db.updateCalls()[0][1]).toEqual([TODAY, 3, 3, TODAY, 'svc-self', TODAY, 3]);
   });
 
   test('floor only lowers: stored 3, truth 1 → 1', async () => {
