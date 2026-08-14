@@ -979,6 +979,8 @@ export default function TimeGridDays({
         toMinutes={pending?.toMinutes}
         isRecurring={!!pending?.svc?.isRecurring && pending?.mode !== 'assign'}
         technicianChange={pending?.technicianChange}
+        serviceId={pending?.svc?.id}
+        toWindow={pending?.newWindow}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
       />

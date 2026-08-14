@@ -32,6 +32,8 @@ import { createPortal } from 'react-dom';
 import AddressAutocomplete from '../AddressAutocomplete';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
 import useModalFocus from '../../hooks/useModalFocus';
+import SlotConflictNotice from './SlotConflictNotice';
+import { useSlotConflicts } from './useSlotConflicts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -1417,6 +1419,26 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const endMin = h * 60 + m + Math.max(durationMin || 0, 30);
     return `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
   };
+
+  // Advisory slot-conflict hint for the manual Date/Time row (also re-runs
+  // when applySlot writes apptDate/windowStart). Warn-only — Book never
+  // keys off it. Span mirrors the submit: groups all POST the same
+  // scheduledDate + windowStart with their own summed duration, so the
+  // union of booked windows is start + the LARGEST group's duration —
+  // summing across groups would warn about time never booked.
+  const slotCheckDuration = groupServicesForAppointmentSubmit(services).reduce(
+    (max, group) => Math.max(
+      max,
+      group.lines.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0),
+    ), 0,
+  );
+  const { conflicts: slotConflicts } = useSlotConflicts({
+    date: apptDate ? String(apptDate).split('T')[0] : null,
+    windowStart,
+    windowEnd: windowStart && slotCheckDuration > 0
+      ? computeWindowEnd(windowStart, slotCheckDuration)
+      : null,
+  });
 
   // Submit
   const handleSubmit = async () => {
@@ -2913,6 +2935,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               </select>
             </div>
           </div>
+          <SlotConflictNotice conflicts={slotConflicts} style={{ marginBottom: 10 }} />
 
           {hasRecurringServices && firstCustomRecurringIndex < 0 && (
             <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 10, marginTop: 4 }}>
