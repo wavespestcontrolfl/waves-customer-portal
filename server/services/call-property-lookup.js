@@ -257,10 +257,16 @@ async function enrichPropertyById(propertyId) {
   // this fire-and-forget lookup finishes). Mirrors propagate the
   // POST-UPDATE row values — never this lookup's inputs — so a concurrent
   // writer's newer coordinates converge everywhere instead of diverging.
+  // Each mirror is its own failure domain: a visit-fill blip must not
+  // skip the customers mirror (and vice versa). Both remain fail-open —
+  // the enrichment itself already landed — and the NIGHTLY RECONCILIATION
+  // (reconcileVisitCoordinates + reconcileCustomerMirrors) is the durable
+  // retry: a completed property leaves the sweep's candidate set, so a
+  // swallowed mirror failure here would otherwise be permanent.
+  const mirrorLat = after.latitude == null ? null : Number(after.latitude);
+  const mirrorLng = after.longitude == null ? null : Number(after.longitude);
+  const { addressKey } = require('./customer-properties');
   try {
-    const mirrorLat = after.latitude == null ? null : Number(after.latitude);
-    const mirrorLng = after.longitude == null ? null : Number(after.longitude);
-    const { addressKey } = require('./customer-properties');
     if (mirrorLat != null && mirrorLng != null) {
       // Visits linked to THIS property whose coordinate pair is absent —
       // fenced to the ADDRESS THAT WAS LOOKED UP: the visit's
@@ -303,6 +309,10 @@ async function enrichPropertyById(propertyId) {
         }
       }
     }
+  } catch (err) {
+    logger.warn('[call-property-lookup] visit mirror update failed', { propertyId, error: errId(err) });
+  }
+  try {
     if (row.is_primary) {
       const customer = await db('customers').where({ id: row.customer_id }).first();
       // Fence: mirror only while the customers primary-address mirror still
@@ -336,7 +346,7 @@ async function enrichPropertyById(propertyId) {
       }
     }
   } catch (err) {
-    logger.warn('[call-property-lookup] mirror update failed', { propertyId, error: errId(err) });
+    logger.warn('[call-property-lookup] customer mirror update failed', { propertyId, error: errId(err) });
   }
   // Post-patch completeness from the AUTHORITATIVE post-update row (drives
   // the sweep's offset accounting): the row leaves the NULL-candidate set
@@ -598,6 +608,77 @@ async function reconcileVisitCoordinates() {
   return filled;
 }
 
+// Customer-side twin of the visit reconciliation, and the durable retry
+// for the fail-open customers mirror: a transient mirror failure on a
+// property that finished COMPLETE would otherwise be permanent (complete
+// rows never re-enter the sweep's candidate set), leaving the legacy
+// surfaces — dispatch maps, completion tax — stale. Same shape: keyset
+// pages, SQL narrows to rows the mirror could actually fill, JS applies
+// the canonical addressKey fence, and the UPDATE re-asserts the captured
+// address columns plus fill-only CASE/COALESCE. The commercial ruling
+// holds here too: never mirrored.
+async function reconcileCustomerMirrors() {
+  let filled = 0;
+  try {
+    const { addressKey } = require('./customer-properties');
+    let lastId = null;
+    for (let page = 0; page < RECONCILE_VISIT_MAX_PAGES; page += 1) {
+      const q = db('customers as c')
+        .join('customer_properties as cp', 'cp.customer_id', 'c.id')
+        .where('cp.is_primary', true)
+        .where('cp.active', true)
+        .whereNull('c.deleted_at')
+        .whereRaw(`(
+          (c.latitude IS NULL AND c.longitude IS NULL AND cp.latitude IS NOT NULL AND cp.longitude IS NOT NULL)
+          OR (NULLIF(TRIM(c.property_type), '') IS NULL AND NULLIF(TRIM(cp.property_type), '') IS NOT NULL AND cp.property_type <> 'commercial')
+        )`)
+        .select(
+          'c.id as customer_id',
+          'c.address_line1 as c_line1', 'c.address_line2 as c_line2', 'c.city as c_city', 'c.zip as c_zip',
+          'cp.latitude', 'cp.longitude', 'cp.property_type as cp_type',
+          'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
+        )
+        .orderBy('c.id', 'asc')
+        .limit(RECONCILE_VISIT_PAGE);
+      if (lastId) q.where('c.id', '>', lastId);
+      const rows = (await q) || [];
+      if (!rows.length) break;
+      lastId = rows[rows.length - 1].customer_id;
+      for (const r of rows) {
+        const propKey = addressKey(r);
+        const custKey = addressKey({
+          address_line1: r.c_line1, address_line2: r.c_line2, city: r.c_city, zip: r.c_zip,
+        });
+        if (!propKey || custKey !== propKey) continue;
+        const mirror = {};
+        const lat = r.latitude == null ? NaN : Number(r.latitude);
+        const lng = r.longitude == null ? NaN : Number(r.longitude);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          mirror.latitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE latitude END', [lat]);
+          mirror.longitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE longitude END', [lng]);
+        }
+        const cpType = String(r.cp_type || '').trim();
+        if (cpType && cpType !== 'commercial') {
+          mirror.property_type = db.raw("COALESCE(NULLIF(TRIM(property_type), ''), ?)", [cpType]);
+        }
+        if (!Object.keys(mirror).length) continue;
+        mirror.updated_at = db.fn.now();
+        await db('customers')
+          .where({ id: r.customer_id })
+          .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
+            r.c_line1 || '', r.c_line2 || '', r.c_city || '', r.c_zip || '',
+          ])
+          .update(mirror);
+        filled += 1;
+      }
+      if (rows.length < RECONCILE_VISIT_PAGE) break;
+    }
+  } catch (err) {
+    logger.warn('[call-property-lookup] customer mirror reconciliation failed', { error: errId(err) });
+  }
+  return filled;
+}
+
 async function sweepUnenrichedProperties({ limit } = {}) {
   const backfillOn = gateEnvValue('GATE_PROPERTY_ENRICH_BACKFILL');
   // Reconciliation heals the CALL-TIME lane's enrich↔booking race, so it
@@ -607,7 +688,8 @@ async function sweepUnenrichedProperties({ limit } = {}) {
   // gate was never the point.
   const reconcileOn = backfillOn || gateEnvValue('GATE_CALL_PROPERTY_LOOKUP');
   const visitCoordsReconciled = reconcileOn ? await reconcileVisitCoordinates() : 0;
-  if (!backfillOn) return { skipped: 'gated', visitCoordsReconciled };
+  const customerMirrorsReconciled = reconcileOn ? await reconcileCustomerMirrors() : 0;
+  if (!backfillOn) return { skipped: 'gated', visitCoordsReconciled, customerMirrorsReconciled };
   const batch = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : backfillBatchSize();
   const t0 = Date.now();
   let processed = 0;
@@ -654,10 +736,17 @@ async function sweepUnenrichedProperties({ limit } = {}) {
     failed,
     cooledDown: cooled,
     visitCoordsReconciled,
+    customerMirrorsReconciled,
     elapsedMs: Date.now() - t0,
   });
   return {
-    candidates: seen, processed, enriched, failed, cooledDown: cooled, visitCoordsReconciled,
+    candidates: seen,
+    processed,
+    enriched,
+    failed,
+    cooledDown: cooled,
+    visitCoordsReconciled,
+    customerMirrorsReconciled,
   };
 }
 
@@ -667,6 +756,6 @@ module.exports = {
   sweepUnenrichedProperties,
   _private: {
     snakePropertyType, propertyRowAddress, fetchBackfillCandidates, attemptedRecently, backfillBatchSize,
-    reconcileVisitCoordinates, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
+    reconcileVisitCoordinates, reconcileCustomerMirrors, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
   },
 };

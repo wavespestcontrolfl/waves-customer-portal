@@ -363,7 +363,7 @@ describe('sweepUnenrichedProperties', () => {
   });
 
   test('both gates off → skipped before any DB read', async () => {
-    expect(await sweepUnenrichedProperties()).toEqual({ skipped: 'gated', visitCoordsReconciled: 0 });
+    expect(await sweepUnenrichedProperties()).toEqual({ skipped: 'gated', visitCoordsReconciled: 0, customerMirrorsReconciled: 0 });
     expect(db).not.toHaveBeenCalled();
   });
 
@@ -375,7 +375,7 @@ describe('sweepUnenrichedProperties', () => {
       return builder([]);
     });
     const res = await sweepUnenrichedProperties();
-    expect(res).toEqual({ skipped: 'gated', visitCoordsReconciled: 0 });
+    expect(res).toEqual({ skipped: 'gated', visitCoordsReconciled: 0, customerMirrorsReconciled: 0 });
     // The race the reconciliation heals is created by the CALL-TIME lane,
     // so the free scan must not hide behind the paid sweep's budget gate.
     expect(joined.join).toHaveBeenCalled();
@@ -540,6 +540,47 @@ describe('reconcileVisitCoordinates', () => {
     expect(upd.where).toHaveBeenCalledTimes(1);
     expect(upd.where).toHaveBeenCalledWith({ id: 'v1' });
     expect(upd.update).toHaveBeenCalledWith({ lat: 27.5, lng: -82.4 });
+  });
+});
+
+describe('reconcileCustomerMirrors', () => {
+  const { _private } = require('../services/call-property-lookup');
+
+  test('fills a stale primary mirror (canonical fence, fill-only, commercial never mirrored)', async () => {
+    const base = {
+      c_line1: '123 Sample Cove', c_line2: null, c_city: 'Bradenton', c_zip: '34212',
+      address_line1: '123 SAMPLE COVE', address_line2: null, city: 'Bradenton', zip: '34212',
+    };
+    const joined = builder([
+      // Coords missing on the customer, present on the primary property.
+      { customer_id: 'c1', latitude: '27.5', longitude: '-82.4', cp_type: 'single_family', ...base },
+      // Commercial type must never reach customers (taxability ruling) and
+      // this row has no coordinate gap → nothing to write, skipped.
+      {
+        customer_id: 'c2', latitude: null, longitude: null, cp_type: 'commercial', ...base,
+      },
+      // Customer address no longer matches the primary property → fenced out.
+      {
+        customer_id: 'c3', latitude: '27.5', longitude: '-82.4', cp_type: 'single_family',
+        ...base, c_line1: '9 Elsewhere Rd',
+      },
+    ]);
+    const upd = builder(1);
+    db.mockImplementation((table) => {
+      if (String(table).startsWith('customers as c')) return joined;
+      if (table === 'customers') return upd;
+      return builder(1);
+    });
+    const filled = await _private.reconcileCustomerMirrors();
+    expect(filled).toBe(1);
+    expect(upd.where).toHaveBeenCalledTimes(1);
+    expect(upd.where).toHaveBeenCalledWith({ id: 'c1' });
+    const mirror = upd.update.mock.calls[0][0];
+    expect(mirror.latitude).toMatchObject({ bindings: [27.5] });
+    expect(mirror.property_type).toMatchObject({ bindings: ['single_family'] });
+    // The captured address columns are re-asserted in the UPDATE predicate.
+    const reassert = upd.whereRaw.mock.calls[0];
+    expect(reassert[1]).toEqual(['123 Sample Cove', '', 'Bradenton', '34212']);
   });
 });
 
