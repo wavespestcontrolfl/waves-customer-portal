@@ -87,6 +87,9 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
         .where('scheduled_date', svcDate)
         .whereNot('id', svc.id)
         .whereNotIn('status', NOT_A_STOP_STATUSES)
+        // Dead estimate-slot holds linger until the cleanup cron deletes
+        // them — same live-hold predicate as route-reorder LIVE_HOLD_SQL.
+        .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())')
         .whereRaw(
           `(COALESCE(route_order, 999), COALESCE(window_start, '23:59'::time), created_at, id)
              < (COALESCE(?::int, 999), COALESCE(?::time, '23:59'::time), ?::timestamptz, ?::uuid)`,
@@ -114,8 +117,11 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     // resets it on a new display date, and RETURNING hands back the
     // authoritative minimum so every racer displays the same floor. Only
     // values that were actually SHOWN (≤ cap) reach this statement, so a
-    // raw count of 7 never stores. Best-effort: on failure fall back to
-    // this request's own clamped value.
+    // raw count of 7 never stores. A value is only DISPLAYED once it is
+    // durably the floor: if the UPDATE fails or returns no row, return
+    // null (generic state) rather than show a number the clamp never
+    // recorded — an unrecorded number could be exceeded by a later poll,
+    // violating the never-increase contract.
     try {
       const res = await db.raw(
         `UPDATE scheduled_services
@@ -134,7 +140,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     } catch (err) {
       logger.warn(`[stops-ahead] floor persist failed for ${svc.id}: ${err.message}`);
     }
-    return clamped;
+    return null;
   } catch (err) {
     logger.warn(`[stops-ahead] compute failed for ${serviceId}: ${err.message}`);
     return null;

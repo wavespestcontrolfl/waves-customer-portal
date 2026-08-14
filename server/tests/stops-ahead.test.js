@@ -80,6 +80,10 @@ describe('computeStopsAhead', () => {
     expect(countQ.whereNotIn).toHaveBeenCalledWith('status', NOT_A_STOP_STATUSES);
     expect(NOT_A_STOP_STATUSES).toEqual(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled']);
     expect(countQ.whereNot).toHaveBeenCalledWith('id', 'svc-self');
+    // Dead estimate-slot holds must not count (hook P1: live-hold predicate).
+    expect(countQ.whereRaw).toHaveBeenCalledWith(
+      '(reservation_expires_at IS NULL OR reservation_expires_at > NOW())'
+    );
   });
 
   test(`raw count above the cap (${STOPS_AHEAD_DISPLAY_CAP}) → null and nothing persists`, async () => {
@@ -148,10 +152,16 @@ describe('computeStopsAhead', () => {
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBe(1);
   });
 
-  test('floor persist failure is swallowed — this request\'s clamped count still returns', async () => {
+  test('floor persist failure → null: never display a number the clamp did not record', async () => {
     const db = makeDb({ svcRow: baseSvc(), countN: 1, rawError: new Error('deadlock') });
-    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBe(1);
+    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
     expect(logger.warn).toHaveBeenCalled();
+  });
+
+  test('zero-row RETURNING (visit deleted mid-poll) → null', async () => {
+    const db = makeDb({ svcRow: baseSvc(), countN: 1 });
+    db.raw = jest.fn().mockResolvedValue({ rows: [] });
+    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
   });
 
   test('any read error fails soft to null', async () => {
