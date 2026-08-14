@@ -567,17 +567,17 @@ describe('sweepUnenrichedProperties', () => {
 
   test('park is ledger-based: worked rows skip free, admin edits and cache catch-ups still enrich', async () => {
     process.env.GATE_PROPERTY_ENRICH_BACKFILL = 'true';
-    process.env.PROPERTY_BACKFILL_BATCH = '3';
+    process.env.PROPERTY_BACKFILL_BATCH = '4';
     const mkRow = (id, createdAt, updatedAt) => ({
       id, active: true, latitude: null, longitude: null, property_type: null,
       address_line1: '123 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
       created_at: createdAt, updated_at: updatedAt,
     });
     const candidates = [
-      // Productive attempt AND the enrich lane's touch landed AFTER it
-      // (updated_at ≥ last_attempt_at, past created_at + 1s) → PARKED:
-      // no lookup, no batch spend.
-      mkRow('p-parked', '2026-08-01T00:00:00Z', '2026-08-13T00:00:00Z'),
+      // Productive attempt AND the enrich lane's touch landed RIGHT after
+      // it (updated_at inside the short window past last_attempt_at, past
+      // created_at + 1s) → PARKED: no lookup, no batch spend.
+      mkRow('p-parked', '2026-08-01T00:00:00Z', '2026-08-12T00:05:00Z'),
       // updated_at recent but NO ledger attempt — an ordinary admin edit
       // (say a ZIP fill that first made the row geocodable) must NEVER
       // park a candidate; property updated_at alone is not attempt
@@ -588,13 +588,19 @@ describe('sweepUnenrichedProperties', () => {
       // still reads as unworked and gets its near-free cache catch-up —
       // a generic "updated after creation" test wrongly parked this.
       mkRow('p-edit-then-lookup', '2026-08-01T00:00:00Z', '2026-08-10T00:00:00Z'),
+      // Estimator lookup, then an unrelated admin edit HOURS later: the
+      // stamp overshoots the touch window, so the row still reads as
+      // unworked — a bare "updated_at >= last_attempt_at" test wrongly
+      // parked this one too.
+      mkRow('p-lookup-then-edit', '2026-08-01T00:00:00Z', '2026-08-13T00:00:00Z'),
       // Productive attempt but the row was never touched at all
       // (in-flight-skip catch-up) → enriched as a near-free cache hit.
       mkRow('p-catchup', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'),
     ];
     // property_lookups call order: p-parked verdict(1) → p-admin-edit
     // verdict(2) + in-flight(3) → p-edit-then-lookup verdict(4) +
-    // in-flight(5) → p-catchup verdict(6) + in-flight(7).
+    // in-flight(5) → p-lookup-then-edit verdict(6) + in-flight(7) →
+    // p-catchup verdict(8) + in-flight(9).
     const attempt = { last_attempt_status: 'resolved', last_attempt_at: '2026-08-12T00:00:00Z' };
     let ledgerCalls = 0;
     let rowFetches = 0;
@@ -603,11 +609,11 @@ describe('sweepUnenrichedProperties', () => {
       if (String(table).startsWith('customer_properties as cp')) return builder(candidates);
       if (table === 'property_lookups') {
         ledgerCalls += 1;
-        return builder([1, 4, 6].includes(ledgerCalls) ? attempt : undefined);
+        return builder([1, 4, 6, 8].includes(ledgerCalls) ? attempt : undefined);
       }
       if (table === 'customer_properties') {
         rowFetches += 1;
-        return builder(candidates[Math.min(rowFetches, 3)]);
+        return builder(candidates[Math.min(rowFetches, 4)]);
       }
       return builder(1);
     });
@@ -619,9 +625,9 @@ describe('sweepUnenrichedProperties', () => {
     const res = await sweepUnenrichedProperties();
     expect(res.parked).toBe(1);
     expect(res.cooledDown).toBe(0);
-    expect(res.processed).toBe(3);
-    expect(res.enriched).toBe(3);
-    expect(performPropertyLookup).toHaveBeenCalledTimes(3);
+    expect(res.processed).toBe(4);
+    expect(res.enriched).toBe(4);
+    expect(performPropertyLookup).toHaveBeenCalledTimes(4);
   });
 
   test('a row that left the candidate set pre-spend shifts the offset like a completion', async () => {

@@ -556,23 +556,32 @@ const LEFT_CANDIDATE_SET_SKIPS = [
  * - 'cooldown'  — the last attempt was UNPRODUCTIVE; retrying soon re-buys
  *   the same nothing.
  * - 'parked'    — a PRODUCTIVE attempt (resolved/cache_hit) already ran AND
- *   the enrich lane worked this row AFTER it: the row's updated_at sits at
- *   or past last_attempt_at (the fact-fill and the deliberate no-fill/flag
- *   touches all stamp updated_at moments after the attempt lands in the
- *   ledger), and past created_at + 1s slop so insertion's own stamp never
- *   qualifies. Re-selecting a worked row nightly would let a batch-sized
- *   head of partially enriched rows starve the backlog; it resurfaces when
- *   the attempt ages out.
+ *   the enrich lane worked this row RIGHT AFTER it: updated_at falls
+ *   inside a short window past last_attempt_at (the fact-fill and the
+ *   deliberate no-fill/flag touches all stamp updated_at seconds after the
+ *   attempt lands in the ledger), and past created_at + 1s slop so
+ *   insertion's own stamp never qualifies. Re-selecting a worked row
+ *   nightly would let a batch-sized head of partially enriched rows starve
+ *   the backlog; it resurfaces when the attempt ages out.
  * - null        — go: no recent attempt, or a productive attempt the enrich
  *   lane never consumed (the in-flight-skip catch-up case — the enrich is
  *   a near-free cache hit, exactly what the sweep wants to consume).
  * Evidence is the ATTEMPT LEDGER, never property updated_at alone — an
  * ordinary admin edit must not park a row a week (that was the old
- * recently_touched sort sink's failure), and because the edit's stamp
- * predates any LATER lookup attempt, an edited row followed by an
- * estimator-side lookup still reads as unworked and gets its catch-up.
+ * recently_touched sort sink's failure). The window makes updated_at
+ * usable both ways without a dedicated marker column: an edit BEFORE the
+ * attempt predates it, an edit well AFTER it overshoots the window — both
+ * read as unworked and keep their catch-up. The residual ambiguity (an
+ * unrelated edit landing inside the window right after someone else's
+ * lookup) can only false-park until the attempt ages out; a worked row
+ * whose later edit falsely UN-parks it just re-enriches as a cache hit,
+ * whose fresh attempt + touch re-park it the following night.
  * Fail-open: a ledger error means "go".
  */
+// The enrich touch trails the ledger stamp by the lookup fan-out's own
+// latency — comfortably under the 10-minute stale-'pending' window that
+// already bounds a single run; anything past this is another writer.
+const ENRICH_TOUCH_WINDOW_MS = 15 * 60 * 1000;
 async function recentLookupVerdict(row) {
   try {
     const { addressKey: cacheKey } = require('./property-lookup/lookup-cache');
@@ -588,7 +597,8 @@ async function recentLookupVerdict(row) {
     const attemptedAt = attempt.last_attempt_at ? new Date(attempt.last_attempt_at).getTime() : NaN;
     const worked = Number.isFinite(created) && Number.isFinite(updated) && Number.isFinite(attemptedAt)
       && updated > created + 1000
-      && updated >= attemptedAt;
+      && updated >= attemptedAt
+      && updated <= attemptedAt + ENRICH_TOUCH_WINDOW_MS;
     return worked ? 'parked' : null;
   } catch (err) {
     logger.warn('[call-property-lookup] attempt-cooldown check failed', { error: errId(err) });
