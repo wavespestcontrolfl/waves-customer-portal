@@ -4052,6 +4052,7 @@ function BankImportTab() {
   // slices show 20, and the real target can sit beyond them
   const [fullRefunds, setFullRefunds] = useState({});
   const [fullExpenseCands, setFullExpenseCands] = useState({});
+  const [fullPayouts, setFullPayouts] = useState({});
 
   // offset pagination with APPEND semantics — the server caps limit at 500,
   // so growing a single limit stalls there; offset pages don't
@@ -4495,6 +4496,12 @@ function BankImportTab() {
                             .catch(() => {});
                           return;
                         }
+                        if (v === "__more_payouts") {
+                          adminFetch(`/admin/tax/bank-import/${r.id}/payout-candidates`)
+                            .then((d) => setFullPayouts((p) => ({ ...p, [r.id]: d.candidates || [] })))
+                            .catch(() => {});
+                          return;
+                        }
                         setLinkPick((p) => ({ ...p, [r.id]: v }));
                       }}
                       title="What is this deposit? Pick the Stripe payout it is, or the original purchase it refunds (applying a refund reduces that expense)"
@@ -4509,14 +4516,14 @@ function BankImportTab() {
                       </option>
                       {!!r.suggestion?.payoutCandidates?.length && (
                         <optgroup label="Stripe payouts — link">
-                          {r.suggestion.payoutCandidates.map((c) => (
+                          {(fullPayouts[r.id] || r.suggestion.payoutCandidates).map((c) => (
                             <option key={`p:${c.id}`} value={`p:${c.id}`}>
                               {fmtM(c.amount)} · arrived {fmtD(c.arrival_date)}
                             </option>
                           ))}
-                          {(r.suggestion.payoutCandidatesTotal || 0) > r.suggestion.payoutCandidates.length && (
-                            <option value="" disabled>
-                              +{r.suggestion.payoutCandidatesTotal - r.suggestion.payoutCandidates.length} more — nearest arrivals shown; identify it on the Banking page
+                          {!fullPayouts[r.id] && (r.suggestion.payoutCandidatesTotal || 0) > r.suggestion.payoutCandidates.length && (
+                            <option value="__more_payouts">
+                              +{r.suggestion.payoutCandidatesTotal - r.suggestion.payoutCandidates.length} more — load all…
                             </option>
                           )}
                         </optgroup>

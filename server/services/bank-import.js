@@ -416,13 +416,15 @@ async function surveyPayoutCandidatesForRow(row, rejected, dbOrTrx = db) {
 // like the echo retries; the normal path clears the marker inline, so this
 // sweep only ever sees crash leftovers.
 async function verifyPendingExpenseClaims() {
-  const rows = await db('bank_transactions')
+  const fetched = await db('bank_transactions')
     .where({ status: 'matched_expense' })
     .whereRaw("suggestion->>'verifyPending' = 'true'")
     .orderBy('updated_at', 'asc')
     .orderBy('id', 'asc')
-    .limit(25)
+    .limit(26) // 25 + sentinel: leftovers beyond the batch feed morePending
     .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion', 'matched_expense_id');
+  const more = fetched.length > 25;
+  const rows = fetched.slice(0, 25);
   let cleared = 0;
   let reverted = 0;
   for (const row of rows) {
@@ -449,7 +451,7 @@ async function verifyPendingExpenseClaims() {
       if (changed) reverted++;
     }
   }
-  return { cleared, reverted };
+  return { cleared, reverted, more };
 }
 
 // Crash-recovery sweep for PAYOUT claims (mirror of the expense sweep): a
@@ -460,19 +462,25 @@ async function verifyPendingExpenseClaims() {
 // clear the marker so the echo may proceed; plural/overflow → atomic
 // rollback with the reconciliation reversal, same shape as the inline path.
 async function verifyPendingPayoutClaims() {
-  const rows = await db('bank_transactions')
+  const fetched = await db('bank_transactions')
     .where({ status: 'matched_payout' })
     .whereRaw("suggestion->>'verifyPending' = 'true'")
     .orderBy('updated_at', 'asc')
     .orderBy('id', 'asc')
-    .limit(25)
+    .limit(26) // 25 + sentinel: leftovers beyond the batch feed morePending
     .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion', 'matched_payout_id');
+  const more = fetched.length > 25;
+  const rows = fetched.slice(0, 25);
   let cleared = 0;
   let reverted = 0;
   for (const row of rows) {
     const rejected = rejectedTargets(row.suggestion);
     const { candidates, overflow } = await surveyPayoutCandidatesForRow(row, rejected);
-    if (!overflow && candidates.length === 1 && candidates[0].id === row.matched_payout_id) {
+    // exact cents required, not just tolerance: a one-cent drift between
+    // claim and verify would otherwise clear the marker and let the echo
+    // confirm a discrepant automatic link (the matcher's exact-cent policy)
+    if (!overflow && candidates.length === 1 && candidates[0].id === row.matched_payout_id
+      && centsEqual(candidates[0].effective_amount, row.amount)) {
       const done = await db('bank_transactions')
         .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
         .update({ suggestion: db.raw("suggestion - 'verifyPending'"), updated_at: new Date() });
@@ -505,7 +513,7 @@ async function verifyPendingPayoutClaims() {
       logger.warn(`[bank-import] payout verify rollback for row ${row.id} failed — link kept: ${err.message}`);
     }
   }
-  return { cleared, reverted };
+  return { cleared, reverted, more };
 }
 
 // Server-side plausibility for a refund target — the SAME rules the matcher
@@ -776,7 +784,9 @@ async function retryPendingReconciliations() {
   // (Reversals need no sweep: the unlink route runs its unlink CAS inside
   // the reversal's own transaction, so a failed reversal rolls the unlink
   // back — there is never a committed unlink awaiting reversal.)
-  const morePending = pendingFetch.length > PENDING_RETRY_LIMIT || unresolved > 0;
+  // unfinished work of EVERY kind feeds the caller's more-signal: retry
+  // backlog, unresolved retries, and verification sweeps that hit their cap
+  const morePending = pendingFetch.length > PENDING_RETRY_LIMIT || unresolved > 0 || claimVerify.more || payoutVerify.more;
   return { pending: pending.length, morePending, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds, expenseLinksReverted: editedLinks, claimVerifyReverted: claimVerify.reverted, payoutVerifyReverted: payoutVerify.reverted };
 }
 
@@ -1325,7 +1335,10 @@ async function runDeterministicMatching({ limit } = {}) {
             // turned plural; payouts arriving after this point are LATER
             // arrivals and never retro-invalidate a link.
             const after = await surveyPayoutCandidates();
-            if (!after.overflow && after.candidates.length === 1 && after.candidates[0].id === exact[0].id) {
+            // exact cents required on the survivor too — a one-cent drift
+            // between survey and verify must park, not confirm
+            if (!after.overflow && after.candidates.length === 1 && after.candidates[0].id === exact[0].id
+              && centsEqual(after.candidates[0].effective_amount, row.amount)) {
               await db('bank_transactions')
                 .where({ id: row.id, status: 'matched_payout', matched_payout_id: exact[0].id })
                 .update({ suggestion: db.raw("suggestion - 'verifyPending'"), updated_at: new Date() });
@@ -1647,9 +1660,11 @@ module.exports = {
   appliedRefundTotal,
   refundCandidatesForRow,
   surveyExpenseCandidatesForRow,
+  surveyPayoutCandidatesForRow,
   rejectedTargets,
   resetDanglingLinks,
   healEditedExpenseLinks,
+  healUnreconciledLinks,
   methodIncompatible,
   effectivePayoutAmount,
   suggestionMerge,

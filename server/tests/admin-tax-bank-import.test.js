@@ -165,6 +165,8 @@ jest.mock('../services/bank-import', () => ({
   // asserts the endpoint's shape and guards
   refundCandidatesForRow: jest.fn(() => Promise.resolve([])),
   surveyExpenseCandidatesForRow: jest.fn(() => Promise.resolve([])),
+  surveyPayoutCandidatesForRow: jest.fn(() => Promise.resolve({ candidates: [], overflow: false })),
+  healUnreconciledLinks: jest.fn(() => Promise.resolve({ reverted: 0, remarked: 0 })),
 }));
 
 const express = require('express');
@@ -635,13 +637,37 @@ describe('refund-candidates on demand (gate on)', () => {
   });
 
   test('status SELF-HEALS before counting — concurrent tab loads cannot report already-reverted matches', async () => {
-    const { resetDanglingLinks, healEditedExpenseLinks } = require('../services/bank-import');
+    const { resetDanglingLinks, healEditedExpenseLinks, healUnreconciledLinks } = require('../services/bank-import');
     resetDanglingLinks.mockClear();
     healEditedExpenseLinks.mockClear();
+    healUnreconciledLinks.mockClear();
     const res = await get('/admin/tax/bank-import/status');
     expect(res.status).toBe(200);
     expect(resetDanglingLinks).toHaveBeenCalled();
     expect(healEditedExpenseLinks).toHaveBeenCalled();
+    // the payout-eligibility healer runs on page load too — a failed/
+    // rescheduled linked payout cannot keep counting as matched
+    expect(healUnreconciledLinks).toHaveBeenCalled();
+  });
+
+  test('payout-candidates serves the full nearest-arrival list for a bank credit', async () => {
+    const { surveyPayoutCandidatesForRow } = require('../services/bank-import');
+    surveyPayoutCandidatesForRow.mockResolvedValueOnce({
+      candidates: [
+        { id: 'po-far', effective_amount: 500, arrival_date: '2026-08-09' },
+        { id: 'po-near', effective_amount: 500, arrival_date: '2026-08-11' },
+      ],
+      overflow: false,
+    });
+    state.bankRow = { id: 'bt-1', amount: '500.00', txn_date: '2026-08-11', description: 'DEPOSIT', direction: 'credit', account_type: 'bank', status: 'unmatched', suggestion: null };
+    const res = await get('/admin/tax/bank-import/bt-1/payout-candidates');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.candidates.map((c) => c.id)).toEqual(['po-near', 'po-far']);
+    expect(body.total).toBe(2);
+    // card credits have no payout candidates
+    state.bankRow = { id: 'bt-1', direction: 'credit', account_type: 'card', status: 'unmatched' };
+    expect((await get('/admin/tax/bank-import/bt-1/payout-candidates')).status).toBe(400);
   });
 });
 

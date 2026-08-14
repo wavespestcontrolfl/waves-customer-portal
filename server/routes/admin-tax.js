@@ -1633,9 +1633,12 @@ router.get('/bank-import/status', async (req, res, next) => {
     // status counts are the tab's headline claims — self-heal first, same
     // as coverage (the client fires /status, /transactions and /coverage
     // concurrently, so this endpoint cannot rely on coverage's healing
-    // having landed before its own snapshot)
+    // having landed before its own snapshot). The payout-eligibility
+    // healer runs too: a webhook can fail/reschedule a linked payout
+    // between matching passes, and page load must not keep counting it.
     await bankImport.resetDanglingLinks();
     await bankImport.healEditedExpenseLinks();
+    await bankImport.healUnreconciledLinks();
     const counts = await db('bank_transactions').select('status').count('* as n').groupBy('status');
     res.json({
       enabled: true,
@@ -2478,6 +2481,31 @@ router.get('/bank-import/:id/expense-candidates', async (req, res, next) => {
     res.json({
       candidates: list.slice(0, 500).map(c => ({ id: c.id, amount: c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: dateCellStr(c.expense_date) })),
       total: list.length,
+    });
+  } catch (err) { next(err); }
+});
+
+// Full payout-candidate list for ONE bank credit, on demand — the parked
+// slice shows 20 of up to 50; link-payout validates by plausibility rules,
+// so every entry served here is actionable (mirror of the expense/refund
+// candidate routes).
+router.get('/bank-import/:id/payout-candidates', async (req, res, next) => {
+  try {
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'credit' || row.account_type !== 'bank') {
+      return res.status(400).json({ error: 'only bank-account credits have payout candidates' });
+    }
+    const rejected = bankImport.rejectedTargets(row.suggestion);
+    const { candidates, overflow } = await bankImport.surveyPayoutCandidatesForRow(row, rejected);
+    const txnMs = new Date(`${dateCellStr(row.txn_date)}T00:00:00Z`).getTime();
+    candidates.sort((a, b) => (Math.abs(new Date(`${dateCellStr(a.arrival_date)}T00:00:00Z`).getTime() - txnMs)
+      - Math.abs(new Date(`${dateCellStr(b.arrival_date)}T00:00:00Z`).getTime() - txnMs))
+      || String(a.id).localeCompare(String(b.id)));
+    res.json({
+      candidates: candidates.map(c => ({ id: c.id, amount: Number(c.effective_amount), arrival_date: dateCellStr(c.arrival_date) })),
+      total: candidates.length,
+      overflow, // >50 same-amount payouts — the survey itself was truncated
     });
   } catch (err) { next(err); }
 });
