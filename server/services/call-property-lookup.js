@@ -137,7 +137,7 @@ async function enrichPropertyById(propertyId) {
     const { hash } = cacheKey(address);
     const inFlight = await db('property_lookups')
       .where({ address_hash: hash, last_attempt_status: 'pending' })
-      .whereRaw("last_attempt_at > NOW() - INTERVAL '10 minutes'")
+      .whereRaw(`last_attempt_at > NOW() - INTERVAL '${PENDING_ACTIVE_MINUTES} minutes'`)
       .first();
     if (inFlight) return { skipped: 'lookup_in_flight' };
   } catch (err) {
@@ -182,7 +182,7 @@ async function enrichPropertyById(propertyId) {
     } catch (err) {
       logger.warn('[call-property-lookup] flag-touch failed', { propertyId, error: errId(err) });
     }
-    return { enriched: true, filled: [], complete: false };
+    return { enriched: true, filled: [], complete: false, exitedCandidateSet: false };
   }
 
   const patch = {};
@@ -244,7 +244,7 @@ async function enrichPropertyById(propertyId) {
       logger.info('[call-property-lookup] row changed during lookup — result discarded', {
         propertyId, elapsedMs: Date.now() - t0,
       });
-      return { enriched: true, filled: [], complete: false };
+      return { enriched: true, filled: [], complete: false, exitedCandidateSet: false };
     }
   } else {
     after = { latitude: row.latitude, longitude: row.longitude, property_type: row.property_type };
@@ -375,12 +375,18 @@ async function enrichPropertyById(propertyId) {
   // the sweep's offset accounting): the row leaves the NULL-candidate set
   // only when coords AND type are all present now.
   const complete = after.latitude != null && after.longitude != null && Boolean(afterType);
+  // Departure from the SWEEP'S candidate predicate — (coords both NULL) OR
+  // type missing — not full completeness: a type fill on a lone-coordinate
+  // row exits the set while still incomplete (the broken pair is a
+  // human-repair case), and the sweep's offset must count that departure
+  // exactly like a completion or it advances past a shifted candidate.
+  const exitedCandidateSet = Boolean(afterType) && !(after.latitude == null && after.longitude == null);
   logger.info('[call-property-lookup] enriched', {
     propertyId,
     filled,
     elapsedMs: Date.now() - t0,
   });
-  return { enriched: true, filled, complete };
+  return { enriched: true, filled, complete, exitedCandidateSet };
 }
 
 /**
@@ -400,6 +406,11 @@ async function enrichPropertyById(propertyId) {
 // an ACTIVE re-stamped lookup — its result warms the same cache, and the
 // nightly sweep catches leftovers.
 const IN_FLIGHT_RETRY_DELAYS_MS = [3 * 60 * 1000, 8 * 60 * 1000];
+
+// One bound for "a 'pending' ledger stamp is a LIVE lookup": shared by the
+// in-flight guard above and the sweep's cooldown verdict. Past it, the
+// stamp is a crashed process that will never produce a result.
+const PENDING_ACTIVE_MINUTES = 10;
 
 // ONE bounded retry after a thrown error or a no-profile result: a brief
 // provider/DB blip at call time otherwise left the row unenriched forever
@@ -466,8 +477,12 @@ const SQL_LEADING_UNIT_RE = '^\\s*(unit|apt|apartment|ste|suite|#)\\s*#?\\s*[a-z
  * Paged (offset) so the sweep can walk past cooled-down rows — a fixed
  * overfetch let a head of perpetually-unresolvable rows starve the
  * backlog forever.
+ * createdWithinDays fences the CALL-TIME RECOVERY mode (backfill gate off)
+ * to recently created rows — the population the call-time lane was already
+ * authorized to buy lookups for — keeping the pre-existing backlog behind
+ * the backfill gate.
  */
-async function fetchBackfillCandidates(limit, offset = 0) {
+async function fetchBackfillCandidates(limit, offset = 0, { createdWithinDays } = {}) {
   const { etDateString } = require('../utils/datetime-et');
   const todayEt = etDateString(new Date());
   // Canonical live-customer predicate (customer-stages.whereLiveCustomer,
@@ -475,7 +490,7 @@ async function fetchBackfillCandidates(limit, offset = 0) {
   // and a retained address of a deleted account must never reach paid
   // external lookup providers.
   const { CUSTOMER_STAGES } = require('./customer-stages');
-  return db('customer_properties as cp')
+  const q = db('customer_properties as cp')
     .join('customers as c', 'c.id', 'cp.customer_id')
     .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
     .where('c.active', true)
@@ -528,6 +543,10 @@ async function fetchBackfillCandidates(limit, offset = 0) {
     ])
     .limit(limit)
     .offset(offset);
+  if (Number.isFinite(createdWithinDays) && createdWithinDays > 0) {
+    q.whereRaw(`cp.created_at > NOW() - INTERVAL '${Math.floor(createdWithinDays)} days'`);
+  }
+  return q;
 }
 
 // Attempt outcomes that mean "retrying soon re-buys the same nothing":
@@ -591,10 +610,22 @@ async function recentLookupVerdict(row) {
       .whereRaw(`last_attempt_at > NOW() - INTERVAL '${BACKFILL_ATTEMPT_COOLDOWN_DAYS} days'`)
       .first('last_attempt_status', 'last_attempt_at');
     if (!attempt) return null;
-    if (COOLDOWN_STATUSES.includes(attempt.last_attempt_status)) return 'cooldown';
+    const attemptedAt = attempt.last_attempt_at ? new Date(attempt.last_attempt_at).getTime() : NaN;
+    if (COOLDOWN_STATUSES.includes(attempt.last_attempt_status)) {
+      // 'pending' is NONTERMINAL: it cools only while a lookup is
+      // genuinely in flight — the same PENDING_ACTIVE_MINUTES bound the
+      // in-flight guard applies. An older stamp is a crashed process
+      // that will never produce a result; cooling it for the full
+      // window stranded the row for weeks while the call-time retry
+      // ladder had already (correctly) moved on after ten minutes.
+      if (attempt.last_attempt_status === 'pending'
+          && !(Number.isFinite(attemptedAt) && attemptedAt > Date.now() - PENDING_ACTIVE_MINUTES * 60 * 1000)) {
+        return null;
+      }
+      return 'cooldown';
+    }
     const created = row.created_at ? new Date(row.created_at).getTime() : NaN;
     const updated = row.updated_at ? new Date(row.updated_at).getTime() : NaN;
-    const attemptedAt = attempt.last_attempt_at ? new Date(attempt.last_attempt_at).getTime() : NaN;
     const worked = Number.isFinite(created) && Number.isFinite(updated) && Number.isFinite(attemptedAt)
       && updated > created + 1000
       && updated >= attemptedAt
@@ -890,17 +921,34 @@ async function reconcileCustomerMirrors() {
   return filled;
 }
 
+// Call-time crash recovery window: with ONLY the call-time gate on, a
+// deploy or crash mid-lookup loses the in-memory retry ladder (unref'd
+// timers, no durable work record), and the committed property would stay
+// unenriched forever — the nightly sweep is the only durable retry. It
+// therefore still runs in that configuration, fenced to rows CREATED
+// inside this window: those are the rows the call-time lane was already
+// authorized to spend a lookup on, so recovery re-buys at most what a
+// crash dropped and the pre-existing backlog stays behind the backfill
+// gate. Wide enough to straddle a weekend outage plus the 14-day attempt
+// cooldown shielding anything already attempted.
+const CALL_TIME_RECOVERY_WINDOW_DAYS = 7;
+
 async function sweepUnenrichedProperties({ limit } = {}) {
   const backfillOn = gateEnvValue('GATE_PROPERTY_ENRICH_BACKFILL');
+  const callTimeOn = gateEnvValue('GATE_CALL_PROPERTY_LOOKUP');
   // Reconciliation heals the CALL-TIME lane's enrich↔booking race, so it
   // runs whenever EITHER lane is live: with only the call-time gate on,
   // a backfill-gated reconciliation would never repair those visits. It
   // is free (no lookup spend), so gating it on the paid sweep's budget
   // gate was never the point.
-  const reconcileOn = backfillOn || gateEnvValue('GATE_CALL_PROPERTY_LOOKUP');
+  const reconcileOn = backfillOn || callTimeOn;
   const visitCoordsReconciled = reconcileOn ? await reconcileVisitCoordinates() : 0;
   const customerMirrorsReconciled = reconcileOn ? await reconcileCustomerMirrors() : 0;
-  if (!backfillOn) return { skipped: 'gated', visitCoordsReconciled, customerMirrorsReconciled };
+  if (!backfillOn && !callTimeOn) return { skipped: 'gated', visitCoordsReconciled, customerMirrorsReconciled };
+  // Backfill off + call-time on = RECOVERY mode: same loop, same budget
+  // cap, candidates fenced to the recovery window (see constant above).
+  const recoveryOnly = !backfillOn;
+  const candidateOpts = recoveryOnly ? { createdWithinDays: CALL_TIME_RECOVERY_WINDOW_DAYS } : {};
   const batch = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : backfillBatchSize();
   const t0 = Date.now();
   let processed = 0;
@@ -915,7 +963,7 @@ async function sweepUnenrichedProperties({ limit } = {}) {
   // the batch, so a head of unresolvable or already-worked rows can't
   // starve older candidates.
   while (processed < batch) {
-    const page = await fetchBackfillCandidates(batch, offset);
+    const page = await fetchBackfillCandidates(batch, offset, candidateOpts);
     if (!page.length) break;
     seen += page.length;
     // OFFSET advances only by rows that STAY in the NULL-filtered result
@@ -948,7 +996,7 @@ async function sweepUnenrichedProperties({ limit } = {}) {
         // and must not let a head of skip rows exhaust the nightly cap.
         if (!res.skipped) processed += 1;
         if (res.enriched) enriched += 1;
-        if (res.complete || LEFT_CANDIDATE_SET_SKIPS.includes(res.skipped)) leftSetThisPage += 1;
+        if (res.exitedCandidateSet || LEFT_CANDIDATE_SET_SKIPS.includes(res.skipped)) leftSetThisPage += 1;
       } catch (err) {
         processed += 1;
         failed += 1;
@@ -958,6 +1006,7 @@ async function sweepUnenrichedProperties({ limit } = {}) {
     offset += page.length - leftSetThisPage;
   }
   logger.info('[call-property-lookup] backfill sweep complete', {
+    mode: recoveryOnly ? 'call_time_recovery' : 'backfill',
     candidates: seen,
     processed,
     enriched,
@@ -969,6 +1018,7 @@ async function sweepUnenrichedProperties({ limit } = {}) {
     elapsedMs: Date.now() - t0,
   });
   return {
+    mode: recoveryOnly ? 'call_time_recovery' : 'backfill',
     candidates: seen,
     processed,
     enriched,

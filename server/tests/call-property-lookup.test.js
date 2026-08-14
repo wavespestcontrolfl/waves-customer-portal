@@ -117,7 +117,7 @@ describe('runCallPropertyLookup', () => {
     });
 
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
-    expect(res).toEqual({ enriched: true, filled: ['latitude', 'longitude', 'property_type'], complete: true });
+    expect(res).toEqual({ enriched: true, filled: ['latitude', 'longitude', 'property_type'], complete: true, exitedCandidateSet: true });
     expect(performPropertyLookup).toHaveBeenCalledWith('123 Sample Cove, Bradenton, FL 34212');
     // Linked visits missing their coordinate pair get the same fill.
     expect(visitsBuilder.update).toHaveBeenCalledWith({ lat: 27.4995, lng: -82.4108 });
@@ -188,7 +188,7 @@ describe('runCallPropertyLookup', () => {
       },
     });
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
-    expect(res).toEqual({ enriched: true, filled: [], complete: false });
+    expect(res).toEqual({ enriched: true, filled: [], complete: false, exitedCandidateSet: false });
     // No durable FACT is written — but the row IS touched (updated_at
     // only), or a completed no-fill lookup (resolved/cache_hit is outside
     // the attempt cooldown) would head the nightly order and consume a
@@ -215,7 +215,7 @@ describe('runCallPropertyLookup', () => {
       },
     });
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
-    expect(res).toEqual({ enriched: true, filled: [], complete: false });
+    expect(res).toEqual({ enriched: true, filled: [], complete: false, exitedCandidateSet: false });
     // The fence includes the address key captured at read time.
     expect(updateBuilder.where).toHaveBeenCalledWith({ id: 'p1', address_key: 'oldkey', active: true });
   });
@@ -235,7 +235,7 @@ describe('runCallPropertyLookup', () => {
       },
     });
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
-    expect(res).toEqual({ enriched: true, filled: [], complete: false });
+    expect(res).toEqual({ enriched: true, filled: [], complete: false, exitedCandidateSet: false });
     // The flag-touch carries the same address fence as the no-fill touch.
     expect(touchBuilder.update).toHaveBeenCalledWith({ updated_at: 'NOW()' });
     expect(touchBuilder.where).toHaveBeenCalledWith({ id: 'p1', address_key: 'key-flagged', active: true });
@@ -358,11 +358,34 @@ describe('runCallPropertyLookup', () => {
       },
     });
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
-    expect(res).toEqual({ enriched: true, filled: ['property_type'], complete: true });
+    expect(res).toEqual({ enriched: true, filled: ['property_type'], complete: true, exitedCandidateSet: true });
     const patch = updateBuilder.update.mock.calls[0][0];
     expect(patch.property_type).toMatchObject({
       __raw: "COALESCE(NULLIF(TRIM(property_type), ''), ?)", bindings: ['single_family'],
     });
+  });
+
+  test('type-only fill on a lone-coordinate row exits the candidate set while still incomplete', async () => {
+    // Eligible via the missing type; the broken coordinate pair is
+    // deliberately unrepairable here. Filling the type removes the row
+    // from the sweep's candidate predicate even though complete stays
+    // false — the sweep's offset must see that departure.
+    const updateBuilder = builder([{ latitude: 27.4, longitude: null, property_type: 'single_family' }]);
+    mockRowDb({
+      id: 'p1', active: true, latitude: 27.4, longitude: null, property_type: null,
+      address_line1: '123 Sample Cove', city: 'Bradenton', state: 'FL', zip: '34212',
+    }, updateBuilder);
+    performPropertyLookup.mockResolvedValueOnce({
+      satellite: { inServiceArea: true },
+      enriched: {
+        lat: 27.4, lng: -82.5, propertyType: 'Single Family',
+        _observed: { propertyType: true }, fieldVerifyFlags: [],
+      },
+    });
+    const res = await runCallPropertyLookup({ propertyId: 'p1' });
+    expect(res.complete).toBe(false);
+    expect(res.exitedCandidateSet).toBe(true);
+    expect(res.filled).toEqual(['property_type']);
   });
 
   test('lone-coordinate row with a type is unrepairable → skipped, no spend', async () => {
@@ -387,7 +410,7 @@ describe('runCallPropertyLookup', () => {
         fieldVerifyFlags: [{ field: 'all', reason: 'ai_only_record' }],
       },
     });
-    expect(await runCallPropertyLookup({ propertyId: 'p1' })).toEqual({ enriched: true, filled: [], complete: false });
+    expect(await runCallPropertyLookup({ propertyId: 'p1' })).toEqual({ enriched: true, filled: [], complete: false, exitedCandidateSet: false });
   });
 
   test('street without ZIP → skipped before any lookup spend', async () => {
@@ -509,19 +532,43 @@ describe('sweepUnenrichedProperties', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('backfill off + call gate on → sweep still gated (no paid spend) but reconciliation runs', async () => {
+  test('backfill off + call gate on → reconciliation runs and RECOVERY sweep is window-fenced', async () => {
     process.env.GATE_CALL_PROPERTY_LOOKUP = 'true';
     const joined = builder([]);
+    const cp = builder([]);
     db.mockImplementation((table) => {
       if (String(table).startsWith('scheduled_services as ss')) return joined;
+      if (String(table).startsWith('customer_properties as cp')) return cp;
       return builder([]);
     });
     const res = await sweepUnenrichedProperties();
-    expect(res).toEqual({ skipped: 'gated', visitCoordsReconciled: 0, customerMirrorsReconciled: 0 });
     // The race the reconciliation heals is created by the CALL-TIME lane,
     // so the free scan must not hide behind the paid sweep's budget gate.
     expect(joined.join).toHaveBeenCalled();
+    // A crash/deploy loses the call-time lane's in-memory retry ladder —
+    // the sweep is the durable retry, so it runs in RECOVERY mode:
+    // fenced to recently created rows (the population the call-time gate
+    // already authorized paid lookups for); the pre-existing backlog
+    // stays behind the backfill gate.
+    expect(res.mode).toBe('call_time_recovery');
+    expect(res.skipped).toBeUndefined();
+    const fence = cp.whereRaw.mock.calls.find((c) => String(c[0]).includes('cp.created_at > NOW()'));
+    expect(String(fence[0])).toContain("INTERVAL '7 days'");
+    // Empty candidate page → no spend.
     expect(performPropertyLookup).not.toHaveBeenCalled();
+  });
+
+  test('backfill ON → no recovery fence: the full backlog is in scope', async () => {
+    process.env.GATE_PROPERTY_ENRICH_BACKFILL = 'true';
+    const cp = builder([]);
+    db.mockImplementation((table) => {
+      if (String(table).startsWith('scheduled_services as ss')) return builder([]);
+      if (String(table).startsWith('customer_properties as cp')) return cp;
+      return builder([]);
+    });
+    const res = await sweepUnenrichedProperties();
+    expect(res.mode).toBe('backfill');
+    expect(cp.whereRaw.mock.calls.some((c) => String(c[0]).includes('cp.created_at > NOW()'))).toBe(false);
   });
 
   test('enriches candidates up to the batch cap; cooldown rows are skipped without spending', async () => {
@@ -756,6 +803,36 @@ describe('fetchBackfillCandidates', () => {
       { column: 'has_estimate', order: 'desc' },
       { column: 'cp.created_at', order: 'desc' },
     ]);
+  });
+});
+
+describe('recentLookupVerdict', () => {
+  const { _private } = require('../services/call-property-lookup');
+  const row = {
+    id: 'p1', address_line1: '123 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+    created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-01T00:00:00Z',
+  };
+
+  test("stale 'pending' no longer cools; a live one does; terminal unproductive always does", async () => {
+    // A killed process leaves last_attempt_status='pending' forever. The
+    // in-flight guard treats 'pending' as live for only ten minutes; the
+    // sweep's cooldown must apply the SAME bound or the nightly runs skip
+    // the row for the whole attempt-cooldown window with no result ever
+    // coming.
+    const stale = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const live = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    const mockLedger = (attempt) => db.mockImplementation((table) => (
+      table === 'property_lookups' ? builder(attempt) : builder(undefined)
+    ));
+
+    mockLedger({ last_attempt_status: 'pending', last_attempt_at: stale });
+    expect(await _private.recentLookupVerdict(row)).toBe(null);
+    mockLedger({ last_attempt_status: 'pending', last_attempt_at: live });
+    expect(await _private.recentLookupVerdict(row)).toBe('cooldown');
+    // Terminal unproductive statuses cool for the full window regardless
+    // of age — retrying re-buys the same nothing.
+    mockLedger({ last_attempt_status: 'no_record', last_attempt_at: stale });
+    expect(await _private.recentLookupVerdict(row)).toBe('cooldown');
   });
 });
 
