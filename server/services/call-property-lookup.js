@@ -230,6 +230,17 @@ async function enrichPropertyById(propertyId) {
     }
   } else {
     after = { latitude: row.latitude, longitude: row.longitude, property_type: row.property_type };
+    // Touch updated_at, same as the flagged path above: a COMPLETED lookup
+    // with nothing durable to write (out-of-area coordinates, an
+    // unobserved/disputed type) stamps resolved/cache_hit — deliberately
+    // outside the attempt cooldown — and leaves the row untouched, so it
+    // would head the nightly candidate order and consume a batch slot
+    // every night. The recently_touched sink parks it for a week instead.
+    try {
+      await db('customer_properties').where({ id: propertyId }).update({ updated_at: db.fn.now() });
+    } catch (err) {
+      logger.warn('[call-property-lookup] no-fill touch failed', { propertyId, error: errId(err) });
+    }
   }
   // filled = what THIS run actually changed (pre-read null → post-update
   // value); a concurrent writer's value surviving the CASE/COALESCE is not

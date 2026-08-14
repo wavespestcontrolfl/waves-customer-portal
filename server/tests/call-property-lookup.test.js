@@ -188,7 +188,12 @@ describe('runCallPropertyLookup', () => {
     });
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
     expect(res).toEqual({ enriched: true, filled: [], complete: false });
-    expect(updateBuilder.update).not.toHaveBeenCalled();
+    // No durable FACT is written — but the row IS touched (updated_at
+    // only), or a completed no-fill lookup (resolved/cache_hit is outside
+    // the attempt cooldown) would head the nightly order and consume a
+    // batch slot every night (hook P1).
+    expect(updateBuilder.update).toHaveBeenCalledTimes(1);
+    expect(updateBuilder.update.mock.calls[0][0]).toEqual({ updated_at: 'NOW()' });
   });
 
   test('address edited during the lookup → update matches nothing, result discarded', async () => {
