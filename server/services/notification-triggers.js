@@ -418,6 +418,19 @@ const TRIGGER_REGISTRY = {
           : '/admin/estimates',
     }),
   },
+  one_tap_purchase_completed: {
+    label: 'One-tap purchase completed',
+    category: 'estimate',
+    priority: 'high',
+    group: 'Leads & Sales',
+    build: (p) => ({
+      title: `One-tap purchase: ${p.customerName || 'Customer'}`,
+      body: `Self-purchased ${p.serviceLabel || 'a service'} at $${Number(p.perVisit || 0).toFixed(2)} per application${p.firstVisitDate ? ` — first visit ${p.firstVisitDate}` : ''}. Booked and converted automatically; no action needed unless something looks off.`,
+      link: p.customerId
+        ? `/admin/customers?customerId=${encodeURIComponent(p.customerId)}`
+        : '/admin/customers',
+    }),
+  },
   credential_expiring_soon: {
     label: 'Credential expiring within 60 days',
     category: 'credential',

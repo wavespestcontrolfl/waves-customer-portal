@@ -1352,6 +1352,16 @@ module.exports = {
   variantsForService,
   currentServiceObjectsFor,
   optionServices,
+  // First-class exports for the one-tap purchase lane (2026-08-13): the
+  // purchase must re-run the pricing engine over the SAME property context
+  // and line-amount arithmetic this module priced the offer with — importing
+  // these (rather than re-implementing them) is what keeps the synthesized
+  // estimate's per-application price equal to the offer's by construction
+  // (the purchase path still asserts the parity and fails closed on drift).
+  resolvePropertyContext,
+  loadTurfProfile,
+  findLineItem,
+  quoteAmountFromLine,
   // Shared per-visit derivation (report click-to-estimate lane): the mint's
   // cent-exact cross-check must read a per-application price off an engine
   // result EXACTLY the way the card's quote did — one function, no second
@@ -1363,9 +1373,6 @@ module.exports = {
   // current services EXACTLY the way the card's composition did — one
   // loader, one street-scope resolution, no second derivation to drift.
   loadCurrentServiceKeys,
-  // Same reasoning: the mint's price-input drift check re-reads the turf
-  // profile through the composition's own loader.
-  loadTurfProfile,
   withTurfProfileFence,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.

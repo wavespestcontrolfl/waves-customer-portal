@@ -277,6 +277,16 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     err.statusCode = 400;
     throw err;
   }
+  // One-tap purchase drafts are INTERNAL flow state, never a document to
+  // publish (Codex #3395 r12 P2): sending one flips it to 'sent' — a state
+  // the open purchase's confirm rejects and neither cleanup sweep reclaims
+  // (their predicates are draft/expired) — and starts the normal estimate
+  // comms for something the customer buys in-app.
+  if (estimate.source === 'one_tap_purchase') {
+    const err = new Error('This is an internal one-tap purchase draft — it is bought in the portal, never sent.');
+    err.statusCode = 400;
+    throw err;
+  }
   // A persisted bermuda-suppression estimate is only sendable while the gate
   // is LIVE: the send path serves stored rows without re-entering
   // priceLawnCare, so a save-then-gate-off sequence would otherwise publish
@@ -3154,6 +3164,14 @@ router.patch('/:id', async (req, res, next) => {
       updates.bill_by_invoice = nextBillByInvoice;
     }
     if (req.body.status !== undefined) {
+      // One-tap purchase drafts take NO generic status transitions (Codex
+      // #3395 r13 P2): a staff decline flips the row out of 'draft', which
+      // strands the open purchase ledger (confirm rejects; neither cleanup
+      // sweep reclaims a declined row) and contaminates the declined
+      // pipeline with an internal draft the customer never received.
+      if (estimate.source === 'one_tap_purchase' && req.body.status !== estimate.status) {
+        return res.status(400).json({ error: 'This is an internal one-tap purchase draft — its lifecycle is owned by the purchase flow.' });
+      }
       const verdict = resolveEstimateStatusPatch(estimate.status, req.body.status);
       if (!verdict.ok) return res.status(verdict.httpStatus).json({ error: verdict.error });
       // Same-status writes are a no-op for the status column (no declined_at
@@ -3202,7 +3220,40 @@ router.delete('/:id', async (req, res, next) => {
     if (estimate.status !== 'draft') {
       return res.status(400).json({ error: 'Only draft estimates can be deleted. Archive closed estimates instead.' });
     }
+    // One-tap ledger rows FK this estimate (NO ACTION): without removing
+    // them first the delete below dies on 23503. A completed ledger row is
+    // a consent artifact and must never be deleted — it also implies the
+    // estimate is accepted, so the draft-only guard above already blocks it;
+    // belt-and-braces refuse anyway. Live holds are the 15-min sweeper's
+    // problem once the ledger row is gone.
+    const oneTapRows = await db('one_tap_purchases')
+      .where({ estimate_id: req.params.id })
+      .select('id', 'status');
+    if (oneTapRows.some((r) => r.status === 'completed')) {
+      return res.status(400).json({ error: 'This estimate carries a completed one-tap purchase and cannot be deleted.' });
+    }
+    // A reserved attempt's LIVE hold also references this estimate
+    // (scheduled_services.source_estimate_id, NO ACTION) — release it
+    // through the slot-reservation mechanism first or the estimate delete
+    // below still 23503s until the hold sweeper runs.
+    const liveHolds = await db('scheduled_services')
+      .where({ source_estimate_id: req.params.id })
+      .whereNull('customer_id')
+      .whereNotNull('reservation_expires_at')
+      .select('id');
+    for (const hold of liveHolds) {
+      await require('../services/slot-reservation').releaseReservation({
+        scheduledServiceId: hold.id,
+        estimateId: req.params.id,
+      });
+    }
     await db.transaction(async (trx) => {
+      if (oneTapRows.length) {
+        await trx('one_tap_purchases')
+          .whereIn('id', oneTapRows.map((r) => r.id))
+          .whereNot({ status: 'completed' })
+          .del();
+      }
       await trx('leads')
         .where({ estimate_id: req.params.id })
         .update({ estimate_id: null, updated_at: new Date() });

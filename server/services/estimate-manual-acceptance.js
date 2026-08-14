@@ -311,6 +311,14 @@ async function markEstimateManuallyAccepted({
   const claim = await database.transaction(async (trx) => {
     let estimate = await trx('estimates').where({ id: estimateId }).first();
     if (!estimate) throw httpError('Estimate not found', 404);
+    // One-tap purchase drafts are INTERNAL flow state (Codex #3395 r12
+    // P2): accepting one here flips it to 'accepted' outside the purchase
+    // saga — the open ledger row is stranded (confirm rejects, neither
+    // cleanup sweep reclaims a non-draft/expired row) and the purchase's
+    // own accept path is the only one carrying its consent artifact.
+    if (estimate.source === 'one_tap_purchase') {
+      throw httpError('This is an internal one-tap purchase draft — the customer completes it in the portal.', 400);
+    }
     // Rung 6 BEFORE the estimate row lock below (Codex #3109 r32): the
     // merge-undo takes customer-comms and THEN locks journaled estimates —
     // acquiring comms only later (inside convertEstimate, after the

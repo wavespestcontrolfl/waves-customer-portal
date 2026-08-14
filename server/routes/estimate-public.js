@@ -10583,6 +10583,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           estimateId: estimate.id,
           ip: req.ip,
           userAgent: req.get('user-agent') || null,
+          // Same visit scope the policy resolver judged with (#3395 r13
+          // P1): a self_pay_override visit on a payer-billed account is
+          // customer-paid — the enrollment's in-lock payer check must not
+          // fall back to the account payer and refuse.
+          scheduledServiceId: recurringCardScopeSsId || null,
         }).catch(() => {});
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'
@@ -10616,6 +10621,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           paymentMethodId: recurringCardPolicy.savedMethodRowId,
           source: 'estimate_accept',
           details: { via: 'saved_method_auto_enroll', estimate_id: estimate.id },
+          // Same visit scope the policy resolver judged with (#3395 r13 P1).
+          scheduledServiceId: recurringCardScopeSsId || null,
         });
         // A refused enrollment (method removed/unenrollable between the
         // policy check and here) must not fail silently — this accepted

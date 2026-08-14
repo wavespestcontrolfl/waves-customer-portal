@@ -289,6 +289,16 @@ describe('completeRecurringCardEnrollment (save → consent → enroll)', () => 
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 
+  it('threads the visit scope into the enrollment payer check (GH #3395 r13: self_pay_override visits still enroll)', async () => {
+    mockDbFixtures.payment_methods = null;
+    mockSavePaymentMethod.mockResolvedValue({ id: 'pmrow-1', method_type: 'card' });
+    const r = await completeRecurringCardEnrollment({ ...ARGS, scheduledServiceId: 'ss-42' });
+    expect(r.enrolled).toBe(true);
+    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({
+      scheduledServiceId: 'ss-42',
+    }));
+  });
+
   it('refuses a pm owned by another customer and parks an office exception', async () => {
     mockDbFixtures.payment_methods = { id: 'pmrow-9', customer_id: 'SOMEONE-ELSE' };
     const r = await completeRecurringCardEnrollment(ARGS);

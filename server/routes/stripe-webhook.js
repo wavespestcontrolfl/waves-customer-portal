@@ -1854,12 +1854,26 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           });
         }
         const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+        // Invoice visit scope for the in-lock payer check (#3395 r14 P1):
+        // the PI belongs to an invoice — a self_pay_override visit on a
+        // payer-billed account must still enroll. Best-effort: a lookup
+        // miss falls to the account scope (toward refusing — fail closed).
+        let mirrorScopeSsId = null;
+        try {
+          const piInvoice = await db('invoices')
+            .where({ stripe_payment_intent_id: piId })
+            .first('scheduled_service_id');
+          mirrorScopeSsId = piInvoice?.scheduled_service_id || null;
+        } catch (scopeErr) {
+          logger.warn(`[stripe-webhook] invoice scope lookup failed for PI ${piId}: ${scopeErr.message}`);
+        }
         await enrollConsentedMethod({
           customerId: wavesCustomerId,
           paymentMethodId: saved.id,
           source: 'save_card_consent',
           details: { billing_mode: signupBillingMode },
           authorizedAt,
+          scheduledServiceId: mirrorScopeSsId,
         });
       }
       if (!existing) {
@@ -3572,12 +3586,29 @@ async function handleSetupIntentSucceeded(setupIntent) {
       // authorizedAt: this webhook can complete DAYS after the customer
       // authorized (browser died / micro-deposits) — an Auto Pay disable
       // recorded since then must win over the stale authorization.
+      // Invoice visit scope for the in-lock payer check (#3395 r14 P1) —
+      // invoice_id was stamped server-side at /capture-setup mint.
+      let coveredScopeSsId = null;
+      try {
+        const scopeInvoiceId = setupIntent.metadata?.invoice_id || null;
+        if (scopeInvoiceId) {
+          const scopeInvoice = await db('invoices')
+            .where({ id: scopeInvoiceId })
+            .first('scheduled_service_id', 'customer_id');
+          if (scopeInvoice && String(scopeInvoice.customer_id) === String(wavesCustomerId)) {
+            coveredScopeSsId = scopeInvoice.scheduled_service_id || null;
+          }
+        }
+      } catch (scopeErr) {
+        logger.warn(`[stripe-webhook] covered-capture invoice scope lookup failed for SI ${setupIntent.id}: ${scopeErr.message}`);
+      }
       const enrollment = await enrollConsentedMethod({
         customerId: wavesCustomerId,
         paymentMethodId: saved.id,
         source: 'save_card_consent',
         details: { via: 'covered_capture_webhook', setup_intent_id: setupIntent.id },
         authorizedAt: setupIntent.created ? new Date(setupIntent.created * 1000) : null,
+        scheduledServiceId: coveredScopeSsId,
       });
       // Capture done → apply the HELD credit coverage (Codex #2507
       // round-7 P1): under the hold flow the invoice stayed collectible
@@ -3716,6 +3747,32 @@ async function handleSetupIntentSucceeded(setupIntent) {
         });
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
+      // Payer routing BEFORE enrollment (Codex #3395 r9 P1) — same fence as
+      // POST /billing-v2/cards: this webhook fires independently of the
+      // browser POST (before or after it), so without its own check a payer
+      // assigned mid-flow still got the homeowner's card enrolled through
+      // this path. Payer-billed OR an unknowable payer picture (fail
+      // closed) keeps the method saved with consent recorded, skips
+      // enrollment, and parks a billing office exception — no rethrow,
+      // matching this branch's existing webhook-retry doctrine.
+      // A TRANSIENT lookup failure must RETHROW, not skip: returning here
+      // marks the event processed, Stripe never retries, and — for hosted
+      // redirects / micro-deposit verification, where this webhook is the
+      // ONLY completion path — a self-pay customer's method stays
+      // permanently unenrolled. Every step above is idempotent, so the
+      // retry re-enters safely. Only a CONFIRMED payer-billed result
+      // returns successfully (that skip is correct and permanent).
+      const resolvedPayer = await require('../services/payer')
+        .resolveForInvoice({ customerId: wavesCustomerId, throwOnError: true });
+      if (resolvedPayer?.payerId) {
+        await require('../services/notification-service').notifyAdmin(
+          'billing',
+          'Card saved without Auto Pay (payer-billed)',
+          'A portal card save (webhook completion) skipped Auto Pay enrollment because this account’s invoices route to a third-party payer — enrolling the saved card would charge the wrong party on self-pay invoices.',
+          { link: `/admin/customers/${wavesCustomerId}`, metadata: { customerId: wavesCustomerId, paymentMethodId: saved.id } },
+        ).catch(() => {});
+        return;
+      }
       const { enrollConsentedMethod } = require('../services/autopay-enrollment');
       // authorizedAt: for the micro-deposit deferred save this webhook fires
       // days after the portal add — a customer who disabled Auto Pay in the
@@ -5534,3 +5591,4 @@ module.exports.sweepUnacknowledgedAchProcessingAcks = sweepUnacknowledgedAchProc
 module.exports._handleAchFailure = handleAchFailure;
 module.exports._armMonthlyAutopayRetryForAsyncFailure = armMonthlyAutopayRetryForAsyncFailure;
 module.exports._handlePaymentIntentSucceeded = handlePaymentIntentSucceeded;
+module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;

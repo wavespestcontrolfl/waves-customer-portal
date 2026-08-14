@@ -993,7 +993,63 @@ const RECOMMENDATION_ICONS = {
 function RecommendationsCard({ data }) {
   // Per-card request state: idle → sending → sent | stale | failed.
   const [requestStates, setRequestStates] = useState({});
-  if (!data?.cards?.length) return null;
+  // One-tap purchase overlay target (bet 3) — a priced offer card while the
+  // server said oneTap:true. Everything else keeps the request-only CTA.
+  const [purchaseCard, setPurchaseCard] = useState(null);
+  // Resume payload after a hosted SetupIntent redirect (3DS/bank auth): the
+  // return handler saves the card, fetches the purchase snapshot, and
+  // reopens the overlay at the right step.
+  const [purchaseResume, setPurchaseResume] = useState(null);
+  const resumeProcessedRef = useRef(false);
+  useEffect(() => {
+    if (resumeProcessedRef.current) return;
+    const returned = getReturnedSetupIntent('one_tap_card');
+    const params = new URLSearchParams(window.location.search);
+    const resumeId = params.get('one_tap_resume');
+    if (!returned || !resumeId) return;
+    resumeProcessedRef.current = true;
+    (async () => {
+      let cardJustSaved = false;
+      try {
+        await api.saveStripeCard(null, returned.setupIntentId);
+        cardJustSaved = true;
+      } catch { /* state fetch below reports hasCardOnFile either way */ }
+      let resolved = false;
+      try {
+        const state = await api.oneTapGet(resumeId);
+        resolved = true;
+        if (state.open) setPurchaseResume({ ...state, cardJustSaved });
+      } catch (err) {
+        // Deterministic outcomes (gone/voided/gate off) end the resume; a
+        // transient failure (network, 5xx) must KEEP the return params so a
+        // reload retries instead of stranding the held purchase.
+        resolved = err?.status === 404 || err?.status === 409 || err?.status === 400;
+      }
+      if (resolved) {
+        clearReturnedSetupIntent();
+        const url = new URL(window.location.href);
+        url.searchParams.delete('one_tap_resume');
+        window.history.replaceState({}, '', url.toString());
+      } else {
+        resumeProcessedRef.current = false;
+      }
+    })();
+  }, []);
+  // A restored purchase must render even when the recommendations payload
+  // is empty or failed transiently — the resume fetch succeeding is the
+  // customer's only automatic path back to the held purchase (the return
+  // URL params are cleared once the state loads).
+  if (!data?.cards?.length) {
+    if (!purchaseResume) return null;
+    return (
+      <OneTapPurchaseOverlay
+        open
+        card={null}
+        resume={purchaseResume}
+        onClose={() => setPurchaseResume(null)}
+      />
+    );
+  }
   const muted = PORTAL_SHELL.muted;
   const setCardState = (id, value) => setRequestStates((prev) => ({ ...prev, [id]: value }));
 
@@ -1042,13 +1098,18 @@ function RecommendationsCard({ data }) {
                   <ShellIconTile icon={icon} size={34} />
                   <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{card.title}</div>
                 </div>
-                <div style={{
-                  flexShrink: 0, padding: '3px 10px', borderRadius: 999,
-                  background: chip.background, border: `1px solid ${chip.border}`, color: chip.color,
-                  fontSize: 14, fontWeight: 850, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
-                }}>
-                  {chip.text}
-                </div>
+                {/* Owner ruling 08-13: offer cards carry no priority chip —
+                    the section header already says "Recommended for your
+                    property". Advice cards keep theirs. */}
+                {card.kind !== 'offer' && (
+                  <div style={{
+                    flexShrink: 0, padding: '3px 10px', borderRadius: 999,
+                    background: chip.background, border: `1px solid ${chip.border}`, color: chip.color,
+                    fontSize: 14, fontWeight: 850, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
+                  }}>
+                    {chip.text}
+                  </div>
+                )}
               </div>
               <div style={{ marginTop: 8, fontSize: 14, color: muted, lineHeight: 1.5 }}>{card.body}</div>
               {priced && (
@@ -1068,6 +1129,19 @@ function RecommendationsCard({ data }) {
                   ) : state === 'stale' ? (
                     <button type="button" style={PORTAL_SECONDARY_ACTION} onClick={() => window.location.reload()}>
                       Offer updated — refresh to see the latest
+                    </button>
+                  ) : data?.oneTap && card.kind === 'offer' && card.mode === 'priced' && priced ? (
+                    // One-tap purchase (bet 3): the buy action is the card's
+                    // ONLY CTA (owner ruling 08-13 — no secondary ask), and it
+                    // carries the yellow glass accent, same treatment as the
+                    // Waves AI Ask button (data-glass-accent, navy text).
+                    <button
+                      type="button"
+                      onClick={() => setPurchaseCard(card)}
+                      data-glass-accent=""
+                      style={PORTAL_PRIMARY_ACTION}
+                    >
+                      Add now — {fmtMoney(card.option.perVisit)} per application
                     </button>
                   ) : (
                     <button
@@ -1090,7 +1164,597 @@ function RecommendationsCard({ data }) {
           );
         })}
       </div>
+      {(purchaseCard || purchaseResume) && (
+        <OneTapPurchaseOverlay
+          open
+          card={purchaseCard}
+          resume={purchaseCard ? null : purchaseResume}
+          onClose={() => { setPurchaseCard(null); setPurchaseResume(null); }}
+        />
+      )}
     </section>
+  );
+}
+
+// =========================================================================
+// ONE-TAP PURCHASE OVERLAY — buy the portal-home priced offer (portal
+// roadmap bet 3, owner rulings 2026-08-13). TERMS → TIME → CONFIRM → DONE.
+// All pricing and terms copy are SERVER-composed at init; the client only
+// renders and taps. Any 409 means the server-recomputed offer no longer
+// matches this render — prompt a refresh, never a dead retry. Nothing is
+// charged here: if no card is on file, the confirm step saves one through
+// the existing SetupIntent + save-card flow (consent copy shown, save only).
+// Closing before confirm releases the slot hold best-effort; the server
+// sweeper is the backstop.
+// =========================================================================
+function oneTapTime12(value) {
+  const [h, m] = String(value || '').split(':').map(Number);
+  if (!Number.isFinite(h)) return String(value || '');
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  const hour = ((h + 11) % 12) + 1;
+  return `${hour}:${String(m || 0).padStart(2, '0')} ${suffix}`;
+}
+
+function oneTapDayLabel(date) {
+  const [y, m, d] = String(date || '').split('-').map(Number);
+  const dt = new Date(Date.UTC(y, (m || 1) - 1, d || 1, 12));
+  if (Number.isNaN(dt.getTime())) return String(date || '');
+  return dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
+  useLockBodyScroll(open);
+  // Close is LOCKED while a confirmation is in flight (same guard as
+  // "Change time"): unmounting races the in-flight /confirm — a commit
+  // that lands after the close books the customer with no success screen
+  // (release correctly refuses to undo a completed purchase, but the
+  // overlay is already gone). Ref so the modal-focus escape handler sees
+  // the live value without re-binding.
+  const confirmingRef = useRef(false);
+  // True once the overlay's unmount cleanup has run — in-flight responses
+  // (a late reserve) check it before acting on a dead overlay.
+  const closedRef = useRef(false);
+  const guardedClose = () => { if (confirmingRef.current) return; onClose(); };
+  const dialogRef = useModalFocus(open, guardedClose);
+  const compact = useIsMobile(760);
+  const muted = PORTAL_SHELL.muted;
+
+  const [step, setStep] = useState('terms'); // terms | time | confirm | done
+  const [init, setInit] = useState(null);
+  const [initError, setInitError] = useState(''); // '' | 'stale' | message
+  const [slots, setSlots] = useState(null);
+  const [slotsBusy, setSlotsBusy] = useState(false);
+  const [selectedSlot, setSelectedSlot] = useState(null);
+  const [reserving, setReserving] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  confirmingRef.current = confirming;
+  const [stepError, setStepError] = useState('');
+  const [needsCard, setNeedsCard] = useState(false);
+  const [cardSaved, setCardSaved] = useState(false);
+  const [cardBusy, setCardBusy] = useState(false);
+  const [cardError, setCardError] = useState('');
+  const [cardReady, setCardReady] = useState(false);
+  const [result, setResult] = useState(null);
+  const stripeRef = useRef(null);
+  const elementsRef = useRef(null);
+  const paymentElementRef = useRef(null);
+  const cardMountRef = useRef(null);
+  // Snapshot for the unmount-time hold release (best-effort).
+  const releaseRef = useRef({});
+  releaseRef.current = { purchaseId: init?.purchaseId || null, done: step === 'done' };
+
+  useEffect(() => {
+    if (!open || (!card && !resume)) return undefined;
+    let stale = false;
+    setStep('terms');
+    setInit(null);
+    setInitError('');
+    setSlots(null);
+    setSelectedSlot(null);
+    setStepError('');
+    setNeedsCard(false);
+    setCardSaved(false);
+    setResult(null);
+    // Resume path (return from a hosted SetupIntent redirect): the server
+    // snapshot re-hydrates the flow — no re-init, the price lock and hold
+    // (if still live) stand. Card was just saved by the return handler.
+    if (resume) {
+      setInit({
+        purchaseId: resume.purchaseId,
+        estimateId: resume.estimateId,
+        serviceKey: resume.serviceKey,
+        label: resume.label,
+        perVisit: resume.perVisit,
+        cadenceLabel: resume.cadenceLabel || '',
+        visitsPerYear: resume.visitsPerYear,
+        terms: resume.terms,
+        hasCardOnFile: resume.hasCardOnFile,
+        holdMinutes: resume.holdMinutes,
+      });
+      setCardSaved(!!resume.cardJustSaved);
+      if (resume.holdLive && resume.slot) {
+        setSelectedSlot({ slotId: null, ...resume.slot });
+        setStep('confirm');
+      } else {
+        setStep('time');
+        refreshSlots(resume.purchaseId);
+      }
+      return () => { stale = true; };
+    }
+    api.oneTapInit({
+      fingerprint: card.fingerprint || null,
+      serviceKey: card.serviceKey,
+      optionId: card.option?.id || null,
+      perApplication: card.option?.perVisit ?? null,
+    }).then((d) => {
+      if (stale) {
+        // The overlay closed while init was in flight: the unmount cleanup
+        // saw no purchase id, so this late success is the only holder of the
+        // new id — release it or its draft sits in the admin pipeline until
+        // the 24h expiry sweep.
+        if (d?.purchaseId) api.oneTapRelease(d.purchaseId).catch(() => {});
+        return;
+      }
+      setInit(d);
+      setSlots(d.slots || null);
+    }).catch((err) => {
+      if (stale) return;
+      setInitError(err?.status === 409 ? 'stale' : (err?.message || 'Something went wrong — please try again.'));
+    });
+    return () => { stale = true; };
+  }, [open, card, resume]);
+
+  // Leaving the confirm step ("Change time") unmounts the Payment Element's
+  // container — tear the Stripe objects down with it so the mount effect can
+  // rebuild from scratch on return (a lingering elementsRef made it bail and
+  // the customer got a dead card form).
+  useEffect(() => {
+    if (step === 'confirm') return;
+    if (paymentElementRef.current) {
+      try { paymentElementRef.current.unmount(); } catch { /* already gone */ }
+    }
+    paymentElementRef.current = null;
+    elementsRef.current = null;
+    stripeRef.current = null;
+    setCardReady(false);
+  }, [step]);
+
+  // Release the hold when the overlay closes without a completed purchase.
+  useEffect(() => {
+    if (!open) return undefined;
+    closedRef.current = false;
+    return () => {
+      closedRef.current = true;
+      const { purchaseId, done } = releaseRef.current;
+      if (purchaseId && !done) api.oneTapRelease(purchaseId).catch(() => {});
+      paymentElementRef.current = null;
+      elementsRef.current = null;
+      stripeRef.current = null;
+    };
+  }, [open]);
+
+  const refreshSlots = async (purchaseId) => {
+    const id = purchaseId || init?.purchaseId;
+    if (!id) return;
+    setSlotsBusy(true);
+    try {
+      setSlots(await api.oneTapSlots(id));
+    } catch (err) {
+      if (err?.status === 409) setInitError('stale');
+    } finally {
+      setSlotsBusy(false);
+    }
+  };
+
+  const pickSlot = async (slot) => {
+    if (!init || reserving) return;
+    setReserving(true);
+    setStepError('');
+    try {
+      await api.oneTapReserve(init.purchaseId, slot.slotId);
+      if (closedRef.current) {
+        // The overlay closed while the reserve was in flight: the unmount
+        // release ran BEFORE the hold attached (its null-identity CAS
+        // missed), so this response is the only holder of the live hold —
+        // release again now that the row carries it.
+        api.oneTapRelease(init.purchaseId).catch(() => {});
+        return;
+      }
+      setSelectedSlot(slot);
+      setStep('confirm');
+    } catch (err) {
+      if (err?.code === 'SLOT_UNAVAILABLE') {
+        setStepError('That time was just taken — pick another slot.');
+        refreshSlots();
+      } else if (err?.status === 409) {
+        setInitError('stale');
+      } else {
+        setStepError(err?.message || 'Could not hold that time — please try again.');
+      }
+    } finally {
+      setReserving(false);
+    }
+  };
+
+  // Inline card capture on CONFIRM when no consented card is on file —
+  // the EXISTING portal save-card sequence (SetupIntent → Payment Element →
+  // save), with the same locked consent copy. Save only; no charge.
+  const mustCollectCard = !!init && (!init.hasCardOnFile || needsCard) && !cardSaved;
+  useEffect(() => {
+    if (!open || step !== 'confirm' || !mustCollectCard || elementsRef.current) return undefined;
+    let stale = false;
+    (async () => {
+      setCardBusy(true);
+      setCardError('');
+      setCardReady(false);
+      try {
+        const setupData = await api.createSetupIntent('card');
+        const stripe = await getStripe(setupData.publishableKey);
+        if (stale) return;
+        stripeRef.current = stripe;
+        const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
+        elementsRef.current = elements;
+        setTimeout(() => {
+          if (stale || !cardMountRef.current) return;
+          const pe = elements.create('payment', {
+            layout: { type: 'tabs' },
+            paymentMethodOrder: ['card', 'apple_pay', 'google_pay'],
+          });
+          pe.mount(cardMountRef.current);
+          paymentElementRef.current = pe;
+          pe.on('ready', () => setCardReady(true));
+        }, 100);
+      } catch (err) {
+        if (!stale) setCardError(err?.message || 'Failed to initialize the payment form');
+      } finally {
+        if (!stale) setCardBusy(false);
+      }
+    })();
+    return () => { stale = true; };
+  }, [open, step, mustCollectCard]);
+
+  const handleSaveCard = async () => {
+    if (!stripeRef.current || !elementsRef.current || cardBusy) return;
+    setCardBusy(true);
+    setCardError('');
+    try {
+      // One-tap-specific return context: a hosted redirect (3DS, bank auth)
+      // navigates away and loses the overlay — the flow + purchase id in
+      // the return URL let the dashboard resume this purchase at confirm.
+      const returnUrl = new URL(buildSetupIntentReturnUrl('one_tap_card'));
+      returnUrl.searchParams.set('one_tap_resume', init.purchaseId);
+      const { error, setupIntent } = await stripeRef.current.confirmSetup({
+        elements: elementsRef.current,
+        confirmParams: { return_url: returnUrl.toString() },
+        redirect: 'if_required',
+      });
+      if (error) {
+        setCardError(error.message);
+        setCardBusy(false);
+        return;
+      }
+      if (redirectToSetupIntentAction(setupIntent)) return;
+      if (!setupIntent || setupIntent.status !== 'succeeded') {
+        setCardError(setupIntentIncompleteMessage('saving'));
+        setCardBusy(false);
+        return;
+      }
+      if (setupIntent.payment_method) {
+        await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
+      }
+      setCardSaved(true);
+      setNeedsCard(false);
+      paymentElementRef.current = null;
+      elementsRef.current = null;
+      stripeRef.current = null;
+      setCardReady(false);
+    } catch (err) {
+      setCardError(err?.message || 'Failed to save the payment method');
+    }
+    setCardBusy(false);
+  };
+
+  const handleConfirm = async () => {
+    if (!init || confirming) return;
+    setConfirming(true);
+    setStepError('');
+    try {
+      const r = await api.oneTapConfirm(init.purchaseId, { termsAccepted: true });
+      setResult(r);
+      setStep('done');
+    } catch (err) {
+      if (err?.status === 402) {
+        setNeedsCard(true);
+        setCardSaved(false);
+        setStepError('Save a payment method above to finish.');
+      } else if (err?.code === 'RESERVATION_EXPIRED' || err?.code === 'SLOT_UNAVAILABLE') {
+        setSelectedSlot(null);
+        setStep('time');
+        setStepError('Your held time expired — pick a slot again.');
+        refreshSlots();
+      } else if (err?.status === 409) {
+        setInitError('stale');
+      } else {
+        setStepError(err?.message || 'Could not confirm — please try again or call (941) 297-5749.');
+      }
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  if (!open) return null;
+
+  const allSlots = [...(slots?.primary || []), ...(slots?.expander || [])];
+  const slotGroups = [];
+  for (const s of allSlots) {
+    const g = slotGroups.find((x) => x.date === s.date);
+    if (g) g.slots.push(s);
+    else slotGroups.push({ date: s.date, slots: [s] });
+  }
+
+  const softBox = {
+    padding: '12px 14px',
+    borderRadius: 10,
+    background: GLASS_SUBTLE,
+    border: `1px solid ${PORTAL_SHELL.border}`,
+  };
+  const summaryRow = (label, value) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 15 }}>
+      <span style={{ color: muted }}>{label}</span>
+      <span style={{ fontWeight: 800, color: B.glassNavy, textAlign: 'right' }}>{value}</span>
+    </div>
+  );
+
+  // Portaled to <body>: the launch button lives inside a data-glass card
+  // whose backdrop-filter makes it the fixed-position containing block —
+  // rendered in place, the overlay pins to the card instead of the viewport
+  // (on mobile the tab bar painted over the sheet).
+  return createPortal(
+    <div data-glass-scrim={compact ? undefined : ''} style={{
+      position: 'fixed', inset: 0, zIndex: 1000,
+      background: compact ? PORTAL_SHELL.page : 'rgba(15,23,42,0.48)',
+      backdropFilter: compact ? 'none' : 'blur(5px)',
+      display: 'flex',
+      alignItems: compact ? 'stretch' : 'center',
+      justifyContent: 'center',
+      padding: compact ? 0 : 24,
+    }}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Add ${init?.label || String(card?.title || 'service').replace(/^Add\s+/i, '')}`}
+        data-glass="modal"
+        style={{
+          position: 'relative',
+          width: '100%',
+          maxWidth: compact ? 'none' : 560,
+          height: compact ? '100%' : 'auto',
+          maxHeight: compact ? 'none' : 'calc(100vh - 48px)',
+          background: PORTAL_SHELL.page,
+          borderRadius: compact ? 0 : 8,
+          boxShadow: compact ? 'none' : '0 24px 70px rgba(15,23,42,0.28)',
+          border: compact ? 'none' : `1px solid ${PORTAL_SHELL.border}`,
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        <header style={{
+          flexShrink: 0,
+          background: 'rgba(255,255,255,0.96)',
+          backdropFilter: 'blur(12px)',
+          borderBottom: `1px solid ${PORTAL_SHELL.border}`,
+          padding: compact ? '12px 14px' : '14px 18px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+            <ShellIconTile icon="sparkles" size={34} />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 18, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.2 }}>
+                {step === 'done' ? 'You are booked' : `Add ${init?.label || String(card?.title || 'service').replace(/^Add\s+/i, '')}`}
+              </div>
+              {step !== 'done' && init && (
+                <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
+                  {fmtMoney(init.perVisit)} per application{init.cadenceLabel ? ` · ${init.cadenceLabel}` : ''}
+                </div>
+              )}
+            </div>
+          </div>
+          <ShellCloseButton onClick={guardedClose} label="Close purchase" />
+        </header>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: compact ? 16 : 20, display: 'grid', gap: 14, alignContent: 'start' }}>
+          {initError === 'stale' ? (
+            <div style={softBox}>
+              <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>This offer changed</div>
+              <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+                The offer was updated since this page loaded, so nothing was purchased. Refresh to see the latest.
+              </div>
+              <button type="button" style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10 }} onClick={() => window.location.reload()}>
+                Refresh the page
+              </button>
+            </div>
+          ) : initError ? (
+            <div style={softBox}>
+              <div style={{ fontSize: 14, color: '#9A3412', lineHeight: 1.5 }}>{initError}</div>
+            </div>
+          ) : !init ? (
+            <div style={{ fontSize: 15, color: muted }}>Loading your offer…</div>
+          ) : step === 'terms' ? (
+            <>
+              <div style={softBox}>
+                {summaryRow('Service', init.label)}
+                <div style={{ height: 6 }} />
+                {summaryRow('Price', `${fmtMoney(init.perVisit)} per application`)}
+                {init.cadenceLabel ? (<><div style={{ height: 6 }} />{summaryRow('Visits', init.cadenceLabel)}</>) : null}
+              </div>
+              <div style={softBox}>
+                <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  Terms
+                </div>
+                <div style={{ marginTop: 8, fontSize: 14, color: PORTAL_SHELL.body, lineHeight: 1.55, whiteSpace: 'pre-line' }}>
+                  {init.terms?.text}
+                </div>
+              </div>
+              <button type="button" data-glass-accent="" style={PORTAL_PRIMARY_ACTION} onClick={() => setStep('time')}>
+                Agree and choose a time
+              </button>
+            </>
+          ) : step === 'time' ? (
+            <>
+              <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+                Choose your first visit
+              </div>
+              {stepError && <div style={{ fontSize: 14, color: '#9A3412' }}>{stepError}</div>}
+              {slotGroups.length === 0 && (
+                <div style={{ fontSize: 14, color: muted }}>
+                  {slotsBusy ? 'Checking availability…' : 'No times are available right now — try refreshing, or call (941) 297-5749.'}
+                </div>
+              )}
+              {slotGroups.map((group) => (
+                <div key={group.date}>
+                  <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, marginBottom: 6 }}>
+                    {oneTapDayLabel(group.date)}
+                  </div>
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    {group.slots.map((slot) => (
+                      <button
+                        key={slot.slotId}
+                        type="button"
+                        disabled={reserving}
+                        onClick={() => pickSlot(slot)}
+                        style={{
+                          ...softBox,
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                          fontFamily: FONTS.body,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 10,
+                          flexWrap: 'wrap',
+                        }}
+                      >
+                        <span style={{ fontSize: 15, fontWeight: 800, color: B.glassNavy }}>
+                          Arrival {oneTapTime12(slot.windowStart)}–{oneTapTime12(slot.windowEnd)}
+                        </span>
+                        {slot.routeOptimal && (
+                          <span style={{
+                            fontSize: 14, fontWeight: 800, color: B.green,
+                            background: '#F0FDF4', border: '1px solid #BBF7D0',
+                            padding: '3px 10px', borderRadius: 999, whiteSpace: 'nowrap',
+                          }}>
+                            Tech nearby — priority
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <button type="button" style={PORTAL_SECONDARY_ACTION} disabled={slotsBusy} onClick={() => refreshSlots()}>
+                {slotsBusy ? 'Refreshing…' : 'Refresh times'}
+              </button>
+            </>
+          ) : step === 'confirm' ? (
+            <>
+              <div style={softBox}>
+                {summaryRow('Service', init.label)}
+                <div style={{ height: 6 }} />
+                {summaryRow('Price', `${fmtMoney(init.perVisit)} per application`)}
+                <div style={{ height: 6 }} />
+                {summaryRow('First visit', selectedSlot
+                  ? `${oneTapDayLabel(selectedSlot.date)}, ${oneTapTime12(selectedSlot.windowStart)}–${oneTapTime12(selectedSlot.windowEnd)}`
+                  : '—')}
+              </div>
+              <div style={{ fontSize: 14, color: muted }}>
+                Your time is held for {init.holdMinutes || 15} minutes.{' '}
+                {/* Locked while confirming: reserving a replacement slot
+                    mid-confirm races the in-flight confirmation's hold. */}
+                <button
+                  type="button"
+                  disabled={confirming}
+                  onClick={() => { if (confirming) return; setStep('time'); setStepError(''); }}
+                  style={{ background: 'none', border: 'none', padding: 0, color: B.glassNavy, fontWeight: 800, fontSize: 14, cursor: confirming ? 'default' : 'pointer', textDecoration: 'underline', opacity: confirming ? 0.55 : 1 }}
+                >
+                  Change time
+                </button>
+              </div>
+              {mustCollectCard && (
+                <div style={softBox}>
+                  <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+                    Add a payment method
+                  </div>
+                  <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+                    Nothing is charged today — each visit is billed after it is completed.
+                  </div>
+                  <div ref={cardMountRef} style={{ marginTop: 10, minHeight: 60 }} />
+                  <SaveCardConsent locked onChange={() => {}} methodType="card" style={{ marginTop: 10 }} />
+                  {cardError && <div style={{ marginTop: 8, fontSize: 14, color: '#9A3412' }}>{cardError}</div>}
+                  <button
+                    type="button"
+                    style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10 }}
+                    disabled={cardBusy || !cardReady}
+                    onClick={handleSaveCard}
+                  >
+                    {cardBusy ? 'Saving…' : 'Save payment method'}
+                  </button>
+                </div>
+              )}
+              {stepError && <div style={{ fontSize: 14, color: '#9A3412' }}>{stepError}</div>}
+              <button
+                type="button"
+                data-glass-accent=""
+                style={{ ...PORTAL_PRIMARY_ACTION, opacity: mustCollectCard || confirming ? 0.55 : 1 }}
+                disabled={mustCollectCard || confirming}
+                onClick={handleConfirm}
+              >
+                {confirming ? 'Confirming…' : 'Confirm'}
+              </button>
+            </>
+          ) : (
+            <>
+              <div style={{ textAlign: 'center', padding: '10px 0 0' }}>
+                <span style={{
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  width: 60, height: 60, borderRadius: 8,
+                  background: PORTAL_SHELL.successBg, color: PORTAL_SHELL.successText,
+                }}>
+                  <Icon name="check" size={28} strokeWidth={2.2} />
+                </span>
+              </div>
+              <div style={{ textAlign: 'center', fontSize: 18, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+                {result?.label || init.label} is confirmed
+              </div>
+              <div style={softBox}>
+                {summaryRow('Price', `${fmtMoney(result?.perVisit ?? init.perVisit)} per application`)}
+                {result?.firstVisit?.date ? (
+                  <>
+                    <div style={{ height: 6 }} />
+                    {summaryRow('First visit', `${oneTapDayLabel(result.firstVisit.date)}${result.firstVisit.windowStart ? `, ${oneTapTime12(result.firstVisit.windowStart)}–${oneTapTime12(result.firstVisit.windowEnd)}` : ''}`)}
+                  </>
+                ) : null}
+              </div>
+              <div style={{ fontSize: 14, color: muted, lineHeight: 1.5, textAlign: 'center' }}>
+                {/* Only promise what can send: email is nullable on
+                    phone-authenticated accounts (server says emailQueued). */}
+                {result?.emailQueued
+                  ? 'A confirmation email and an app notification are on the way.'
+                  : 'A confirmation notification is on the way.'}
+              </div>
+              <button type="button" data-glass-accent="" style={PORTAL_PRIMARY_ACTION} onClick={onClose}>
+                Done
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 

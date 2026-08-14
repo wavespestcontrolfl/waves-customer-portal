@@ -332,6 +332,11 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
         paymentMethodId: savedMethod.id,
         source: 'save_card_consent',
         details: { via: 'appointment_card_request', scheduled_service_id: visit.id, trigger },
+        // Scope the enrollment's in-lock payer check to THIS visit (r11
+        // P1): the sweep deliberately admits self_pay_override visits on
+        // payer-billed accounts — an account-level check would refuse and
+        // leave the customer-paid visit perpetually unsecured.
+        scheduledServiceId: visit.id,
         dbh: trx,
       });
       if (!enrollment?.enrolled && enrollment?.reason !== 'already_enrolled') {
@@ -1307,6 +1312,11 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       paymentMethodId: saved?.id,
       source: 'save_card_consent',
       details: { via: 'appointment_card_request', scheduled_service_id: request.scheduled_service_id, setup_intent_id: setupIntentId },
+      // Visit-scoped payer check (r12): the preceding payer gate admitted
+      // this visit (self_pay_override on a payer-billed account is
+      // customer-paid) — the in-lock re-check must use the same scope or
+      // it refuses on the account payer and strands the request retryable.
+      scheduledServiceId: request.scheduled_service_id || null,
     });
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
       // A refused enrollment must NOT complete the request (Codex #2771

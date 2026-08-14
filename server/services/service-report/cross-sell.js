@@ -991,8 +991,17 @@ async function buildReportCrossSell(service, database, {
 //     on recurring evidence).
 // Best-effort by contract: every failure path returns null — the portal
 // home must never notice this feature exists.
-async function buildPortalOffer(customerId, database, { propertyLookup = cacheOnlyPropertyLookup } = {}) {
-  try {
+//
+// composePortalOffer is the ONE internal function both portal surfaces share
+// (one-tap purchase lane, 2026-08-13): buildPortalOffer serializes its
+// payload unchanged (byte-identical to the pre-refactor shape — bet 2 is
+// live and the fingerprint hashes these exact fields), while
+// buildPortalPurchaseBasis additionally returns the server-only pricing
+// context (full picked option, pricing result, customer row) the purchase
+// path needs to re-synthesize the same price. Sharing the core is what makes
+// the two surfaces unable to disagree about what a customer may be offered.
+async function composePortalOffer(customerId, database, { propertyLookup = cacheOnlyPropertyLookup } = {}) {
+  {
     if (!customerId || !database) return null;
 
     const customer = await database('customers').where({ id: customerId }).first();
@@ -1114,9 +1123,48 @@ async function buildPortalOffer(customerId, database, { propertyLookup = cacheOn
         confidence: option.confidence || null,
       } : null,
     };
-    return { ...payload, fingerprint: offerFingerprint(payload) };
+    return {
+      payload: { ...payload, fingerprint: offerFingerprint(payload) },
+      // Server-only context (never serialized to the client): the FULL
+      // quoted option (annual/monthly/perVisit and the engine-visible
+      // fields), the pricing result (currentServiceKeys = the modeled
+      // qualifying baseline), the customer row, and the seed the price used.
+      option: priced ? option : null,
+      result,
+      customer,
+      ownedKeys,
+      propertySeed,
+      primaryStreet,
+    };
+  }
+}
+
+async function buildPortalOffer(customerId, database, opts = {}) {
+  try {
+    const basis = await composePortalOffer(customerId, database, opts);
+    return basis ? basis.payload : null;
   } catch (err) {
-    logger.warn(`[portal-offer] suppressed (${err.message})`);
+    // Redacted (AGENTS PII rule): a DB/property error message can carry a
+    // bound street address — log only the code, same as the report path.
+    logger.warn(`[portal-offer] suppressed (code=${err?.code || 'none'})`);
+    return null;
+  }
+}
+
+// buildPortalPurchaseBasis(customerId, database) → basis | null.
+// The one-tap purchase entry point: same offer machinery as buildPortalOffer
+// (shared composePortalOffer core — the suppression ladder can never fork),
+// but only a PRICED offer is purchasable, and the caller additionally gets
+// the server-side pricing context. Fail closed by contract: any failure or
+// non-priced outcome returns null and the purchase route answers 409.
+async function buildPortalPurchaseBasis(customerId, database, opts = {}) {
+  try {
+    const basis = await composePortalOffer(customerId, database, opts);
+    if (!basis || basis.payload.mode !== 'priced' || !basis.option) return null;
+    return basis;
+  } catch (err) {
+    // Redacted (AGENTS PII rule): same posture as the report/portal paths.
+    logger.warn(`[one-tap-purchase] offer basis suppressed (code=${err?.code || 'none'})`);
     return null;
   }
 }
@@ -1124,6 +1172,11 @@ async function buildPortalOffer(customerId, database, { propertyLookup = cacheOn
 module.exports = {
   buildReportCrossSell,
   buildPortalOffer,
+  buildPortalPurchaseBasis,
+  // The cache-only lookup discipline both offer surfaces price under — the
+  // one-tap purchase re-resolves the same property context through it (one
+  // definition; a live lookup must never run inside a portal view).
+  cacheOnlyPropertyLookup,
   // The mint re-runs this proof under its transaction lock for reports the
   // fallback branch admitted (GitHub #3391 round — see premisesProof stamp).
   customerHasOnlyPrimaryPremises,

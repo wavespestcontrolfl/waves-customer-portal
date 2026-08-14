@@ -617,6 +617,22 @@ describe('estimate manual acceptance', () => {
     }
   });
 
+  test('rejects one-tap purchase drafts regardless of status — internal flow state, never operator-acceptable (GH #3395 r12)', async () => {
+    const estimate = { id: 'estimate-ot', status: 'sent', source: 'one_tap_purchase' };
+    const { database, updates, inserts } = makeDb(estimate);
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      database,
+    })).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringMatching(/one-tap purchase draft/),
+    });
+
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+  });
+
   test('rejects non-delivered estimates', async () => {
     const estimate = { id: 'estimate-3', status: 'draft' };
     const { database, updates, inserts } = makeDb(estimate);

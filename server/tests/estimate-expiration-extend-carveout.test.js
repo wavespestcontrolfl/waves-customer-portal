@@ -47,7 +47,7 @@ function makeQuery(updateResult = 0) {
     }
     return name === 'update' ? Promise.resolve(updateResult) : q;
   };
-  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'modify', 'update']
+  ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'modify', 'update']
     .forEach((m) => { q[m] = record(m); });
   return { q, calls };
 }
@@ -93,10 +93,17 @@ describe('runEstimateExpiration Rule 1 extension carve-out', () => {
     expect(aged[3]).toBeInstanceOf(Date);
   });
 
-  test('Rule 2 (explicit expires_at passed) is unchanged', () => {
+  test('Rule 2 (explicit expires_at passed) keeps its terminal-status filter', () => {
     expect(rule2.calls).toContainEqual(['whereNotNull', 'expires_at']);
     const passed = rule2.calls.find(([n, col, op]) => n === 'where' && col === 'expires_at' && op === '<');
     expect(passed).toBeDefined();
     expect(rule2.calls).toContainEqual(['whereNotIn', 'status', ['expired', 'accepted', 'declined']]);
+  });
+
+  test('Rule 2 leaves one-tap purchase drafts to their own sweep (GH #3395 r9 P1)', () => {
+    // Flipping a synthesized one-tap draft to expired here stranded its
+    // open ledger row and put a phantom "walked away" line in the 6am bell
+    // for an estimate no customer ever received.
+    expect(rule2.calls).toContainEqual(['whereNot', { source: 'one_tap_purchase' }]);
   });
 });
