@@ -45,6 +45,10 @@ const mockResolveProfile = jest.fn();
 jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: (...args) => mockResolveProfile(...args),
 }));
+const mockCheckLimits = jest.fn();
+jest.mock('../services/application-limits', () => ({
+  checkLimits: (...args) => mockCheckLimits(...args),
+}));
 jest.mock('../services/service-report/since-last-visit', () => ({
   buildSinceLastVisitContext: jest.fn(async () => ({
     pressureLine: 'Pressure: 2.0 -> 1.0',
@@ -213,6 +217,7 @@ beforeEach(() => {
   mockGrassContext.mockResolvedValue({ trackKey: 'st_augustine' });
   mockWindowContext.mockResolvedValue({});
   mockResolveProfile.mockResolvedValue({ companions: [] });
+  mockCheckLimits.mockResolvedValue({ allowed: true, warnings: [], blocks: [] });
   mockSummarize.mockReturnValue(null);
   mockGetContext.mockResolvedValue({
     serviceHistory: [{ type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter.' }],
@@ -522,6 +527,29 @@ describe('grounded allowlist validation of LLM output', () => {
       grounding,
     );
     expect(verdict.body).toBeTruthy();
+  });
+
+  test('a bare short ALLCAPS product token with no verb is rejected (codex P1)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['DDT'] },
+      grounding,
+    );
+    expect(verdict.reason).toBe('ungrounded_novel_product:DDT');
+    // Ordinary abbreviation prose and grounded acronyms still pass:
+    // "PM" is allowlisted, "IT" grounds on the historical "Bifen IT".
+    const ok = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: ['bifen it'],
+        priorities: [],
+        last_visit_summary: 'Applied Bifen IT.',
+        customer_context: 'Prefers PM arrivals.',
+      },
+      { catalogVocabulary: { names: [], targets: [] }, llmFacts: { lastVisit: { productNames: ['Bifen IT'] } } },
+    );
+    expect(ok.body).toBeTruthy();
   });
 
   test('a short (≤3-letter) ungrounded product in an instruction is rejected, not vacuously grounded', () => {
@@ -1152,6 +1180,52 @@ describe('lawn bounded product section', () => {
     expect(mockWindowContext).toHaveBeenCalled();
     // Track came from the customer's profile, never a default.
     expect(mockWindowContext.mock.calls[0][1].grassTrack).toBe('st_augustine');
+  });
+
+  test('a customer at an application limit demotes the fixed product to conditional (codex P1)', async () => {
+    mockSummarize.mockReturnValue({
+      window: { key: 'aug', month: 8, title: 'August window', visitType: 'granular', goal: 'Summer stress' },
+      products: [
+        { productId: 'prod-pro', productName: 'Prodiamine 65 WDG', role: 'pre_emergent', applicationMode: 'spray', ratePer1000: 0.185, rateUnit: 'oz', defaultInPlan: true },
+        { productId: 'prod-fert', productName: '0-0-7 Fert', role: 'fertility', applicationMode: 'granular', ratePer1000: 3, rateUnit: 'lb', defaultInPlan: true },
+      ],
+    });
+    mockCheckLimits.mockImplementation(async (_customerId, productId) => (
+      productId === 'prod-pro'
+        ? { allowed: false, warnings: [], blocks: [{ type: 'annual_max_apps', message: 'Annual max applications reached (2/2)' }] }
+        : { allowed: true, warnings: [], blocks: [] }
+    ));
+    const state = useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const { brief } = storedBrief(state);
+    // The limited product must NOT present as fixed guidance…
+    expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['0-0-7 Fert']);
+    // …it demotes to conditional with the violation attached.
+    const demoted = brief.product_guidance.conditional_products.find((p) => p.name === 'Prodiamine 65 WDG');
+    expect(demoted).toBeTruthy();
+    expect(demoted.gates.applicationLimits).toEqual([
+      { severity: 'block', type: 'annual_max_apps', message: 'Annual max applications reached (2/2)' },
+    ]);
+    expect(demoted.trigger).toBe('Annual max applications reached (2/2)');
+    expect(mockCheckLimits).toHaveBeenCalledWith('cust-1', 'prod-pro', expect.any(Date));
+  });
+
+  test('a limit-checker outage aborts generation instead of hashing a limit-blind fixed list', async () => {
+    mockSummarize.mockReturnValue({
+      window: { key: 'aug', month: 8, title: 'August window', visitType: 'granular', goal: 'Summer stress' },
+      products: [
+        { productId: 'prod-pro', productName: 'Prodiamine 65 WDG', role: 'pre_emergent', applicationMode: 'spray', ratePer1000: 0.185, rateUnit: 'oz', defaultInPlan: true },
+      ],
+    });
+    mockCheckLimits.mockRejectedValue(new Error('limits db down'));
+    const state = useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }],
+    }));
+    await expect(PrevisitBrief.generateVisitBrief('svc-1')).rejects.toThrow('limits db down');
+    expect(state.updates.scheduled_services || []).toHaveLength(0);
   });
 
   test('a protocol-wide gate demotes every product to conditional (fail closed)', async () => {

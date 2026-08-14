@@ -399,6 +399,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
     const shaped = (summary.products || [])
       .map((p) => ({
         shapedEntry: shapeWindowProduct(p),
+        productId: p.productId || null,
         // FIXED only when default-in-plan AND gate-free at BOTH layers —
         // a default row with product gates (maxTempF, soil conditions,
         // blackout sensitivity) or any protocol-wide gate is still
@@ -407,6 +408,33 @@ async function loadLawnWindowGuidance(dbh, svc) {
         gates: (p.gates && typeof p.gates === 'object') ? p.gates : {},
       }))
       .filter((p) => p.shapedEntry.name);
+
+    // Customer-specific application limits (annual max apps, cumulative
+    // rate, minimum interval, MOA rotation — application-limits.js, the
+    // SAME checker the completion path enforces): static gate absence is
+    // not eligibility. A would-be-fixed product at one of THIS
+    // customer's limits for the scheduled date demotes to conditional
+    // with the violations attached — the pocket reference must never
+    // direct a product the completion flow would flag as blocked or at
+    // its edge. Checker outages propagate (strict): a limit-blind fixed
+    // list must not hash over a valid cached brief.
+    const LimitChecker = require('./application-limits');
+    for (const entry of shaped) {
+      if (!entry.fixed || !entry.productId) continue;
+      const limits = await LimitChecker.checkLimits(svc.customer_id, entry.productId, serviceDate);
+      const violations = [
+        ...(limits.blocks || []).map((v) => ({ severity: 'block', type: v.type || null, message: cleanText(v.message || v.description, 200) })),
+        ...(limits.warnings || []).map((v) => ({ severity: v.severity || 'warn', type: v.type || null, message: cleanText(v.message || v.description, 200) })),
+      ];
+      if (violations.length) {
+        entry.fixed = false;
+        entry.gates = {
+          ...entry.gates,
+          applicationLimits: violations,
+          trigger: entry.gates.trigger || violations[0].message || 'application limit',
+        };
+      }
+    }
     return {
       source: 'lawn_protocol_window',
       available: !!summary.window,
@@ -900,6 +928,11 @@ const COMMON_PROSE_WORDS = new Set([
 // 'operator'). Every occurrence must be WORD-BOUNDARY grounded.
 const SHORT_ORGANISM_RE = /\b(rats?|mouse|mice|ants?|bees?|fly|flies|wasps?|ticks?|fleas?|moths?|slugs?|grubs?|mites?|voles?|moles?|gnats?|weeds?|aphids?)\b/g;
 
+// Ordinary short ALLCAPS abbreviations a brief legitimately uses without
+// grounding (times, zones, business boilerplate) — everything else
+// ALLCAPS-short must ground or reject (bare-product scan below).
+const ACRONYM_PROSE_WORDS = new Set(['am', 'pm', 'et', 'est', 'edt', 'asap', 'hoa', 'ac', 'id', 'ok', 'po', 'llc', 'inc', 'na']);
+
 // Light stemming for the rare-word pass — plurals/participles of known or
 // grounded words must not read as novel.
 function wordVariants(word) {
@@ -1200,6 +1233,23 @@ function findUngroundedClaim(body, grounding) {
       const escapeStem = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const grounded = stems.some((stem) => new RegExp(`\\b${escapeStem(stem)}s?\\b`).test(groundedText));
       if (!grounded) return { kind: 'novel_target', term: organism };
+    }
+  }
+  // Bare short ALLCAPS product tokens ("DDT" as a whole priority): no
+  // verb for the instructed/directive captures, a single token for the
+  // capitalized-run regex (needs 2+), and under the rare-word scan's
+  // 4-letter floor — with mentioned_terms omitted, nothing sees it. Any
+  // standalone 2–6-char ALLCAPS token must be word-boundary grounded,
+  // self-reported (mentioned_terms are exact-grounded above), or
+  // ordinary abbreviation prose; otherwise it is an invented product.
+  for (const field of outputFields) {
+    for (const m of String(field).matchAll(/\b[A-Z]{2,6}\d{0,3}\b/g)) {
+      const token = m[0].toLowerCase();
+      if (ACRONYM_PROSE_WORDS.has(token)) continue;
+      if (REFERENCE_STOP_WORDS.has(token) || COMMON_PROSE_WORDS.has(token)) continue;
+      if (selfReported.has(token)) continue;
+      if (new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedText)) continue;
+      return { kind: 'novel_product', term: m[0] };
     }
   }
   const wordKnown = (word) => wordVariants(word).some((v) => (
