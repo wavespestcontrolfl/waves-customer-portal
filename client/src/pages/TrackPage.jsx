@@ -891,7 +891,29 @@ export default function TrackPage() {
       if (!r.ok) return;
       const body = await r.json();
       if (stale()) return;
-      if (body?.state) setData(body);
+      if (body?.state) {
+        setData(body);
+        // The GET is read-only by contract: stopsAheadPending means the
+        // clamp floor isn't durable yet. Ack through the explicit POST
+        // write path and render from ITS response — a number never shows
+        // before it is persisted. (The approximate map fills in on the
+        // next poll, once the floor is durable.)
+        if (body.stopsAheadPending) {
+          try {
+            const ackRes = await fetch(`${API_BASE}/public/track/${token}/stops-ahead`, { method: 'POST' });
+            if (stale() || !ackRes.ok) return;
+            const ack = await ackRes.json();
+            if (stale()) return;
+            if (ack && ack.stopsAhead != null) {
+              setData((cur) => (cur
+                ? { ...cur, stopsAhead: ack.stopsAhead, routeProgress: ack.routeProgress, stopsAheadPending: false }
+                : cur));
+            }
+          } catch {
+            // Stay in the generic state; the next poll retries the ack.
+          }
+        }
+      }
     } catch {
       // Don't clobber an existing render on a transient network blip;
       // the next broadcast (or page refresh) will recover.

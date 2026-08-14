@@ -479,9 +479,13 @@ router.get('/:token', async (req, res, next) => {
     // "N stops before yours" (GATE_STOPS_AWAY): bare counts only — never
     // other customers' info. Scheduled state only (the en-route card's
     // "on the way" copy owns later states); fail-soft null otherwise.
+    // readOnly: this GET must never write (route contract, AGENTS.md) —
+    // a value that isn't yet the durable clamp floor comes back pending
+    // and the page acks via POST /:token/stops-ahead, which persists.
     const stops = customerState === 'scheduled'
-      ? await computeStopsAhead(db, row.id)
+      ? await computeStopsAhead(db, row.id, { readOnly: true })
       : null;
+    const stopsReady = stops && !stops.pending ? stops : null;
 
     const response = {
       state: customerState,
@@ -524,14 +528,18 @@ router.get('/:token', async (req, res, next) => {
       // streaming fresh tech GPS coords and polling until token expiry
       // even though the customer is shown a terminal missed-visit card.
       vehicle: customerState === 'en_route' ? await buildVehicle(row) : null,
-      stopsAhead: stops ? stops.stopsAhead : null,
-      routeProgress: stops
-        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop, atStop: stops.atStop, headingToStop: stops.headingToStop }
+      stopsAhead: stopsReady ? stopsReady.stopsAhead : null,
+      // True when a count exists but is not yet the durable clamp floor —
+      // the page must POST /:token/stops-ahead (the explicit write path)
+      // and render from THAT response, keeping this GET read-only.
+      stopsAheadPending: !!(stops && stops.pending),
+      routeProgress: stopsReady
+        ? { yourStop: stopsReady.yourStop, totalStops: stopsReady.totalStops, currentStop: stopsReady.currentStop, atStop: stopsReady.atStop, headingToStop: stopsReady.headingToStop }
         : null,
       // Truck coords only once the route has STARTED (currentStop ≥ 1) —
       // before the first stop the truck sits at the tech's home/base,
       // which is not route information.
-      vehicleApprox: stops && stops.currentStop >= 1 ? await buildApproxVehicle(row) : null,
+      vehicleApprox: stopsReady && stopsReady.currentStop >= 1 ? await buildApproxVehicle(row) : null,
       summary: customerState === 'complete' ? await buildSummary(row) : null,
       cancellation: customerState === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }
@@ -584,6 +592,45 @@ router.get('/:token', async (req, res, next) => {
     }
 
     res.json(response);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Explicit write path for the stops-ahead clamp floor. The GET above is
+// contractually read-only, so when it reports stopsAheadPending the page
+// calls this POST: it recomputes server-side (the body is ignored — a
+// client can never choose its own count) and persists the floor
+// atomically before the number is displayed. Same token gate, same
+// router-level rate limit, monotone + skip-unchanged writes, so retries
+// are harmless. Returns the displayable payload or nulls (generic state).
+router.post('/:token/stops-ahead', async (req, res, next) => {
+  res.set(PRIVACY_HEADERS);
+  if (!TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const row = await db('scheduled_services as s')
+      .where('s.track_view_token', req.params.token)
+      .first('s.id', 's.status', 's.track_state', 's.track_token_expires_at');
+    if (!row || !isTrackTokenLive(row.track_token_expires_at)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    // Same terminal-status precedence as the GET: only the scheduled
+    // customer state carries a planned count.
+    let customerState = row.track_state;
+    if (row.status === 'no_show') customerState = 'no_show';
+    else if (row.status === 'cancelled' || row.status === 'skipped') customerState = 'cancelled';
+    else if (row.status === 'completed') customerState = 'complete';
+    const stops = customerState === 'scheduled'
+      ? await computeStopsAhead(db, row.id)
+      : null;
+    res.json({
+      stopsAhead: stops ? stops.stopsAhead : null,
+      routeProgress: stops
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop, atStop: stops.atStop, headingToStop: stops.headingToStop }
+        : null,
+    });
   } catch (err) {
     next(err);
   }

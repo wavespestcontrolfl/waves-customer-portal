@@ -34,9 +34,9 @@ function baseSvc(overrides = {}) {
 // value by default; `rawFloor` overrides it to emulate a concurrent
 // racer's smaller floor, or null for the guarded no-op write.
 function makeDb({
-  svcRow, countN = 0, beforeAll, othersAll, doneBefore = 0, atBefore = 0,
-  enrouteBefore = 0, groupFloor = null, reReadFloor = null, rawFloor,
-  rawError = null,
+  svcRow, siblings = [], countN = 0, beforeAll, othersAll, doneBefore = 0,
+  atBefore = 0, enrouteBefore = 0, activeBeyond = 0, groupFloor = null,
+  reReadFloor = null, rawFloor, rawError = null,
 } = {}) {
   const queries = [];
   const dbFn = jest.fn(() => {
@@ -51,6 +51,13 @@ function makeDb({
     return q;
   });
   dbFn.raw = jest.fn((sql, bindings) => {
+    if (/SELECT s\.id, s\.technician_id/.test(sql)) {
+      // Sibling-group eligibility fetch: the target row plus any sibling
+      // rows of the same (customer, slot). A NULL-technician target
+      // yields no rows (the self-join drops it), matching Postgres.
+      const rows = svcRow && svcRow.technician_id ? [svcRow, ...siblings] : [];
+      return Promise.resolve({ rows });
+    }
     if (/WITH target/.test(sql)) {
       return Promise.resolve({
         rows: [{
@@ -60,6 +67,7 @@ function makeDb({
           done_before: doneBefore,
           at_before: atBefore,
           enroute_before: enrouteBefore,
+          active_beyond: activeBeyond,
           group_floor: groupFloor,
         }],
       });
@@ -140,10 +148,13 @@ describe('computeStopsAhead', () => {
     expect(countSql).toContain('GROUP BY r.customer_id, r.slot');
     expect(countSql).toContain('NOT (s.customer_id = t.customer_id');
     expect(countSql).toContain('s.window_start IS NOT DISTINCT FROM t.window_start');
-    // A mixed stop (one line done, one line active) must classify ONCE:
-    // active wins over done, on-property wins over en-route.
-    expect(countSql).toContain('AND NOT g.has_at AND NOT g.has_enroute');
+    // A mixed stop (one line done, one line live) must classify ONCE:
+    // any live sibling keeps the stop out of done_before, on-property
+    // wins over en-route, and an active stop at/beyond the target is
+    // surfaced so the planned count can be suppressed.
+    expect(countSql).toContain('AND NOT g.has_live');
     expect(countSql).toContain('g.has_enroute AND NOT g.has_at');
+    expect(countSql).toMatch(/active_beyond/);
     // Dead estimate-slot holds must not count (live-hold predicate).
     expect(countSql).toContain('(s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())');
     // Tracker-terminal rows drop out of the LIVE flag by track_state too,
@@ -252,9 +263,60 @@ describe('computeStopsAhead', () => {
       .toEqual({ stopsAhead: 1, yourStop: 4, totalStops: 6, currentStop: 3, atStop: false, headingToStop: true });
   });
 
+  test.each([
+    ['sibling en_route (tech transitions rows by id)', { id: 'svc-sib', status: 'en_route', track_state: 'scheduled' }],
+    ['sibling on_site', { id: 'svc-sib', status: 'on_site', track_state: 'scheduled' }],
+    ['sibling track_state on_property', { id: 'svc-sib', status: 'confirmed', track_state: 'on_property' }],
+    ['sibling completed (stop already visited)', { id: 'svc-sib', status: 'completed', track_state: 'complete' }],
+  ])('advanced sibling suppresses the count: %s → null', async (_label, sibling) => {
+    const db = makeDb({
+      svcRow: baseSvc(),
+      siblings: [{ technician_id: 'tech-1', scheduled_date: TODAY, ...sibling }],
+      countN: 1,
+    });
+    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
+    expect(db.updateCalls()).toHaveLength(0);
+  });
+
+  test('a scheduled sibling does NOT suppress the count', async () => {
+    const db = makeDb({
+      svcRow: baseSvc(),
+      siblings: [{ id: 'svc-sib', technician_id: 'tech-1', scheduled_date: TODAY, status: 'confirmed', track_state: 'scheduled' }],
+      countN: 1,
+    });
+    expect((await computeStopsAhead(db, 'svc-self', { today: TODAY }))?.stopsAhead).toBe(1);
+  });
+
+  test('an active stop at/beyond the target suppresses the planned count', async () => {
+    // Tech is servicing a LATER stop — "You're next"/"Route starts soon"
+    // would be a lie; fail to the generic state, persist nothing.
+    const db = makeDb({ svcRow: baseSvc(), countN: 0, activeBeyond: 1 });
+    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
+    expect(db.updateCalls()).toHaveLength(0);
+  });
+
+  test('readOnly: a durable same-day floor displays without any write', async () => {
+    const db = makeDb({
+      svcRow: baseSvc(), countN: 2, beforeAll: 2, othersAll: 4, groupFloor: 2,
+    });
+    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY, readOnly: true }))
+      .toEqual({ stopsAhead: 2, yourStop: 3, totalStops: 5, currentStop: 0, atStop: false, headingToStop: false });
+    expect(db.updateCalls()).toHaveLength(0);
+  });
+
+  test.each([
+    ['no floor stored yet', { countN: 2, groupFloor: null }],
+    ['count dropped below the stored floor', { countN: 1, groupFloor: 3 }],
+  ])('readOnly: %s → pending, no write', async (_label, opts) => {
+    const db = makeDb({ svcRow: baseSvc(), ...opts });
+    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY, readOnly: true }))
+      .toEqual({ pending: true });
+    expect(db.updateCalls()).toHaveLength(0);
+  });
+
   test('any read error fails soft to null', async () => {
     const db = jest.fn(() => { throw new Error('boom'); });
-    db.raw = jest.fn();
+    db.raw = jest.fn(() => { throw new Error('boom'); });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
     expect(logger.warn).toHaveBeenCalled();
   });

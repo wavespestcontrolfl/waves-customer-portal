@@ -63,22 +63,41 @@ function dateOnly(value) {
 }
 
 /**
- * @returns {Promise<{stopsAhead: number, yourStop: number, totalStops: number}|null>}
+ * @returns {Promise<{stopsAhead: number, yourStop: number, totalStops: number}|{pending: true}|null>}
  *   stopsAhead — clamped stops-ahead (0..CAP) to display;
  *   yourStop / totalStops — the visit's 1-based position on today's route
  *   and the route's stop count (completed stops included), feeding the
  *   "Now at stop X of Y / You're stop Z" strip. Null when the count
  *   shouldn't render (gate off, no tech, not today, terminal visit,
- *   beyond the cap, or any error).
+ *   sibling already underway, active stop beyond the target, beyond the
+ *   cap, or any error). With opts.readOnly (the public GET), a value that
+ *   is not yet the durable floor returns {pending: true} instead of
+ *   writing — the caller's explicit POST runs the persisting path.
  */
 async function computeStopsAhead(db, serviceId, opts = {}) {
   if (!gateEnvValue('GATE_STOPS_AWAY')) return null;
   try {
     const today = opts.today || etDateString();
-    const svc = await db('scheduled_services')
-      .where({ id: serviceId })
-      .first('id', 'technician_id', 'scheduled_date', 'status', 'track_state');
-    if (!svc || !svc.technician_id) return null;
+    // Eligibility reads the WHOLE sibling group, not just the requested
+    // row: tech-track transitions rows by id, so a sibling of a
+    // multi-service appointment can be en_route/on_site/completed while
+    // the requested row still reads 'scheduled' — and the truck is already
+    // heading to (or done with) this physical stop. The self-join also
+    // drops NULL technician/customer/date targets (NULL never equals),
+    // covering the no-technician case.
+    const grpRes = await db.raw(
+      `SELECT s.id, s.technician_id, s.scheduled_date, s.status, s.track_state
+         FROM scheduled_services s, scheduled_services t
+        WHERE t.id = ?::uuid
+          AND s.technician_id = t.technician_id
+          AND s.scheduled_date = t.scheduled_date
+          AND s.customer_id = t.customer_id
+          AND s.window_start IS NOT DISTINCT FROM t.window_start`,
+      [serviceId]
+    );
+    const grpRows = grpRes?.rows || [];
+    const svc = grpRows.find((r) => r.id === serviceId);
+    if (!svc) return null;
     // The target itself must be a real upcoming stop — terminal visits AND
     // rescheduled placeholders (which can retain track_state='scheduled')
     // never display a count.
@@ -95,8 +114,15 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     // second step fails, a visit already underway keeps
     // track_state='scheduled'. A live operational status makes the target
     // ineligible: the planned-route count must not display (or persist a
-    // floor) for a stop the tech is already traveling to or working.
+    // floor) for a stop the tech is already traveling to or working. The
+    // same applies when ANY SIBLING row has advanced (or finished): the
+    // physical stop is underway/visited, so a planned count on the
+    // untouched sibling's link would be a lie.
     if (svc.status === 'en_route' || svc.status === 'on_site') return null;
+    const siblingAdvanced = grpRows.some((r) => r.id !== svc.id
+      && (['en_route', 'on_site', 'completed'].includes(r.status)
+          || ['en_route', 'on_property', 'complete'].includes(r.track_state)));
+    if (siblingAdvanced) return null;
     const svcDate = dateOnly(svc.scheduled_date);
     if (!svcDate || svcDate !== today) return null;
 
@@ -230,9 +256,11 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
          COUNT(*) FILTER (WHERE ${G_PRECEDES})::int AS before_all,
          COUNT(*)::int AS others_all,
          COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_done
-                            AND NOT g.has_at AND NOT g.has_enroute)::int AS done_before,
+                            AND NOT g.has_live)::int AS done_before,
          COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_at)::int AS at_before,
          COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_enroute AND NOT g.has_at)::int AS enroute_before,
+         COUNT(*) FILTER (WHERE (g.has_at OR g.has_enroute)
+                            AND NOT (${G_PRECEDES}))::int AS active_beyond,
          MIN(t.group_floor)::int AS group_floor
          FROM grp g, target t`,
       // Binding order mirrors the SQL order: the group_floor subquery's
@@ -272,6 +300,11 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     const currentStop = (Number.isFinite(doneBefore) ? doneBefore : 0)
       + (atStop || headingToStop ? 1 : 0);
     if (!Number.isFinite(raw) || !Number.isFinite(yourStop) || !Number.isFinite(totalStops)) return null;
+    // The tech actively at/driving to a stop that does NOT precede the
+    // target (per-id transitions don't enforce route order) makes the
+    // planned count a lie: "You're next" / "Route starts soon" while the
+    // truck is already working a LATER stop. Fail to the generic state.
+    if (Number(agg?.active_beyond) > 0) return null;
 
     // Clamp against the persisted floor — the GROUP's smallest same-day
     // floor (fetched in the same snapshot as the count), not the requested
@@ -286,6 +319,20 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     let clamped = raw;
     if (Number.isInteger(groupFloor)) clamped = Math.min(raw, groupFloor);
     if (clamped > STOPS_AHEAD_DISPLAY_CAP) return null;
+
+    // readOnly: the public track GET is contractually read-only
+    // (AGENTS.md) — retries and prefetches must never mutate. It may
+    // display ONLY a value that is already the durable same-day floor;
+    // anything else comes back {pending: true} and the page acks through
+    // the explicit POST (which runs the persisting path below) before the
+    // number ever renders. The never-increase contract holds because an
+    // undurable value is never displayed.
+    if (opts.readOnly) {
+      if (Number.isInteger(groupFloor) && clamped === groupFloor) {
+        return { stopsAhead: clamped, yourStop, totalStops, currentStop, atStop, headingToStop };
+      }
+      return { pending: true };
+    }
 
     // Persist the floor ATOMICALLY (single conditional UPDATE, no
     // read-modify-write): concurrent portal/public polls can interleave, and

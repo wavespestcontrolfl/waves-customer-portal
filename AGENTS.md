@@ -998,7 +998,12 @@ violations at the severity noted.
   tokens — `serviceReportToken` (`report_view_token`), `invoiceToken`, a
   `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
   to the report / receipt / rate surfaces. Treat the track token and any change
-  to its payload, in any state, as security-critical).
+  to its payload, in any state, as security-critical. The GET stays strictly
+  read-only; `POST /api/public/track/:token/stops-ahead` is the ONE write
+  companion — same token gate + rate limit, ignores its body, and only
+  persists the stops-ahead display-clamp floor (monotone LEAST,
+  skip-unchanged) via `computeStopsAhead` before returning the displayable
+  count; it must never grow beyond that single bounded metadata write).
   `/api/public/appointment/:token` (GET summary + `GET /:token/calendar.ics`
   + `POST /:token/confirm`; the destination the 24h reminder and booking
   confirmation texts link to. Gated by `scheduled_services.reschedule_token`
