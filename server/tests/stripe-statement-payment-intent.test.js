@@ -84,7 +84,14 @@ describe('StripeService.createStatementPaymentIntent', () => {
     stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
       id: 'pi_ach_microdeposit',
       status: 'requires_action',
-      next_action: { type: 'verify_with_microdeposits' },
+      next_action: {
+        type: 'verify_with_microdeposits',
+        verify_with_microdeposits: {
+          microdeposit_type: 'amounts',
+          hosted_verification_url: 'https://payments.stripe.com/microdeposit/pacs_test_stmt',
+          arrival_date: 1786690800,
+        },
+      },
       payment_method_types: ['us_bank_account'],
       metadata: { waves_statement_id: statementRow.id },
     });
@@ -98,6 +105,13 @@ describe('StripeService.createStatementPaymentIntent', () => {
         statusCode: 409,
         inProgress: true,
         microdepositPending: true,
+        // Verification detail rides the 409 so the statement pay page can
+        // render type-correct guidance and Stripe's hosted verification link.
+        microdeposit: {
+          microdepositType: 'amounts',
+          hostedVerificationUrl: 'https://payments.stripe.com/microdeposit/pacs_test_stmt',
+          arrivalDate: 1786690800,
+        },
       });
     expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
