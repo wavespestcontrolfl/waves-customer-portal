@@ -4136,14 +4136,15 @@ function BankImportTab() {
         setDupPicks({});
         setNotice({
           text:
-            `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skipped.length} skipped)` +
+            `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skippedTotal ?? r.skipped.length} skipped)` +
             // skipped rows never reach staging or coverage — name each line
             // and reason so the operator can fix the statement and re-import
+            // (the server returns a bounded sample plus the honest total)
             (r.skipped.length
               ? ` — skipped: ${r.skipped
                   .slice(0, 5)
                   .map((s) => `line ${s.line} (${s.reason})`)
-                  .join("; ")}${r.skipped.length > 5 ? ` and ${r.skipped.length - 5} more` : ""}`
+                  .join("; ")}${(r.skippedTotal ?? r.skipped.length) > 5 ? ` and ${(r.skippedTotal ?? r.skipped.length) - 5} more` : ""}`
               : "") +
             (r.matching
               ? ` · matching linked ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses${r.matching.moreRemaining ? " (more rows pending — click Run matching)" : ""}`
@@ -4441,7 +4442,9 @@ function BankImportTab() {
                       to the select — a vendor refund whose descriptor says
                       "transfer" still needs its Apply refund action (the
                       hint folds into the select placeholder) */}
-                  {r.suggestion?.ignore && !(r.direction === "credit" && (r.suggestion?.refundCandidates?.length || r.suggestion?.payoutCandidates?.length)) ? (
+                  {r.suggestion?.ignore
+                    && !(r.direction === "credit" && (r.suggestion?.refundCandidates?.length || r.suggestion?.payoutCandidates?.length))
+                    && !r.suggestion?.candidates?.length ? (
                     "internal transfer?"
                   ) : r.status === "unmatched" && r.suggestion?.candidates?.length ? (
                     <select
@@ -4463,6 +4466,7 @@ function BankImportTab() {
                       title="Existing ledger expenses with a matching amount — link instead of creating a duplicate"
                     >
                       <option value="">
+                        {r.suggestion?.ignore ? "internal transfer? · " : ""}
                         {r.suggestion.candidates.length} possible existing match{r.suggestion.candidates.length > 1 ? "es" : ""}…
                       </option>
                       {(fullExpenseCands[r.id] || r.suggestion.candidates).map((c) => (

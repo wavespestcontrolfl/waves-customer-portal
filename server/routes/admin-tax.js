@@ -1639,6 +1639,9 @@ router.get('/bank-import/status', async (req, res, next) => {
     await bankImport.resetDanglingLinks();
     await bankImport.healEditedExpenseLinks();
     await bankImport.healUnreconciledLinks();
+    // orphaned refund_applied rows too — the association lives only in
+    // suggestion JSON, so no FK heal can catch a deleted target
+    await bankImport.healOrphanRefunds();
     const counts = await db('bank_transactions').select('status').count('* as n').groupBy('status');
     res.json({
       enabled: true,
@@ -1680,7 +1683,7 @@ router.post('/bank-import/upload', async (req, res, next) => {
     }
     const { rows, skipped } = bankImport.parseStatementCsv(csv);
     if (rows.length === 0) {
-      return res.status(400).json({ error: 'no usable rows in that CSV', skipped });
+      return res.status(400).json({ error: 'no usable rows in that CSV', skipped: skipped.slice(0, 50), skippedTotal: skipped.length });
     }
     const hashed = bankImport.withRowHashes(label, rows);
     const toInsert = hashed.map(r => ({
@@ -1845,7 +1848,11 @@ router.post('/bank-import/upload', async (req, res, next) => {
       // disclosed and force selection works on what is shown (a smaller
       // re-upload slice reaches the rest).
       duplicateRows: duplicateRows.slice(0, 200).map(r => ({ row_hash: r.row_hash, txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
-      skipped,
+      // bounded sample + honest total: a malformed file can skip one row
+      // per record, and echoing tens of thousands of reason objects back
+      // would dwarf the upload itself
+      skipped: skipped.slice(0, 50),
+      skippedTotal: skipped.length,
       matching,
       matchingError,
     });
@@ -2519,6 +2526,9 @@ router.get('/bank-import/coverage', async (req, res, next) => {
     // writes only on actual violations.
     await bankImport.resetDanglingLinks();
     await bankImport.healEditedExpenseLinks();
+    // orphaned refunds skew the coverage NETTING (their adjustment no
+    // longer exists) — heal them before this money claim too
+    await bankImport.healOrphanRefunds();
     const year = /^\d{4}$/.test(String(req.query.year || '')) ? String(req.query.year) : String(etParts().year);
     res.json({ year, months: await bankImport.ledgerCoverage(year) });
   } catch (err) { next(err); }

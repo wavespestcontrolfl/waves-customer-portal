@@ -124,6 +124,12 @@ function makeBuilder(table) {
           // they participate only through the gross path
           .filter(e => !state.bankRows.some(r => r.status === 'refund_applied' && r.suggestion?.refundAppliedTo === e.id));
       }
+      // date-window filters mirror the SQL (the refund lookback floors at
+      // the credit's tax year — prior-year targets never surface)
+      const between = b.whereBetween.mock.calls.find(c => c[0] === 'expense_date');
+      if (between && Array.isArray(between[1])) {
+        rows = rows.filter(e => e.expense_date >= between[1][0] && e.expense_date <= between[1][1]);
+      }
     }
     // mirror the status + pending-flag filters so the unmatched loop and the
     // reconciliation sweep each see only their own rows (a row with no
@@ -547,14 +553,19 @@ describe('runDeterministicMatching', () => {
     expect(state.updates.find(u => u.patch.status)).toBeUndefined();
   });
 
-  test('transfer-looking rows get the ignore suggestion and never query candidates', async () => {
-    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', suggestion: null }];
-    state.expenses = [{ id: 'exp-1', description: 'X', vendor_name: 'X', expense_date: '2026-08-08' }];
+  test('transfer-looking debits get the ignore flag and NEVER auto-link — but park candidates for manual linking', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-08', description: 'CAPITAL ONE CRCARDPMT', amount: 500, direction: 'debit', account_type: 'bank', suggestion: null }];
+    state.expenses = [{ id: 'exp-1', amount: '500.00', description: 'card payment', vendor_name: 'Capital One', expense_date: '2026-08-08', payment_method: 'ach' }];
     const summary = await runDeterministicMatching();
     expect(summary.transferFlagged).toBe(1);
-    expect(summary.expensesLinked).toBe(0);
-    expect(state.queried.filter(t => t === 'expenses')).toHaveLength(0);
-    expect(sugOf(state.updates[0]).ignore).toBe(true);
+    expect(summary.expensesLinked).toBe(0); // suppression holds — never auto-matches
+    expect(state.updates.find(u => u.patch.status)).toBeUndefined();
+    const flagged = state.updates.find(u => sugOf(u) && sugOf(u).ignore);
+    expect(sugOf(flagged).ignore).toBe(true);
+    // the operator can still LINK the existing ledger expense instead of
+    // being forced into a duplicate create or Ignore
+    expect(sugOf(flagged).candidates).toHaveLength(1);
+    expect(sugOf(flagged).candidates[0].id).toBe('exp-1');
   });
 
   test('a failed reconciliation echo flags the row and the next pass retries it', async () => {
@@ -1320,12 +1331,52 @@ describe('runDeterministicMatching', () => {
   test('a RECONCILED link whose payout later FAILED (amount unchanged) is reverted — the credit is not hidden', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
     // payout.failed webhook AFTER the echo succeeded: reconciled stays true,
-    // amount unchanged — only status flipped
-    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'failed', reconciled: true }];
+    // amount unchanged — only status flipped; the echo was BANK-authored
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'failed', reconciled: true, reconciled_by: 'bank-import:bt-1' }];
     state.reconRows = [{ payout_id: 'po-1', status: 'confirmed', actual_amount: '2418.66' }];
     const summary = await runDeterministicMatching();
     expect(summary.linksReverted).toBe(1);
     expect(sugOf(state.updates.find(u => u.patch.status === 'unmatched')).autoRevert.reason).toContain('status');
+    // our OWN reconciliation is reversed in the same transaction — Banking
+    // must not keep a confirmed reconciliation authored by an unmatched row
+    expect(reconcilePayout).toHaveBeenCalledWith('po-1', 2418.66, expect.stringContaining('Eligibility revert'), 'bank-import:bt-1', 'rejected', expect.objectContaining({ trx: expect.anything() }));
+  });
+
+  test('a HUMAN-authored reconciliation survives an eligibility revert — only the link is released', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'failed', reconciled: true, reconciled_by: 'adam' }];
+    state.reconRows = [{ payout_id: 'po-1', status: 'confirmed', actual_amount: '2418.66' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.linksReverted).toBe(1);
+    expect(reconcilePayout).not.toHaveBeenCalled();
+  });
+
+  test('the healer holds EXACT cents for auto links; manual links keep the one-cent tolerance', async () => {
+    state.bankRows = [
+      { id: 'bt-auto', txn_date: '2026-08-10', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', match_method: 'expense_amount_date_vendor', matched_expense_id: 'exp-1', description: 'SITEONE LANDSCAPE', suggestion: null },
+      { id: 'bt-manual', txn_date: '2026-08-10', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', match_method: 'manual', matched_expense_id: 'exp-2', suggestion: null },
+    ];
+    state.expenses = [
+      // both edited by ONE cent — voids the automatic justification only
+      { id: 'exp-1', amount: '100.01', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' },
+      { id: 'exp-2', amount: '100.01', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' },
+    ];
+    const summary = await runDeterministicMatching();
+    expect(summary.expenseLinksReverted).toBe(1);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert.where).toContainEqual({ id: 'bt-auto', status: 'matched_expense', matched_expense_id: 'exp-1' });
+  });
+
+  test('refund candidates never offer PRIOR-YEAR expenses — apply-refund would only 409 them', async () => {
+    // credit posts in January; the November purchase is within 90 days but
+    // in the prior tax year (a manual recovery-income case)
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-01-15', description: 'WAWA REFUND', amount: 20, direction: 'credit', account_type: 'card', suggestion: null }];
+    state.expenses = [{ id: 'exp-old', amount: '58.12', description: 'gas', vendor_name: 'Wawa', expense_date: '2025-12-20', payment_method: 'card' }];
+    await runDeterministicMatching();
+    expect(state.updates.find(u => sugOf(u) && sugOf(u).refundCandidates)).toBeUndefined();
+    // the SQL lookback floors at the credit's tax year
+    const between = state.builders.find(x => x.table === 'expenses' && x.b.whereBetween.mock.calls.length);
+    expect(between.b.whereBetween.mock.calls[0][1][0]).toBe('2026-01-01');
   });
 
   test('a RECONCILED link still fully eligible is left alone by the heal scan', async () => {

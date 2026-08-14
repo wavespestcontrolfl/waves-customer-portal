@@ -280,8 +280,13 @@ async function appliedRefundTotal(expenseId, dbOrTrx = db) {
 // covering amount, then the most recent purchase, then id.
 async function refundCandidatesForRow(row, dbOrTrx = db) {
   const txnDate = toDateStr(row.txn_date);
+  // lookback floored at the credit's tax year: apply-refund refuses to
+  // reduce a prior-year expense (rewriting filed books — the recovery is
+  // current-year income), so offering one would be a guaranteed 409
+  const lookbackStart = addDays(txnDate, -REFUND_LOOKBACK_DAYS);
+  const yearStart = `${txnDate.slice(0, 4)}-01-01`;
   const originals = await dbOrTrx('expenses')
-    .whereBetween('expense_date', [addDays(txnDate, -REFUND_LOOKBACK_DAYS), txnDate])
+    .whereBetween('expense_date', [lookbackStart > yearStart ? lookbackStart : yearStart, txnDate])
     .where('amount', '>=', row.amount)
     .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
   const list = originals.filter(c => vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
@@ -662,7 +667,7 @@ async function healUnreconciledLinks() {
       : Number(row.payout_amount); // reconciled but no confirmed row — same fallback as effectivePayoutAmount
     if (linkStillEligible(row, effective)) continue;
     await db.transaction(async (trx) => {
-      const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('id', 'amount', 'status', 'arrival_date', 'reconciled');
+      const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('id', 'amount', 'status', 'arrival_date', 'reconciled', 'reconciled_by');
       if (!sp || !sp.reconciled) return; // state changed since the scan
       const lockedEffective = await effectivePayoutAmount(sp, trx);
       if (linkStillEligible({ ...row, payout_status: sp.status, arrival_date: sp.arrival_date }, lockedEffective)) return;
@@ -678,7 +683,17 @@ async function healUnreconciledLinks() {
           }, ['reconcilePending']),
           updated_at: new Date(),
         });
-      if (changed) amountReverts++;
+      if (!changed) return;
+      amountReverts++;
+      // A reconciliation THIS row authored must not outlive its link —
+      // Banking would keep presenting a confirmed reconciliation from a
+      // now-unmatched row. Reverse it in the SAME locked transaction (the
+      // unlink route's shape); a human-authored reconciliation is never
+      // touched from here.
+      if (sp.reconciled_by === `bank-import:${row.id}`) {
+        const { reconcilePayout } = require('./stripe-banking');
+        await reconcilePayout(row.matched_payout_id, Number(row.amount), `Eligibility revert for bank import row ${row.id}`, `bank-import:${row.id}`, 'rejected', { trx });
+      }
     });
   }
   return { reverted: reverted + amountReverts, remarked };
@@ -827,9 +842,13 @@ async function healEditedExpenseLinks() {
     const txn = toDateStr(link.txn_date);
     const expDate = toDateStr(exp.expense_date);
     const windowOk = expDate >= addDays(txn, -EXPENSE_DATE_WINDOW_DAYS) && expDate <= addDays(txn, EXPENSE_DATE_WINDOW_DAYS);
-    const amountOk = withinCandidateTolerance(exp.amount, link.bt_amount)
-      || withinCandidateTolerance(Number(exp.amount) + Number(rsum || 0), link.bt_amount);
     const auto = link.match_method === 'expense_amount_date_vendor';
+    // AUTO links must hold the matcher's exact-cent policy (a one-cent
+    // edit voids the automatic justification); MANUAL links keep the
+    // operator's one-cent tolerance, the same window link-expense accepts.
+    const amountMatches = auto ? centsEqual : withinCandidateTolerance;
+    const amountOk = amountMatches(exp.amount, link.bt_amount)
+      || amountMatches(Number(exp.amount) + Number(rsum || 0), link.bt_amount);
     const autoOk = !auto || (vendorEvidence(link.description, exp)
       && !methodIncompatible(link.account_type, exp.payment_method));
     return windowOk && amountOk && autoOk;
@@ -1232,6 +1251,16 @@ async function runDeterministicMatching({ limit } = {}) {
       refundCandidates: list.slice(0, 20).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: toDateStr(c.expense_date) })),
       refundCandidatesTotal: list.length,
     });
+    // Parked DEBIT candidates — deterministic display order (newest first,
+    // then id), amounts included (gross reading for refund-reduced ones).
+    const expenseCandidatePatch = (list) => {
+      const parked = [...list].sort((a, b) => String(toDateStr(b.expense_date)).localeCompare(String(toDateStr(a.expense_date)))
+        || String(a.id).localeCompare(String(b.id)));
+      return {
+        candidates: parked.slice(0, 20).map(c => ({ id: c.id, amount: c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount), description: c.description, vendor_name: c.vendor_name, expense_date: toDateStr(c.expense_date) })),
+        candidatesTotal: list.length,
+      };
+    };
     // A bank-account credit with a Stripe-shaped description is PAYOUT
     // territory even when it also carries a transfer word (Capital One
     // renders payouts as e.g. "STRIPE TRANSFER ST-…") — payoutProvenance
@@ -1243,32 +1272,39 @@ async function runDeterministicMatching({ limit } = {}) {
     const stripeBankCredit = row.direction === 'credit' && row.account_type === 'bank' && stripeShapedDescription(row.description);
     const transfer = stripeBankCredit ? null : transferSuggestion(row.description);
     if (transfer) {
-      // For CREDITS the refund candidates ride along with the flag: the
-      // flag is only ever a SUGGESTION, and without candidates a vendor
-      // refund whose descriptor says "transfer" would leave the operator
-      // with Ignore as the only action.
+      // The flag is only ever a SUGGESTION, so the human actions ride
+      // along with it: CREDITS park refund candidates, DEBITS park expense
+      // candidates for manual linking — a legit vendor whose descriptor
+      // trips the heuristic (AUTOPAY, ONLINE PYMT) must not leave the
+      // operator choosing between a duplicate create and Ignore. Automatic
+      // matching stays suppressed for transfer-shaped rows either way.
       const refunds = row.direction === 'credit' ? await refundCandidateList() : [];
+      const debitCands = row.direction === 'debit' ? await surveyExpenseCandidatesForRow(row, rejected) : [];
+      const actionPatch = refunds.length ? refundPatch(refunds) : (debitCands.length ? expenseCandidatePatch(debitCands) : {});
+      const hasActions = refunds.length > 0 || debitCands.length > 0;
+      const staleActionKeys = row.direction === 'credit'
+        ? ['refundCandidates', 'refundCandidatesTotal']
+        : ['candidates', 'candidatesTotal'];
       if (!row.suggestion || !row.suggestion.ignore) {
         // merged, not replaced — suggestion also carries durable identity
         // records (forceToken/forcedFor, lastUnlink) that must survive
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-          suggestion: suggestionMerge({ ...transfer, ...(refunds.length ? refundPatch(refunds) : {}) }, refunds.length ? ['noMatch'] : []),
+          suggestion: suggestionMerge({ ...transfer, ...actionPatch }, hasActions ? ['noMatch'] : []),
           updated_at: new Date(),
         });
         summary.transferFlagged++;
-      } else if (row.direction === 'credit') {
-        // already flagged — REFRESH the refund list on every rescan
+      } else if (hasActions
+        || (row.direction === 'credit' && row.suggestion.refundCandidates)
+        || (row.direction === 'debit' && row.suggestion.candidates)) {
+        // already flagged — REFRESH the action list on every rescan
         // (targets appear and disappear; a stale list can only 404/409)
         // and rotate via updated_at like every other examined row
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-          suggestion: suggestionMerge(
-            refunds.length ? refundPatch(refunds) : {},
-            refunds.length ? ['noMatch'] : ['refundCandidates', 'refundCandidatesTotal']),
+          suggestion: suggestionMerge(actionPatch, hasActions ? ['noMatch'] : staleActionKeys),
           updated_at: new Date(),
         });
       } else if (bounded) {
-        // rotation bump — an already-flagged row rescanned by a bounded
-        // pass goes to the back of the examined queue (see markScanned)
+        // nothing to park and nothing stale to clear — plain rotation bump
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({ updated_at: new Date() });
       }
       continue; // transfer-looking rows never auto-match anything
@@ -1665,6 +1701,7 @@ module.exports = {
   resetDanglingLinks,
   healEditedExpenseLinks,
   healUnreconciledLinks,
+  healOrphanRefunds,
   methodIncompatible,
   effectivePayoutAmount,
   suggestionMerge,

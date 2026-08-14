@@ -167,6 +167,7 @@ jest.mock('../services/bank-import', () => ({
   surveyExpenseCandidatesForRow: jest.fn(() => Promise.resolve([])),
   surveyPayoutCandidatesForRow: jest.fn(() => Promise.resolve({ candidates: [], overflow: false })),
   healUnreconciledLinks: jest.fn(() => Promise.resolve({ reverted: 0, remarked: 0 })),
+  healOrphanRefunds: jest.fn(() => Promise.resolve(0)),
 }));
 
 const express = require('express');
@@ -648,6 +649,10 @@ describe('refund-candidates on demand (gate on)', () => {
     // the payout-eligibility healer runs on page load too — a failed/
     // rescheduled linked payout cannot keep counting as matched
     expect(healUnreconciledLinks).toHaveBeenCalled();
+    // and orphaned refunds (suggestion-JSON association — no FK heal can
+    // see a deleted target) stop counting as completed refunds
+    const { healOrphanRefunds } = require('../services/bank-import');
+    expect(healOrphanRefunds).toHaveBeenCalled();
   });
 
   test('payout-candidates serves the full nearest-arrival list for a bank credit', async () => {
