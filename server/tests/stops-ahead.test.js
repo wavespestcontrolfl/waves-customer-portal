@@ -35,7 +35,7 @@ function baseSvc(overrides = {}) {
 // racer's smaller floor, or null for the guarded no-op write.
 function makeDb({
   svcRow, siblings = [], countN = 0, beforeAll, othersAll, doneBefore = 0,
-  atBefore = 0, enrouteBefore = 0, activeBeyond = 0, groupFloor = null,
+  atBefore = 0, enrouteBefore = 0, progressedBeyond = 0, groupFloor = null,
   reReadFloor = null, rawFloor, rawError = null,
 } = {}) {
   const queries = [];
@@ -67,7 +67,7 @@ function makeDb({
           done_before: doneBefore,
           at_before: atBefore,
           enroute_before: enrouteBefore,
-          active_beyond: activeBeyond,
+          progressed_beyond: progressedBeyond,
           group_floor: groupFloor,
         }],
       });
@@ -154,7 +154,7 @@ describe('computeStopsAhead', () => {
     // surfaced so the planned count can be suppressed.
     expect(countSql).toContain('AND NOT g.has_live');
     expect(countSql).toContain('g.has_enroute AND NOT g.has_at');
-    expect(countSql).toMatch(/active_beyond/);
+    expect(countSql).toMatch(/progressed_beyond/);
     // Dead estimate-slot holds must not count (live-hold predicate).
     expect(countSql).toContain('(s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())');
     // Tracker-terminal rows drop out of the LIVE flag by track_state too,
@@ -287,10 +287,12 @@ describe('computeStopsAhead', () => {
     expect((await computeStopsAhead(db, 'svc-self', { today: TODAY }))?.stopsAhead).toBe(1);
   });
 
-  test('an active stop at/beyond the target suppresses the planned count', async () => {
-    // Tech is servicing a LATER stop — "You're next"/"Route starts soon"
-    // would be a lie; fail to the generic state, persist nothing.
-    const db = makeDb({ svcRow: baseSvc(), countN: 0, activeBeyond: 1 });
+  test('an active OR completed stop at/beyond the target suppresses the planned count', async () => {
+    // Tech is servicing — or already finished — a LATER stop: "You're
+    // next"/"Route starts soon" would be a lie; fail to the generic
+    // state, persist nothing. (progressed_beyond covers has_at,
+    // has_enroute AND has_done groups that don't precede the target.)
+    const db = makeDb({ svcRow: baseSvc(), countN: 0, progressedBeyond: 1 });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
     expect(db.updateCalls()).toHaveLength(0);
   });

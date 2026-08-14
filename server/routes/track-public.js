@@ -147,8 +147,14 @@ async function withTimeout(promise, timeoutMs, fallbackValue = null) {
 async function buildApproxVehicle(row) {
   if (!row?.technician_id) return null;
   try {
+    // Cache-only read: the Bouncie fallback inside resolveFreshTechPosition
+    // write-through-persists tech_status, and this runs on the scheduled
+    // public GET, which is contractually read-only. A stale/missing cache
+    // renders no approx marker rather than mutating; the en-route flows
+    // and Bouncie pings keep tech_status warm.
     const pos = await resolveFreshTechPosition({
       techId: row.technician_id,
+      allowBouncieFallback: false,
       logPrefix: 'track-public-approx',
     });
     if (!pos) return null;

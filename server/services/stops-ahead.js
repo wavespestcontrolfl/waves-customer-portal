@@ -259,8 +259,8 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
                             AND NOT g.has_live)::int AS done_before,
          COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_at)::int AS at_before,
          COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_enroute AND NOT g.has_at)::int AS enroute_before,
-         COUNT(*) FILTER (WHERE (g.has_at OR g.has_enroute)
-                            AND NOT (${G_PRECEDES}))::int AS active_beyond,
+         COUNT(*) FILTER (WHERE (g.has_at OR g.has_enroute OR g.has_done)
+                            AND NOT (${G_PRECEDES}))::int AS progressed_beyond,
          MIN(t.group_floor)::int AS group_floor
          FROM grp g, target t`,
       // Binding order mirrors the SQL order: the group_floor subquery's
@@ -300,11 +300,12 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     const currentStop = (Number.isFinite(doneBefore) ? doneBefore : 0)
       + (atStop || headingToStop ? 1 : 0);
     if (!Number.isFinite(raw) || !Number.isFinite(yourStop) || !Number.isFinite(totalStops)) return null;
-    // The tech actively at/driving to a stop that does NOT precede the
-    // target (per-id transitions don't enforce route order) makes the
-    // planned count a lie: "You're next" / "Route starts soon" while the
-    // truck is already working a LATER stop. Fail to the generic state.
-    if (Number(agg?.active_beyond) > 0) return null;
+    // The tech at/driving-to — or already FINISHED with — a stop that
+    // does NOT precede the target (per-id transitions don't enforce route
+    // order) makes the planned count a lie: "You're next" / "Route starts
+    // soon" while the truck is working, or was already past, a LATER
+    // stop. Fail to the generic state, persist nothing.
+    if (Number(agg?.progressed_beyond) > 0) return null;
 
     // Clamp against the persisted floor — the GROUP's smallest same-day
     // floor (fetched in the same snapshot as the count), not the requested
