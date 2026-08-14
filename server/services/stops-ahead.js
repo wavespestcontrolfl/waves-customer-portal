@@ -70,7 +70,10 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
         'stops_ahead_min_shown', 'stops_ahead_shown_date'
       );
     if (!svc || !svc.technician_id) return null;
-    if (TERMINAL_STATUSES.includes(svc.status)) return null;
+    // The target itself must be a real upcoming stop — terminal visits AND
+    // rescheduled placeholders (which can retain track_state='scheduled')
+    // never display a count.
+    if (NOT_A_STOP_STATUSES.includes(svc.status)) return null;
     const trackState = svc.track_state || 'scheduled';
     // Only the pre-dispatch scheduled state shows a count. en_route and
     // later are null: both clients render stopsAhead exclusively on their

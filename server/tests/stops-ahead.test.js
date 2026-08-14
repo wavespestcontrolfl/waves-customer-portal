@@ -142,6 +142,7 @@ describe('computeStopsAhead', () => {
     ['no technician assigned', baseSvc({ technician_id: null })],
     ['en route to this stop (scheduled card owns the count)', baseSvc({ track_state: 'en_route' })],
     ['terminal status', baseSvc({ status: 'completed' })],
+    ['rescheduled placeholder (still track_state=scheduled)', baseSvc({ status: 'rescheduled' })],
     ['on the property already', baseSvc({ track_state: 'on_property' })],
     ['scheduled for a future date', baseSvc({ scheduled_date: '2026-08-15' })],
     ['row not found', null],
