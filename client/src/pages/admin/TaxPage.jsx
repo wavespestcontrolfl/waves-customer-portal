@@ -10,6 +10,7 @@ import {
   ListChecks,
   Package,
   Percent,
+  Landmark,
   Receipt,
   ShieldCheck,
   Truck,
@@ -46,20 +47,32 @@ function adminFetch(path, options = {}) {
       "Content-Type": "application/json",
     },
     ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }).then(async (r) => {
+    if (!r.ok) {
+      // the intentional 400/409s carry actionable operator guidance in
+      // {error} — surface it instead of a bare status code
+      let detail = "";
+      try {
+        detail = (await r.json())?.error || "";
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new Error(detail || `HTTP ${r.status}`);
+    }
     return r.json();
   });
 }
 
-function Badge({ children, color, small }) {
+function Badge({ children, color, small, fontSize }) {
   return (
     <span
       style={{
         display: "inline-block",
         padding: small ? "1px 6px" : "2px 10px",
         borderRadius: 9999,
-        fontSize: small ? 10 : 11,
+        // fontSize override: newer surfaces hold the repo's 14px floor
+        // without disturbing the legacy tabs' compact badges
+        fontSize: fontSize || (small ? 10 : 11),
         fontWeight: 600,
         background: `${color || D.muted}22`,
         color: color || D.muted,
@@ -176,6 +189,7 @@ const TAX_SECTIONS = [
   { key: "exemptions", label: "Exemptions", Icon: FileText },
   { key: "equipment", label: "Equipment", Icon: Package },
   { key: "expenses", label: "Expenses", Icon: ListChecks },
+  { key: "bankimport", label: "Bank Import", Icon: Landmark },
   { key: "mileage", label: "Mileage", Icon: Truck },
   { key: "revenue", label: "Revenue", Icon: DollarSign },
   { key: "pnl", label: "P&L", Icon: BarChart3 },
@@ -3986,15 +4000,777 @@ function AccountsReceivableTab() {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════
+// BANK IMPORT TAB (GATE_BANK_IMPORT)
+// ═══════════════════════════════════════════════════════════════
+
+const BANK_STATUS_COLORS = {
+  unmatched: D.amber,
+  matched_expense: D.green,
+  matched_payout: D.blue,
+  created_expense: D.green,
+  refund_applied: D.green,
+  ignored: D.muted,
+};
+const BANK_STATUS_LABELS = {
+  unmatched: "review",
+  matched_expense: "expense",
+  matched_payout: "payout",
+  created_expense: "created",
+  refund_applied: "refund",
+  ignored: "ignored",
+};
+
+function BankImportTab() {
+  // 14px floor on this financial-review surface (repo minimum readable
+  // size) — the shared inputStyle stays 12px for the legacy tabs
+  const bankInput = { ...inputStyle, fontSize: 14 };
+  const [counts, setCounts] = useState({});
+  const [rows, setRows] = useState([]);
+  const [coverage, setCoverage] = useState([]);
+  const [filter, setFilter] = useState("");
+  const [accountLabel, setAccountLabel] = useState("capone-checking");
+  const [accountType, setAccountType] = useState("bank");
+  const [busy, setBusy] = useState("");
+  const [notice, setNotice] = useState(null);
+  // per-row candidate pick for the manual link path (row id → expense id)
+  const [linkPick, setLinkPick] = useState({});
+  // per-row category override for Create (row id → category id) — the AI
+  // suggestion is a default, never the only option
+  const [catPick, setCatPick] = useState({});
+  const [categories, setCategories] = useState([]);
+  const [hasMore, setHasMore] = useState(false);
+  // ET-derived, NOT the browser's UTC calendar: between 7pm ET and
+  // midnight on Dec 31 the UTC year is already next year, which would
+  // request an empty coverage report and drop the oldest picker option
+  const etYear = etDateString().slice(0, 4);
+  const [covYear, setCovYear] = useState(etYear);
+  // last upload payload, kept only while its result reported duplicates —
+  // fuels the explicit force-import path for identical-but-distinct rows
+  const [dupUpload, setDupUpload] = useState(null);
+  // per-row force selection: hash → checked. Default UNCHECKED — the
+  // operator names exactly which skipped tuples were genuinely separate
+  // purchases; forcing the whole set would re-import ordinary overlaps too.
+  const [dupPicks, setDupPicks] = useState({});
+  // on-demand FULL candidate lists (row id → candidates): the parked
+  // slices show 20, and the real target can sit beyond them
+  const [fullRefunds, setFullRefunds] = useState({});
+  const [fullExpenseCands, setFullExpenseCands] = useState({});
+  const [fullPayouts, setFullPayouts] = useState({});
+
+  // offset pagination with APPEND semantics — the server caps limit at 500,
+  // so growing a single limit stalls there; offset pages don't
+  const loadRows = useCallback(
+    (offset) => {
+      adminFetch(
+        `/admin/tax/bank-import/transactions?limit=200&offset=${offset}${filter ? `&status=${filter}` : ""}`,
+      )
+        .then((d) => {
+          setRows((prev) => (offset === 0 ? d.transactions || [] : [...prev, ...(d.transactions || [])]));
+          setHasMore(!!d.hasMore);
+        })
+        .catch(() => {
+          if (offset === 0) setRows([]);
+        });
+    },
+    [filter],
+  );
+  const load = useCallback(() => {
+    // expanded candidate caches are snapshots of a suggestion state that a
+    // reload replaces — keeping them would pin stale targets (and hide
+    // newly valid ones) with no load-all option left to refresh
+    setFullRefunds({});
+    setFullExpenseCands({});
+    setFullPayouts({});
+    adminFetch("/admin/tax/bank-import/status")
+      .then((s) => setCounts(s?.counts || {}))
+      .catch(() => {});
+    loadRows(0);
+    adminFetch(`/admin/tax/bank-import/coverage?year=${covYear}`)
+      .then((d) => setCoverage(d.months || []))
+      .catch(() => setCoverage([]));
+  }, [loadRows, covYear]);
+  useEffect(load, [load]);
+  useEffect(() => {
+    adminFetch("/admin/tax/expense-categories")
+      .then((d) => setCategories(d.categories || []))
+      .catch(() => {});
+  }, []);
+
+  const act = (label, path, body) => {
+    setBusy(label);
+    setNotice(null);
+    return adminFetch(path, { method: "POST", body: JSON.stringify(body || {}) })
+      .then((r) => {
+        load();
+        return r;
+      })
+      .catch((e) => {
+        setNotice({ error: true, text: e.message });
+        load();
+      })
+      .finally(() => setBusy(""));
+  };
+
+  const onFile = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!accountLabel.trim()) {
+      setNotice({ error: true, text: "Set an account label before uploading" });
+      return;
+    }
+    // a NEW ordinary upload voids any prior duplicate confirmation — if
+    // this upload fails, a stale "Import skipped duplicates anyway" button
+    // would force-import rows from the PREVIOUS statement. The token is
+    // retained only across forceImportDuplicates retries.
+    setDupUpload(null);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const payload = {
+        accountLabel: accountLabel.trim(),
+        accountType,
+        filename: file.name,
+        csv: String(reader.result || ""),
+      };
+      act("upload", "/admin/tax/bank-import/upload", payload).then((r) => {
+        if (!r) return;
+        // hashes scope a later force-import to EXACTLY these skipped rows
+        // (on a re-post every previously imported row conflicts too), and
+        // the server-issued token makes that confirmation replay-safe
+        setDupUpload(
+          r.duplicates > 0
+            ? { ...payload, duplicateRows: r.duplicateRows || [], duplicatesTotal: r.duplicates, forceToken: r.forceToken }
+            : null,
+        );
+        setDupPicks({});
+        setNotice({
+          text:
+            `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skippedTotal ?? r.skipped.length} skipped)` +
+            // skipped rows never reach staging or coverage — name each line
+            // and reason so the operator can fix the statement and re-import
+            // (the server returns a bounded sample plus the honest total)
+            (r.skipped.length
+              ? ` — skipped: ${r.skipped
+                  .slice(0, 5)
+                  .map((s) => `line ${s.line} (${s.reason})`)
+                  .join("; ")}${(r.skippedTotal ?? r.skipped.length) > 5 ? ` and ${(r.skippedTotal ?? r.skipped.length) - 5} more` : ""}`
+              : "") +
+            (r.matching
+              ? ` · matching linked ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses${r.matching.moreRemaining ? " (more rows pending — click Run matching)" : ""}`
+              : ` · ${r.matchingError || "matching not run"}`) +
+            (r.duplicates > 0 && r.duplicateSamples?.length
+              ? ` — skipped as re-uploads: ${r.duplicateSamples
+                  .slice(0, 3)
+                  .map((d) => `${d.txn_date} ${d.description.slice(0, 24)} $${d.amount}`)
+                  .join("; ")}${r.duplicates > 3 ? "…" : ""}`
+              : ""),
+        });
+      });
+    };
+    reader.readAsText(file);
+  };
+
+  // Re-post the same file with forceDuplicates: rows already present stay
+  // deduped; ONLY the operator-checked identical rows import as additional
+  // copies — never the whole skipped set.
+  const forceImportDuplicates = () => {
+    if (!dupUpload) return;
+    const selected = (dupUpload.duplicateRows || []).filter((d) => dupPicks[d.row_hash]).map((d) => d.row_hash);
+    if (!selected.length) return;
+    if (
+      !window.confirm(
+        `Import the ${selected.length} checked row${selected.length === 1 ? "" : "s"} as ADDITIONAL transactions? Only do this when they were genuinely separate purchases, not a re-upload of the same statement.`,
+      )
+    )
+      return;
+    const payload = { ...dupUpload, forceDuplicates: true, forceRowHashes: selected };
+    // dupUpload is kept until the request SUCCEEDS: it holds the only copy
+    // of the forceToken, and the server's replay protection only works when
+    // a failed/lost confirmation retries under the SAME token
+    act("upload", "/admin/tax/bank-import/upload", payload).then((r) => {
+      if (!r) return; // failed — token + selection retained, the button retries this confirmation
+      setDupUpload(null);
+      setDupPicks({});
+      setNotice({
+        text:
+          `Force-imported ${r.forced} duplicate row${r.forced === 1 ? "" : "s"}` +
+          (r.forceAlreadyPresent ? ` (${r.forceAlreadyPresent} already force-imported earlier — nothing re-added)` : "") +
+          (r.forceFailed ? ` · ${r.forceFailed} could NOT be imported (ordinal space exhausted) — add manually via the Expenses tab` : ""),
+      });
+    });
+  };
+
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+        <StatCard label="Needs Review" value={counts.unmatched || 0} color={D.amber} />
+        <StatCard
+          label="Matched"
+          value={(counts.matched_expense || 0) + (counts.matched_payout || 0)}
+          color={D.green}
+        />
+        <StatCard label="Created" value={counts.created_expense || 0} color={D.green} />
+        {/* applied refunds are completed review work too — without this
+            card each refund made the totals stop reconciling with the
+            number of imported rows */}
+        <StatCard label="Refunds" value={counts.refund_applied || 0} color={D.green} />
+        <StatCard label="Ignored" value={counts.ignored || 0} />
+      </div>
+
+      <div
+        style={{
+          background: D.card,
+          border: `1px solid ${D.border}`,
+          borderRadius: 12,
+          padding: 16,
+          marginBottom: 16,
+          display: "flex",
+          gap: 10,
+          flexWrap: "wrap",
+          alignItems: "center",
+        }}
+      >
+        <input
+          style={{ ...bankInput, width: 180 }}
+          value={accountLabel}
+          onChange={(e) => setAccountLabel(e.target.value)}
+          placeholder="Account label (e.g. capone-card-1234)"
+          title="Stamped on every imported row so checking and each card stay separate"
+        />
+        <select
+          style={bankInput}
+          value={accountType}
+          onChange={(e) => setAccountType(e.target.value)}
+          title="Card statements book created expenses as 'card'; bank statements as 'ach'"
+        >
+          <option value="bank">Bank account</option>
+          <option value="card">Credit card</option>
+        </select>
+        <label
+          style={{
+            ...bankInput,
+            cursor: "pointer",
+            background: D.heading,
+            color: D.white,
+            border: "none",
+            fontWeight: 600,
+          }}
+        >
+          {busy === "upload" ? "Importing…" : "Upload statement CSV"}
+          <input type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={onFile} />
+        </label>
+        <button
+          type="button"
+          style={{ ...bankInput, cursor: "pointer", fontWeight: 600 }}
+          disabled={!!busy}
+          onClick={() =>
+            act("match", "/admin/tax/bank-import/match").then((r) => {
+              if (r)
+                setNotice({
+                  text: `Matching pass: ${r.matching.payoutsLinked} payouts + ${r.matching.expensesLinked} expenses linked, ${r.matching.ambiguous} ambiguous${r.matching.moreRemaining ? " — more rows pending, run again" : ""}`,
+                });
+            })
+          }
+        >
+          {busy === "match" ? "Matching…" : "Run matching"}
+        </button>
+        <button
+          type="button"
+          style={{ ...bankInput, cursor: "pointer", fontWeight: 600 }}
+          disabled={!!busy}
+          onClick={() => {
+            // scoped to the rows on screen — a global oldest-first pass can
+            // report "processed" while changing nothing the operator can see
+            const visibleIds = rows
+              .filter((r) => r.status === "unmatched" && r.direction === "debit" && !r.suggestion?.categoryId && !r.suggestion?.ignore)
+              .map((r) => r.id)
+              .slice(0, 50);
+            if (!visibleIds.length) {
+              setNotice({ text: "No uncategorized unmatched debits on screen — load or filter to the rows you want suggestions for" });
+              return;
+            }
+            act("suggest", "/admin/tax/bank-import/suggest", { limit: 20, ids: visibleIds }).then(
+              (r) => {
+                if (r) setNotice({ text: `AI suggested categories for ${r.processed} rows` });
+              },
+            );
+          }}
+          title="AI proposes an expense category for unmatched debits — nothing is created until you click Create"
+        >
+          {busy === "suggest" ? "Suggesting…" : "Suggest categories (AI)"}
+        </button>
+        <select style={bankInput} value={filter} onChange={(e) => setFilter(e.target.value)}>
+          <option value="">All statuses</option>
+          <option value="unmatched">Needs review</option>
+          <option value="matched_expense">Matched to expense</option>
+          <option value="matched_payout">Stripe payout</option>
+          <option value="created_expense">Created expense</option>
+          <option value="refund_applied">Refund applied</option>
+          <option value="ignored">Ignored</option>
+        </select>
+        <select
+          style={bankInput}
+          value={covYear}
+          onChange={(e) => setCovYear(e.target.value)}
+          title="Coverage year — switch when backfilling a prior tax year"
+        >
+          {[0, 1, 2, 3].map((back) => {
+            const y = String(Number(etYear) - back);
+            return (
+              <option key={y} value={y}>
+                Coverage {y}
+              </option>
+            );
+          })}
+        </select>
+      </div>
+
+      {notice && (
+        <div
+          style={{
+            border: `1px solid ${notice.error ? D.red : D.border}`,
+            background: notice.error ? `${D.red}11` : D.card,
+            color: notice.error ? D.red : D.text,
+            borderRadius: 8,
+            padding: "8px 14px",
+            fontSize: 14,
+            marginBottom: 16,
+          }}
+        >
+          {notice.text}
+          {/* rendered on error notices too — a failed force confirmation
+              must retry under the SAME retained token and selection */}
+          {dupUpload && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ color: D.muted, marginBottom: 4 }}>
+                Skipped as re-uploads — check ONLY the rows that were genuinely separate purchases, then import:
+              </div>
+              {(dupUpload.duplicateRows || []).map((d) => (
+                <label key={d.row_hash} style={{ display: "block", cursor: "pointer", padding: "1px 0" }}>
+                  <input
+                    type="checkbox"
+                    checked={!!dupPicks[d.row_hash]}
+                    onChange={(e) => setDupPicks((p) => ({ ...p, [d.row_hash]: e.target.checked }))}
+                    style={{ marginRight: 6 }}
+                  />
+                  {d.txn_date} · {String(d.description).slice(0, 40)} · ${d.amount} ({d.direction})
+                </label>
+              ))}
+              {(dupUpload.duplicatesTotal || 0) > (dupUpload.duplicateRows || []).length && (
+                <div style={{ color: D.muted, marginTop: 4 }}>
+                  +{dupUpload.duplicatesTotal - dupUpload.duplicateRows.length} more duplicates not shown — re-upload a smaller slice of the statement to force those
+                </div>
+              )}
+              <button
+                type="button"
+                disabled={!!busy || !Object.values(dupPicks).some(Boolean)}
+                style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginTop: 6 }}
+                onClick={forceImportDuplicates}
+                title="Imports only the checked rows as additional transactions"
+              >
+                Import selected duplicates
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* every month the API returned for the selected year — showing only
+          the latest would hide earlier months' unexplained outflow */}
+      {coverage.length > 0 && (
+        <div
+          style={{
+            background: D.card,
+            border: `1px solid ${D.border}`,
+            borderRadius: 12,
+            padding: 16,
+            marginBottom: 16,
+          }}
+        >
+          {coverage.map((m, i) => (
+            <div key={m.month} style={{ marginBottom: i < coverage.length - 1 ? 10 : 0 }}>
+              <div style={{ fontSize: 14, color: D.muted, marginBottom: 6 }}>
+                {m.month} ledger coverage —{" "}
+                <span style={{ color: D.heading, fontWeight: 700 }}>
+                  {m.pct == null ? "—" : `${m.pct}%`}
+                </span>{" "}
+                of bank outflow is in the expenses ledger · {fmtM(m.unexplained)} unexplained
+              </div>
+              <div style={{ height: 6, background: D.border, borderRadius: 3, overflow: "hidden" }}>
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${m.pct || 0}%`,
+                    background: (m.pct || 0) >= 90 ? D.green : D.amber,
+                  }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+          <thead>
+            <tr style={{ color: D.muted, textAlign: "left" }}>
+              {["Date", "Account", "Description", "Amount", "Status", "Suggestion", ""].map((h) => (
+                <th key={h} style={{ padding: "10px 12px", borderBottom: `1px solid ${D.border}`, fontWeight: 600, textTransform: "uppercase", fontSize: 14, letterSpacing: 0.5 }}>
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={7} style={{ padding: 24, color: D.muted, textAlign: "center" }}>
+                  No imported transactions yet — upload a Capital One CSV export to start.
+                </td>
+              </tr>
+            )}
+            {rows.map((r) => (
+              <tr key={r.id} style={{ borderBottom: `1px solid ${D.border}` }}>
+                <td style={{ padding: "8px 12px", whiteSpace: "nowrap" }}>{fmtD(r.txn_date)}</td>
+                <td style={{ padding: "8px 12px", color: D.muted }}>{r.account_label}</td>
+                <td style={{ padding: "8px 12px", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.description}>
+                  {r.description}
+                </td>
+                <td style={{ padding: "8px 12px", fontFamily: MONO, whiteSpace: "nowrap", color: r.direction === "credit" ? D.green : D.text }}>
+                  {r.direction === "credit" ? "+" : "−"}
+                  {fmtM(r.amount)}
+                </td>
+                <td style={{ padding: "8px 12px" }}>
+                  <Badge small fontSize={14} color={BANK_STATUS_COLORS[r.status]}>
+                    {BANK_STATUS_LABELS[r.status] || r.status}
+                  </Badge>
+                </td>
+                <td style={{ padding: "8px 12px", color: D.muted, maxWidth: 260, overflow: "hidden", whiteSpace: "nowrap" }}>
+                  {/* a transfer-flagged CREDIT with candidates falls through
+                      to the select — a vendor refund whose descriptor says
+                      "transfer" still needs its Apply refund action (the
+                      hint folds into the select placeholder) */}
+                  {r.suggestion?.ignore
+                    && !(r.direction === "credit" && (r.suggestion?.refundCandidates?.length || r.suggestion?.payoutCandidates?.length))
+                    && !r.suggestion?.candidates?.length ? (
+                    "internal transfer?"
+                  ) : r.status === "unmatched" && (r.suggestion?.candidates?.length
+                    /* after the SOLE candidate is unlinked, the parked list is
+                       empty but the on-demand endpoint is rejection-agnostic —
+                       keep the picker reachable as the load entry point */
+                    || (r.direction === "debit" && (fullExpenseCands[r.id] || r.suggestion?.rejectedExpenseIds?.length || r.suggestion?.lastUnlink?.expenseId))) ? (
+                    <select
+                      style={{ ...bankInput, maxWidth: 240 }}
+                      value={linkPick[r.id] || ""}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === "__more_candidates") {
+                          // paged load-more — link-expense validates by
+                          // plausibility rules, so every entry is actionable
+                          const have = fullExpenseCands[r.id]?.list || [];
+                          adminFetch(`/admin/tax/bank-import/${r.id}/expense-candidates?offset=${have.length}`)
+                            .then((d) => setFullExpenseCands((p) => ({ ...p, [r.id]: { list: [...have, ...(d.candidates || [])], total: d.total ?? 0 } })))
+                            .catch(() => {});
+                          return;
+                        }
+                        setLinkPick((p) => ({ ...p, [r.id]: v }));
+                      }}
+                      title="Existing ledger expenses with a matching amount — link instead of creating a duplicate"
+                    >
+                      <option value="">
+                        {r.suggestion?.ignore ? "internal transfer? · " : ""}
+                        {(fullExpenseCands[r.id]?.list?.length ?? r.suggestion?.candidates?.length ?? 0) > 0
+                          ? `${fullExpenseCands[r.id]?.list?.length ?? r.suggestion.candidates.length} possible existing match${(fullExpenseCands[r.id]?.list?.length ?? r.suggestion.candidates.length) > 1 ? "es" : ""}…`
+                          : "link an existing expense…"}
+                      </option>
+                      {(fullExpenseCands[r.id]?.list || r.suggestion?.candidates || []).map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {(c.vendor_name || c.description || "expense").slice(0, 34)}
+                          {c.amount != null ? ` · ${fmtM(c.amount)}` : ""} · {fmtD(c.expense_date)}
+                        </option>
+                      ))}
+                      {(fullExpenseCands[r.id]
+                        ? fullExpenseCands[r.id].list.length < fullExpenseCands[r.id].total
+                        : (r.suggestion?.candidatesTotal || 0) > (r.suggestion?.candidates?.length || 0)
+                          || !r.suggestion?.candidates?.length) && (
+                        <option value="__more_candidates">
+                          {(fullExpenseCands[r.id]?.total ?? r.suggestion?.candidatesTotal ?? 0) > 0
+                            ? `+${(fullExpenseCands[r.id]?.total ?? r.suggestion.candidatesTotal) - (fullExpenseCands[r.id]?.list.length ?? (r.suggestion?.candidates?.length || 0))} more — load…`
+                            : "load matching expenses…"}
+                        </option>
+                      )}
+                    </select>
+                  ) : r.status === "unmatched" && r.direction === "credit" && (r.suggestion?.refundCandidates?.length || r.suggestion?.payoutCandidates?.length
+                    /* same reachability rule for credits: an unlinked payout
+                       leaves no parked candidates, so the picker renders on
+                       the rejection residue with load entries */
+                    || r.suggestion?.rejectedPayoutIds?.length || r.suggestion?.lastUnlink?.payoutId || fullPayouts[r.id] || fullRefunds[r.id]) ? (
+                    /* BOTH action types can be parked at once (an unrelated
+                       same-amount payout must not hide a legitimate refund) —
+                       one select, values prefixed p:/r: so the button knows
+                       which route the pick belongs to */
+                    <select
+                      style={{ ...bankInput, maxWidth: 240 }}
+                      value={linkPick[r.id] || ""}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === "__more_refunds") {
+                          // paged load-more — every entry is actionable
+                          // through apply-refund's plausibility validation,
+                          // and the option stays until ALL of `total` are
+                          // loaded (a hard truncation would strand a valid
+                          // off-page original)
+                          const have = fullRefunds[r.id]?.list || [];
+                          adminFetch(`/admin/tax/bank-import/${r.id}/refund-candidates?offset=${have.length}`)
+                            .then((d) => setFullRefunds((p) => ({ ...p, [r.id]: { list: [...have, ...(d.candidates || [])], total: d.total ?? 0 } })))
+                            .catch(() => {});
+                          return;
+                        }
+                        if (v === "__more_payouts") {
+                          adminFetch(`/admin/tax/bank-import/${r.id}/payout-candidates`)
+                            .then((d) => setFullPayouts((p) => ({ ...p, [r.id]: d.candidates || [] })))
+                            .catch(() => {});
+                          return;
+                        }
+                        setLinkPick((p) => ({ ...p, [r.id]: v }));
+                      }}
+                      title="What is this deposit? Pick the Stripe payout it is, or the original purchase it refunds (applying a refund reduces that expense)"
+                    >
+                      <option value="">
+                        {[
+                          r.suggestion?.ignore ? "internal transfer?" : null,
+                          r.suggestion?.payoutCandidates?.length ? `${r.suggestion.payoutCandidates.length} payout${r.suggestion.payoutCandidates.length > 1 ? "s" : ""}` : null,
+                          r.suggestion?.refundCandidates?.length ? `${r.suggestion.refundCandidates.length} original purchase${r.suggestion.refundCandidates.length > 1 ? "s" : ""}` : null,
+                        ].filter(Boolean).join(" · ") || "link payout / refund"}
+                        …
+                      </option>
+                      {!!(r.suggestion?.payoutCandidates?.length || fullPayouts[r.id]
+                        || r.suggestion?.rejectedPayoutIds?.length || r.suggestion?.lastUnlink?.payoutId) && (
+                        <optgroup label="Stripe payouts — link">
+                          {(fullPayouts[r.id] || r.suggestion?.payoutCandidates || []).map((c) => (
+                            <option key={`p:${c.id}`} value={`p:${c.id}`}>
+                              {fmtM(c.amount)} · arrived {fmtD(c.arrival_date)}
+                            </option>
+                          ))}
+                          {!fullPayouts[r.id] && ((r.suggestion?.payoutCandidatesTotal || 0) > (r.suggestion?.payoutCandidates?.length || 0)
+                            || !r.suggestion?.payoutCandidates?.length) && (
+                            <option value="__more_payouts">
+                              {(r.suggestion?.payoutCandidatesTotal || 0) > 0
+                                ? `+${r.suggestion.payoutCandidatesTotal - (r.suggestion?.payoutCandidates?.length || 0)} more — load all…`
+                                : "load payouts…"}
+                            </option>
+                          )}
+                        </optgroup>
+                      )}
+                      <optgroup label="Original purchases — apply refund">
+                        {(fullRefunds[r.id]?.list || r.suggestion?.refundCandidates || []).map((c) => (
+                          <option key={`r:${c.id}`} value={`r:${c.id}`}>
+                            {(c.vendor_name || c.description || "expense").slice(0, 34)} · {fmtM(c.amount)} · {fmtD(c.expense_date)}
+                          </option>
+                        ))}
+                        {(fullRefunds[r.id]
+                          ? fullRefunds[r.id].list.length < fullRefunds[r.id].total
+                          : (r.suggestion?.refundCandidatesTotal || 0) > (r.suggestion?.refundCandidates?.length || 0)
+                            || !r.suggestion?.refundCandidates?.length) && (
+                          <option value="__more_refunds">
+                            {(fullRefunds[r.id]?.total ?? r.suggestion?.refundCandidatesTotal ?? 0) > 0
+                              ? `+${(fullRefunds[r.id]?.total ?? r.suggestion.refundCandidatesTotal) - (fullRefunds[r.id]?.list.length ?? (r.suggestion?.refundCandidates?.length || 0))} more — load…`
+                              : "load original purchases…"}
+                          </option>
+                        )}
+                      </optgroup>
+                    </select>
+                  ) : (
+                    r.suggestion?.categoryName || ""
+                  )}
+                </td>
+                <td style={{ padding: "8px 12px", whiteSpace: "nowrap" }}>
+                  {r.status === "unmatched" && r.direction === "debit" && linkPick[r.id] && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
+                      onClick={() =>
+                        act("link", `/admin/tax/bank-import/${r.id}/link-expense`, { expenseId: linkPick[r.id] }).then((res) => {
+                          if (res)
+                            setLinkPick((p) => {
+                              const next = { ...p };
+                              delete next[r.id];
+                              return next;
+                            });
+                        })
+                      }
+                    >
+                      Link
+                    </button>
+                  )}
+                  {r.status === "unmatched" && r.direction === "credit" && linkPick[r.id] && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
+                      onClick={() => {
+                        // the pick's p:/r: prefix says which route it belongs
+                        // to — both lists can be parked on one credit
+                        const pick = String(linkPick[r.id] || "");
+                        const isRefund = pick.startsWith("r:");
+                        const id = pick.slice(2);
+                        const path = isRefund
+                          ? `/admin/tax/bank-import/${r.id}/apply-refund`
+                          : `/admin/tax/bank-import/${r.id}/link-payout`;
+                        const body = isRefund ? { expenseId: id } : { payoutId: id };
+                        act(isRefund ? "apply-refund" : "link-payout", path, body).then((res) => {
+                          if (res)
+                            setLinkPick((p) => {
+                              const next = { ...p };
+                              delete next[r.id];
+                              return next;
+                            });
+                        });
+                      }}
+                    >
+                      {String(linkPick[r.id] || "").startsWith("r:") ? "Apply refund" : "Link payout"}
+                    </button>
+                  )}
+                  {/* transfer-flagged rows keep Create too — the flag is only a
+                      suggestion, and a legit vendor can trip the heuristic.
+                      The category selector lives HERE so it stays reachable
+                      in every review state (transfer warning, parked
+                      candidates). Refund credits go through Apply refund. */}
+                  {r.status === "unmatched" && r.direction === "debit" && !linkPick[r.id] && (
+                    <>
+                      <select
+                        style={{ ...bankInput, maxWidth: 170, marginRight: 6 }}
+                        value={catPick[r.id] || ""}
+                        onChange={(e) => setCatPick((p) => ({ ...p, [r.id]: e.target.value }))}
+                        title="Category — the AI suggestion is only a default; pick to override"
+                      >
+                        <option value="">
+                          {r.suggestion?.categoryName ? `AI: ${r.suggestion.categoryName}` : "Category…"}
+                        </option>
+                        {categories.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        disabled={!!busy}
+                        style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginRight: 6 }}
+                        onClick={() =>
+                          // an operator-picked category overrides the AI
+                          // suggestion (and skips the AI-verify note)
+                          act("create", `/admin/tax/bank-import/${r.id}/create-expense`, catPick[r.id] ? { categoryId: catPick[r.id] } : {}).then((res) => {
+                            if (res)
+                              setCatPick((p) => {
+                                const next = { ...p };
+                                delete next[r.id];
+                                return next;
+                              });
+                          })
+                        }
+                      >
+                        Create expense
+                      </button>
+                    </>
+                  )}
+                  {r.status === "unmatched" && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...bankInput, cursor: "pointer", color: D.muted }}
+                      onClick={() => act("ignore", `/admin/tax/bank-import/${r.id}/ignore`)}
+                    >
+                      Ignore
+                    </button>
+                  )}
+                  {/* released refunds are terminal — no reopen path (the
+                      expense keeps its reduction; reopening could reduce a
+                      second expense with the same credit) */}
+                  {r.status === "ignored" && !r.suggestion?.releasedRefundOf && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...bankInput, cursor: "pointer", color: D.muted }}
+                      onClick={() => act("unignore", `/admin/tax/bank-import/${r.id}/unignore`)}
+                    >
+                      Undo
+                    </button>
+                  )}
+                  {(r.status === "matched_expense" || r.status === "matched_payout" || r.status === "refund_applied") && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...bankInput, cursor: "pointer", color: D.muted }}
+                      title={r.status === "refund_applied"
+                        ? "Undo this refund — restores the adjusted expense and returns the credit to review"
+                        : "Wrong match? Returns the row to Needs Review; the linked expense/payout itself is untouched"}
+                      onClick={() => {
+                        if (window.confirm(r.status === "refund_applied" ? "Undo this refund? The adjusted expense is restored." : "Unlink this bank row from its matched ledger record?"))
+                          act("unlink", `/admin/tax/bank-import/${r.id}/unlink`);
+                      }}
+                    >
+                      {r.status === "refund_applied" ? "Undo refund" : "Unlink"}
+                    </button>
+                  )}
+                  {r.status === "refund_applied" && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...bankInput, cursor: "pointer", color: D.muted, marginLeft: 6 }}
+                      title="Already fixed the expense by hand on the Expenses tab? Clears this refund association WITHOUT touching the expense — the escape hatch when Undo refuses because the expense changed"
+                      onClick={() => {
+                        if (window.confirm("Release this refund WITHOUT restoring the expense? Only after you already corrected the expense manually on the Expenses tab."))
+                          act("release", `/admin/tax/bank-import/${r.id}/unlink`, { releaseOnly: true });
+                      }}
+                    >
+                      Release
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {hasMore && (
+          <div style={{ padding: 12, textAlign: "center" }}>
+            <button
+              type="button"
+              style={{ ...bankInput, cursor: "pointer", fontWeight: 600 }}
+              onClick={() => loadRows(rows.length)}
+            >
+              Load 200 more
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function TaxPage() {
   const [activeTab, setActiveTab] = useState("overview");
+  // GATE_BANK_IMPORT: the leaf only exists when the server says the gate is
+  // on (status is the one bank-import endpoint that answers while dark).
+  const [bankImportOn, setBankImportOn] = useState(false);
+  const tabGroups = bankImportOn
+    ? TAX_TAB_GROUPS.map((g) =>
+        g.key === "expenses" ? { ...g, tabs: [...g.tabs, "bankimport"] } : g,
+      )
+    : TAX_TAB_GROUPS;
   const activeGroup =
-    TAX_TAB_GROUPS.find((g) => g.tabs.includes(activeTab)) || TAX_TAB_GROUPS[0];
+    tabGroups.find((g) => g.tabs.includes(activeTab)) || tabGroups[0];
   const [dashboard, setDashboard] = useState(null);
   const [quickPnl, setQuickPnl] = useState(null);
   const [arSummary, setArSummary] = useState(null);
 
   useEffect(() => {
+    adminFetch("/admin/tax/bank-import/status")
+      .then((s) => setBankImportOn(!!s?.enabled))
+      .catch(() => {});
     adminFetch("/admin/tax/dashboard")
       .then(setDashboard)
       .catch(() => {});
@@ -4014,14 +4790,14 @@ export default function TaxPage() {
       <AdminCommandHeader
         title="Taxes"
         icon={Receipt}
-        sections={TAX_TAB_GROUPS.map((g) =>
+        sections={tabGroups.map((g) =>
           g.tabs.includes("advisor") && d?.pendingAlerts?.high
             ? { key: g.key, label: `${g.label} (${d.pendingAlerts.high})`, Icon: g.Icon }
             : { key: g.key, label: g.label, Icon: g.Icon },
         )}
         activeKey={activeGroup.key}
         onSectionChange={(key) => {
-          const g = TAX_TAB_GROUPS.find((x) => x.key === key);
+          const g = tabGroups.find((x) => x.key === key);
           if (g) setActiveTab(g.tabs[0]);
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
@@ -4423,6 +5199,7 @@ export default function TaxPage() {
       {activeTab === "exemptions" && <ExemptionsTab />}
       {activeTab === "equipment" && <EquipmentTab />}
       {activeTab === "expenses" && <ExpensesTab />}
+      {activeTab === "bankimport" && <BankImportTab />}
       {activeTab === "mileage" && <MileageTab />}
       {activeTab === "revenue" && <RevenueTab />}
       {activeTab === "filings" && <FilingCalendarTab />}

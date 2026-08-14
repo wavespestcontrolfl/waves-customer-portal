@@ -1057,10 +1057,24 @@ async function getCashFlow(startDate, endDate) {
  * @param {number} actualAmount — amount that hit the bank
  * @param {string} notes — reconciliation notes
  * @param {string} reconciledBy — who reconciled
+ * @param {string} status — draft | confirmed | rejected
+ * @param {object} opts — optional atomic guards, checked under a row lock
+ *   inside the transaction; a guard miss returns { skipped: true } instead
+ *   of writing, so automation can never clobber a concurrent human
+ *   reconciliation in either direction:
+ *   - onlyIfUnreconciled: proceed only if the payout is NOT currently
+ *     reconciled (automated confirms).
+ *   - precondition: async (trx) => boolean — arbitrary caller-owned check
+ *     run inside the same transaction (after the payout row lock); returning
+ *     false skips the write. Callers use it to lock-and-verify their own
+ *     rows so the reconciliation can't outlive the state that justified it.
+ *   - trx: run inside this EXISTING transaction instead of opening one —
+ *     for callers that must make the reconciliation atomic with their own
+ *     writes (their commit/rollback governs everything together).
  */
-async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, status = 'confirmed') {
+async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, status = 'confirmed', opts = {}) {
   try {
-    const payout = await db('stripe_payouts').where('id', payoutId).first();
+    const payout = await (opts.trx || db)('stripe_payouts').where('id', payoutId).first();
     if (!payout) throw new Error('Payout not found');
 
     const allowedStatuses = ['draft', 'confirmed', 'rejected'];
@@ -1071,13 +1085,70 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
       throw new Error('Invalid actual amount');
     }
 
-    const expectedAmount = parseFloat(payout.amount || 0);
+    let expectedAmount = parseFloat(payout.amount || 0);
     const normalizedActual = Number(actualAmount);
-    const discrepancy = Math.round((normalizedActual - expectedAmount) * 100) / 100;
-    const matched = Math.abs(discrepancy) < 0.01;
-    const now = new Date().toISOString();
+    let discrepancy = Math.round((normalizedActual - expectedAmount) * 100) / 100;
+    let matched = Math.abs(discrepancy) < 0.01;
+    let now; // assigned AFTER the payout row lock — see below
 
-    await db.transaction(async (trx) => {
+    let skipped = false;
+    // In an externally-owned transaction the caller's commit/rollback
+    // governs these writes together with its own.
+    const runInTransaction = opts.trx ? (fn) => fn(opts.trx) : (fn) => db.transaction(fn);
+    await runInTransaction(async (trx) => {
+      // EVERY reconciliation writer — human or automation — serializes on
+      // the payout row before touching history. Without this, an unguarded
+      // human write could interleave with a guarded automated one and
+      // commit later while carrying an earlier reconciled_at, making the
+      // latest-row history checks lie.
+      const cur = await trx('stripe_payouts').where('id', payoutId).forUpdate().first('reconciled', 'reconciled_by', 'amount');
+      // The reconciliation fields are recomputed from the LOCKED amount —
+      // a payout.updated webhook can rewrite it between the unlocked read
+      // above and this lock, and a history row computed from the stale
+      // amount would record a false discrepancy/matched verdict.
+      if (cur) {
+        expectedAmount = parseFloat(cur.amount || 0);
+        discrepancy = Math.round((normalizedActual - expectedAmount) * 100) / 100;
+        matched = Math.abs(discrepancy) < 0.01;
+      }
+      // Timestamp AFTER the lock: writers commit in lock order, so
+      // reconciled_at ordering matches commit ordering and the
+      // latest-history checks can trust it. (A pre-lock timestamp could
+      // make a later-committing writer look older.) This app-clock value
+      // stamps only the payout row and the return payload; the HISTORY row
+      // the ordering queries read gets the DB clock at insert (below).
+      now = new Date().toISOString();
+      // (an onlyIfReconciledBy author-guard variant existed here briefly —
+      // removed unused: reversal callers do their ownership check under
+      // the payout lock and pass trx directly)
+      if (opts.onlyIfUnreconciled) {
+        if (!cur || cur.reconciled) {
+          skipped = 'guard';
+          return;
+        }
+        // onlyIfUnreconciled is an AUTOMATION confirm: "unreconciled" does
+        // not distinguish never-reconciled from a HUMAN's explicit rejection
+        // ('rejected' clears the payout flag). A human ruling stands —
+        // check the latest reconciliation row under the same lock and skip
+        // with a DISTINCT reason so callers can un-finalize their link.
+        const latest = await trx('bank_reconciliation')
+          .where('payout_id', payoutId)
+          .orderBy('reconciled_at', 'desc')
+          .orderBy('created_at', 'desc')
+          .orderBy('id', 'desc') // deterministic final tie-breaker
+          .first('status', 'reconciled_by');
+        if (latest && ['rejected', 'draft'].includes(latest.status) && !String(latest.reconciled_by || '').startsWith('bank-import')) {
+          // rejected = the ruling stands (callers un-finalize their link);
+          // draft = active human deliberation (callers keep their retry
+          // marker and wait — automation never writes over a draft)
+          skipped = latest.status === 'rejected' ? 'human_rejected' : 'human_draft';
+          return;
+        }
+      }
+      if (opts.precondition && !(await opts.precondition(trx))) {
+        skipped = 'precondition';
+        return;
+      }
       const reconRow = {
         payout_id: payoutId,
         expected_amount: expectedAmount,
@@ -1086,7 +1157,13 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
         discrepancy,
         notes,
         status,
-        reconciled_at: now,
+        // DB clock, evaluated at insert time — AFTER the payout lock: one
+        // clock for every pod (app clocks can skew across writers) at
+        // microsecond precision (toISOString ties at milliseconds), so the
+        // latest-history ordering follows lock/commit order. The payout row
+        // and the return value keep the app-clock stamp below — nothing
+        // orders by them.
+        reconciled_at: db.raw('clock_timestamp()'),
         reconciled_by: reconciledBy,
       };
       await trx('bank_reconciliation').insert(reconRow);
@@ -1098,6 +1175,11 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
         reconciled_by: status === 'confirmed' ? reconciledBy : null,
       });
     });
+
+    if (skipped) {
+      logger.info(`[stripe-banking] Payout ${payoutId} reconciliation=${status} SKIPPED (${skipped}) — guard did not match current state`);
+      return { payout_id: payoutId, skipped: true, reason: skipped };
+    }
 
     logger.info(`[stripe-banking] Payout ${payoutId} reconciliation=${status}: expected=$${expectedAmount}, actual=$${normalizedActual}, matched=${matched}`);
 

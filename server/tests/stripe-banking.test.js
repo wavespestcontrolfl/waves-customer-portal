@@ -6,6 +6,9 @@ describe('stripe banking service', () => {
   let payoutAttempts;
   let syncStateRow;
   let syncStatePatch;
+  let payoutRow;
+  let reconInserts;
+  let latestRecon;
   let service;
 
   function makePayoutAttemptQuery() {
@@ -49,6 +52,9 @@ describe('stripe banking service', () => {
     payoutAttempts = [];
     syncStateRow = null;
     syncStatePatch = null;
+    payoutRow = { id: 'local-payout-1', stripe_payout_id: 'po_123', amount: '120.00' };
+    reconInserts = [];
+    latestRecon = null;
 
     stripeClient = {
       balance: { retrieve: jest.fn() },
@@ -60,7 +66,8 @@ describe('stripe banking service', () => {
       if (table === 'stripe_payouts') {
         return {
           where: jest.fn().mockReturnThis(),
-          first: jest.fn().mockResolvedValue({ id: 'local-payout-1', stripe_payout_id: 'po_123', amount: '120.00' }),
+          forUpdate: jest.fn().mockReturnThis(),
+          first: jest.fn(async () => payoutRow),
           update: jest.fn((patch) => { payoutUpdate = patch; return Promise.resolve(1); }),
           insert: jest.fn(() => ({
             onConflict: jest.fn(() => ({
@@ -95,9 +102,19 @@ describe('stripe banking service', () => {
         };
       }
       if (table === 'stripe_payout_idempotency_attempts') return makePayoutAttemptQuery();
+      if (table === 'bank_reconciliation') {
+        return {
+          insert: jest.fn((row) => { reconInserts.push(row); return Promise.resolve([1]); }),
+          where: jest.fn().mockReturnThis(),
+          orderBy: jest.fn().mockReturnThis(),
+          first: jest.fn(async () => latestRecon),
+        };
+      }
       throw new Error(`Unexpected table ${table}`);
     });
     db.transaction = jest.fn(async (callback) => callback(db));
+    // the history row's reconciled_at is a DB-clock expression
+    db.raw = jest.fn((sql) => ({ __raw: sql }));
 
     jest.doMock('../models/db', () => db);
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_123', apiVersion: '2024-06-20' }));
@@ -506,5 +523,85 @@ describe('stripe banking service', () => {
 
     await expect(service.createInstantPayout(50, { idempotencyKey: 'ipo_propagate_status' }))
       .rejects.toMatchObject({ message: 'Insufficient instant available balance', status: 400 });
+  });
+
+  describe('reconcilePayout guards', () => {
+    test('onlyIfUnreconciled writes when nothing is reconciled yet', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import', 'confirmed', { onlyIfUnreconciled: true });
+      expect(result.skipped).toBeUndefined();
+      expect(reconInserts).toHaveLength(1);
+      expect(payoutUpdate).toMatchObject({ reconciled: true, reconciled_by: 'bank-import' });
+    });
+
+    test('onlyIfUnreconciled skips atomically when a human reconciled first — nothing is written', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: true, reconciled_by: 'adam' };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import', 'confirmed', { onlyIfUnreconciled: true });
+      expect(result).toMatchObject({ payout_id: 'local-payout-1', skipped: true });
+      expect(reconInserts).toHaveLength(0);
+      expect(payoutUpdate).toBeNull();
+    });
+
+    test('a false precondition skips atomically inside the transaction — nothing is written', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      const precondition = jest.fn(async () => false);
+      const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import', 'confirmed', { onlyIfUnreconciled: true, precondition });
+      expect(precondition).toHaveBeenCalledWith(db); // receives the trx
+      expect(result).toMatchObject({ payout_id: 'local-payout-1', skipped: true });
+      expect(reconInserts).toHaveLength(0);
+      expect(payoutUpdate).toBeNull();
+    });
+
+    test('a true precondition lets the write proceed', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import', 'confirmed', { onlyIfUnreconciled: true, precondition: async () => true });
+      expect(result.skipped).toBeUndefined();
+      expect(reconInserts).toHaveLength(1);
+    });
+
+    test("onlyIfUnreconciled respects a HUMAN's explicit rejection — automation never re-confirms it", async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      latestRecon = { status: 'rejected', reconciled_by: 'adam' };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import:bt-1', 'confirmed', { onlyIfUnreconciled: true });
+      expect(result.skipped).toBe(true);
+      expect(reconInserts).toHaveLength(0);
+      expect(payoutUpdate).toBeNull();
+    });
+
+    test('a bank-import-authored rejection (an unlink reversal) does NOT block a later automated confirm', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      latestRecon = { status: 'rejected', reconciled_by: 'bank-import:bt-old' };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import:bt-new', 'confirmed', { onlyIfUnreconciled: true });
+      expect(result.skipped).toBeUndefined();
+      expect(reconInserts).toHaveLength(1);
+    });
+
+    test('a human DRAFT skips distinctly — automation never writes over deliberation', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      latestRecon = { status: 'draft', reconciled_by: 'adam' };
+      const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import:bt-1', 'confirmed', { onlyIfUnreconciled: true });
+      expect(result).toMatchObject({ skipped: true, reason: 'human_draft' });
+      expect(reconInserts).toHaveLength(0);
+      expect(payoutUpdate).toBeNull();
+    });
+
+    test('opts.trx joins the external transaction instead of opening one', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: true, reconciled_by: 'bank-import:bt-1' };
+      const before = db.transaction.mock.calls.length;
+      const result = await service.reconcilePayout('local-payout-1', 120, 'undo', 'bank-import:bt-1', 'rejected', { trx: db });
+      expect(db.transaction.mock.calls.length).toBe(before); // no new transaction opened
+      expect(result.skipped).toBeUndefined();
+      expect(reconInserts).toHaveLength(1);
+      expect(payoutUpdate).toMatchObject({ reconciled: false });
+    });
+
+    test('no guard passed = unchanged legacy behavior (unconditional write)', async () => {
+      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
+      const result = await service.reconcilePayout('local-payout-1', 118.5, 'bank shows less', 'admin', 'confirmed');
+      expect(result.skipped).toBeUndefined();
+      expect(result.discrepancy).toBe(-1.5);
+      expect(reconInserts).toHaveLength(1);
+      expect(payoutUpdate).toMatchObject({ reconciled: true });
+    });
   });
 });

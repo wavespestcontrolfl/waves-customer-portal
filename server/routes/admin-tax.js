@@ -1611,4 +1611,1012 @@ router.get('/export/tax-package', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ═══════════════════════════════════════════════════════════════
+// BANK IMPORT (GATE_BANK_IMPORT) — statement CSV → staging → reconcile
+// ═══════════════════════════════════════════════════════════════
+// Staging only: nothing under /bank-import writes to `expenses` except the
+// explicit create-expense action below, which reuses the exact policy the
+// manual POST /expenses applies (server-owned partial deduction, AI-verify
+// flag). See services/bank-import.js for the matching policy.
+
+const nodeCrypto = require('crypto');
+const bankImport = require('../services/bank-import');
+const { gateEnvValue } = require('../config/feature-gates');
+
+const MAX_STATEMENT_BYTES = 2 * 1024 * 1024;
+
+// Every read endpoint the tab loads CONCURRENTLY self-heals before its own
+// snapshot (the client fires /status, /transactions and /coverage together,
+// so none may rely on a sibling's healing having landed first): dangling
+// FKs, edited/ineligible expense links, ineligible payout links (webhooks
+// fail/reschedule payouts between passes), and orphaned refunds whose
+// association lives only in suggestion JSON. All are fixed-count scans that
+// write only on actual violations.
+async function healBankImportSnapshot() {
+  await bankImport.resetDanglingLinks();
+  await bankImport.healEditedExpenseLinks();
+  await bankImport.healUnreconciledLinks();
+  await bankImport.healOrphanRefunds();
+  // crash-leftover claim verifications finish here too (bounded sweeps):
+  // the snapshots must not count a possibly-ambiguous claim as completed,
+  // and a verifyPending payout is deliberately excluded from echo retries
+  // until someone verifies it
+  await bankImport.verifyPendingExpenseClaims();
+  await bankImport.verifyPendingPayoutClaims();
+  // and the echo retries: a payout claim whose verification a page load
+  // just finished must not sit reconcilePending until an explicit
+  // matching action (bounded 25 + rotation, same as a matching pass)
+  await bankImport.retryPendingEchoes();
+}
+
+// /bank-import/status always answers (the client uses it to decide whether
+// to show the tab at all); every other bank-import route 404s when dark.
+router.get('/bank-import/status', async (req, res, next) => {
+  try {
+    if (!gateEnvValue('GATE_BANK_IMPORT')) return res.json({ enabled: false });
+    await healBankImportSnapshot();
+    const counts = await db('bank_transactions').select('status').count('* as n').groupBy('status');
+    res.json({
+      enabled: true,
+      counts: Object.fromEntries(counts.map(c => [c.status, parseInt(c.n, 10)])),
+    });
+  } catch (err) { next(err); }
+});
+
+router.use('/bank-import', (req, res, next) => {
+  if (!gateEnvValue('GATE_BANK_IMPORT')) return res.status(404).json({ error: 'not found' });
+  next();
+});
+
+router.post('/bank-import/upload', async (req, res, next) => {
+  try {
+    const { accountLabel, accountType, filename, csv, forceDuplicates, forceRowHashes, forceToken } = req.body || {};
+    // normalized ONCE and reused everywhere below — a whitespace-only label
+    // would otherwise store/hash as '' and merge unrelated accounts
+    const label = typeof accountLabel === 'string' ? accountLabel.trim() : '';
+    if (!label || label.length > 100) {
+      return res.status(400).json({ error: 'accountLabel is required (max 100 chars)' });
+    }
+    if (!['bank', 'card'].includes(accountType)) {
+      return res.status(400).json({ error: "accountType must be 'bank' or 'card'" });
+    }
+    if (typeof csv !== 'string' || csv.length === 0) {
+      return res.status(400).json({ error: 'csv text is required' });
+    }
+    if (Buffer.byteLength(csv, 'utf8') > MAX_STATEMENT_BYTES) {
+      return res.status(400).json({ error: 'statement too large (2MB max)' });
+    }
+    // Force options are validated BEFORE any insert — a 400 must mean
+    // "nothing changed", never "your rows imported but the force was ignored".
+    if (forceDuplicates === true
+      && (!Array.isArray(forceRowHashes) || forceRowHashes.length === 0 || forceRowHashes.length > 10000
+        || !forceRowHashes.every(h => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h))
+        || typeof forceToken !== 'string' || forceToken.length < 8 || forceToken.length > 64)) {
+      return res.status(400).json({ error: 'forceDuplicates requires forceRowHashes + forceToken from the original upload response' });
+    }
+    const { rows, skipped } = bankImport.parseStatementCsv(csv);
+    if (rows.length === 0) {
+      return res.status(400).json({ error: 'no usable rows in that CSV', skipped: skipped.slice(0, 50), skippedTotal: skipped.length });
+    }
+    const hashed = bankImport.withRowHashes(label, rows);
+    const toInsert = hashed.map(r => ({
+      account_label: label,
+      account_type: accountType,
+      txn_date: r.txn_date,
+      description: r.description,
+      amount: r.amount,
+      direction: r.direction,
+      source: 'csv',
+      source_file: String(filename || '').slice(0, 300) || null,
+      row_hash: r.row_hash,
+    }));
+    // Chunked: 9 binds/row × 8k+ rows in one statement would blow past
+    // PostgreSQL's 65,535 bind-parameter ceiling and fail the whole upload.
+    // One transaction across all chunks: a mid-upload failure rolls the
+    // whole import back, so an error response always means "nothing
+    // imported" — never a partial commit that a retry then misreports as
+    // duplicates. (Force inserts below stay outside: their retry is already
+    // idempotent via the confirmation token.)
+    const inserted = [];
+    await db.transaction(async (trx) => {
+      // Advisory xact-lock serializes uploads per canonical label, making
+      // the label→type invariant race-free: two concurrent FIRST uploads
+      // of the same label with different types can't both pass the check.
+      await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`bank-import-label:${label.toUpperCase()}`]);
+      // One account_type per canonical label: row_hash excludes account_type,
+      // so re-using a label under the other type would silently dedupe against
+      // the existing rows (and book expenses with the wrong payment_method).
+      const existingType = await trx('bank_transactions')
+        .whereRaw('upper(trim(account_label)) = upper(?)', [label])
+        .first('account_type');
+      if (existingType && existingType.account_type !== accountType) {
+        const asWhat = existingType.account_type === 'bank' ? 'a bank account' : 'a credit card';
+        const e = new Error(`"${label}" is already imported as ${asWhat} — keep that type, or use a different label if this is a different account`);
+        e.status = 400;
+        throw e; // rolls back before any insert
+      }
+      for (let i = 0; i < toInsert.length; i += 500) {
+        const batch = await trx('bank_transactions')
+          .insert(toInsert.slice(i, i + 500))
+          .onConflict('row_hash')
+          .ignore()
+          .returning(['id', 'row_hash']);
+        inserted.push(...batch);
+      }
+    });
+    // Duplicates are SURFACED, not silently swallowed: identical rows carry
+    // no bank-side ID in a CSV, so a skipped row is *probably* a re-upload
+    // but could be a genuinely distinct identical purchase from a partial
+    // earlier export. The operator sees exactly which rows were skipped and
+    // can add the real one by hand if it wasn't a re-upload.
+    const insertedHashes = new Set(inserted.map(r => r.row_hash));
+    const duplicateRows = hashed.filter(r => !insertedHashes.has(r.row_hash));
+    // Force path for the split-across-uploads case: a genuinely distinct
+    // identical transaction in a SEPARATE file hashes like a re-upload and
+    // is skipped above. When the operator confirms these are real:
+    // - Replay safety comes from the SERVER-ISSUED forceToken: a forced row
+    //   records {forceToken, forcedFor} in suggestion, and a re-post of the
+    //   same confirmation (double-click, network retry) finds that record
+    //   and reports alreadyPresent instead of minting another copy.
+    // - A LATER genuine confirmation carries a NEW token, so it walks to the
+    //   next free ordinal — a third/fourth identical transaction stays
+    //   importable. The walk starts at the file's occurrence count for the
+    //   tuple — past every ordinal this file occupies, so it can never
+    //   collide with a row the same upload imported normally — and lets
+    //   conflicts advance it, so the canonical sequence stays CONTIGUOUS:
+    //   adding the row's own ordinal would leave holes (forcing the second
+    //   of two stored duplicates would land at 3, not 2) that a later
+    //   fuller export refills as phantom extra copies.
+    // ⛔ Force is scoped to EXPLICIT row hashes from the FIRST response's
+    // duplicate set: on the confirming re-post every previously inserted row
+    // conflicts too, so an unscoped force would duplicate the whole
+    // statement, not just the skipped rows.
+    let forced = 0;
+    let forceAlreadyPresent = 0;
+    let forceFailed = 0;
+    if (forceDuplicates === true) {
+      const tupleCounts = new Map();
+      for (const h of hashed) tupleCounts.set(h.tuple_key, (tupleCounts.get(h.tuple_key) || 0) + 1);
+      const forceSet = new Set(forceRowHashes);
+      for (const r of duplicateRows.filter(d => forceSet.has(d.row_hash))) {
+        const replay = await db('bank_transactions')
+          .whereRaw("suggestion->>'forceToken' = ?", [forceToken])
+          .whereRaw("suggestion->>'forcedFor' = ?", [r.row_hash])
+          .first('id');
+        if (replay) { forceAlreadyPresent++; continue; }
+        const startOrdinal = tupleCounts.get(r.tuple_key);
+        let landed = false;
+        let lostIdentityRace = false;
+        for (let ord = startOrdinal; ord < startOrdinal + 25 && !landed && !lostIdentityRace; ord++) {
+          try {
+            const [ins] = await db('bank_transactions')
+              .insert({
+                account_label: label,
+                account_type: accountType,
+                txn_date: r.txn_date,
+                description: r.description,
+                amount: r.amount,
+                direction: r.direction,
+                source: 'csv',
+                source_file: String(filename || '').slice(0, 300) || null,
+                row_hash: bankImport.hashRow(label, r, ord),
+                suggestion: { forceToken, forcedFor: r.row_hash },
+              })
+              .onConflict('row_hash')
+              .ignore()
+              .returning(['id']);
+            if (ins) landed = true;
+          } catch (err) {
+            // onConflict only swallows row_hash conflicts; a 23505 that
+            // surfaces here is the partial unique index on
+            // (forceToken, forcedFor) — a concurrent retry of this SAME
+            // confirmation won the race, which IS replay safety. The
+            // SELECT above is just the fast path; this is the guarantee.
+            if (err.code !== '23505') throw err;
+            lostIdentityRace = true;
+          }
+        }
+        if (landed) forced++;
+        else if (lostIdentityRace) forceAlreadyPresent++;
+        // walk exhausted with THIS token unrecorded = the copy was NOT
+        // imported — reporting it as already-present would silently drop a
+        // real transaction from review; surface it as an explicit failure
+        else forceFailed++;
+      }
+    }
+    // The inserts above are already committed — a matching failure must NOT
+    // turn the response into an error, or a retry re-reports every committed
+    // row as a duplicate and dangles the force-import footgun. Imports are
+    // reported as what they are; matching is retryable via "Run matching".
+    let matching = null;
+    let matchingError = null;
+    try {
+      // bounded: a multi-thousand-row backfill must not run thousands of
+      // serial per-row queries inside this request — the response reports
+      // moreRemaining and "Run matching" continues the pass
+      matching = await bankImport.runDeterministicMatching({ limit: 500 });
+    } catch (err) {
+      logger.warn(`[bank-import] upload imported rows but the matching pass failed: ${err.message}`);
+      matchingError = 'rows imported, but the matching pass failed — use "Run matching" to retry';
+    }
+    res.json({
+      success: true,
+      parsed: rows.length,
+      imported: inserted.length + forced,
+      forced,
+      forceAlreadyPresent,
+      forceFailed,
+      duplicates: duplicateRows.length,
+      // capped in lockstep with duplicateRows below — force selection
+      // operates on what is shown
+      duplicateHashes: duplicateRows.slice(0, 200).map(r => r.row_hash),
+      // one-time confirmation identity for a force re-post (replay-safe)
+      forceToken: duplicateRows.length > 0 ? nodeCrypto.randomUUID() : null,
+      duplicateSamples: duplicateRows.slice(0, 10).map(r => ({ txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
+      // per-row force selection payload, hash included — one genuinely
+      // distinct same-tuple transaction must be recoverable WITHOUT also
+      // re-importing every ordinary overlap. CAPPED: the parser accepts
+      // multi-thousand-row files, and a wholesale re-upload would otherwise
+      // ship a multi-megabyte checkbox list; the honest remainder is
+      // disclosed and force selection works on what is shown (a smaller
+      // re-upload slice reaches the rest).
+      duplicateRows: duplicateRows.slice(0, 200).map(r => ({ row_hash: r.row_hash, txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
+      // bounded sample + honest total: a malformed file can skip one row
+      // per record, and echoing tens of thousands of reason objects back
+      // would dwarf the upload itself
+      skipped: skipped.slice(0, 50),
+      skippedTotal: skipped.length,
+      matching,
+      matchingError,
+    });
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.get('/bank-import/transactions', async (req, res, next) => {
+  try {
+    // the rendered rows carry ACTIONS (Unlink/Undo) — heal before this
+    // snapshot too, or a concurrent /status heal lands after this read and
+    // the page shows stale rows whose actions can only 409
+    await healBankImportSnapshot();
+    const { status, month, account } = req.query;
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    // limit+1 sentinel row answers hasMore without a second count query.
+    // id tie-breaker makes the order TOTAL — bulk-inserted rows share
+    // txn_date+created_at, and an unstable order across offset pages would
+    // repeat some rows and silently drop others from review.
+    let q = db('bank_transactions').orderBy('txn_date', 'desc').orderBy('created_at', 'desc').orderBy('id', 'desc').limit(limit + 1).offset(offset);
+    if (status) q = q.where('status', String(status));
+    if (account) q = q.where('account_label', String(account));
+    if (month && /^\d{4}-\d{2}$/.test(String(month))) {
+      q = q.whereRaw("to_char(txn_date, 'YYYY-MM') = ?", [String(month)]);
+    }
+    const rows = await q.select('*');
+    res.json({ transactions: rows.slice(0, limit), hasMore: rows.length > limit, offset, limit });
+  } catch (err) { next(err); }
+});
+
+router.post('/bank-import/match', async (req, res, next) => {
+  try {
+    res.json({ success: true, matching: await bankImport.runDeterministicMatching({ limit: 2000 }) });
+  } catch (err) { next(err); }
+});
+
+// AI category suggestions for unmatched debits — operator-triggered and
+// bounded like /expenses/auto-categorize; writes only the suggestion jsonb,
+// never an expense row. `ids` scopes the pass to the rows the operator is
+// LOOKING AT (same principle as /expenses/auto-categorize's scoped ids —
+// a global oldest-first pass can report "20 processed" while changing
+// nothing on screen); without ids it falls back to oldest-first.
+router.post('/bank-import/suggest', async (req, res, next) => {
+  try {
+    const rawLimit = parseInt(req.body?.limit, 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, rawLimit)) : 20;
+    const ids = Array.isArray(req.body?.ids)
+      ? req.body.ids.filter(x => typeof x === 'string').slice(0, 50)
+      : null;
+    let q = db('bank_transactions')
+      .where({ status: 'unmatched', direction: 'debit' })
+      .whereRaw("(suggestion is null or (suggestion->>'categoryId') is null)")
+      .whereRaw("coalesce(suggestion->>'ignore','') <> 'true'")
+      .orderBy('txn_date', 'asc')
+      .limit(limit)
+      .select('id', 'description', 'amount', 'suggestion');
+    if (ids && ids.length) q = q.whereIn('id', ids);
+    const rows = await q;
+    const results = [];
+    for (const row of rows) {
+      try {
+        const ai = await autoCategorizeExpense(null, row.description, row.amount);
+        if (ai?.categoryId) {
+          // atomic jsonb merge: the matching pass can write transfer flags
+          // or candidates into suggestion DURING the model call — a rebuild
+          // from the pre-call snapshot would erase them (same guard the
+          // expenses auto-categorize path applies to its post-model write)
+          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+            suggestion: db.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ categoryId: ai.categoryId, categoryName: ai.categoryName, reasoning: ai.reasoning })]),
+            updated_at: new Date(),
+          });
+          results.push({ id: row.id, category: ai.categoryName, applied: true });
+        } else {
+          results.push({ id: row.id, applied: false, error: 'no matching category' });
+        }
+      } catch (err) {
+        results.push({ id: row.id, applied: false, error: err.message });
+      }
+    }
+    res.json({ success: true, processed: results.length, results });
+  } catch (err) { next(err); }
+});
+
+// Create a real expense from a staged debit. Card-statement credits
+// (refunds) do NOT create rows here — negative expenses would violate the
+// ledger's [0, amount] deductible invariant and the P&L clamps; refunds go
+// through /bank-import/:id/apply-refund, which REDUCES the original
+// expense instead. The insert and the bank-row claim happen in ONE
+// transaction with a CAS on status='unmatched' — a double-click, a match
+// landing mid-flight, or a crash between the two statements can never
+// leave an orphan expense feeding the P&L.
+router.post('/bank-import/:id/create-expense', async (req, res, next) => {
+  try {
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits become expenses — refund credits use apply-refund' });
+    if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+
+    const suggested = row.suggestion?.categoryId || null;
+    const categoryId = req.body?.categoryId || suggested;
+    const usedAi = !req.body?.categoryId && !!suggested;
+    let deductible = parseFloat(row.amount);
+    if (categoryId) {
+      const cat = await db('expense_categories').where({ id: categoryId }).first('name');
+      if (!cat) return res.status(400).json({ error: 'unknown categoryId' });
+      const partial = categoryDeductibleAmount(cat.name, deductible);
+      if (partial !== null) deductible = partial;
+    }
+    const txnDate = dateCellStr(row.txn_date);
+    const quarter = `Q${Math.ceil(Number(txnDate.slice(5, 7)) / 3)}`;
+    let expense;
+    try {
+      expense = await db.transaction(async trx => {
+        const [inserted] = await trx('expenses').insert({
+          category_id: categoryId,
+          description: row.description.slice(0, 300),
+          amount: row.amount,
+          tax_deductible_amount: deductible,
+          expense_date: txnDate,
+          vendor_name: row.description.slice(0, 200),
+          // debit-card/ACH spend from checking books as 'ach'; card accounts as 'card'
+          payment_method: row.account_type === 'card' ? 'card' : 'ach',
+          tax_year: txnDate.slice(0, 4),
+          quarter,
+          notes: `[Bank import ${row.account_label}]${usedAi ? ' [AI-categorized — verify]' : ''}`,
+        }).returning('*');
+        const claimed = await trx('bank_transactions')
+          .where({ id: row.id, status: 'unmatched' })
+          .update({ status: 'created_expense', matched_expense_id: inserted.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() });
+        if (!claimed) {
+          const e = new Error('row was matched by someone else mid-flight');
+          e.code = 'CLAIM_LOST';
+          throw e; // rolls the expense insert back with it
+        }
+        return inserted;
+      });
+    } catch (err) {
+      if (err.code === 'CLAIM_LOST') return res.status(409).json({ error: err.message });
+      throw err;
+    }
+    res.json({ success: true, expense });
+  } catch (err) { next(err); }
+});
+
+// Manually link a staged debit to an EXISTING expense (the ambiguous-
+// candidates path — creating would duplicate the ledger row, ignoring would
+// drop it from coverage). Atomic: CAS on status='unmatched' plus the partial
+// unique index on matched_expense_id; losing either race answers 409.
+router.post('/bank-import/:id/link-expense', async (req, res, next) => {
+  try {
+    const { expenseId } = req.body || {};
+    if (!expenseId) return res.status(400).json({ error: 'expenseId is required' });
+    const row = await db('bank_transactions').where({ id: req.params.id }).first('id', 'direction', 'status', 'amount', 'txn_date');
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits link to expenses' });
+    if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    // Plausibility is judged and the claim committed in ONE transaction
+    // with the expense row LOCKED — a concurrent expense edit or refund
+    // between an unlocked validation and the claim could otherwise leave
+    // an implausible link falsifying coverage (same guarded pattern as
+    // apply-refund and the automatic matcher).
+    let claimed;
+    try {
+      claimed = await db.transaction(async trx => {
+        const expense = await trx('expenses').where({ id: expenseId }).forUpdate().first('id', 'amount', 'expense_date');
+        if (!expense) { const e = new Error('expense not found'); e.status = 404; throw e; }
+        // same amount tolerance + date window the matcher's candidates
+        // satisfy — a stale/crafted id outside them would falsify coverage.
+        // An expense a refund already REDUCED also matches at its GROSS
+        // (amount + applied refunds): the original full-price debit is
+        // still its statement row.
+        const refundTotal = await bankImport.appliedRefundTotal(expenseId, trx);
+        // gross-ONLY when refunds exist (the survey's net/gross
+        // exclusivity): a refunded expense whose net drifted to equal the
+        // debit must not link on the coincidence while its true gross
+        // stopped explaining it
+        const plausible = refundTotal > 0
+          ? bankImport.isPlausibleExpenseLink(row, { ...expense, amount: Number(expense.amount) + refundTotal })
+          : bankImport.isPlausibleExpenseLink(row, expense);
+        if (!plausible) {
+          const e = new Error('that expense does not plausibly match this bank row (amount/date outside the matching window)');
+          e.status = 400;
+          throw e;
+        }
+        return trx('bank_transactions')
+          .where({ id: row.id, status: 'unmatched' })
+          .update({ status: 'matched_expense', matched_expense_id: expenseId, match_method: 'manual', matched_at: new Date(), updated_at: new Date() });
+      });
+    } catch (err) {
+      if (err.code === '23505') return res.status(409).json({ error: 'that expense is already linked to another bank row' });
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      throw err;
+    }
+    if (!claimed) return res.status(409).json({ error: 'row was matched by someone else mid-flight' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// Apply a statement credit (merchant refund — card credit, or a bank credit
+// no payout explains) to the ORIGINAL expense: the expense's amount is
+// REDUCED and its deductible scaled proportionally (floor 0) — never a
+// negative ledger row, which would violate the [0, amount] deductible
+// invariant and the P&L clamps. The target is validated under the expense
+// lock by the SAME plausibility rules the matcher parks candidates with
+// (lookback window, covering amount, vendor evidence, method compatibility)
+// — not by membership in the bounded parked slice, so a valid original a
+// high-frequency vendor pushed off the list is still applicable (mirrors
+// link-expense). The adjustment and the bank-row claim commit in one
+// transaction with the expense row locked.
+router.post('/bank-import/:id/apply-refund', async (req, res, next) => {
+  try {
+    const { expenseId } = req.body || {};
+    if (!expenseId) return res.status(400).json({ error: 'expenseId is required' });
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'credit') {
+      return res.status(400).json({ error: 'only statement credits apply as refunds' });
+    }
+    if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    // a credit RELEASED against this expense already reduced it once — a
+    // second application would double-reduce the ledger
+    if (row.suggestion?.releasedRefundOf && String(row.suggestion.releasedRefundOf) === String(expenseId)) {
+      return res.status(409).json({ error: 'this credit was already applied to that expense and released without restoring it — applying again would reduce the expense twice' });
+    }
+    const refund = Number(row.amount);
+    let adjusted;
+    let adjustedServiceId = null;
+    try {
+      adjusted = await db.transaction(async trx => {
+        const expense = await trx('expenses').where({ id: expenseId }).forUpdate().first('id', 'amount', 'tax_deductible_amount', 'notes', 'vendor_name', 'description', 'payment_method', 'expense_date', 'scheduled_service_id');
+        if (!expense) { const e = new Error('expense not found'); e.status = 404; throw e; }
+        const oldAmount = Number(expense.amount);
+        if (!(refund <= oldAmount) || oldAmount <= 0) {
+          const e = new Error(`refund ($${refund.toFixed(2)}) exceeds the expense's remaining amount ($${oldAmount.toFixed(2)})`);
+          e.status = 400;
+          throw e;
+        }
+        // Money-correctness: full plausibility re-checked against the
+        // expense's CURRENT values under the lock — a stale or crafted id
+        // must never reduce an arbitrary ledger expense.
+        if (!bankImport.isPlausibleRefundTarget(row, expense)) {
+          const e = new Error('that expense is not a plausible original for this refund (amount/date/vendor/payment-method) — run matching to refresh candidates');
+          e.status = 409;
+          throw e;
+        }
+        // PERIOD INTEGRITY: reducing the original rewrites the P&L period
+        // the expense sits in (buildPnlReport selects by expense_date).
+        // Same-tax-year netting is standard cash-basis practice, but a
+        // PRIOR-year expense's books may already be filed — a recovered
+        // prior-year deduction is CURRENT-year income (tax benefit rule),
+        // a mechanism this expense ledger deliberately doesn't have.
+        // Refuse instead of silently rewriting a filed year.
+        const txnYear = dateCellStr(row.txn_date).slice(0, 4);
+        const expenseYear = dateCellStr(expense.expense_date).slice(0, 4);
+        if (txnYear !== expenseYear) {
+          const e = new Error(`this refund posted in ${txnYear} but the original expense is dated ${expenseYear} — reducing it would rewrite that year's books; record the recovery as ${txnYear} income manually, then Ignore this row`);
+          e.status = 409;
+          throw e;
+        }
+        adjustedServiceId = expense.scheduled_service_id || null;
+        const newAmount = Math.round((oldAmount - refund) * 100) / 100;
+        // proportional: preserves category policies AND operator-set custom
+        // percentages, clamped to the ledger invariant [0, newAmount].
+        // NULL stays NULL — the P&L's COALESCE(deductible, amount) fallback
+        // means NULL is "fully deductible", and it keeps scaling correctly
+        // on its own; converting it to a number here would silently flip
+        // the expense to zero-deductible.
+        const newDeductible = expense.tax_deductible_amount == null
+          ? null
+          : Math.min(newAmount, Math.max(0, Math.round(Number(expense.tax_deductible_amount) * (oldAmount ? newAmount / oldAmount : 0) * 100) / 100));
+        const [updated] = await trx('expenses').where({ id: expenseId }).update({
+          amount: newAmount,
+          tax_deductible_amount: newDeductible,
+          // etDateString: a business-date stamp — UTC would say "tomorrow"
+          // during evening ET hours on Railway. Appended UNSLICED — notes is
+          // unrestricted text and truncation would destroy prior audit trail.
+          notes: `${expense.notes ? `${expense.notes} ` : ''}[Refund $${refund.toFixed(2)} applied ${etDateString()} from bank import ${row.account_label}]`,
+        }).returning(['id', 'amount', 'tax_deductible_amount']);
+        const claimed = await trx('bank_transactions')
+          .where({ id: row.id, status: 'unmatched' })
+          .update({
+            status: 'refund_applied',
+            match_method: 'refund',
+            matched_at: new Date(),
+            updated_at: new Date(),
+            // refundRestore = exact pre-adjustment values, so undo can
+            // restore the expense byte-for-byte (and verify nothing else
+            // changed it in between)
+            suggestion: bankImport.suggestionMerge({
+              refundAppliedTo: expenseId,
+              refundAmount: refund,
+              // prev = exact pre-adjustment values; applied = what we wrote,
+              // so undo can verify NOTHING ELSE edited the expense since
+              refundRestore: {
+                prevAmount: oldAmount,
+                prevDeductible: expense.tax_deductible_amount == null ? null : Number(expense.tax_deductible_amount),
+                appliedDeductible: newDeductible,
+              },
+            }),
+          });
+        if (!claimed) {
+          const e = new Error('row was matched by someone else mid-flight');
+          e.code = 'CLAIM_LOST';
+          throw e; // rolls the expense adjustment back with it
+        }
+        return updated;
+      });
+    } catch (err) {
+      if (err.code === 'CLAIM_LOST') return res.status(409).json({ error: err.message });
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      throw err;
+    }
+    // job_costs and the service_records financial fields are persisted
+    // rollups — a job expense's amount change must re-derive them (same
+    // pattern as the expense update route in admin-job-expenses.js).
+    // Fire-and-forget BY DESIGN (the refund itself is committed), but a
+    // failure leaves the rollups at pre-refund values, so it is LOGGED —
+    // never swallowed — until a later expense edit or recalc heals them.
+    if (adjustedServiceId) {
+      try {
+        const JobCosting = require('../services/job-costing');
+        void JobCosting.calculateJobCost(adjustedServiceId).catch((err) => {
+          logger.warn(`[bank-import] job-cost recalculation for service ${adjustedServiceId} failed after refund adjustment — job_costs/service_records remain pre-refund: ${err.message}`);
+        });
+      } catch (err) {
+        logger.warn(`[bank-import] job-cost recalculation unavailable for service ${adjustedServiceId}: ${err.message}`);
+      }
+    }
+    res.json({ success: true, expense: adjusted });
+  } catch (err) { next(err); }
+});
+
+// Manually link a staged BANK credit to an existing Stripe payout (the
+// ambiguous-payout path — the automatic matcher parks candidates when more
+// than one paid payout fits). Atomic claim via CAS + the partial unique
+// index on matched_payout_id; the reconciliation echo reuses the exact
+// mechanism the automatic path uses (pending flag persisted with the claim,
+// guarded echo, sweep retry on failure).
+router.post('/bank-import/:id/link-payout', async (req, res, next) => {
+  try {
+    const { payoutId } = req.body || {};
+    if (!payoutId) return res.status(400).json({ error: 'payoutId is required' });
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'credit' || row.account_type !== 'bank') {
+      return res.status(400).json({ error: 'only bank-account credits link to payouts' });
+    }
+    if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    const payout = await db('stripe_payouts').where({ id: payoutId }).first('id', 'status', 'amount', 'arrival_date', 'reconciled');
+    if (!payout) return res.status(404).json({ error: 'payout not found' });
+    // Only money that actually REACHED the bank can explain a bank credit —
+    // the same rule the automatic matcher applies, enforced server-side so
+    // a stale or crafted request can't link a pending/failed payout.
+    if (payout.status !== 'paid') {
+      return res.status(400).json({ error: `payout is ${payout.status}, not paid — only settled payouts can explain a bank credit` });
+    }
+    // same amount tolerance + arrival window the matcher's candidates
+    // satisfy — an unrelated payout would falsify the reconciliation. A
+    // reconciled payout compares against its confirmed ACTUAL banked amount.
+    const effectiveAmount = await bankImport.effectivePayoutAmount(payout);
+    if (!bankImport.isPlausiblePayoutLink(row, { amount: effectiveAmount, arrival_date: payout.arrival_date })) {
+      return res.status(400).json({ error: 'that payout does not plausibly match this bank row (amount/arrival outside the matching window)' });
+    }
+    // The pending flag ALWAYS rides in the claim (an unlocked reconciled
+    // pre-read can go stale); the guarded echo below resolves current state.
+    let claimed;
+    try {
+      claimed = await db('bank_transactions')
+        .where({ id: row.id, status: 'unmatched' })
+        .update({
+          status: 'matched_payout',
+          matched_payout_id: payoutId,
+          match_method: 'manual',
+          matched_at: new Date(),
+          updated_at: new Date(),
+          suggestion: bankImport.suggestionMerge({ reconcilePending: true }),
+        });
+    } catch (err) {
+      if (err.code === '23505') return res.status(409).json({ error: 'that payout is already linked to another bank row' });
+      throw err;
+    }
+    if (!claimed) return res.status(409).json({ error: 'row was matched by someone else mid-flight' });
+    let reconciliation;
+    try {
+      const result = await bankImport.echoPayoutReconciliation(row.id, payoutId, Number(row.amount), `Manually linked to bank import row ${row.id}`);
+      if (result && result.skipped && result.reason === 'human_rejected') {
+        // the helper REVERTED the link (a human rejected this payout's
+        // reconciliation on the Banking page) — success:true would have the
+        // UI silently clear the selection while the link no longer exists
+        return res.status(409).json({ error: "a human rejected this payout's reconciliation on the Banking page — the link was not kept, and this payout is now excluded for this row" });
+      }
+      if (result && result.ineligibleReverted) {
+        return res.status(409).json({ error: 'that payout is no longer eligible (its status, amount, or arrival changed) — the link was not kept' });
+      }
+      if (result && result.skipped && result.reason === 'precondition') {
+        return res.status(409).json({ error: 'row changed mid-flight — reload' });
+      }
+      if (result && result.amountMismatchReverted) {
+        return res.status(409).json({ error: 'that payout was just reconciled with a different banked amount — the link was not kept' });
+      }
+      if (result && result.skipped && result.reason === 'human_draft') {
+        // link stands, pending flag retained — the sweep finishes the echo
+        // after the human resolves their draft
+        reconciliation = 'pending';
+      } else {
+        reconciliation = result && result.skipped ? 'already_reconciled' : 'confirmed';
+      }
+    } catch (err) {
+      // pending flag persisted with the claim — the matching sweep retries
+      logger.warn(`[bank-import] manual payout link ${row.id}→${payoutId} succeeded but reconciliation write failed (sweep will retry): ${err.message}`);
+      reconciliation = 'pending';
+    }
+    res.json({ success: true, reconciliation });
+  } catch (err) { next(err); }
+});
+
+router.post('/bank-import/:id/ignore', async (req, res, next) => {
+  try {
+    const changed = await db('bank_transactions')
+      .where({ id: req.params.id }).whereIn('status', ['unmatched'])
+      .update({ status: 'ignored', updated_at: new Date() });
+    if (!changed) return res.status(409).json({ error: 'only unmatched rows can be ignored' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+router.post('/bank-import/:id/unignore', async (req, res, next) => {
+  try {
+    // released refunds are TERMINAL: the expense keeps its reduction, so
+    // reopening the credit would let it apply against ANOTHER same-vendor
+    // expense and reduce the ledger twice for one statement credit
+    const row = await db('bank_transactions').where({ id: req.params.id }).first('id', 'status', 'suggestion');
+    if (!row || row.status !== 'ignored') return res.status(409).json({ error: 'row is not ignored' });
+    if (row.suggestion?.releasedRefundOf) {
+      return res.status(409).json({ error: 'this credit was released after a manual refund reconciliation — it stays accounted for and cannot re-enter review' });
+    }
+    const changed = await db('bank_transactions')
+      .where({ id: req.params.id, status: 'ignored' })
+      // the CAS re-checks the released marker — a concurrent Release must
+      // not be reopened by a stale unignore
+      .whereRaw("suggestion->>'releasedRefundOf' is null")
+      .update({ status: 'unmatched', updated_at: new Date() });
+    if (!changed) return res.status(409).json({ error: 'row is not ignored' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// Undo a wrong link — automatic, manual, or a mis-picked ambiguous candidate.
+// The row returns to unmatched with the undo recorded in suggestion.lastUnlink;
+// the ledger side is never touched for expenses (deleting a real expense is an
+// Expenses-tab decision). For payout rows, releasing the claim and REVERSING
+// the reconciliation echo are ONE transaction: the unlink CAS runs inside
+// reconcilePayout's precondition hook, so the payout stays claimed until the
+// reversal commits with it — another matching pass can never observe a
+// released-but-still-reconciled payout (which would link it with no echo and
+// then lose the reconciliation to this reversal). The row-specific author
+// guard means only the reconciliation THIS row authored can be undone; a
+// human's reconciliation is never overridden from here.
+// created_expense rows are deliberately excluded: the expense EXISTS because
+// of this row, so the undo is deleting it in the Expenses tab — the FK SET
+// NULL plus the matcher's self-heal then returns this row to unmatched.
+router.post('/bank-import/:id/unlink', async (req, res, next) => {
+  try {
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (!['matched_expense', 'matched_payout', 'refund_applied'].includes(row.status)) {
+      return res.status(409).json({ error: `only matched rows can be unlinked (row is ${row.status})` });
+    }
+
+    // refund_applied undo: atomically RESTORE the adjusted expense from the
+    // refundRestore snapshot (verifying nothing else changed it since) and
+    // return the credit row to review. If the expense was deleted, the undo
+    // just releases the row — there is nothing left to restore.
+    if (row.status === 'refund_applied') {
+      const target = row.suggestion?.refundAppliedTo;
+      const restore = row.suggestion?.refundRestore;
+      const refund = Number(row.amount);
+      // releaseOnly: the drift 409 below is otherwise a dead end — once
+      // the operator restores the expense BY HAND on the Expenses tab,
+      // the snapshot comparison keeps failing forever. This clears the
+      // refund association WITHOUT touching the expense.
+      const releaseOnly = !!(req.body && req.body.releaseOnly === true);
+      let restoredServiceId = null;
+      try {
+        await db.transaction(async (trx) => {
+          const expense = target ? await trx('expenses').where({ id: target }).forUpdate().first('id', 'amount', 'tax_deductible_amount', 'notes', 'scheduled_service_id') : null;
+          // the snapshot comparison runs in BOTH modes — Release is the
+          // escape hatch for a DRIFTED expense only; on an untouched one it
+          // would strand the applied reduction while the credit re-parks,
+          // and a second apply would then reduce the ledger twice
+          let amountUntouched = false;
+          let deductibleUntouched = false;
+          if (expense && restore) {
+            const expected = Math.round((Number(restore.prevAmount) - refund) * 100) / 100;
+            amountUntouched = Math.round(Number(expense.amount) * 100) === Math.round(expected * 100);
+            // deductible must ALSO equal what apply-refund wrote — an
+            // operator's later deductible/category edit would otherwise be
+            // silently destroyed by restoring the old snapshot
+            const appliedDeductible = restore.appliedDeductible === undefined ? null : restore.appliedDeductible;
+            deductibleUntouched = (expense.tax_deductible_amount == null && appliedDeductible == null)
+              || (expense.tax_deductible_amount != null && appliedDeductible != null
+                && Math.round(Number(expense.tax_deductible_amount) * 100) === Math.round(Number(appliedDeductible) * 100));
+          }
+          if (releaseOnly && expense && restore && amountUntouched && deductibleUntouched) {
+            const e = new Error('nothing has drifted — use Undo refund, which restores the expense; Release would strand the applied reduction');
+            e.status = 409;
+            throw e;
+          }
+          if (expense && restore && !releaseOnly) {
+            if (!amountUntouched || !deductibleUntouched) {
+              const e = new Error('the expense changed since this refund was applied — fix it manually on the Expenses tab, then use Release to clear this refund without touching the expense again');
+              e.status = 409;
+              throw e;
+            }
+            await trx('expenses').where({ id: target }).update({
+              amount: restore.prevAmount,
+              tax_deductible_amount: restore.prevDeductible,
+              notes: `${expense.notes ? `${expense.notes} ` : ''}[Refund $${refund.toFixed(2)} UNDONE ${etDateString()}]`,
+            });
+            restoredServiceId = expense.scheduled_service_id || null;
+          }
+          const changed = await trx('bank_transactions')
+            .where({ id: row.id, status: 'refund_applied' })
+            // bound to the SCANNED target: a concurrent orphan heal +
+            // re-apply to a different expense must not have this stale
+            // undo clear the newer association while its ledger
+            // adjustment stays applied
+            .whereRaw("coalesce(suggestion->>'refundAppliedTo', '') = ?", [String(target || '')])
+            .update({
+              // Release is TERMINAL: the expense keeps its reduction, so
+              // the credit must never re-enter matching where the same
+              // expense could be offered and reduced a second time. It
+              // lands in 'ignored' (accounted for outside the flow);
+              // releasedRefundOf is the durable guard should the operator
+              // ever explicitly unignore it.
+              status: releaseOnly ? 'ignored' : 'unmatched',
+              match_method: null,
+              matched_at: null,
+              suggestion: bankImport.suggestionMerge({
+                refundUndone: { at: new Date().toISOString(), expenseId: target || null, ...(releaseOnly ? { releasedWithoutRestore: true } : {}) },
+                ...(releaseOnly && target ? { releasedRefundOf: target } : {}),
+              }, ['refundAppliedTo', 'refundAmount', 'refundRestore']),
+              updated_at: new Date(),
+            });
+          if (!changed) {
+            const e = new Error('row changed mid-flight — reload');
+            e.status = 409;
+            throw e;
+          }
+        });
+      } catch (err) {
+        if (err.status) return res.status(err.status).json({ error: err.message });
+        throw err;
+      }
+      // same persisted-rollup rule as apply-refund: restoring a job
+      // expense's amount must re-derive job_costs / service_records —
+      // fire-and-forget, but failures are logged, never swallowed
+      if (restoredServiceId) {
+        try {
+          const JobCosting = require('../services/job-costing');
+          void JobCosting.calculateJobCost(restoredServiceId).catch((err) => {
+            logger.warn(`[bank-import] job-cost recalculation for service ${restoredServiceId} failed after refund undo — job_costs/service_records remain stale: ${err.message}`);
+          });
+        } catch (err) {
+          logger.warn(`[bank-import] job-cost recalculation unavailable for service ${restoredServiceId}: ${err.message}`);
+        }
+      }
+      return res.json({ success: true, reconciliation: null });
+    }
+    const baseSuggestion = row.suggestion || {};
+    // rejections are CUMULATIVE: unlinking B after A must not let the
+    // matcher re-propose A — every rejected id stays excluded forever
+    const rejectedExpenseIds = [...new Set([
+      ...(baseSuggestion.rejectedExpenseIds || []),
+      ...(row.matched_expense_id ? [row.matched_expense_id] : []),
+    ])];
+    const rejectedPayoutIds = [...new Set([
+      ...(baseSuggestion.rejectedPayoutIds || []),
+      ...(row.matched_payout_id ? [row.matched_payout_id] : []),
+    ])];
+    // atomic jsonb merge (stale confirm-pending flag subtracted): concurrent
+    // suggestion writers are appended to, never erased by a snapshot rebuild
+    const suggestion = bankImport.suggestionMerge({
+      ...(rejectedExpenseIds.length ? { rejectedExpenseIds } : {}),
+      ...(rejectedPayoutIds.length ? { rejectedPayoutIds } : {}),
+      lastUnlink: {
+        at: new Date().toISOString(),
+        was: row.status,
+        method: row.match_method,
+        ...(row.matched_expense_id ? { expenseId: row.matched_expense_id } : {}),
+        ...(row.matched_payout_id ? { payoutId: row.matched_payout_id } : {}),
+      },
+      // verifyPending stripped too: a crash-leftover marker must never
+      // cross link generations — the sweep would treat the operator's
+      // NEXT manual link as an unfinished automatic claim and could
+      // revert it (or reverse its reconciliation) for plurality
+    }, ['reconcilePending', 'verifyPending']);
+    // CAS on the status AND the exact linked id (payout or expense) so a
+    // concurrent change 409s instead of being clobbered — without the
+    // expense id, a stale unlink read against expense A could clear a newer
+    // link to expense B while recording A in the rejection ledger (ABA).
+    const doUnlink = (dbOrTrx) => dbOrTrx('bank_transactions')
+      .where({
+        id: row.id,
+        status: row.status,
+        ...(row.status === 'matched_payout' ? { matched_payout_id: row.matched_payout_id } : {}),
+        ...(row.status === 'matched_expense' ? { matched_expense_id: row.matched_expense_id } : {}),
+      })
+      .update({
+        status: 'unmatched',
+        matched_expense_id: null,
+        matched_payout_id: null,
+        match_method: null,
+        matched_at: null,
+        suggestion,
+        updated_at: new Date(),
+      });
+
+    if (row.status === 'matched_expense' || !row.matched_payout_id) {
+      const changed = await doUnlink(db);
+      if (!changed) return res.status(409).json({ error: 'row changed mid-flight — reload' });
+      return res.json({ success: true, reconciliation: null });
+    }
+
+    // ONE transaction, payout row locked FIRST (same payout→bank-row lock
+    // order as the matcher's echo): the reconciliation decision — reverse
+    // ours / keep a human's or a newer claim's / nothing to do — and the
+    // unlink commit together. A pending echo retry can't land in the gap:
+    // it blocks on the payout lock, and after our commit its still-linked
+    // precondition fails.
+    const { reconcilePayout } = require('../services/stripe-banking');
+    let reconciliation = null;
+    try {
+      await db.transaction(async (trx) => {
+        const payout = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('reconciled', 'reconciled_by');
+        const changed = await doUnlink(trx);
+        if (!changed) {
+          const e = new Error('row changed mid-flight — reload');
+          e.code = 'CAS_LOST';
+          throw e; // rolls everything back
+        }
+        if (payout && payout.reconciled && payout.reconciled_by === `bank-import:${row.id}`) {
+          // reverse OUR OWN reconciliation inside this same transaction; the
+          // ownership check just happened under the payout lock, so no
+          // further guard is needed
+          await reconcilePayout(row.matched_payout_id, Number(row.amount), `Unlinked from bank import row ${row.id}`, `bank-import:${row.id}`, 'rejected', { trx });
+          reconciliation = 'reversed';
+        } else if (payout && payout.reconciled) {
+          // a human or a newer claim owns the reconciliation — never touched
+          reconciliation = 'kept';
+        }
+      });
+    } catch (err) {
+      if (err.code === 'CAS_LOST') return res.status(409).json({ error: err.message });
+      logger.warn(`[bank-import] unlink of row ${row.id} rolled back — reconciliation reversal failed: ${err.message}`);
+      return res.status(502).json({ error: `reconciliation reversal failed (${err.message}) — the row is still linked; retry` });
+    }
+    res.json({ success: true, reconciliation });
+  } catch (err) { next(err); }
+});
+
+// Full refund-candidate list for ONE credit, on demand — the parked slice
+// shows 20, and a high-frequency vendor's real original can sit beyond it.
+// Everything served here passes the same plausibility rules apply-refund
+// enforces under its lock, so every option is actionable.
+router.get('/bank-import/:id/refund-candidates', async (req, res, next) => {
+  try {
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'credit') return res.status(400).json({ error: 'only credits have refund candidates' });
+    const list = await bankImport.refundCandidatesForRow(row);
+    // offset pagination: 500 per page, and the client keeps a load-more
+    // path until every one of `total` is reachable — a hard truncation
+    // would leave a valid off-page original unselectable
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    res.json({
+      candidates: list.slice(offset, offset + 500).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: dateCellStr(c.expense_date) })),
+      total: list.length,
+    });
+  } catch (err) { next(err); }
+});
+
+// Full expense-candidate list for ONE debit, on demand — same shape as the
+// refund-candidate route: the parked slice shows 20, and the real target
+// can sit beyond it; link-expense validates by plausibility rules, so
+// every entry served here is actionable.
+router.get('/bank-import/:id/expense-candidates', async (req, res, next) => {
+  try {
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits have expense candidates' });
+    // NO unlink-rejection filter here: rejections stop AUTOMATIC
+    // re-proposal, but manual re-linking is allowed by design
+    // (link-expense accepts these ids) — hiding a previously unlinked
+    // target from the operator's only row-specific picker would make a
+    // valid restore unreachable
+    const list = await bankImport.surveyExpenseCandidatesForRow(row, { expenseIds: [], payoutIds: [], bankingPayoutIds: [] });
+    list.sort((a, b) => String(dateCellStr(b.expense_date)).localeCompare(String(dateCellStr(a.expense_date))) || String(a.id).localeCompare(String(b.id)));
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    res.json({
+      candidates: list.slice(offset, offset + 500).map(c => ({ id: c.id, amount: c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: dateCellStr(c.expense_date) })),
+      total: list.length,
+    });
+  } catch (err) { next(err); }
+});
+
+// Full payout-candidate list for ONE bank credit, on demand — the parked
+// slice shows 20 of up to 50; link-payout validates by plausibility rules,
+// so every entry served here is actionable (mirror of the expense/refund
+// candidate routes).
+router.get('/bank-import/:id/payout-candidates', async (req, res, next) => {
+  try {
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'credit' || row.account_type !== 'bank') {
+      return res.status(400).json({ error: 'only bank-account credits have payout candidates' });
+    }
+    // explicit-unlink rejections are lifted for the MANUAL picker (same
+    // rationale as expense candidates: link-payout accepts them); the
+    // Banking-derived human-rejection exclusion stays — that ruling stands
+    // until a corrected confirmed reconciliation lifts it
+    const rejected = bankImport.rejectedTargets(row.suggestion);
+    // manual mode: a far higher cap than the automatic 50-sentinel — a
+    // valid payout beyond the uniqueness cap must stay selectable here
+    const { candidates, overflow } = await bankImport.surveyPayoutCandidatesForRow(row, { expenseIds: [], payoutIds: [], bankingPayoutIds: rejected.bankingPayoutIds }, undefined, { cap: 1000 });
+    const txnMs = new Date(`${dateCellStr(row.txn_date)}T00:00:00Z`).getTime();
+    candidates.sort((a, b) => (Math.abs(new Date(`${dateCellStr(a.arrival_date)}T00:00:00Z`).getTime() - txnMs)
+      - Math.abs(new Date(`${dateCellStr(b.arrival_date)}T00:00:00Z`).getTime() - txnMs))
+      || String(a.id).localeCompare(String(b.id)));
+    res.json({
+      candidates: candidates.map(c => ({ id: c.id, amount: Number(c.effective_amount), arrival_date: dateCellStr(c.arrival_date) })),
+      total: candidates.length,
+      overflow, // >50 same-amount payouts — the survey itself was truncated
+    });
+  } catch (err) { next(err); }
+});
+
+router.get('/bank-import/coverage', async (req, res, next) => {
+  try {
+    // Coverage is a money CLAIM — self-heal stale links first, exactly as a
+    // matching pass would: an expense edited (or deleted) since the last
+    // pass must not keep reporting covered outflow until someone happens to
+    // upload a statement or click Run matching. Cheap: fixed-count scans,
+    // writes only on actual violations.
+    await healBankImportSnapshot();
+    const year = /^\d{4}$/.test(String(req.query.year || '')) ? String(req.query.year) : String(etParts().year);
+    res.json({ year, months: await bankImport.ledgerCoverage(year) });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
