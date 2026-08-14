@@ -1854,12 +1854,26 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           });
         }
         const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+        // Invoice visit scope for the in-lock payer check (#3395 r14 P1):
+        // the PI belongs to an invoice — a self_pay_override visit on a
+        // payer-billed account must still enroll. Best-effort: a lookup
+        // miss falls to the account scope (toward refusing — fail closed).
+        let mirrorScopeSsId = null;
+        try {
+          const piInvoice = await db('invoices')
+            .where({ stripe_payment_intent_id: piId })
+            .first('scheduled_service_id');
+          mirrorScopeSsId = piInvoice?.scheduled_service_id || null;
+        } catch (scopeErr) {
+          logger.warn(`[stripe-webhook] invoice scope lookup failed for PI ${piId}: ${scopeErr.message}`);
+        }
         await enrollConsentedMethod({
           customerId: wavesCustomerId,
           paymentMethodId: saved.id,
           source: 'save_card_consent',
           details: { billing_mode: signupBillingMode },
           authorizedAt,
+          scheduledServiceId: mirrorScopeSsId,
         });
       }
       if (!existing) {
@@ -3572,12 +3586,29 @@ async function handleSetupIntentSucceeded(setupIntent) {
       // authorizedAt: this webhook can complete DAYS after the customer
       // authorized (browser died / micro-deposits) — an Auto Pay disable
       // recorded since then must win over the stale authorization.
+      // Invoice visit scope for the in-lock payer check (#3395 r14 P1) —
+      // invoice_id was stamped server-side at /capture-setup mint.
+      let coveredScopeSsId = null;
+      try {
+        const scopeInvoiceId = setupIntent.metadata?.invoice_id || null;
+        if (scopeInvoiceId) {
+          const scopeInvoice = await db('invoices')
+            .where({ id: scopeInvoiceId })
+            .first('scheduled_service_id', 'customer_id');
+          if (scopeInvoice && String(scopeInvoice.customer_id) === String(wavesCustomerId)) {
+            coveredScopeSsId = scopeInvoice.scheduled_service_id || null;
+          }
+        }
+      } catch (scopeErr) {
+        logger.warn(`[stripe-webhook] covered-capture invoice scope lookup failed for SI ${setupIntent.id}: ${scopeErr.message}`);
+      }
       const enrollment = await enrollConsentedMethod({
         customerId: wavesCustomerId,
         paymentMethodId: saved.id,
         source: 'save_card_consent',
         details: { via: 'covered_capture_webhook', setup_intent_id: setupIntent.id },
         authorizedAt: setupIntent.created ? new Date(setupIntent.created * 1000) : null,
+        scheduledServiceId: coveredScopeSsId,
       });
       // Capture done → apply the HELD credit coverage (Codex #2507
       // round-7 P1): under the hold flow the invoice stayed collectible

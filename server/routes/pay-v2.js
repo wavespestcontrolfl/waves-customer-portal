@@ -1030,6 +1030,10 @@ router.post('/:token/consent', async (req, res, next) => {
       customerId: invoice.customer_id,
       paymentMethodId: saved.id,
       source: 'save_card_consent',
+      // The invoice's visit scopes the in-lock payer check (#3395 r14 P1):
+      // a self_pay_override visit on a payer-billed account is
+      // customer-paid — the account-level fallback would refuse.
+      scheduledServiceId: invoice.scheduled_service_id || null,
     });
     if (enrollment?.reason === 'method_not_found') {
       throw new Error('Saved payment method could not be enrolled');
@@ -1199,6 +1203,8 @@ router.post('/:token/setup-complete', async (req, res) => {
       paymentMethodId: saved.id,
       source: 'save_card_consent',
       details: { via: 'covered_by_credit_setup', invoice_id: invoice.id },
+      // Invoice visit scope for the in-lock payer check (#3395 r14 P1).
+      scheduledServiceId: invoice.scheduled_service_id || null,
     });
     // A REFUSED enrollment must leave the invoice collectible (Codex
     // #2507 round-8 P2): settling here would complete the required-save
