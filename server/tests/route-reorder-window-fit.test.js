@@ -231,6 +231,47 @@ test('gate ON: feasibility (WINDOW_FIT_CONFLICT) rejection also falls back — u
   ]);
 });
 
+test('gate ON: a below-floor ILLEGAL Google order still reaches the fallback — the floor applies to the legal order', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  // Google's routed-distance pick scores 0 model savings AND runs the 13:00
+  // promise before the 09:00 one; exiting on BELOW_MIN_SAVINGS would hide
+  // the legal order that saves 18000 m (audit r3 P1). Current U,T2,T1 =
+  // 42000 m; Google returns the SAME illegal sequence (model saving 0,
+  // chronology illegal); legal best T1,U,T2 = 24000 m.
+  stopsByDate[DAY] = [
+    stop('T1', { window_start: '09:00', lng: 10, route_order: 3 }),
+    stop('T2', { window_start: '13:00', lng: 1, route_order: 2 }),
+    stop('U', { lng: 11, route_order: 1 }),
+  ];
+  mockOptimizerOrder(['U', 'T2', 'T1']);
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(1);
+  const applied = ledger().reorders[0];
+  expect(applied).toMatchObject({
+    source: 'window_constrained',
+    before_distance_meters: 42000,
+    after_distance_meters: 24000,
+    saved_meters: 18000,
+    unconstrained_saved_meters: 0,
+  });
+  expect(ledger().skips.find((s) => s.date === DAY)).toBeUndefined();
+});
+
+test('gate OFF: a below-floor illegal Google order still skips BELOW_MIN_SAVINGS — legacy sequencing byte for byte', async () => {
+  stopsByDate[DAY] = [
+    stop('T1', { window_start: '09:00', lng: 10, route_order: 3 }),
+    stop('T2', { window_start: '13:00', lng: 1, route_order: 2 }),
+    stop('U', { lng: 11, route_order: 1 }),
+  ];
+  mockOptimizerOrder(['U', 'T2', 'T1']);
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  const skip = ledger().skips.find((s) => s.date === DAY);
+  expect(skip).toMatchObject({ reason: 'BELOW_MIN_SAVINGS', saved_meters: 0 });
+  expect(skip.fallback).toBeUndefined();
+});
+
 test('gate ON: a LEGAL Google order never consults the fallback — applied as google_routes_api, no unconstrained delta', async () => {
   process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
   process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';

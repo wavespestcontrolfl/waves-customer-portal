@@ -429,11 +429,6 @@ async function runRouteReorder(opts = {}) {
             saved_meters: savedMeters,
             source: result.source,
           };
-          if (savedMeters < config.minSavingsMeters) {
-            summary.skipped.push({ ...entryBase, reason: 'BELOW_MIN_SAVINGS', ...metrics });
-            continue;
-          }
-
           // Window chronology guard: the optimizer sees only coordinates, so a
           // pure-distance order could put a later fixed window before an
           // earlier one — an infeasible running order. Feasibility guard:
@@ -445,12 +440,25 @@ async function runRouteReorder(opts = {}) {
           // outright (gate off = byte-for-byte the pre-fallback skip).
           let finalOrdered = result.orderedStops;
           let appliedMetrics = metrics;
+          const windowFitEnabled = gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT');
           const chronoConflict = violatesWindowChronology(result.orderedStops, techStops);
           const fitConflict = !chronoConflict
             && violatesWindowFeasibility(RouteOptimizer, result.orderedStops, techStops, result.legs);
+          // Savings floor for GOOGLE's order. Fallback ON + a guard conflict
+          // defers the floor to the fallback's own check: Google optimizes
+          // ROUTED distance, so its (illegal) permutation can score below the
+          // 805 m model floor while a legal permutation clears it — exiting
+          // here would record BELOW_MIN_SAVINGS and never consult the
+          // fallback (pre-push audit r3 P1). Fallback OFF keeps the legacy
+          // sequencing byte for byte.
+          if (savedMeters < config.minSavingsMeters
+              && (!windowFitEnabled || (!chronoConflict && !fitConflict))) {
+            summary.skipped.push({ ...entryBase, reason: 'BELOW_MIN_SAVINGS', ...metrics });
+            continue;
+          }
           if (chronoConflict || fitConflict) {
             const reason = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : 'WINDOW_FIT_CONFLICT';
-            if (!gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT')) {
+            if (!windowFitEnabled) {
               summary.skipped.push({ ...entryBase, reason, ...metrics });
               continue;
             }
