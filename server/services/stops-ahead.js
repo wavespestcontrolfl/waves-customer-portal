@@ -36,6 +36,14 @@ const STOPS_AHEAD_DISPLAY_CAP = 3;
 // (Matches the terminal set formatScheduledTracker/track-public key off.)
 const TERMINAL_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 
+// Statuses that never count as a stop ahead: terminal ones plus
+// 'rescheduled' phantoms — a rescheduled row is a non-actionable
+// placeholder whose replacement visit is the real stop (mirrors
+// route-reorder EXCLUDE_STATUSES / dispatch BOARD_HIDDEN_STATUSES).
+// en_route / on_site stay countable: a stop the tech is at right now IS
+// still ahead of you.
+const NOT_A_STOP_STATUSES = [...TERMINAL_STATUSES, 'rescheduled'];
+
 // scheduled_date / stops_ahead_shown_date arrive as 'YYYY-MM-DD' strings or
 // midnight-UTC Dates depending on the driver path — normalize to the
 // etDateString() key shape (same normalization as track-transitions).
@@ -78,7 +86,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
         .where({ technician_id: svc.technician_id })
         .where('scheduled_date', svcDate)
         .whereNot('id', svc.id)
-        .whereNotIn('status', TERMINAL_STATUSES)
+        .whereNotIn('status', NOT_A_STOP_STATUSES)
         .whereRaw(
           `(COALESCE(route_order, 999), COALESCE(window_start, '23:59'::time), created_at, id)
              < (COALESCE(?::int, 999), COALESCE(?::time, '23:59'::time), ?::timestamptz, ?::uuid)`,
@@ -98,16 +106,33 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     if (floorIsToday) clamped = Math.min(raw, minShown);
     if (clamped > STOPS_AHEAD_DISPLAY_CAP) return null;
 
-    // Persist the new floor best-effort — only values that were actually
-    // SHOWN (≤ cap) become floors, so a raw count of 7 never stores.
-    if (!floorIsToday || clamped < minShown) {
-      try {
-        await db('scheduled_services')
-          .where({ id: svc.id })
-          .update({ stops_ahead_min_shown: clamped, stops_ahead_shown_date: today });
-      } catch (err) {
-        logger.warn(`[stops-ahead] floor persist failed for ${svc.id}: ${err.message}`);
-      }
+    // Persist the floor ATOMICALLY (single conditional UPDATE, no
+    // read-modify-write): concurrent portal/public polls can interleave, and
+    // a stale request re-persisting its larger value would both regress the
+    // floor and let the displayed count go up. LEAST() keeps the stored
+    // floor monotone for the day (LEAST ignores a NULL column), the CASE
+    // resets it on a new display date, and RETURNING hands back the
+    // authoritative minimum so every racer displays the same floor. Only
+    // values that were actually SHOWN (≤ cap) reach this statement, so a
+    // raw count of 7 never stores. Best-effort: on failure fall back to
+    // this request's own clamped value.
+    try {
+      const res = await db.raw(
+        `UPDATE scheduled_services
+            SET stops_ahead_min_shown = CASE
+                  WHEN stops_ahead_shown_date = ?::date
+                    THEN LEAST(stops_ahead_min_shown, ?::int)
+                  ELSE ?::int
+                END,
+                stops_ahead_shown_date = ?::date
+          WHERE id = ?::uuid
+          RETURNING stops_ahead_min_shown`,
+        [today, clamped, clamped, today, svc.id]
+      );
+      const persisted = Number(res?.rows?.[0]?.stops_ahead_min_shown);
+      if (Number.isFinite(persisted)) return Math.min(persisted, clamped);
+    } catch (err) {
+      logger.warn(`[stops-ahead] floor persist failed for ${svc.id}: ${err.message}`);
     }
     return clamped;
   } catch (err) {
@@ -116,4 +141,9 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
   }
 }
 
-module.exports = { computeStopsAhead, STOPS_AHEAD_DISPLAY_CAP, TERMINAL_STATUSES };
+module.exports = {
+  computeStopsAhead,
+  STOPS_AHEAD_DISPLAY_CAP,
+  TERMINAL_STATUSES,
+  NOT_A_STOP_STATUSES,
+};
