@@ -91,6 +91,13 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     // persisting an undisplayed en-route zero would let a same-day rewind
     // back to scheduled clamp the real count to a floor no one ever saw.
     if (trackState !== 'scheduled') return null;
+    // status can LEAD track_state: tech-track commits the operational
+    // transition first and the tracker transition is best-effort — if the
+    // second step fails, a visit already underway keeps
+    // track_state='scheduled'. A live operational status makes the target
+    // ineligible: the planned-route count must not display (or persist a
+    // floor) for a stop the tech is already traveling to or working.
+    if (svc.status === 'en_route' || svc.status === 'on_site') return null;
     const svcDate = dateOnly(svc.scheduled_date);
     if (!svcDate || svcDate !== today) return null;
 
@@ -135,11 +142,38 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     const STOP_KEY = "(s.customer_id, COALESCE(s.window_start, '23:59'::time))";
     const PRECEDES = `(COALESCE(s.route_order, 999), COALESCE(s.window_start, '23:59'::time), s.created_at, s.id)
               < (COALESCE(t.route_order, 999), COALESCE(t.window_start, '23:59'::time), t.created_at, t.id)`;
+    // The comparison anchors at the SIBLING GROUP's earliest route tuple,
+    // not the requested row's own: the route optimizer assigns route_order
+    // per ROW, so another customer's stop can sort between two siblings —
+    // anchoring per-row would count that customer as ahead on one
+    // sibling's link but not the other's, and the truck visits the group
+    // once, at its earliest position. Cancelled/rescheduled/dead-hold
+    // siblings can't anchor (their tuple is stale), but the target row
+    // itself always can — it was already validated eligible above.
     const countRes = await db.raw(
-      `WITH target AS (
-         SELECT id, customer_id, technician_id, scheduled_date, route_order, window_start, created_at
+      `WITH target_row AS (
+         SELECT id, customer_id, technician_id, scheduled_date, window_start
            FROM scheduled_services
           WHERE id = ?::uuid
+       ),
+       target AS (
+         SELECT tr.customer_id, tr.technician_id, tr.scheduled_date, tr.window_start,
+                g.route_order, g.created_at, g.id
+           FROM target_row tr
+           JOIN LATERAL (
+             SELECT s.route_order, s.created_at, s.id
+               FROM scheduled_services s
+              WHERE s.technician_id = tr.technician_id
+                AND s.scheduled_date = tr.scheduled_date
+                AND s.customer_id = tr.customer_id
+                AND s.window_start IS NOT DISTINCT FROM tr.window_start
+                AND (s.id = tr.id
+                     OR (s.status NOT IN (${routeExcl})
+                         AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
+                         AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())))
+              ORDER BY COALESCE(s.route_order, 999), COALESCE(s.window_start, '23:59'::time), s.created_at, s.id
+              LIMIT 1
+           ) g ON TRUE
        )
        SELECT
          COUNT(DISTINCT ${STOP_KEY}) FILTER (
@@ -179,7 +213,8 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
           AND NOT (s.customer_id = t.customer_id
                    AND s.window_start IS NOT DISTINCT FROM t.window_start)
           AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())`,
-      // Binding order mirrors the FILTER order: ahead (live-excluded),
+      // Binding order mirrors the SQL order: the sibling-anchor lateral
+      // (route-excluded), then the FILTERs — ahead (live-excluded),
       // before_all / others_all / done_before (route-excluded), and
       // at_before / enroute_before (live-excluded again — terminal-status
       // precedence: a completed/cancelled row with a stale active
@@ -187,6 +222,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
       // tracking routes).
       [
         svc.id,
+        ...NOT_A_ROUTE_STOP_STATUSES,
         ...NOT_A_STOP_STATUSES,
         ...NOT_A_ROUTE_STOP_STATUSES,
         ...NOT_A_ROUTE_STOP_STATUSES,
@@ -284,8 +320,18 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
   }
 }
 
+// True when the visit's scheduled_date is today in ET — the only day
+// computeStopsAhead can ever return a count, so callers gate their
+// stops-ahead polling on it (a stale or far-future scheduled link would
+// otherwise poll forever for a count that cannot render).
+function isServiceDateToday(scheduledDate, today = etDateString()) {
+  const d = dateOnly(scheduledDate);
+  return d != null && d === today;
+}
+
 module.exports = {
   computeStopsAhead,
+  isServiceDateToday,
   STOPS_AHEAD_DISPLAY_CAP,
   TERMINAL_STATUSES,
   NOT_A_STOP_STATUSES,

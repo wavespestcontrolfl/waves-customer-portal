@@ -44,7 +44,7 @@ const { resolveFreshTechPosition } = require('../services/tracking-vehicle-locat
 const { ensureCustomerGeocoded } = require('../services/geocoder');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
-const { computeStopsAhead } = require('../services/stops-ahead');
+const { computeStopsAhead, isServiceDateToday } = require('../services/stops-ahead');
 const { gateEnvValue } = require('../config/feature-gates');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
@@ -549,9 +549,16 @@ router.get('/:token', async (req, res, next) => {
       },
       prepToken: null,
       meta: {
+        // The scheduled poll exists only for the stops-ahead count, which
+        // can only render on the visit's ET service date — retained links
+        // for rescheduled/far-future visits and stale links past their
+        // date must not poll for a count that cannot appear. Same-day
+        // rows keep polling even while the count is above the cap (it can
+        // drop into range as stops complete).
         pollIntervalSeconds: customerState === 'en_route'
           ? EN_ROUTE_POLL_SECONDS
           : (customerState === 'scheduled' && gateEnvValue('GATE_STOPS_AWAY')
+              && isServiceDateToday(row.scheduled_date)
             ? SCHEDULED_POLL_SECONDS
             : 0),
       },

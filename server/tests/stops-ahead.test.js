@@ -106,6 +106,7 @@ describe('computeStopsAhead', () => {
     const [countSql, countBindings] = db.countCall();
     expect(countBindings).toEqual([
       'svc-self',
+      ...NOT_A_ROUTE_STOP_STATUSES,    // sibling-anchor lateral
       ...NOT_A_STOP_STATUSES,          // ahead (live-excluded)
       ...NOT_A_ROUTE_STOP_STATUSES,    // before_all
       ...NOT_A_ROUTE_STOP_STATUSES,    // others_all
@@ -121,6 +122,12 @@ describe('computeStopsAhead', () => {
     expect(countSql).toContain("OR (s.track_state = 'complete' AND s.status NOT IN");
     expect(NOT_A_STOP_STATUSES).toEqual(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled']);
     expect(NOT_A_ROUTE_STOP_STATUSES).toEqual(['cancelled', 'skipped', 'no_show', 'rescheduled']);
+    // The comparison anchors at the sibling GROUP's earliest route tuple
+    // (route_order is assigned per row, so per-row anchoring would give
+    // sibling links different counts); the target row itself can always
+    // anchor even when its siblings are all route-excluded.
+    expect(countSql).toContain('JOIN LATERAL');
+    expect(countSql).toContain('s.id = tr.id');
     // A stop = the repo's sibling identity (customer_id, slot); only the
     // target's OWN sibling group is excluded.
     expect(countSql).toContain("COUNT(DISTINCT (s.customer_id, COALESCE(s.window_start, '23:59'::time)))");
@@ -186,6 +193,11 @@ describe('computeStopsAhead', () => {
     ['on the property already', baseSvc({ track_state: 'on_property' })],
     ['scheduled for a future date', baseSvc({ scheduled_date: '2026-08-15' })],
     ['row not found', null],
+    // status LEADS track_state when the best-effort tracker transition
+    // failed (tech-track commits status first): a visit already underway
+    // must not display or persist a planned-route count.
+    ['status en_route with stale track_state=scheduled', baseSvc({ status: 'en_route' })],
+    ['status on_site with stale track_state=scheduled', baseSvc({ status: 'on_site' })],
   ])('%s → null', async (_label, svcRow) => {
     const db = makeDb({ svcRow, countN: 1 });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
@@ -233,5 +245,19 @@ describe('computeStopsAhead', () => {
     db.raw = jest.fn();
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
     expect(logger.warn).toHaveBeenCalled();
+  });
+});
+
+describe('isServiceDateToday', () => {
+  const { isServiceDateToday } = require('../services/stops-ahead');
+
+  test('matches same-day strings and midnight-UTC Dates, rejects other days and junk', () => {
+    expect(isServiceDateToday(TODAY, TODAY)).toBe(true);
+    expect(isServiceDateToday(new Date(`${TODAY}T00:00:00.000Z`), TODAY)).toBe(true);
+    expect(isServiceDateToday('2026-08-15', TODAY)).toBe(false);
+    expect(isServiceDateToday('2026-08-13', TODAY)).toBe(false);
+    expect(isServiceDateToday(null, TODAY)).toBe(false);
+    expect(isServiceDateToday(undefined, TODAY)).toBe(false);
+    expect(isServiceDateToday('not-a-date', TODAY)).toBe(false);
   });
 });
