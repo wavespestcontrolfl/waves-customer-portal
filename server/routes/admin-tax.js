@@ -1979,25 +1979,36 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
     if (!row) return res.status(404).json({ error: 'row not found' });
     if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits link to expenses' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
-    const expense = await db('expenses').where({ id: expenseId }).first('id', 'amount', 'expense_date');
-    if (!expense) return res.status(404).json({ error: 'expense not found' });
-    // same amount tolerance + date window the matcher's candidates satisfy —
-    // a stale/crafted id outside them would falsify coverage. An expense a
-    // refund already REDUCED also matches at its GROSS (amount + applied
-    // refunds): the original full-price debit is still its statement row.
-    const refundTotal = await bankImport.appliedRefundTotal(expenseId);
-    const plausible = bankImport.isPlausibleExpenseLink(row, expense)
-      || (refundTotal > 0 && bankImport.isPlausibleExpenseLink(row, { ...expense, amount: Number(expense.amount) + refundTotal }));
-    if (!plausible) {
-      return res.status(400).json({ error: 'that expense does not plausibly match this bank row (amount/date outside the matching window)' });
-    }
+    // Plausibility is judged and the claim committed in ONE transaction
+    // with the expense row LOCKED — a concurrent expense edit or refund
+    // between an unlocked validation and the claim could otherwise leave
+    // an implausible link falsifying coverage (same guarded pattern as
+    // apply-refund and the automatic matcher).
     let claimed;
     try {
-      claimed = await db('bank_transactions')
-        .where({ id: row.id, status: 'unmatched' })
-        .update({ status: 'matched_expense', matched_expense_id: expenseId, match_method: 'manual', matched_at: new Date(), updated_at: new Date() });
+      claimed = await db.transaction(async trx => {
+        const expense = await trx('expenses').where({ id: expenseId }).forUpdate().first('id', 'amount', 'expense_date');
+        if (!expense) { const e = new Error('expense not found'); e.status = 404; throw e; }
+        // same amount tolerance + date window the matcher's candidates
+        // satisfy — a stale/crafted id outside them would falsify coverage.
+        // An expense a refund already REDUCED also matches at its GROSS
+        // (amount + applied refunds): the original full-price debit is
+        // still its statement row.
+        const refundTotal = await bankImport.appliedRefundTotal(expenseId, trx);
+        const plausible = bankImport.isPlausibleExpenseLink(row, expense)
+          || (refundTotal > 0 && bankImport.isPlausibleExpenseLink(row, { ...expense, amount: Number(expense.amount) + refundTotal }));
+        if (!plausible) {
+          const e = new Error('that expense does not plausibly match this bank row (amount/date outside the matching window)');
+          e.status = 400;
+          throw e;
+        }
+        return trx('bank_transactions')
+          .where({ id: row.id, status: 'unmatched' })
+          .update({ status: 'matched_expense', matched_expense_id: expenseId, match_method: 'manual', matched_at: new Date(), updated_at: new Date() });
+      });
     } catch (err) {
       if (err.code === '23505') return res.status(409).json({ error: 'that expense is already linked to another bank row' });
+      if (err.status) return res.status(err.status).json({ error: err.message });
       throw err;
     }
     if (!claimed) return res.status(409).json({ error: 'row was matched by someone else mid-flight' });
