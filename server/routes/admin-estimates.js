@@ -3164,6 +3164,14 @@ router.patch('/:id', async (req, res, next) => {
       updates.bill_by_invoice = nextBillByInvoice;
     }
     if (req.body.status !== undefined) {
+      // One-tap purchase drafts take NO generic status transitions (Codex
+      // #3395 r13 P2): a staff decline flips the row out of 'draft', which
+      // strands the open purchase ledger (confirm rejects; neither cleanup
+      // sweep reclaims a declined row) and contaminates the declined
+      // pipeline with an internal draft the customer never received.
+      if (estimate.source === 'one_tap_purchase' && req.body.status !== estimate.status) {
+        return res.status(400).json({ error: 'This is an internal one-tap purchase draft — its lifecycle is owned by the purchase flow.' });
+      }
       const verdict = resolveEstimateStatusPatch(estimate.status, req.body.status);
       if (!verdict.ok) return res.status(verdict.httpStatus).json({ error: verdict.error });
       // Same-status writes are a no-op for the status column (no declined_at

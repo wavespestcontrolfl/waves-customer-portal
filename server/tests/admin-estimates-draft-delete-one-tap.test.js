@@ -120,6 +120,25 @@ describe('standard send is blocked on one-tap drafts (GH #3395 r12 P2)', () => {
   });
 });
 
+describe('generic PATCH decline is blocked on one-tap drafts (GH #3395 r13 P2)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('PATCH /:id with status=declined answers 400 for source=one_tap_purchase', async () => {
+    const calls = makeTableDb({ estimate: { id: 'est-1', status: 'draft', source: 'one_tap_purchase' } });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/est-1`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'declined' }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toMatch(/one-tap purchase draft/);
+      expect(calls.updated).toEqual([]);
+    });
+  });
+});
+
 describe('draft delete with one-tap ledger rows', () => {
   beforeEach(() => jest.clearAllMocks());
 

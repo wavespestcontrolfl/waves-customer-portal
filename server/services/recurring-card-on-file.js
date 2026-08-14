@@ -263,6 +263,11 @@ async function completeRecurringCardEnrollment({
   estimateId,
   ip = null,
   userAgent = null,
+  // Visit scope for the enrollment's in-lock payer check (Codex #3395
+  // r13 P1): the accept-path policy resolver admits self_pay_override
+  // visits on payer-billed accounts — the enrollment must judge at the
+  // same scope or it refuses on the account payer.
+  scheduledServiceId = null,
 }) {
   if (!customerId || !stripePaymentMethodId) return { enrolled: false, reason: 'missing_args' };
   try {
@@ -311,6 +316,7 @@ async function completeRecurringCardEnrollment({
       paymentMethodId: saved?.id,
       source: 'estimate_accept',
       details: { via: 'recurring_card_on_file', estimate_id: estimateId, setup_intent_id: setupIntentId },
+      scheduledServiceId,
     });
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
       logger.warn(`[recurring-cof] enrollment refused (${enrollment.reason}) for customer ${customerId} pm ${saved?.id}`);
