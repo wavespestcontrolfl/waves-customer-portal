@@ -2152,6 +2152,59 @@ router.post('/contact-compliance-checks', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/communications/collections-voice-status — kill-switch
+// dashboard read for the collections outbound-voice lane (PR B). Read-only:
+// gate states, case counts by state, and the last few call outcomes off the
+// collections contact ledger (masked; no PII beyond what the admin bell
+// already shows). Safe with the lane dark — every count is simply zero.
+router.get('/collections-voice-status', async (req, res, next) => {
+  try {
+    const { isVoiceLatePaymentEnabled, isPayLinkEnabled } = require('../services/collections/outbound-voice/gates');
+    const { retentionDays } = require('../services/collections/outbound-voice/retention');
+
+    const caseRows = await db('collection_cases')
+      .select('current_state')
+      .count('* as count')
+      .groupBy('current_state')
+      .catch(() => []);
+    const caseCounts = {};
+    for (const row of caseRows) caseCounts[row.current_state] = parseInt(row.count, 10);
+
+    const recent = await db('collections_contact_ledger')
+      .where({ channel: 'voice', source: 'collections_voice' })
+      .orderBy('occurred_at', 'desc')
+      .limit(10)
+      .select('id', 'customer_id', 'occurred_at', 'metadata')
+      .catch(() => []);
+    const lastOutcomes = recent.map((r) => {
+      const meta = typeof r.metadata === 'string'
+        ? (() => { try { return JSON.parse(r.metadata); } catch { return {}; } })()
+        : (r.metadata || {});
+      return {
+        occurredAt: r.occurred_at,
+        customerId: r.customer_id,
+        outcome: meta.outcome || 'dialed',
+        liveConversation: Boolean(meta.live_conversation),
+        voicemailLeft: Boolean(meta.voicemail_left),
+        payLinkSent: Boolean(meta.pay_link_sent),
+        sendFailed: Boolean(meta.send_failed),
+      };
+    });
+
+    res.json({
+      gates: {
+        GATE_VOICE_LATE_PAYMENT: isVoiceLatePaymentEnabled(),
+        GATE_VOICE_LATE_PAYMENT_PAYLINK: isPayLinkEnabled(),
+        GATE_COLLECTIONS_POLICY: process.env.GATE_COLLECTIONS_POLICY === 'true',
+        GATE_COLLECTIONS_SHADOW: process.env.GATE_COLLECTIONS_SHADOW === 'true',
+      },
+      retentionDays: retentionDays(),
+      caseCounts,
+      lastOutcomes,
+    });
+  } catch (err) { next(err); }
+});
+
 router._internals = {
   buildSmsRewritePrompt,
   cleanSmsRewriteOutput,
