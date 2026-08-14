@@ -1007,6 +1007,20 @@ describe('runDeterministicMatching', () => {
     expect(revert.where).toContainEqual({ id: 'bt-auto', status: 'matched_expense', matched_expense_id: 'exp-1' });
   });
 
+  test('a RECONCILED payout whose status flipped (amount unchanged) reverts at the echo re-check too', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
+    // webhook flipped status while reconciled stayed true; the confirmed
+    // amount still matches — the old amount-only re-check kept the link
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'failed', reconciled: true }];
+    state.reconRows = [{ payout_id: 'po-1', status: 'confirmed', actual_amount: '2418.66' }];
+    reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-1', skipped: true, reason: 'guard' });
+    const summary = await runDeterministicMatching();
+    expect(summary.reconcileRetried).toBe(0);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert).toBeDefined();
+    expect(sugOf(revert).autoRevert.reason).toContain('no longer eligible');
+  });
+
   test('a linked payout that turned INELIGIBLE (webhook rewrote it) reverts instead of confirming', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
     // the payout.failed webhook landed after matching — status is no longer paid

@@ -841,24 +841,22 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
         if (changed) outcome = 'human_reverted';
         return;
       }
-      if (sp.reconciled) {
-        const effective = await effectivePayoutAmount(sp, trx);
-        if (!withinCandidateTolerance(effective, amount)) {
-          const changed = await trx('bank_transactions')
-            .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
-            .update({
-              status: 'unmatched',
-              matched_payout_id: null,
-              match_method: null,
-              matched_at: null,
-              suggestion: suggestionMerge({
-                autoRevert: { at: new Date().toISOString(), payoutId, reason: 'payout was reconciled with a different banked amount after matching' },
-              }, ['reconcilePending']),
-              updated_at: new Date(),
-            });
-          if (changed) outcome = 'amount_reverted';
-          return;
-        }
+      const reconciledEffective = sp.reconciled ? await effectivePayoutAmount(sp, trx) : null;
+      if (sp.reconciled && !withinCandidateTolerance(reconciledEffective, amount)) {
+        const changed = await trx('bank_transactions')
+          .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+          .update({
+            status: 'unmatched',
+            matched_payout_id: null,
+            match_method: null,
+            matched_at: null,
+            suggestion: suggestionMerge({
+              autoRevert: { at: new Date().toISOString(), payoutId, reason: 'payout was reconciled with a different banked amount after matching' },
+            }, ['reconcilePending']),
+            updated_at: new Date(),
+          });
+        if (changed) outcome = 'amount_reverted';
+        return;
       }
       const cur = await trx('bank_transactions')
         .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
@@ -869,11 +867,34 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
         outcome = 'skip_stands';
         return;
       }
+      if (sp.reconciled) {
+        // Amount matches, but a webhook can rewrite status/arrival while
+        // reconciled stays true (the same gap the reconciled-link healer
+        // closes) — the FULL predicate is judged here too, under the same
+        // lock, so an ineligible payout never keeps the link with its
+        // pending flag cleared.
+        if (!(sp.status === 'paid'
+          && isPlausiblePayoutLink({ txn_date: cur.txn_date, amount }, { amount: reconciledEffective, arrival_date: sp.arrival_date }))) {
+          const changed = await trx('bank_transactions')
+            .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+            .update({
+              status: 'unmatched',
+              matched_payout_id: null,
+              match_method: null,
+              matched_at: null,
+              suggestion: suggestionMerge({
+                autoRevert: { at: new Date().toISOString(), payoutId, reason: 'the payout is no longer eligible (status/amount/arrival changed after matching)' },
+              }, ['reconcilePending']),
+              updated_at: new Date(),
+            });
+          if (changed) outcome = 'ineligible_reverted';
+          return;
+        }
+      }
       // ELIGIBILITY revert for a still-unreconciled payout: a webhook
       // rewrote its status/amount/arrival and it no longer explains the
       // credit — the link must not survive on a payout the echo can never
-      // legitimately confirm. (A reconciled payout was already judged by
-      // the amount check above; a human ruling is never second-guessed.)
+      // legitimately confirm.
       if (!sp.reconciled) {
         const effective = await effectivePayoutAmount(sp, trx);
         const eligible = sp.status === 'paid'
