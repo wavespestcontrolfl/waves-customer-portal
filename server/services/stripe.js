@@ -3383,6 +3383,17 @@ const StripeService = {
               // page must NOT tell them "nothing more to do". Surface a specific
               // flag so it can show verification guidance instead.
               err.microdepositPending = true;
+              // Verification detail for the pay page: `descriptor_code` sends ONE
+              // deposit with an SM-prefixed code; `amounts` sends TWO deposits.
+              // The hosted URL is Stripe's own verification form — surfacing it
+              // beats "check your email", since the customer is already standing
+              // on the pay page. All three come from Stripe's live PI read.
+              const md = activeIntent.next_action?.verify_with_microdeposits || {};
+              err.microdeposit = {
+                microdepositType: md.microdeposit_type || null,
+                hostedVerificationUrl: md.hosted_verification_url || null,
+                arrivalDate: md.arrival_date || null,
+              };
               throw err;
             }
 
@@ -4204,6 +4215,14 @@ const StripeService = {
               err.statusCode = 409;
               err.inProgress = true;
               err.microdepositPending = true;
+              // Same verification detail as the single-invoice path: type-correct
+              // guidance + Stripe's hosted verification link for the pay page.
+              const md = activeIntent.next_action?.verify_with_microdeposits || {};
+              err.microdeposit = {
+                microdepositType: md.microdeposit_type || null,
+                hostedVerificationUrl: md.hosted_verification_url || null,
+                arrivalDate: md.arrival_date || null,
+              };
               throw err;
             }
 

@@ -98,6 +98,7 @@ import DocumentActionBar from '../components/DocumentActionBar';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
+import { microdepositDetailFromNextAction, microdepositGuidance } from '../lib/microdeposit';
 import { getStripe } from '../lib/stripeLoader';
 import { fetchWithNetworkRetry } from '../lib/fetchRetry';
 
@@ -158,6 +159,7 @@ function serverReportedError(message, {
   status = null,
   inProgress = false,
   microdepositPending = false,
+  microdeposit = null,
   savedCardPending = false,
 } = {}) {
   const err = new Error(message || 'Payment error');
@@ -165,6 +167,7 @@ function serverReportedError(message, {
   if (status != null) err.status = status;
   err.inProgress = !!inProgress;
   err.microdepositPending = !!microdepositPending;
+  err.microdeposit = microdeposit || null;
   err.savedCardPending = !!savedCardPending;
   return err;
 }
@@ -411,7 +414,7 @@ function SummaryRow({ label, value, strong, muted }) {
 }
 
 // ── Stripe Payment Element wrapper ─────────────────────────────────
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, thirdPartyBilled = false }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, thirdPartyBilled = false }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -867,7 +870,21 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           return;
         }
         if (pi && (pi.status === 'succeeded' || pi.status === 'processing')) onSuccess?.(pi, 'us_bank_account');
-        else if (pi?.status === 'requires_action') { setElementError('Additional verification required.'); setProcessingSync(false); }
+        else if (pi?.status === 'requires_action') {
+          // Manual account entry falls back to micro-deposit verification: the
+          // PI parks in requires_action until the customer confirms the
+          // deposit(s), so this is NOT an error and NOT a success — hand the
+          // page the same "verify your bank" state a revisit gets from the
+          // server's 409, with the verification detail Stripe just returned.
+          // (This dead-ended as a bare "Additional verification required."
+          // element error before — hit by a real customer payment, 2026-08.)
+          if (pi.next_action?.type === 'verify_with_microdeposits') {
+            onBankVerificationPending?.(pi.next_action.verify_with_microdeposits || {});
+            return;
+          }
+          setElementError('Additional verification required.');
+          setProcessingSync(false);
+        }
         else onSuccess?.(pi, 'us_bank_account');
       } catch (err) {
         setElementError(err.message || 'Payment failed');
@@ -1451,6 +1468,12 @@ export default function PayPageV2() {
   // wrongly imply there's nothing left to do. When set, the same in-flight panel
   // shows verification guidance instead.
   const [microdepositVerifying, setMicrodepositVerifying] = useState(false);
+  // Verification specifics from Stripe's live PI read (server 409 payload on a
+  // revisit, or the confirmPayment result's next_action on a fresh submit):
+  // { microdepositType: 'descriptor_code'|'amounts', hostedVerificationUrl,
+  //   arrivalDate (unix secs) }. Null when unknown — the panel falls back to
+  // generic copy, so a missing detail can never block the state itself.
+  const [microdepositDetail, setMicrodepositDetail] = useState(null);
   // An off-session saved-method attempt owns the invoice fence. This is not an
   // ACH-processing signal: the attempt can still decline/release, so show a
   // distinct wait-and-refresh state instead of claiming a bank debit is moving.
@@ -1729,6 +1752,7 @@ export default function PayPageV2() {
             status: r.status,
             inProgress: setup.inProgress,
             microdepositPending: setup.microdepositPending,
+            microdeposit: setup.microdeposit,
             savedCardPending: setup.savedCardPending,
           });
         }
@@ -1797,7 +1821,10 @@ export default function PayPageV2() {
         if (err.status === 409 && err.inProgress) {
           // Micro-deposit verification is in flight but NOT done — the same panel
           // renders verification guidance instead of "nothing more to do".
-          if (err.microdepositPending) setMicrodepositVerifying(true);
+          if (err.microdepositPending) {
+            setMicrodepositVerifying(true);
+            setMicrodepositDetail(err.microdeposit || null);
+          }
           setBankProcessing(true);
           setPaymentState('idle');
           return;
@@ -2059,18 +2086,35 @@ export default function PayPageV2() {
       <WavesShell variant="customer" topBar="solid">
         <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
           <BrandCard>
-            {microdepositVerifying ? (
-              <>
-                <SerifHeading style={{ marginBottom: SP.sm }}>Verify your bank to finish paying</SerifHeading>
-                <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
-                  You started a bank (ACH) payment for invoice {invoiceLabel}. In the next 1–2
-                  business days your bank will show two small deposits from Stripe — enter those
-                  amounts using the link in the email Stripe sent you to confirm and complete the
-                  payment. Until then there’s nothing to re-enter here. Questions? Give us a call
-                  — <HelpPhoneLink tone="dark" inline />.
-                </p>
-              </>
-            ) : (
+            {microdepositVerifying ? (() => {
+              const { windowLabel, depositSentence, verifyUrl } = microdepositGuidance(microdepositDetail);
+              return (
+                <>
+                  <SerifHeading style={{ marginBottom: SP.sm }}>Verify your bank to finish paying</SerifHeading>
+                  <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
+                    You started a bank (ACH) payment for invoice {invoiceLabel}. Nothing has been
+                    charged yet — {windowLabel} {depositSentence}
+                  </p>
+                  <p style={{ margin: 0, marginTop: SP.sm, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
+                    Stripe also emailed you a verification link. Until then there’s nothing to
+                    re-enter here. Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
+                  </p>
+                  {verifyUrl ? (
+                    // SP.xl gap before an in-card primary CTA — matches
+                    // ContractSignPage's post-copy button spacing.
+                    <div style={{ marginTop: SP.xl }}>
+                      <BrandButton
+                        variant="primary"
+                        fullWidth
+                        onClick={() => window.open(verifyUrl, '_blank', 'noopener')}
+                      >
+                        Verify my bank account
+                      </BrandButton>
+                    </div>
+                  ) : null}
+                </>
+              );
+            })() : (
               <>
                 <SerifHeading style={{ marginBottom: SP.sm }}>Your bank payment is processing</SerifHeading>
                 <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
@@ -2441,6 +2485,12 @@ export default function PayPageV2() {
                 token={token}
                 cardSurchargeRate={stripeSetup.cardSurchargeRate}
                 onSuccess={handlePaymentSuccess}
+                onBankVerificationPending={(md) => {
+                  setMicrodepositDetail(microdepositDetailFromNextAction(md));
+                  setMicrodepositVerifying(true);
+                  setBankProcessing(true);
+                  setPaymentState('idle');
+                }}
                 onError={(msg) => setPaymentError(msg)}
                 saveCard={payer ? false : saveCard}
                 saveCardLocked={!payer && saveCardRequired}

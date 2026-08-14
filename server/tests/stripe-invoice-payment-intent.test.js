@@ -359,7 +359,14 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
       id: 'pi_ach_microdeposit',
       status: 'requires_action',
-      next_action: { type: 'verify_with_microdeposits' },
+      next_action: {
+        type: 'verify_with_microdeposits',
+        verify_with_microdeposits: {
+          microdeposit_type: 'descriptor_code',
+          hosted_verification_url: 'https://payments.stripe.com/microdeposit/pacs_test_123',
+          arrival_date: 1786690800,
+        },
+      },
       payment_method_types: ['us_bank_account'],
       metadata: { waves_invoice_id: invoiceRow.id },
     });
@@ -371,10 +378,45 @@ describe('StripeService.createInvoicePaymentIntent', () => {
         statusCode: 409,
         inProgress: true,
         microdepositPending: true,
+        // Verification detail rides the 409 so the pay page can render
+        // type-correct guidance and Stripe's hosted verification link.
+        microdeposit: {
+          microdepositType: 'descriptor_code',
+          hostedVerificationUrl: 'https://payments.stripe.com/microdeposit/pacs_test_123',
+          arrivalDate: 1786690800,
+        },
       });
     expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     expect(updateInvoice).not.toHaveBeenCalled();
+  });
+
+  test('micro-deposit 409 degrades to null detail fields when Stripe omits the verification payload', async () => {
+    // Older API shapes / partial reads must never turn the benign 409 into a
+    // crash — the pay page falls back to generic verification copy on nulls.
+    invoiceRow.stripe_payment_intent_id = 'pi_ach_microdeposit_bare';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_ach_microdeposit_bare',
+      status: 'requires_action',
+      next_action: { type: 'verify_with_microdeposits' },
+      payment_method_types: ['us_bank_account'],
+      metadata: { waves_invoice_id: invoiceRow.id },
+    });
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+      .rejects.toMatchObject({
+        statusCode: 409,
+        inProgress: true,
+        microdepositPending: true,
+        microdeposit: {
+          microdepositType: null,
+          hostedVerificationUrl: null,
+          arrivalDate: null,
+        },
+      });
+    expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
   test('does NOT cancel-and-replace a requires_capture invoice PI (authorized hold must not be voided)', async () => {

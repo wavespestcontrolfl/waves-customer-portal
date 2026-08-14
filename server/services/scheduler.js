@@ -800,6 +800,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY MON 4:05AM ET — Manatee permit sync (public ACA CSV reports →
+  // pool_permit_records + construction_permit_records). Pool report =
+  // closed-permit backstop for the pool-facts lookup (the live GIS layer
+  // drops permits when they close and the assessment roll lags a finished
+  // pool by up to a year); construction reports = under-construction /
+  // new-build evidence (stale-imagery signal). Inert unless
+  // GATE_PERMIT_SYNC is set (checked inside syncPermits — single source of
+  // truth); first enabled run on empty tables backfills, then
+  // trailing-window refreshes. runExclusive: a deploy overlap must not run
+  // two ACA report sessions at once.
+  // =========================================================================
+  cron.schedule('5 4 * * 1', async () => {
+    try {
+      const res = await runExclusive('permit-sync', () =>
+        require('./property-lookup/manatee-permit-sync').syncPermits());
+      if (res && !res.skipped) {
+        const part = (r) => (r ? `${r.written}/${r.fetched} rows` : 'failed');
+        logger.info(`Permit sync: pool ${part(res.pool)}; construction ${part(res.construction)}${res.errors.length ? `; errors: ${res.errors.join(' | ')}` : ''}`);
+      }
+    } catch (err) {
+      logger.error(`Permit sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
   // renames from the unit-review queue only: "Gallons" -> gal at factor 1;
   // missing-unit and ambiguous-oz rows stay parked for review). Gate is

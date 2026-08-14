@@ -58,6 +58,10 @@ function createDbMock(initialRows = {}) {
       const cutoff = new Date(bindings[0]);
       return row => row.publish_claimed_until == null || new Date(row.publish_claimed_until) < cutoff;
     }
+    if (sql.includes('review_created_at IS NULL OR review_created_at <')) {
+      const cutoff = new Date(bindings[0]);
+      return row => row.review_created_at == null || new Date(row.review_created_at) < cutoff;
+    }
     return null;
   }
 
@@ -933,6 +937,10 @@ describe('Google Business review sync', () => {
     await service.syncAllReviews();
 
     expect(db.__state.rows.google_reviews.find(r => r.id === 'back-via-places').missing_since).toBeNull();
+    // The corroborated clear also rings the correction bell.
+    const restored = (db.__state.rows.notifications || []).find(n => n.title.includes('restored at'));
+    expect(restored).toBeTruthy();
+    expect(restored.body).toContain('Paula Placeholder');
   });
 
   test('Places fallback does NOT revive a stamped review on an uncorroborated same-name match', async () => {
@@ -1016,6 +1024,74 @@ describe('Google Business review sync', () => {
     await service.syncAllReviews();
 
     expect(db.__state.rows.google_reviews.find(r => r.id === 'back-1').missing_since).toBeNull();
+    // The correction bell: the admin who saw "removed" hears it came back.
+    const restored = (db.__state.rows.notifications || []).find(n => n.title.includes('restored at'));
+    expect(restored).toBeTruthy();
+    expect(restored.title).toContain('1 Google review restored at Lakewood Ranch');
+    expect(restored.body).toContain('John Doe');
+    expect(restored.link).toBe('/admin/reviews');
+  });
+
+  test('no restored bell when the feed simply confirms an unstamped review', async () => {
+    seedSyncedReview({ id: 'keep-1' });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('restored at'))).toHaveLength(0);
+  });
+
+  test('a review inside the fresh-review grace window is not stamped by one absent pull', async () => {
+    // Google returns brand-new reviews inconsistently while replication/spam
+    // screening settles (2026-08-13: a 2.5h-old review vanished from one pull
+    // and was back two hours later) — absence of a <48h-old review is not
+    // removal evidence. An old review missing from the SAME pull still stamps.
+    seedSyncedReview({
+      id: 'fresh-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-fresh',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-fresh',
+      reviewer_name: 'Newly Nadia',
+      review_created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    });
+    seedSyncedReview({
+      id: 'old-gone-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-old-gone',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-old-gone',
+      reviewer_name: 'Vanished Vera',
+      review_created_at: '2026-04-01T12:00:00Z',
+    });
+    gbpFeed([]);
+
+    await service.syncAllReviews();
+
+    const rows = db.__state.rows.google_reviews;
+    expect(rows.find(r => r.id === 'fresh-1').missing_since).toBeNull();
+    expect(rows.find(r => r.id === 'old-gone-1').missing_since).toBeTruthy();
+    const alert = (db.__state.rows.notifications || []).find(n => n.title.includes('removed at'));
+    expect(alert).toBeTruthy();
+    expect(alert.body).toContain('Vanished Vera');
+    expect(alert.body).not.toContain('Newly Nadia');
+  });
+
+  test('a review older than the grace window stamps normally when absent', async () => {
+    seedSyncedReview({
+      id: 'aged-out-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-aged',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-aged',
+      reviewer_name: 'Aged Out',
+      review_created_at: new Date(Date.now() - 49 * 60 * 60 * 1000).toISOString(),
+    });
+    gbpFeed([]);
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'aged-out-1').missing_since).toBeTruthy();
   });
 
   test('a same-name review from a different account cannot hijack a stamped evidence row', async () => {
