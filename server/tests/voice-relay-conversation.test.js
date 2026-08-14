@@ -551,6 +551,35 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(spoken).toMatch(/Tuesday open/i);
   });
 
+  // ⭐ A SUPERSEDED SESSION LOSES ITS TOOLS. After a fresh-token reconnect
+  // takes over the CallSid claim, the OLD socket must not keep account
+  // context or write access — every tool call re-proves nonce ownership.
+  test('a session whose claim was taken over refuses tools and ends', async () => {
+    const builder = {};
+    builder.where = jest.fn(() => builder);
+    builder.first = jest.fn(async () => ({ metadata: { relay_session_claim_owner: 'nonce-NEW' } }));
+    db.mockImplementation(() => builder);
+    const endSession = jest.fn();
+    const convo = new RelayConversation({
+      callSid: 'CA-superseded', sessionKey: 'nonce-OLD', from: '+19415551234', send: jest.fn(), endSession,
+    });
+    const out = await convo._executeToolBounded('get_availability', {}, {});
+    expect(out).toMatch(/superseded by a reconnect/i);
+    expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
+  });
+
+  test('a session that still OWNS the claim executes tools normally', async () => {
+    const builder = {};
+    builder.where = jest.fn(() => builder);
+    builder.first = jest.fn(async () => ({ metadata: { relay_session_claim_owner: 'nonce-MINE' } }));
+    db.mockImplementation(() => builder);
+    const convo = new RelayConversation({
+      callSid: 'CA-owned', sessionKey: 'nonce-MINE', from: '+19415551234', send: jest.fn(), endSession: jest.fn(),
+    });
+    const out = await convo._executeToolBounded('definitely_not_a_tool', {}, {});
+    expect(out).not.toMatch(/superseded/i); // fence passed; normal tool handling follows
+  });
+
   // Contact-slot recognition must never reach the ctx as 'full'.
   test('customerTier on the tool ctx mirrors the ANI match column, failing closed', () => {
     const convo = new RelayConversation({ callSid: 'CA7', from: '+19415551234', send: jest.fn() });

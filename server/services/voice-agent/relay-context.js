@@ -133,6 +133,25 @@ async function beginRelaySessionClaim(callSid, sessionKey = null) {
   }
 }
 
+/**
+ * The CURRENT owner (token nonce) of a call's relay-session claim — what the
+ * per-tool supersession fence in relay-conversation compares its own nonce
+ * against. Read-only; null when the row/owner is absent or unreadable (the
+ * fence fails open on unprovable, the claim WRITE stays the atomic boundary).
+ */
+async function relaySessionClaimOwner(callSid) {
+  const key = String(callSid || '').trim();
+  if (!key) return null;
+  try {
+    const db = require('../../models/db');
+    const row = await db('call_log').where({ twilio_call_sid: key }).first('metadata');
+    const meta = row && (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata);
+    return (meta && meta[RELAY_CLAIM_OWNER_KEY]) || null;
+  } catch {
+    return null;
+  }
+}
+
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -1612,6 +1631,7 @@ module.exports = {
   requiresAttestation,
   isFullAttestation,
   beginRelaySessionClaim,
+  relaySessionClaimOwner,
   servicesCatalogText,
   loadOfficeHours,
   renderClockBlock,

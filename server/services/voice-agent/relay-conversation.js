@@ -609,6 +609,27 @@ class RelayConversation {
     const isWrite = WRITE_TOOLS.has(name);
     const ms = isWrite ? WRITE_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
     const onTimeout = isWrite ? WRITE_TOOL_TIMEOUT_TEXT : TOOL_TIMEOUT_TEXT;
+    // ⭐ A SUPERSEDED SESSION LOSES ITS TOOLS. The nonce-owned CallSid claim
+    // lets a fresh-token reconnect take over the live call — and the OLD
+    // socket (dead to Twilio but possibly still open here, or on another
+    // instance) must not keep account context and write access past that
+    // takeover: every tool call re-proves ownership against the current
+    // claim. Fail-open only on a READ ERROR (a transient DB blip must not
+    // strangle a live call — the claim itself is the boundary, this fence is
+    // its enforcement at the privileged surface).
+    if (this.sessionKey && this.callSid) {
+      try {
+        const { relaySessionClaimOwner } = require('./relay-context');
+        const owner = await relaySessionClaimOwner(this.callSid);
+        if (owner && owner !== this.sessionKey) {
+          logger.warn(`[voice-relay] session superseded by a reconnect callSid=${this.callSid} — tool "${name}" refused, ending`);
+          this._ending = true;
+          try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing anyway */ }
+          return 'This session was superseded by a reconnect. Do NOT call any more tools and do not answer '
+            + 'account questions — say goodbye briefly.';
+        }
+      } catch { /* unprovable ⇒ proceed; the claim write itself is atomic */ }
+    }
     // IN-FLIGHT LATCH (writes only). A write that blew its budget kept running
     // while the model was told "no confirmation either way" — and nothing
     // stopped the model calling it again. Refuse the second call instead of

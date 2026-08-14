@@ -175,11 +175,24 @@ async function fileContactInstructionNotification(customer, instruction, opts, d
     // obligation standing; without this probe every hourly sweep re-inserted
     // the same admin card. A probe failure proceeds to notify — a duplicate
     // card beats a lost do-not-contact.
+    // The dedupe key is the NORMALIZED INSTRUCTION, not the call alone: a
+    // second capture_lead on the same call can carry an UPDATED preference or
+    // a new DNC, and matching by CallSid+title would clear the fresh
+    // obligation against the stale row. Old rows without the key simply never
+    // match (one duplicate card beats a lost instruction).
+    const instructionKey = require('crypto').createHash('sha256')
+      .update(JSON.stringify({
+        customerId: customer.id,
+        contact_preference: instruction.contact_preference || null,
+        preferred_contact_method: instruction.preferred_contact_method || null,
+        do_not_contact_request: instruction.do_not_contact_request === true,
+      }))
+      .digest('hex').slice(0, 16);
     if (opts.callSid) {
       const existing = await db('notifications')
         .whereRaw("metadata->>'callSid' = ?", [String(opts.callSid)])
         .whereRaw("metadata->>'source' = ?", ['voice_agent'])
-        .where('title', 'like', '%stated on a phone call')
+        .whereRaw("metadata->>'instructionKey' = ?", [instructionKey])
         .first('id')
         .catch(() => null);
       if (existing) {
@@ -223,6 +236,7 @@ async function fileContactInstructionNotification(customer, instruction, opts, d
           customerId: customer.id,
           source: 'voice_agent',
           callSid: opts.callSid || null,
+          instructionKey, // the sweep-retry dedupe key (normalized instruction)
           ...instruction,
         },
       },
