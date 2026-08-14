@@ -102,12 +102,13 @@ describe('runCallPropertyLookup', () => {
     });
 
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
-    expect(res).toEqual({ enriched: true, filled: ['latitude', 'longitude', 'property_type'] });
+    expect(res).toEqual({ enriched: true, filled: ['latitude', 'longitude', 'property_type'], complete: true });
     expect(performPropertyLookup).toHaveBeenCalledWith('123 Sample Cove, Bradenton, FL, 34212');
 
     const patch = updateBuilder.update.mock.calls[0][0];
-    expect(patch.latitude).toMatchObject({ __raw: 'COALESCE(latitude, ?)', bindings: [27.4995] });
-    expect(patch.longitude).toMatchObject({ __raw: 'COALESCE(longitude, ?)', bindings: [-82.4108] });
+    // Atomic coordinate pair: each component writes only when BOTH are null.
+    expect(patch.latitude).toMatchObject({ __raw: 'CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE latitude END', bindings: [27.4995] });
+    expect(patch.longitude).toMatchObject({ __raw: 'CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE longitude END', bindings: [-82.4108] });
     expect(patch.property_type).toMatchObject({ __raw: 'COALESCE(property_type, ?)', bindings: ['single_family'] });
     // sqft semantics belong to the lawn lane — never written here.
     expect(Object.keys(patch)).toEqual(['latitude', 'longitude', 'property_type', 'updated_at']);
@@ -128,8 +129,28 @@ describe('runCallPropertyLookup', () => {
       },
     });
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
-    expect(res).toEqual({ enriched: true, filled: [] });
+    expect(res).toEqual({ enriched: true, filled: [], complete: false });
     expect(updateBuilder.update).not.toHaveBeenCalled();
+  });
+
+  test('address edited during the lookup → update matches nothing, result discarded', async () => {
+    const updateBuilder = builder(0); // fenced UPDATE matched no rows
+    mockRowDb({
+      id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
+      address_line1: '123 Sample Cove', city: 'Bradenton', state: 'FL', zip: '34212',
+      address_key: 'oldkey',
+    }, updateBuilder);
+    performPropertyLookup.mockResolvedValueOnce({
+      satellite: { inServiceArea: true },
+      enriched: {
+        lat: 27.5, lng: -82.4, propertyType: 'Single Family',
+        _observed: { propertyType: true }, fieldVerifyFlags: [],
+      },
+    });
+    const res = await runCallPropertyLookup({ propertyId: 'p1' });
+    expect(res).toEqual({ enriched: true, filled: [], complete: false });
+    // The fence includes the address key captured at read time.
+    expect(updateBuilder.where).toHaveBeenCalledWith({ id: 'p1', address_key: 'oldkey', active: true });
   });
 
   test('address field-verify flag → cache warmed but nothing persisted', async () => {
@@ -145,7 +166,7 @@ describe('runCallPropertyLookup', () => {
       },
     });
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
-    expect(res).toEqual({ enriched: true, filled: [] });
+    expect(res).toEqual({ enriched: true, filled: [], complete: false });
   });
 
   test('street without ZIP → skipped before any lookup spend', async () => {

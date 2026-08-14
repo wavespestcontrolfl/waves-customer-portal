@@ -132,7 +132,7 @@ async function enrichPropertyById(propertyId) {
     logger.info('[call-property-lookup] address flagged — cache warmed, no fill', {
       propertyId, elapsedMs: Date.now() - t0,
     });
-    return { enriched: true, filled: [] };
+    return { enriched: true, filled: [], complete: false };
   }
 
   const patch = {};
@@ -144,9 +144,12 @@ async function enrichPropertyById(propertyId) {
   const lng = enriched.lng == null ? NaN : Number(enriched.lng);
   const inServiceArea = result?.satellite?.inServiceArea === true;
   if (Number.isFinite(lat) && Number.isFinite(lng) && inServiceArea) {
-    // COALESCE fill-only: never overwrites a human-set value, even racing one.
-    patch.latitude = db.raw('COALESCE(latitude, ?)', [lat]);
-    patch.longitude = db.raw('COALESCE(longitude, ?)', [lng]);
+    // ATOMIC-PAIR fill-only: both components write only when BOTH are
+    // currently absent — a lone stored coordinate (e.g. a manual partial
+    // correction) must never be paired with the lookup's other half, which
+    // would identify no actual property. Never overwrites either value.
+    patch.latitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE latitude END', [lat]);
+    patch.longitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE longitude END', [lng]);
   }
   // Property type persists only when the profile marks it OBSERVED (the
   // lookup synthesizes 'Single Family' as a display default) and no
@@ -160,16 +163,40 @@ async function enrichPropertyById(propertyId) {
   if (propertyType) {
     patch.property_type = db.raw('COALESCE(property_type, ?)', [propertyType]);
   }
+  let updated = 0;
   if (Object.keys(patch).length) {
     patch.updated_at = db.fn.now();
-    await db('customer_properties').where({ id: propertyId }).update(patch);
+    // Fenced to the ADDRESS THAT WAS LOOKED UP: the external fan-out can
+    // run for a minute, and an address edit meanwhile (syncPrimaryAddress
+    // clears coordinates on edit) must not receive the OLD address's
+    // facts. A changed address_key or deactivated row matches nothing and
+    // the result is discarded.
+    updated = await db('customer_properties')
+      .where({ id: propertyId, address_key: row.address_key, active: true })
+      .update(patch);
+    if (!updated) {
+      logger.info('[call-property-lookup] row changed during lookup — result discarded', {
+        propertyId, elapsedMs: Date.now() - t0,
+      });
+      return { enriched: true, filled: [], complete: false };
+    }
   }
+  const filled = Object.keys(patch).filter((k) => k !== 'updated_at');
+  // Post-patch completeness (drives the sweep's offset accounting): the
+  // row leaves the NULL-candidate set only when coords AND type are all
+  // present now — a partial fill (coords taken, synthesized type refused)
+  // keeps it in the set.
+  // The atomic-pair CASE only writes when BOTH were null — a patched key
+  // with one lone stored coordinate wrote nothing.
+  const coordsComplete = (row.latitude != null && row.longitude != null)
+    || (filled.includes('latitude') && row.latitude == null && row.longitude == null);
+  const typeComplete = Boolean(row.property_type) || filled.includes('property_type');
   logger.info('[call-property-lookup] enriched', {
     propertyId,
-    filled: Object.keys(patch).filter((k) => k !== 'updated_at'),
+    filled,
     elapsedMs: Date.now() - t0,
   });
-  return { enriched: true, filled: Object.keys(patch).filter((k) => k !== 'updated_at') };
+  return { enriched: true, filled, complete: coordsComplete && typeComplete };
 }
 
 /**
@@ -298,9 +325,10 @@ async function sweepUnenrichedProperties({ limit } = {}) {
     if (!page.length) break;
     seen += page.length;
     // OFFSET advances only by rows that STAY in the NULL-filtered result
-    // set (cooled/failed/no-data). A filled row leaves the set, shifting
-    // everything left — advancing past it too would skip unseen rows.
-    let filledThisPage = 0;
+    // set (cooled/failed/no-data/partially-filled). Only a row that is now
+    // COMPLETE leaves the set and shifts everything left — a partial fill
+    // (coords taken, synthesized type refused) still matches the filter.
+    let completedThisPage = 0;
     for (const row of page) {
       if (processed >= batch) break;
       if (await attemptedRecently(propertyRowAddress(row))) { cooled += 1; continue; }
@@ -308,13 +336,13 @@ async function sweepUnenrichedProperties({ limit } = {}) {
       try {
         const res = await enrichPropertyById(row.id);
         if (res.enriched) enriched += 1;
-        if (res.enriched && res.filled?.length) filledThisPage += 1;
+        if (res.complete) completedThisPage += 1;
       } catch (err) {
         failed += 1;
         logger.warn('[call-property-lookup] backfill row failed', { propertyId: row.id, error: errId(err) });
       }
     }
-    offset += page.length - filledThisPage;
+    offset += page.length - completedThisPage;
   }
   logger.info('[call-property-lookup] backfill sweep complete', {
     candidates: seen,
