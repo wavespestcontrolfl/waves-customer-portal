@@ -4187,6 +4187,10 @@ function BankImportTab() {
           color={D.green}
         />
         <StatCard label="Created" value={counts.created_expense || 0} color={D.green} />
+        {/* applied refunds are completed review work too — without this
+            card each refund made the totals stop reconciling with the
+            number of imported rows */}
+        <StatCard label="Refunds" value={counts.refund_applied || 0} color={D.green} />
         <StatCard label="Ignored" value={counts.ignored || 0} />
       </div>
 

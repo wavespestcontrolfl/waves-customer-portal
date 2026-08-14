@@ -865,6 +865,29 @@ describe('runDeterministicMatching', () => {
     expect(sugOf(revert).autoRevert.reason).toContain('ambiguous');
   });
 
+  test('the ambiguity rollback REVERSES a reconciliation a concurrent retry confirmed mid-verify', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE DEPOSIT', amount: 500, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '500.00', arrival_date: '2026-08-11', reconciled: false }];
+    // between the claim and the post-claim verify: a concurrent pass's
+    // pending-retry CONFIRMS our echo, and a same-amount payout arrives
+    state.onUpdate = (u) => {
+      if (u.patch.status === 'matched_payout') {
+        state.onUpdate = null;
+        state.payouts[0] = { ...state.payouts[0], reconciled: true, reconciled_by: 'bank-import:bt-1' };
+        state.payouts.push({ id: 'po-2', amount: '500.00', arrival_date: '2026-08-11', reconciled: false });
+        // the concurrent confirm carries an actual amount for effectivePayoutAmount
+        state.reconRows = [{ payout_id: 'po-1', status: 'confirmed', actual_amount: '500.00' }];
+      }
+    };
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert).toBeDefined();
+    // the reversal rides in the SAME transaction as the unlink — Banking
+    // can never keep reporting the payout reconciled by an unlinked row
+    expect(reconcilePayout).toHaveBeenCalledWith('po-1', 500, expect.stringContaining('Ambiguity rollback'), 'bank-import:bt-1', 'rejected', expect.objectContaining({ trx: expect.anything() }));
+  });
+
   test('an AUTO-linked expense whose vendor was corrected away is healed; a matching vendor survives', async () => {
     state.bankRows = [
       { id: 'bt-changed', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', match_method: 'expense_amount_date_vendor', matched_expense_id: 'exp-1', suggestion: null },

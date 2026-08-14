@@ -1070,21 +1070,45 @@ async function runDeterministicMatching({ limit } = {}) {
             // arrivals and never retro-invalidate a link.
             const after = await surveyPayoutCandidates();
             if (!(!after.overflow && after.candidates.length === 1 && after.candidates[0].id === exact[0].id)) {
-              const undone = await db('bank_transactions')
-                .where({ id: row.id, status: 'matched_payout', matched_payout_id: exact[0].id })
-                .update({
-                  status: 'unmatched',
-                  matched_payout_id: null,
-                  match_method: null,
-                  matched_at: null,
-                  suggestion: suggestionMerge({
-                    autoRevert: { at: new Date().toISOString(), payoutId: exact[0].id, reason: 'a concurrently arrived payout made the match ambiguous' },
-                  }, ['reconcilePending']),
-                  updated_at: new Date(),
+              // Atomic rollback, SAME shape as the unlink route: payout
+              // locked FIRST, the CAS unlink inside, and — when a
+              // concurrent pending-retry already confirmed our echo between
+              // the claim and this verify — the reconciliation reversal in
+              // the same transaction. Without this, the unlink could
+              // succeed while Banking permanently reported the payout
+              // reconciled by a row that is no longer linked.
+              let rolledBack = false;
+              try {
+                await db.transaction(async (trx) => {
+                  const sp = await trx('stripe_payouts').where('id', exact[0].id).forUpdate().first('reconciled', 'reconciled_by');
+                  const undone = await trx('bank_transactions')
+                    .where({ id: row.id, status: 'matched_payout', matched_payout_id: exact[0].id })
+                    .update({
+                      status: 'unmatched',
+                      matched_payout_id: null,
+                      match_method: null,
+                      matched_at: null,
+                      suggestion: suggestionMerge({
+                        autoRevert: { at: new Date().toISOString(), payoutId: exact[0].id, reason: 'a concurrently arrived payout made the match ambiguous' },
+                      }, ['reconcilePending']),
+                      updated_at: new Date(),
+                    });
+                  // CAS no-op = someone else already changed the row —
+                  // their write owns the outcome
+                  if (!undone) return;
+                  rolledBack = true;
+                  if (sp && sp.reconciled && sp.reconciled_by === `bank-import:${row.id}`) {
+                    const { reconcilePayout } = require('./stripe-banking');
+                    await reconcilePayout(exact[0].id, Number(row.amount), `Ambiguity rollback for bank import row ${row.id}`, `bank-import:${row.id}`, 'rejected', { trx });
+                  }
                 });
-              // CAS no-op = someone else already changed the row — their
-              // write owns the outcome
-              if (undone) summary.ambiguous++;
+              } catch (rollbackErr) {
+                // the transaction rolled everything back together — the
+                // claim stands (rare; a later pass re-verifies via the
+                // pending-retry path)
+                logger.warn(`[bank-import] ambiguity rollback for row ${row.id} failed — link kept: ${rollbackErr.message}`);
+              }
+              if (rolledBack) summary.ambiguous++;
               continue; // never echo a reverted (or foreign-owned) claim
             }
             summary.payoutsLinked++;
