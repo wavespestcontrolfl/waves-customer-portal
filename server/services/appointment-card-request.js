@@ -332,6 +332,11 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
         paymentMethodId: savedMethod.id,
         source: 'save_card_consent',
         details: { via: 'appointment_card_request', scheduled_service_id: visit.id, trigger },
+        // Scope the enrollment's in-lock payer check to THIS visit (r11
+        // P1): the sweep deliberately admits self_pay_override visits on
+        // payer-billed accounts — an account-level check would refuse and
+        // leave the customer-paid visit perpetually unsecured.
+        scheduledServiceId: visit.id,
         dbh: trx,
       });
       if (!enrollment?.enrolled && enrollment?.reason !== 'already_enrolled') {

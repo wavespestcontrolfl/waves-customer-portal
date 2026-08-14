@@ -78,6 +78,21 @@ describe('enrollConsentedMethod', () => {
     expect(logAutopay).not.toHaveBeenCalled();
   });
 
+  test('scheduledServiceId scopes the payer check to the visit being secured (r11: self_pay_override visits still enroll)', async () => {
+    setQueues({
+      customers: [qb({ first: custRow() }), qb()],
+      payment_methods: [qb({ first: TARGET }), qb({ first: null }), qb(), qb()],
+      autopay_log: [],
+    });
+    const out = await enrollConsentedMethod({
+      customerId: 'cust-1', paymentMethodId: 'pm-new', source: 'test', scheduledServiceId: 'ss-42',
+    });
+    expect(out.enrolled).toBe(true);
+    expect(PayerService.resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1', scheduledServiceId: 'ss-42', throwOnError: true,
+    }));
+  });
+
   test('a payer-resolver failure THROWS (fail closed, transaction rolls back, caller retries)', async () => {
     setQueues({ customers: [qb({ first: custRow() })] });
     PayerService.resolveForInvoice.mockRejectedValue(new Error('payer lookup down'));

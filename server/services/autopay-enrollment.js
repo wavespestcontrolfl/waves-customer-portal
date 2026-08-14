@@ -58,7 +58,7 @@ const BANK_ALIASES = ['ach', 'us_bank_account'];
  *   every other caller.
  * @returns {{ enrolled: boolean, reason?: string, methodId?: string, inChargeMethodId?: string, sendEnrollmentConfirmation?: Function }}
  */
-async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null, dbh = db }) {
+async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null, scheduledServiceId = null, dbh = db }) {
   if (!customerId || (!paymentMethodId && !stripePaymentMethodId)) {
     return { enrolled: false, reason: 'missing_args' };
   }
@@ -84,10 +84,14 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
     // enrolling the homeowner's method on a payer-billed account points
     // self-pay charging at the wrong party. Re-check against the locked
     // snapshot; a resolver failure THROWS (fail closed) so the transaction
-    // rolls back and each caller's retry semantics apply.
+    // rolls back and each caller's retry semantics apply. scheduledServiceId
+    // scopes the check to the visit being secured (r11 P1): a per-visit
+    // self_pay_override on a payer-billed account is customer-paid — the
+    // previsit auto-secure path must still enroll for it.
     const resolvedPayer = await require('./payer').resolveForInvoice({
       database: trx,
       customerId,
+      scheduledServiceId,
       throwOnError: true,
     });
     if (resolvedPayer?.payerId) {

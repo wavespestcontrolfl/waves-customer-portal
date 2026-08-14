@@ -1056,6 +1056,28 @@ describe('route contracts', () => {
     expect(serviceMock.confirm).not.toHaveBeenCalled();
   });
 
+  test('confirm keeps its OWN rate allowance — reserve churn can never 429 the required confirmation (GH r11 P2)', async () => {
+    serviceMock.reserve.mockResolvedValue({ scheduledServiceId: 'ss-1', expiresAt: new Date().toISOString(), holdMinutes: 15 });
+    serviceMock.confirm.mockResolvedValue({ success: true, perVisit: 84, label: 'Lawn Care', emailQueued: true, firstVisit: null });
+    const base = await listen(appWithGate(true));
+    // Exhaust the init/reserve limiter (max 10/hr, shared instance).
+    for (let i = 0; i < 10; i += 1) {
+      const r = await fetch(`${base}/api/one-tap/${PURCHASE_ID}/reserve`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slotId: `slot-${i}` }),
+      });
+      expect(r.status).toBe(200);
+    }
+    const eleventh = await fetch(`${base}/api/one-tap/${PURCHASE_ID}/reserve`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slotId: 'slot-x' }),
+    });
+    expect(eleventh.status).toBe(429);
+    // The confirmation that completes the purchase must still get through.
+    const confirm = await fetch(`${base}/api/one-tap/${PURCHASE_ID}/confirm`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ termsAccepted: true }),
+    });
+    expect(confirm.status).toBe(200);
+  });
+
   test('gate on: init passes the click through and returns the service payload', async () => {
     serviceMock.initPurchase.mockResolvedValue({ purchaseId: PURCHASE_ID, perVisit: 84 });
     const base = await listen(appWithGate(true));

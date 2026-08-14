@@ -40,6 +40,20 @@ const writeLimiter = rateLimit({
   message: { error: 'Too many attempts. Please wait a moment or call our office.' },
 });
 
+// Confirmation gets its OWN allowance (codex r11 P2): sharing the
+// init/reserve limiter made the quota cumulative across the whole flow —
+// enough re-picks (unavailable slots, reopened overlays) could spend the
+// tenth request on a reservation and 429 the required confirm, and waiting
+// out the hour guarantees the 15-minute hold expires first.
+const confirmLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.customerId || req.ip,
+  message: { error: 'Too many attempts. Please wait a moment or call our office.' },
+});
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function gateOff(res) {
@@ -154,7 +168,7 @@ router.get('/:purchaseId/slots', async (req, res, next) => {
   }
 });
 
-router.post('/:purchaseId/confirm', writeLimiter, async (req, res, next) => {
+router.post('/:purchaseId/confirm', confirmLimiter, async (req, res, next) => {
   try {
     if (!gateEnvValue('GATE_ONE_TAP_PURCHASE')) return gateOff(res);
     const purchaseId = validPurchaseId(req, res);

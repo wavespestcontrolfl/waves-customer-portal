@@ -1154,6 +1154,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
         paymentMethodId: card.id,
         source: 'one_tap_purchase',
         details: { via: 'one_tap_confirm', estimate_id: purchase.estimate_id, purchase_id: purchase.id },
+        scheduledServiceId: committed?.id || null,
         // The confirmation moment: an Auto Pay opt-out committed AFTER the
         // customer authorized this purchase must win over the enrollment
         // (r10 P1 — enrollConsentedMethod's opted_out_after_authorization
