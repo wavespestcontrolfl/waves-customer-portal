@@ -544,9 +544,16 @@ const NEW_BUILD_CO_MONTHS = 18;
 // nobody refreshes shouldn't keep asserting active construction.
 const ACTIVE_SEEN_WITHIN_DAYS = 30;
 
+// N calendar months before TODAY IN ET (the county's frame — issued_date /
+// co_date are ET-local DATE columns), not 30-day approximations: 24
+// "30-day months" is ~23.7 real months, and a UTC "today" is tomorrow for
+// the last 4-5 hours of every ET day (the repo's timestamptz rule).
+// Date.UTC normalizes month underflow; an out-of-range day-of-month (Mar
+// 31 − 1 month) rolls forward, which is fine for an evidence window.
 function monthsAgoIso(months) {
-  const d = new Date(Date.now() - months * 30 * 24 * 60 * 60 * 1000);
-  return d.toISOString().slice(0, 10);
+  const { etDateString } = require('../../utils/datetime-et');
+  const [y, m, d] = etDateString(new Date()).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1 - months, d)).toISOString().slice(0, 10);
 }
 
 const toIso = (v) => (v ? new Date(v).toISOString().slice(0, 10) : null);
