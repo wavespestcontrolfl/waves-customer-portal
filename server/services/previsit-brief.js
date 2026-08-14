@@ -637,6 +637,23 @@ async function assembleGrounding(svc, dbh = db) {
   const genuinelyNew = history.available ? !history.last : false;
   const access = buildAccessBlock(prefs, svc, genuinelyNew, normalizedType);
 
+  // Current service opt-outs from scheduled_services.service_preferences
+  // (jsonb or string — same tolerant parse and pest scoping as the
+  // deterministic alert in nextstop-alerts). Boolean whitelist only.
+  let servicePrefFlags = null;
+  if (/pest/i.test(normalizedType)) {
+    let svcPrefs = null;
+    try {
+      svcPrefs = typeof svc.service_preferences === 'string'
+        ? JSON.parse(svc.service_preferences || '{}')
+        : (svc.service_preferences || null);
+    } catch { svcPrefs = null; }
+    const flags = {};
+    if (typeof svcPrefs?.interior_spray === 'boolean') flags.interiorSpray = svcPrefs.interior_spray;
+    if (typeof svcPrefs?.exterior_sweep === 'boolean') flags.exteriorSweep = svcPrefs.exterior_sweep;
+    if (Object.keys(flags).length) servicePrefFlags = flags;
+  }
+
   const catalogVocabulary = await loadCatalogVocabulary(dbh);
 
   // The ONLY facts the LLM may see: already-redacted context slices plus
@@ -653,6 +670,13 @@ async function assembleGrounding(svc, dbh = db) {
       // outage manufactured.
       ...(history.available ? { newCustomer: genuinelyNew } : {}),
     },
+    // Current service opt-outs (NON-SECRET whitelist — never the raw
+    // jsonb): the model must SEE "exterior only" or it will echo
+    // historical interior work as guidance, and the validator's
+    // deterministic conflict check keys off these same hashed flags
+    // (grounding text alone cannot express a negation — "no interior"
+    // in a preference string GROUNDS the word "interior").
+    ...(servicePrefFlags ? { servicePreferences: servicePrefFlags } : {}),
     history: { available: history.available },
     lastVisit: lastVisitRecord ? {
       date: calendarDay(lastVisitRecord.service_date),
@@ -1072,7 +1096,29 @@ function findUngroundedClaim(body, grounding) {
     { text: body.customer_context, instructional: false },
   ].filter((f) => f.text);
   const escapeReTerm = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Deterministic service-preference conflicts: grounding text cannot
+  // express negation — an "exterior only — no interior" preference (or
+  // historical interior notes) GROUNDS the word "interior", so a
+  // grounding check alone would accept "Treat interior" on an
+  // exterior-only visit. Instruction fields must not mention the
+  // opted-out scope AT ALL (even an agreeing restatement — the
+  // deterministic alert already carries the opt-out, and a rejected leg
+  // falls to the template which includes it).
+  const prefConflicts = [];
+  const svcPrefFlags = grounding.llmFacts?.servicePreferences || null;
+  if (svcPrefFlags?.interiorSpray === false) {
+    prefConflicts.push({ re: /\b(?:interior|inside|indoors?)\b/, term: 'interior' });
+  }
+  if (svcPrefFlags?.exteriorSweep === false) {
+    prefConflicts.push({ re: /\b(?:eaves?|cobwebs?)\b/, term: 'eave sweep' });
+  }
   for (const field of labeledFields) {
+    if (field.instructional && prefConflicts.length) {
+      const fieldText = String(field.text).toLowerCase();
+      for (const conflict of prefConflicts) {
+        if (conflict.re.test(fieldText)) return { kind: 'preference_conflict', term: conflict.term };
+      }
+    }
     // Instruction fields: scan for EVERY known product name regardless of
     // casing — the capitalized extractors miss "priorities: ['bifen it']",
     // and a known-but-off-fixed-list name is an instruction toward a

@@ -486,6 +486,44 @@ describe('grounded allowlist validation of LLM output', () => {
     ).reason).toBe('ungrounded_numeric:100.50');
   });
 
+  test('an instruction against a current service opt-out is rejected even when grounded (codex P1)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    // The preference text itself grounds the word "interior" — grounding
+    // cannot express negation, so the conflict check must be
+    // deterministic off the hashed flag.
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: {
+        servicePreferences: { interiorSpray: false },
+        flags: [{ detail: 'EXTERIOR ONLY — no interior treatment' }],
+      },
+    };
+    for (const directive of ['Treat interior', 'Inspect inside near the kitchen']) {
+      const verdict = validateBriefJson(
+        { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [directive] },
+        grounding,
+      );
+      expect(verdict.reason).toBe('ungrounded_preference_conflict:interior');
+    }
+  });
+
+  test('descriptive prose may still mention the opted-out scope (history is a fact)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: {
+        servicePreferences: { interiorSpray: false },
+        flags: [{ detail: 'EXTERIOR ONLY — no interior treatment' }],
+        recentCalls: ['Asked about ants in garage'],
+      },
+    };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], last_visit_summary: 'Interior baseboards treated in March.' },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
   test('a short (≤3-letter) ungrounded product in an instruction is rejected, not vacuously grounded', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     // 'ddt' is under every length-gated pass (rare-word scan and catalog
@@ -603,6 +641,24 @@ describe('serviceHistory is line-scoped from the paged walk', () => {
       { type: 'Pest Control Service', date: '2026-07-15', notes: null },
     ]);
     expect(text).not.toContain('4482');
+  });
+});
+
+describe('service-preference opt-outs in grounding', () => {
+  test('non-secret opt-out flags reach llmFacts and an opted-out instruction falls to the template', async () => {
+    global.__dispatch = jest.fn(async () => ({
+      ok: true,
+      json: { ...CLEAN_LLM_JSON, priorities: ['Treat interior'] },
+    }));
+    useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_preferences: { interior_spray: false, exterior_sweep: true } }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    expect(out.via).toBe('template');
+    const text = global.__dispatch.mock.calls[0][1].text;
+    const facts = JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
+    expect(facts.servicePreferences).toEqual({ interiorSpray: false, exteriorSweep: true });
   });
 });
 
