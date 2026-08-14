@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
@@ -11138,6 +11138,120 @@ function useLastUpdated(iso) {
   return text;
 }
 
+// "N stops before yours" hero + route-dots strip (GATE_STOPS_AWAY).
+// stopsAhead is null unless the gate is on AND the clamped count is within
+// the display cap — null renders nothing, so gate-off behavior is
+// byte-for-byte unchanged. Bare counts only, by owner ruling: the strip
+// shows positions and totals, never any other customer's information.
+function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, customerLocation }) {
+  if (stopsAhead == null) return null;
+  const yourStop = routeProgress?.yourStop;
+  const totalStops = routeProgress?.totalStops;
+  // The truck sits just past the last finished stop. Derived from the
+  // CLAMPED count so the strip can never contradict the hero numeral.
+  const truckStop = yourStop != null ? Math.max(0, yourStop - stopsAhead - 1) : null;
+  const started = truckStop != null && truckStop >= 1;
+
+  const dot = (bg, fg, iconName, size, label) => (
+    <div style={{
+      width: size, height: size, borderRadius: '50%', background: bg,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+    }} aria-label={label}>
+      <Icon name={iconName} size={Math.round(size * 0.55)} style={{ color: fg }} />
+    </div>
+  );
+  const seg = (color) => (
+    <div style={{ flex: 1, height: 2, background: color, minWidth: 8 }} />
+  );
+  const betweenStops = [];
+  if (yourStop != null) {
+    for (let s = truckStop + 1; s < yourStop; s += 1) betweenStops.push(s);
+  }
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      {stopsAhead > 0 ? (
+        <>
+          <div style={{ fontSize: 16, color: B.textBody }}>
+            {started ? `${techFirst} is out on the route —` : `${techFirst}'s route today —`}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 2 }}>
+            <span style={{
+              fontFamily: FONTS.display, fontSize: 54, lineHeight: 1,
+              color: B.glassNavy, letterSpacing: '0.02em',
+            }}>
+              {stopsAhead}
+            </span>
+            <span style={{ fontSize: 19, fontWeight: 600, color: B.glassNavy }}>
+              {stopsAhead === 1 ? 'stop before yours' : 'stops before yours'}
+            </span>
+          </div>
+        </>
+      ) : (
+        <div style={{
+          fontFamily: FONTS.display, fontSize: 32, lineHeight: 1.1,
+          color: B.glassNavy, letterSpacing: '0.02em',
+        }}>
+          You&apos;re next
+        </div>
+      )}
+
+      {yourStop != null && totalStops != null && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {started && (
+              <>
+                {dot(B.wavesBlue, B.white, 'check', 22, 'Completed stops')}
+                {seg(B.wavesBlue)}
+              </>
+            )}
+            {dot(B.glassNavy, B.white, 'truck', 28, started ? `Now at stop ${truckStop}` : 'Route starting soon')}
+            {betweenStops.map((s) => (
+              <Fragment key={s}>
+                {seg(B.grayLight)}
+                <div style={{
+                  width: 20, height: 20, borderRadius: '50%', flexShrink: 0,
+                  border: `1.5px solid ${B.grayLight}`, color: B.textCaption,
+                  fontSize: 12, fontWeight: 700, display: 'flex',
+                  alignItems: 'center', justifyContent: 'center',
+                }}>
+                  {s}
+                </div>
+              </Fragment>
+            ))}
+            {seg(B.grayLight)}
+            {dot(B.yellow, B.glassNavy, 'home', 28, `Your stop: ${yourStop}`)}
+          </div>
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', marginTop: 8,
+            fontSize: 14, color: B.textCaption,
+          }}>
+            <span>{started ? <>Now at <strong style={{ color: B.glassNavy }}>stop {truckStop} of {totalStops}</strong></> : 'Route starts soon'}</span>
+            <span style={{ fontWeight: 700, color: B.glassNavy }}>You&apos;re stop {yourStop}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Approximate route map: the truck's ~1km-rounded position (server
+          rounds — precise coords mid-route would disclose another
+          customer's address) + this property. Precise live tracking stays
+          an en-route-only feature. */}
+      {techApprox && customerLocation && (
+        <div style={{ marginTop: 14 }}>
+          <EnRouteLiveMap
+            techPosition={techApprox}
+            customerLocation={customerLocation}
+            techName={techFirst}
+          />
+          <div style={{ fontSize: 14, color: B.textCaption, marginTop: 6 }}>
+            Approximate location — updates as {techFirst} works the route.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ServiceTracker() {
   const [tracker, setTracker] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -11314,23 +11428,13 @@ function ServiceTracker() {
             }}>
               Your {svcType.toLowerCase()} is {step === 2 ? 'confirmed' : 'booked'}{tracker.service?.windowStart ? ` for ${window}` : ''}.
             </div>
-            {/* "N stops away" (GATE_STOPS_AWAY): stopsAhead rides the payload
-                only when the gate is on AND the clamped count is within the
-                display cap — null renders nothing, so gate-off behavior is
-                byte-for-byte unchanged. Bare count only, by owner ruling. */}
-            {tracker.stopsAhead != null && (
-              <div style={{
-                display: 'inline-block', marginTop: 12,
-                fontSize: 14, fontWeight: 700, fontFamily: FONTS.ui,
-                color: B.wavesBlue, background: `${B.wavesBlue}14`,
-                padding: '6px 12px', borderRadius: 8,
-                border: `1px solid ${B.wavesBlue}33`,
-              }}>
-                {tracker.stopsAhead === 0
-                  ? `You're next on ${techFirst}'s route`
-                  : `${tracker.stopsAhead} ${tracker.stopsAhead === 1 ? 'stop' : 'stops'} away`}
-              </div>
-            )}
+            <StopsAheadHero
+              stopsAhead={tracker.stopsAhead}
+              routeProgress={tracker.routeProgress}
+              techFirst={techFirst}
+              techApprox={tracker.techApprox}
+              customerLocation={tracker.customerLocation}
+            />
             <div style={{ fontSize: 16, color: B.textBody, marginTop: 12, lineHeight: 1.5 }}>
               You'll get a text as soon as {techFirst} is on the way.
             </div>

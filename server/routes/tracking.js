@@ -192,6 +192,8 @@ function formatScheduledTracker(service, tech, customer) {
     etaMinutes: null,
     etaSource: null,
     stopsAhead: null,
+    routeProgress: null,
+    techApprox: null,
     liveNotes: [],
     serviceSummary: null,
     service: {
@@ -367,8 +369,33 @@ router.get('/active', async (req, res, next) => {
       await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
       await attachRainChance(formatted, canonical, req.customer);
-      // "N stops away" (GATE_STOPS_AWAY) — bare count only, fail-soft null.
-      formatted.stopsAhead = await computeStopsAhead(db, canonical.id);
+      // "N stops before yours" (GATE_STOPS_AWAY) — bare counts only,
+      // fail-soft null. routeProgress feeds the route-dots strip.
+      const stops = await computeStopsAhead(db, canonical.id);
+      formatted.stopsAhead = stops ? stops.stopsAhead : null;
+      formatted.routeProgress = stops
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops }
+        : null;
+      // Approximate truck position for the scheduled-state map — ONLY when
+      // the stops count is displayable, and ROUNDED to ~1km (2 decimal
+      // places) on purpose: mid-route the truck is parked at another
+      // customer's home, and precise coords would disclose their address.
+      // The precise feed stays exclusive to the en-route state.
+      if (stops && canonical.technician_id) {
+        try {
+          const pos = await resolveFreshTechPosition({
+            techId: canonical.technician_id,
+            logPrefix: 'tracking-stops-approx',
+          });
+          if (pos) {
+            formatted.techApprox = {
+              lat: Math.round(pos.lat * 100) / 100,
+              lng: Math.round(pos.lng * 100) / 100,
+              lastReportedAt: pos.lastReportedAt || null,
+            };
+          }
+        } catch { /* map is best-effort; the count renders without it */ }
+      }
       return res.json({ tracker: formatted });
     }
 
@@ -388,8 +415,33 @@ router.get('/today', async (req, res, next) => {
       await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
       await attachRainChance(formatted, canonical, req.customer);
-      // "N stops away" (GATE_STOPS_AWAY) — bare count only, fail-soft null.
-      formatted.stopsAhead = await computeStopsAhead(db, canonical.id);
+      // "N stops before yours" (GATE_STOPS_AWAY) — bare counts only,
+      // fail-soft null. routeProgress feeds the route-dots strip.
+      const stops = await computeStopsAhead(db, canonical.id);
+      formatted.stopsAhead = stops ? stops.stopsAhead : null;
+      formatted.routeProgress = stops
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops }
+        : null;
+      // Approximate truck position for the scheduled-state map — ONLY when
+      // the stops count is displayable, and ROUNDED to ~1km (2 decimal
+      // places) on purpose: mid-route the truck is parked at another
+      // customer's home, and precise coords would disclose their address.
+      // The precise feed stays exclusive to the en-route state.
+      if (stops && canonical.technician_id) {
+        try {
+          const pos = await resolveFreshTechPosition({
+            techId: canonical.technician_id,
+            logPrefix: 'tracking-stops-approx',
+          });
+          if (pos) {
+            formatted.techApprox = {
+              lat: Math.round(pos.lat * 100) / 100,
+              lng: Math.round(pos.lng * 100) / 100,
+              lastReportedAt: pos.lastReportedAt || null,
+            };
+          }
+        } catch { /* map is best-effort; the count renders without it */ }
+      }
       return res.json({ tracker: formatted });
     }
 

@@ -5,6 +5,7 @@ const {
   computeStopsAhead,
   STOPS_AHEAD_DISPLAY_CAP,
   NOT_A_STOP_STATUSES,
+  NOT_A_ROUTE_STOP_STATUSES,
 } = require('../services/stops-ahead');
 
 const TODAY = '2026-08-14';
@@ -26,13 +27,16 @@ function baseSvc(overrides = {}) {
 }
 
 // db mock: builder calls fetch the visit row (and the fallback floor
-// re-read); db.raw serves BOTH the single-snapshot CTE count and the
-// atomic floor UPDATE … RETURNING, dispatched on the SQL text. By default
-// the UPDATE mock echoes back the bound clamped value (the ELSE /
-// no-prior-floor branch of the real statement); tests override `rawFloor`
-// to emulate a concurrent racer having stored a smaller floor, or set it
-// to null to emulate the guarded no-op write.
-function makeDb({ svcRow, countN = 0, rawFloor, rawError = null } = {}) {
+// re-read); db.raw serves BOTH the single-snapshot CTE aggregate and the
+// atomic floor UPDATE … RETURNING, dispatched on the SQL text. The CTE
+// returns { ahead, before_all, others_all } — ahead defaults from countN,
+// before_all/others_all from beforeAll/othersAll (completed stops earlier
+// on the route make before_all exceed ahead). The UPDATE mock echoes back
+// the bound clamped value by default; `rawFloor` overrides it to emulate a
+// concurrent racer's smaller floor, or null for the guarded no-op write.
+function makeDb({
+  svcRow, countN = 0, beforeAll, othersAll, rawFloor, rawError = null,
+} = {}) {
   const queries = [];
   const dbFn = jest.fn(() => {
     const q = {
@@ -47,7 +51,13 @@ function makeDb({ svcRow, countN = 0, rawFloor, rawError = null } = {}) {
   });
   dbFn.raw = jest.fn((sql, bindings) => {
     if (/WITH target/.test(sql)) {
-      return Promise.resolve({ rows: [{ n: countN }] });
+      return Promise.resolve({
+        rows: [{
+          ahead: countN,
+          before_all: beforeAll !== undefined ? beforeAll : countN,
+          others_all: othersAll !== undefined ? othersAll : countN + 3,
+        }],
+      });
     }
     if (rawError) return Promise.reject(rawError);
     if (rawFloor === null) return Promise.resolve({ rows: [] }); // guarded no-op write
@@ -75,30 +85,33 @@ describe('computeStopsAhead', () => {
     expect(db.raw).not.toHaveBeenCalled();
   });
 
-  test('counts non-stop-excluded earlier visits and persists the floor atomically', async () => {
-    const db = makeDb({ svcRow: baseSvc(), countN: 2 });
-    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBe(2);
+  test('returns count + route position and persists the floor atomically', async () => {
+    // 2 live stops ahead, 3 stops already completed earlier on the route:
+    // yourStop = 5+1 = 6, totalStops = 7+1 = 8.
+    const db = makeDb({ svcRow: baseSvc(), countN: 2, beforeAll: 5, othersAll: 7 });
+    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY }))
+      .toEqual({ stopsAhead: 2, yourStop: 6, totalStops: 8 });
     // Single conditional UPDATE — (today, clamped, clamped, today, id) for
     // the SET, plus (today, clamped) for the skip-unchanged-write guard.
     expect(db.updateCalls()).toHaveLength(1);
     expect(db.updateCalls()[0][1]).toEqual([TODAY, 2, 2, TODAY, 'svc-self', TODAY, 2]);
-    // Single-snapshot CTE count (hook P1 r6): target tuple and preceding
-    // count in ONE statement, bound to (target id, excluded statuses).
+    // Single-snapshot CTE aggregate: bound to (target id, live-excluded
+    // statuses, route-excluded statuses ×2).
     const [countSql, countBindings] = db.countCall();
-    expect(countBindings).toEqual(['svc-self', ...NOT_A_STOP_STATUSES]);
+    expect(countBindings).toEqual([
+      'svc-self', ...NOT_A_STOP_STATUSES, ...NOT_A_ROUTE_STOP_STATUSES, ...NOT_A_ROUTE_STOP_STATUSES,
+    ]);
     expect(NOT_A_STOP_STATUSES).toEqual(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled']);
-    // A stop = the repo's sibling identity (customer_id, slot) — sibling
-    // rows for one slot read as one stop, a customer's separate same-day
-    // appointment stays a real stop, and only the target's OWN sibling
-    // group is excluded.
+    expect(NOT_A_ROUTE_STOP_STATUSES).toEqual(['cancelled', 'skipped', 'no_show', 'rescheduled']);
+    // A stop = the repo's sibling identity (customer_id, slot); only the
+    // target's OWN sibling group is excluded.
     expect(countSql).toContain("COUNT(DISTINCT (s.customer_id, COALESCE(s.window_start, '23:59'::time)))");
     expect(countSql).toContain('NOT (s.customer_id = t.customer_id');
     expect(countSql).toContain('s.window_start IS NOT DISTINCT FROM t.window_start');
-    // Dead estimate-slot holds must not count (hook P1: live-hold predicate).
+    // Dead estimate-slot holds must not count (live-hold predicate).
     expect(countSql).toContain('(s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())');
-    // track_state can diverge from status (markComplete can leave
-    // status='confirmed' + track_state='complete') — tracker-terminal rows
-    // must drop out too, NULL-safely.
+    // Tracker-terminal rows drop out of the LIVE count by track_state too,
+    // NULL-safely (track_state can diverge from status).
     expect(countSql).toContain("(s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))");
   });
 
@@ -113,10 +126,11 @@ describe('computeStopsAhead', () => {
     // returns the stored floor — the displayed count never increases.
     const db = makeDb({
       svcRow: baseSvc({ stops_ahead_min_shown: 2, stops_ahead_shown_date: TODAY }),
-      countN: 4,
+      countN: 4, beforeAll: 4, othersAll: 6,
       rawFloor: null,
     });
-    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBe(2);
+    const res = await computeStopsAhead(db, 'svc-self', { today: TODAY });
+    expect(res).toEqual({ stopsAhead: 2, yourStop: 5, totalStops: 7 });
   });
 
   test('a floor from a previous date is superseded (re-date resets the clamp)', async () => {
@@ -126,7 +140,7 @@ describe('computeStopsAhead', () => {
     });
     // Stale-date floor is ignored for clamping; the atomic UPDATE's CASE
     // resets it (mock echoes the ELSE branch).
-    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBe(3);
+    expect((await computeStopsAhead(db, 'svc-self', { today: TODAY }))?.stopsAhead).toBe(3);
     expect(db.updateCalls()[0][1]).toEqual([TODAY, 3, 3, TODAY, 'svc-self', TODAY, 3]);
   });
 
@@ -136,33 +150,33 @@ describe('computeStopsAhead', () => {
       countN: 1,
       rawFloor: 1,
     });
-    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBe(1);
+    expect((await computeStopsAhead(db, 'svc-self', { today: TODAY }))?.stopsAhead).toBe(1);
   });
 
   test('race collapse: a concurrent racer stored a smaller floor → its value wins', async () => {
     // This request computed 2, but RETURNING says another request already
     // persisted 1 — display the authoritative smaller floor, never 2.
     const db = makeDb({ svcRow: baseSvc(), countN: 2, rawFloor: 1 });
-    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBe(1);
+    expect((await computeStopsAhead(db, 'svc-self', { today: TODAY }))?.stopsAhead).toBe(1);
   });
 
   test.each([
     ['no technician assigned', baseSvc({ technician_id: null })],
-    ['en route to this stop (scheduled card owns the count)', baseSvc({ track_state: 'en_route' })],
     ['terminal status', baseSvc({ status: 'completed' })],
     ['rescheduled placeholder (still track_state=scheduled)', baseSvc({ status: 'rescheduled' })],
+    ['en route to this stop (scheduled card owns the count)', baseSvc({ track_state: 'en_route' })],
     ['on the property already', baseSvc({ track_state: 'on_property' })],
     ['scheduled for a future date', baseSvc({ scheduled_date: '2026-08-15' })],
     ['row not found', null],
   ])('%s → null', async (_label, svcRow) => {
     const db = makeDb({ svcRow, countN: 1 });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
-    expect(db.raw).not.toHaveBeenCalled();
+    expect(db.updateCalls()).toHaveLength(0);
   });
 
   test('midnight-UTC Date scheduled_date still matches today', async () => {
     const db = makeDb({ svcRow: baseSvc({ scheduled_date: new Date(`${TODAY}T00:00:00.000Z`) }), countN: 1 });
-    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBe(1);
+    expect((await computeStopsAhead(db, 'svc-self', { today: TODAY }))?.stopsAhead).toBe(1);
   });
 
   test('floor persist failure → null: never display a number the clamp did not record', async () => {
@@ -171,9 +185,9 @@ describe('computeStopsAhead', () => {
     expect(logger.warn).toHaveBeenCalled();
   });
 
-  test('zero-row RETURNING (visit deleted mid-poll) → null', async () => {
-    const db = makeDb({ svcRow: baseSvc(), countN: 1 });
-    db.raw = jest.fn().mockResolvedValue({ rows: [] });
+  test('zero-row RETURNING with no same-day floor on re-read → null', async () => {
+    const db = makeDb({ svcRow: baseSvc(), countN: 1, rawFloor: null });
+    // fallback re-read returns baseSvc (no floor fields) → null
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
   });
 

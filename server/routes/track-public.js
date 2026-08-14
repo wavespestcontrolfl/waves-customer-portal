@@ -139,6 +139,29 @@ async function withTimeout(promise, timeoutMs, fallbackValue = null) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
+// Approximate truck position for the scheduled-state map (GATE_STOPS_AWAY).
+// ROUNDED to ~1km (2 decimal places) on purpose: mid-route the truck is
+// parked at another customer's home, and precise coords would disclose
+// their address. The precise feed (buildVehicle) stays exclusive to the
+// en-route state.
+async function buildApproxVehicle(row) {
+  if (!row?.technician_id) return null;
+  try {
+    const pos = await resolveFreshTechPosition({
+      techId: row.technician_id,
+      logPrefix: 'track-public-approx',
+    });
+    if (!pos) return null;
+    return {
+      lat: Math.round(pos.lat * 100) / 100,
+      lng: Math.round(pos.lng * 100) / 100,
+      lastReportedAt: pos.lastReportedAt || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function buildVehicle(service) {
   // Phase 2: live tech location + ETA from tech_status. Returns null
   // if either the tech's last GPS ping is missing or the property
@@ -453,6 +476,13 @@ router.get('/:token', async (req, res, next) => {
     else if (row.status === 'cancelled' || row.status === 'skipped') customerState = 'cancelled';
     else if (row.status === 'completed') customerState = 'complete';
 
+    // "N stops before yours" (GATE_STOPS_AWAY): bare counts only — never
+    // other customers' info. Scheduled state only (the en-route card's
+    // "on the way" copy owns later states); fail-soft null otherwise.
+    const stops = customerState === 'scheduled'
+      ? await computeStopsAhead(db, row.id)
+      : null;
+
     const response = {
       state: customerState,
       tech: row.technician_id
@@ -494,12 +524,11 @@ router.get('/:token', async (req, res, next) => {
       // streaming fresh tech GPS coords and polling until token expiry
       // even though the customer is shown a terminal missed-visit card.
       vehicle: customerState === 'en_route' ? await buildVehicle(row) : null,
-      // "N stops away" (GATE_STOPS_AWAY): bare count only — never other
-      // customers' info. Scheduled state only (the en-route card's "on the
-      // way" copy owns later states); fail-soft null otherwise.
-      stopsAhead: customerState === 'scheduled'
-        ? await computeStopsAhead(db, row.id)
+      stopsAhead: stops ? stops.stopsAhead : null,
+      routeProgress: stops
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops }
         : null,
+      vehicleApprox: stops ? await buildApproxVehicle(row) : null,
       summary: customerState === 'complete' ? await buildSummary(row) : null,
       cancellation: customerState === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }

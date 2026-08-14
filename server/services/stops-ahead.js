@@ -44,6 +44,13 @@ const TERMINAL_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 // still ahead of you.
 const NOT_A_STOP_STATUSES = [...TERMINAL_STATUSES, 'rescheduled'];
 
+// Statuses that were never (or are no longer) a stop on today's ROUTE at
+// all — used for the position/total figures ("Now at stop 2 of 6").
+// Completed visits stay route stops here: the truck really did park there
+// today, and position/total must include them or "stop 4 of 6" would
+// renumber itself every time a stop finishes.
+const NOT_A_ROUTE_STOP_STATUSES = ['cancelled', 'skipped', 'no_show', 'rescheduled'];
+
 // scheduled_date / stops_ahead_shown_date arrive as 'YYYY-MM-DD' strings or
 // midnight-UTC Dates depending on the driver path — normalize to the
 // etDateString() key shape (same normalization as track-transitions).
@@ -54,9 +61,13 @@ function dateOnly(value) {
 }
 
 /**
- * @returns {Promise<number|null>} clamped stops-ahead (0..CAP) to display,
- *   or null when the count shouldn't render (gate off, no tech, not today,
- *   terminal visit, beyond the cap, or any error).
+ * @returns {Promise<{stopsAhead: number, yourStop: number, totalStops: number}|null>}
+ *   stopsAhead — clamped stops-ahead (0..CAP) to display;
+ *   yourStop / totalStops — the visit's 1-based position on today's route
+ *   and the route's stop count (completed stops included), feeding the
+ *   "Now at stop X of Y / You're stop Z" strip. Null when the count
+ *   shouldn't render (gate off, no tech, not today, terminal visit,
+ *   beyond the cap, or any error).
  */
 async function computeStopsAhead(db, serviceId, opts = {}) {
   if (!gateEnvValue('GATE_STOPS_AWAY')) return null;
@@ -104,28 +115,52 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     // real stop. Only the target's OWN sibling group is excluded, so a
     // sibling of the target never counts as ahead of itself but the
     // customer's genuinely-earlier other appointment still does.
-    const statusPlaceholders = NOT_A_STOP_STATUSES.map(() => '?').join(', ');
+    // Three figures from the same rows in one pass:
+    //   ahead      — live (not-yet-serviced) stops sorting before the target;
+    //                this is the number the cap and clamp govern.
+    //   before_all — ROUTE stops (completed included) before the target →
+    //                yourStop = before_all + 1.
+    //   others_all — every route stop today besides the target's own group →
+    //                totalStops = others_all + 1.
+    const liveExcl = NOT_A_STOP_STATUSES.map(() => '?').join(', ');
+    const routeExcl = NOT_A_ROUTE_STOP_STATUSES.map(() => '?').join(', ');
+    const STOP_KEY = "(s.customer_id, COALESCE(s.window_start, '23:59'::time))";
+    const PRECEDES = `(COALESCE(s.route_order, 999), COALESCE(s.window_start, '23:59'::time), s.created_at, s.id)
+              < (COALESCE(t.route_order, 999), COALESCE(t.window_start, '23:59'::time), t.created_at, t.id)`;
     const countRes = await db.raw(
       `WITH target AS (
          SELECT id, customer_id, technician_id, scheduled_date, route_order, window_start, created_at
            FROM scheduled_services
           WHERE id = ?::uuid
        )
-       SELECT COUNT(DISTINCT (s.customer_id, COALESCE(s.window_start, '23:59'::time)))::int AS n
+       SELECT
+         COUNT(DISTINCT ${STOP_KEY}) FILTER (
+           WHERE ${PRECEDES}
+             AND s.status NOT IN (${liveExcl})
+             AND (s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))
+         )::int AS ahead,
+         COUNT(DISTINCT ${STOP_KEY}) FILTER (
+           WHERE ${PRECEDES}
+             AND s.status NOT IN (${routeExcl})
+             AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
+         )::int AS before_all,
+         COUNT(DISTINCT ${STOP_KEY}) FILTER (
+           WHERE s.status NOT IN (${routeExcl})
+             AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
+         )::int AS others_all
          FROM scheduled_services s, target t
         WHERE s.technician_id = t.technician_id
           AND s.scheduled_date = t.scheduled_date
           AND NOT (s.customer_id = t.customer_id
                    AND s.window_start IS NOT DISTINCT FROM t.window_start)
-          AND s.status NOT IN (${statusPlaceholders})
-          AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())
-          AND (s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))
-          AND (COALESCE(s.route_order, 999), COALESCE(s.window_start, '23:59'::time), s.created_at, s.id)
-              < (COALESCE(t.route_order, 999), COALESCE(t.window_start, '23:59'::time), t.created_at, t.id)`,
-      [svc.id, ...NOT_A_STOP_STATUSES]
+          AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())`,
+      [svc.id, ...NOT_A_STOP_STATUSES, ...NOT_A_ROUTE_STOP_STATUSES, ...NOT_A_ROUTE_STOP_STATUSES]
     );
-    const raw = Number(countRes?.rows?.[0]?.n);
-    if (!Number.isFinite(raw)) return null;
+    const agg = countRes?.rows?.[0];
+    const raw = Number(agg?.ahead);
+    const yourStop = Number(agg?.before_all) + 1;
+    const totalStops = Number(agg?.others_all) + 1;
+    if (!Number.isFinite(raw) || !Number.isFinite(yourStop) || !Number.isFinite(totalStops)) return null;
 
     // Clamp against the persisted floor — valid only for today's display.
     const minShownRaw = svc.stops_ahead_min_shown;
@@ -171,7 +206,9 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
       );
       if (res?.rows?.[0]) {
         const persisted = Number(res.rows[0].stops_ahead_min_shown);
-        return Number.isFinite(persisted) ? Math.min(persisted, clamped) : null;
+        return Number.isFinite(persisted)
+          ? { stopsAhead: Math.min(persisted, clamped), yourStop, totalStops }
+          : null;
       }
       // Zero rows updated = today's stored floor is already ≤ this value
       // (nothing needed writing) — or the visit vanished mid-poll. Re-read
@@ -181,7 +218,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
         .first('stops_ahead_min_shown', 'stops_ahead_shown_date');
       const curMin = cur?.stops_ahead_min_shown == null ? null : Number(cur.stops_ahead_min_shown);
       if (Number.isInteger(curMin) && dateOnly(cur?.stops_ahead_shown_date) === today) {
-        return Math.min(curMin, clamped);
+        return { stopsAhead: Math.min(curMin, clamped), yourStop, totalStops };
       }
     } catch (err) {
       logger.warn(`[stops-ahead] floor persist failed for ${svc.id}: ${err.message}`);
@@ -198,4 +235,5 @@ module.exports = {
   STOPS_AHEAD_DISPLAY_CAP,
   TERMINAL_STATUSES,
   NOT_A_STOP_STATUSES,
+  NOT_A_ROUTE_STOP_STATUSES,
 };
