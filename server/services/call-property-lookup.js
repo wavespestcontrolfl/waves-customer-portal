@@ -160,6 +160,15 @@ async function enrichPropertyById(propertyId) {
     logger.info('[call-property-lookup] address flagged — cache warmed, no fill', {
       propertyId, elapsedMs: Date.now() - t0,
     });
+    // Touch updated_at: the lookup's own attempt stamp is resolved/
+    // cache_hit (deliberately outside the cooldown), so without this the
+    // flagged row would head the nightly candidate order forever. The
+    // recently_touched sink parks it for a week instead.
+    try {
+      await db('customer_properties').where({ id: propertyId }).update({ updated_at: db.fn.now() });
+    } catch (err) {
+      logger.warn('[call-property-lookup] flag-touch failed', { propertyId, error: errId(err) });
+    }
     return { enriched: true, filled: [], complete: false };
   }
 
@@ -191,85 +200,101 @@ async function enrichPropertyById(propertyId) {
   if (propertyType) {
     patch.property_type = db.raw('COALESCE(property_type, ?)', [propertyType]);
   }
-  let updated = 0;
+  let after = null;
   if (Object.keys(patch).length) {
     patch.updated_at = db.fn.now();
     // Fenced to the ADDRESS THAT WAS LOOKED UP: the external fan-out can
     // run for a minute, and an address edit meanwhile (syncPrimaryAddress
     // clears coordinates on edit) must not receive the OLD address's
     // facts. A changed address_key or deactivated row matches nothing and
-    // the result is discarded.
-    updated = await db('customer_properties')
+    // the result is discarded. RETURNING gives the POST-UPDATE row — the
+    // authoritative values (this lookup's, or a concurrent writer's that
+    // the CASE/COALESCE correctly preserved) that everything downstream
+    // derives from.
+    const rows = await db('customer_properties')
       .where({ id: propertyId, address_key: row.address_key, active: true })
-      .update(patch);
-    if (!updated) {
+      .update(patch, ['latitude', 'longitude', 'property_type']);
+    after = rows && rows[0];
+    if (!after) {
       logger.info('[call-property-lookup] row changed during lookup — result discarded', {
         propertyId, elapsedMs: Date.now() - t0,
       });
       return { enriched: true, filled: [], complete: false };
     }
+  } else {
+    after = { latitude: row.latitude, longitude: row.longitude, property_type: row.property_type };
   }
-  const filled = Object.keys(patch).filter((k) => k !== 'updated_at');
-  const wroteCoords = filled.includes('latitude') && row.latitude == null && row.longitude == null;
+  // filled = what THIS run actually changed (pre-read null → post-update
+  // value); a concurrent writer's value surviving the CASE/COALESCE is not
+  // a fill by this run.
+  const filled = [];
+  if (row.latitude == null && after.latitude != null) filled.push('latitude', 'longitude');
+  if (!row.property_type && after.property_type) filled.push('property_type');
   // ── Downstream mirrors (fill-only, fenced, fail-open) ──
   // Production paths still read the LEGACY surfaces: dispatch maps/ETAs
   // read customers.latitude/longitude, completion tax reads
   // customers.property_type, and route tooling reads the coordinates on
   // scheduled_services rows linked at booking time (often inserted before
-  // this fire-and-forget lookup finishes). Enriching only the property row
-  // would leave all of them stale.
+  // this fire-and-forget lookup finishes). Mirrors propagate the
+  // POST-UPDATE row values — never this lookup's inputs — so a concurrent
+  // writer's newer coordinates converge everywhere instead of diverging.
   try {
-    if (wroteCoords) {
+    const mirrorLat = after.latitude == null ? null : Number(after.latitude);
+    const mirrorLng = after.longitude == null ? null : Number(after.longitude);
+    if (mirrorLat != null && mirrorLng != null) {
       // Visits linked to THIS property whose coordinate pair is absent.
       await db('scheduled_services')
         .where({ property_id: propertyId })
         .whereNull('lat')
         .whereNull('lng')
-        .update({ lat, lng });
+        .update({ lat: mirrorLat, lng: mirrorLng });
     }
     if (row.is_primary) {
       const { addressKey } = require('./customer-properties');
       const customer = await db('customers').where({ id: row.customer_id }).first();
       // Fence: mirror only while the customers primary-address mirror still
-      // IS this property's address.
+      // IS this property's address — and the SAME captured address columns
+      // are reasserted in the UPDATE predicate, so an edit committing
+      // between this read and the write matches nothing (the read-then-
+      // compare alone left that window open).
       if (customer && addressKey(customer) === row.address_key) {
         const mirror = {};
-        if (wroteCoords) {
-          mirror.latitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE latitude END', [lat]);
-          mirror.longitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE longitude END', [lng]);
+        if (mirrorLat != null && mirrorLng != null) {
+          mirror.latitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE latitude END', [mirrorLat]);
+          mirror.longitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE longitude END', [mirrorLng]);
         }
         // NEVER mirror a commercial classification onto customers:
         // customers.property_type feeds service_taxability, and activating
         // sales tax off an AI-inferred classification is an owner ruling
         // (pending), not an enrichment side effect. Residential types are
         // display/routing metadata only.
-        if (filled.includes('property_type') && propertyType && propertyType !== 'commercial') {
-          mirror.property_type = db.raw('COALESCE(property_type, ?)', [propertyType]);
+        if (after.property_type && after.property_type !== 'commercial') {
+          mirror.property_type = db.raw('COALESCE(property_type, ?)', [after.property_type]);
         }
         if (Object.keys(mirror).length) {
           mirror.updated_at = db.fn.now();
-          await db('customers').where({ id: row.customer_id }).update(mirror);
+          await db('customers')
+            .where({ id: row.customer_id })
+            .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
+              customer.address_line1 || '', customer.address_line2 || '', customer.city || '', customer.zip || '',
+            ])
+            .update(mirror);
         }
       }
     }
   } catch (err) {
     logger.warn('[call-property-lookup] mirror update failed', { propertyId, error: errId(err) });
   }
-  // Post-patch completeness (drives the sweep's offset accounting): the
-  // row leaves the NULL-candidate set only when coords AND type are all
-  // present now — a partial fill (coords taken, synthesized type refused)
-  // keeps it in the set.
-  // The atomic-pair CASE only writes when BOTH were null — a patched key
-  // with one lone stored coordinate wrote nothing.
-  const coordsComplete = (row.latitude != null && row.longitude != null)
-    || (filled.includes('latitude') && row.latitude == null && row.longitude == null);
-  const typeComplete = Boolean(row.property_type) || filled.includes('property_type');
+  // Post-patch completeness from the AUTHORITATIVE post-update row (drives
+  // the sweep's offset accounting): the row leaves the NULL-candidate set
+  // only when coords AND type are all present now.
+  const complete = after.latitude != null && after.longitude != null && Boolean(after.property_type);
   logger.info('[call-property-lookup] enriched', {
     propertyId,
     filled,
     elapsedMs: Date.now() - t0,
   });
-  return { enriched: true, filled, complete: coordsComplete && typeComplete };
+  return { enriched: true, filled, complete };
 }
 
 /**
@@ -343,6 +368,9 @@ async function fetchBackfillCandidates(limit, offset = 0) {
     // a candidate — it would consume a batch slot every night unrepaired.
     .whereRaw('((cp.latitude IS NULL AND cp.longitude IS NULL) OR cp.property_type IS NULL)')
     .whereRaw("COALESCE(TRIM(cp.address_line1), '') <> ''")
+    // Mirrors the enrich guard's house-number prerequisite — a numberless
+    // street would be selected, skip unspent, and churn the batch nightly.
+    .whereRaw("TRIM(cp.address_line1) ~ '^[0-9]'")
     .whereRaw("COALESCE(TRIM(cp.zip), '') <> ''")
     .select('cp.*')
     .select(db.raw(
@@ -435,12 +463,16 @@ async function sweepUnenrichedProperties({ limit } = {}) {
     for (const row of page) {
       if (processed >= batch) break;
       if (await attemptedRecently(propertyRowAddress(row))) { cooled += 1; continue; }
-      processed += 1;
       try {
         const res = await enrichPropertyById(row.id);
+        // Only rows that reached a REAL lookup consume the batch budget —
+        // pre-spend skips (row vanished, unrepairable, in-flight) are free
+        // and must not let a head of skip rows exhaust the nightly cap.
+        if (!res.skipped) processed += 1;
         if (res.enriched) enriched += 1;
         if (res.complete) completedThisPage += 1;
       } catch (err) {
+        processed += 1;
         failed += 1;
         logger.warn('[call-property-lookup] backfill row failed', { propertyId: row.id, error: errId(err) });
       }

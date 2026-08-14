@@ -90,7 +90,8 @@ describe('runCallPropertyLookup', () => {
   });
 
   test('fill-only patch: COALESCE lat/lng/type, snake_case vocabulary, no sqft ever', async () => {
-    const updateBuilder = builder(1);
+    // update(...) uses RETURNING — resolves to the post-update rows.
+    const updateBuilder = builder([{ latitude: 27.4995, longitude: -82.4108, property_type: 'single_family' }]);
     const visitsBuilder = builder(1);
     mockRowDb({
       id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
@@ -139,7 +140,7 @@ describe('runCallPropertyLookup', () => {
   });
 
   test('address edited during the lookup → update matches nothing, result discarded', async () => {
-    const updateBuilder = builder(0); // fenced UPDATE matched no rows
+    const updateBuilder = builder([]); // fenced UPDATE matched no rows (RETURNING empty)
     mockRowDb({
       id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
       address_line1: '123 Sample Cove', city: 'Bradenton', state: 'FL', zip: '34212',
@@ -195,7 +196,7 @@ describe('runCallPropertyLookup', () => {
       address_key: require('../services/customer-properties').addressKey({
         address_line1: '123 Sample Cove', city: 'Bradenton', zip: '34212',
       }),
-    }, undefined, { customers: customersBuilder });
+    }, builder([{ latitude: 27.5, longitude: -82.4, property_type: 'commercial' }]), { customers: customersBuilder });
     performPropertyLookup.mockResolvedValueOnce({
       satellite: { inServiceArea: true },
       enriched: {
