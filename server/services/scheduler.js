@@ -2644,6 +2644,34 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 10:42AM (Mon–Fri) — Collections SHADOW sweep (observation only).
+  // Evaluates the voice contact policy for every open-balance customer,
+  // upserts shadow collection_cases, and files admin proposal cards. It
+  // NEVER dials, texts, or emails anyone — the sweep module imports no
+  // messaging surface at all (pinned by tests). DARK unless
+  // GATE_COLLECTIONS_SHADOW=true. 10:42 is an unoccupied fixed minute
+  // (10am-hour stagger rule above: never :00) and sits inside the policy's
+  // 9:00–18:00 ET Mon–Fri call window, so the quiet-window check reflects a
+  // genuinely dialable moment instead of denying every case at dawn.
+  // =========================================================================
+  cron.schedule('42 10 * * 1-5', async () => {
+    logger.info('Running: collections shadow sweep');
+    try {
+      await runExclusive('collections-shadow-sweep', async () => {
+        const ShadowSweep = require('./collections/shadow-sweep');
+        const result = await ShadowSweep.runShadowSweep();
+        if (result.skipped) {
+          logger.info(`Collections shadow sweep inert: ${result.reason}`);
+        } else {
+          logger.info(`Collections shadow sweep done: ${result.considered} considered, ${result.casesCreated} created, ${result.casesUpdated} updated, ${result.cardsFiled} cards`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Collections shadow sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 10:05AM — Pre-visit late-balance reminders (owner directive
   // 2026-07-17). One text+email per RECURRING visit landing in 3 days when
   // the customer has a late RECURRING balance (unpaid dues / overdue
