@@ -314,6 +314,31 @@ function attachVoiceRelay(httpServer) {
             teardown('setup_callsid_mismatch');
             return;
           }
+          // Collections session mode (PR B): the outbound late-payment leg's
+          // TwiML labels itself via a <Parameter>. The label is UNVERIFIED
+          // frame input, so CollectionsConversation re-proves it server-side
+          // against the call_log row for the AUTHENTICATED CallSid before
+          // acting on anything — a mislabeled or forged frame gets a fixed
+          // polite close, never a session. Without the label (every inbound
+          // call today) this branch is untouched, byte-identical.
+          if (p.session_mode === 'collections') {
+            try {
+              const { CollectionsConversation } = require('../collections/outbound-voice/collections-conversation');
+              convo = new CollectionsConversation({
+                callSid: authenticatedCallSid,
+                from: msg.from || p.from || null,
+                to: msg.to || p.to || null,
+                send,
+                endSession,
+              });
+            } catch (e) {
+              logger.error(`[voice-relay] collections session load failed — terminating: ${e.message}`);
+              teardown('collections_session_load_failed');
+              return;
+            }
+            logger.info(`[voice-relay] collections session setup callSid=${convo.callSid}`);
+            break;
+          }
           convo = new RelayConversation({
             // ALWAYS the authenticated one — never the frame's.
             callSid: authenticatedCallSid,
@@ -350,7 +375,16 @@ function attachVoiceRelay(httpServer) {
           logger.warn(`[voice-relay] relay error frame received (description withheld, ${len} chars)`);
           break;
         }
-        // 'dtmf' and others: ignored in Phase 0
+        case 'dtmf': {
+          // Only sessions that define handleDtmf act on digits (the
+          // collections escape hatch: press 0 = human). RelayConversation
+          // defines none, so the inbound path stays byte-identical.
+          if (convo && typeof convo.handleDtmf === 'function') {
+            convo.handleDtmf(msg.digit != null ? msg.digit : (msg.dtmf && msg.dtmf.digit));
+          }
+          break;
+        }
+        // others: ignored in Phase 0
         default:
           break;
       }
