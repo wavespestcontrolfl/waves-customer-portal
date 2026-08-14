@@ -1235,6 +1235,13 @@ class RelayConversation {
         // createLeadFromExtraction creates nothing for a matched lifecycle
         // customer, which is the most ordinary hangup there is. Suppressing the
         // floor is still right; stamping the record "lead captured" is not.
+        // ⭐ A FAILED OR SUPERSEDED FLOOR WRITE LATCHES NOTHING — the
+        // transcript must stamp lead_captured=false (honest) and the record
+        // stays recoverable, instead of a failed write reading as "captured".
+        if (result && (result.failed || result.superseded)) {
+          logger.error(`[voice-relay] capture-floor ${result.superseded ? 'superseded' : 'write FAILED'} callSid=${this.callSid} — nothing latched`);
+          return;
+        }
         const floorLeadId = result && result.leadId;
         this.leadCaptured = true;
         if (!floorLeadId) this._noLeadCreated = true;

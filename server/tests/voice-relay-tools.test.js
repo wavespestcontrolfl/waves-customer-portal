@@ -231,6 +231,33 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
     expect(flat).toContain('[card ending 1111]'); // scrubbed, not dropped
   });
 
+  // ⭐ A FAILED WRITE IS NOT A CAPTURE — the fail-closed keyed path must not
+  // latch the one-capture budget or let the model claim anything was saved.
+  test('a FAILED keyed capture never claims a capture — floor stays armed', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: null, created: false, failed: true });
+    const markCaptured = jest.fn();
+    const out = await executeTool(
+      'capture_lead',
+      { call_summary: 'caller details' },
+      { from: '+19415551234', callSid: 'CA-write-failed', markCaptured },
+    );
+    expect(out).toMatch(/could NOT be saved/i);
+    expect(out).not.toMatch(/saved successfully/i);
+    expect(markCaptured).not.toHaveBeenCalled();
+  });
+
+  test('a SUPERSEDED capture tells the model to stand down entirely', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: null, created: false, superseded: true });
+    const markCaptured = jest.fn();
+    const out = await executeTool(
+      'capture_lead',
+      { call_summary: 'caller details' },
+      { from: '+19415551234', callSid: 'CA-superseded-cap', markCaptured },
+    );
+    expect(out).toMatch(/superseded by a reconnect/i);
+    expect(markCaptured).not.toHaveBeenCalled();
+  });
+
   test('a SPAM capture suppresses the floor WITHOUT claiming a lead', async () => {
     const markCaptured = jest.fn();
     const out = await executeTool(

@@ -587,6 +587,20 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(endSession).toHaveBeenCalled();
   });
 
+  // ⭐ A FAILED FLOOR WRITE LATCHES NOTHING — the transcript stamps
+  // lead_captured=false (honest) and the record stays recoverable.
+  test('a FAILED capture-floor write leaves leadCaptured false', async () => {
+    const { createLeadFromExtraction } = require('../services/lead-from-extraction');
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: null, created: false, failed: true });
+    const convo = new RelayConversation({
+      callSid: 'CA-floor-fail', from: '+19415551234', send: jest.fn(), endSession: jest.fn(),
+    });
+    await convo._runCaptureFloor('end');
+    expect(convo.leadCaptured).toBe(false);
+    // Restore a benign default — later tests' floors expect a resolved write.
+    createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-x', customerId: null, created: true });
+  });
+
   // ⭐ THE SAFE RECONNECT PATH: an UNVERIFIED session is never killed by a
   // foreign owner — it might be the mis-ordered legitimate reconnect that
   // lost the claim race (clock skew / same-ms tie), and it only ever writes

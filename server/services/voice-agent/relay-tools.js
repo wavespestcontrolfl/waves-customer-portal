@@ -1212,6 +1212,20 @@ async function executeTool(name, input = {}, ctx = {}) {
       // stamps it on the review card, so office confirm converts THIS lead —
       // outbound-review-confirm.js otherwise falls back to "the customer's
       // single active lead", which can convert an unrelated open quote to WON.
+      // ⭐ A FAILED WRITE IS NOT A CAPTURE. The keyed fail-closed path (and a
+      // superseded session) return explicit markers — neither may latch the
+      // one-capture budget, stand the floor down, or let the model claim
+      // anything was recorded.
+      if (leadResult && leadResult.superseded) {
+        return 'This session was superseded by a reconnect — NOTHING was saved. Do NOT call any more '
+          + 'tools and do not answer account questions; say goodbye briefly.';
+      }
+      if (leadResult && leadResult.failed) {
+        logger.error(`[voice-relay] capture_lead write FAILED callSid=${ctx.callSid || 'n/a'} — floor left armed, no capture claimed`);
+        return 'The capture could NOT be saved just now — do NOT tell the caller anything was recorded. '
+          + 'Keep their details in the conversation, finish helping them, and call capture_lead again '
+          + 'before the call ends.';
+      }
       const capturedLeadId = leadResult && leadResult.leadId;
       if (capturedLeadId && typeof ctx.noteLeadId === 'function') ctx.noteLeadId(capturedLeadId);
       // ⭐ EXACT CALL→LEAD PROVENANCE, ON THE CALL'S OWN ROW. leads only stamp

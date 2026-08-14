@@ -739,7 +739,11 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
       // ownership against) keep the unserialized fallback.
       if (opts.sessionKey) {
         logger.error(`[voice-agent-lead] capture serialization failed on a KEYED session callSid=${opts.callSid} — failing closed, no unserialized write: ${err.message}`);
-        return { leadId: null, customerId, created: false };
+        // ⭐ EXPLICITLY A FAILURE — never the shape of an intentional no-lead
+        // (a lifecycle customer's capture). Callers must NOT latch "captured",
+        // must not stand the floor down, and must not tell the caller
+        // anything was recorded.
+        return { leadId: null, customerId, created: false, failed: true };
       }
       logger.warn(`[voice-agent-lead] capture serialization failed for callSid=${opts.callSid} (${err.message}) — proceeding unserialized`);
       leadId = undefined;
