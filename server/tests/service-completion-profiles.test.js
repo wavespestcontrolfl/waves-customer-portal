@@ -343,4 +343,62 @@ describe('service completion profiles', () => {
       bindings: ['Lawn Care'],
     });
   });
+
+  // Strict resolution (the pre-visit brief hashes the resolved companion
+  // list): every swallow point on the resolution path must rethrow under
+  // { strict: true } — swallowed-to-default it resolves companions: []
+  // and the caller persists an outage-shaped empty over cached guidance.
+  // The fail-soft default stays for every other caller.
+  describe('strict resolution', () => {
+    // Chain where a chosen table's queries reject; everything else
+    // resolves empty so the walk reaches the failing leg.
+    function failingKnex({ failTable, failOn }) {
+      const knex = jest.fn((table) => {
+        const chain = {};
+        chain.where = jest.fn(() => chain);
+        chain.whereRaw = jest.fn(() => chain);
+        chain.limit = jest.fn(() => chain);
+        chain.first = jest.fn(async () => {
+          if (table === failTable && failOn === 'first') throw new Error(`${failTable} down`);
+          return null;
+        });
+        chain.select = jest.fn(async () => {
+          if (table === failTable && failOn === 'select') throw new Error(`${failTable} down`);
+          return [];
+        });
+        return chain;
+      });
+      knex.schema = { hasTable: jest.fn(async () => true) };
+      return knex;
+    }
+    const AMBIGUOUS = { id: 'svc-1', service_type: 'Lawn Care' };
+
+    test('schema-probe failure rethrows under strict, swallows by default', async () => {
+      const knex = makeKnex({ service: { service_key: 'lawn_tree_shrub_combo', name: 'Lawn + Tree & Shrub', category: 'lawn', billing_type: 'recurring' } });
+      knex.schema.hasTable = jest.fn(async () => { throw new Error('schema probe down'); });
+      await expect(
+        resolveCompletionProfileForScheduledService({ service_id: 'lib-1' }, knex, { strict: true }),
+      ).rejects.toThrow('schema probe down');
+      const soft = await resolveCompletionProfileForScheduledService({ service_id: 'lib-1' }, knex);
+      expect(soft.companions).toEqual([]);
+    });
+
+    test('short-name collision-query outage rethrows under strict, swallows by default', async () => {
+      const knex = failingKnex({ failTable: 'services', failOn: 'select' });
+      await expect(
+        resolveCompletionProfileForScheduledService(AMBIGUOUS, knex, { strict: true }),
+      ).rejects.toThrow('services down');
+      const soft = await resolveCompletionProfileForScheduledService(AMBIGUOUS, failingKnex({ failTable: 'services', failOn: 'select' }));
+      expect(soft.companions).toEqual([]);
+    });
+
+    test('identity-evidence reload outage rethrows under strict, swallows by default', async () => {
+      const knex = failingKnex({ failTable: 'scheduled_services', failOn: 'first' });
+      await expect(
+        resolveCompletionProfileForScheduledService(AMBIGUOUS, knex, { strict: true }),
+      ).rejects.toThrow('scheduled_services down');
+      const soft = await resolveCompletionProfileForScheduledService(AMBIGUOUS, failingKnex({ failTable: 'scheduled_services', failOn: 'first' }));
+      expect(soft.companions).toEqual([]);
+    });
+  });
 });

@@ -191,14 +191,18 @@ function serializeProfile(row = null) {
   };
 }
 
-async function tableAvailable(knex) {
+async function tableAvailable(knex, { strict = false } = {}) {
   // try/catch, not just .catch(): if knex.schema itself is unavailable the
   // property access throws before a promise exists, and the rejection would
   // escape appointmentManagedProjectTypes' fail-open contract (500ing every
   // project create instead of degrading to "no types managed").
+  // strict: persisted-state callers (the pre-visit brief hashes the
+  // companion list) must SEE a transient failure — swallowed-to-false it
+  // reads as "no companions" and overwrites cached guidance.
   try {
     return await knex.schema.hasTable('service_completion_profiles');
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     return false;
   }
 }
@@ -258,7 +262,7 @@ function serviceNameCandidates(serviceType) {
 // Called ONLY on the slow path — after service_id and exact-name matching have
 // both missed — so the hot path (dispatch list views resolving many visits)
 // pays nothing.
-async function reloadIdentityEvidence(scheduledService, knex) {
+async function reloadIdentityEvidence(scheduledService, knex, { strict = false } = {}) {
   const needsSnapshot = scheduledService.service_key_snapshot === undefined;
   const needsRecurring = scheduledService.is_recurring === undefined;
   if (!scheduledService.id || (!needsSnapshot && !needsRecurring)) return scheduledService;
@@ -268,11 +272,15 @@ async function reloadIdentityEvidence(scheduledService, knex) {
       .first('service_key_snapshot', 'is_recurring');
     return reloaded ? { ...scheduledService, ...reloaded } : scheduledService;
   } catch (err) {
+    // strict callers (pre-visit brief) hash the resolved companions —
+    // a swallowed identity failure would resolve the DEFAULT profile
+    // and persist an outage-shaped empty companion list.
+    if (strict) throw err;
     return scheduledService;
   }
 }
 
-async function lookupServiceForScheduledService(scheduledService = {}, knex = db) {
+async function lookupServiceForScheduledService(scheduledService = {}, knex = db, { strict = false } = {}) {
   if (!scheduledService) return null;
   if (scheduledService.service_id) {
     const byId = await knex('services')
@@ -311,7 +319,7 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
   // without evidence. Reload what the caller's projection left out, then retry
   // the snapshot with it. Costs one query, and only for rows that would
   // otherwise fail closed.
-  const row = await reloadIdentityEvidence(scheduledService, knex);
+  const row = await reloadIdentityEvidence(scheduledService, knex, { strict });
   const reloadedSnapshotKey = String(row.service_key_snapshot || '').trim();
   if (reloadedSnapshotKey && reloadedSnapshotKey !== snapshotKey) {
     const bySnapshot = await knex('services')
@@ -356,6 +364,9 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
       .whereRaw('lower(short_name) = lower(?)', [serviceType])
       .select('service_key', 'name', 'category', 'billing_type');
   } catch (err) {
+    // strict callers must see the outage (see reloadIdentityEvidence) —
+    // an empty collision set here resolves the default profile.
+    if (strict) throw err;
     shortNameMatches = [];
   }
   if (!Array.isArray(shortNameMatches)) shortNameMatches = [];
@@ -379,17 +390,17 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
   return null;
 }
 
-async function profileByServiceKey(serviceKey, knex = db) {
-  if (!serviceKey || !(await tableAvailable(knex))) return null;
+async function profileByServiceKey(serviceKey, knex = db, { strict = false } = {}) {
+  if (!serviceKey || !(await tableAvailable(knex, { strict }))) return null;
   return knex('service_completion_profiles')
     .where({ service_key: serviceKey, active: true })
     .first();
 }
 
-async function resolveCompletionProfileForScheduledService(scheduledService = {}, knex = db) {
-  const service = await lookupServiceForScheduledService(scheduledService, knex);
+async function resolveCompletionProfileForScheduledService(scheduledService = {}, knex = db, { strict = false } = {}) {
+  const service = await lookupServiceForScheduledService(scheduledService, knex, { strict });
   const profile = service?.service_key
-    ? await profileByServiceKey(service.service_key, knex)
+    ? await profileByServiceKey(service.service_key, knex, { strict })
     : null;
   if (profile) return serializeProfile(profile);
 

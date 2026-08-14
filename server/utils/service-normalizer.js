@@ -82,15 +82,25 @@ const SERVICE_TYPE_MAP = [
  *   "Lawn Care" → "Lawn Care"
  *   null → "General Service"
  */
-function normalizeServiceType(raw) {
-  if (!raw) return 'General Service';
-
-  // Strip duration/price suffixes: " - 1 hour", " - $117", " - 45 min"
-  let cleaned = raw
+// Strip duration/price suffixes only (" - 1 hour", " - $117", " - 45
+// min"), preserving the service identity itself. Unlike
+// normalizeServiceType, this never collapses distinct services onto one
+// label ("Tree & Shrub Fertilization" stays itself instead of mapping to
+// "Lawn Fertilization") — use it where the SPECIFIC service matters and
+// only cosmetic suffixes should be ignored.
+function stripServiceSuffixes(raw) {
+  if (!raw) return '';
+  return String(raw)
     .replace(/\s*[-–]\s*\d+\s*(hour|hr|min|minute)s?\b/gi, '')
     .replace(/\s*[-–]\s*\$[\d,.]+/g, '')
     .replace(/\s*[-–]\s*$/g, '')
     .trim();
+}
+
+function normalizeServiceType(raw) {
+  if (!raw) return 'General Service';
+
+  const cleaned = stripServiceSuffixes(raw);
 
   // Match against known patterns
   for (const mapping of SERVICE_TYPE_MAP) {
@@ -215,6 +225,7 @@ function safeDateLabel(d) {
 
 module.exports = {
   normalizeServiceType,
+  stripServiceSuffixes,
   detectServiceCategory,
   serviceIcon,
   serviceColor,

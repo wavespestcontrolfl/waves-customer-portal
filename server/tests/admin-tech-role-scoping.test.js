@@ -171,7 +171,6 @@ describe('schedule per-visit ownership (technician role)', () => {
     ['PUT', '/api/admin/schedule/svc-other/status', { status: 'completed' }],
     ['GET', '/api/admin/schedule/svc-other/wdo-brief', undefined],
     ['GET', '/api/admin/schedule/svc-other/estimate-source', undefined],
-    ['POST', '/api/admin/schedule/svc-other/regenerate-brief', {}],
     ['GET', '/api/admin/schedule/eta/svc-other', undefined],
     ['POST', '/api/admin/schedule/generate-report', { scheduledServiceId: 'svc-other' }],
     ['GET', '/api/admin/schedule/vehicle-location?serviceId=svc-other', undefined],
@@ -198,6 +197,8 @@ describe('schedule per-visit ownership (technician role)', () => {
   });
 
   test.each([
+    ['POST', '/api/admin/schedule/svc-other/regenerate-brief', {}],
+    ['POST', '/api/admin/schedule/svc-own/regenerate-brief', {}],
     ['POST', '/api/admin/schedule/optimize', {}],
     ['POST', '/api/admin/schedule/optimize-route', {}],
     ['GET', '/api/admin/schedule/recurring-alerts', undefined],

@@ -227,6 +227,15 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VISION }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
+  visitBrief: Object.freeze({
+    name: 'visitBrief',
+    // Per-visit pocket-reference brief (previsit-brief.js) — summarization
+    // over deterministic grounding, not analysis, so it rides the WORKHORSE
+    // tier rather than the WDO brief's deepAnalysis (scope ruling
+    // 2026-08-06: deepAnalysis is overkill per-visit).
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: WORKHORSE }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+  }),
   deepAnalysis: Object.freeze({
     name: 'deepAnalysis',
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: DEEP }),

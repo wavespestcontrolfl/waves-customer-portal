@@ -10,8 +10,8 @@ const { isEnabled } = require('../config/feature-gates');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
-const { previewText, stripSchedulerAuditText } = require('../utils/visit-notes');
-const { mowingAlertText } = require('../utils/mowing-schedule');
+const { previewText } = require('../utils/visit-notes');
+const { compilePropertyAlerts } = require('../services/nextstop-alerts');
 const { loadLastServices } = require('../utils/last-line-service');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
@@ -2093,42 +2093,17 @@ router.get('/', async (req, res, next) => {
         } catch { /* fail toward not-applied — preview still nets the prepaid */ }
       }
 
-      const alerts = [];
-      if (prefs?.neighborhood_gate_code) alerts.push({ type: 'gate', text: `Gate: ${prefs.neighborhood_gate_code}` });
-      if (prefs?.property_gate_code) alerts.push({ type: 'gate', text: `Yard: ${prefs.property_gate_code}` });
-      if (prefs?.garage_code) alerts.push({ type: 'gate', text: `Garage: ${prefs.garage_code}` });
-      if (prefs?.lockbox_code) alerts.push({ type: 'gate', text: `Lockbox: ${prefs.lockbox_code}` });
-      if (prefs?.pet_count > 0 || prefs?.pet_details) alerts.push({ type: 'pet', text: prefs.pet_details || `${prefs.pet_count} pet(s)` });
-      if (prefs?.pets_secured_plan) alerts.push({ type: 'pet_plan', text: prefs.pets_secured_plan });
-      if (prefs?.chemical_sensitivities) alerts.push({ type: 'chemical', text: prefs.chemical_sensitivity_details || 'Chemical sensitivity' });
-      if (prefs?.access_notes) alerts.push({ type: 'access', text: prefs.access_notes });
-      if (prefs?.side_gate_access) alerts.push({ type: 'access', text: `Side gate: ${prefs.side_gate_access}` });
-      if (prefs?.parking_notes) alerts.push({ type: 'access', text: `Parking: ${prefs.parking_notes}` });
-      if (prefs?.special_instructions) alerts.push({ type: 'special', text: prefs.special_instructions });
-      // Mowing schedule — a cut right before/after an application undoes it,
-      // so the tech needs to know when the mower comes through.
-      const mowingAlert = mowingAlertText(prefs);
-      if (mowingAlert) alerts.push({ type: 'mowing', text: mowingAlert });
-      // Only add notes if there's meaningful content after cleaning. Ops
-      // sessions write scheduling-audit trails into notes; those are internal
-      // and never belong on the tech-facing alerts block.
-      const displayNotes = stripSchedulerAuditText(cleanedNotes);
-      if (displayNotes) alerts.push({ type: 'note', text: displayNotes });
-      // Show "New customer" badge ONLY if genuinely new (no completed service records)
-      if (genuinelyNew) alerts.push({ type: 'new_customer', text: 'New customer — first visit' });
-      // Service-preference opt-outs — the customer toggled one of these off
-      // in the estimator or portal. Surface prominently so the tech knows
-      // to skip that part of the visit.
-      let svcPrefs = null;
-      try {
-        svcPrefs = typeof s.service_preferences === 'string'
-          ? JSON.parse(s.service_preferences || '{}')
-          : (s.service_preferences || null);
-      } catch { svcPrefs = null; }
-      if (svcPrefs && /pest/i.test(normalizedType)) {
-        if (svcPrefs.interior_spray === false) alerts.push({ type: 'service_pref', text: 'EXTERIOR ONLY — no interior treatment' });
-        if (svcPrefs.exterior_sweep === false) alerts.push({ type: 'service_pref', text: 'Skip eave/cobweb sweep' });
-      }
+      // Compiled by the shared helper (services/nextstop-alerts.js) so the
+      // pre-visit brief's deterministic access block and this day feed can
+      // never drift — the block moved verbatim, behavior 1:1.
+      const alerts = compilePropertyAlerts({
+        prefs,
+        notes: cleanedNotes,
+        genuinelyNew,
+        servicePreferences: s.service_preferences,
+        normalizedServiceType: normalizedType,
+      });
+
       const zone = s.zone || getZone(s.city, s.zip);
       const autopayActive = await customerOnAutopay({
         id: s.customer_id,
@@ -5689,6 +5664,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             }
           }
         }
+        // An actual service change must not leave the stored brief
+        // servable (rationale on briefClearOnReclassification): clear it
+        // in the same row update so the next sweep or an admin
+        // regenerate rebuilds the correct brief. Same-value re-posts
+        // (modal label re-saves) are not a change and keep the brief.
+        if (updates.service_type !== undefined && preTupleRow
+          && String(updates.service_type) !== String(preTupleRow.service_type || '')) {
+          const { briefClearOnReclassification } = require('../services/previsit-brief');
+          const clear = briefClearOnReclassification(
+            classifyAppointmentTag(updates.service_type),
+            preTupleRow.pre_service_brief_type,
+          );
+          if (clear) Object.assign(updates, clear);
+        }
         // A date move through this edit modal was the one mover with NO
         // tracker-lifecycle rewind: an en_route/on_site visit (or one
         // carrying stale stamps from an aborted attempt) kept
@@ -9100,16 +9089,45 @@ function haversine(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// GET /api/admin/schedule/:id/wdo-brief
-router.get('/:id/wdo-brief', async (req, res, next) => {
+// GET /api/admin/schedule/:id/visit-brief
+// GET /api/admin/schedule/:id/wdo-brief (legacy alias — identical behavior)
+// Returns whatever pre-service brief the visit carries, TYPED (the wdo-brief
+// path always returned the stored brief regardless of type, so the alias is
+// behavior-preserving). Same tech-ownership scoping as every per-visit read.
+router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
   try {
-    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
-      return res.status(404).json({ error: 'Scheduled service not found' });
-    }
-    const svc = await db('scheduled_services').where({ id: req.params.id }).first();
-    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    // ONE ownership-scoped fetch — a separate check-then-SELECT lets a
+    // dispatch reassignment in between hand the credential-bearing brief
+    // (gate/garage/lockbox codes) to the former technician.
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.*');
+    if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
     if (!svc.pre_service_brief) return res.json({ brief: null });
-    res.json({ brief: typeof svc.pre_service_brief === 'string' ? JSON.parse(svc.pre_service_brief) : svc.pre_service_brief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at });
+    // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
+    // off, generic visit briefs cached while the gate was on are WITHDRAWN
+    // from the read path (regeneration is already gated, and a rollback
+    // toggle that keeps serving stored guidance can't withdraw it).
+    // Everything this lane did not write — the legacy WDO brief and any
+    // other/untyped legacy brief — serves exactly as it always has.
+    const PrevisitBrief = require('../services/previsit-brief');
+    const parsedBrief = typeof svc.pre_service_brief === 'string' ? JSON.parse(svc.pre_service_brief) : svc.pre_service_brief;
+    if (String(svc.pre_service_brief_type || '') === PrevisitBrief.VISIT_BRIEF_TYPE) {
+      if (!PrevisitBrief.briefGateEnabled()) {
+        return res.json({ brief: null });
+      }
+      // A reschedule or a direct service_type rewrite (edit modal,
+      // estimate acceptance, call flows) leaves the stored brief behind —
+      // stale guidance is WITHDRAWN on read rather than served until a
+      // later sweep (briefStaleReason; the sweep regenerates via the
+      // grounding-hash mismatch, both stamps being hashed facts).
+      const staleReason = PrevisitBrief.briefStaleReason(parsedBrief, svc);
+      if (staleReason) {
+        return res.json({ brief: null, stale: staleReason });
+      }
+    }
+    res.json({ brief: parsedBrief, type: svc.pre_service_brief_type, generatedAt: svc.pre_service_brief_generated_at });
   } catch (err) { next(err); }
 });
 
@@ -10703,15 +10721,85 @@ router.post('/:id/card-request', requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/admin/schedule/:id/regenerate-brief
-router.post('/:id/regenerate-brief', async (req, res, next) => {
+// Routes by brief type: WDO visits replay the tagger hook (unchanged
+// behavior — regenerates the WDO brief); every other visit replays the
+// tagger hook TOO (its prep-flow enrollment and booking pre-drafts are
+// explicitly idempotent for replays from this route — dropping the
+// replay would remove the operator's only retry for a failed booking-time
+// run) and then regenerates the generic visit brief, which requires
+// GATE_PREVISIT_BRIEF. Gate off → 409 with nothing changed (same
+// convention as the edit-appt visit-count gate).
+// requireAdmin: regeneration triggers prep-flow side effects, LLM spend,
+// and a brief write. Restricting it to admins removes the tech-token
+// reassignment race outright (an assignment check is only valid at the
+// instant it runs; the work spans minutes) — techs never had a UI for
+// this endpoint, and the brief READ route stays technician-scoped.
+router.post('/:id/regenerate-brief', requireAdmin, async (req, res, next) => {
   try {
-    if (!(await technicianOwnsScheduledService(req, req.params.id))) {
-      return res.status(404).json({ error: 'Scheduled service not found' });
-    }
     const AppointmentTagger = require('../services/appointment-tagger');
+    const target = await db('scheduled_services').where({ id: req.params.id }).first('id', 'service_type', 'pre_service_brief_type');
+    if (!target) return res.status(404).json({ error: 'Scheduled service not found' });
+
+    // pre_service_brief is jsonb — node-postgres hands it back as an
+    // OBJECT, so a bare JSON.parse would 500 after the write already
+    // committed. Same string-or-object handling as the GET route above.
+    const briefValue = (raw) => (raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null);
+
+    const PrevisitBrief = require('../services/previsit-brief');
+    const isWdo = AppointmentTagger.classifyAppointmentType(target.service_type).tag === 'wdo_inspection'
+      || String(target.pre_service_brief_type || '') === PrevisitBrief.WDO_BRIEF_TYPE;
+    if (isWdo) {
+      await AppointmentTagger.onServiceScheduled(req.params.id, { suppressWelcome: true });
+      // Ownership-scoped final read (atomic — see the generic path below).
+      const svc = await db('scheduled_services')
+        .where({ 'scheduled_services.id': req.params.id })
+        .modify((q) => technicianCurrentVisitFilter(req, q))
+        .first('scheduled_services.*');
+      if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+      return res.json({ success: true, brief: briefValue(svc.pre_service_brief) });
+    }
+
+    // Tagger replay FIRST — before the brief gate (idempotent —
+    // appointment-tagger's own contract for this route): the operator's
+    // retry for a failed booking-time run (prep email/SMS enrollment,
+    // assessment pre-draft) must work even while GATE_PREVISIT_BRIEF is
+    // off, which is the default.
     await AppointmentTagger.onServiceScheduled(req.params.id, { suppressWelcome: true });
-    const svc = await db('scheduled_services').where({ id: req.params.id }).first();
-    res.json({ success: true, brief: svc.pre_service_brief ? JSON.parse(svc.pre_service_brief) : null });
+    if (!PrevisitBrief.briefGateEnabled()) {
+      // Not an error: the tagger replay above DID run — only the generic
+      // brief regeneration is gated off.
+      return res.json({ success: true, brief: null, briefSkipped: 'gate_off' });
+    }
+    const outcome = await PrevisitBrief.generateVisitBrief(req.params.id);
+    // A skip is not a success: only 'unchanged' (the hash-cache no-op) is a
+    // legitimate 200. The row vanishing mid-request reads as 404 (matching
+    // the ownership probe's answer); everything else — terminal status, a
+    // concurrently-written WDO brief, gate off inside the service — is a
+    // 409 carrying the reason, never success:true over a stale/null brief.
+    if (outcome.skipped && outcome.reason !== 'unchanged') {
+      if (outcome.reason === 'not_found' || outcome.reason === 'no_customer') {
+        return res.status(404).json({ error: 'Scheduled service not found', reason: outcome.reason });
+      }
+      return res.status(409).json({
+        error: `Visit brief not regenerated (${outcome.reason}). Nothing was changed.`,
+        reason: outcome.reason,
+      });
+    }
+    // Ownership-scoped final read in ONE query: generation can run
+    // minutes (LLM fallback chain), and a check-then-SELECT would let a
+    // mid-flight dispatch reassignment hand the regenerated brief —
+    // deterministic gate/garage/lockbox codes included — to the FORMER
+    // technician.
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.*');
+    if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+    res.json({
+      success: true,
+      unchanged: outcome.reason === 'unchanged',
+      brief: briefValue(svc.pre_service_brief),
+    });
   } catch (err) { next(err); }
 });
 
