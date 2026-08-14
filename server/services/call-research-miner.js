@@ -211,6 +211,15 @@ function eligibleCallsQuery({ onlyUnmined = true } = {}) {
     })
     .where(function () {
       this.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']);
+    })
+    // ⭐ NEVER MINE THE AI AGENT'S OWN CALLS. relay-transcript.js writes
+    // `Agent:` / `Caller:` labels, so a ConversationRelay transcript passes
+    // hasAgentCallerLabels and every filter above — mining it would research
+    // Waves' own generated speech as if a human had said it.
+    // NULL-safe: the column post-dates most rows and a bare whereNot would
+    // evaluate UNKNOWN on NULL, dropping every legacy human call.
+    .where(function () {
+      this.whereNull('transcription_provider').orWhereNot('transcription_provider', 'conversation_relay');
     });
   if (onlyUnmined) {
     q = q.where(function () {

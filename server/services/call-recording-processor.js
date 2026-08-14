@@ -14009,6 +14009,14 @@ const CallRecordingProcessor = {
 // the office settles the email read-back question.
 CallRecordingProcessor.resumeNewsletterForCallCustomer = subscribeNewCallCustomerToNewsletter;
 
+// Named production exports for the voice-relay context lane (Phase 2,
+// read-only): the canonical inbound phone→identity column set and the
+// sanitized prior-call continuation summary (PR #2601), so the relay's
+// caller recognition mirrors the call pipeline exactly instead of forking a
+// parallel matcher — the two can never drift.
+CallRecordingProcessor.CONTACT_MATCH_PHONE_COLS = CONTACT_MATCH_PHONE_COLS;
+CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
+
 CallRecordingProcessor._test = {
   isImplausibleTranscript,
   reconcileFormerLeadLinkage,
@@ -14104,5 +14112,13 @@ CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 // changing the gate. Deliberately on the module surface, not `_test`.
 CallRecordingProcessor.buildFailOpenRoutingContext = buildFailOpenRoutingContext;
 CallRecordingProcessor.demoteFailOpenOnV1AddressConflict = demoteFailOpenOnV1AddressConflict;
+
+// Production contract for the VOICE-RELAY booking path (NOT test-only): the
+// relay must decide WHICH PREMISE a voice booking lands on with the exact
+// resolver the call pipeline uses, or the two disagree about the same account.
+// It lived only under `_test`, where a mock in the voice-booking suite hid the
+// fact that production got `undefined` — every single-property account would
+// have fallen into the catch and had its booking refused.
+CallRecordingProcessor.resolveCallBookingPropertyLinkage = resolveCallBookingPropertyLinkage;
 
 module.exports = CallRecordingProcessor;

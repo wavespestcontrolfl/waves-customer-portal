@@ -16,6 +16,27 @@
  * existing customer when one unambiguously matches but never creates a
  * customer — the lead is the capture artifact; conversion stays a human step.
  *
+ * CONTACT PREFERENCE / CONSENT (Phase E): a caller who says "stop texting me",
+ * "call my husband, not me", or "email only" mid-call has stated something that
+ * must not evaporate. Those three fields ride `extracted_data` (and the
+ * ai_triage activity metadata) so a human sees them on the lead:
+ *   - contact_preference        — the caller's own words, verbatim
+ *   - preferred_contact_method  — 'phone' | 'sms' | 'email' | 'unspecified'
+ *   - do_not_contact_request    — boolean
+ * The key names and the enum deliberately MIRROR the call-extraction schemas'
+ * existing shape (caller.preferred_contact_method, consent.do_not_contact_request
+ * in server/schemas/call-extraction.{model-output,persisted}.schema.json) so the
+ * two capture surfaces speak the same vocabulary. This module does NOT extend
+ * those JSON schemas: they describe the RECORDED-CALL extraction contract, no
+ * relay field flows through them, and any key added there bumps
+ * validate-extraction.SCHEMA_VERSION + the prompt contract hash and re-cohorts
+ * the promotion-readiness gate.
+ *
+ * CAPTURED, NEVER ACTED ON. Nothing here (or anywhere in the voice agent)
+ * writes an opt-out, a messaging preference, or a suppression from a stated
+ * preference — a human actions it. The only customer-row write in this module
+ * remains the empty-only preferred_language hint.
+ *
  * Core lead writes PROPAGATE on failure (the caller — the agent webhook —
  * returns 5xx so ElevenLabs retries). Unlike the voicemail path there is no
  * persisted recording/transcript to replay, so a swallowed DB error would
@@ -28,6 +49,282 @@ const { properCase } = require('../utils/name-case');
 const { composeServiceInterest } = require('../utils/lead-service-interest');
 
 const isEmpty = (v) => v === null || v === undefined || v === '';
+
+/** jsonb column → plain object ({} for null / string-encoded / array / garbage). */
+function parseJsonObject(value) {
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+// Mirrors caller.preferred_contact_method in the call-extraction schemas.
+const CONTACT_METHODS = new Set(['phone', 'sms', 'email', 'unspecified']);
+
+/**
+ * The stated contact preference / consent instruction, normalized for storage.
+ * Returns null when the caller said nothing about it, so a later payload with
+ * no preference can never blank one already recorded.
+ */
+function contactPreferenceFields(extracted = {}) {
+  // ⭐ THE PAN SCRUB RUNS AT THE SOURCE, before the verbatim note fans out to
+  // every durable copy (lead JSON, activity metadata, the admin notification,
+  // the call-log recovery marker, recordSuppression's capturedBody). A caller
+  // who volunteers a card number mid-instruction must not leave it in any of
+  // them. Fail CLOSED: if the scrub cannot run, the note is dropped — the
+  // structured method/DNC flags still carry the instruction.
+  let rawNote = extracted.contact_preference == null ? '' : String(extracted.contact_preference);
+  if (rawNote) {
+    try {
+      const { scrubPans } = require('../utils/pan-scrub');
+      rawNote = scrubPans(rawNote);
+    } catch {
+      rawNote = '';
+    }
+  }
+  const note = rawNote.trim().slice(0, 300);
+  const method = String(extracted.preferred_contact_method || '').trim().toLowerCase();
+  const dnc = extracted.do_not_contact_request === true;
+  if (!note && !CONTACT_METHODS.has(method) && !dnc) return null;
+  return {
+    contact_preference: note || null,
+    preferred_contact_method: CONTACT_METHODS.has(method) ? method : null,
+    do_not_contact_request: dnc,
+  };
+}
+
+/**
+ * A stated contact instruction from a caller who is an EXISTING lifecycle
+ * customer — the one case with no lead row to record it on.
+ *
+ * Nothing here writes consent, suppression or messaging-preference state (the
+ * voice agent never does — that stays a human decision). This only makes sure
+ * the instruction REACHES a human: the same internal admin notification feed
+ * the re-service lane files to, on the customer's own deep link. Internal-only
+ * and fail-open by contract — the caller is on the line and a notification
+ * hiccup can never surface to them.
+ */
+async function surfaceContactInstructionForCustomer(customer, extracted = {}, opts = {}) {
+  const instruction = contactPreferenceFields(extracted);
+  if (!customer || !customer.id || !instruction) return false;
+  const dnc = instruction.do_not_contact_request === true;
+  // ⭐ THE OBLIGATION IS ESTABLISHED BEFORE THE DELIVERY ATTEMPT — the
+  // hot-alert doctrine. This feed row is the ONLY structured artifact for a
+  // lifecycle customer's stated instruction; stamping the recovery marker
+  // only AFTER a failed notifyAdmin left a gap where a stall or process exit
+  // mid-attempt lost the instruction with neither a notification nor a marker
+  // for the hourly sweep to find. The marker lands first (fail-soft) and is
+  // cleared only on a PROVEN outcome: persisted, or the internal-test
+  // suppression gate's deliberate zero-artifact decision. The sweep's own
+  // retries never re-stamp (the marker is already there).
+  let stamped = false;
+  if (!opts.sweepRetry && opts.callSid) {
+    try {
+      // ⭐ ZERO ROWS IS NOT A STAMP. An update whose CallSid matches no
+      // call_log row writes nothing — treating it as durable meant a failed
+      // delivery below left NO recovery marker for the hourly sweep, and the
+      // stated instruction (possibly a do-not-contact) was silently lost.
+      const updated = await db('call_log')
+        .where({ twilio_call_sid: opts.callSid })
+        .update({
+          metadata: db.raw(
+            "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({
+              relay_contact_instruction_needed: 'true',
+              relay_contact_instruction: {
+                customerId: customer.id,
+                smsSuppressionApplied: opts.smsSuppressionApplied === true,
+                ...instruction,
+              },
+            })],
+          ),
+        });
+      stamped = Number(updated) > 0;
+      if (!stamped) {
+        logger.error(`[voice-agent-lead] contact-instruction obligation pre-stamp matched NO call_log row callSid=${opts.callSid} — no sweep recovery exists for this instruction`);
+      }
+    } catch (stampErr) {
+      logger.error(`[voice-agent-lead] contact-instruction obligation pre-stamp failed callSid=${opts.callSid}: ${stampErr.message}`);
+    }
+  }
+  const result = await fileContactInstructionNotification(customer, instruction, opts, dnc);
+  // ⭐ NO MARKER + NO DELIVERY = the instruction has NO durable artifact.
+  // Say so at error level — this is the one path with nothing left to retry.
+  if (!stamped && !opts.sweepRetry && !result.persisted && !result.suppressed) {
+    logger.error(`[voice-agent-lead] contact instruction for customer ${customer.id} has NO durable artifact (unstamped + undelivered) callSid=${opts.callSid || 'n/a'}`);
+  }
+  const surfaced = result.persisted;
+  if (stamped && (surfaced || result.suppressed)) {
+    await db('call_log')
+      .where({ twilio_call_sid: opts.callSid })
+      .update({
+        metadata: db.raw("metadata - 'relay_contact_instruction_needed' - 'relay_contact_instruction' - 'relay_contact_instruction_attempts'"),
+      })
+      .catch((e) => logger.warn(`[voice-agent-lead] contact-instruction marker clear failed callSid=${opts.callSid}: ${e.message}`));
+  }
+  return surfaced;
+}
+
+async function fileContactInstructionNotification(customer, instruction, opts, dnc) {
+  try {
+    // ⭐ THE FEED ROW IS THE DELIVERY EVIDENCE — probe before re-notifying
+    // (the reservice lane's rule). A notification that persisted while the
+    // marker clear failed (or the process died between them) left the
+    // obligation standing; without this probe every hourly sweep re-inserted
+    // the same admin card. A probe failure proceeds to notify — a duplicate
+    // card beats a lost do-not-contact.
+    // The dedupe key is the NORMALIZED INSTRUCTION, not the call alone: a
+    // second capture_lead on the same call can carry an UPDATED preference or
+    // a new DNC, and matching by CallSid+title would clear the fresh
+    // obligation against the stale row. Old rows without the key simply never
+    // match (one duplicate card beats a lost instruction).
+    const instructionKey = require('crypto').createHash('sha256')
+      .update(JSON.stringify({
+        customerId: customer.id,
+        contact_preference: instruction.contact_preference || null,
+        preferred_contact_method: instruction.preferred_contact_method || null,
+        do_not_contact_request: instruction.do_not_contact_request === true,
+        // The notification BODY states whether the SMS opt-out already landed
+        // — a "suppression failed" card is not delivery evidence for a later
+        // capture where it succeeded (staff would keep the wrong compliance
+        // state).
+        smsSuppressionApplied: opts.smsSuppressionApplied === true,
+      }))
+      .digest('hex').slice(0, 16);
+    if (opts.callSid) {
+      // ⭐ SERIALIZED, NOT JUST PROBED. A pre-insert SELECT alone is not
+      // cross-pod idempotency: the live delivery and the hourly sweep (or two
+      // scheduler pods) can both read "no row" and both notify. The advisory
+      // xact lock — keyed by (callSid, instructionKey) — makes probe→notify a
+      // critical section; the lock releases at commit, after the winner's
+      // notification exists for the loser's probe to find. A lock/transaction
+      // failure falls through to the unserialized path: a duplicate card
+      // beats a lost do-not-contact.
+      let serialized = null;
+      if (typeof db.transaction === 'function') {
+        try {
+          serialized = await db.transaction(async (trx) => {
+            await trx.raw(
+              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+              ['voice-contact-instruction', `${String(opts.callSid)}:${instructionKey}`],
+            );
+            const existing = await trx('notifications')
+              .whereRaw("metadata->>'callSid' = ?", [String(opts.callSid)])
+              .whereRaw("metadata->>'source' = ?", ['voice_agent'])
+              .whereRaw("metadata->>'instructionKey' = ?", [instructionKey])
+              .first('id');
+            if (existing) return { deduped: true, id: existing.id };
+            const NotificationServiceLocked = require('./notification-service');
+            // The insert rides the SAME locked transaction (connection: trx) —
+            // a second pool connection per lock-holder could otherwise occupy
+            // the pool with waiting transactions and stall every compliance
+            // notification.
+            const lockedNotif = await notifyContactInstruction(NotificationServiceLocked, customer, instruction, opts, dnc, instructionKey, trx);
+            return { deduped: false, notif: lockedNotif };
+          });
+        } catch (err) {
+          logger.warn(`[voice-agent-lead] contact-instruction serialization failed (${err.message}) — proceeding unserialized`);
+          serialized = null;
+        }
+      }
+      if (serialized && serialized.deduped) {
+        logger.info(`[voice-agent-lead] contact instruction for customer ${customer.id} already persisted (notification ${serialized.id}) — not re-notifying`);
+        return { persisted: true, suppressed: false };
+      }
+      if (serialized && !serialized.deduped) {
+        return finishContactInstructionResult(serialized.notif, customer, dnc);
+      }
+    }
+    // Unserialized fallback (no callSid, or the lock/transaction failed):
+    // still probe best-effort — non-atomic, but a repaired marker beats an
+    // hourly duplicate, and a probe failure proceeds to notify.
+    if (opts.callSid) {
+      const existing = await db('notifications')
+        .whereRaw("metadata->>'callSid' = ?", [String(opts.callSid)])
+        .whereRaw("metadata->>'source' = ?", ['voice_agent'])
+        .whereRaw("metadata->>'instructionKey' = ?", [instructionKey])
+        .first('id')
+        .catch(() => null);
+      if (existing) {
+        logger.info(`[voice-agent-lead] contact instruction for customer ${customer.id} already persisted (notification ${existing.id}) — not re-notifying`);
+        return { persisted: true, suppressed: false };
+      }
+    }
+    const NotificationService = require('./notification-service');
+    const notif = await notifyContactInstruction(NotificationService, customer, instruction, opts, dnc, instructionKey);
+    return finishContactInstructionResult(notif, customer, dnc);
+  } catch (err) {
+    logger.error(`[voice-agent-lead] contact instruction surfacing FAILED for customer ${customer.id}: ${err.message}`);
+    return { persisted: false, suppressed: false };
+  }
+}
+
+// The single notifyAdmin composition — shared by the serialized (advisory-
+// locked) path and the unserialized fallback, so the card is identical
+// whichever rail delivered it.
+function notifyContactInstruction(NotificationService, customer, instruction, opts, dnc, instructionKey, connection = null) {
+  return NotificationService.notifyAdmin(
+    'service',
+    `${dnc ? '🚫 DO-NOT-CONTACT request' : '📞 Contact preference'} stated on a phone call`,
+    [
+      // ⭐ THE ALERT TELLS THE TRUTH ABOUT WHAT ALREADY HAPPENED. The voice
+      // agent applies an explicit, verified SMS opt-out itself (the one write
+      // it makes — relay-tools, via recordSuppression); telling staff
+      // "nothing was changed" over a suppression that already landed reports
+      // a false compliance state in the exact place they check it. Everything
+      // BEYOND that write (email, broader preferences) is still theirs.
+      dnc && opts.smsSuppressionApplied
+        ? 'The caller asked NOT to be contacted. Automated TEXTS to their number are ALREADY STOPPED '
+          + '(the voice agent applied the SMS opt-out). Any email or broader preference still needs a human — review and action the rest.'
+        : null,
+      dnc && !opts.smsSuppressionApplied
+        ? 'The caller asked NOT to be contacted. Nothing was changed automatically — review and action it.'
+        : null,
+      instruction.preferred_contact_method ? `Preferred method: ${instruction.preferred_contact_method}.` : null,
+      instruction.contact_preference ? `In their words: "${instruction.contact_preference}"` : null,
+    ].filter(Boolean).join('\n'),
+    {
+      icon: dnc ? '🚫' : '📞',
+      link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+      // ⭐ THIS ROW IS THE ONLY ARTIFACT. A lifecycle customer gets no lead, so
+      // a stated contact instruction lives nowhere but this feed row — and the
+      // admin bell policy silences the whole 'service' category by default
+      // when it is on, which would have made a caller's "email only" (or the
+      // DNC's paper trail) vanish without a sound. `bell: true` is the
+      // policy's own site-level tag for "this specific notification must
+      // ring": a consent instruction is compliance, not FYI noise.
+      bell: true,
+      // Inside the advisory-locked path the insert uses the LOCKED
+      // transaction's connection — never a second pool checkout.
+      ...(connection ? { connection } : {}),
+      metadata: {
+        customerId: customer.id,
+        source: 'voice_agent',
+        callSid: opts.callSid || null,
+        instructionKey, // the sweep-retry dedupe key (normalized instruction)
+        ...instruction,
+      },
+    },
+  );
+}
+
+// ⭐ SUPPRESSED IS NOT PERSISTED. notifyAdmin's suppression sentinel is truthy
+// on purpose (`{ id: null, suppressed: true }`), so a bare truthiness check
+// read "no row was written" as success. With `bell: true` the policy can no
+// longer silence this site, so a suppressed return means the internal-test-
+// customer gate — deliberate, but still zero artifact, and this must never
+// claim otherwise.
+function finishContactInstructionResult(notif, customer, dnc) {
+  if (!notif || notif.suppressed) {
+    logger.error(`[voice-agent-lead] contact instruction for customer ${customer.id} did NOT persist to the admin feed (dnc=${dnc}${notif && notif.suppressed ? `, suppressed:${notif.reason || 'internal_test'}` : ''})`);
+    return { persisted: false, suppressed: !!(notif && notif.suppressed) };
+  }
+  logger.info(`[voice-agent-lead] contact instruction surfaced for existing customer ${customer.id} (dnc=${dnc})`);
+  return { persisted: true, suppressed: false };
+}
+
 const phoneDigits = (v) => String(v || '').replace(/\D/g, '');
 const nameCase = (v) => (v && String(v).trim() ? properCase(String(v).trim()) : null);
 
@@ -111,7 +408,8 @@ async function resolveLeadSourceId(toPhone) {
  * @param {object} extracted  agent-captured fields:
  *   { first_name, last_name, email, address_line1, city, zip,
  *     requested_service|matched_service, preferred_date_time, pain_points,
- *     call_summary, lead_quality ('hot'|'warm'|'cold') }
+ *     call_summary, lead_quality ('hot'|'warm'|'cold'),
+ *     contact_preference, preferred_contact_method, do_not_contact_request }
  * @param {object} opts { phone, toPhone, callSid, language, callDurationSeconds }
  * @returns {Promise<{ leadId: string|null, customerId: string|null, created: boolean }>}
  */
@@ -127,16 +425,70 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   let leadId = null;
   let created = false;
 
-  let customer = await findCustomerByPhone(phone);
+  // ⭐ IDENTITY CAN BE HANDED IN, AND WHEN IT IS, IT WINS. The voice relay knows
+  // WHO is on the call from the ANI cross-check against the signature-verified
+  // /voice row — and it may pass a DIFFERENT `phone` here, because the caller
+  // gave an alternate callback number (the capture_lead schema asks for one
+  // explicitly, e.g. calling from a blocked line). Resolving identity from that
+  // alternate number instead would surface this call — and any contact
+  // instruction on it — against whoever else owns that number, or mint a fresh
+  // lead for a customer we already recognised. `identityCustomerId` keeps the
+  // two apart: the matched account is the identity, the phone is only where to
+  // call back.
+  // ⭐ AND WHEN NO IDENTITY WAS HANDED IN, THE CALLBACK NUMBER STILL ISN'T ONE.
+  // On a relay call (opts.aniPhone present) with no identityCustomerId — an
+  // unverified or redacted-tier caller — the model-controlled callback_phone
+  // must never resolve an ACCOUNT: any declared number would attach this
+  // call's contact instruction, language hint, and lifecycle notification to
+  // whoever owns it. Identity may come only from the caller's own ANI; the
+  // callback number stays what it is — where to call back. Non-relay callers
+  // (no aniPhone) keep the legacy phone lookup unchanged.
+  // ⭐ AND AN UNVERIFIED ANI RESOLVES NOTHING AT ALL. The setup frame's `from`
+  // is only an identity when it survived the call_log cross-check against the
+  // signature-verified /voice row (opts.aniVerified). A session whose frame
+  // failed that check — or whose verification never settled — is a CLAIMED
+  // number, and resolving it would attach this call's lead writes, language
+  // hint, and lifecycle contact notification to whichever account the claim
+  // named. Unverified relay sessions create only UNLINKED leads.
+  let identityPhone = phone;
+  if (!opts.identityCustomerId && opts.aniPhone) {
+    if (opts.aniVerified !== true) {
+      identityPhone = null;
+      logger.info(`[voice-agent-lead] unverified relay session ${maskPhone(opts.aniPhone)} — creating an unlinked lead, no identity resolution`);
+    } else {
+      const ownAni = phoneDigits(opts.aniPhone).slice(-10);
+      const lookupNumber = phoneDigits(phone).slice(-10);
+      identityPhone = ownAni && ownAni === lookupNumber ? phone : opts.aniPhone;
+    }
+  }
+  let customer = opts.identityCustomerId
+    ? await db('customers').where({ id: opts.identityCustomerId }).whereNull('deleted_at').first()
+    : (identityPhone ? await findCustomerByPhone(identityPhone) : null);
   // Name-aware guard: on a shared line the phone-only match can resolve the
   // wrong household member. If the agent captured a name that conflicts with the
   // matched customer's, don't link (treat as a new, unlinked caller) rather than
   // attach the call + language hint to the wrong customer.
-  if (customer && nameConflicts(extracted, customer)) {
+  // The name guard is for a PHONE match on a shared line; a caller the ANI
+  // already authenticated is not a guess to second-guess.
+  if (customer && !opts.identityCustomerId && nameConflicts(extracted, customer)) {
     logger.info(`[voice-agent-lead] Captured name conflicts with customer on ${maskPhone(phone)}; not linking`);
     customer = null;
   }
   customerId = customer?.id || null;
+
+  // ⭐ EARLY KEYED OWNERSHIP CHECK — before ANY write this function makes
+  // (the language hint below, the lifecycle contact-instruction surfacing).
+  // Non-atomic by design (the merge transaction keeps the locked check); this
+  // closes the pre-merge write paths for a superseded socket. opts.sessionKey
+  // is only threaded for sessions that actually CLAIMED the call.
+  if (opts.sessionKey && opts.callSid) {
+    const { claimOwnedElsewhere } = require('./voice-agent/relay-context');
+    const supersededEarly = await claimOwnedElsewhere(db, opts.callSid, opts.sessionKey).catch(() => false);
+    if (supersededEarly) {
+      logger.warn(`[voice-agent-lead] capture refused before any write — session superseded callSid=${opts.callSid}`);
+      return { leadId: null, customerId: null, created: false, superseded: true };
+    }
+  }
 
   // Non-routing language hint on the matched customer — applied even if the lead
   // is skipped below. Best-effort; only fills when empty so a prior preference
@@ -156,12 +508,75 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   // proceed below.
   if (customer && !isLeadStage(customer.pipeline_stage)) {
     logger.info(`[voice-agent-lead] Skipping lead for ${maskPhone(phone)} — existing ${customer.pipeline_stage || 'lifecycle'} customer`);
+    // …but a stated CONTACT INSTRUCTION is not lead work and must not leave
+    // with it. The lead row is where these get recorded for a human to action
+    // (nothing here ever writes consent or suppression state — see the header),
+    // and a lifecycle customer has no lead: the instruction would simply
+    // vanish, which for a "stop texting me" is the one outcome that matters.
+    // Surface it on the SAME internal admin feed the re-service lane uses, so
+    // it reaches a person instead of a dropped return value.
+    await surfaceContactInstructionForCustomer(customer, extracted, opts).catch(() => {});
     return { leadId: null, customerId, created: false };
   }
 
-  let existingLead = phone
-    ? await db('leads').where('phone', phone).whereNull('deleted_at').orderBy('created_at', 'desc').first()
-    : null;
+  // ⭐ RELAY LEAD RESOLUTION IS SERIALIZED PER CALL. Two sessions on the same
+  // CallSid (a dropped socket closing while its replacement runs the same
+  // capture, or the hangup floor racing capture_lead cross-instance) can both
+  // read "no lead" and both insert — the read-then-insert is not idempotent
+  // on its own. Relay calls take an advisory xact lock keyed by CallSid
+  // around the lookup+insert; the second holder reads after the first's
+  // commit and reuses the same-call lead (twilio_call_sid reuse rule below).
+  // Lock/transaction failure falls through unserialized — a duplicate lead
+  // beats a lost capture.
+  let existingLead = null;
+  const resolveExistingLead = async (q) => {
+    existingLead = phone
+      ? await q('leads').where('phone', phone).whereNull('deleted_at').orderBy('created_at', 'desc').first()
+      : null;
+  // ⭐ AN UNVERIFIED SESSION REUSES NOTHING. Nulling identity resolution above
+  // is not enough: leads resolve BY PHONE, so an unverified relay caller
+  // claiming a victim's number would still land on — and overwrite the rolling
+  // fields (transcript_summary, extracted_data) of — the lead already linked
+  // to that customer. A session whose ANI is unproven gets a FRESH, UNLINKED
+  // lead every time; a duplicate row for a legitimate caller whose
+  // verification blipped is the cheap side of that trade.
+  // (A handed-in identityCustomerId only exists on a verified full-tier match
+  // — those sessions keep the nuanced reuse rules below. And a lead THIS CALL
+  // created is this call's own record — leads.twilio_call_sid is INSERT-only,
+  // so a matching sid can only mean this session's earlier capture_lead:
+  // reusing it is idempotency, not cross-caller leakage.)
+  if (existingLead && opts.aniPhone && !opts.identityCustomerId && opts.aniVerified !== true
+      && !(opts.callSid && existingLead.twilio_call_sid === opts.callSid)) {
+    logger.info(`[voice-agent-lead] unverified relay session ${maskPhone(opts.aniPhone)} — never reusing the existing lead on ${maskPhone(phone)}`);
+    existingLead = null;
+  }
+  // ⭐ THE IDENTITY FIX HAS TO REACH THE LEAD LOOKUP TOO. Leads resolve BY
+  // PHONE, and when the caller gave an ALTERNATE callback number that number
+  // can already belong to somebody else's lead — so reusing it would rewrite
+  // that lead's customer_id to this authenticated caller and hand them another
+  // person's record.
+  //
+  // ⭐ AND "UNCLAIMED" IS NOT "OURS". The first cut of this guard rejected only
+  // a lead already stamped with a DIFFERENT customer_id — but a lead with NO
+  // customer_id on an alternate number is somebody's too: it is the record of
+  // whoever owns that number calling in as a prospect (a spouse's own inquiry,
+  // say), and reusing it would assign it to the authenticated caller and
+  // overwrite its rolling fields. So on an authenticated call, a lead found by
+  // a number OTHER than the caller's own ANI is reused only when it is already
+  // linked to this customer; an unclaimed lead by the caller's OWN ANI is
+  // their pre-customer history and stays reusable (idempotency by phone).
+  if (existingLead && opts.identityCustomerId && existingLead.customer_id !== customerId) {
+    const ownAni = phoneDigits(opts.aniPhone).slice(-10);
+    const lookupNumber = phoneDigits(phone).slice(-10);
+    const phoneIsOwnAni = !!ownAni && ownAni === lookupNumber;
+    if (existingLead.customer_id || !phoneIsOwnAni) {
+      logger.info(
+        `[voice-agent-lead] lead on ${maskPhone(phone)} is ${existingLead.customer_id ? 'another customer\'s' : 'an unclaimed lead on an alternate number'} — `
+        + 'not reusing it for the authenticated caller'
+      );
+      existingLead = null;
+    }
+  }
 
   // Don't reuse a lead that belongs to a different person on a shared line: if
   // the captured name conflicts with the existing lead's name and it isn't our
@@ -173,34 +588,43 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     existingLead = null;
   }
 
-  if (existingLead) {
-    leadId = existingLead.id;
-  } else {
-    const leadSourceId = await resolveLeadSourceId(opts.toPhone);
-    const insert = {
-      lead_source_id: leadSourceId,
-      customer_id: customerId,
-      phone,
-      first_name: nameCase(extracted.first_name),
-      last_name: nameCase(extracted.last_name) || '',
-      email: extracted.email || null,
-      lead_type: 'inbound_call',
-      first_contact_at: new Date(),
-      first_contact_channel: 'call',
-      status: 'new',
-    };
-    if (opts.callSid) insert.twilio_call_sid = opts.callSid;
-    if (opts.callDurationSeconds != null) insert.call_duration_seconds = opts.callDurationSeconds;
-    const [newLead] = await db('leads').insert(insert).returning('*');
-    leadId = newLead.id;
-    created = true;
-    // Log IDs/masked phone only — `service` is caller-provided free text and
-    // can contain names/addresses; it belongs in the row, not plain logs.
-    logger.info(`[voice-agent-lead] Created lead ${leadId} for ${maskPhone(phone)}`);
-  }
+    if (existingLead) {
+      leadId = existingLead.id;
+    } else {
+      const leadSourceId = await resolveLeadSourceId(opts.toPhone);
+      const insert = {
+        lead_source_id: leadSourceId,
+        customer_id: customerId,
+        phone,
+        first_name: nameCase(extracted.first_name),
+        last_name: nameCase(extracted.last_name) || '',
+        email: extracted.email || null,
+        lead_type: 'inbound_call',
+        first_contact_at: new Date(),
+        first_contact_channel: 'call',
+        status: 'new',
+      };
+      if (opts.callSid) insert.twilio_call_sid = opts.callSid;
+      if (opts.callDurationSeconds != null) insert.call_duration_seconds = opts.callDurationSeconds;
+      const [newLead] = await q('leads').insert(insert).returning('*');
+      leadId = newLead.id;
+      created = true;
+      // Log IDs/masked phone only — `service` is caller-provided free text and
+      // can contain names/addresses; it belongs in the row, not plain logs.
+      logger.info(`[voice-agent-lead] Created lead ${leadId} for ${maskPhone(phone)}`);
+    }
+  };
+  const serializeCapture = opts.callSid && opts.aniPhone && typeof db.transaction === 'function';
 
-  if (leadId) {
-    const current = existingLead || (await db('leads').where({ id: leadId }).first());
+  // ⭐ THE LOCK COVERS THE MUTABLE LEAD STATE, NOT JUST THE INSERT. Releasing
+  // it after the lookup/insert left the current-read → merge → update →
+  // activity section racing: two same-call sessions could both read stale
+  // extracted_data and overwrite each other's summary or contact-preference
+  // fields. The merge runs inside the same locked transaction, on the same
+  // connection.
+  const mergeAndStamp = async (q) => {
+    if (!leadId) return;
+    const current = existingLead || (await q('leads').where({ id: leadId }).first());
     const leadUpdates = {};
     if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = nameCase(extracted.first_name);
     if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = nameCase(extracted.last_name);
@@ -216,12 +640,36 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     else if (extracted.lead_quality && isEmpty(current?.urgency)) leadUpdates.urgency = 'normal';
 
     if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
-    leadUpdates.extracted_data = JSON.stringify({
-      pain_points: extracted.pain_points,
-      preferred_date_time: extracted.preferred_date_time,
-      source: 'voice_agent',
-      language,
-    });
+    // ⭐ extracted_data is MERGED, never replaced.
+    //
+    // contactPreferenceFields returning null was supposed to mean "a
+    // preference-free payload cannot erase a recorded instruction" — but the
+    // write below was a wholesale JSON.stringify of a freshly built object, so
+    // the spread-or-not was irrelevant: the SECOND capture_lead on the same
+    // call (or a call NEXT WEEK, since the lead is resolved by phone) rebuilt
+    // extracted_data from scratch and dropped every consent key that was not in
+    // that payload. A caller who said "stop texting me" and then answered one
+    // more question lost the instruction.
+    const priorExtracted = parseJsonObject(current?.extracted_data);
+    const merged = { ...priorExtracted };
+    // Fill-forward: a payload that simply didn't mention a field keeps the
+    // value already on the lead rather than nulling it.
+    merged.pain_points = extracted.pain_points || priorExtracted.pain_points || null;
+    merged.preferred_date_time = extracted.preferred_date_time || priorExtracted.preferred_date_time || null;
+    merged.source = 'voice_agent';
+    merged.language = language || priorExtracted.language || null;
+    const contactPreference = contactPreferenceFields(extracted);
+    if (contactPreference) {
+      if (contactPreference.contact_preference) merged.contact_preference = contactPreference.contact_preference;
+      if (contactPreference.preferred_contact_method) merged.preferred_contact_method = contactPreference.preferred_contact_method;
+      // do_not_contact_request is STICKY-ON. Lifting a stated do-not-contact is
+      // a human decision (the agent cannot act on one either way), so a later
+      // payload may SET it and never clear it. The false is still recorded on a
+      // lead that has never carried a true.
+      if (contactPreference.do_not_contact_request === true) merged.do_not_contact_request = true;
+      else if (merged.do_not_contact_request !== true) merged.do_not_contact_request = false;
+    }
+    leadUpdates.extracted_data = JSON.stringify(merged);
     // Only touch is_qualified when the agent sent a recognized quality, so a
     // later quality-less payload can't demote a previously qualified lead.
     if (extracted.lead_quality) leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality);
@@ -230,9 +678,14 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     // null out an existing lead's customer_id on a no-match/ambiguous lookup.
     if (customerId) leadUpdates.customer_id = customerId;
     leadUpdates.updated_at = new Date();
-    await db('leads').where({ id: leadId }).update(leadUpdates);
+    await q('leads').where({ id: leadId }).update(leadUpdates);
 
-    await db('lead_activities').insert({
+    // The activity row is stashed for a POST-COMMIT best-effort insert —
+    // ⭐ a caught error INSIDE a Postgres transaction still ABORTS it
+    // (try/catch is not a savepoint): swallowing the failure here turned the
+    // whole lead commit into a silent rollback while the function returned a
+    // leadId and the capture floor stood down forever.
+    activityRow = {
       lead_id: leadId,
       activity_type: 'ai_triage',
       description: `AI voice agent captured: ${service || 'general inquiry'}${language === 'es' ? ' (Spanish)' : ''}, quality: ${extracted.lead_quality || 'unknown'}`,
@@ -242,11 +695,165 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
         pain_points: extracted.pain_points,
         language,
         source: 'voice_agent',
+        ...(contactPreference || {}),
       }),
-    }).catch((e) => logger.warn(`[voice-agent-lead] activity log failed (non-blocking): ${e.message}`));
+    };
+  };
+
+  const runCapture = async (q) => {
+    await resolveExistingLead(q);
+    await mergeAndStamp(q);
+  };
+  let superseded = false;
+  let activityRow = null;
+  if (serializeCapture) {
+    try {
+      await db.transaction(async (trx) => {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['voice-lead-capture', String(opts.callSid)],
+        );
+        // ⭐ OWNERSHIP RE-PROVEN INSIDE THE WRITE TRANSACTION — a takeover
+        // landing mid-capture (or a superseded socket's floor racing the
+        // replacement's) aborts before any lead state is written.
+        if (opts.sessionKey) {
+          const { claimOwnedElsewhere } = require('./voice-agent/relay-context');
+          if (await claimOwnedElsewhere(trx, opts.callSid, opts.sessionKey)) {
+            superseded = true;
+            return;
+          }
+        }
+        await runCapture(trx);
+      });
+      if (superseded) {
+        logger.warn(`[voice-agent-lead] capture skipped — session superseded callSid=${opts.callSid}`);
+        return { leadId: null, customerId, created: false, superseded: true };
+      }
+    } catch (err) {
+      // ⭐ A KEYED SESSION FAILS CLOSED. Retrying unserialized would run the
+      // lead writes with NO claim check and no per-call lock — exactly the
+      // superseded-write hole the lock exists to close, opened by any
+      // transient DB error. A keyed capture that cannot be serialized is a
+      // FAILED capture (the model reports it; the hangup floor and the sweep
+      // rails still stand). Legacy sessions (no sessionKey — nothing to prove
+      // ownership against) keep the unserialized fallback.
+      if (opts.sessionKey) {
+        logger.error(`[voice-agent-lead] capture serialization failed on a KEYED session callSid=${opts.callSid} — failing closed, no unserialized write: ${err.message}`);
+        // ⭐ EXPLICITLY A FAILURE — never the shape of an intentional no-lead
+        // (a lifecycle customer's capture). Callers must NOT latch "captured",
+        // must not stand the floor down, and must not tell the caller
+        // anything was recorded.
+        return { leadId: null, customerId, created: false, failed: true };
+      }
+      logger.warn(`[voice-agent-lead] capture serialization failed for callSid=${opts.callSid} (${err.message}) — proceeding unserialized`);
+      leadId = undefined;
+      created = false;
+      existingLead = null;
+      await runCapture(db);
+    }
+  } else {
+    await runCapture(db);
+  }
+
+  // Best-effort, AFTER the lead transaction committed — an activity failure
+  // must cost only the activity, never the lead.
+  if (leadId && activityRow) {
+    await db('lead_activities').insert(activityRow)
+      .catch((e) => logger.warn(`[voice-agent-lead] activity log failed (non-blocking): ${e.message}`));
   }
 
   return { leadId, customerId, created };
 }
 
-module.exports = { createLeadFromExtraction, findCustomerByPhone, resolveLeadSourceId };
+/**
+ * Hourly recovery for contact instructions whose ONLY artifact (the admin feed
+ * row) failed to persist on the live call. Mirrors sweepAbandonedHotAlerts:
+ * keyed on the durable obligation marker capture time stamped, cleared only on
+ * a proven re-file. Fail-open toward a duplicate feed row — a rare duplicate
+ * beats a silently lost "stop texting me".
+ *
+ * ⭐ THE MARKER OUTLIVES ANY OUTAGE. There is no attempt cap: a compliance
+ * instruction with no other artifact is never discarded because delivery kept
+ * failing — the marker (and the stored instruction) stay until a re-file
+ * SUCCEEDS. The only clears besides success are deliberate ones: the
+ * internal-test suppression gate (zero-artifact by policy) and a customer row
+ * that no longer exists (a debt nobody can pay). Attempts are counted for
+ * observability only.
+ */
+async function sweepUnsurfacedContactInstructions({ limit = 10 } = {}) {
+  const rows = await db('call_log')
+    .whereRaw("metadata->>'relay_contact_instruction_needed' = 'true'")
+    .orderBy('created_at', 'asc')
+    .limit(limit)
+    .select('id', 'twilio_call_sid', 'metadata');
+  let recovered = 0;
+  for (const row of rows) {
+    const meta = (row.metadata && typeof row.metadata === 'object') ? row.metadata : {};
+    const payload = (meta.relay_contact_instruction && typeof meta.relay_contact_instruction === 'object')
+      ? meta.relay_contact_instruction : {};
+    const clearMarker = () => db('call_log').where({ id: row.id }).update({
+      metadata: db.raw("metadata - 'relay_contact_instruction_needed' - 'relay_contact_instruction' - 'relay_contact_instruction_attempts'"),
+    }).catch((e) => logger.warn(`[voice-agent-lead] contact-instruction marker clear failed call_log=${row.id}: ${e.message}`));
+
+    // ⭐ A LOOKUP FAILURE IS NOT A MISSING CUSTOMER. Collapsing a DB error to
+    // null cleared the ONLY durable marker for a stated instruction (possibly
+    // a do-not-contact) during a transient outage — the exact window the
+    // sweep exists to survive. An error keeps the marker for the next pass;
+    // only a CONFIRMED missing/deleted row clears the debt.
+    let customer = null;
+    let lookupFailed = false;
+    if (payload.customerId) {
+      try {
+        customer = await db('customers').where({ id: payload.customerId }).whereNull('deleted_at').first();
+      } catch (err) {
+        lookupFailed = true;
+        logger.warn(`[voice-agent-lead] contact-instruction sweep customer lookup failed call_log=${row.id} — keeping the marker for retry: ${err.message}`);
+      }
+    }
+    if (lookupFailed) continue;
+    if (!customer) {
+      // Unresolvable obligation (customer gone / malformed payload): clear it
+      // loudly rather than retry a debt nobody can pay.
+      logger.error(`[voice-agent-lead] contact-instruction obligation unresolvable (customer ${payload.customerId || 'missing'}) call_log=${row.id} — clearing marker`);
+      await clearMarker();
+      continue;
+    }
+    const attempts = Number(meta.relay_contact_instruction_attempts || 0);
+    const instruction = {
+      contact_preference: payload.contact_preference || null,
+      preferred_contact_method: CONTACT_METHODS.has(String(payload.preferred_contact_method || '')) ? payload.preferred_contact_method : null,
+      do_not_contact_request: payload.do_not_contact_request === true,
+    };
+    const dnc = instruction.do_not_contact_request;
+    const result = await fileContactInstructionNotification(customer, instruction, {
+      callSid: row.twilio_call_sid,
+      smsSuppressionApplied: payload.smsSuppressionApplied === true,
+      sweepRetry: true,
+    }, dnc);
+    if (result.persisted) {
+      await clearMarker();
+      recovered += 1;
+    } else if (result.suppressed) {
+      // Deliberate zero-artifact (internal-test customer gate) — not a
+      // delivery failure. Clearing is the policy's decision, not a give-up.
+      logger.warn(`[voice-agent-lead] contact-instruction for customer ${customer.id} suppressed by policy on sweep retry call_log=${row.id} — clearing marker`);
+      await clearMarker();
+    } else {
+      if (attempts > 0 && attempts % 24 === 0) {
+        logger.error(`[voice-agent-lead] contact-instruction for customer ${customer.id} STILL unsurfaced after ${attempts} sweep attempts call_log=${row.id} — marker retained, keeps retrying`);
+      }
+      await db('call_log').where({ id: row.id }).update({
+        metadata: db.raw(
+          "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ relay_contact_instruction_attempts: attempts + 1 })],
+        ),
+      }).catch(() => {});
+    }
+  }
+  return { scanned: rows.length, recovered };
+}
+
+module.exports = {
+  createLeadFromExtraction, findCustomerByPhone, resolveLeadSourceId, contactPreferenceFields,
+  sweepUnsurfacedContactInstructions,
+};

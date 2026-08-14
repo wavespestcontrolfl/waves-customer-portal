@@ -52,7 +52,9 @@ describe('previsitCardInviteEligible', () => {
     const sweep = require('fs').readFileSync(
       require.resolve('../services/previsit-card-request-sweep'), 'utf8',
     );
-    expect(sweep).toContain('outboundReviewUncleared: visit.source_action === OUTBOUND_REVIEW_SOURCE_ACTION && !visit.call_sms_cleared_at');
+    // Set membership, not a single marker: voice-agent bookings share the
+    // office-review lifecycle, so both markers derive the flag the same way.
+    expect(sweep).toContain('outboundReviewUncleared: OFFICE_REVIEW_SOURCE_ACTIONS.includes(visit.source_action) && !visit.call_sms_cleared_at');
     // The SQL admission mirrors it: no status-based re-admit branch remains.
     expect(sweep).not.toContain("outboundConfirmed");
     expect(sweep).toContain(".orWhereNotNull('s.call_sms_cleared_at'))");

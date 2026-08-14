@@ -298,7 +298,7 @@ describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () =>
     const state = { updates: [] };
     const fn = (table) => {
       const q = {};
-      ['where', 'whereNotIn', 'whereNull', 'whereIn', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
+      ['where', 'whereNotIn', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
       q.first = jest.fn(async () => {
         if (table === 'scheduled_services') return row;
         if (table === 'appointment_reminders') {
@@ -401,18 +401,211 @@ describe('activateLegacyOutboundReviewRowIfNeeded — direct-writer belt', () =>
   });
 });
 
+// ⭐ THE VOICE-AGENT ROW TAKES THE SAME ACTIVATION PATH — the P0 this branch
+// shipped with. 'voice_agent' was added to OFFICE_REVIEW_PENDING_SOURCE_ACTIONS
+// (and honoured by the dispatch/schedule confirm routes and tech-track), but the
+// LAZY-ACTIVATION machinery still matched the single outbound marker. #3361
+// removed the office-review dispatch/reschedule hold, so SmartRebooker can flip
+// a pending voice booking straight to confirmed with a direct UPDATE — and the
+// completion that followed skipped reminder arming, lead/card resolution and the
+// inspection-credit evidence: the half-activated completion job-status.js itself
+// classifies P0. These assert a voice_agent row behaves EXACTLY like an
+// ai_call_outbound_review one.
+describe('voice-agent bookings share the office-review activation path', () => {
+  const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+  const InspectionCredit = require('../services/inspection-credit');
+
+  const voiceRow = (extra = {}) => ({
+    id: 'svc-v1',
+    source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION,
+    status: 'pending',
+    customer_confirmed: false,
+    customer_id: 'cust-v1',
+    scheduled_date: '2026-08-20',
+    window_start: '09:00',
+    service_type: 'General Pest Control',
+    source_call_log_id: 'cl-v1',
+    is_callback: false,
+    estimated_price: 150,
+    ...extra,
+  });
+
+  // Table-aware knex-ish handle shared by the helper and the transition writer.
+  const makeHandle = (row, { rows = null } = {}) => {
+    const state = { updates: [], raws: [] };
+    const fn = (table) => {
+      const q = {};
+      ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere',
+        'whereRaw', 'orderBy', 'limit', 'modify', 'leftJoin'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.select = jest.fn(async (col) => (table === 'scheduled_services' && col === 'id' && rows ? rows : []));
+      q.first = jest.fn(async () => {
+        if (table === 'scheduled_services') return { ...row };
+        if (table === 'appointment_reminders') return reminderRowFor(row);
+        // The review card the voice booking wrote, carrying the lead capture_lead
+        // created on the same call.
+        if (table === 'triage_items') return { payload: JSON.stringify({ lead_id: 'lead-v1' }) };
+        if (table === 'scheduled_services as s') {
+          return {
+            job_id: row.id, customer_id: row.customer_id, tech_id: null, service_type: row.service_type,
+            scheduled_date: row.scheduled_date, window_start: row.window_start, window_end: null,
+            notes: null, internal_notes: null, updated_at: new Date(),
+          };
+        }
+        return null;
+      });
+      q.update = jest.fn(async (vals) => { state.updates.push({ table, vals }); return 1; });
+      q.insert = jest.fn(async () => 1);
+      q.del = jest.fn(async () => 1);
+      return q;
+    };
+    fn.fn = { now: () => new Date() };
+    fn.transaction = async (cb) => cb(fn);
+    fn.raw = jest.fn(async (...args) => { state.raws.push(args); return {}; });
+    fn.executionPromise = Promise.resolve();
+    fn._state = state;
+    return fn;
+  };
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a SmartRebooker-style direct flip activates it: reminders armed, lead converted, card resolved, stamped', async () => {
+    // The rebooker moves the visit with a direct UPDATE (status 'confirmed'),
+    // then calls this helper — which used to no-op for a voice row.
+    const db = makeHandle(voiceRow({ status: 'confirmed' }));
+    const activated = await activateLegacyOutboundReviewRowIfNeeded(db, 'svc-v1', 'rebooker-reschedule');
+
+    expect(activated).toBe(true);
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
+      'svc-v1', 'cust-v1', '2026-08-20T09:00', 'General Pest Control', 'admin_manual',
+      { sendConfirmation: false, closeReminderWindows: false },
+    );
+    expect(convertCallLeadOnPhoneBooking).toHaveBeenCalledWith(db, expect.objectContaining({
+      customerId: 'cust-v1', scheduledServiceId: 'svc-v1',
+    }));
+    expect(db._state.updates.some((u) => u.table === 'triage_items' && u.vals.status === 'resolved')).toBe(true);
+    expect(db._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true)).toBe(true);
+  });
+
+  test('completing an unstamped voice row writes the inspection-credit evidence IN the transition trx', async () => {
+    // The billing moment. Without the shared set here the completion committed
+    // with no credit evidence at all.
+    const row = voiceRow({ status: 'confirmed' });
+    const trx = makeHandle(row);
+    const db = require('../models/db');
+    const dbHandle = makeHandle(row);
+    db.mockImplementation(dbHandle);
+    db.transaction = dbHandle.transaction;
+    db.fn = dbHandle.fn;
+    db.raw = dbHandle.raw;
+
+    await transitionJobStatus({
+      jobId: 'svc-v1', fromStatus: 'confirmed', toStatus: 'completed', transitionedBy: 'tech1', trx,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(InspectionCredit.markBookingForInspectionCredit).toHaveBeenCalledWith(
+      trx,
+      expect.objectContaining({
+        customerId: 'cust-v1', scheduledServiceId: 'svc-v1', source: 'phone_call',
+        recoveryStatusIn: ['completed'],
+      }),
+    );
+    // …and the post-commit activation still ran the rest of the legs.
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+    expect(dbHandle._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true)).toBe(true);
+  });
+
+  test('a pending voice row going straight to en_route activates instead of going half-armed', async () => {
+    const row = voiceRow();
+    const trx = makeHandle(row);
+    const db = require('../models/db');
+    const dbHandle = makeHandle(row);
+    db.mockImplementation(dbHandle);
+    db.transaction = dbHandle.transaction;
+    db.fn = dbHandle.fn;
+    db.raw = dbHandle.raw;
+
+    await transitionJobStatus({
+      jobId: 'svc-v1', fromStatus: 'pending', toStatus: 'en_route', transitionedBy: 'tech1', trx,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+    expect(dbHandle._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true)).toBe(true);
+  });
+
+  // ⭐ THE ONE CONSUMER WHERE FULL MEMBERSHIP WOULD BE WRONG. The hourly sweep
+  // is not a touch-driven activation: it drains the LEGACY population outright,
+  // never-touched pending rows included, which is correct only because that
+  // hold was removed collectively and the population only shrinks. Voice rows
+  // are created pending ON PURPOSE with an outbound_booking_review card for the
+  // office — and this hook RESOLVES that card, arms customer reminders and
+  // converts the lead. So voice rows enter the sweep only in the state it
+  // exists to repair: already moved off 'pending', still unstamped.
+  test('the sweep takes STRANDED voice rows but never a never-touched pending one', async () => {
+    const db = makeHandle(voiceRow({ status: 'completed' }), { rows: [{ id: 'svc-v1' }] });
+    const result = await sweepStrandedLegacyOutboundActivations(db, { limit: 5 });
+    expect(result).toEqual({ candidates: 1, activated: 1 });
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+
+    // The predicate itself: the voice branch is scoped to rows that are no
+    // longer 'pending'.
+    const predicates = [];
+    const probe = (table) => {
+      const q = {};
+      ['whereNotIn', 'whereNull', 'whereNotNull', 'orderBy', 'limit', 'whereRaw'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.where = jest.fn((arg, val) => {
+        if (typeof arg === 'function') { predicates.push({ op: 'group' }); arg(q); } else predicates.push({ op: 'where', arg, val });
+        return q;
+      });
+      q.orWhere = jest.fn((arg, val) => {
+        if (typeof arg === 'function') { predicates.push({ op: 'orGroup' }); arg(q); } else predicates.push({ op: 'orWhere', arg, val });
+        return q;
+      });
+      q.whereNot = jest.fn((arg, val) => { predicates.push({ op: 'whereNot', arg, val }); return q; });
+      q.select = jest.fn(async () => []);
+      return q;
+    };
+    probe.raw = jest.fn(() => ({}));
+    await sweepStrandedLegacyOutboundActivations(probe, { limit: 5 });
+    // The legacy marker keeps its unscoped membership; the voice marker sits in
+    // an OR group that also carries the not-pending scope.
+    expect(predicates).toContainEqual({ op: 'where', arg: 'source_action', val: CALL_OUTBOUND_REVIEW_SOURCE_ACTION });
+    const orGroupAt = predicates.findIndex((p) => p.op === 'orGroup');
+    expect(orGroupAt).toBeGreaterThan(-1);
+    expect(predicates.slice(orGroupAt)).toContainEqual({ op: 'where', arg: 'source_action', val: 'voice_agent' });
+    expect(predicates.slice(orGroupAt)).toContainEqual({ op: 'whereNot', arg: 'status', val: 'pending' });
+  });
+});
+
 // A hand-built knex-ish db mock for the confirm hook: table-aware first()/
 // select()/update() so the triage-payload path and the fallback lead lookup
 // can be exercised independently.
-function confirmHookDb({ cardPayload = null, fallbackLeads = [], leadRow = null } = {}) {
+function confirmHookDb({ cardPayload = null, fallbackLeads = [], leadRow = null, callRow = null, svcRow = { status: 'confirmed', scheduled_date: '2026-07-14', window_start: '09:00' } } = {}) {
   const state = { triageResolved: false, updates: [] };
   const fn = (table) => {
     const q = {};
-    ['where', 'whereNotIn', 'whereNull', 'whereIn', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
+    ['where', 'whereNotIn', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
     q.select = jest.fn(async () => fallbackLeads);
     q.first = jest.fn(async () => {
       if (table === 'triage_items') return cardPayload ? { payload: JSON.stringify(cardPayload) } : null;
+      if (table === 'call_log') return callRow;
       if (table === 'leads') return leadRow;
+      // The hook re-reads the row's CURRENT status at entry and after the
+      // legs (cancellation-race guard) — a non-terminal row by default.
+      if (table === 'scheduled_services') return svcRow;
+      // The post-registration slot verify compares the PERSISTED reminder row
+      // against the service's current slot — armed at exactly that instant.
+      if (table === 'appointment_reminders' && svcRow && svcRow.window_start) {
+        const { parseETDateTime } = require('../utils/datetime-et');
+        return {
+          id: 'ar-verify-1',
+          appointment_time: parseETDateTime(`${svcRow.scheduled_date}T${svcRow.window_start}`),
+          windows_preclosed: false,
+        };
+      }
       return null;
     });
     q.update = jest.fn(async (vals) => {
@@ -483,6 +676,146 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
     }));
   });
 
+  // ⭐ A VOICE CARD WITH NO lead_id IS AN ANSWER, NOT A GAP. The fallback above
+  // exists for cards written before the payload carried lead_id; a voice card
+  // always carries the key, so a null means the call identified no lead
+  // (capture_lead never ran, or it matched an existing customer and created
+  // none). Guessing "their single active lead" would mark an unrelated open
+  // quote WON — a booked ants visit closing a termite estimate.
+  test('a voice card with no lead_id converts NOTHING (no single-active-lead guess)', async () => {
+    const db = confirmHookDb({
+      cardPayload: { origin: 'voice_agent', lead_id: null },
+      fallbackLeads: [{ id: 'lead-unrelated', status: 'estimate_sent' }],
+    });
+    await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(convertCallLeadOnPhoneBooking).not.toHaveBeenCalled();
+    // The rest of the confirm still runs — this is a lead decision, not a halt.
+    expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+    expect(db._state.triageResolved).toBe(true);
+  });
+
+  // ⭐ …BUT A BACKFILL THAT FAILED IS NOT AN ANSWER. The lead id reaches the
+  // card by a best-effort update after capture_lead; one transient failure and
+  // a lead that really exists would be skipped forever. The call stamps its own
+  // CallSid on the lead, so the confirm asks the call directly — exact, not the
+  // single-active-lead guess the case above rules out.
+  test('a null lead_id is RECOVERED via call_log.metadata.relay_lead_id before it is believed', async () => {
+    // NOT by leads.twilio_call_sid — that column is set at INSERT only, so a
+    // lead reused by phone keeps its ORIGINAL call's sid and a sid-keyed
+    // lookup silently missed every reuse.
+    const db = confirmHookDb({
+      cardPayload: { origin: 'voice_agent', lead_id: null },
+      callRow: { twilio_call_sid: 'CA-voice-1', metadata: { relay_lead_id: 'lead-recovered' } },
+      leadRow: { id: 'lead-recovered', status: 'new' },
+      fallbackLeads: [{ id: 'lead-unrelated', status: 'estimate_sent' }],
+    });
+    await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(convertCallLeadOnPhoneBooking).toHaveBeenCalledWith(db, expect.objectContaining({
+      leadId: 'lead-recovered',
+    }));
+  });
+
+  test('a voice card that DOES carry a lead still converts exactly that lead', async () => {
+    const db = confirmHookDb({
+      cardPayload: { origin: 'voice_agent', lead_id: 'lead-v9' },
+      leadRow: { status: 'new' },
+      fallbackLeads: [{ id: 'lead-unrelated', status: 'new' }],
+    });
+    await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(convertCallLeadOnPhoneBooking).toHaveBeenCalledWith(db, expect.objectContaining({ leadId: 'lead-v9' }));
+  });
+
+  // ⭐ THE ROW'S CURRENT STATUS, NOT THE CALLER'S SNAPSHOT. On the sweep path
+  // the snapshot can be an hour old; a cancellation that landed since must
+  // stand — activating it would arm reminders that TEXT the customer about a
+  // visit nobody is making. The stamp guard alone only stopped the receipt.
+  test('a row cancelled since the snapshot stands the whole activation down', async () => {
+    const db = confirmHookDb({
+      fallbackLeads: [{ id: 'lead-1', status: 'new' }],
+      svcRow: { status: 'cancelled', scheduled_date: '2026-07-14', window_start: '09:00' },
+    });
+    const ok = await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(ok).toBe(false); // unstamped — and the sweep excludes rejections
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+    expect(convertCallLeadOnPhoneBooking).not.toHaveBeenCalled();
+    expect(db._state.triageResolved).toBe(false);
+  });
+
+  // ⭐ A SKIP OR RESCHEDULE THAT COMMITS DURING THE LEGS CLOSES THE REMINDER
+  // TOO. handleCancellation no-ops unless the visit is still exactly
+  // 'cancelled' — so the post-legs cleanup for skipped/rescheduled rows must
+  // close the just-armed reminder directly, or it may text for a superseded
+  // visit (its own path's cleanup ran before this reminder existed).
+  test('a visit that went SKIPPED during the legs closes the just-armed reminder directly', async () => {
+    const base = confirmHookDb({ fallbackLeads: [] });
+    let svcReads = 0;
+    const wrapped = (table) => {
+      const q = base(table);
+      if (table === 'scheduled_services') {
+        const orig = q.first;
+        q.first = jest.fn(async (...a) => {
+          const row = await orig(...a);
+          svcReads += 1;
+          // Entry read sees the live row; everything after sees the skip.
+          return svcReads === 1 ? row : { ...row, status: 'skipped' };
+        });
+      }
+      return q;
+    };
+    Object.assign(wrapped, { fn: base.fn, transaction: base.transaction, raw: base.raw, _state: base._state });
+
+    const ok = await runOutboundReviewConfirmHook(wrapped, svc, 'test');
+    expect(ok).toBe(false); // unstamped — stood down
+    const reminderCloses = base._state.updates.filter(
+      (u) => u.table === 'appointment_reminders' && u.vals && u.vals.cancelled === true,
+    );
+    expect(reminderCloses.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('an unreadable current status refuses to activate (retryable), never guesses', async () => {
+    const db = confirmHookDb({ fallbackLeads: [], svcRow: null });
+    const ok = await runOutboundReviewConfirmHook(db, svc, 'test');
+    expect(ok).toBe(false);
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  });
+
+  test('an unreadable POST-hook status refuses the stamp too (fail closed, retryable)', async () => {
+    // Entry read succeeds; the post-legs re-read throws. An unreadable status
+    // cannot prove the cancellation race did not happen, so the activation
+    // must not report complete — false leaves the row unstamped for the sweep.
+    // The harness mints a fresh builder per db(table) call, so count reads by
+    // wrapping the db fn itself. The LAST scheduled_services .first() of a
+    // clean run is the post-hook re-read this test wants to fail.
+    const countingDb = (failAt) => {
+      const base = confirmHookDb({ fallbackLeads: [] });
+      const state = { reads: 0 };
+      const wrapped = (table) => {
+        const q = base(table);
+        if (table === 'scheduled_services') {
+          const orig = q.first;
+          q.first = jest.fn(async (...a) => {
+            state.reads += 1;
+            if (state.reads === failAt) throw new Error('db gone');
+            return orig(...a);
+          });
+        }
+        return q;
+      };
+      Object.assign(wrapped, { fn: base.fn, transaction: base.transaction, raw: base.raw, _state: base._state });
+      return { wrapped, state };
+    };
+
+    const probe = countingDb(Infinity);
+    expect(await runOutboundReviewConfirmHook(probe.wrapped, svc, 'test')).toBe(true);
+    const totalReads = probe.state.reads;
+    expect(totalReads).toBeGreaterThan(1);
+
+    const failing = countingDb(totalReads); // ONLY the post-hook re-read throws
+    const ok = await runOutboundReviewConfirmHook(failing.wrapped, svc, 'test');
+    expect(ok).toBe(false);
+    expect(failing.state.reads).toBe(totalReads);
+  });
+
   test('skipCardRequest:true (field confirm) skips the card-on-file leg; default keeps it', async () => {
     // Owner decision 2026-08-11: a tech-tap-confirmed booking collects the
     // card in person, so the funnel leg is skipped on the tech-track path —
@@ -510,6 +843,76 @@ describe('runOutboundReviewConfirmHook — shared confirm side effects', () => {
     const ok = await runOutboundReviewConfirmHook(db, svc, 'test');
     expect(ok).toBe(false); // the failed leg still reports retryable
     expect(db._state.updates.some((u) => u.table === 'scheduled_services' && u.vals.call_sms_cleared_at)).toBe(true);
+  });
+
+  // ⭐ THE STAMP IS A RECEIPT, NOT A UI FLAG. customer_confirmed is what
+  // activateLegacyOutboundReviewRowIfNeeded and the hourly sweep both key on,
+  // so an office confirm that stamped inside its own transaction and then lost
+  // a core leg (or the process) left a half-armed row both rails skip forever.
+  describe('runOfficeConfirmActivation — hook first, stamp on success', () => {
+    const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
+
+    function stampOf(db) {
+      return db._state.updates.find((u) => u.table === 'scheduled_services' && u.vals.customer_confirmed === true);
+    }
+
+    test('stamps customer_confirmed only after the core legs succeed', async () => {
+      const db = confirmHookDb({ fallbackLeads: [] });
+      const ok = await runOfficeConfirmActivation(db, svc, 'test');
+      expect(ok).toBe(true);
+      expect(AppointmentReminders.registerAppointment).toHaveBeenCalled();
+      expect(stampOf(db)).toBeTruthy();
+      expect(stampOf(db).vals.confirmed_at).toBeInstanceOf(Date);
+    });
+
+    // ⭐ THE CLEARANCE STAMP IS A CORE LEG. A row stamped confirmed WITHOUT it
+    // falls between both rails: the legacy sweep skips it (already confirmed)
+    // and the pre-visit card sweep excludes it (no clearance).
+    test('a failed clearance stamp leaves the row unstamped too', async () => {
+      const base = confirmHookDb({ fallbackLeads: [] });
+      const db = (table) => {
+        const q = base(table);
+        if (table === 'scheduled_services') {
+          const inner = q.update;
+          q.update = jest.fn(async (vals) => {
+            if (vals.call_sms_cleared_at) throw new Error('clearance write failed');
+            return inner(vals);
+          });
+        }
+        return q;
+      };
+      Object.assign(db, base);
+      const ok = await runOfficeConfirmActivation(db, svc, 'test');
+      expect(ok).toBe(false);
+      expect(stampOf(db)).toBeUndefined();
+    });
+
+    test('a failed core leg leaves the row UNSTAMPED so the sweep retries it', async () => {
+      AppointmentReminders.registerAppointment.mockResolvedValueOnce(null);
+      const db = confirmHookDb({ fallbackLeads: [] });
+      const ok = await runOfficeConfirmActivation(db, svc, 'test');
+      expect(ok).toBe(false);
+      expect(stampOf(db)).toBeUndefined();
+    });
+
+    test('a stamp write that fails reports false — the sweep still owns the row', async () => {
+      const base = confirmHookDb({ fallbackLeads: [] });
+      const db = (table) => {
+        const q = base(table);
+        if (table === 'scheduled_services') {
+          const inner = q.update;
+          q.update = jest.fn(async (vals) => {
+            if (vals.customer_confirmed) throw new Error('write failed');
+            return inner(vals);
+          });
+        }
+        return q;
+      };
+      Object.assign(db, base);
+      const ok = await runOfficeConfirmActivation(db, svc, 'test');
+      expect(ok).toBe(false);
+      expect(stampOf(db)).toBeUndefined();
+    });
   });
 
   test('an ambiguous fallback (two active leads) converts NOTHING', async () => {
@@ -714,5 +1117,64 @@ describe('round 27 — clearance is stamped, side effects wait for commits, repa
     expect(hook).toContain("first('id', 'appointment_time', 'windows_preclosed')");
     expect(hook).toContain('persistedSlotStale');
     expect(hook).toContain('needsWindowlessConversion');
+  });
+});
+
+// ⭐ A TECHNICIAN RUNNING THE VISIT IS A FIELD CONFIRMATION. The explicit
+// 'confirmed' tap is not the only field path: pending → en_route/on_site/
+// completed day-of skips 'confirmed' entirely, and without the durable stamp
+// the lazy activation ran the office-side card funnel on a visit the tech was
+// standing at. Both status routes must carry the same takeover predicate and
+// stamp it inside the status transaction (source pin — the mechanism the
+// hook's own field_confirmed_at re-read consumes).
+describe('field-confirm semantics cover day-of takeovers on BOTH status routes', () => {
+  const fs = require('fs');
+  const path = require('path');
+  for (const { file, anchor } of [
+    { file: 'admin-schedule.js', anchor: 'const isFieldLifecycleTakeover' },
+    { file: 'admin-dispatch.js', anchor: 'const takeoverCandidate' },
+  ]) {
+    test(`${file}: unactivated office-review row moved day-of by its technician stamps field_confirmed_at`, () => {
+      const src = fs.readFileSync(path.join(__dirname, '../routes', file), 'utf8');
+      const idx = src.indexOf(anchor);
+      expect(idx).toBeGreaterThan(-1);
+      const predicate = src.slice(idx, idx + 700);
+      expect(predicate).toContain('OFFICE_REVIEW_PENDING_SOURCE_ACTIONS');
+      // The state test is "activation still owed", NOT "status pending" — a
+      // confirmed-but-unstamped activation-retry row is a field confirm too.
+      expect(predicate).toContain('svc.customer_confirmed !== true');
+      expect(predicate).toContain("['pending', 'confirmed'].includes(fromStatus)");
+      expect(src).toMatch(/if \(isFieldLifecycleTakeover\) \{\s*\n\s*lifecycleUpdates\.field_confirmed_at = svc\.field_confirmed_at \|\| /);
+    });
+  }
+
+  // ⭐ ONLY THE VISIT'S OWN TECHNICIAN CAN FIELD-STAMP IT — PROVEN UNDER THE
+  // ROW LOCK. admin-schedule scopes technician requests via
+  // technicianCurrentVisitFilter + an in-trx row-locked re-check;
+  // admin-dispatch is not ownership-scoped, so it re-reads the row FOR UPDATE
+  // inside the transaction and re-verifies assignment + the owed-activation
+  // state there — a pre-transaction snapshot races reassignment.
+  test('admin-dispatch.js: ownership + state are re-verified under the transaction row lock for BOTH stamp paths', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const idx = src.indexOf('let fieldConfirmVerified = false');
+    expect(idx).toBeGreaterThan(-1);
+    const recheck = src.slice(idx, idx + 2000);
+    // One verification covers the EXPLICIT technician confirm AND the day-of
+    // takeover — the confirm path finds the visit by ID with no ownership
+    // predicate, so an unowned tech confirm must fall back to OFFICE-confirm
+    // semantics (no field stamp, card funnel intact).
+    expect(recheck).toContain('takeoverCandidate || explicitFieldConfirm');
+    expect(recheck).toContain('.forUpdate()');
+    expect(recheck).toContain("String(locked.technician_id || '') === String(req.technicianId)");
+    expect(recheck).toContain('locked.customer_confirmed !== true');
+    expect(recheck).toContain("['pending', 'confirmed'].includes(String(locked.status))");
+    // …and the explicit stamp is gated on that verification.
+    expect(src).toMatch(/if \(explicitFieldConfirm && fieldConfirmVerified\) \{\s*\n\s*lifecycleUpdates\.field_confirmed_at = svc\.field_confirmed_at \|\| /);
+    // …and the post-commit activation keys skipCardRequest on the SAME
+    // verification, never on the token role alone — an unowned tech confirm
+    // must run the office funnel (customer_confirmed stamps; nothing restores
+    // a wrongly-skipped funnel).
+    expect(src).toMatch(/skipCardRequest: fieldConfirmVerified,/);
+    expect(src).not.toMatch(/skipCardRequest: req\.techRole === 'technician'/);
   });
 });

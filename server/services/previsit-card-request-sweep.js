@@ -49,9 +49,11 @@ const { etDateString, parseETDateTime, addETDays } = require('../utils/datetime-
 
 const LEAD_DAYS = 3;
 const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
-// Mirror of CALL_OUTBOUND_REVIEW_SOURCE_ACTION (call-booking-source-actions)
+// Mirror of OFFICE_REVIEW_PENDING_SOURCE_ACTIONS (call-booking-source-actions)
 // — required at module top to avoid a cycle with call-recording-processor.
-const OUTBOUND_REVIEW_SOURCE_ACTION = require('./call-booking-source-actions').CALL_OUTBOUND_REVIEW_SOURCE_ACTION;
+// Voice-agent bookings share the outbound-review treatment: pending rows stay
+// excluded from the sweep; the office confirmation is the clearance decision.
+const OFFICE_REVIEW_SOURCE_ACTIONS = require('./call-booking-source-actions').OFFICE_REVIEW_PENDING_SOURCE_ACTIONS;
 const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS, isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const BATCH_CAP = 25;
 
@@ -142,8 +144,9 @@ async function runSweep(dbh = db) {
     .where('s.estimated_price', '>', 0)
     // Call-level TCPA holds survive into the sweep (codex r2/r3): ANY
     // call-linked row — phone_call booking_source, a source_call_log_id
-    // linkage (attached manual bookings included), or an outbound-review
-    // row — needs the ONE durable clearance record before the sweep may
+    // linkage (attached manual bookings included), or an office-review row
+    // (outbound-callback OR voice-agent — OFFICE_REVIEW_SOURCE_ACTIONS)
+    // — needs the ONE durable clearance record before the sweep may
     // text: call_sms_cleared_at, stamped at the exact decision point that
     // releases the call's SMS legs (no proxy: reminder rows register
     // regardless of holds, and confirmation_sent_at stamps even on skipped
@@ -160,7 +163,9 @@ async function runSweep(dbh = db) {
       .where((nonCall) => nonCall
         .whereRaw("s.booking_source IS DISTINCT FROM 'phone_call'")
         .whereNull('s.source_call_log_id')
-        .where((sa) => sa.whereNull('s.source_action').orWhereNot('s.source_action', OUTBOUND_REVIEW_SOURCE_ACTION)))
+        // NULL-safe by construction: SQL `NULL <> 'x'` is NULL, so a row with
+        // no source_action only survives via the explicit whereNull leg.
+        .where((sa) => sa.whereNull('s.source_action').orWhereNotIn('s.source_action', OFFICE_REVIEW_SOURCE_ACTIONS)))
       .orWhereNotNull('s.call_sms_cleared_at'))
     // Freshly created visits are excluded for one run (codex r2 P2): the
     // realistic cross-path double-invite is a booking-time trigger still in
@@ -223,7 +228,9 @@ async function runSweep(dbh = db) {
       reServiceLabel: isAlwaysFreeServiceType(visit.service_type),
       // Clearance-stamped or not at all (Codex #3361 r27 P1) — mirrors the
       // query's call-linked clause; status is deliberately not consulted.
-      outboundReviewUncleared: visit.source_action === OUTBOUND_REVIEW_SOURCE_ACTION && !visit.call_sms_cleared_at,
+      // Membership, not a single marker: voice-agent bookings share the
+      // office-review lifecycle (OFFICE_REVIEW_SOURCE_ACTIONS).
+      outboundReviewUncleared: OFFICE_REVIEW_SOURCE_ACTIONS.includes(visit.source_action) && !visit.call_sms_cleared_at,
       cardLinkSentAt: visit.card_link_sent_at,
       customerEverInvited: false, // query-level NOT EXISTS owns the fast path; the locked recheck below owns the race
     });

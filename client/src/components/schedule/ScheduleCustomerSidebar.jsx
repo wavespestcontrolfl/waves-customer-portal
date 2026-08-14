@@ -163,6 +163,10 @@ export default function ScheduleCustomerSidebar({
   const canCancelAppointment = !['completed', 'skipped', 'cancelled'].includes(String(service?.status || '').toLowerCase());
   // Stricter than the cancel gate: SmartRebooker.reschedule 409s a no_show
   // (terminal) — the menu must not offer a reschedule that can never work.
+  // No office-review clause: the dispatch route no longer 409s a pending
+  // AI-created booking (#3361 removed the hold end to end), so gating the
+  // menu on source_action would hide a reschedule that now succeeds — for
+  // outbound-callback AND voice-agent bookings alike.
   const canRescheduleAppointment =
     !['completed', 'skipped', 'cancelled', 'no_show'].includes(String(service?.status || '').toLowerCase());
 

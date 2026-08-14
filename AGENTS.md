@@ -1168,16 +1168,65 @@ violations at the severity noted.
   server only ATTACHES when `VOICE_RELAY_ENABLED=true` AND `ANTHROPIC_API_KEY`
   AND `VOICE_RELAY_WS_SECRET` are all set — otherwise the endpoint does not
   exist; (2) every upgrade is rejected (socket destroyed before handshake)
-  unless the `?key=` query param matches `VOICE_RELAY_WS_SECRET` via a
-  constant-time compare, so only Twilio carrying the configured secret can
-  connect. Caller PII is masked in logs; lead writes require a valid E.164
+  unless it carries a PER-CALL TOKEN — `?callSid=<sid>&t=v1.<exp>.<hmac>`, an
+  HMAC-SHA256 over that CallSid keyed by `VOICE_RELAY_WS_SECRET`, verified with a
+  constant-time compare, valid ~5 minutes, and accepted ONCE — the burn is an
+  `INSERT … ON CONFLICT DO NOTHING` on `voice_relay_token_burns` (hashed token),
+  i.e. SHARED storage, because a per-process claim is no claim at all here: a
+  second instance or a restart would take the replay. It fails closed, and the
+  CallSid the token authenticated is carried onto the socket — the setup frame
+  that follows is unverified input and may not rename the session (a mismatch
+  terminates it), or a token for call A would authenticate a session claiming
+  call B. **The raw secret is never put in a URL and is never accepted as a
+  credential** — it stays server-side (Railway env, and the Twilio Function env
+  that renders the sandbox TwiML), because a URL param is exactly what leaks:
+  Twilio logs request URLs, and a reusable key in one would let anyone who saw it
+  open unlimited synthetic sessions, spend Anthropic tokens and write leads with
+  no call behind them. Anything that renders this TwiML MUST mint the token
+  (`relay-protocol.mintCallToken` / `buildRelayTwiML({ callSid })`); a render
+  without a CallSid produces a URL the server refuses.
+  Caller PII is masked in logs; lead writes require a valid E.164
   caller number (`capture_lead` tool + the capture-floor on session close).
   The live `/voice` backstop only routes a call here when the relay actually
   attached (`isRelayAttached`) AND the configured endpoint's scheme/host/path are
   trusted (`wss://` + this portal's own origin from `PUBLIC_PORTAL_URL` + the
   exact `/ws/voice-agent` path; `ws://localhost` for dev) — so the WS secret is
-  never appended to a foreign host. Any change to this endpoint, its auth, or its
-  frame handling is security-critical).
+  never appended to a foreign host. Caller RECOGNITION on this endpoint is a
+  third, independent layer: the WS setup frame's `from` is unverified input and
+  is cross-checked against the signature-verified `/voice` webhook's `call_log`
+  row before any account read, and `VOICE_RELAY_REQUIRE_ATTESTATION=true`
+  additionally demands STIR/SHAKEN attestation A — the carrier vouching that the
+  caller owns the number — before the caller is recognised at all. That switch
+  ships OFF: most genuine calls carry no attestation, so turning it on trades
+  spoofing resistance for treating real customers as strangers, and the
+  attestation is logged on every call so the distribution can be measured first.
+  **The SPLIT TIER (owner ruling 2026-08-12) is the default that does not wait
+  for that measurement**: an ANI match alone still recognises the caller and
+  answers the receptionist questions (who they are, appointments, today's ETA,
+  open estimates, visit dates and service names), but the reads a spoofed caller
+  ID would pay for — `get_invoice_history` (amounts), `get_message_history` and
+  `get_call_history` (the bodies of texts and calls), `get_service_report`
+  (what a technician found inside the home) — require attestation A, as do the
+  balance FIGURE (in the KNOWN CALLER block AND `get_account_overview` — the
+  amount is not even FETCHED unattested), the visit SUMMARY lines in
+  `get_service_history` (report detail through another door), and the session's
+  recent-texts block (not fetched at all without it). Enforced in
+  `relay-tools.ATTESTATION_ONLY_TOOLS` BEFORE the tool runs, so a new sensitive
+  tool cannot be added without deciding which side of the line it is on; fails
+  closed on a missing flag. When gating a read, gate EVERY reader of the same
+  loader — the balance figure and the report summaries each turned out to have a
+  second door.
+  Recognition is additionally bound to a freshness window on that call_log row
+  and to ONE session per CallSid — burned atomically as a metadata key on the
+  row itself (`relay_session_claimed_at`), so the claim holds across instances
+  and restarts and a historical (CallSid, from) pair cannot be replayed by
+  anyone holding the key. WRITES for a caller the ANI did
+  not fully authenticate — a looked-up account, or a number that matched only a
+  service-contact slot — are gated separately again by
+  `VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES` (default OFF: full ANI match or no
+  booking and no re-service ticket).
+  Any change to this endpoint, its auth, or its frame handling is
+  security-critical).
   `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
   "secure your appointment" card-on-file capture page for the
   appointment-card-request funnel — dark until `APPOINTMENT_CARD_REQUEST`

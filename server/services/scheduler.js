@@ -701,6 +701,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Voice-filed re-service tickets whose owner page never went out (process
+  // exit between the ticket commit and the alert). The page is the owner-ruled
+  // escape hatch from the ticket queue's documented black hole, so a missing
+  // receipt is swept rather than waiting on a second call that may never come.
+  // Bounded and self-terminating: rows stamp owner_alerted_at on success.
+  cron.schedule('24 * * * *', async () => {
+    try {
+      await runExclusive('voice-reservice-alert-sweep', async () => {
+        await require('./voice-agent/relay-reservice').sweepUnalertedVoiceReservices();
+        // Same cadence, same rationale: a hot-lead page whose process died
+        // between the claim and the send has no live-call retry left.
+        await require('./voice-agent/relay-alert').sweepAbandonedHotAlerts();
+        // And a lifecycle customer's stated contact instruction whose ONLY
+        // artifact (the admin feed row) failed to persist on the live call.
+        await require('./lead-from-extraction').sweepUnsurfacedContactInstructions();
+      });
+    } catch (err) {
+      logger.error(`[voice-reservice-alert-sweep] hourly sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('40 2 * * *', async () => {
     if (!isEnabled('hybridKnowledge')) return;
     try {

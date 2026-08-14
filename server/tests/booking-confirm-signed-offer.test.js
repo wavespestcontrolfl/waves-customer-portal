@@ -326,12 +326,16 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       return b;
     }
     if (table === 'scheduled_services') {
+      let counting = false;
       const b = {
         leftJoin: () => b,
         where: () => b,
         whereNotIn: () => b,
         whereRaw: () => b,
-        first: () => Promise.resolve(null), // conflict re-check → free
+        // The day cap counts VOICE bookings off this table too (they write no
+        // self_booked_appointments row) — none here, so the cap is unchanged.
+        count: () => { counting = true; return b; },
+        first: () => Promise.resolve(counting ? { count: 0 } : null), // conflict re-check → free
         // Global tech-blind probe (shared occupancy module, round 3): its
         // chain tails with .select(...).orderBy(...) and resolves rows —
         // empty here, so the probe passes and the flow reaches the insert.

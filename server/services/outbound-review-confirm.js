@@ -1,6 +1,8 @@
 /**
- * Office-confirmation side effects for a pending outbound-callback review
- * booking (source_action = CALL_OUTBOUND_REVIEW_SOURCE_ACTION).
+ * Office-confirmation side effects for a pending office-review booking
+ * (source_action ∈ OFFICE_REVIEW_PENDING_SOURCE_ACTIONS — the outbound-
+ * callback review booking, and the voice-agent booking that reuses the same
+ * lifecycle rather than inventing a parallel pending state).
  *
  * The AI call pipeline creates these rows PENDING and intentionally defers
  * everything that treats the appointment as live: reminder registration (the
@@ -33,7 +35,7 @@ const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate'];
 /**
  * Run the confirm side effects for `svc` (a scheduled_services row already
  * flipped to 'confirmed' by the calling route). Caller is responsible for
- * checking source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION.
+ * checking source_action ∈ OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.
  *
  * @param {object} db   knex instance
  * @param {object} svc  the scheduled_services row (needs id, customer_id,
@@ -65,6 +67,36 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // backstop). Existing callers that ignore the return value are
   // unaffected.
   let coreLegsOk = true;
+  // ⭐ 0a. THE ROW'S CURRENT STATUS, NOT THE CALLER'S SNAPSHOT. `svc` was read
+  // when the confirmation committed — on the sweep path that can be an hour
+  // ago — and a cancellation that landed since must stand: activating a
+  // cancelled visit arms reminders that TEXT the customer about a visit nobody
+  // is making. The terminal-status guard on the stamp (below, and in both
+  // legacy stampers) only stopped the RECEIPT; the legs had already run. So
+  // the legs themselves stand down on a terminal row — not a failure, the
+  // call's own answer: nothing stamps, and the sweep excludes cancel/skip
+  // rejections, so there is no retry churn.
+  try {
+    const fresh = await db('scheduled_services').where({ id: svc.id }).first('status', 'field_confirmed_at');
+    if (!fresh || ['cancelled', 'skipped', 'rescheduled'].includes(String(fresh.status))) {
+      logger.info(`[${routeTag}] activation stood down for ${svc.id} — row is ${fresh ? fresh.status : 'gone'}`);
+      return false;
+    }
+    // ⭐ THE FIELD-CONFIRM MODE IS RE-APPLIED ON EVERY RAIL. A field-confirmed
+    // row whose first activation failed reaches the sweep WITHOUT the calling
+    // route's in-memory skipCardRequest — the durable stamp is what makes the
+    // retry honour the owner rule (tech collects the card in person; no
+    // funnel, no clearance stamp).
+    if (fresh.field_confirmed_at && !opts.skipCardRequest) {
+      opts = { ...opts, skipCardRequest: true, suppressCardAskWithoutClearance: false };
+      logger.info(`[${routeTag}] ${svc.id} is field-confirmed (durable stamp) — card funnel skipped on this rail`);
+    }
+  } catch (freshErr) {
+    // Unknown is not safe: refusing to activate leaves the row unstamped,
+    // which is exactly the retry rail.
+    logger.error(`[${routeTag}] could not read current status for ${svc.id} — reporting retryable: ${freshErr.message}`);
+    return false;
+  }
   // 0. Office-confirm clearance stamp — FIRST, before every best-effort leg
   // (Codex #3361 r28 P1): the calling route already committed the
   // confirmation, so a process exit inside any leg below leaves the row
@@ -86,7 +118,14 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
         .whereNull('call_sms_cleared_at')
         .update({ call_sms_cleared_at: new Date() });
     } catch (stampErr) {
-      logger.warn(`[${routeTag}] office-confirm clearance stamp failed for ${svc.id}: ${stampErr.message}`);
+      // ⭐ AND A FAILED CLEARANCE STAMP IS A FAILED CORE LEG. This stamp is what
+      // the pre-visit card sweep keys on, so a row that is stamped
+      // customer_confirmed WITHOUT it falls between both rails: the legacy
+      // activation sweep skips it (already confirmed) and the pre-visit sweep
+      // excludes it (no clearance). Reporting failure here keeps
+      // customer_confirmed unstamped, which is exactly the retry rail.
+      coreLegsOk = false;
+      logger.error(`[${routeTag}] office-confirm clearance stamp failed for ${svc.id} — reporting retryable: ${stampErr.message}`);
     }
   }
   // 1. Arm the 72h/24h reminders that were deferred at booking time.
@@ -236,6 +275,8 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
     const CallProc = require('./call-recording-processor');
     let leadId = null;
     let keepOpenForQuote = false;
+    // A VOICE card with no lead_id is an ANSWER, not a gap — see below.
+    let noLeadIdentifiedOnCall = false;
     if (svc.source_call_log_id) {
       const card = await db('triage_items')
         .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
@@ -247,7 +288,51 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       if (payload?.lead_id) {
         leadId = payload.lead_id;
         keepOpenForQuote = payload.keep_open_for_quote === true;
+      } else if (payload && payload.origin === 'voice_agent') {
+        // ⭐ …BUT FIRST, ASK THE CALL ITSELF. The lead id lands on this card by
+        // a BACKFILL after capture_lead runs, and that backfill is best-effort:
+        // one transient failure and a lead that really exists is invisible here
+        // forever, because the branch below then treats the null as the call's
+        // answer and permanently skips conversion. Leads stamp their own
+        // `twilio_call_sid`, so the call can be asked directly — an EXACT
+        // recovery keyed to this call, never the single-active-lead guess the
+        // comment below rules out.
+        // Exact linkage only: capture_lead stamps call_log.metadata.relay_lead_id
+        // for THIS call. (leads.twilio_call_sid is set at INSERT only — a lead
+        // reused by phone keeps its ORIGINAL call's sid, so a sid-keyed lookup
+        // silently missed every reuse and could never be trusted here.)
+        const callRow = await db('call_log')
+          .where({ id: svc.source_call_log_id })
+          .first('metadata');
+        const callMeta = callRow && (typeof callRow.metadata === 'string'
+          ? (() => { try { return JSON.parse(callRow.metadata); } catch { return {}; } })()
+          : (callRow.metadata || {}));
+        const linkedLeadId = callMeta && callMeta.relay_lead_id ? String(callMeta.relay_lead_id) : null;
+        const recovered = linkedLeadId
+          ? await db('leads')
+            .where({ id: linkedLeadId })
+            .whereNull('deleted_at')
+            .first('id', 'status')
+          : null;
+        if (recovered) {
+          leadId = recovered.id;
+          logger.info(`[${routeTag}] voice card for ${svc.id} carried no lead_id — recovered lead ${leadId} via call_log.metadata.relay_lead_id`);
+        }
+        // ⭐ NO LEAD ON A VOICE CARD MEANS NO LEAD — DO NOT GUESS ONE.
+        // The single-active-lead fallback below exists for PRE-PAYLOAD
+        // outbound-review rows, where a missing lead_id only meant the card
+        // predates the field. A voice card always carries the key, so a null
+        // is the call's own answer: capture_lead either never ran or matched
+        // an existing customer and created no lead. Falling back would mark
+        // whatever unrelated quote that customer happens to have open as WON —
+        // a booked ants visit closing an open termite estimate. (Only once the
+        // CallSid recovery above has come up empty too: then there genuinely is
+        // no lead from this call.)
+        noLeadIdentifiedOnCall = !recovered;
       }
+    }
+    if (noLeadIdentifiedOnCall) {
+      logger.info(`[${routeTag}] voice booking ${svc.id} identified no lead on the call — skipping the single-active-lead fallback`);
     }
     if (leadId) {
       // Preserve a promised-quote follow-up: beyond the booking-time flag, a
@@ -255,7 +340,7 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       // booking doesn't hide an owed quote.
       const lead = await db('leads').where({ id: leadId }).first('status');
       keepOpenForQuote = keepOpenForQuote || /estimate|quote/i.test(String(lead?.status || ''));
-    } else {
+    } else if (!noLeadIdentifiedOnCall) {
       // Pre-payload fallback: only when EXACTLY ONE active lead maps to this
       // customer (avoids converting the wrong lead when ambiguous).
       const activeLeads = await db('leads')
@@ -340,6 +425,52 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       }
       await requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'outbound_review_confirm', ...cardCallOpts });
     } catch (e) { logger.warn(`[${routeTag}] card-request funnel failed for ${svc.id}: ${e.message}`); }
+  }
+
+  // ⭐ 0a's MIRROR: a cancellation that landed DURING the legs. The entry check
+  // closes the wide window (sweep-path minutes); this closes the narrow one.
+  // The cancel path's own cleanup ran before the reminder existed and found
+  // nothing to close, so the just-armed reminder is the one artifact that
+  // would go on to TEXT the customer about a cancelled visit — close it here.
+  // handleCancellation is internally guarded (no-ops unless the visit is
+  // still cancelled at write time) and sends nothing. Lead conversion and the
+  // resolved review card keep normal confirm-then-cancel semantics — cancel
+  // after activation is the everyday sequence and its paths own that cleanup.
+  // Reporting FALSE keeps the row unstamped, same as the entry check.
+  try {
+    const post = await db('scheduled_services').where({ id: svc.id }).first('status');
+    if (post && ['cancelled', 'skipped', 'rescheduled'].includes(String(post.status))) {
+      // ⭐ ALL THREE TERMINAL PATHS CLOSE THE REMINDER, NOT JUST 'cancelled'.
+      // handleCancellation deliberately no-ops unless the visit is still
+      // exactly 'cancelled' at write time — so a skip or reschedule that
+      // committed during the legs (its own cleanup ran before this reminder
+      // existed) left the just-armed reminder active. Close it directly, with
+      // the same one-statement status guard handleCancellation uses so a
+      // restoration committing after the status read above is never re-closed.
+      // 'rescheduled' is a SUPERSEDED row in this lane (the rebook is a new
+      // row with its own reminder), so closing its reminder is final, not a
+      // pending-rebook hold.
+      await db('appointment_reminders')
+        .where({ scheduled_service_id: svc.id })
+        .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status IN ('cancelled','skipped','rescheduled'))")
+        .update({ cancelled: true, updated_at: new Date() })
+        .catch((e) => logger.warn(`[${routeTag}] terminal-race reminder close failed for ${svc.id}: ${e.message}`));
+      if (String(post.status) === 'cancelled') {
+        // The cancelled path also takes the cancellation-notice claim (a
+        // sendNotification:false caller claims to BLOCK a later auto-send).
+        const AppointmentReminders = require('./appointment-reminders');
+        await AppointmentReminders.handleCancellation(svc.id, { sendNotification: false }).catch(() => {});
+      }
+      logger.info(`[${routeTag}] visit ${svc.id} went ${post.status} during the confirm hook — reminder closed, activation stood down`);
+      return false;
+    }
+  } catch (postErr) {
+    // Fail CLOSED, same as the entry check: an unreadable status cannot prove
+    // the cancellation race did not happen, and returning coreLegsOk here would
+    // let the stamp land over an unverified activation. False leaves the row
+    // unstamped — the retry rail — and every leg is idempotent on the retry.
+    logger.error(`[${routeTag}] post-hook status re-read failed for ${svc.id} — reporting retryable: ${postErr.message}`);
+    return false;
   }
 
   return coreLegsOk;
@@ -536,8 +667,13 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
 }
 
 /**
- * Lazy activation for a LEGACY outbound-review row (created pending before
- * the 2026-08-11 review-hold removal, PR #3361) touched by a writer that
+ * Lazy activation for a PENDING OFFICE-REVIEW row — a legacy outbound-review
+ * row (created pending before the 2026-08-11 review-hold removal, PR #3361)
+ * OR a voice-agent booking, which is created with the same pending/
+ * unconfirmed shape and owes the same legs (the membership list is
+ * call-booking-source-actions.OFFICE_REVIEW_PENDING_SOURCE_ACTIONS; matching
+ * only the outbound marker here is what let a moved voice booking go
+ * operational half-armed) — touched by a writer that
  * does NOT go through transitionJobStatus — the direct reschedule writers
  * (SmartRebooker, admin-schedule update-details, the bulk paths) and the
  * shared reschedule-notice sender. The hook runs BEFORE the stamp and the
@@ -552,13 +688,13 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
  */
 async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag = 'legacy-activation', opts = {}) {
   try {
-    const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+    const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
     const row = await db('scheduled_services')
       .where({ id: serviceId })
       .first('id', 'source_action', 'status', 'customer_confirmed', 'customer_id',
         'scheduled_date', 'window_start', 'service_type', 'source_call_log_id',
         'is_callback', 'estimated_price');
-    if (!row || row.source_action !== CALL_OUTBOUND_REVIEW_SOURCE_ACTION || row.customer_confirmed) {
+    if (!row || !OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) || row.customer_confirmed) {
       return false;
     }
     // Rejected rows are not activated — a cancelled/skipped legacy review
@@ -607,11 +743,73 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
       .where({ id: serviceId, customer_confirmed: false })
       // A rejection that committed during the hook window wins: never
       // stamp a cancelled/skipped row confirmed (Codex #3361 r8 P1).
-      .whereNotIn('status', ['cancelled', 'skipped'])
+      .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
       .update({ customer_confirmed: true, confirmed_at: new Date() });
     return stamped > 0;
   } catch (e) {
     logger.warn(`[${routeTag}] legacy outbound activation failed for ${serviceId}: ${e.message}`);
+    return false;
+  }
+}
+
+/**
+ * OFFICE-CONFIRM activation — hook FIRST, stamp on success, for the two admin
+ * status routes (admin-dispatch, admin-schedule) that flip an office-review
+ * row to 'confirmed' themselves.
+ *
+ * Those routes used to stamp `customer_confirmed` inside the confirmation
+ * transaction and then call the hook post-commit, ignoring its result. But
+ * `customer_confirmed` is the COMPLETION MARKER for this whole lane, not just a
+ * UI flag: activateLegacyOutboundReviewRowIfNeeded skips a stamped row, and
+ * sweepStrandedLegacyOutboundActivations selects on `customer_confirmed:
+ * false`. So a row whose core legs failed — or whose process exited between the
+ * commit and the hook — was already stamped, and both retry rails rejected it
+ * forever: no reminder registration, an unconverted lead, an open review card,
+ * with nothing left to notice.
+ *
+ * The fix is the rule the rest of the lane already follows (Codex #3361 r3/r4
+ * P1, job-status.processLegacyOutboundActivation): the stamp is the RECEIPT for
+ * a completed activation, so it is written here, after the legs, and only when
+ * they succeeded. A failure leaves the row confirmed-but-unstamped — exactly
+ * the state the hourly sweep exists to drain — and every leg is idempotent, so
+ * the retry is safe.
+ *
+ * Callers keep their own hook call (office semantics: the clearance stamp and
+ * the messaging-mode card ask, which the lazy-activation path deliberately
+ * suppresses) and must tell transitionJobStatus to stand down via
+ * `legacyOutboundActivation: 'caller'`, or the two would run concurrently.
+ *
+ * `opts` is forwarded verbatim to the hook — notably `skipCardRequest` for a
+ * FIELD confirm (a technician tapping confirm collects a card in person; the
+ * office-only card-request funnel and its clearance stamp must not fire behind
+ * them, per the #3356 owner decision).
+ *
+ * @returns {Promise<boolean>} true when the legs ran AND the row is now stamped.
+ */
+async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm', opts = {}) {
+  let coreLegsOk = false;
+  try {
+    coreLegsOk = await runOutboundReviewConfirmHook(dbh, svc, routeTag, opts);
+  } catch (e) {
+    logger.error(`[${routeTag}] office-confirm hook threw for ${svc.id}: ${e.message}`);
+  }
+  if (!coreLegsOk) {
+    logger.error(
+      `[${routeTag}] office-confirm activation incomplete for ${svc.id} — leaving customer_confirmed `
+      + 'unstamped so the legacy-activation sweep retries it'
+    );
+    return false;
+  }
+  try {
+    const stamped = await dbh('scheduled_services')
+      .where({ id: svc.id, customer_confirmed: false })
+      // A rejection that committed during the hook window wins: never stamp a
+      // cancelled/skipped row confirmed (same guard as the lazy helper).
+      .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
+      .update({ customer_confirmed: true, confirmed_at: new Date() });
+    return stamped > 0;
+  } catch (e) {
+    logger.error(`[${routeTag}] office-confirm stamp failed for ${svc.id}: ${e.message}`);
     return false;
   }
 }
@@ -632,12 +830,44 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
  * stays clearance-gated). Idempotent (the helper's guarded stamp), bounded
  * per run, and self-terminating: the legacy population only shrinks, so
  * runs become free no-ops once it drains.
+ *
+ * ⭐ VOICE-AGENT ROWS ARE IN THIS SWEEP, BUT ONLY ONCE SOMETHING MOVED THEM.
+ * Every other activation consumer takes the whole
+ * OFFICE_REVIEW_PENDING_SOURCE_ACTIONS set unchanged, because each of them
+ * fires on a WRITER TOUCHING THE ROW (a transition, a reschedule, a pipeline
+ * reuse) — the touch is the activation trigger, and a voice booking owes the
+ * same legs as an outbound-review one. This sweep is the one consumer whose
+ * predicate is not a touch: it drains the LEGACY population outright,
+ * including never-touched pending rows, and that is correct ONLY because the
+ * office-review hold was removed collectively for those rows (owner directive
+ * 2026-08-11) and that population only shrinks. Voice bookings are the
+ * opposite: they are created pending on purpose, RIGHT NOW, with an
+ * outbound_booking_review card for the office to work — and this hook resolves
+ * that card, arms customer reminders and converts the lead. Draining
+ * never-touched voice rows would therefore auto-confirm an unreviewed AI
+ * booking, close the office's own review card behind their back, and arm
+ * customer-facing reminder SMS for it. So voice rows enter this backstop only
+ * in the state it exists to repair: a row some writer already moved off
+ * 'pending' that is still unstamped (a crash or a transient core-leg failure
+ * after a lazy activation). Untouched pending voice rows stay for the office.
  */
 async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } = {}) {
-  const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+  const {
+    CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
+    VOICE_AGENT_BOOKING_SOURCE_ACTION,
+  } = require('./call-booking-source-actions');
   const rows = await dbh('scheduled_services')
-    .where({ source_action: CALL_OUTBOUND_REVIEW_SOURCE_ACTION, customer_confirmed: false })
-    .whereNotIn('status', ['cancelled', 'skipped'])
+    .where({ customer_confirmed: false })
+    .where((q) => q
+      .where('source_action', CALL_OUTBOUND_REVIEW_SOURCE_ACTION)
+      .orWhere((q2) => q2
+        .where('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION)
+        .whereNot('status', 'pending')))
+    // ⭐ 'rescheduled' is a SUPERSEDED row (the live visit is a different row) —
+    // activating it arms reminders for an appointment the customer already
+    // moved. Excluded here AND at the activation entry check, so neither rail
+    // can resurrect it.
+    .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
     // Random order (Codex #3361 r15 P2): with more rows than the batch cap,
     // an unordered LIMIT could hand a batch of permanently-unactivatable
     // rows (bad slot data, malformed payloads) to every run and starve the
@@ -661,6 +891,7 @@ async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } =
 
 module.exports = {
   runOutboundReviewConfirmHook,
+  runOfficeConfirmActivation,
   activateLegacyOutboundReviewRowIfNeeded,
   sweepStrandedLegacyOutboundActivations,
   verifyReminderSlotAfterRegistration,

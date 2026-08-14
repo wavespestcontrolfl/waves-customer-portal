@@ -22,9 +22,10 @@
  * targets this endpoint. See docs/conversationrelay-booking-plan.md.
  */
 
-const crypto = require('crypto');
 const logger = require('../logger');
-const { RELAY_WS_PATH, parsePrompt, isRelayEnabled, maskPhone } = require('./relay-protocol');
+const {
+  RELAY_WS_PATH, parsePrompt, isRelayEnabled, maskPhone, verifyCallToken, CALL_TOKEN_TTL_MS,
+} = require('./relay-protocol');
 
 // VOICE_RELAY_ENABLED check lives in relay-protocol (single source of truth,
 // shared with the /voice webhook). Re-exported here under the name index.js uses.
@@ -46,15 +47,79 @@ const WS_MAX_PAYLOAD_BYTES = 64 * 1024;
 const WS_IDLE_MS = 2 * 60 * 1000;        // no inbound frame for 2 min → drop
 const WS_MAX_SESSION_MS = 15 * 60 * 1000; // hard cap on a single call
 
-// Timing-safe check of the shared-secret `key` query param against
-// VOICE_RELAY_WS_SECRET. False when either side is empty or the lengths differ.
-function isValidWsKey(provided) {
-  const secret = process.env.VOICE_RELAY_WS_SECRET || '';
-  if (!secret || !provided) return false;
-  const a = Buffer.from(String(provided));
-  const b = Buffer.from(secret);
-  if (a.length !== b.length) return false;
-  try { return crypto.timingSafeEqual(a, b); } catch { return false; }
+// ⭐ ONE SESSION PER MINTED TOKEN — AND THE CLAIM LIVES IN SHARED STORAGE.
+//
+// The token proves the URL was minted for a specific CallSid by something
+// holding the secret; this burn is what stops the SAME url being replayed for
+// its few remaining minutes of life. It was a per-process Map first, which is
+// not a claim at all in the shape this deploys: a second Railway instance, or
+// the same one after a restart, has an empty Map and would happily accept the
+// replay — and a replayed socket spends Anthropic tokens and writes leads. The
+// shared CallSid claim in relay-context does NOT cover this: it only decides
+// whether the session gets account context, so a replay it refuses still
+// reaches capture_lead.
+//
+// So the burn is a single INSERT … ON CONFLICT DO NOTHING against
+// voice_relay_token_burns — one statement, so the "is it burned" test and the
+// write cannot be interleaved by a racing socket. Exactly one racer gets a row
+// back; every replay gets none. The token is HASHED at rest: it is short-lived,
+// but it is still a credential and this table is durable.
+//
+// Fails CLOSED: any error means the claim is unproven, which is treated as
+// already-burned. A DB outage therefore drops relay calls to the <Connect
+// action> voicemail fallback — the same place a relay outage sends them.
+// The burn's own deadline. A stalled pool otherwise leaves the upgrade PENDING
+// until Knex's own timeout — the caller stuck in silence, neither accepted nor
+// rejected, and the <Connect action> voicemail fallback unable to fire. Short
+// and fail-closed: past the deadline the socket is destroyed, Twilio takes the
+// call to the fallback, and nobody waits on a database that is not answering.
+const TOKEN_BURN_DEADLINE_MS = 2500;
+
+async function burnCallToken(token, callSid) {
+  const tokenHash = require('crypto').createHash('sha256').update(String(token)).digest('hex');
+  try {
+    const db = require('../../models/db');
+    // ⭐ MATERIALIZED ONCE. A Knex QueryBuilder is a THENABLE, and every
+    // `.then()` on it starts a fresh query — racing the builder and then
+    // touching it again in cleanup issued TWO inserts per upgrade (and, after
+    // a timeout, a brand-new query while the stalled one still held its pool
+    // slot). One Promise.resolve() executes it exactly once; the race and the
+    // late-loser catch both hold that same promise.
+    const burnPromise = Promise.resolve(db('voice_relay_token_burns')
+      .insert({ token_hash: tokenHash, call_sid: String(callSid).slice(0, 64), burned_at: new Date() })
+      .onConflict('token_hash')
+      .ignore()
+      .returning('token_hash'));
+    let deadlineTimer;
+    const deadline = new Promise((_, reject) => {
+      deadlineTimer = setTimeout(
+        () => reject(new Error(`token burn exceeded ${TOKEN_BURN_DEADLINE_MS}ms`)),
+        TOKEN_BURN_DEADLINE_MS,
+      );
+      deadlineTimer.unref?.();
+    });
+    let rows;
+    try {
+      rows = await Promise.race([burnPromise, deadline]);
+    } finally {
+      clearTimeout(deadlineTimer);
+      // A late loser must never surface as unhandled (the write may still
+      // land after the deadline — the burn row is then simply present for
+      // the retry, which is correct). Same promise, no re-execution.
+      burnPromise.catch(() => {});
+    }
+    if (!rows || rows.length === 0) return false; // replay — somebody already has it
+    // Opportunistic sweep of rows no token can still be valid for. Detached:
+    // the caller is already through the door and must never wait on cleanup.
+    db('voice_relay_token_burns')
+      .where('burned_at', '<', new Date(Date.now() - (CALL_TOKEN_TTL_MS + 60 * 60 * 1000)))
+      .del()
+      .catch(() => {});
+    return true;
+  } catch (e) {
+    logger.warn(`[voice-relay] token burn failed — refusing the upgrade (fail-closed): ${e.message}`);
+    return false;
+  }
 }
 
 /**
@@ -103,18 +168,65 @@ function attachVoiceRelay(httpServer) {
     if (url.pathname !== RELAY_WS_PATH) return; // NOT ours — do not touch the socket
     // Authenticate BEFORE accepting the upgrade — this endpoint can spend
     // Anthropic tokens and write leads, so an unauthenticated client is a P0.
-    // ConversationRelay carries the shared secret as the `key` query param
-    // (relay-protocol.appendWsKey / buildRelayTwiML embed it in the wss URL).
-    if (!isValidWsKey(url.searchParams.get('key'))) {
-      logger.warn('[voice-relay] rejected ws upgrade: missing/invalid key');
+    //
+    // ⭐ AND A REUSABLE CREDENTIAL IS NOT AUTHENTICATION HERE. This used to
+    // accept the raw VOICE_RELAY_WS_SECRET as a `key` query param: one static
+    // string, in a URL, that Twilio writes to its logs — so anyone who ever saw
+    // one URL could open unlimited sessions forever, burn Anthropic tokens and
+    // write leads, with no call behind any of it. The URL now carries a token
+    // minted for ONE CallSid that expires in minutes (relay-protocol), the
+    // secret itself never leaves the server, and each token opens exactly one
+    // session. A captured URL is then worth a single replay attempt against a
+    // call that has already hung up.
+    const callSid = String(url.searchParams.get('callSid') || '').trim();
+    const token = String(url.searchParams.get('t') || '');
+    if (!callSid || !verifyCallToken(token, callSid)) {
+      logger.warn('[voice-relay] rejected ws upgrade: missing/invalid per-call token');
       try { socket.destroy(); } catch { /* socket already gone */ }
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    // The burn is a DB round trip, so the upgrade completes asynchronously. The
+    // socket is not handed to `ws` until it wins the claim; a loser (or an
+    // error) is destroyed exactly as an unauthenticated one is.
+    burnCallToken(token, callSid).then((won) => {
+      if (!won) {
+        logger.warn(`[voice-relay] rejected ws upgrade: token already used callSid=${callSid}`);
+        try { socket.destroy(); } catch { /* socket already gone */ }
+        return;
+      }
+      // ⭐ THE AUTHENTICATED CallSid RIDES WITH THE SOCKET. The token was
+      // verified against THIS CallSid, and the setup frame that follows is
+      // unverified input: honouring the frame's own callSid would let a valid
+      // token for call A authenticate a session claiming call B, and every
+      // downstream check (call_log verification, the session claim, the
+      // transcript write) would then be aimed at B.
+      req.authenticatedCallSid = callSid;
+      // The token's nonce doubles as the SESSION KEY for the CallSid claim: a
+      // legitimate ConversationRelay retry renders fresh TwiML and mints a
+      // NEW token, and that fresh nonce is what lets the reconnect reclaim
+      // the live CallSid — while a duplicate setup frame on the SAME socket
+      // (same nonce) still cannot claim twice.
+      req.relaySessionKey = String(token).split('.')[2] || null;
+      // The nonce's 12-hex millisecond prefix IS the mint generation (see
+      // mintCallToken): millisecond-resolution ordering so a takeover can
+      // require the claimant to be provably newer — a delayed old socket
+      // cannot steal the claim back, and same-millisecond mints break ties
+      // deterministically on the nonce's lexicographic order.
+      req.relaySessionGeneration = parseInt(String(req.relaySessionKey || '').slice(0, 12), 16) || null;
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    }).catch(() => {
+      try { socket.destroy(); } catch { /* socket already gone */ }
+    });
   });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, req) => {
     let convo = null;
+    // The CallSid the upgrade token was verified against — the only CallSid this
+    // socket is allowed to be. Absent only if something bypassed the upgrade
+    // path, which the setup handler treats as unauthenticated.
+    const authenticatedCallSid = (req && req.authenticatedCallSid) || null;
+    const relaySessionKey = (req && req.relaySessionKey) || null;
+    const relaySessionGeneration = (req && req.relaySessionGeneration) || null;
 
     // Idle + max-duration backstops. All cleanup funnels through teardown()
     // (idempotent) so a leaked-key client can't pin an open socket — and keep
@@ -178,9 +290,35 @@ function attachVoiceRelay(httpServer) {
       }
       switch (msg && msg.type) {
         case 'setup': {
+          // ⭐ ONE SETUP PER SOCKET. A second setup frame used to REPLACE the
+          // live conversation: both instances then raced the atomic CallSid
+          // claim, so the retained one could be the instance that LOST
+          // verification (a stranger's session for a recognised caller), while
+          // the orphaned winner never persisted its transcript and never ran
+          // its capture floor — the call's whole record lost to a duplicate
+          // frame. Frame handling on this endpoint is security-critical
+          // (AGENTS.md); a duplicate is ignored, not honoured.
+          if (convo) {
+            logger.warn(`[voice-relay] duplicate setup frame IGNORED on an established session callSid=${convo.callSid}`);
+            return;
+          }
           const p = msg.customParameters || {};
+          // ⭐ THE FRAME DOES NOT GET TO NAME THE CALL. The upgrade token was
+          // verified against one CallSid; a setup frame naming a different one
+          // is either Twilio contradicting its own URL or somebody replaying a
+          // token they hold against an account they do not. Either way the
+          // session dies rather than proceeding under the frame's claim.
+          const framedCallSid = msg.callSid || p.callSid || null;
+          if (!authenticatedCallSid || (framedCallSid && framedCallSid !== authenticatedCallSid)) {
+            logger.warn('[voice-relay] setup frame CallSid does not match the authenticated upgrade — terminating');
+            teardown('setup_callsid_mismatch');
+            return;
+          }
           convo = new RelayConversation({
-            callSid: msg.callSid || p.callSid || null,
+            // ALWAYS the authenticated one — never the frame's.
+            callSid: authenticatedCallSid,
+            sessionKey: relaySessionKey,
+            sessionGeneration: relaySessionGeneration,
             from: msg.from || p.from || null,
             to: msg.to || p.to || null,
             language: msg.lang || p.lang || null,

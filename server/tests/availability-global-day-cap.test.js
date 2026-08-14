@@ -72,11 +72,17 @@ function selfBookedBuilder() {
 }
 
 function arrayChain(rowsArr) {
+  let counting = false;
   const b = {
     where: () => b,
     whereNot: () => b,
     whereIn: () => b,
     whereNotIn: () => b,
+    // The GLOBAL day cap also counts VOICE-AGENT bookings, which live on
+    // scheduled_services and write no self_booked_appointments row at all.
+    // None in these fixtures, so the zone-vs-global assertions are unchanged.
+    count: () => { counting = true; return b; },
+    first: () => Promise.resolve(counting ? { count: 0 } : (rowsArr[0] || null)),
     // Case-insensitive city leg (schedule small-fixes wave) rewired the zone
     // filter through .modify + .whereRaw — passthroughs keep the fixture rows.
     whereRaw: () => b,

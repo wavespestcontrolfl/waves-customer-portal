@@ -8483,6 +8483,30 @@ router.put('/:id/status', async (req, res, next) => {
       }
     }
     const { transitionJobStatus } = require('../services/job-status');
+    // An OFFICE CONFIRM of a pending office-review booking (outbound-callback
+    // or voice-agent): its `customer_confirmed` stamp is the RECEIPT for the
+    // shared activation legs, so it moves out of the transaction and onto the
+    // post-commit hook's success (see runOfficeConfirmActivation) — and the
+    // shared writer stands down instead of running a second activation.
+    const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+    const isOfficeReviewConfirm = toStatus === 'confirmed'
+      && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action);
+    // ⭐ A TECHNICIAN RUNNING THE VISIT IS A FIELD CONFIRMATION. The explicit
+    // 'confirmed' tap is not the only field path: pending → en_route/on_site/
+    // completed day-of skips 'confirmed' entirely, and without the durable
+    // stamp the lazy activation ran the office-side card funnel on a visit
+    // the technician was standing at. Same stamp, same trx. The state test is
+    // "activation still owed" (customer_confirmed unset — the stamp IS the
+    // activation receipt on office-review rows), not "status pending": an
+    // office confirm whose activation failed leaves the row confirmed-but-
+    // unstamped, and the tech advancing THAT row day-of is a field confirm
+    // too. Ownership is enforced by technicianCurrentVisitFilter on the
+    // pre-select plus the in-trx row-locked re-check below.
+    const isFieldLifecycleTakeover = isTechnicianRequest(req)
+      && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
+      && svc.customer_confirmed !== true
+      && ['pending', 'confirmed'].includes(fromStatus)
+      && DAY_OF_LIFECYCLE_STATUSES.has(toStatus);
 
     try {
       await db.transaction(async (trx) => {
@@ -8508,11 +8532,24 @@ router.put('/:id/status', async (req, res, next) => {
         // rolls back these timestamps + flags.
         const lifecycleUpdates = {};
         if (toStatus === 'confirmed') {
-          lifecycleUpdates.customer_confirmed = true;
+          // Office-review rows are the exception: for them this column is also
+          // the activation receipt, stamped post-commit only once the shared
+          // confirm hook's core legs succeed.
+          if (!isOfficeReviewConfirm) lifecycleUpdates.customer_confirmed = true;
+          // ⭐ THE FIELD-CONFIRM MODE RIDES THE STATUS TRANSACTION. The hourly
+          // retry has ONLY this durable stamp to know a technician confirmed
+          // the row (card collected in person — no funnel). Same-trx, never
+          // swallowed: a stamp failure rolls the confirmation back with it.
+          if (isOfficeReviewConfirm && isTechnicianRequest(req)) {
+            lifecycleUpdates.field_confirmed_at = svc.field_confirmed_at || new Date();
+          }
         } else if (toStatus === 'on_site') {
           Object.assign(lifecycleUpdates, buildOnSiteLifecycleUpdates(svc, new Date()));
         } else if (toStatus === 'completed') {
           Object.assign(lifecycleUpdates, buildCompletionLifecycleUpdates(svc, new Date()));
+        }
+        if (isFieldLifecycleTakeover) {
+          lifecycleUpdates.field_confirmed_at = svc.field_confirmed_at || new Date();
         }
         if (Object.keys(lifecycleUpdates).length > 0) {
           await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
@@ -8528,6 +8565,9 @@ router.put('/:id/status', async (req, res, next) => {
           // This route's cancel branch sends its own notice below — the
           // shared-writer hook must stand down, not race the claim.
           notifyCustomer: 'caller',
+          // Same for the legacy activation: this route runs the OFFICE
+          // version of it below and owns the stamp.
+          legacyOutboundActivation: isOfficeReviewConfirm ? 'caller' : undefined,
         });
       });
     } catch (err) {
@@ -8612,12 +8652,24 @@ router.put('/:id/status', async (req, res, next) => {
     // Shared hook (services/outbound-review-confirm) so the admin-dispatch
     // status route — the other surface staff confirm from — runs the exact
     // same side effects and the two paths can't drift.
-    {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-      if (toStatus === 'confirmed' && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION) {
-        const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
-        await runOutboundReviewConfirmHook(db, svc, 'admin-schedule');
-      }
+    // Hook-first / stamp-on-success: the customer_confirmed stamp deferred out
+    // of the transaction lands inside this helper, and only when the core legs
+    // ran — a failure leaves the row confirmed-but-unstamped for the hourly
+    // legacy-activation sweep to retry. (Voice-agent bookings share the
+    // lifecycle via OFFICE_REVIEW_PENDING_SOURCE_ACTIONS: office confirm is
+    // what arms reminders for them too.)
+    if (isOfficeReviewConfirm) {
+      const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
+      // ⭐ A TECHNICIAN TOKEN ON THIS ROUTE IS A FIELD CONFIRM. Same distinction
+      // tech-track draws: the tech is already driving to meet the customer and
+      // collects a card in person, so the office-only card-request funnel — and
+      // the clearance stamp that arms the pre-visit sweep behind it — must not
+      // fire from a field status tap. Office confirms keep the full funnel.
+      // (field_confirmed_at was stamped INSIDE the status transaction above —
+      // atomic with the confirmation, never swallowed.)
+      await runOfficeConfirmActivation(db, svc, 'admin-schedule', {
+        skipCardRequest: isTechnicianRequest(req),
+      });
     }
 
     // En-route: track-transitions flip (which fires the customer SMS

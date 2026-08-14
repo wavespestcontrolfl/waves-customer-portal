@@ -45,8 +45,11 @@ const MAX_OPEN_INVOICES = 200;
  * link must not fan out into bearer credentials for the account's other
  * invoices).
  */
-async function openBalanceInvoices(customerId, { excludeInvoiceId = null, database = db } = {}) {
-  if (!customerId) return [];
+// The ONE eligibility query — both the full read and the existence probe run
+// this exact selection, so "is there an open balance" can never disagree with
+// the invoice list (the columns are needed either way: eligibility itself is
+// remainder > 0, cents-checked in JS below).
+function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db } = {}) {
   const query = database('invoices')
     .where({ customer_id: customerId })
     .whereIn('status', ['sent', 'viewed', 'overdue'])
@@ -61,23 +64,84 @@ async function openBalanceInvoices(customerId, { excludeInvoiceId = null, databa
       'credit_applied', 'scheduled_service_id', 'stripe_payment_intent_id',
     );
   if (excludeInvoiceId) query.whereNot('id', excludeInvoiceId);
-  const rows = await query;
+  return query;
+}
+
+// The per-row self-pay test the SQL cannot make alone: cents-authoritative
+// remainder plus the LIVE payer re-resolution (fail-closed toward DROP).
+async function rowIsSelfPayDue(customerId, row) {
+  if (!(invoiceAmountDue(row) > 0)) return false;
+  const PayerService = require('./payer');
+  try {
+    const resolved = await PayerService.resolveForInvoice({
+      customerId: String(customerId),
+      ...(row.scheduled_service_id ? { scheduledServiceId: String(row.scheduled_service_id) } : {}),
+      throwOnError: true,
+    });
+    if (resolved?.payerId) return false;
+  } catch (err) {
+    logger.warn(`[open-balance] payer resolve failed for invoice ${row.invoice_number} — dropping from balance (fail closed): ${err.message}`);
+    return false;
+  }
+  return true;
+}
+
+async function openBalanceInvoices(customerId, { excludeInvoiceId = null, database = db } = {}) {
+  if (!customerId) return [];
+  const rows = await openInvoiceQuery(customerId, { excludeInvoiceId, database });
   if (rows.length >= MAX_OPEN_INVOICES) {
     logger.warn(`[open-balance] customer ${customerId} hit the ${MAX_OPEN_INVOICES}-invoice bound — balance surfaces may understate`);
   }
 
-  const PayerService = require('./payer');
   const selfPay = [];
   for (const row of rows) {
-    // invoiceAmountDue is cents-authoritative — re-filter in JS so a row the
-    // SQL GREATEST admitted on float representation can't surface as $0.00.
-    if (!(invoiceAmountDue(row) > 0)) continue;
-    // Live payer re-resolution (pre-push P0). resolveForInvoice is the same
-    // authority the completion charge rails consult: per-visit payer when
-    // the invoice carries one, the customer's DEFAULT payer either way. A
-    // resolve outage fails toward DROP — a payer's bill must never be shown
-    // to (or collected from) the homeowner.
+     
+    if (await rowIsSelfPayDue(customerId, row)) selfPay.push(row);
+  }
+  return selfPay;
+}
+
+/**
+ * EXISTENCE ONLY — "does this customer have any open self-pay balance", with
+ * the exact same eligibility rules as the full read (same SQL, same
+ * cents-authoritative remainder, same live payer re-resolution), but no total
+ * is ever materialized and nothing amount-shaped is returned. Built for the
+ * voice split tier (AGENTS.md): an unattested caller may hear THAT a balance
+ * exists, and the figure must not even be fetched into the session. Stops at
+ * the first qualifying row.
+ */
+async function openBalanceExists(customerId, { excludeInvoiceId = null, database = db } = {}) {
+  if (!customerId) return false;
+  // ⭐ NO AMOUNTS LEAVE THE DATABASE. The full read's projection carries
+  // subtotal/total/credit_applied because its callers render them; an
+  // existence probe has no business materializing 200 invoices' figures to
+  // reduce them to a boolean. The cents-positive test runs IN SQL — the exact
+  // integer arithmetic invoiceAmountDue performs
+  // (ROUND(total·100) − ROUND(credit·100) > 0), not the float GREATEST the
+  // broad-phase WHERE uses — and the projection is only what the live payer
+  // re-resolution needs. Same eligibility rules, no figures in the process.
+  const query = database('invoices')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['sent', 'viewed', 'overdue'])
+    .whereNull('payer_id')
+    .whereNull('payer_statement_id')
+    .whereRaw('(ROUND(total * 100) - ROUND(COALESCE(credit_applied, 0) * 100)) > 0')
+    .orderBy('created_at', 'asc')
+    .limit(MAX_OPEN_INVOICES)
+    .select('id', 'invoice_number', 'scheduled_service_id');
+  if (excludeInvoiceId) query.whereNot('id', excludeInvoiceId);
+  const rows = await query;
+  const PayerService = require('./payer');
+  // ⭐ A DROPPED ROW IS NOT A "NO". The full read fails a resolve-outage row
+  // toward DROP because SHOWING a possibly-payer-billed invoice is the harm
+  // there. Here the harm is inverted: this boolean gets SPOKEN as "no open
+  // balance" to a customer who may owe money, so a candidate lost to a
+  // transient failure makes the answer INDETERMINATE (null) — the voice layer
+  // already degrades null to "couldn't check, a team member can confirm".
+  let anyResolveFailed = false;
+  for (const row of rows) {
     try {
+       
       const resolved = await PayerService.resolveForInvoice({
         customerId: String(customerId),
         ...(row.scheduled_service_id ? { scheduledServiceId: String(row.scheduled_service_id) } : {}),
@@ -85,12 +149,19 @@ async function openBalanceInvoices(customerId, { excludeInvoiceId = null, databa
       });
       if (resolved?.payerId) continue;
     } catch (err) {
-      logger.warn(`[open-balance] payer resolve failed for invoice ${row.invoice_number} — dropping from balance (fail closed): ${err.message}`);
+      logger.warn(`[open-balance] payer resolve failed for invoice ${row.invoice_number} — existence answer degrades to indeterminate: ${err.message}`);
+      anyResolveFailed = true;
       continue;
     }
-    selfPay.push(row);
+    return true; // short-circuit at the first qualifying self-pay row
   }
-  return selfPay;
+  // ⭐ A FULL PAGE OF NON-QUALIFIERS IS NOT A "NO" EITHER. If the candidate
+  // query hit its cap and every fetched row resolved to a payer, a self-pay
+  // invoice can still exist beyond the cap — a confident false here would be
+  // SPOKEN as "no open balance" to a customer who owes money. Off-the-end of
+  // a full page is indeterminate, same degradation as a failed resolve.
+  if (rows.length >= MAX_OPEN_INVOICES) return null;
+  return anyResolveFailed ? null : false;
 }
 
 /**
@@ -116,4 +187,4 @@ async function openBalanceSummary(customerId, { displayLimit = 5, ...opts } = {}
   };
 }
 
-module.exports = { openBalanceInvoices, openBalanceSummary, MAX_OPEN_INVOICES };
+module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, MAX_OPEN_INVOICES };

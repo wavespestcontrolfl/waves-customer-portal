@@ -275,6 +275,10 @@ router.get('/stats/summary', async (req, res, next) => {
 });
 
 module.exports = router;
+// THE customer-artifact suppression predicate — a named production export so
+// other customer-facing surfaces (the voice agent's account/visit reads) can
+// import it instead of re-implementing it and drifting.
+module.exports.suppressesCustomerArtifacts = suppressesCustomerArtifacts;
 module.exports._test = {
   parseJsonObject,
   suppressesCustomerArtifacts,

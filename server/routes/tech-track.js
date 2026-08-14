@@ -104,14 +104,33 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
       e.code = 'REVIEW_STATE_CHANGED';
       throw e;
     }
+    // ⭐ NO STAMP IN HERE. `customer_confirmed` is the completion RECEIPT for
+    // the activation legs, not merely a lifecycle flag: the legacy activation
+    // helper skips a stamped row and the hourly sweep selects on unstamped
+    // ones. Stamping in this transaction and then running a best-effort hook
+    // meant a failed leg left the field-confirmed booking half-armed with NO
+    // retry rail — the same hole the two admin confirm routes had, and voice
+    // rows reach this path too now that the office-review set includes them.
+    // The stamp moved to the hook's success, below.
+    // ⭐ THE FIELD-CONFIRM MODE IS PERSISTED, NOT JUST PASSED. skipCardRequest
+    // used to live only in this route's call — a failed core leg then left the
+    // row for the hourly sweep, whose retry ran WITHOUT it and pushed the
+    // field-confirmed booking through the card funnel the owner rule says to
+    // skip. Stamped in the same transaction as the confirmation; every
+    // activation rail reads it.
     await trx('scheduled_services')
       .where({ id: svc.id })
-      .update({ customer_confirmed: true });
+      .whereNull('field_confirmed_at')
+      .update({ field_confirmed_at: new Date() });
     await transitionJobStatus({
       jobId: svc.id,
       fromStatus: 'pending',
       toStatus: 'confirmed',
       transitionedBy: req.technicianId,
+      // This route owns the activation (field semantics: the card funnel is
+      // skipped because the tech collects in person), so the shared writer
+      // must not fire its lazy one too.
+      legacyOutboundActivation: 'caller',
       trx,
     });
   });
@@ -128,9 +147,13 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
       'source_call_log_id', 'is_callback', 'estimated_price',
     );
 
-  // Best-effort, catches per-leg internally. skipCardRequest — see the
-  // header comment above.
-  await runOutboundReviewConfirmHook(db, hookRow || svc, 'tech-track', { skipCardRequest: true });
+  // Hook FIRST, stamp on success — the stamp deferred out of the transaction
+  // above lands inside this helper, and only when the core legs ran. A failure
+  // leaves the row confirmed-but-unstamped, which is exactly what the hourly
+  // legacy-activation sweep exists to drain. skipCardRequest — see the header
+  // comment above (a field confirm collects the card in person).
+  const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
+  await runOfficeConfirmActivation(db, hookRow || svc, 'tech-track', { skipCardRequest: true });
 
   // Post-hook reminder repair (Codex P1 rounds 4–5): an office action can
   // commit between the hookRow snapshot and registerAppointment's insert —

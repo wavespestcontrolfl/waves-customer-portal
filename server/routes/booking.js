@@ -901,9 +901,42 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     .select('date')
     .count('* as count')
     .groupBy('date');
+  // ⭐ THE OFFER MUST COUNT WHAT THE COMMIT COUNTS. Voice-agent bookings write
+  // only `scheduled_services` (the office-review pending lifecycle), and
+  // countActiveSelfBookingsForDay — the commit-time gate — now includes them.
+  // Counting only self_booked_appointments HERE would keep offering a day the
+  // commit refuses, so every pick on a voice-filled day would come back
+  // day_full: the offer surface promising what the gate declines, which is the
+  // exact divergence this filter exists to prevent.
+  const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+  const voiceCounts = await db('scheduled_services')
+    .where('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION)
+    // Same inactive set the commit-time counter uses — a skipped (office-
+    // rejected) AI request releases its slot instead of holding the day full.
+    .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
+    .whereBetween('scheduled_date', [rangeFrom, rangeTo])
+    .select('scheduled_date')
+    .count('* as count')
+    .groupBy('scheduled_date');
+  // Never throws on a missing/unparseable date: an availability BUILDER that
+  // dies mid-count would take the whole offer surface down with it.
+  const dayKey = (d) => {
+    if (!d) return null;
+    if (typeof d === 'string') return d.split('T')[0] || null;
+    const t = new Date(d);
+    return Number.isNaN(t.getTime()) ? null : t.toISOString().split('T')[0];
+  };
+  const perDay = new Map();
+  for (const r of bookingCounts) {
+    const k = dayKey(r.date);
+    if (k) perDay.set(k, parseInt(r.count, 10) || 0);
+  }
+  for (const r of voiceCounts) {
+    const k = dayKey(r.scheduled_date);
+    if (k) perDay.set(k, (perDay.get(k) || 0) + (parseInt(r.count, 10) || 0));
+  }
   const fullDays = new Set(
-    bookingCounts.filter(r => parseInt(r.count) >= maxPerDay)
-      .map(r => (typeof r.date === 'string' ? r.date.split('T')[0] : r.date.toISOString().split('T')[0]))
+    [...perDay.entries()].filter(([, count]) => count >= maxPerDay).map(([date]) => date)
   );
 
   // Offer must mirror the /confirm commit gate (the #2704 estimate-surface

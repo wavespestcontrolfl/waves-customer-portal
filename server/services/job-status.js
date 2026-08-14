@@ -296,11 +296,23 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  *                                       BOTH emits chain on commit. If
  *                                       not passed, this function owns
  *                                       the trx end-to-end.
+ * @param {string} [args.legacyOutboundActivation] pass 'caller' when the
+ *                                       CALLER owns the office-review
+ *                                       activation for this row (the two
+ *                                       admin confirm routes do — they run
+ *                                       the office variant of the hook and
+ *                                       stamp customer_confirmed on its
+ *                                       success). This writer then skips its
+ *                                       own lazy activation instead of
+ *                                       running a second, concurrent one.
  * @returns {Promise<{customerPayload: object, adminPayload: object}>}
  *           the two payloads broadcast (or, with an outer trx, the
  *           payloads that will broadcast on commit)
  */
-async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer, cancelNoticeToken }) {
+async function transitionJobStatus({
+  jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer,
+  cancelNoticeToken, legacyOutboundActivation,
+}) {
   if (!jobId || !toStatus || fromStatus == null) {
     throw new Error(
       'transitionJobStatus: jobId, fromStatus, and toStatus are required'
@@ -344,18 +356,33 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // after the core legs succeed — so a transient leg failure (or a
     // crash after commit) leaves the row unstamped and the next touch
     // retries (Codex #3361 r4 P1). The dispatch/schedule confirm routes
-    // stamp customer_confirmed themselves before calling this writer
-    // (same trx), so those paths skip here and keep their own hook call —
-    // no double run. Cancel/skip stay pure rejections, and a row read in
+    // own the activation for the row they are confirming — they run the
+    // OFFICE version of the hook (clearance stamp + messaging-mode card
+    // ask, both of which the lazy path deliberately suppresses) and stamp
+    // on its success — so they pass `legacyOutboundActivation: 'caller'`
+    // and this writer stands down rather than running a second, concurrent
+    // activation. (They used to be excluded implicitly, by stamping
+    // customer_confirmed inside this same trx; that stamp is what made a
+    // failed hook unretryable, so it moved to the hook's success path and
+    // the stand-down had to become explicit.) Cancel/skip stay pure
+    // rejections, and a row read in
     // a rejected state (cancelled/skipped) is left to the hourly sweep,
     // whose post-commit read sees the transition's outcome.
     if (!['cancelled', 'skipped'].includes(String(toStatus || ''))) {
-      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+      // The SHARED office-review set, not the single outbound-review marker:
+      // a voice-agent booking (source_action 'voice_agent') is created with
+      // exactly the same pending/unconfirmed shape and owes exactly the same
+      // activation legs, so matching only the outbound marker here let a
+      // voice row go operational half-armed — the very P0 this branch of the
+      // writer exists to prevent. Membership decisions live in
+      // call-booking-source-actions.OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.
+      const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
       const legacyRow = await t('scheduled_services')
         .where({ id: jobId })
         .first('source_action', 'status', 'customer_confirmed', 'customer_id');
-      legacyOutboundActivationNeeded = !!legacyRow
-        && legacyRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+      legacyOutboundActivationNeeded = legacyOutboundActivation !== 'caller'
+        && !!legacyRow
+        && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(legacyRow.source_action)
         && !['cancelled', 'skipped'].includes(String(legacyRow.status || ''))
         && !legacyRow.customer_confirmed;
       // COMPLETION is the billing moment: the inspection-credit booking
@@ -434,12 +461,14 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // idempotent belt (onConflict ignore).
     if (String(toStatus || '') === 'confirmed') {
       try {
-        const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+        // Voice-agent bookings share the lifecycle: office confirmation is
+        // their booking moment too (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS).
+        const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
         const confirmedRow = await t('scheduled_services')
           .where({ id: jobId })
           .first('source_action', 'customer_id');
         if (confirmedRow
-          && confirmedRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+          && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(confirmedRow.source_action)
           && confirmedRow.customer_id) {
           await require('./inspection-credit').markBookingForInspectionCredit(t, {
             customerId: confirmedRow.customer_id,

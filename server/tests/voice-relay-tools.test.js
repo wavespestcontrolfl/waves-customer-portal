@@ -15,7 +15,7 @@ jest.mock('../routes/booking', () => ({
 }));
 jest.mock('../services/scheduling/parse-when', () => ({ parseWhen: jest.fn(), summarizeWindow: jest.fn() }));
 
-const { TOOLS, executeTool, speakSlot, formatSlots } = require('../services/voice-agent/relay-tools');
+const { TOOLS, CONTEXT_TOOLS, activeTools, executeTool, speakSlot, formatSlots } = require('../services/voice-agent/relay-tools');
 const { isEnabled } = require('../config/feature-gates');
 const booking = require('../routes/booking')._internals;
 const { parseWhen, summarizeWindow } = require('../services/scheduling/parse-when');
@@ -43,6 +43,110 @@ describe('TOOLS surface', () => {
   test('find_slots requires `when`; get_availability requires nothing', () => {
     expect(TOOLS.find((t) => t.name === 'find_slots').input_schema.required).toEqual(['when']);
     expect(TOOLS.find((t) => t.name === 'get_availability').input_schema.required).toEqual([]);
+  });
+});
+
+describe('Phase 2 context tools gate (VOICE_RELAY_CONTEXT_ENABLED, fail-closed)', () => {
+  const saved = process.env.VOICE_RELAY_CONTEXT_ENABLED;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    else process.env.VOICE_RELAY_CONTEXT_ENABLED = saved;
+  });
+
+  // ⭐ THE GATE-OFF PIN WAS VACUOUS. `expect(activeTools()).toEqual(TOOLS)`
+  // compares the module's output to the module's own constant, so ANY schema
+  // edit satisfied it — capture_lead silently gained four properties under it.
+  // The pin is now a FROZEN SNAPSHOT: an independent description of what a
+  // caller reaches with the gate off, which a schema edit must consciously
+  // update.
+  const GATE_OFF_TOOL_SURFACE = {
+    capture_lead: {
+      required: ['call_summary'],
+      properties: [
+        'address_line1', 'callback_phone', 'city', 'contact_preference', 'call_summary',
+        'do_not_contact_request', 'email', 'first_name', 'last_name', 'lead_quality',
+        'pain_points', 'preferred_contact_method', 'preferred_date_time', 'requested_service',
+        'urgency_reason', 'zip',
+      ],
+    },
+    find_slots: {
+      required: ['when'],
+      properties: ['address_line1', 'city', 'when', 'zip'],
+    },
+    get_availability: {
+      required: [],
+      properties: ['address_line1', 'city', 'zip'],
+    },
+  };
+
+  function toolSurface(tools) {
+    return Object.fromEntries(tools.map((t) => [t.name, {
+      required: [...(t.input_schema.required || [])].sort(),
+      properties: Object.keys(t.input_schema.properties || {}).sort(),
+    }]));
+  }
+
+  function normalizedSnapshot(snapshot) {
+    return Object.fromEntries(Object.entries(snapshot).map(([name, shape]) => [name, {
+      required: [...shape.required].sort(),
+      properties: [...shape.properties].sort(),
+    }]));
+  }
+
+  test('gate off/absent/anything-but-true → the tool surface matches the frozen snapshot', () => {
+    for (const value of [undefined, 'false', '1', 'TRUE ', 'yes']) {
+      if (value === undefined) delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+      else process.env.VOICE_RELAY_CONTEXT_ENABLED = value;
+      const tools = activeTools();
+      expect(tools.map((t) => t.name).sort()).toEqual(['capture_lead', 'find_slots', 'get_availability']);
+      expect(toolSurface(tools)).toEqual(normalizedSnapshot(GATE_OFF_TOOL_SURFACE));
+      // No write tool and no account/pricing tool is reachable at all.
+      for (const forbidden of ['request_booking', 'request_reservice', 'lookup_customer', 'get_pricing']) {
+        expect(tools.map((t) => t.name)).not.toContain(forbidden);
+      }
+    }
+  });
+
+  // The prompt is what the caller actually experiences with the gate off, and
+  // buildBasePrompt(false) alone does not cover the ASSEMBLED result — the
+  // voice profile and every gate-on addendum compose on top of it.
+  test('gate off → the ASSEMBLED system prompt carries no gate-on behavior', () => {
+    delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    delete process.env.GATE_VOICE_AI_BOOKING;
+    const { buildBasePrompt, composeSystemPrompt, SYSTEM_PROMPT } = require('../services/voice-agent/relay-conversation');
+    // Assembled the way _runLoop assembles it, including a profile.
+    const assembled = composeSystemPrompt(buildBasePrompt(false), 'Keep it warm and plain-spoken.');
+    expect(assembled.startsWith(SYSTEM_PROMPT)).toBe(true);
+    for (const gateOnMarker of [
+      'ACCOUNT ACCESS RULES', 'KNOWN CALLER', 'CLOCK DATA', 'RECENT TEXTS',
+      'BOOKING REQUESTS', 'request_reservice', 'lookup_customer', 'get_pricing',
+      'get_account_overview', 'get_invoice_history', 'slot_ref', 'contact_preference',
+      'urgency_reason', 'Sandy',
+    ]) {
+      expect(assembled).not.toContain(gateOnMarker);
+    }
+    // The Phase-1 price refusal is still exactly the line the gate swaps out.
+    const { PRICE_LINE_NO_CONTEXT } = require('../services/voice-agent/relay-conversation');
+    expect(assembled).toContain(PRICE_LINE_NO_CONTEXT);
+    // A profile still composes on (it is style, not gate-on behavior).
+    expect(assembled).toContain('VOICE PROFILE');
+  });
+
+  test('gate on → the read-only context tools register too', () => {
+    process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+    expect(activeTools().map((t) => t.name).sort()).toEqual(
+      ['capture_lead', 'find_slots', 'get_account_overview', 'get_availability',
+        'get_call_history', 'get_invoice_history', 'get_message_history', 'get_open_estimates',
+        'get_pricing', 'get_service_history', 'get_service_report', 'get_services_catalog',
+        'get_today_eta', 'lookup_customer', 'request_reservice']
+    );
+    expect(CONTEXT_TOOLS).toHaveLength(12);
+  });
+
+  test('gate off → executeTool refuses context tools outright', async () => {
+    delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1' });
+    expect(out).toMatch(/not available/i);
   });
 });
 
@@ -101,7 +205,107 @@ describe('find_slots', () => {
 });
 
 describe('capture_lead (Phase 0 floor, unchanged)', () => {
+  // ⭐ SCRUBBED AT THE SOURCE. The free-text capture fields persist on durable
+  // lead rows (transcript_summary, extracted_data, lead_activities.metadata)
+  // — a spoken card number relayed by the model must be redacted BEFORE
+  // createLeadFromExtraction ever sees it (the transcript/alert scrubs are
+  // separate writers and do not cover these).
+  test('a spoken card number never reaches the lead pipeline in any free-text field', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: 'l-1', customerId: null, created: true });
+    await executeTool(
+      'capture_lead',
+      {
+        call_summary: 'Wants pest control; read out card 4111 1111 1111 1111 by mistake',
+        pain_points: 'charged on 4111 1111 1111 1111 twice',
+        requested_service: 'refund to 4111 1111 1111 1111',
+        // The model classifies caller speech into WHICHEVER field fits —
+        // the scheduling note and address are free text too.
+        preferred_date_time: 'after the 4111 1111 1111 1111 charge clears',
+        address_line1: 'unit 4111 1111 1111 1111 somewhere',
+      },
+      { from: '+19415551234', callSid: 'CA-pan-capture', markCaptured: jest.fn() },
+    );
+    const [extracted] = createLeadFromExtraction.mock.calls[0];
+    const flat = JSON.stringify(extracted);
+    expect(flat).not.toMatch(/4111[\s-]?1111[\s-]?1111[\s-]?1111/);
+    expect(flat).toContain('[card ending 1111]'); // scrubbed, not dropped
+  });
+
+  // ⭐ A FAILED WRITE IS NOT A CAPTURE — the fail-closed keyed path must not
+  // latch the one-capture budget or let the model claim anything was saved.
+  test('a FAILED keyed capture never claims a capture — floor stays armed', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: null, created: false, failed: true });
+    const markCaptured = jest.fn();
+    const out = await executeTool(
+      'capture_lead',
+      { call_summary: 'caller details' },
+      { from: '+19415551234', callSid: 'CA-write-failed', markCaptured },
+    );
+    expect(out).toMatch(/could NOT be saved/i);
+    expect(out).not.toMatch(/saved successfully/i);
+    expect(markCaptured).not.toHaveBeenCalled();
+  });
+
+  // ⭐ A LATE-SETTLING FAILURE IS OBSERVED: the failed result fires the
+  // session's onCaptureFailed callback, which re-runs the floor after the
+  // call has closed (nothing else ever sees a post-drain failure).
+  test('a FAILED capture fires onCaptureFailed for the post-close floor', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: null, created: false, failed: true });
+    const onCaptureFailed = jest.fn();
+    await executeTool(
+      'capture_lead',
+      { call_summary: 'caller details' },
+      { from: '+19415551234', callSid: 'CA-late-fail', markCaptured: jest.fn(), onCaptureFailed },
+    );
+    expect(onCaptureFailed).toHaveBeenCalled();
+  });
+
+  test('a SUPERSEDED capture tells the model to stand down entirely', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: null, created: false, superseded: true });
+    const markCaptured = jest.fn();
+    const out = await executeTool(
+      'capture_lead',
+      { call_summary: 'caller details' },
+      { from: '+19415551234', callSid: 'CA-superseded-cap', markCaptured },
+    );
+    expect(out).toMatch(/superseded by a reconnect/i);
+    expect(markCaptured).not.toHaveBeenCalled();
+  });
+
+  test('a SPAM capture suppresses the floor WITHOUT claiming a lead', async () => {
+    const markCaptured = jest.fn();
+    const out = await executeTool(
+      'capture_lead',
+      { call_summary: 'auto warranty robocall', lead_quality: 'spam' },
+      { from: '+19415551234', callSid: 'CA-spam', markCaptured }
+    );
+    expect(out).toMatch(/no lead created/i);
+    expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ leadCreated: false }));
+    expect(createLeadFromExtraction).not.toHaveBeenCalled();
+  });
+
+  // ⭐ NO LEAD IS A REAL OUTCOME. createLeadFromExtraction deliberately creates
+  // nothing for a matched lifecycle customer (an ordinary support call must
+  // never overwrite a won lead) — so the model must not be told a lead was
+  // saved, and the transcript must not be stamped as one, while the hangup
+  // floor still stands down (a second attempt creates nothing either).
+  test('an existing lifecycle customer → honest "no lead created", floor still suppressed', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
+    const markCaptured = jest.fn();
+    const out = await executeTool(
+      'capture_lead',
+      { call_summary: 'asking about the last visit' },
+      { from: '+19415551234', callSid: 'CA-lifecycle', markCaptured }
+    );
+    expect(out).toMatch(/no new lead was created/i);
+    expect(out).not.toMatch(/Lead saved/);
+    expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ leadCreated: false }));
+  });
+
   test('writes the lead, marks captured, drops invalid quality', async () => {
+    // A REAL lead id back: capture_lead now distinguishes "lead created" from
+    // "existing customer, deliberately no lead" (see the lifecycle test below).
+    createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-1', created: true });
     const markCaptured = jest.fn();
     const out = await executeTool(
       'capture_lead',
@@ -112,7 +316,7 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       expect.objectContaining({ call_summary: 'ants in kitchen', first_name: 'Pat', lead_quality: null, preferred_date_time: 'Tue 9 AM' }),
       expect.objectContaining({ phone: '+19415551234', toPhone: '+19412691697', callSid: 'CA1' })
     );
-    expect(markCaptured).toHaveBeenCalled();
+    expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ leadCreated: true }));
     expect(out).toMatch(/Lead saved/);
   });
 });
