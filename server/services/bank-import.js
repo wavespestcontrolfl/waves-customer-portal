@@ -290,7 +290,11 @@ async function refundCandidatesForRow(row, dbOrTrx = db) {
     .whereBetween('expense_date', [lookbackStart > yearStart ? lookbackStart : yearStart, txnDate])
     .where('amount', '>=', row.amount)
     .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
-  const list = originals.filter(c => vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
+  const list = originals.filter(c => vendorEvidence(row.description, c)
+    && !methodIncompatible(row.account_type, c.payment_method)
+    // a target this credit was RELEASED against already carries its
+    // reduction — never offer it again (double-reduce guard)
+    && !(row.suggestion?.releasedRefundOf && String(row.suggestion.releasedRefundOf) === String(c.id)));
   list.sort((a, b) => (Number(a.amount) - Number(b.amount))
     || String(toDateStr(b.expense_date)).localeCompare(String(toDateStr(a.expense_date)))
     || String(a.id).localeCompare(String(b.id)));
@@ -1375,6 +1379,8 @@ async function runDeterministicMatching({ limit } = {}) {
   };
   let unmatched;
   let moreRemaining = false;
+  let examinedOverflow = false;
+  let freshCount = 0;
   if (!bounded) {
     unmatched = await baseSelect();
   } else {
@@ -1386,6 +1392,7 @@ async function runDeterministicMatching({ limit } = {}) {
       .limit(limit + 1);
     const moreFresh = fresh.length > limit;
     unmatched = fresh.slice(0, limit);
+    freshCount = unmatched.length;
     let moreExamined = false;
     if (!moreFresh) {
       // Even with NO leftover capacity (fresh pool exactly == limit), the
@@ -1411,11 +1418,8 @@ async function runDeterministicMatching({ limit } = {}) {
       moreExamined = examined.length > fill;
       unmatched = unmatched.concat(examined.slice(0, fill));
     }
-    // The sentinel is honest again with the 4x rescan-only budget: a
-    // typical examined pool is fully revisited in one explicit run (done
-    // reads done), and overflow beyond even the enlarged budget is rows
-    // this run genuinely never reached — remaining reads remaining.
-    moreRemaining = moreFresh || moreExamined;
+    examinedOverflow = moreExamined;
+    moreRemaining = moreFresh;
   }
   // pending echoes beyond the retry batch are unfinished work too — the
   // caller's "more rows pending" surface must not read as done
@@ -1839,6 +1843,15 @@ async function runDeterministicMatching({ limit } = {}) {
     } else {
       await markScanned(row); // nothing to propose — leave the fresh pool
     }
+  }
+  // Examined-pool overflow counts as remaining only while passes make
+  // real progress (fresh imports, or actual links landed this pass): the
+  // pool is a permanent rotation, and churning it forever would nag the
+  // operator — at up to thousands of row surveys a click — with nothing
+  // new to find. Rows beyond the enlarged rescan budget are reached by
+  // rotation on subsequent productive passes.
+  if (examinedOverflow && (freshCount > 0 || (summary.expensesLinked + summary.payoutsLinked) > 0)) {
+    summary.moreRemaining = true;
   }
   return summary;
 }

@@ -833,8 +833,19 @@ describe('apply-refund (gate on)', () => {
     expect(res.status).toBe(200);
     expect(state.expenseUpdates).toHaveLength(0); // the expense is NEVER touched
     const claim = state.bankUpdates[0];
-    expect(claim.patch.status).toBe('unmatched');
+    // TERMINAL: the expense keeps its reduction, so the credit must never
+    // re-enter matching where the same expense could be reduced twice
+    expect(claim.patch.status).toBe('ignored');
     expect(sugOf(claim).refundUndone.releasedWithoutRestore).toBe(true);
+    expect(sugOf(claim).releasedRefundOf).toBe('exp-9'); // durable double-apply guard
+  });
+
+  test('apply-refund refuses a target this credit was RELEASED against — no double reduction', async () => {
+    state.bankRow = { id: 'bt-1', amount: '20.00', txn_date: '2026-08-09', description: 'WAWA 5211 REFUND', direction: 'credit', account_type: 'card', status: 'unmatched', suggestion: { releasedRefundOf: 'exp-9' } };
+    const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain('twice');
+    expect(state.bankUpdates).toHaveLength(0);
   });
 
   test('Release is REFUSED while the ordinary Undo would still succeed — no stranded reductions', async () => {

@@ -2088,6 +2088,11 @@ router.post('/bank-import/:id/apply-refund', async (req, res, next) => {
       return res.status(400).json({ error: 'only statement credits apply as refunds' });
     }
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    // a credit RELEASED against this expense already reduced it once — a
+    // second application would double-reduce the ledger
+    if (row.suggestion?.releasedRefundOf && String(row.suggestion.releasedRefundOf) === String(expenseId)) {
+      return res.status(409).json({ error: 'this credit was already applied to that expense and released without restoring it — applying again would reduce the expense twice' });
+    }
     const refund = Number(row.amount);
     let adjusted;
     let adjustedServiceId = null;
@@ -2382,10 +2387,19 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
             // adjustment stays applied
             .whereRaw("coalesce(suggestion->>'refundAppliedTo', '') = ?", [String(target || '')])
             .update({
-              status: 'unmatched',
+              // Release is TERMINAL: the expense keeps its reduction, so
+              // the credit must never re-enter matching where the same
+              // expense could be offered and reduced a second time. It
+              // lands in 'ignored' (accounted for outside the flow);
+              // releasedRefundOf is the durable guard should the operator
+              // ever explicitly unignore it.
+              status: releaseOnly ? 'ignored' : 'unmatched',
               match_method: null,
               matched_at: null,
-              suggestion: bankImport.suggestionMerge({ refundUndone: { at: new Date().toISOString(), expenseId: target || null, ...(releaseOnly ? { releasedWithoutRestore: true } : {}) } }, ['refundAppliedTo', 'refundAmount', 'refundRestore']),
+              suggestion: bankImport.suggestionMerge({
+                refundUndone: { at: new Date().toISOString(), expenseId: target || null, ...(releaseOnly ? { releasedWithoutRestore: true } : {}) },
+                ...(releaseOnly && target ? { releasedRefundOf: target } : {}),
+              }, ['refundAppliedTo', 'refundAmount', 'refundRestore']),
               updated_at: new Date(),
             });
           if (!changed) {
