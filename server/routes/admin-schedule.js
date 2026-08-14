@@ -5155,10 +5155,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // Silent edits into the past stay allowed — record corrections and
     // backfills are legitimate; TEXTING a customer a past date never is.
     // Same-day moves stay allowed.
-    if (notifyCustomer === true && updates.scheduled_date !== undefined
-        && !validScheduleDate(updates.scheduled_date)) {
-      const movedTo = String(updates.scheduled_date).split('T')[0];
-      throw httpError(400, `That date (${movedTo}) isn't a valid upcoming date — pick a current or future date, or turn off the booking notification for a record correction.`);
+    if (notifyCustomer === true && updates.scheduled_date !== undefined) {
+      const movedTo = validScheduleDate(updates.scheduled_date);
+      if (!movedTo) {
+        throw httpError(400, `That date (${String(updates.scheduled_date).split('T')[0]}) isn't a valid upcoming date — pick a current or future date, or turn off the booking notification for a record correction.`);
+      }
+      // Persist the validator's normalized YYYY-MM-DD — a raw suffix
+      // ('2026-08-14Tgarbage') passes the date-part check but would still
+      // hit the PG DATE cast downstream (codex P1).
+      updates.scheduled_date = movedTo;
     }
     if (windowStart !== undefined) updates.window_start = windowStart || null;
     if (windowEnd !== undefined) updates.window_end = windowEnd || null;

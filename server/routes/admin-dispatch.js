@@ -12463,12 +12463,16 @@ function pastRescheduleDateError(newDate) {
 
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
-    const { newDate, newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+    const { newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
 
-    const pastDateError = pastRescheduleDateError(newDate);
+    const pastDateError = pastRescheduleDateError(req.body.newDate);
     if (pastDateError) {
       return res.status(400).json({ error: pastDateError });
     }
+    // The validator's normalized YYYY-MM-DD — downstream (rebooker, reminder
+    // sync) must never see a raw suffix ('2026-08-14Tgarbage' passes the
+    // guard's date-part check but would still hit the PG DATE cast, codex P1).
+    const newDate = validScheduleDate(req.body.newDate);
 
     // Series scope shifts every future occurrence — skip the customer-confirm
     // SMS path (which only handles a single appt) and commit directly.
