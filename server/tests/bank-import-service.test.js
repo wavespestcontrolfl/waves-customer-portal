@@ -25,8 +25,12 @@ const state = {
 function makeBuilder(table) {
   const b = {};
   const chain = (name) => { b[name] = jest.fn(() => b); };
-  ['join', 'leftJoin', 'joinRaw', 'forUpdate', 'where', 'andWhere', 'whereNot', 'whereNotIn', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
+  ['join', 'leftJoin', 'joinRaw', 'forUpdate', 'andWhere', 'whereNot', 'whereNotIn', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
     'orderBy', 'limit', 'groupBy', 'groupByRaw', 'havingRaw', 'select', 'first'].forEach(chain);
+  // where/orWhere EXECUTE function args (knex grouping semantics) so the
+  // applied-or-released refund query registers its inner whereRaw calls
+  b.where = jest.fn((c) => { if (typeof c === 'function') c.call(b); return b; });
+  b.orWhere = jest.fn((c) => { if (typeof c === 'function') c.call(b); return b; });
   b.update = jest.fn((patch) => {
     // Only row-scoped updates (where({id,...})) are the matcher's claims and
     // parks; the dangling-link heal sweep uses whereIn/whereNull and is
@@ -58,8 +62,9 @@ function makeBuilder(table) {
             const e = state.expenses.find(x => x.id === r.matched_expense_id);
             if (!e) return [];
             const rsum = state.bankRows
-              .filter(x => x.status === 'refund_applied' && x.suggestion?.refundAppliedTo === e.id)
-              .reduce((s, x) => s + Number(x.suggestion.refundAmount || 0), 0);
+              .filter(x => (x.status === 'refund_applied' && x.suggestion?.refundAppliedTo === e.id)
+                || (x.status === 'ignored' && x.suggestion?.releasedRefundOf === e.id))
+              .reduce((s, x) => s + (x.status === 'refund_applied' ? Number(x.suggestion.refundAmount || 0) : Number(x.amount || 0)), 0);
             return [{
               id: r.id, bt_amount: r.amount, txn_date: r.txn_date, description: r.description,
               account_type: r.account_type, match_method: r.match_method, expense_id: r.matched_expense_id,
@@ -116,9 +121,10 @@ function makeBuilder(table) {
       const having = b.havingRaw.mock.calls[0];
       const target = having && Array.isArray(having[1]) ? Number(having[1][0]) : null;
       rows = state.expenses.map(e => {
-        const refunds = state.bankRows.filter(r => r.status === 'refund_applied' && r.suggestion?.refundAppliedTo === e.id);
+        const refunds = state.bankRows.filter(r => (r.status === 'refund_applied' && r.suggestion?.refundAppliedTo === e.id)
+          || (r.status === 'ignored' && r.suggestion?.releasedRefundOf === e.id));
         if (!refunds.length) return null;
-        const gross = Number(e.amount) + refunds.reduce((s, r) => s + Number(r.suggestion.refundAmount || 0), 0);
+        const gross = Number(e.amount) + refunds.reduce((s, r) => s + (r.status === 'refund_applied' ? Number(r.suggestion.refundAmount || 0) : Number(r.amount || 0)), 0);
         return { ...e, gross_amount: gross };
       }).filter(Boolean).filter(e => target == null || Math.abs(e.gross_amount - target) <= 0.011);
     }
@@ -129,9 +135,10 @@ function makeBuilder(table) {
       if (absCall && Array.isArray(absCall[1])) {
         rows = rows
           .filter(e => Math.abs(Number(e.amount) - Number(absCall[1][0])) <= Number(absCall[1][1]) + 0.001)
-          // refund-reduced expenses are excluded from NET matching in SQL —
-          // they participate only through the gross path
-          .filter(e => !state.bankRows.some(r => r.status === 'refund_applied' && r.suggestion?.refundAppliedTo === e.id));
+          // refund-reduced expenses (applied OR released) are excluded from
+          // NET matching in SQL — they participate only through gross
+          .filter(e => !state.bankRows.some(r => (r.status === 'refund_applied' && r.suggestion?.refundAppliedTo === e.id)
+            || (r.status === 'ignored' && r.suggestion?.releasedRefundOf === e.id)));
       }
       // date-window filters mirror the SQL (the refund lookback floors at
       // the credit's tax year — prior-year targets never surface)
@@ -150,8 +157,9 @@ function makeBuilder(table) {
       if (refundSumCall) {
         const expId = Array.isArray(refundSumCall[1]) ? refundSumCall[1][0] : refundSumCall[1];
         const total = state.bankRows
-          .filter(r => r.status === 'refund_applied' && r.suggestion?.refundAppliedTo === expId)
-          .reduce((s, r) => s + Number(r.suggestion.refundAmount || 0), 0);
+          .filter(r => (r.status === 'refund_applied' && r.suggestion?.refundAppliedTo === expId)
+            || (r.status === 'ignored' && r.suggestion?.releasedRefundOf === expId))
+          .reduce((s, r) => s + (r.status === 'refund_applied' ? Number(r.suggestion.refundAmount || 0) : Number(r.amount || 0)), 0);
         return Promise.resolve([{ total }]).then(resolve, reject);
       }
       const statusWhere = b.where.mock.calls.map(c => c[0]).find(a => a && typeof a === 'object' && 'status' in a);
@@ -926,6 +934,22 @@ describe('runDeterministicMatching', () => {
     state.bankRows = [
       { id: 'bt-1', txn_date: '2026-08-10', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', matched_expense_id: 'exp-1', suggestion: null },
       { id: 'bt-credit', txn_date: '2026-08-12', amount: 20, direction: 'credit', account_type: 'card', status: 'refund_applied', suggestion: { refundAppliedTo: 'exp-1', refundAmount: 20 } },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '80.00', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.expenseLinksReverted).toBe(0);
+    expect(state.updates.find(u => u.patch.status === 'unmatched')).toBeUndefined();
+  });
+
+  test('a RELEASED refund keeps counting toward gross — the reduced expense link is not healed away', async () => {
+    // Release is terminal: the credit sits in 'ignored' with releasedRefundOf
+    // and its refundAmount key stripped — its own amount IS the refund. The
+    // $100 debit explains an $80 expense + $20 released refund; every gross
+    // reading must agree or the healer unlinks an explained debit that the
+    // gross-candidate path can never recover.
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', matched_expense_id: 'exp-1', suggestion: null },
+      { id: 'bt-credit', txn_date: '2026-08-12', amount: 20, direction: 'credit', account_type: 'card', status: 'ignored', suggestion: { releasedRefundOf: 'exp-1' } },
     ];
     state.expenses = [{ id: 'exp-1', amount: '80.00', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' }];
     const summary = await runDeterministicMatching();

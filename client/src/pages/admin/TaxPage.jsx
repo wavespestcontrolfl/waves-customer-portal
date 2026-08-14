@@ -4456,7 +4456,11 @@ function BankImportTab() {
                     && !(r.direction === "credit" && (r.suggestion?.refundCandidates?.length || r.suggestion?.payoutCandidates?.length))
                     && !r.suggestion?.candidates?.length ? (
                     "internal transfer?"
-                  ) : r.status === "unmatched" && r.suggestion?.candidates?.length ? (
+                  ) : r.status === "unmatched" && (r.suggestion?.candidates?.length
+                    /* after the SOLE candidate is unlinked, the parked list is
+                       empty but the on-demand endpoint is rejection-agnostic —
+                       keep the picker reachable as the load entry point */
+                    || (r.direction === "debit" && (fullExpenseCands[r.id] || r.suggestion?.rejectedExpenseIds?.length || r.suggestion?.lastUnlink?.expenseId))) ? (
                     <select
                       style={{ ...bankInput, maxWidth: 240 }}
                       value={linkPick[r.id] || ""}
@@ -4477,9 +4481,11 @@ function BankImportTab() {
                     >
                       <option value="">
                         {r.suggestion?.ignore ? "internal transfer? · " : ""}
-                        {r.suggestion.candidates.length} possible existing match{r.suggestion.candidates.length > 1 ? "es" : ""}…
+                        {(fullExpenseCands[r.id]?.list?.length ?? r.suggestion?.candidates?.length ?? 0) > 0
+                          ? `${fullExpenseCands[r.id]?.list?.length ?? r.suggestion.candidates.length} possible existing match${(fullExpenseCands[r.id]?.list?.length ?? r.suggestion.candidates.length) > 1 ? "es" : ""}…`
+                          : "link an existing expense…"}
                       </option>
-                      {(fullExpenseCands[r.id]?.list || r.suggestion.candidates).map((c) => (
+                      {(fullExpenseCands[r.id]?.list || r.suggestion?.candidates || []).map((c) => (
                         <option key={c.id} value={c.id}>
                           {(c.vendor_name || c.description || "expense").slice(0, 34)}
                           {c.amount != null ? ` · ${fmtM(c.amount)}` : ""} · {fmtD(c.expense_date)}
@@ -4487,13 +4493,20 @@ function BankImportTab() {
                       ))}
                       {(fullExpenseCands[r.id]
                         ? fullExpenseCands[r.id].list.length < fullExpenseCands[r.id].total
-                        : (r.suggestion.candidatesTotal || 0) > r.suggestion.candidates.length) && (
+                        : (r.suggestion?.candidatesTotal || 0) > (r.suggestion?.candidates?.length || 0)
+                          || !r.suggestion?.candidates?.length) && (
                         <option value="__more_candidates">
-                          +{(fullExpenseCands[r.id]?.total ?? r.suggestion.candidatesTotal) - (fullExpenseCands[r.id]?.list.length ?? r.suggestion.candidates.length)} more — load…
+                          {(fullExpenseCands[r.id]?.total ?? r.suggestion?.candidatesTotal ?? 0) > 0
+                            ? `+${(fullExpenseCands[r.id]?.total ?? r.suggestion.candidatesTotal) - (fullExpenseCands[r.id]?.list.length ?? (r.suggestion?.candidates?.length || 0))} more — load…`
+                            : "load matching expenses…"}
                         </option>
                       )}
                     </select>
-                  ) : r.status === "unmatched" && r.direction === "credit" && (r.suggestion?.refundCandidates?.length || r.suggestion?.payoutCandidates?.length) ? (
+                  ) : r.status === "unmatched" && r.direction === "credit" && (r.suggestion?.refundCandidates?.length || r.suggestion?.payoutCandidates?.length
+                    /* same reachability rule for credits: an unlinked payout
+                       leaves no parked candidates, so the picker renders on
+                       the rejection residue with load entries */
+                    || r.suggestion?.rejectedPayoutIds?.length || r.suggestion?.lastUnlink?.payoutId || fullPayouts[r.id] || fullRefunds[r.id]) ? (
                     /* BOTH action types can be parked at once (an unrelated
                        same-amount payout must not hide a legitimate refund) —
                        one select, values prefixed p:/r: so the button knows
@@ -4530,39 +4543,44 @@ function BankImportTab() {
                           r.suggestion?.ignore ? "internal transfer?" : null,
                           r.suggestion?.payoutCandidates?.length ? `${r.suggestion.payoutCandidates.length} payout${r.suggestion.payoutCandidates.length > 1 ? "s" : ""}` : null,
                           r.suggestion?.refundCandidates?.length ? `${r.suggestion.refundCandidates.length} original purchase${r.suggestion.refundCandidates.length > 1 ? "s" : ""}` : null,
-                        ].filter(Boolean).join(" · ")}
+                        ].filter(Boolean).join(" · ") || "link payout / refund"}
                         …
                       </option>
-                      {!!r.suggestion?.payoutCandidates?.length && (
+                      {!!(r.suggestion?.payoutCandidates?.length || fullPayouts[r.id]
+                        || r.suggestion?.rejectedPayoutIds?.length || r.suggestion?.lastUnlink?.payoutId) && (
                         <optgroup label="Stripe payouts — link">
-                          {(fullPayouts[r.id] || r.suggestion.payoutCandidates).map((c) => (
+                          {(fullPayouts[r.id] || r.suggestion?.payoutCandidates || []).map((c) => (
                             <option key={`p:${c.id}`} value={`p:${c.id}`}>
                               {fmtM(c.amount)} · arrived {fmtD(c.arrival_date)}
                             </option>
                           ))}
-                          {!fullPayouts[r.id] && (r.suggestion.payoutCandidatesTotal || 0) > r.suggestion.payoutCandidates.length && (
+                          {!fullPayouts[r.id] && ((r.suggestion?.payoutCandidatesTotal || 0) > (r.suggestion?.payoutCandidates?.length || 0)
+                            || !r.suggestion?.payoutCandidates?.length) && (
                             <option value="__more_payouts">
-                              +{r.suggestion.payoutCandidatesTotal - r.suggestion.payoutCandidates.length} more — load all…
+                              {(r.suggestion?.payoutCandidatesTotal || 0) > 0
+                                ? `+${r.suggestion.payoutCandidatesTotal - (r.suggestion?.payoutCandidates?.length || 0)} more — load all…`
+                                : "load payouts…"}
                             </option>
                           )}
                         </optgroup>
                       )}
-                      {!!r.suggestion?.refundCandidates?.length && (
-                        <optgroup label="Original purchases — apply refund">
-                          {(fullRefunds[r.id]?.list || r.suggestion.refundCandidates).map((c) => (
-                            <option key={`r:${c.id}`} value={`r:${c.id}`}>
-                              {(c.vendor_name || c.description || "expense").slice(0, 34)} · {fmtM(c.amount)} · {fmtD(c.expense_date)}
-                            </option>
-                          ))}
-                          {(fullRefunds[r.id]
-                            ? fullRefunds[r.id].list.length < fullRefunds[r.id].total
-                            : (r.suggestion.refundCandidatesTotal || 0) > r.suggestion.refundCandidates.length) && (
-                            <option value="__more_refunds">
-                              +{(fullRefunds[r.id]?.total ?? r.suggestion.refundCandidatesTotal) - (fullRefunds[r.id]?.list.length ?? r.suggestion.refundCandidates.length)} more — load…
-                            </option>
-                          )}
-                        </optgroup>
-                      )}
+                      <optgroup label="Original purchases — apply refund">
+                        {(fullRefunds[r.id]?.list || r.suggestion?.refundCandidates || []).map((c) => (
+                          <option key={`r:${c.id}`} value={`r:${c.id}`}>
+                            {(c.vendor_name || c.description || "expense").slice(0, 34)} · {fmtM(c.amount)} · {fmtD(c.expense_date)}
+                          </option>
+                        ))}
+                        {(fullRefunds[r.id]
+                          ? fullRefunds[r.id].list.length < fullRefunds[r.id].total
+                          : (r.suggestion?.refundCandidatesTotal || 0) > (r.suggestion?.refundCandidates?.length || 0)
+                            || !r.suggestion?.refundCandidates?.length) && (
+                          <option value="__more_refunds">
+                            {(fullRefunds[r.id]?.total ?? r.suggestion?.refundCandidatesTotal ?? 0) > 0
+                              ? `+${(fullRefunds[r.id]?.total ?? r.suggestion.refundCandidatesTotal) - (fullRefunds[r.id]?.list.length ?? (r.suggestion?.refundCandidates?.length || 0))} more — load…`
+                              : "load original purchases…"}
+                          </option>
+                        )}
+                      </optgroup>
                     </select>
                   ) : (
                     r.suggestion?.categoryName || ""

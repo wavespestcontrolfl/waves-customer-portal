@@ -267,10 +267,20 @@ function isPlausiblePayoutLink(row, payout) {
 // which matters when the refund was applied BEFORE that debit was imported:
 // the reduced net amount would otherwise never match the full-price debit.
 async function appliedRefundTotal(expenseId, dbOrTrx = db) {
+  // RELEASED refunds count too: the expense keeps its reduction after a
+  // Release (terminal 'ignored' + releasedRefundOf), so every gross
+  // reading must include them or the healer would unlink the explained
+  // debit and the gross-candidate path could never recover it. A released
+  // row's own amount IS its refund (the refundAmount key is stripped).
   const r = await dbOrTrx('bank_transactions')
-    .where({ status: 'refund_applied' })
-    .whereRaw("suggestion->>'refundAppliedTo' = ?", [String(expenseId)])
-    .first(dbOrTrx.raw("coalesce(sum((suggestion->>'refundAmount')::numeric), 0) as total"));
+    .where(function appliedOrReleased() {
+      this.where(function applied() {
+        this.where({ status: 'refund_applied' }).whereRaw("suggestion->>'refundAppliedTo' = ?", [String(expenseId)]);
+      }).orWhere(function released() {
+        this.where({ status: 'ignored' }).whereRaw("suggestion->>'releasedRefundOf' = ?", [String(expenseId)]);
+      });
+    })
+    .first(dbOrTrx.raw("coalesce(sum(case when status = 'refund_applied' then (suggestion->>'refundAmount')::numeric else amount end), 0) as total"));
   return Number(r && r.total) || 0;
 }
 
@@ -323,8 +333,7 @@ async function surveyExpenseCandidatesForRow(row, rejected, dbOrTrx = db) {
     // unexplained. Refunded expenses match ONLY through the gross path.
     .whereNotExists(function refunded() {
       this.select(1).from('bank_transactions as rbt')
-        .whereRaw("rbt.status = 'refund_applied'")
-        .whereRaw("rbt.suggestion->>'refundAppliedTo' = expenses.id::text");
+        .whereRaw("((rbt.status = 'refund_applied' and rbt.suggestion->>'refundAppliedTo' = expenses.id::text) or (rbt.status = 'ignored' and rbt.suggestion->>'releasedRefundOf' = expenses.id::text))");
     })
     // UNBOUNDED on purpose: uniqueness must be judged over the COMPLETE
     // candidate set — a cap could hide a second strong candidate and fake
@@ -342,17 +351,17 @@ async function surveyExpenseCandidatesForRow(row, rejected, dbOrTrx = db) {
   // refund credit nets the difference in the purchase month.
   let grossQuery = dbOrTrx('expenses as e')
     .join('bank_transactions as rbt', function refundLink() {
-      this.on(db.raw("rbt.status = 'refund_applied'"))
-        .andOn(db.raw("rbt.suggestion->>'refundAppliedTo' = e.id::text"));
+      // applied OR released — both leave the expense reduced
+      this.on(db.raw("((rbt.status = 'refund_applied' and rbt.suggestion->>'refundAppliedTo' = e.id::text) or (rbt.status = 'ignored' and rbt.suggestion->>'releasedRefundOf' = e.id::text))"));
     })
     .whereBetween('e.expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
     .whereNotExists(function claimed() {
       this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = e.id').whereRaw('bt.id <> ?', [row.id]);
     })
     .groupBy('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method')
-    .havingRaw("abs(e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) - ?) <= ?", [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
+    .havingRaw("abs(e.amount + sum(case when rbt.status = 'refund_applied' then (rbt.suggestion->>'refundAmount')::numeric else rbt.amount end) - ?) <= ?", [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
     .select('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method',
-      db.raw("e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) as gross_amount"));
+      db.raw("e.amount + sum(case when rbt.status = 'refund_applied' then (rbt.suggestion->>'refundAmount')::numeric else rbt.amount end) as gross_amount"));
   if (rejected.expenseIds.length) grossQuery = grossQuery.whereNotIn('e.id', rejected.expenseIds);
   const netIds = new Set(found.map(c => c.id));
   for (const g of await grossQuery) {
@@ -979,10 +988,10 @@ async function healEditedExpenseLinks() {
   const links = await db('bank_transactions as bt')
     .join('expenses as e', 'e.id', 'bt.matched_expense_id')
     .joinRaw(`left join lateral (
-        select coalesce(sum((rbt.suggestion->>'refundAmount')::numeric), 0) as rsum
+        select coalesce(sum(case when rbt.status = 'refund_applied' then (rbt.suggestion->>'refundAmount')::numeric else rbt.amount end), 0) as rsum
         from bank_transactions rbt
-        where rbt.status = 'refund_applied'
-          and rbt.suggestion->>'refundAppliedTo' = e.id::text
+        where (rbt.status = 'refund_applied' and rbt.suggestion->>'refundAppliedTo' = e.id::text)
+           or (rbt.status = 'ignored' and rbt.suggestion->>'releasedRefundOf' = e.id::text)
       ) rs on true`)
     .where('bt.status', 'matched_expense')
     .select('bt.id as id', 'bt.amount as bt_amount', 'bt.txn_date as txn_date', 'bt.description as description',
