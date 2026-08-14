@@ -363,7 +363,11 @@ async function surveyExpenseCandidatesForRow(row, rejected, dbOrTrx = db) {
 // against the effective banked amount, excluding only OTHER rows' claims.
 // Used by the matcher, its post-claim ambiguity verify, and the
 // crash-recovery sweep for verifyPending payout claims.
-async function surveyPayoutCandidatesForRow(row, rejected, dbOrTrx = db) {
+// opts.cap: the automatic paths keep the 50(+1 sentinel) uniqueness cap;
+// the manual candidate endpoint passes a much higher cap so a valid payout
+// beyond the automatic sentinel stays selectable (the ±3-day amount-matched
+// window keeps the real set tiny either way; overflow stays honest).
+async function surveyPayoutCandidatesForRow(row, rejected, dbOrTrx = db, { cap = 50 } = {}) {
   const txnDate = toDateStr(row.txn_date);
   let payoutQuery = dbOrTrx('stripe_payouts')
     // Only money that actually REACHED the bank can explain a bank
@@ -396,13 +400,11 @@ async function surveyPayoutCandidatesForRow(row, rejected, dbOrTrx = db) {
     })
     .select('id', 'amount', 'arrival_date', 'reconciled', 'bank_last_four',
       db.raw('(case when stripe_payouts.reconciled then coalesce(latest.actual_amount, stripe_payouts.amount) else stripe_payouts.amount end) as effective_amount'))
-    // 50 + 1 overflow sentinel over the now amount-filtered set, far
-    // above any real same-amount count: a 51st row means uniqueness
-    // would be a guess, so the row parks its candidates instead of
-    // auto-linking — and still leaves the fresh pool (a bare
-    // `continue` kept re-selecting it, starving newer imports while
-    // offering the operator nothing).
-    .limit(51);
+    // cap + 1 overflow sentinel over the now amount-filtered set, far
+    // above any real same-amount count: an over-cap row means the survey
+    // was truncated — automatic paths treat that as uniqueness-would-be-a-
+    // guess and park instead of auto-linking, still leaving the fresh pool.
+    .limit(cap + 1);
   if (rejected.payoutIds.length) payoutQuery = payoutQuery.whereNotIn('id', rejected.payoutIds);
   const fetched = await payoutQuery;
   const bankingRejected = new Set(rejected.bankingPayoutIds);
@@ -413,7 +415,7 @@ async function surveyPayoutCandidatesForRow(row, rejected, dbOrTrx = db) {
     // stands: once a corrected 'confirmed' reconciliation flips the
     // payout back to reconciled, it is eligible again
     .filter(c => !(bankingRejected.has(c.id) && !c.reconciled));
-  return { candidates: found, overflow: fetched.length > 50 };
+  return { candidates: found, overflow: fetched.length > cap };
 }
 
 // Crash-recovery sweep for the post-claim plurality verify: a claim commits

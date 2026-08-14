@@ -2543,7 +2543,9 @@ router.get('/bank-import/:id/payout-candidates', async (req, res, next) => {
     // Banking-derived human-rejection exclusion stays — that ruling stands
     // until a corrected confirmed reconciliation lifts it
     const rejected = bankImport.rejectedTargets(row.suggestion);
-    const { candidates, overflow } = await bankImport.surveyPayoutCandidatesForRow(row, { expenseIds: [], payoutIds: [], bankingPayoutIds: rejected.bankingPayoutIds });
+    // manual mode: a far higher cap than the automatic 50-sentinel — a
+    // valid payout beyond the uniqueness cap must stay selectable here
+    const { candidates, overflow } = await bankImport.surveyPayoutCandidatesForRow(row, { expenseIds: [], payoutIds: [], bankingPayoutIds: rejected.bankingPayoutIds }, undefined, { cap: 1000 });
     const txnMs = new Date(`${dateCellStr(row.txn_date)}T00:00:00Z`).getTime();
     candidates.sort((a, b) => (Math.abs(new Date(`${dateCellStr(a.arrival_date)}T00:00:00Z`).getTime() - txnMs)
       - Math.abs(new Date(`${dateCellStr(b.arrival_date)}T00:00:00Z`).getTime() - txnMs))
