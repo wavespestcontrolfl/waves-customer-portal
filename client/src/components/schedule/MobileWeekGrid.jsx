@@ -719,6 +719,8 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
         technicianChange={pending?.technicianChange}
         serviceId={pending?.svc?.id}
         toWindow={pending?.newWindow}
+        customerId={pending?.svc?.customerId || pending?.svc?.customer_id}
+        durationMinutes={pending?.svc ? effectiveDuration(pending.svc) : undefined}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
       />

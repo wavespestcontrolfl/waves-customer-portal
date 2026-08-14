@@ -11,6 +11,8 @@ import { useEffect, useState } from 'react';
 import { Button } from '../ui';
 import { useSlotConflicts } from './useSlotConflicts';
 import SlotConflictNotice from './SlotConflictNotice';
+import { useBestTimes } from './useBestTimes';
+import BestTimeHint from './BestTimeHint';
 
 function formatDateLong(dateStr) {
   if (!dateStr) return '';
@@ -41,6 +43,8 @@ export default function RescheduleConfirmModal({
   technicianChange, // optional { fromName, toName }
   serviceId, // optional — enables the advisory slot-conflict check
   toWindow, // optional 'HH:MM-HH:MM' landing window (pending.newWindow)
+  customerId, // optional — enables the advisory best-times hint
+  durationMinutes, // optional — best-times hint duration (engine defaults 60)
   onConfirm,
   onCancel,
 }) {
@@ -57,6 +61,18 @@ export default function RescheduleConfirmModal({
     windowEnd: toEnd || null,
     excludeServiceIds: serviceId != null ? [serviceId] : [],
     enabled: open && !!toStart,
+  });
+
+  // Best times on the landing day — display-only by design: the landing
+  // window is fixed by the drop, so the chips carry no onPick (cancel and
+  // re-drop to take a suggestion). If the drop IS a best time, its chip
+  // shows as selected.
+  const { bestTimes } = useBestTimes({
+    date: /^\d{4}-\d{2}-\d{2}$/.test(String(toDate || '')) ? toDate : null,
+    customerId,
+    durationMinutes,
+    excludeServiceIds: serviceId != null ? [serviceId] : undefined,
+    enabled: open,
   });
 
   // The modal stays mounted between drags (open just flips), so a previous
@@ -163,6 +179,7 @@ export default function RescheduleConfirmModal({
           </div>
 
           <SlotConflictNotice conflicts={conflicts} />
+          <BestTimeHint bestTimes={bestTimes} currentStart={toStart} />
         </div>
 
         {/* Footer */}

@@ -10,6 +10,9 @@
  *     dateFrom?, dateTo?,     // default: today → +7 days
  *     technicianId?,          // restrict to one tech
  *     topN?,                  // default 10
+ *     excludeServiceIds?,     // drop these visits from occupancy (reschedule self-exclusion)
+ *     slotStepMinutes?,       // snap starts to this granularity (1–120)
+ *     hint?,                  // advisory best-times consumer — gated (GATE_BEST_TIME_HINTS)
  *   }
  */
 
@@ -19,6 +22,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
@@ -104,7 +108,35 @@ router.post('/', async (req, res) => {
       customerId, address, lat, lng,
       durationMinutes, dateFrom, dateTo,
       technicianId, topN,
+      hint, excludeServiceIds, slotStepMinutes,
     } = req.body || {};
+
+    // Best-time hint consumers go dark behind GATE_BEST_TIME_HINTS — read
+    // at call time so a flip needs no redeploy (same kill-switch contract
+    // as dispatch slot-check: gated:true, no search, pickers render exactly
+    // as today). The Find-a-Time button never sends `hint`, so the existing
+    // ranged search stays ungated.
+    if (hint && !gateEnvValue('GATE_BEST_TIME_HINTS')) {
+      return res.json({ ok: true, gated: true, slots: [] });
+    }
+
+    // Reschedule pickers exclude the visit's own current row so it can't
+    // collide with itself. Same 25-id cap as dispatch slot-check.
+    if (excludeServiceIds !== undefined) {
+      const valid = Array.isArray(excludeServiceIds)
+        && excludeServiceIds.length <= 25
+        && excludeServiceIds.every((id) => (
+          (typeof id === 'string' && id.trim() !== '')
+          || (typeof id === 'number' && Number.isFinite(id))
+        ));
+      if (!valid) throw httpError(400, 'excludeServiceIds must be an array of up to 25 service ids');
+    }
+    if (slotStepMinutes !== undefined) {
+      const step = Number(slotStepMinutes);
+      if (!Number.isInteger(step) || step < 1 || step > 120) {
+        throw httpError(400, 'slotStepMinutes must be an integer between 1 and 120');
+      }
+    }
 
     const today = etDateString();
     const from = dateFrom || today;
@@ -126,6 +158,9 @@ router.post('/', async (req, res) => {
       dateTo: clampedTo,
       technicianId: technicianId || undefined,
       topN: Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100),
+      // undefined = the engine's own defaults ([] / exact-minute starts).
+      excludeServiceIds,
+      slotStepMinutes: slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
       includeBlackoutDates: true,

@@ -34,6 +34,8 @@ import EstimateProvenanceCard from './EstimateProvenanceCard';
 import useModalFocus from '../../hooks/useModalFocus';
 import SlotConflictNotice from './SlotConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
+import BestTimeHint from './BestTimeHint';
+import { useBestTimes } from './useBestTimes';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -1438,6 +1440,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     windowEnd: windowStart && slotCheckDuration > 0
       ? computeWindowEnd(windowStart, slotCheckDuration)
       : null,
+  });
+  // Advisory drive-detour suggestions for the picked day — a chip only sets
+  // the start time (window end is derived from durations at submit), and is
+  // separate from the ranged "Find best times" panel above.
+  const { bestTimes } = useBestTimes({
+    date: apptDate ? String(apptDate).split('T')[0] : null,
+    customerId: selectedCustomer?.id,
+    durationMinutes: slotCheckDuration,
   });
 
   // Submit
@@ -2936,6 +2946,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
           </div>
           <SlotConflictNotice conflicts={slotConflicts} style={{ marginBottom: 10 }} />
+          <BestTimeHint
+            bestTimes={bestTimes}
+            currentStart={windowStart}
+            onPick={(slot) => setWindowStart(slot.start)}
+            style={{ marginBottom: 10 }}
+          />
 
           {hasRecurringServices && firstCustomRecurringIndex < 0 && (
             <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 10, marginTop: 4 }}>
