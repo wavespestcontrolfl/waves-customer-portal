@@ -1580,6 +1580,11 @@ async function runDeterministicMatching({ limit } = {}) {
               } else if (echo && echo.ineligibleReverted) {
                 summary.payoutsLinked--;
                 summary.payoutIneligibleReverted = (summary.payoutIneligibleReverted || 0) + 1;
+              } else if (echo && echo.skipped && (echo.reason === 'human_draft' || echo.reason === 'precondition')) {
+                // link kept, pending flag kept, NOTHING echoed — this new
+                // claim needs another pass, and the retry sweep already
+                // ran, so it must read as remaining work here
+                summary.moreRemaining = true;
               }
             } catch (reconErr) {
               // flag already persisted with the claim — the sweep retries,
@@ -1846,6 +1851,8 @@ module.exports = {
   healEditedExpenseLinks,
   healUnreconciledLinks,
   healOrphanRefunds,
+  verifyPendingExpenseClaims,
+  verifyPendingPayoutClaims,
   methodIncompatible,
   effectivePayoutAmount,
   suggestionMerge,

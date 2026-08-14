@@ -1637,6 +1637,12 @@ async function healBankImportSnapshot() {
   await bankImport.healEditedExpenseLinks();
   await bankImport.healUnreconciledLinks();
   await bankImport.healOrphanRefunds();
+  // crash-leftover claim verifications finish here too (bounded sweeps):
+  // the snapshots must not count a possibly-ambiguous claim as completed,
+  // and a verifyPending payout is deliberately excluded from echo retries
+  // until someone verifies it
+  await bankImport.verifyPendingExpenseClaims();
+  await bankImport.verifyPendingPayoutClaims();
 }
 
 // /bank-import/status always answers (the client uses it to decide whether
