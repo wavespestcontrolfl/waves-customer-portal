@@ -765,6 +765,42 @@ describe('admin customers route helpers', () => {
     expect(restampedLine.serviceId).toBe(11);
   });
 
+  test('one-time palm item sheds the recurring identity; omitted when no one-time row exists', () => {
+    const semiannualRow = { id: 21, service_key: 'palm_injection_semiannual', name: 'Semiannual Palm Injection Program', category: 'lawn', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2 };
+    const oneTimeRow = { id: 22, service_key: 'palm_injection', name: 'Palm Injection Treatment', category: 'lawn', billing_type: 'one_time', frequency: null, visits_per_year: null };
+    const estimate = {
+      id: 'estimate-palm-onetime',
+      service_interest: 'Semiannual Palm Injection Program',
+      onetime_total: 150,
+      monthly_total: 0,
+      estimate_data: {
+        result: {
+          oneTime: {
+            total: 150,
+            items: [{ service: 'palm_injection_semiannual', name: 'Semiannual Palm Injection Program', price: 150 }],
+          },
+        },
+      },
+    };
+    // Both rows present: the one-time item routes to the ONE-TIME palm row
+    // (codex r27 P1) — never the semiannual identity whose completion
+    // profile carries recurring billing posture.
+    const [line] = scheduleLinesFromEstimate(estimate, indexServicesForSchedule([semiannualRow, oneTimeRow]));
+    expect(line.serviceId).toBe(22);
+    expect(line.serviceKey).toBe('palm_injection');
+    expect(line.cadence).toBe('one_time');
+    // One-time row absent: a null identity is NOT safely unmatched — the
+    // line's name would resolve the recurring completion profile by exact
+    // name at completion — so the line is omitted, and the zero-line
+    // fallback (fed by a service_interest naming the semiannual row) must
+    // not resurrect the identity either (codex #3400 r1 P1).
+    const lines = scheduleLinesFromEstimate(estimate, indexServicesForSchedule([semiannualRow]));
+    for (const fallback of lines) {
+      expect(fallback.serviceKey).not.toBe('palm_injection_semiannual');
+      expect(fallback.serviceId).not.toBe(21);
+    }
+  });
+
   test('does not create fallback schedule lines from billing-only estimate rows', () => {
     const lines = scheduleLinesFromEstimate({
       id: 'estimate-1',

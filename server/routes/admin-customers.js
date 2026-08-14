@@ -590,9 +590,13 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
   // (codex r27 P1): the modal would submit a non-recurring visit carrying
   // the semiannual service id + recurring completion profile — completing
   // with recurring posture and skipping its one-time invoice. Route to
-  // the one-time palm row when the index has it, else stay unmatched.
+  // the one-time palm row when the index has it; with no one-time row the
+  // line is OMITTED — a null identity is not safely unmatched here, since
+  // the return below falls back to line.service/name and completion
+  // resolves the semiannual profile by exact name.
   if (kind !== 'recurring' && rawMatched?.service_key === 'palm_injection_semiannual') {
     rawMatched = serviceIndex.byKey.get('palm_injection') || null;
+    if (!rawMatched) return null;
   }
   // The matched catalog row's own cadence beats the hardcoded quarterly
   // fallback (codex r18 pre-push P0): a bare explicit semiannual palm
@@ -838,8 +842,15 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
       ? moneyOrNull(monthlyTotal > 0 ? monthlyTotal : null, annualMonthlyEquivalent)
       : moneyOrNull(estimate.onetime_total, estimate.monthly_total);
     const fallbackName = estimate.service_interest || estimate.waveguard_tier || 'Accepted estimate';
-    const matched = serviceCatalogMatch({ name: fallbackName }, serviceIndex);
+    let matched = serviceCatalogMatch({ name: fallbackName }, serviceIndex);
     const fallbackIsRecurring = hasRecurringEstimateTotal;
+    // Same rule as formatEstimateLine (codex r27 P1): a one-time fallback
+    // line must not carry the recurring palm identity either — a
+    // service_interest naming the semiannual row would otherwise resurrect
+    // the exact identity the omitted line shed.
+    if (!fallbackIsRecurring && matched?.service_key === 'palm_injection_semiannual') {
+      matched = serviceIndex.byKey.get('palm_injection') || null;
+    }
     lines.push({
       serviceId: matched?.id || null,
       serviceKey: matched?.service_key || null,

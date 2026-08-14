@@ -4172,7 +4172,18 @@ const EstimateConverter = {
             }
           } catch (retryErr) {
             logger.error(`[estimate-converter] reserved catalog-key prefetch failed twice: ${retryErr.message}`);
-            throw idErr;
+            // A bare database error would be swallowed by the fail-soft
+            // comboErr catch below (it rethrows recognized codes only), so
+            // the abort must carry one — same operational contract as the
+            // palm refusals: 422, convert manually.
+            const abort = new Error(
+              'Catalog identities for the reserved rows could not be resolved (database lookup failed twice), so this acceptance cannot verify what is already scheduled — retry, or convert manually.'
+            );
+            abort.code = 'RESERVED_CATALOG_IDENTITY_UNKNOWN';
+            abort.isOperational = true;
+            abort.status = 422;
+            abort.statusCode = 422;
+            throw abort;
           }
         }
         for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits]) {
@@ -4426,7 +4437,8 @@ const EstimateConverter = {
         // P0): this fail-soft catch would otherwise complete
         // acceptance/billing without the sold palm series.
         if (comboErr.code === 'PALM_RECURRING_CATALOG_MISSING'
-          || comboErr.code === 'PALM_RECURRING_LINE_INVALID') throw comboErr;
+          || comboErr.code === 'PALM_RECURRING_LINE_INVALID'
+          || comboErr.code === 'RESERVED_CATALOG_IDENTITY_UNKNOWN') throw comboErr;
         logger.warn(`[estimate-converter] combined routing on reserved rows failed: ${comboErr.message}`);
       }
 
