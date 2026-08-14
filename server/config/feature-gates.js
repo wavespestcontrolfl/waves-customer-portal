@@ -1231,6 +1231,17 @@ const gates = {
   // Double-gated behind cronJobs. Kill switch: unset GATE_ROUTE_REORDER.
   routeReorder: gateEnvValue('GATE_ROUTE_REORDER'),
 
+  // WINDOW-FIT FALLBACK inside the nightly reorder pass: when Google's
+  // distance-optimal order fails the window chronology/feasibility guards,
+  // compute the best LEGAL order in-process (backbone of promised windows +
+  // exhaustive/greedy interleaving, same 805 m floor, same fenced write)
+  // instead of skipping the day. Nested inside GATE_ROUTE_REORDER — it only
+  // ever runs from that pass. Explicit opt-in in every environment; OFF =
+  // the pre-fallback skip, byte for byte. Read at CALL time via
+  // gateEnvValue (flip needs no redeploy). Kill switch: unset
+  // GATE_ROUTE_REORDER_WINDOW_FIT.
+  routeReorderWindowFit: gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT'),
+
   // Drive-Time Calibration — swaps the straight-line drive-time approximation
   // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
   // real trips: a fixed per-leg overhead plus a per-mile rate. Purely an
