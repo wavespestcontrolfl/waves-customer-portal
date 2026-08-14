@@ -853,7 +853,12 @@ async function runDeterministicMatching({ limit } = {}) {
           this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_payout_id = stripe_payouts.id');
         })
         .select('id', 'amount', 'arrival_date', 'reconciled', 'bank_last_four')
-        .limit(50); // safety net far above any real 7-day payout count
+        // 50 + 1 overflow sentinel, far above any real 7-day payout count:
+        // a 51st row means the window wasn't fully surveyed, so the row
+        // parks its candidates instead of auto-linking — and still leaves
+        // the fresh pool (the old bare `continue` kept re-selecting it,
+        // starving newer imports while offering the operator nothing).
+        .limit(51);
       if (rejected.payoutIds.length) payoutQuery = payoutQuery.whereNotIn('id', rejected.payoutIds);
       const fetched = await payoutQuery;
       // reconciled candidates compare against their confirmed ACTUAL amount
@@ -867,13 +872,11 @@ async function runDeterministicMatching({ limit } = {}) {
         // payout back to reconciled, it is eligible again
         .filter(c => !(bankingRejected.has(c.id) && !c.reconciled));
       const exact = candidates.filter(c => centsEqual(c.effective_amount, row.amount));
-      if (fetched.length === 50) {
-        // cap hit = the window wasn't fully surveyed; uniqueness would be a
-        // guess — park by treating the set as plural
-        summary.ambiguous++;
-        continue;
-      }
-      if (candidates.length === 1 && exact.length === 1 && payoutProvenance(row, exact[0])) {
+      // survey overflow = uniqueness would be a guess; fall through to the
+      // parking branches so the row gains candidates (or noMatch) and
+      // rotates into the examined pool
+      const surveyOverflow = fetched.length > 50;
+      if (!surveyOverflow && candidates.length === 1 && exact.length === 1 && payoutProvenance(row, exact[0])) {
         try {
           // Reconciliation intent is persisted ATOMICALLY with the claim —
           // ALWAYS, not conditioned on a pre-read of `reconciled` (that read

@@ -2134,7 +2134,7 @@ router.post('/bank-import/:id/apply-refund', async (req, res, next) => {
     if (adjustedServiceId) {
       try {
         const JobCosting = require('../services/job-costing');
-        JobCosting.calculateJobCost(adjustedServiceId).catch((err) => {
+        void JobCosting.calculateJobCost(adjustedServiceId).catch((err) => {
           logger.warn(`[bank-import] job-cost recalculation for service ${adjustedServiceId} failed after refund adjustment — job_costs/service_records remain pre-refund: ${err.message}`);
         });
       } catch (err) {
@@ -2327,7 +2327,7 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       if (restoredServiceId) {
         try {
           const JobCosting = require('../services/job-costing');
-          JobCosting.calculateJobCost(restoredServiceId).catch((err) => {
+          void JobCosting.calculateJobCost(restoredServiceId).catch((err) => {
             logger.warn(`[bank-import] job-cost recalculation for service ${restoredServiceId} failed after refund undo — job_costs/service_records remain stale: ${err.message}`);
           });
         } catch (err) {

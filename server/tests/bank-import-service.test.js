@@ -664,6 +664,18 @@ describe('runDeterministicMatching', () => {
     expect(state.updates.find(u => u.patch.status === 'matched_expense')).toBeUndefined();
   });
 
+  test('a payout survey OVERFLOW parks candidates instead of auto-linking or staying forever fresh', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE DEPOSIT', amount: 500, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = Array.from({ length: 51 }, (_, i) => ({ id: `po-${String(i).padStart(2, '0')}`, amount: '500.00', arrival_date: '2026-08-11', reconciled: false }));
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0); // uniqueness would be a guess over a truncated survey
+    expect(summary.ambiguous).toBe(1);
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).payoutCandidates);
+    expect(parked).toBeDefined(); // the row leaves the fresh pool with candidates, not a bare continue
+    expect(sugOf(parked).payoutCandidates).toHaveLength(20);
+    expect(sugOf(parked).payoutCandidatesTotal).toBe(51);
+  });
+
   test('ambiguous payout candidates park nearest-arrival-first with an honest total', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'DEPOSIT', amount: 500, direction: 'credit', account_type: 'bank', suggestion: null }];
     state.payouts = [
