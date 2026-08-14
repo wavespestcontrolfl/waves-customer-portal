@@ -563,6 +563,7 @@ describe('RelayConversation — explicit end after capture', () => {
     const convo = new RelayConversation({
       callSid: 'CA-superseded', sessionKey: 'nonce-OLD', from: '+19415551234', send: jest.fn(), endSession,
     });
+    convo._callerVerified = true; // only a CLAIMED session is fenced
     const out = await convo._executeToolBounded('get_availability', {}, {});
     expect(out).toMatch(/superseded by a reconnect/i);
     expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
@@ -584,6 +585,23 @@ describe('RelayConversation — explicit end after capture', () => {
     const out = await convo._executeToolBounded('get_availability', {}, {});
     expect(out).toMatch(/superseded by a reconnect/i);
     expect(endSession).toHaveBeenCalled();
+  });
+
+  // ⭐ THE SAFE RECONNECT PATH: an UNVERIFIED session is never killed by a
+  // foreign owner — it might be the mis-ordered legitimate reconnect that
+  // lost the claim race (clock skew / same-ms tie), and it only ever writes
+  // unlinked capture-only state.
+  test('an UNVERIFIED session with a FOREIGN owner keeps its capture-only tools', async () => {
+    const builder = {};
+    builder.where = jest.fn(() => builder);
+    builder.first = jest.fn(async () => ({ metadata: { relay_session_claim_owner: 'nonce-WINNER' } }));
+    db.mockImplementation(() => builder);
+    const convo = new RelayConversation({
+      callSid: 'CA-lost-race', sessionKey: 'nonce-LOSER', from: '+19415551234', send: jest.fn(), endSession: jest.fn(),
+    });
+    // _callerVerified stays false — the claim was refused.
+    const out = await convo._executeToolBounded('definitely_not_a_tool', {}, {});
+    expect(out).not.toMatch(/superseded/i);
   });
 
   test('an UNVERIFIED session with NO call_log row (the sandbox path) keeps its tools', async () => {
@@ -621,6 +639,7 @@ describe('RelayConversation — explicit end after capture', () => {
     const convo = new IsolatedConvo({
       callSid: 'CA-superseded-turn', sessionKey: 'nonce-OLD', from: '+19415551234', send: jest.fn(), endSession,
     });
+    convo._callerVerified = true; // only a CLAIMED session is fenced
     await convo._runLoop('what is my balance?').catch(() => {});
     expect(streamSpy).not.toHaveBeenCalled();
     expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
@@ -672,6 +691,7 @@ describe('RelayConversation — explicit end after capture', () => {
     const convo = new RelayConversation({
       callSid: 'CA-superseded-close', sessionKey: 'nonce-OLD', from: '+19415551234', send: jest.fn(), endSession: jest.fn(),
     });
+    convo._callerVerified = true; // only a CLAIMED session is fenced
     const { createLeadFromExtraction: floorWrite } = require('../services/lead-from-extraction');
     floorWrite.mockClear();
     await convo.end('socket_closed');
@@ -697,6 +717,7 @@ describe('RelayConversation — explicit end after capture', () => {
     const convo = new RelayConversation({
       callSid: 'CA-owned-close', sessionKey: 'nonce-MINE', from: '+19415551234', send: jest.fn(), endSession: jest.fn(),
     });
+    convo._callerVerified = true; // only a CLAIMED session is fenced
     await convo.end('socket_closed');
     const fences = builder.whereRaw.mock.calls.map(([sql]) => String(sql));
     expect(fences.some((sql) => sql.includes("relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?"))).toBe(true);
@@ -710,6 +731,7 @@ describe('RelayConversation — explicit end after capture', () => {
     const convo = new RelayConversation({
       callSid: 'CA-owned', sessionKey: 'nonce-MINE', from: '+19415551234', send: jest.fn(), endSession: jest.fn(),
     });
+    convo._callerVerified = true; // only a CLAIMED session is fenced
     const out = await convo._executeToolBounded('definitely_not_a_tool', {}, {});
     expect(out).not.toMatch(/superseded/i); // fence passed; normal tool handling follows
   });

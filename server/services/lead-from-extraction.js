@@ -476,6 +476,20 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   }
   customerId = customer?.id || null;
 
+  // ⭐ EARLY KEYED OWNERSHIP CHECK — before ANY write this function makes
+  // (the language hint below, the lifecycle contact-instruction surfacing).
+  // Non-atomic by design (the merge transaction keeps the locked check); this
+  // closes the pre-merge write paths for a superseded socket. opts.sessionKey
+  // is only threaded for sessions that actually CLAIMED the call.
+  if (opts.sessionKey && opts.callSid) {
+    const { claimOwnedElsewhere } = require('./voice-agent/relay-context');
+    const supersededEarly = await claimOwnedElsewhere(db, opts.callSid, opts.sessionKey).catch(() => false);
+    if (supersededEarly) {
+      logger.warn(`[voice-agent-lead] capture refused before any write — session superseded callSid=${opts.callSid}`);
+      return { leadId: null, customerId: null, created: false, superseded: true };
+    }
+  }
+
   // Non-routing language hint on the matched customer — applied even if the lead
   // is skipped below. Best-effort; only fills when empty so a prior preference
   // is never clobbered. (Routing never reads this column.)
@@ -666,7 +680,12 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     leadUpdates.updated_at = new Date();
     await q('leads').where({ id: leadId }).update(leadUpdates);
 
-    await q('lead_activities').insert({
+    // The activity row is stashed for a POST-COMMIT best-effort insert —
+    // ⭐ a caught error INSIDE a Postgres transaction still ABORTS it
+    // (try/catch is not a savepoint): swallowing the failure here turned the
+    // whole lead commit into a silent rollback while the function returned a
+    // leadId and the capture floor stood down forever.
+    activityRow = {
       lead_id: leadId,
       activity_type: 'ai_triage',
       description: `AI voice agent captured: ${service || 'general inquiry'}${language === 'es' ? ' (Spanish)' : ''}, quality: ${extracted.lead_quality || 'unknown'}`,
@@ -678,7 +697,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
         source: 'voice_agent',
         ...(contactPreference || {}),
       }),
-    }).catch((e) => logger.warn(`[voice-agent-lead] activity log failed (non-blocking): ${e.message}`));
+    };
   };
 
   const runCapture = async (q) => {
@@ -686,6 +705,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     await mergeAndStamp(q);
   };
   let superseded = false;
+  let activityRow = null;
   if (serializeCapture) {
     try {
       await db.transaction(async (trx) => {
@@ -729,6 +749,13 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     }
   } else {
     await runCapture(db);
+  }
+
+  // Best-effort, AFTER the lead transaction committed — an activity failure
+  // must cost only the activity, never the lead.
+  if (leadId && activityRow) {
+    await db('lead_activities').insert(activityRow)
+      .catch((e) => logger.warn(`[voice-agent-lead] activity log failed (non-blocking): ${e.message}`));
   }
 
   return { leadId, customerId, created };

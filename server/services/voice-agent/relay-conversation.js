@@ -674,8 +674,12 @@ class RelayConversation {
       callSid: this.callSid,
       // The claim-owner nonce — every WRITE transaction re-proves ownership
       // against it INSIDE the transaction (the supersession fences outside
-      // are check-then-act; the in-trx check is the atomic one).
-      sessionKey: this.sessionKey,
+      // are check-then-act; the in-trx check is the atomic one). LIVE getter,
+      // and null for an unverified session: only a session that actually
+      // CLAIMED the call is fenced — an unverified one (including the
+      // mis-ordered reconnect that lost the claim race) writes unlinked
+      // capture-only state and must not be blocked by the foreign owner.
+      get sessionKey() { return convo._callerVerified === true ? convo.sessionKey : null; },
       language: this.language,
       // Live getters like callerVerified below: a late-landing verification
       // UPGRADES the session context after this turn's ctx was built, and a
@@ -790,12 +794,17 @@ class RelayConversation {
    */
   async _sessionSuperseded() {
     if (!this.sessionKey || !this.callSid) return false;
+    // ⭐ ONLY A CLAIMED SESSION CAN BE SUPERSEDED. An UNVERIFIED session never
+    // held privileged context: it is capture-only by construction, its writes
+    // are unlinked, and killing it on a foreign owner terminated the one
+    // thing it might legitimately be — a mis-ordered reconnect (clock skew /
+    // same-ms tie) that lost the claim race. That degraded-but-alive session
+    // IS the safe reconnect path. A session that DID claim (verified) fails
+    // closed: it must still prove the claim is exactly its own.
+    if (this._callerVerified !== true) return false;
     const { relaySessionClaimOwner } = require('./relay-context');
     const res = await relaySessionClaimOwner(this.callSid);
-    const claimedByUs = this._callerVerified === true;
-    return claimedByUs
-      ? !(res && res.ok === true && res.owner === this.sessionKey)
-      : !!(res && res.ok === true && res.owner && res.owner !== this.sessionKey);
+    return !(res && res.ok === true && res.owner === this.sessionKey);
   }
 
   async _runLoop(callerText = null) {
@@ -1216,7 +1225,8 @@ class RelayConversation {
         // stays UNLINKED instead of resolving the claimed number's account.
         aniPhone: callerPhone,
         aniVerified: this._callerVerified === true,
-        sessionKey: this.sessionKey || null,
+        // Fence key only for a CLAIMED session (see toolCtx.sessionKey).
+        sessionKey: this._callerVerified === true ? this.sessionKey : null,
       }
     ).then(
       async (result) => {

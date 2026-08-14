@@ -113,10 +113,12 @@ function mintCallToken(callSid, { secret = process.env.VOICE_RELAY_WS_SECRET, no
   // would need a DB-assigned generation and an async mint on the live /voice
   // path). Pod clock skew or an unlucky same-millisecond tie can order a
   // legitimate reconnect BELOW the stale claim — the cost is bounded and
-  // non-fatal: the refused claim degrades that session to UNVERIFIED
-  // capture-only service (the same posture as any claim refusal), it never
-  // drops the call. A delayed old socket still cannot reclaim once any newer
-  // mint holds the claim.
+  // non-fatal BY CONSTRUCTION: a refused claim leaves the session UNVERIFIED,
+  // and unverified sessions are exempt from every supersession fence
+  // (relay-conversation _sessionSuperseded and the write-fence key are both
+  // verified-only), so the mis-ordered reconnect keeps capture-only service
+  // instead of being terminated. A delayed old socket that HELD the claim is
+  // verified and stays strictly fenced.
   const nonce = now.toString(16).padStart(12, '0')
     + require('crypto').randomBytes(2).toString('hex');
   return `${CALL_TOKEN_VERSION}.${expSec}.${nonce}.${callTokenMac(sid, expSec, nonce, secret)}`;
