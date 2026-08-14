@@ -205,6 +205,16 @@ describe('prompt wiring', () => {
   // (a false promise at 2 AM). Every remaining "shortly" in the voice-agent
   // sources must be part of the rule itself — either the negative form
   // (never "shortly") or the office-OPEN example inside the clock rule.
+  // ⭐ ONE COMPANY NAME. The approved name is "Waves Pest Control" — the
+  // prompt must not teach the agent an alternate brand form to speak.
+  test('the prompt uses the approved company name only, at both gate states', () => {
+    for (const gateOn of [false, true]) {
+      const p = buildBasePrompt(gateOn);
+      expect(p).toContain('Waves Pest Control,');
+      expect(p).not.toContain('& Lawn Care');
+    }
+  });
+
   test('no voice-agent source carries an unconditional "shortly" promise', () => {
     const fs = require('fs');
     const path = require('path');

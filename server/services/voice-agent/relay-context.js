@@ -811,7 +811,7 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
  * instruction is most likely to be obeyed — it is injected as a user-role data
  * turn by relay-conversation instead.
  */
-async function resolveCallerContext(from, { callSid = null, onVerified = null } = {}) {
+async function resolveCallerContext(from, { callSid = null, onVerified = null, onLateContext = null } = {}) {
   // Reported to the SESSION, not returned: a caller can be verified and still
   // match no account (an unmatched-but-real caller may use lookup_customer; a
   // WS client that declared an ANI may not), and it is decided only after
@@ -990,7 +990,17 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null } 
     return null;
   } finally {
     clearTimeout(timer);
-    work.catch(() => {}); // a late loser must never surface as unhandled
+    // ⭐ A LATE HYDRATION STILL UPGRADES THE SESSION — the verification
+    // doctrine, applied to identity. When the timeout won but the match
+    // settles moments later, discarding it left callerVerified=true with no
+    // customerId, and the history tools then asserted "no matching account"
+    // (a false claim) instead of an indeterminate lookup. The live getters on
+    // the tool ctx make the late publish visible mid-turn.
+    work.then((ctx) => {
+      if (ctx && typeof onLateContext === 'function') {
+        try { onLateContext(ctx); } catch { /* the upgrade is the caller's */ }
+      }
+    }).catch(() => {}); // a late loser must never surface as unhandled
   }
 }
 
@@ -1522,10 +1532,19 @@ async function servicesCatalogText() {
   const db = require('../../models/db');
   const { loadBookableCallServices } = require('../call-booking-catalog');
   const rows = await loadBookableCallServices(db);
+  // ⭐ THE SAME COMPLIANCE SCREEN THE REPORT SURFACES TAKE. A catalog NAME is
+  // admin free text too — "Pet-Safe Pest Control" spoken by the agent extends
+  // a banned claim onto a new customer surface. A name carrying banned copy
+  // is dropped, never paraphrased (relay-visit's rule).
+  const { findBannedCustomerCopy } = require('../service-report/activity-indicators');
   const names = [...new Set(
     (Array.isArray(rows) ? rows : [])
       .map((row) => promptSafe(row && (row.name || row.short_name), 60))
-      .filter(Boolean),
+      .filter(Boolean)
+      .filter((name) => {
+        try { return findBannedCustomerCopy(name).length === 0; }
+        catch { return false; } // fail closed — an unscreenable name is not spoken
+      }),
   )];
   if (!names.length) {
     return 'The service list is not available right now. Describe what Waves does in general terms only — '

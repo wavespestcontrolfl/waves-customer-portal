@@ -92,7 +92,9 @@ try {
 }
 
 const SYSTEM_PROMPT = [
-  'You are the phone assistant for Waves Pest Control & Lawn Care, a family-owned',
+  // The approved company name is "Waves Pest Control" — never an alternate
+  // brand form on any customer surface (AGENTS.md; the greeting says the same).
+  'You are the phone assistant for Waves Pest Control, a family-owned',
   'company in southwest Florida (Manatee, Sarasota, and Charlotte counties).',
   'You are answering a real, live phone call. The caller hears your words spoken aloud.',
   '',
@@ -483,8 +485,14 @@ class RelayConversation {
       this._contextReady = resolveCallerContext(this.from, {
         callSid: this.callSid,
         onVerified: (ok) => { this._callerVerified = ok === true; },
+        // A hydration that settles AFTER the 4s race still upgrades the
+        // session (the late-verification doctrine): without this, a slow
+        // optional loader left a VERIFIED caller with no customerId and the
+        // history tools asserted "no matching account". Guarded so a late
+        // result never clobbers a context already published.
+        onLateContext: (ctx) => { if (!this._callerContext) this._callerContext = ctx; },
       })
-        .then((ctx) => { this._callerContext = ctx; })
+        .then((ctx) => { this._callerContext = this._callerContext || ctx; })
         .catch(() => {});
       const { loadOfficeHours } = require('./relay-context');
       this._officeHoursReady = loadOfficeHours()

@@ -138,7 +138,8 @@ async function quotedLines(estimateRow) {
   // that surface states it as a note UNDER the per-application price.
   const billedPerApplication = chosen.billedPerApplication === true;
 
-  const lines = (Array.isArray(chosen.perServiceTreatments) ? chosen.perServiceTreatments : [])
+  const allTreatments = Array.isArray(chosen.perServiceTreatments) ? chosen.perServiceTreatments : [];
+  const lines = allTreatments
     .slice(0, 6)
     .map((item) => {
       if (!item || typeof item !== 'object') return null;
@@ -172,6 +173,13 @@ async function quotedLines(estimateRow) {
       return bits.length ? `${label} at ${bits.join(', ')}` : label;
     })
     .filter(Boolean);
+  // ⭐ TRUNCATION IS DISCLOSED, NEVER SILENT. A larger multi-service plan must
+  // not be described as if the first six rows were the whole estimate — the
+  // caller is told how many more are on the written document.
+  if (allTreatments.length > 6) {
+    lines.push(`(${allTreatments.length - 6} more service${allTreatments.length - 6 === 1 ? '' : 's'} on the written estimate — `
+      + 'tell the caller the full list is on their estimate page)');
+  }
   return lines;
 }
 

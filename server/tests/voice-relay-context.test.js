@@ -1014,6 +1014,35 @@ describe('GATE ON — disclosure tiers (enforced in tool output, not prompt lang
     expect(out).toMatch(/Looked-up account|confirm, don't recite/i);
   });
 
+  // ⭐ A LATE HYDRATION STILL UPGRADES THE SESSION — the verification
+  // doctrine applied to identity. When the 4s race times out but the match
+  // settles moments later, discarding it left callerVerified=true with no
+  // customerId, and the history tools then asserted "no matching account".
+  test('a hydration that outlives the 4s race still upgrades the session via onLateContext', async () => {
+    jest.useFakeTimers();
+    try {
+      primeDb({ customers: [{ ...CONTACT_SLOT_CUSTOMER, phone: FROM }] });
+      loadOwnedRecurringServiceKeys.mockResolvedValue([]);
+      openBalanceSummary.mockImplementation(() => new Promise((resolve) => {
+        const t = setTimeout(() => resolve({ total: 0, count: 0, moreCount: 0, invoices: [] }), 6000);
+        t.unref?.();
+      }));
+      const onLateContext = jest.fn();
+      const pending = relayContext.resolveCallerContext(FROM, { callSid: CALL_SID, onLateContext });
+      await jest.advanceTimersByTimeAsync(4100);
+      expect(await pending).toBeNull(); // the race timed out — unknown FOR NOW
+      expect(onLateContext).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(3000); // the slow loader settles
+      await Promise.resolve();
+      expect(onLateContext).toHaveBeenCalledWith(expect.objectContaining({
+        customer: expect.objectContaining({ id: 'c-1111' }),
+        tier: 'full',
+      }));
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('customers.phone wins when the ANI is in BOTH its own column and a slot', async () => {
     primeDb({ customers: [{ ...CONTACT_SLOT_CUSTOMER, phone: FROM }] });
     const ctx = await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID });

@@ -223,6 +223,27 @@ describe('get_open_estimates — SENT-price doctrine', () => {
     expect(out).not.toMatch(/per year/i);
   });
 
+  // ⭐ TRUNCATION IS DISCLOSED, NEVER SILENT — a big multi-service plan must
+  // not be described as if the first six rows were the whole estimate.
+  test('an estimate with more than six services says how many were omitted', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [{
+        key: 'quarterly',
+        monthly: 41.5,
+        annual: 498,
+        perServiceTreatments: Array.from({ length: 8 }, (_, i) => (
+          { service: `svc_${i}`, label: `Service ${i}`, monthly: 10, perTreatment: 30, visitsPerYear: 4 }
+        )),
+      }],
+    });
+    primeDb({ estimates: [SENT_ESTIMATE] });
+    const out = await executeTool('get_open_estimates', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).toContain('Service 0');
+    expect(out).toContain('Service 5');
+    expect(out).not.toContain('Service 6'); // capped…
+    expect(out).toMatch(/2 more services on the written estimate/i); // …but disclosed
+  });
+
   // The bundle offers a cadence LADDER; the sent estimate is one rung of it.
   test('the cadence spoken is the one matching the estimate row\'s own totals', async () => {
     primeDb({ estimates: [{ ...SENT_ESTIMATE, monthly_total: 58, annual_total: 696 }] });
@@ -596,6 +617,19 @@ describe('get_services_catalog — public, no tier gate', () => {
     expect(out).not.toMatch(/\$\d/);
     expect(out).not.toMatch(/\$0/);
     expect(out).not.toMatch(TOKEN_LEAK_RE);
+  });
+
+  // ⭐ A CATALOG NAME IS ADMIN FREE TEXT — the same banned-claim screen the
+  // report surfaces take. A name carrying a prohibited claim is dropped,
+  // never spoken or paraphrased.
+  test('a catalog name carrying banned customer copy is dropped from the spoken list', async () => {
+    loadBookableCallServices.mockResolvedValue([
+      { name: 'Pest-Free Guarantee Plan' }, // banned: pest-free + guarantee
+      { name: 'Quarterly Pest Control' },
+    ]);
+    const out = await executeTool('get_services_catalog', {}, { customerId: null });
+    expect(out).toContain('Quarterly Pest Control');
+    expect(out).not.toMatch(/pest-free|guarantee/i);
   });
 
   test('empty/unavailable catalog → general terms only, still no invented names', async () => {
