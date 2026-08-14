@@ -153,31 +153,15 @@ function templateKeyForOverdue(daysSince) {
   return `late_payment_${tierDaysForOverdue(daysSince)}d`;
 }
 
-/**
- * Collections contact policy consult for ONE channel (PR A). Enforced ONLY
- * while GATE_COLLECTIONS_POLICY is exactly 'true' — gate off/unset returns
- * true without loading the policy module, so this rail stays byte-identical
- * (pinned by test). Two requirements when the gate is on (codex 2026-08-14):
- *   - the verdict must allow the channel (each channel evaluated
- *     independently: do_not_text blocks only sms, do_not_email only email);
- *   - THIS invoice must be in the verdict's eligible set — an allowed
- *     verdict about a different invoice is not permission to dun this one.
- * evaluate() fails closed internally (an error is a denial), so a policy
- * blip skips the send rather than bypassing the policy.
- */
+// Collections policy consult lives in the SHARED rail guard (codex
+// 2026-08-14: one implementation, not three that drift) — gate-off
+// byte-identical, per-channel verdicts, invoice-membership required.
+const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
+
 async function collectionsChannelPermitted(customerId, invoiceId, channel, now) {
-  if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return true;
-  const ContactPolicy = require('./collections/contact-policy');
-  const verdict = await ContactPolicy.evaluate(customerId, {
-    channel, purpose: 'late_payment', now,
+  return railGuardPermitted({
+    customerId, invoiceId, channel, purpose: 'late_payment', now, logTag: 'late-payment',
   });
-  const member = (verdict.eligibleInvoiceIds || []).map(String).includes(String(invoiceId));
-  if (!verdict.allowed || !member) {
-    const why = !verdict.allowed ? verdict.denialReasons.join(', ') : 'invoice_not_eligible';
-    logger.info(`[late-payment] collections policy denied ${channel} for customer ${customerId} invoice ${invoiceId}: ${why}`);
-    return false;
-  }
-  return true;
 }
 
 const LatePaymentService = {

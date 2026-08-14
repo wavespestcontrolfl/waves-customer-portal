@@ -191,6 +191,44 @@ describe('structural denials', () => {
     expect(activityChain.whereRaw).toHaveBeenCalledWith("metadata->>'invoiceId' = ?", ['inv-1']);
   });
 
+  test('dues-only carve-out: sms/email balance_reminder with validated dues and ZERO invoices is allowed', async () => {
+    // Late monthly dues aren't invoiced — the previsit rail supplies the
+    // dues amount so the balance-existence check doesn't wrongly deny.
+    armAllowedBaseline({ invoices: [] });
+    const result = await ContactPolicy.evaluate('cust-1', {
+      channel: 'sms', purpose: 'balance_reminder', aggregateDuesCents: 12800, now: WED_11AM_EDT,
+    });
+    expect(result.allowed).toBe(true);
+    expect(result.denialReasons).toEqual([]);
+  });
+
+  test('dues context is NOT a bypass: zero dues, voice channel, and late_payment purpose all still require an invoice', async () => {
+    armAllowedBaseline({ invoices: [] });
+    const zeroDues = await ContactPolicy.evaluate('cust-1', {
+      channel: 'sms', purpose: 'balance_reminder', aggregateDuesCents: 0, now: WED_11AM_EDT,
+    });
+    expect(zeroDues.denialReasons).toContain('no_eligible_balance');
+    armAllowedBaseline({ invoices: [] });
+    const voice = await ContactPolicy.evaluate('cust-1', {
+      channel: 'voice', purpose: 'late_payment', aggregateDuesCents: 12800, now: WED_11AM_EDT,
+    });
+    expect(voice.denialReasons).toContain('no_eligible_balance');
+    armAllowedBaseline({ invoices: [] });
+    const latePayment = await ContactPolicy.evaluate('cust-1', {
+      channel: 'sms', purpose: 'late_payment', aggregateDuesCents: 12800, now: WED_11AM_EDT,
+    });
+    expect(latePayment.denialReasons).toContain('no_eligible_balance');
+  });
+
+  test('dues carve-out leaves every other denial standing (flag still blocks)', async () => {
+    armAllowedBaseline({ invoices: [], flags: [{ flag: 'do_not_text', customer_id: 'cust-1', released_at: null }] });
+    const result = await ContactPolicy.evaluate('cust-1', {
+      channel: 'sms', purpose: 'balance_reminder', aggregateDuesCents: 12800, now: WED_11AM_EDT,
+    });
+    expect(result.allowed).toBe(false);
+    expect(result.denialReasons).toContain('flag_do_not_text');
+  });
+
   test('missing customer → customer_not_found', async () => {
     armAllowedBaseline({ customer: undefined });
     setDbTables({ customers: chain({ first: undefined }) });

@@ -117,7 +117,7 @@ async function deliveredDunningTouches(invoice) {
   return touches;
 }
 
-async function evaluate(customerId, { channel, purpose, now = new Date() } = {}) {
+async function evaluate(customerId, { channel, purpose, now = new Date(), aggregateDuesCents = 0 } = {}) {
   const result = {
     allowed: false,
     denialReasons: [],
@@ -180,7 +180,18 @@ async function evaluate(customerId, { channel, purpose, now = new Date() } = {})
       (sum, inv) => sum + Math.round(invoiceAmountDue(inv) * 100),
       0,
     );
-    if (!eligible.length) deny('no_eligible_balance');
+    // Dues-only carve-out (codex 2026-08-14 P1): the previsit rail
+    // legitimately reminds about late MONTHLY-MEMBERSHIP DUES with zero
+    // open invoices — dues aren't invoiced until collected. The caller
+    // supplies the validated dues amount; it substitutes ONLY for the
+    // balance-existence check, ONLY for text/email balance_reminder
+    // (call-shaped channels and late_payment purposes still require a real
+    // invoice — the voice pilot is invoice-anchored by design). Flags,
+    // frequency windows, and every other denial still apply.
+    const duesQualifies = purpose === 'balance_reminder'
+      && !isVoiceLike(channel)
+      && Number.isFinite(aggregateDuesCents) && aggregateDuesCents > 0;
+    if (!eligible.length && !duesQualifies) deny('no_eligible_balance');
 
     // ── Hard flags ──────────────────────────────────────────────────────
     const flags = await db('collections_flags')

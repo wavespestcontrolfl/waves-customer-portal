@@ -185,12 +185,12 @@ describe('late-payment-checker rail', () => {
       invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
     });
     const result = await LatePaymentChecker.checkAndNotify();
-    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', {
+    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({
       channel: 'sms', purpose: 'late_payment', now: expect.any(Date),
-    });
-    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', {
+    }));
+    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({
       channel: 'email', purpose: 'late_payment', now: expect.any(Date),
-    });
+    }));
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
     expect(ContactLedger.recordContact).not.toHaveBeenCalled();

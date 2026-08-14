@@ -175,3 +175,28 @@ test('an unavailable ledger on the email leg skips that email (record-then-send)
   expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
   expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
 });
+
+test('dues-only visit (monthly membership, no overdue invoices) supplies aggregateDuesCents to the policy consult', async () => {
+  const { resolveBillingLane, monthlyDuesCollected } = require('../services/billing-lane');
+  resolveBillingLane.mockReturnValue({ mode: 'monthly_membership' });
+  monthlyDuesCollected.mockResolvedValue(false);
+  const claimChain = chain({ result: 1 });
+  setDbQueues({
+    sms_templates: [chain({ first: { is_active: true } })],
+    // billing_day 1 + 3 grace days is long past on Aug 14 ⇒ dues late.
+    scheduled_services: [
+      chain({ result: [{ ...VISIT, monthly_rate: '128.00', billing_day: 1 }] }),
+      claimChain,
+    ],
+    invoices: [chain({ result: [] })], // dues-only: ZERO overdue invoices
+    activity_log: [chain({ result: [] })],
+  });
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(result).toMatchObject({ sent: 1 });
+  expect(collectionsChannelPermitted).toHaveBeenCalledWith(
+    expect.objectContaining({ channel: 'sms', aggregateDuesCents: 12800 }),
+  );
+  expect(collectionsChannelPermitted).toHaveBeenCalledWith(
+    expect.objectContaining({ channel: 'email', aggregateDuesCents: 12800 }),
+  );
+});

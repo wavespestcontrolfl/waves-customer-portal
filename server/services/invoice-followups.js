@@ -92,29 +92,15 @@ function isSchedulableInvoice(invoice) {
   return !NON_SCHEDULABLE_INVOICE_STATUSES.includes(normalizedStatus(invoice));
 }
 
-/**
- * Collections contact policy consult for ONE channel (PR A). Enforced ONLY
- * while GATE_COLLECTIONS_POLICY is exactly 'true' — gate off/unset returns
- * true without loading the policy module, so this rail stays byte-identical
- * (pinned by test). Channels are evaluated INDEPENDENTLY at their legs
- * (codex 2026-08-14: the email leg must not ride an SMS verdict), and the
- * verdict must name THIS invoice in its eligible set — an allowed verdict
- * about a sibling invoice is not permission to dun this one. evaluate()
- * fails closed internally, so a policy blip denies rather than bypasses.
- */
+// Collections policy consult lives in the SHARED rail guard (codex
+// 2026-08-14: one implementation, not three that drift) — gate-off
+// byte-identical, per-channel verdicts, invoice-membership required.
+const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
+
 async function collectionsChannelPermitted(customerId, invoiceId, channel) {
-  if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return true;
-  const ContactPolicy = require('./collections/contact-policy');
-  const verdict = await ContactPolicy.evaluate(customerId, {
-    channel, purpose: 'late_payment', now: new Date(),
+  return railGuardPermitted({
+    customerId, invoiceId, channel, purpose: 'late_payment', logTag: 'invoice-followups',
   });
-  const member = (verdict.eligibleInvoiceIds || []).map(String).includes(String(invoiceId));
-  if (!verdict.allowed || !member) {
-    const why = !verdict.allowed ? verdict.denialReasons.join(', ') : 'invoice_not_eligible';
-    logger.info(`[invoice-followups] collections policy denied ${channel} for customer ${customerId} invoice ${invoiceId}: ${why}`);
-    return false;
-  }
-  return true;
 }
 
 /**

@@ -28,13 +28,14 @@ async function collectionsChannelPermitted({
   channel,
   purpose,
   now = new Date(),
+  aggregateDuesCents = 0,
   logTag = 'collections',
 }) {
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return true;
   let verdict;
   try {
     const ContactPolicy = require('./contact-policy');
-    verdict = await ContactPolicy.evaluate(customerId, { channel, purpose, now });
+    verdict = await ContactPolicy.evaluate(customerId, { channel, purpose, now, aggregateDuesCents });
   } catch (err) {
     // evaluate() is documented never to throw (it denies internally), but a
     // guard-level surprise must read as a denial, not abort a sweep loop.

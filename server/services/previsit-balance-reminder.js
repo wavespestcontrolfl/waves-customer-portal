@@ -296,16 +296,25 @@ async function runSweep({ now = new Date() } = {}) {
       // membership check applies. Both channels denied ⇒ skip before
       // claiming, so a policy hold never churns the one-per-appointment
       // claim.
+      // Late monthly dues aren't invoiced, so a dues-only reminder has no
+      // open invoice for the policy's balance-existence check — pass the
+      // validated dues amount so the carve-out (not a bypass: flags and
+      // frequency still apply) covers it.
+      const duesCents = verdict.duesLate
+        ? Math.round((Number(visit.monthly_rate) || 0) * 100)
+        : 0;
       const smsPolicyPermitted = await collectionsChannelPermitted({
         customerId: visit.customer_id,
         channel: 'sms',
         purpose: 'balance_reminder',
+        aggregateDuesCents: duesCents,
         logTag: 'previsit-balance',
       });
       const emailPolicyPermitted = await collectionsChannelPermitted({
         customerId: visit.customer_id,
         channel: 'email',
         purpose: 'balance_reminder',
+        aggregateDuesCents: duesCents,
         logTag: 'previsit-balance',
       });
       if (!smsPolicyPermitted && !emailPolicyPermitted) { skipped++; continue; }
