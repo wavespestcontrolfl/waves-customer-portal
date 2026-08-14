@@ -1087,10 +1087,10 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
       throw new Error('Invalid actual amount');
     }
 
-    const expectedAmount = parseFloat(payout.amount || 0);
+    let expectedAmount = parseFloat(payout.amount || 0);
     const normalizedActual = Number(actualAmount);
-    const discrepancy = Math.round((normalizedActual - expectedAmount) * 100) / 100;
-    const matched = Math.abs(discrepancy) < 0.01;
+    let discrepancy = Math.round((normalizedActual - expectedAmount) * 100) / 100;
+    let matched = Math.abs(discrepancy) < 0.01;
     let now; // assigned AFTER the payout row lock — see below
 
     let skipped = false;
@@ -1103,7 +1103,16 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
       // human write could interleave with a guarded automated one and
       // commit later while carrying an earlier reconciled_at, making the
       // latest-row history checks lie.
-      const cur = await trx('stripe_payouts').where('id', payoutId).forUpdate().first('reconciled', 'reconciled_by');
+      const cur = await trx('stripe_payouts').where('id', payoutId).forUpdate().first('reconciled', 'reconciled_by', 'amount');
+      // The reconciliation fields are recomputed from the LOCKED amount —
+      // a payout.updated webhook can rewrite it between the unlocked read
+      // above and this lock, and a history row computed from the stale
+      // amount would record a false discrepancy/matched verdict.
+      if (cur) {
+        expectedAmount = parseFloat(cur.amount || 0);
+        discrepancy = Math.round((normalizedActual - expectedAmount) * 100) / 100;
+        matched = Math.abs(discrepancy) < 0.01;
+      }
       // Timestamp AFTER the lock: writers commit in lock order, so
       // reconciled_at ordering matches commit ordering and the
       // latest-history checks can trust it. (A pre-lock timestamp could

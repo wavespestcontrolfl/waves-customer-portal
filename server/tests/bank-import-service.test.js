@@ -33,7 +33,9 @@ function makeBuilder(table) {
     // treated as a no-op here so it doesn't pollute the assertions.
     const wheres = b.where.mock.calls.map(c => c[0]);
     if (!wheres.some(w => w && typeof w === 'object' && 'id' in w)) return Promise.resolve(0);
-    state.updates.push({ table, where: wheres, patch });
+    const u = { table, where: wheres, patch };
+    state.updates.push(u);
+    if (state.onUpdate) state.onUpdate(u); // concurrency hooks for race tests
     return Promise.resolve(1);
   });
   b.then = (resolve, reject) => {
@@ -61,7 +63,10 @@ function makeBuilder(table) {
             const windowOk = Math.abs(new Date(`${e.expense_date}T00:00:00Z`) - new Date(`${r.txn_date}T00:00:00Z`)) <= 5 * dayMs;
             const amountOk = Math.abs(Number(e.amount) - Number(r.amount)) <= 0.011
               || Math.abs(Number(e.amount) + rsum - Number(r.amount)) <= 0.011;
-            return (windowOk && amountOk) ? [] : [{ id: r.id, expense_id: r.matched_expense_id }];
+            const methodBad = r.match_method === 'expense_amount_date_vendor' && (
+              (r.account_type === 'card' && ['ach', 'check', 'cash'].includes(String(e.payment_method || '').toLowerCase()))
+              || (r.account_type === 'bank' && String(e.payment_method || '').toLowerCase() === 'cash'));
+            return (windowOk && amountOk && !methodBad) ? [] : [{ id: r.id, expense_id: r.matched_expense_id }];
           })).then(resolve, reject);
       }
       // the orphan-refund heal anti-joins expenses on the suggestion target
@@ -77,6 +82,19 @@ function makeBuilder(table) {
           && r.matched_payout_id
           && !(r.suggestion && r.suggestion.reconcilePending)
           && state.payouts.some(p => p.id === r.matched_payout_id && p.reconciled === wantReconciled));
+      }
+    }
+    // the payout survey is amount-aware against the EFFECTIVE banked amount
+    // (lateral latest-confirmed join) — mirror the mapping and the filter
+    if (table === 'stripe_payouts' && b.joinRaw.mock.calls.some(c => String(c[0]).includes('actual_amount'))) {
+      rows = rows.map(p => {
+        const latest = state.reconRows.find(r => r.status === 'confirmed' && (r.payout_id === undefined || r.payout_id === p.id));
+        const eff = p.reconciled && latest && latest.actual_amount != null ? Number(latest.actual_amount) : Number(p.amount);
+        return { ...p, effective_amount: eff };
+      });
+      const effCall = b.whereRaw.mock.calls.find(c => String(c[0]).includes('coalesce(latest.actual_amount'));
+      if (effCall && Array.isArray(effCall[1])) {
+        rows = rows.filter(p => Math.abs(p.effective_amount - Number(effCall[1][0])) <= Number(effCall[1][1]) + 0.001);
       }
     }
     // the gross-candidate scan joins applied refunds back onto expenses —
@@ -173,6 +191,7 @@ beforeEach(() => {
   state.updates = [];
   state.queried = [];
   state.builders = [];
+  state.onUpdate = null;
   reconcilePayout.mockClear();
 });
 
@@ -749,6 +768,52 @@ describe('runDeterministicMatching', () => {
     const revert = state.updates.find(u => u.patch.status === 'unmatched');
     expect(revert).toBeDefined();
     expect(sugOf(revert).autoRevert.reason).toContain('ambiguous');
+  });
+
+  test('the matching payout is found even when 50+ other payouts crowd the window (amount-aware survey)', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE DEPOSIT', amount: 500, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = [
+      ...Array.from({ length: 51 }, (_, i) => ({ id: `po-noise-${String(i).padStart(2, '0')}`, amount: '999.00', arrival_date: '2026-08-11', reconciled: false })),
+      { id: 'po-match', amount: '500.00', arrival_date: '2026-08-11', reconciled: false },
+    ];
+    const summary = await runDeterministicMatching();
+    // the old amount-BLIND fetch cap could truncate the window to 51 noise
+    // rows and send this credit to no-match with no payout path at all
+    expect(summary.payoutsLinked).toBe(1);
+    expect(state.updates.find(u => u.patch.status === 'matched_payout').patch.matched_payout_id).toBe('po-match');
+  });
+
+  test('a payout arriving between survey and claim reverts the auto-link BEFORE any echo (post-claim verify)', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE DEPOSIT', amount: 500, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '500.00', arrival_date: '2026-08-11', reconciled: false }];
+    // the delayed payout webhook lands right after the claim CAS commits
+    state.onUpdate = (u) => {
+      if (u.patch.status === 'matched_payout') {
+        state.onUpdate = null;
+        state.payouts.push({ id: 'po-2', amount: '500.00', arrival_date: '2026-08-11', reconciled: false });
+      }
+    };
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    expect(reconcilePayout).not.toHaveBeenCalled(); // reverted claims are never echoed
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
+    expect(sugOf(revert).autoRevert.reason).toContain('ambiguous');
+  });
+
+  test('an AUTO-linked expense edited to an incompatible payment method is healed; a MANUAL link is not', async () => {
+    state.bankRows = [
+      { id: 'bt-auto', txn_date: '2026-08-10', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', match_method: 'expense_amount_date_vendor', matched_expense_id: 'exp-1', suggestion: null },
+      { id: 'bt-manual', txn_date: '2026-08-10', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', match_method: 'manual', matched_expense_id: 'exp-2', suggestion: null },
+    ];
+    state.expenses = [
+      { id: 'exp-1', amount: '100.00', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'cash' },
+      { id: 'exp-2', amount: '100.00', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'cash' },
+    ];
+    const summary = await runDeterministicMatching();
+    expect(summary.expenseLinksReverted).toBe(1);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert.where).toContainEqual({ id: 'bt-auto', status: 'matched_expense', matched_expense_id: 'exp-1' });
   });
 
   test('a linked payout that turned INELIGIBLE (webhook rewrote it) reverts instead of confirming', async () => {
