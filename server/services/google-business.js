@@ -931,11 +931,6 @@ class GoogleBusinessService {
     // after every location's reviews are inserted/linked — the likely-reviewer
     // exclusion must see the full batch (codex #3264 r2).
     const pendingUnlinked = [];
-    // Reinstated-review notifications (stamped missing_since → cleared),
-    // collected across the run and fired as one bell per location — the
-    // removal alert's correction; without it "removed" is the last word the
-    // admin ever hears about a review that came back.
-    const pendingRestored = [];
 
     for (const loc of WAVES_LOCATIONS) {
       try {
@@ -949,6 +944,16 @@ class GoogleBusinessService {
         // location and the holder's cycle (or the next hourly tick) covers
         // it; a skipped location must NOT ring the degraded alert.
         const cycle = await runExclusive(`gbp-review-sync:${loc.id}`, async () => {
+        // Reinstated-review notifications (stamped missing_since → cleared)
+        // for THIS location's cycle, flushed as one bell before the location
+        // lock releases — the removal alert's correction; without it
+        // "removed" is the last word the admin ever hears about a review
+        // that came back. Deferring past the lock would let a newer runner
+        // re-stamp and alert "removed" first, then our stale "restored"
+        // bell would land LAST and contradict it (codex #3397 r1) — under
+        // the lock, any later removal alert arrives after us, so the
+        // newest information always rings last.
+        const locRestored = [];
         if (GOOGLE_KEY) {
           await this._syncPlacesStatsForLocation(loc, GOOGLE_KEY).catch(err => {
             logger.warn(`[gbp] Places stats sync failed for ${loc.name}: ${err.message}`);
@@ -969,7 +974,7 @@ class GoogleBusinessService {
             pulledCounts[loc.id] = reviews.length;
             for (const review of reviews) {
               const normalized = this._normalizeGbpReview(review, loc);
-              const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked, pendingRestored);
+              const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked, locRestored);
               if (result.inserted) totalNew++;
               totalSynced++;
             }
@@ -1006,7 +1011,7 @@ class GoogleBusinessService {
             await this._notifyDegradedSync(loc, gbpFailure || 'no_client');
           }
           if (GOOGLE_KEY) {
-            const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked, pendingRestored);
+            const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked, locRestored);
             pulledCounts[loc.id] = sample.synced;
             totalSynced += sample.synced;
             totalNew += sample.new;
@@ -1016,6 +1021,7 @@ class GoogleBusinessService {
             sources[loc.id] = 'none';
           }
         }
+        await this._notifyRestoredReviews(locRestored);
         return { done: true };
         }, { recordHealth: false });
         if (cycle?.skipped) {
@@ -1035,8 +1041,6 @@ class GoogleBusinessService {
     for (const row of pendingUnlinked) {
       await this._notifyUnlinkedReview(row);
     }
-
-    await this._notifyRestoredReviews(pendingRestored);
 
     await this._resolveGbpResourceNames();
     try {
@@ -1335,7 +1339,10 @@ class GoogleBusinessService {
    * cleared this run are back on Google, and the admin who saw "removed"
    * needs to hear it (2026-08-13: a transient false removal alert sent the
    * owner toward filing a GBP support case for a review that was already
-   * back). One bell per location per run. Best-effort by design — the stamp
+   * back). One bell per location per cycle, flushed while the caller still
+   * holds that location's gbp-review-sync lock so a newer runner's removal
+   * alert can only land AFTER this correction, never be contradicted by it
+   * (codex #3397 r1). Best-effort by design — the stamp
    * is already cleared, so unlike the removal alert's claim/rollback
    * coupling, a lost good-news bell costs nothing durable and must never
    * fail the sync.
