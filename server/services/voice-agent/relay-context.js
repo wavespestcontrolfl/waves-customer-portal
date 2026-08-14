@@ -1340,7 +1340,26 @@ async function pricingText(input = {}) {
     return `Cannot price ${service.replace(/_/g, ' ')} yet — still needed: ${missing.join(' and ')}. Ask the caller, then call get_pricing again. Do NOT guess or estimate a price yourself.`;
   }
 
-  // Same residential bounds as public-quote.js /calculate.
+  // ⭐ COMMERCIAL IS NEVER PRICED AS A HOUSE. This is the RESIDENTIAL engine
+  // path only — public-quote.js routes commercial intent through its own
+  // sizing. A stated non-residential property type, or a building beyond the
+  // residential bounds, is a custom quote: clamping it into the house table
+  // produced a concrete underquote the prompt then orders Sandy to state as
+  // exact. Refuse for human follow-up instead.
+  const statedType = String(input.property_type || '').trim().toLowerCase();
+  if (statedType && !PRICEABLE_PROPERTY_TYPES.includes(statedType)) {
+    return 'That property type is outside standard residential pricing — it needs a custom quote. '
+      + 'Do NOT state a price. Capture the lead and tell the caller a Waves team member will follow up '
+      + 'with exact pricing for the property.';
+  }
+  if (homeSqFt > 20000 || (lotSqFt && lotSqFt > 200000)) {
+    return 'A property this size is beyond standard residential pricing — it needs a custom quote. '
+      + 'Do NOT state a price. Capture the lead and tell the caller a Waves team member will follow up '
+      + 'with exact pricing.';
+  }
+
+  // Same residential bounds as public-quote.js /calculate (low-end floors only
+  // — the high end was refused above, never silently clamped down).
   const sqft = Math.max(500, Math.min(20000, homeSqFt));
   const lot = Math.max(500, Math.min(200000, lotSqFt || sqft * 4));
 

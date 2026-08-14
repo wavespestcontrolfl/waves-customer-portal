@@ -564,9 +564,12 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
       // markers themselves (cleared on delivery or on a dead linkage).
       .orderBy('created_at', 'asc')
       .limit(limit)
-      // from_phone + call_summary feed the lead-LESS branch below (a hot
-      // lifecycle-customer call composes its page from the call row itself).
-      .select('twilio_call_sid', 'metadata', 'from_phone', 'call_summary');
+      // from_phone + call_summary + customer_id feed the lead-LESS branch
+      // below (a hot lifecycle-customer call composes its page from the call
+      // row itself — and the customer link is what makes the recovered alert
+      // actionable: the body's callback number is masked by the internal-alert
+      // sanitizer and there is no lead record to open).
+      .select('twilio_call_sid', 'metadata', 'from_phone', 'call_summary', 'customer_id');
   } catch (err) {
     logger.error(`[voice-relay-alert] abandoned hot-alert sweep query failed: ${err.message}`);
     return 0;
@@ -619,7 +622,11 @@ async function sweepAbandonedHotAlerts({ limit = 10 } = {}) {
         call_summary: lead.transcript_summary,
         urgency_reason: 'recovered by the hot-alert sweep',
       },
-      { callSid: row.twilio_call_sid, recovery: true },
+      // customer_id rides into the recovery ctx so alertOwnerHotLead's deep
+      // link lands on the CUSTOMER page for the leadless (lifecycle) branch —
+      // /admin/leads with a masked number was an urgent page with nothing to
+      // open. Harmless when a lead exists (leadId wins the link).
+      { callSid: row.twilio_call_sid, recovery: true, customerId: row.customer_id || null },
     ).catch(() => false);
     if (ok) paged += 1;
   }

@@ -319,6 +319,7 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
       twilio_call_sid: 'CA-lifecycle-1',
       metadata: { relay_hot_alert_needed: 'true' }, // no relay_lead_id
       from_phone: CALLER, call_summary: 'Known customer, wasps in the soffit, urgent.',
+      customer_id: 'c-88',
     }];
     const callBuilder = {};
     for (const m of ['where', 'whereRaw', 'orderBy', 'limit']) callBuilder[m] = jest.fn(() => callBuilder);
@@ -334,10 +335,14 @@ describe('GATE ON — the durable one-page-per-CALL receipt', () => {
 
     const paged = await relayAlert.sweepAbandonedHotAlerts();
     expect(paged).toBe(1);
-    const [, body] = TwilioService.sendSMS.mock.calls[0];
+    const [, body, sendOpts] = TwilioService.sendSMS.mock.calls[0];
     expect(body).toContain('wasps in the soffit'); // the call row fed the page
+    // ⭐ THE RECOVERED ALERT IS ACTIONABLE: the internal-alert sanitizer masks
+    // the callback number in the body and there is no lead record to open, so
+    // the deep link must land on the CUSTOMER the call row already knows.
+    expect(sendOpts.link).toBe('/admin/customers?customerId=c-88');
     // …and the query selected what the branch reads.
-    expect(callBuilder.select).toHaveBeenCalledWith('twilio_call_sid', 'metadata', 'from_phone', 'call_summary');
+    expect(callBuilder.select).toHaveBeenCalledWith('twilio_call_sid', 'metadata', 'from_phone', 'call_summary', 'customer_id');
   });
 
   // ⭐ RECOVERY OUTLIVES THE GATE. Obligations minted while the lane was live

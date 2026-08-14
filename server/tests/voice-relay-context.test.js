@@ -1117,6 +1117,26 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(out).not.toContain('$420');
   });
 
+  // ⭐ COMMERCIAL IS NEVER PRICED AS A HOUSE. The residential fallback used to
+  // clamp any building into the house table and speak a concrete underquote;
+  // a stated non-residential type or an out-of-bounds size is a custom quote.
+  test('a commercial property type refuses the price — engine never consulted', async () => {
+    const out = await executeTool('get_pricing', {
+      service: 'pest_control', home_sqft: 8000, property_type: 'commercial',
+    }, { customerId: null });
+    expect(out).toMatch(/custom quote/i);
+    expect(out).toMatch(/Do NOT state a price/);
+    expect(generateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a building beyond the residential bounds refuses instead of clamping down', async () => {
+    const out = await executeTool('get_pricing', {
+      service: 'pest_control', home_sqft: 50000,
+    }, { customerId: null });
+    expect(out).toMatch(/custom quote/i);
+    expect(generateEstimate).not.toHaveBeenCalled();
+  });
+
   // ⭐ THE RETIRED 'basic' TIER IS NEITHER ADVERTISED NOR FORWARDED. The 4x
   // lawn tier is fully retired (owner 2026-08-04); the engine silently
   // resolves it to enhanced, so offering it in the schema quoted a program

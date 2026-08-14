@@ -349,9 +349,11 @@ const CONTEXT_TOOLS = [
         mosquito_tier: { type: 'string', enum: ['seasonal9', 'monthly12'], description: 'Mosquito program (default monthly12)' },
         property_type: {
           type: 'string',
-          enum: ['single_family', 'townhome_end', 'townhome_interior', 'duplex', 'condo_ground', 'condo_upper'],
-          description: 'What kind of home it is, if the caller says. A condo or townhome prices lower than a '
-            + 'house, so pass it when you know it. Omit when they have not said — it defaults to a single-family home.',
+          enum: ['single_family', 'townhome_end', 'townhome_interior', 'duplex', 'condo_ground', 'condo_upper', 'commercial'],
+          description: 'What kind of property it is, if the caller says. A condo or townhome prices lower than a '
+            + 'house, so pass it when you know it. Omit when they have not said — it defaults to a single-family home. '
+            + 'Pass "commercial" for any business, office, restaurant, HOA, or multifamily property — commercial is '
+            + 'never priced on this call; the tool will tell you what to say.',
         },
       },
       required: ['service'],
@@ -774,6 +776,21 @@ async function executeTool(name, input = {}, ctx = {}) {
         return 'I could not save the lead yet — we do not have a valid phone number to reach the caller. '
           + 'Ask the caller for the best 10-digit number and call capture_lead again with callback_phone.';
       }
+      // ⭐ SCRUBBED AT THE SOURCE, FAIL CLOSED. The free-text capture fields
+      // are model-relayed caller speech headed for durable rows
+      // (leads.transcript_summary, extracted_data, lead_activities.metadata)
+      // — a caller reading a card number aloud must never persist a PAN there
+      // (the transcript and alert copies scrub separately and do not cover
+      // these writes). An unscrubbable field is dropped, never stored raw.
+      const scrubbedField = (value) => {
+        if (value == null || String(value).trim() === '') return null;
+        try {
+          const { scrubPans } = require('../../utils/pan-scrub');
+          return scrubPans(String(value));
+        } catch {
+          return '[detail unavailable]';
+        }
+      };
       const extracted = {
         first_name: input.first_name || null,
         last_name: input.last_name || null,
@@ -781,11 +798,11 @@ async function executeTool(name, input = {}, ctx = {}) {
         address_line1: input.address_line1 || null,
         city: input.city || null,
         zip: input.zip || null,
-        requested_service: input.requested_service || null,
+        requested_service: scrubbedField(input.requested_service),
         matched_service: null,
         preferred_date_time: input.preferred_date_time || null,
-        pain_points: input.pain_points || null,
-        call_summary: input.call_summary || null,
+        pain_points: scrubbedField(input.pain_points),
+        call_summary: scrubbedField(input.call_summary),
         lead_quality: LEAD_QUALITIES.includes(input.lead_quality) ? input.lead_quality : null,
         // Phase E — a PREFERENCE is captured for a human to action; nothing
         // here starts messaging anyone, changes a channel, or grants consent.

@@ -657,6 +657,23 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     assertNoComms();
   });
 
+  // ⭐ THE CALL ITSELF IS THE IDEMPOTENCY KEY. The review card's partial-unique
+  // index only guards while the card is OPEN — the office resolving it mid-call
+  // plus a reconnect (fresh latch) let a second request on ANOTHER date through
+  // the customer+date dedupe. A live scheduled_services row with this call's
+  // source_call_log_id means the one-booking budget is spent.
+  test('a resolved review card does not reopen the one-booking-per-call budget', async () => {
+    primeDb({ scheduled: [] });
+    trxBuilders.scheduled_services.first
+      .mockImplementationOnce(async () => null) // customer+date dedupe: clear
+      .mockImplementationOnce(async () => ({ id: 'ss-prior-this-call' })); // per-call key: spent
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/already in/i);
+    expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
+    expect(trxBuilders.triage_items.insert).not.toHaveBeenCalled();
+    assertNoComms();
+  });
+
   test('selfBooking engine gate off → refused (no slot can be validated), nothing written', async () => {
     isEnabled.mockReturnValue(false);
     const out = await executeTool('request_booking', GOOD_INPUT, CTX);

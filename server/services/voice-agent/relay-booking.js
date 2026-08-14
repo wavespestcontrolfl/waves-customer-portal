@@ -318,6 +318,22 @@ async function commitVoiceBooking({
         .first('id');
       if (existing) return { status: 'duplicate' };
 
+      // ⭐ ONE BOOKING PER CALL, KEYED TO THE CALL ITSELF. The review card's
+      // partial-unique index only guards while the card is OPEN — the office
+      // resolving it mid-call plus a ConversationRelay reconnect (fresh
+      // in-memory latch) let a second request on ANOTHER date through both
+      // the latch and the customer+date dedupe above. The durable per-call
+      // key is scheduled_services.source_call_log_id: a live row minted by
+      // this call means the call's one-booking budget is spent, whatever the
+      // card's current status.
+      if (callLogId) {
+        const priorForCall = await trx('scheduled_services')
+          .where({ source_call_log_id: callLogId })
+          .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
+          .first('id');
+        if (priorForCall) return { status: 'duplicate' };
+      }
+
       // Commit-time max_self_books_per_day re-check, the same predicate the
       // availability builder drops full days with (shared helper). The builder's
       // cap is advisory-only without this.

@@ -205,6 +205,28 @@ describe('find_slots', () => {
 });
 
 describe('capture_lead (Phase 0 floor, unchanged)', () => {
+  // ⭐ SCRUBBED AT THE SOURCE. The free-text capture fields persist on durable
+  // lead rows (transcript_summary, extracted_data, lead_activities.metadata)
+  // — a spoken card number relayed by the model must be redacted BEFORE
+  // createLeadFromExtraction ever sees it (the transcript/alert scrubs are
+  // separate writers and do not cover these).
+  test('a spoken card number never reaches the lead pipeline in any free-text field', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: 'l-1', customerId: null, created: true });
+    await executeTool(
+      'capture_lead',
+      {
+        call_summary: 'Wants pest control; read out card 4111 1111 1111 1111 by mistake',
+        pain_points: 'charged on 4111 1111 1111 1111 twice',
+        requested_service: 'refund to 4111 1111 1111 1111',
+      },
+      { from: '+19415551234', callSid: 'CA-pan-capture', markCaptured: jest.fn() },
+    );
+    const [extracted] = createLeadFromExtraction.mock.calls[0];
+    const flat = JSON.stringify(extracted);
+    expect(flat).not.toMatch(/4111[\s-]?1111[\s-]?1111[\s-]?1111/);
+    expect(flat).toContain('[card ending 1111]'); // scrubbed, not dropped
+  });
+
   test('a SPAM capture suppresses the floor WITHOUT claiming a lead', async () => {
     const markCaptured = jest.fn();
     const out = await executeTool(
