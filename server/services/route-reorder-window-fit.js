@@ -13,11 +13,16 @@
  *
  *   - Backbone: stops with a promised window, in chronological order of
  *     their effective window start (the same anchor the chronology guard
- *     enforces). The backbone's relative order is never permuted — any
- *     other relative order is exactly what the guard exists to reject.
+ *     enforces). Distinct starts are never permuted — any other relative
+ *     order is exactly what the guard exists to reject. EQUAL starts are a
+ *     tie the guard explicitly permits in any order, so the exhaustive
+ *     search explores every within-group permutation too (a specific tie
+ *     order can be the only feasible or the cheapest one); the greedy path
+ *     keeps ties in the caller-supplied current running order, which is
+ *     deterministic and operator-visible.
  *   - Untimed stops: interleaved around the backbone. Small days get an
  *     exhaustive search over every backbone-preserving interleaving with
- *     infeasible-prefix pruning; days whose interleaving count exceeds the
+ *     infeasible-prefix pruning; days whose sequence count exceeds the
  *     cap get greedy cheapest-feasible insertion (globally cheapest
  *     feasible (stop, position) pair each round).
  *   - Every surviving candidate is scored under the ONE shared in-house
@@ -39,18 +44,25 @@
  * word on the returned order.
  */
 
-// Interleaving-count ceiling for the exhaustive search. n stops with k
-// timed have n!/k! backbone-preserving sequences; beyond this we fall back
-// to greedy insertion. 20k full-day simulations is comfortably sub-second
-// at the 25-stop Google cap the caller already enforces.
+// Sequence-count ceiling for the exhaustive search. n stops with k timed in
+// g equal-start groups have (n!/k!)·∏ gᵢ! backbone-preserving sequences
+// (interleavings × within-tie permutations); beyond this we fall back to
+// greedy insertion. 20k full-day simulations is comfortably sub-second at
+// the 25-stop Google cap the caller already enforces.
 const EXHAUSTIVE_SEQUENCE_CAP = 20000;
 
-function interleavingCount(total, timed) {
-  // n!/k! with an early cap so a 25-stop day never overflows.
+function sequenceCount(total, timed, groupSizes) {
+  // (n!/k!)·∏ gᵢ! with an early cap so a 25-stop day never overflows.
   let count = 1;
   for (let i = timed + 1; i <= total; i++) {
     count *= i;
     if (count > EXHAUSTIVE_SEQUENCE_CAP) return count;
+  }
+  for (const g of groupSizes) {
+    for (let i = 2; i <= g; i++) {
+      count *= i;
+      if (count > EXHAUSTIVE_SEQUENCE_CAP) return count;
+    }
   }
   return count;
 }
@@ -100,14 +112,21 @@ function simulateSequence(RouteOptimizer, effectiveWindowRange, seq) {
   return state.travelMin + returnMin;
 }
 
-/** Exhaustive backbone-preserving interleaving search with prefix pruning. */
-function exhaustiveSearch(RouteOptimizer, guards, backbone, untimed) {
+/** Exhaustive backbone-preserving interleaving search with prefix pruning.
+ *  `groups` = the backbone as equal-start groups in chronological order:
+ *  order BETWEEN groups is fixed (the chronology guard's rule); order
+ *  WITHIN a group is explored (the guard permits any tie order, and a
+ *  specific one can be the only feasible or the cheapest sequence —
+ *  pre-push audit P1). */
+function exhaustiveSearch(RouteOptimizer, guards, groups, untimed) {
   let best = null;
   let bestMeters = Infinity;
+  const total = groups.reduce((n, g) => n + g.length, 0) + untimed.length;
   const used = new Array(untimed.length).fill(false);
+  const groupUsed = groups.map((g) => new Array(g.length).fill(false));
   const seq = [];
-  const recurse = (backboneIdx, state) => {
-    if (seq.length === backbone.length + untimed.length) {
+  const recurse = (groupIdx, groupRemaining, state) => {
+    if (seq.length === total) {
       const meters = guards.modelDistanceMeters(RouteOptimizer, seq);
       if (meters < bestMeters) {
         bestMeters = meters;
@@ -115,14 +134,20 @@ function exhaustiveSearch(RouteOptimizer, guards, backbone, untimed) {
       }
       return;
     }
-    // Next stop is either the next backbone stop (relative order fixed) or
-    // any unused untimed stop.
-    if (backboneIdx < backbone.length) {
-      const next = advanceSim(RouteOptimizer, guards.effectiveWindowRange, state, backbone[backboneIdx]);
-      if (next) {
-        seq.push(backbone[backboneIdx]);
-        recurse(backboneIdx + 1, next);
+    // Next stop is either any unused member of the CURRENT tie group (the
+    // group must fully precede the next one) or any unused untimed stop.
+    if (groupIdx < groups.length) {
+      const group = groups[groupIdx];
+      for (let i = 0; i < group.length; i++) {
+        if (groupUsed[groupIdx][i]) continue;
+        const next = advanceSim(RouteOptimizer, guards.effectiveWindowRange, state, group[i]);
+        if (!next) continue;
+        groupUsed[groupIdx][i] = true;
+        seq.push(group[i]);
+        if (groupRemaining === 1) recurse(groupIdx + 1, (groups[groupIdx + 1] || []).length, next);
+        else recurse(groupIdx, groupRemaining - 1, next);
         seq.pop();
+        groupUsed[groupIdx][i] = false;
       }
     }
     for (let i = 0; i < untimed.length; i++) {
@@ -131,12 +156,12 @@ function exhaustiveSearch(RouteOptimizer, guards, backbone, untimed) {
       if (!next) continue;
       used[i] = true;
       seq.push(untimed[i]);
-      recurse(backboneIdx, next);
+      recurse(groupIdx, groupRemaining, next);
       seq.pop();
       used[i] = false;
     }
   };
-  recurse(0, { clock: 8 * 60, prev: RouteOptimizer.HQ, travelMin: 0 });
+  recurse(0, (groups[0] || []).length, { clock: 8 * 60, prev: RouteOptimizer.HQ, travelMin: 0 });
   return best;
 }
 
@@ -184,25 +209,45 @@ function computeWindowFitOrder(RouteOptimizer, stops, guards) {
     if (guards.effectiveWindowStart(s) != null) timed.push(s);
     else untimed.push(s);
   }
-  // Backbone in promised-start order. Equal starts keep their input order —
-  // any relative order of a tie satisfies the chronology guard, and the
-  // input order (the current running order) is the operator-visible one.
+  // Backbone in promised-start order, as equal-start GROUPS. The sort is
+  // stable, so within a group stops keep the caller-supplied order — the
+  // caller passes the CURRENT RUNNING order (currentOrder), making the
+  // greedy path's tie order deterministic and operator-visible; the
+  // exhaustive path explores tie permutations regardless.
   const backbone = [...timed].sort((a, b) => {
     const wa = guards.effectiveWindowStart(a);
     const wb = guards.effectiveWindowStart(b);
     if (wa !== wb) return wa < wb ? -1 : 1;
     return 0;
   });
+  const groups = [];
+  for (const s of backbone) {
+    const start = guards.effectiveWindowStart(s);
+    const last = groups[groups.length - 1];
+    if (last && last.start === start) last.stops.push(s);
+    else groups.push({ start, stops: [s] });
+  }
+  const groupStops = groups.map((g) => g.stops);
 
-  const winner = interleavingCount(stops.length, backbone.length) <= EXHAUSTIVE_SEQUENCE_CAP
-    ? exhaustiveSearch(RouteOptimizer, guards, backbone, untimed)
+  const winner = sequenceCount(stops.length, backbone.length, groupStops.map((g) => g.length)) <= EXHAUSTIVE_SEQUENCE_CAP
+    ? exhaustiveSearch(RouteOptimizer, guards, groupStops, untimed)
     : greedyInsertion(RouteOptimizer, guards, backbone, untimed);
   if (!winner) return null;
 
-  // Owner ruling: model-authored orders are acceptable BECAUSE every
-  // candidate passes the SAME guards a Google order must pass. Re-check
-  // with the production functions (legs = null ⇒ the guard's own model
-  // path) before handing the order back.
+  // Owner ruling (2026-08-14): model-authored orders are acceptable BECAUSE
+  // every candidate passes the SAME guards a Google order must pass —
+  // re-check with the production functions before handing the order back.
+  // legs = null is DELIBERATE, not a downgrade (pre-push audit P1 rebutted):
+  // Google's legs describe ITS order's sequence — they do not exist for a
+  // different permutation, and fetching routed legs per candidate is the
+  // fleet-API spend this lane scoped out. The model path is the calibrated
+  // two-term drive-time fit under GATE_DRIVE_TIME_CALIBRATION (live in
+  // prod, MAE 3.89 min — the underestimation note on the guard describes
+  // the LEGACY 30 mph constant), and the promises being protected are
+  // 2-hour arrival windows, so the model's error is an order of magnitude
+  // inside the slack. Any residual miss is also self-limiting: route_order
+  // is a board ordering, the day re-evaluates every night, and dispatch
+  // remains human-driven.
   if (guards.violatesWindowChronology(winner, stops)) return null;
   if (guards.violatesWindowFeasibility(RouteOptimizer, winner, stops, null)) return null;
 
@@ -217,5 +262,5 @@ function computeWindowFitOrder(RouteOptimizer, stops, guards) {
 
 module.exports = {
   computeWindowFitOrder,
-  _internals: { interleavingCount, simulateSequence, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
+  _internals: { sequenceCount, simulateSequence, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
 };

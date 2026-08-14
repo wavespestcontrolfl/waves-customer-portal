@@ -454,7 +454,10 @@ async function runRouteReorder(opts = {}) {
               summary.skipped.push({ ...entryBase, reason, ...metrics });
               continue;
             }
-            const fallback = computeWindowFitOrder(RouteOptimizer, techStops, {
+            // Pass the CURRENT RUNNING order (not raw query order — the day
+            // load has no ORDER BY): equal-window backbone ties then default
+            // to the sequence the operator actually sees on the board.
+            const fallback = computeWindowFitOrder(RouteOptimizer, ordered, {
               effectiveWindowStart,
               effectiveWindowRange,
               violatesWindowChronology,

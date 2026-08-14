@@ -264,11 +264,26 @@ test('unit: above the interleaving cap the greedy path still produces a full fea
   // 8 untimed stops ⇒ 8! = 40320 interleavings > cap ⇒ greedy insertion.
   // On a line, cheapest-feasible insertion converges to the sorted sweep.
   const stops = Array.from({ length: 8 }, (_, i) => stop(`s${i}`, { lng: i + 1, estimated_duration_minutes: 30 }));
-  expect(wfInternals.interleavingCount(8, 0)).toBeGreaterThan(wfInternals.EXHAUSTIVE_SEQUENCE_CAP);
+  expect(wfInternals.sequenceCount(8, 0, [])).toBeGreaterThan(wfInternals.EXHAUSTIVE_SEQUENCE_CAP);
   const out = computeWindowFitOrder(FAKE_RO, stops, GUARDS);
   expect(out).not.toBeNull();
   expect(out.orderedStops).toHaveLength(8);
   expect(out.afterMeters).toBe(16000);
+});
+
+test('unit: equal-window ties are PERMUTED, not frozen in input order — the only feasible tie order is found', () => {
+  // A and B share the 09:00 promise (window 540–660, +2h deadline). With
+  // 10 min/mile travel from HQ(1,0): A(lng 2) then B(lng 8) works — A starts
+  // 540, done 600, arrive B 660 = deadline. B then A: B done at 620, arrive
+  // A at 680 > 660 — infeasible. Input order is B first; a backbone frozen
+  // in input order would return null (pre-push audit P1).
+  const stops = [
+    stop('B', { window_start: '09:00', lng: 8 }),
+    stop('A', { window_start: '09:00', lng: 2 }),
+  ];
+  const out = computeWindowFitOrder(FAKE_RO, stops, GUARDS);
+  expect(out).not.toBeNull();
+  expect(out.orderedStops.map((s) => s.id)).toEqual(['A', 'B']);
 });
 
 test('unit: fewer than 2 stops is not a reorder problem', () => {
