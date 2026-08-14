@@ -242,11 +242,28 @@ async function enrichPropertyById(propertyId) {
     const mirrorLat = after.latitude == null ? null : Number(after.latitude);
     const mirrorLng = after.longitude == null ? null : Number(after.longitude);
     if (mirrorLat != null && mirrorLng != null) {
-      // Visits linked to THIS property whose coordinate pair is absent.
+      // Visits linked to THIS property whose coordinate pair is absent —
+      // fenced to the ADDRESS THAT WAS LOOKED UP: the visit's
+      // service_address_* stamp is immutable booking-time truth, while
+      // syncPrimaryAddress keeps the property ID across an address edit.
+      // Matching by property_id alone let a later lookup for the EDITED
+      // address attach its coordinates to a visit stamped with the old
+      // one, dispatching to the wrong parcel. Unstamped legacy rows are
+      // excluded on purpose: they render the customers mirror address,
+      // which has its own fenced fill below. (row.address_* is safe here —
+      // the address_key fence above already proved it unchanged.)
       await db('scheduled_services')
         .where({ property_id: propertyId })
         .whereNull('lat')
         .whereNull('lng')
+        .whereRaw(
+          "LOWER(TRIM(COALESCE(service_address_line1, ''))) = ? AND LOWER(TRIM(COALESCE(service_address_line2, ''))) = ? AND LEFT(TRIM(COALESCE(service_address_zip, '')), 5) = ?",
+          [
+            String(row.address_line1 || '').trim().toLowerCase(),
+            String(row.address_line2 || '').trim().toLowerCase(),
+            String(row.zip || '').trim().slice(0, 5),
+          ],
+        )
         .update({ lat: mirrorLat, lng: mirrorLng });
     }
     if (row.is_primary) {
@@ -338,6 +355,16 @@ function backfillBatchSize() {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_BACKFILL_BATCH;
 }
 
+// SQL twins of the estimator's PRIMARY_STREET_NUMBER_RE and
+// LEADING_SUBPREMISE_RE (unit-scope-model.hasPrimaryStreetNumber). POSIX
+// classes instead of \d/\w/\s perl shorthands are avoided on purpose —
+// these run under ~* / regexp_replace(...,'i'), so the a-z ranges are
+// case-insensitive. The JS predicate's "strip must have CHANGED the
+// string" step is redundant here: an unchanged strip re-tests the same
+// string the first branch already tested.
+const SQL_PRIMARY_NUMBER_RE = '^\\s*[0-9]+[a-z]?([-/][a-z0-9_]+)?\\s+\\S';
+const SQL_LEADING_UNIT_RE = '^\\s*(unit|apt|apartment|ste|suite|#)\\s*#?\\s*[a-z0-9_-]+\\s*(,\\s*|\\s+at\\s+|\\s+)';
+
 /**
  * Backfill candidates: active property rows of REAL customers
  * (active_customer/won/at_risk — leads' addresses churn and their lookups
@@ -368,9 +395,18 @@ async function fetchBackfillCandidates(limit, offset = 0) {
     // a candidate — it would consume a batch slot every night unrepaired.
     .whereRaw('((cp.latitude IS NULL AND cp.longitude IS NULL) OR cp.property_type IS NULL)')
     .whereRaw("COALESCE(TRIM(cp.address_line1), '') <> ''")
-    // Mirrors the enrich guard's house-number prerequisite — a numberless
-    // street would be selected, skip unspent, and churn the batch nightly.
-    .whereRaw("TRIM(cp.address_line1) ~ '^[0-9]'")
+    // Mirrors the enrich guard's house-number prerequisite (estimator
+    // hasPrimaryStreetNumber INCLUDING its leading-unit rule): a primary
+    // street number up front, or a unit-first form ("Unit 7, 123 Main St",
+    // "#12 900 Bayview Ter") whose remainder starts with one. Parity is
+    // the point — a form this filter rejects but the guard accepts is
+    // PERMANENTLY invisible to the sweep, while drift the other way just
+    // skips unspent and churns. Patterns are BINDINGS (knex.raw eats bare
+    // '?', and these regexes need optional quantifiers).
+    .whereRaw(
+      "(cp.address_line1 ~* ? OR regexp_replace(cp.address_line1, ?, '', 'i') ~* ?)",
+      [SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE, SQL_PRIMARY_NUMBER_RE],
+    )
     .whereRaw("COALESCE(TRIM(cp.zip), '') <> ''")
     .select('cp.*')
     .select(db.raw(
@@ -389,9 +425,16 @@ async function fetchBackfillCandidates(limit, offset = 0) {
     .select(db.raw(
       "(cp.updated_at IS NOT NULL AND cp.updated_at > NOW() - INTERVAL '7 days') as recently_touched",
     ))
+    // has_upcoming_visit OUTRANKS the weekly sink: insertion itself stamps
+    // updated_at, so a sink-first order put every NEWLY CREATED property —
+    // including one visiting tomorrow — behind the entire untouched legacy
+    // backlog whenever only the backfill gate is on (weeks at the default
+    // batch). Within each visit class the sink still holds; the partial
+    // rows it resurfaces early are near-free cache hits, and the
+    // upcoming-visit set is small by nature.
     .orderBy([
-      { column: 'recently_touched', order: 'asc' },
       { column: 'has_upcoming_visit', order: 'desc' },
+      { column: 'recently_touched', order: 'asc' },
       { column: 'has_estimate', order: 'desc' },
       { column: 'cp.created_at', order: 'desc' },
     ])
@@ -494,5 +537,8 @@ module.exports = {
   runCallPropertyLookup,
   enqueueCallPropertyLookup,
   sweepUnenrichedProperties,
-  _private: { snakePropertyType, propertyRowAddress, fetchBackfillCandidates, attemptedRecently, backfillBatchSize },
+  _private: {
+    snakePropertyType, propertyRowAddress, fetchBackfillCandidates, attemptedRecently, backfillBatchSize,
+    SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
+  },
 };

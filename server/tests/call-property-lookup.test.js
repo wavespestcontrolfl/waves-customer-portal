@@ -120,6 +120,32 @@ describe('runCallPropertyLookup', () => {
     expect(Object.keys(patch)).toEqual(['latitude', 'longitude', 'property_type', 'updated_at']);
   });
 
+  test('visit coordinate fill only reaches visits stamped with the looked-up address', async () => {
+    const updateBuilder = builder([{ latitude: 27.4995, longitude: -82.4108, property_type: 'single_family' }]);
+    const visitsBuilder = builder(1);
+    mockRowDb({
+      id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
+      address_line1: ' 123 Sample Cove ', address_line2: 'Unit 4', city: 'Bradenton', state: 'FL', zip: '34212-1234',
+    }, updateBuilder, { visits: visitsBuilder });
+    performPropertyLookup.mockResolvedValueOnce({
+      satellite: { inServiceArea: true },
+      enriched: {
+        lat: 27.4995, lng: -82.4108, propertyType: 'Single Family',
+        _observed: { propertyType: true }, fieldVerifyFlags: [],
+      },
+    });
+    await runCallPropertyLookup({ propertyId: 'p1' });
+    // Fence: stamped service_address must still match the looked-up
+    // address (normalized), so a post-edit backfill can't attach the new
+    // address's coordinates to a visit booked for the old one.
+    const [sql, bindings] = visitsBuilder.whereRaw.mock.calls[0];
+    expect(sql).toContain('service_address_line1');
+    expect(sql).toContain('service_address_line2');
+    expect(sql).toContain('service_address_zip');
+    expect(bindings).toEqual(['123 sample cove', 'unit 4', '34212']);
+    expect(visitsBuilder.update).toHaveBeenCalledWith({ lat: 27.4995, lng: -82.4108 });
+  });
+
   test('null coordinates are never persisted as 0,0; synthesized type never persists', async () => {
     const updateBuilder = builder(1);
     mockRowDb({
@@ -350,6 +376,50 @@ describe('sweepUnenrichedProperties', () => {
     expect(res.processed).toBe(2);
     expect(res.failed).toBe(1);
     expect(res.enriched).toBe(1);
+  });
+});
+
+describe('fetchBackfillCandidates', () => {
+  const { _private } = require('../services/call-property-lookup');
+
+  test('SQL house-number gate is behavior-parity with hasPrimaryStreetNumber (incl. unit-first forms)', () => {
+    // The SQL patterns use only constructs whose semantics coincide in
+    // Postgres ARE and JS RegExp ([0-9]/[a-z] classes, \s/\S, ?, *,
+    // alternation), so evaluating them in JS pins parity with the
+    // authoritative predicate: a form SQL rejects but the enrich guard
+    // accepts would be permanently invisible to the sweep.
+    const { hasPrimaryStreetNumber } = jest.requireActual('../services/estimator-engine/unit-scope-model');
+    const primary = new RegExp(_private.SQL_PRIMARY_NUMBER_RE, 'i');
+    const leadingUnit = new RegExp(_private.SQL_LEADING_UNIT_RE, 'i');
+    const sqlAccepts = (a) => primary.test(a) || primary.test(a.replace(leadingUnit, ''));
+    const corpus = [
+      '123 Main St', '123A Main St', '123-125 Main St', '123/2 Main St',
+      'Unit 7, 123 Main St', '#12 900 Bayview Ter', 'Apt B 55 Palm Ave',
+      'Suite 4 at 200 Cortez Rd', 'Ste 9 77 Beach Dr', 'apartment 2, 8 Oak Ln',
+      'Main St', '62nd Avenue East', 'Unit 7', 'Unit 7, Main St',
+      'PO Box 123', '', '   ', '# 3, 41 Gulf Dr',
+    ];
+    for (const a of corpus) {
+      expect({ address: a, accepted: sqlAccepts(a) })
+        .toEqual({ address: a, accepted: hasPrimaryStreetNumber(a) });
+    }
+  });
+
+  test('patterns are BOUND (knex.raw eats bare ?) and upcoming visits outrank the weekly sink', async () => {
+    const cpBuilder = builder([]);
+    db.mockImplementation(() => cpBuilder);
+    await _private.fetchBackfillCandidates(5, 0);
+    const rawCall = cpBuilder.whereRaw.mock.calls.find((c) => String(c[0]).includes('regexp_replace'));
+    expect(rawCall).toBeDefined();
+    expect(rawCall[1]).toEqual([
+      _private.SQL_PRIMARY_NUMBER_RE, _private.SQL_LEADING_UNIT_RE, _private.SQL_PRIMARY_NUMBER_RE,
+    ]);
+    expect(cpBuilder.orderBy).toHaveBeenCalledWith([
+      { column: 'has_upcoming_visit', order: 'desc' },
+      { column: 'recently_touched', order: 'asc' },
+      { column: 'has_estimate', order: 'desc' },
+      { column: 'cp.created_at', order: 'desc' },
+    ]);
   });
 });
 
