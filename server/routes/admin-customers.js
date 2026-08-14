@@ -585,7 +585,19 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
   const price = perVisitPrice != null ? perVisitPrice : monthlyFallbackPrice;
   if (kind !== 'recurring' && price == null) return null;
 
-  const rawMatched = serviceCatalogMatch({ ...line, name }, serviceIndex);
+  let rawMatched = serviceCatalogMatch({ ...line, name }, serviceIndex);
+  // A ONE-TIME list item must never keep the recurring palm identity
+  // (codex r27 P1): the modal would submit a non-recurring visit carrying
+  // the semiannual service id + recurring completion profile — completing
+  // with recurring posture and skipping its one-time invoice. Route to
+  // the one-time palm row when the index has it; with no one-time row the
+  // line is OMITTED — a null identity is not safely unmatched here, since
+  // the return below falls back to line.service/name and completion
+  // resolves the semiannual profile by exact name.
+  if (kind !== 'recurring' && rawMatched?.service_key === 'palm_injection_semiannual') {
+    rawMatched = serviceIndex.byKey.get('palm_injection') || null;
+    if (!rawMatched) return null;
+  }
   // The matched catalog row's own cadence beats the hardcoded quarterly
   // fallback (codex r18 pre-push P0): a bare explicit semiannual palm
   // selection carries no line cadence data, and a quarterly prefill on a
@@ -830,8 +842,19 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
       ? moneyOrNull(monthlyTotal > 0 ? monthlyTotal : null, annualMonthlyEquivalent)
       : moneyOrNull(estimate.onetime_total, estimate.monthly_total);
     const fallbackName = estimate.service_interest || estimate.waveguard_tier || 'Accepted estimate';
-    const matched = serviceCatalogMatch({ name: fallbackName }, serviceIndex);
+    let matched = serviceCatalogMatch({ name: fallbackName }, serviceIndex);
     const fallbackIsRecurring = hasRecurringEstimateTotal;
+    // Same rule as formatEstimateLine (codex r27 P1): a one-time fallback
+    // line must not carry the recurring palm identity either — a
+    // service_interest naming the semiannual row would otherwise resurrect
+    // the exact identity the omitted line shed. With no one-time row the
+    // fallback is dropped entirely (local codex P0): even a null-id line
+    // keeps the semiannual NAME, and completion's exact-name lookup would
+    // resolve the recurring profile from it.
+    if (!fallbackIsRecurring && matched?.service_key === 'palm_injection_semiannual') {
+      matched = serviceIndex.byKey.get('palm_injection') || null;
+      if (!matched) return lines;
+    }
     lines.push({
       serviceId: matched?.id || null,
       serviceKey: matched?.service_key || null,

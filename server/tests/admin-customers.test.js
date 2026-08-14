@@ -598,6 +598,10 @@ describe('admin customers route helpers', () => {
     // exact match.
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection', visitsPerYear: 1 }, serviceIndex)?.service_key).toBe('palm_injection');
     expect(serviceCatalogMatch({ serviceKey: 'palm_injection', service: 'palm_injection' }, serviceIndex)?.service_key).toBe('palm_injection');
+    // A ONE-TIME list item never keeps the recurring palm identity
+    // (codex r27 P1): scheduleLinesFromEstimate routes it to the one-time
+    // row via formatEstimateLine's kind check (covered indirectly by the
+    // catalog match below staying available for recurring kinds).
     // The raw `service` field carries the semiannual key too (codex r23
     // P1): validation applies without an explicit key or name.
     expect(serviceCatalogMatch({ service: 'palm_injection_semiannual', frequency: 'monthly', visitsPerYear: 2 }, serviceIndex)).toBeFalsy();
@@ -759,6 +763,40 @@ describe('admin customers route helpers', () => {
     const [restampedLine] = scheduleLinesFromEstimate(restamped, index);
     expect(restampedLine.serviceKey).toBe('mosquito_seasonal');
     expect(restampedLine.serviceId).toBe(11);
+  });
+
+  test('one-time palm item sheds the recurring identity; omitted when no one-time row exists', () => {
+    const semiannualRow = { id: 21, service_key: 'palm_injection_semiannual', name: 'Semiannual Palm Injection Program', category: 'lawn', billing_type: 'recurring', frequency: 'semiannual', visits_per_year: 2 };
+    const oneTimeRow = { id: 22, service_key: 'palm_injection', name: 'Palm Injection Treatment', category: 'lawn', billing_type: 'one_time', frequency: null, visits_per_year: null };
+    const estimate = {
+      id: 'estimate-palm-onetime',
+      service_interest: 'Semiannual Palm Injection Program',
+      onetime_total: 150,
+      monthly_total: 0,
+      estimate_data: {
+        result: {
+          oneTime: {
+            total: 150,
+            items: [{ service: 'palm_injection_semiannual', name: 'Semiannual Palm Injection Program', price: 150 }],
+          },
+        },
+      },
+    };
+    // Both rows present: the one-time item routes to the ONE-TIME palm row
+    // (codex r27 P1) — never the semiannual identity whose completion
+    // profile carries recurring billing posture.
+    const [line] = scheduleLinesFromEstimate(estimate, indexServicesForSchedule([semiannualRow, oneTimeRow]));
+    expect(line.serviceId).toBe(22);
+    expect(line.serviceKey).toBe('palm_injection');
+    expect(line.cadence).toBe('one_time');
+    // One-time row absent: a null identity is NOT safely unmatched — even
+    // an id-less line keeps the semiannual NAME, and completion's
+    // exact-name lookup resolves the recurring profile from it. The line
+    // is omitted AND the zero-line fallback (fed by a service_interest
+    // naming the semiannual row) is dropped entirely (codex #3400 r1 P1
+    // + local P0): no prefill at all beats a prefill that bills recurring.
+    const lines = scheduleLinesFromEstimate(estimate, indexServicesForSchedule([semiannualRow]));
+    expect(lines).toEqual([]);
   });
 
   test('does not create fallback schedule lines from billing-only estimate rows', () => {

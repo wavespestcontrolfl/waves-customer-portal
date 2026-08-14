@@ -4159,7 +4159,32 @@ const EstimateConverter = {
             for (const idRow of idRows) reservedServiceKeyById.set(idRow.id, idRow.service_key);
           }
         } catch (idErr) {
-          logger.warn(`[estimate-converter] reserved catalog-key prefetch failed (label matching only): ${idErr.message}`);
+          // One retry, then PROPAGATE (codex r27 P1): palm units match by
+          // identity ONLY and catalog-first adoptions are invisible to
+          // labels — an empty map after a transient failure would promote
+          // a duplicate parent beside the reserved program row. Unknown
+          // identity state fails the conversion instead.
+          try {
+            const retryIds = [...new Set((reservedRows || []).map((row) => row.service_id).filter(Boolean))];
+            if (retryIds.length) {
+              const retryRows = await database('services').whereIn('id', retryIds).select('id', 'service_key');
+              for (const idRow of retryRows) reservedServiceKeyById.set(idRow.id, idRow.service_key);
+            }
+          } catch (retryErr) {
+            logger.error(`[estimate-converter] reserved catalog-key prefetch failed twice: ${retryErr.message}`);
+            // A bare database error would be swallowed by the fail-soft
+            // comboErr catch below (it rethrows recognized codes only), so
+            // the abort must carry one — same operational contract as the
+            // palm refusals: 422, convert manually.
+            const abort = new Error(
+              'Catalog identities for the reserved rows could not be resolved (database lookup failed twice), so this acceptance cannot verify what is already scheduled — retry, or convert manually.'
+            );
+            abort.code = 'RESERVED_CATALOG_IDENTITY_UNKNOWN';
+            abort.isOperational = true;
+            abort.status = 422;
+            abort.statusCode = 422;
+            throw abort;
+          }
         }
         for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits]) {
           if (!reservedStart?.scheduled_date) break;
@@ -4412,7 +4437,8 @@ const EstimateConverter = {
         // P0): this fail-soft catch would otherwise complete
         // acceptance/billing without the sold palm series.
         if (comboErr.code === 'PALM_RECURRING_CATALOG_MISSING'
-          || comboErr.code === 'PALM_RECURRING_LINE_INVALID') throw comboErr;
+          || comboErr.code === 'PALM_RECURRING_LINE_INVALID'
+          || comboErr.code === 'RESERVED_CATALOG_IDENTITY_UNKNOWN') throw comboErr;
         logger.warn(`[estimate-converter] combined routing on reserved rows failed: ${comboErr.message}`);
       }
 
@@ -5104,9 +5130,21 @@ const EstimateConverter = {
             // the single-recurring case like the derivation below, so the
             // (0-recurring) prepay edge keeps its no-coverage/no-seeding shape
             // and can't grow phantom seeded visits from an override.
-            coverageServiceType = annualPrepayCoverageOverride.serviceType;
-            coverageVisitCount = annualPrepayCoverageOverride.visitCount;
-            coverageCadence = annualPrepayCoverageOverride.cadence;
+            // The override does NOT bypass the palm/lawn validation mirrors
+            // (codex r27 P1): a contradictory palm quote or commercial line
+            // must not mint the annual invoice just because the booking
+            // path supplied explicit coverage values — the ordinary
+            // acceptance path rejects the same line.
+            const overrideValidation = annualPrepayCoverageCadence(
+              recurringServicesForConversion[0], inferredFrequencyKey,
+            );
+            if (overrideValidation === PREPAY_COVERAGE_INVALID) {
+              recurringPrepayCoverageInvalid = true;
+            } else {
+              coverageServiceType = annualPrepayCoverageOverride.serviceType;
+              coverageVisitCount = annualPrepayCoverageOverride.visitCount;
+              coverageCadence = annualPrepayCoverageOverride.cadence;
+            }
           } else if (recurringServicesForConversion.length === 1) {
             const coverageSvc = recurringServicesForConversion[0];
             const svcType = coverageSvc.name || coverageSvc.serviceName || coverageSvc.service_name || null;

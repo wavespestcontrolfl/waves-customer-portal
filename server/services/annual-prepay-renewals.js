@@ -507,28 +507,33 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     // defers before anything is created.
     const semiannualPalmId = (await conn('services').where({ service_key: 'palm_injection_semiannual' }).first('id'))?.id || null;
     const oneTimePalmId = (await conn('services').where({ service_key: 'palm_injection' }).first('id'))?.id || null;
-    const carriesRecurringPalmIdentity = (row) =>
-      (semiannualPalmId && row.service_id === semiannualPalmId)
-      || String(row.service_key_snapshot || '') === 'palm_injection_semiannual';
-    // Provenance/commitment fallback is only for rows the backfill can
-    // OWN (codex r26 pre-push P0): identity-less (name-only) or the KNOWN
-    // stale one-time palm identity. A row carrying any FOREIGN explicit
-    // id/snapshot is another service's visit — counting it as coverage
-    // would suppress its separate billing and seed the palm term short.
-    const carriesForeignIdentity = (row) =>
-      (row.service_id && row.service_id !== semiannualPalmId
-        && (!oneTimePalmId || row.service_id !== oneTimePalmId))
-      || (row.service_key_snapshot
-        && String(row.service_key_snapshot) !== 'palm_injection_semiannual'
-        && String(row.service_key_snapshot) !== 'palm_injection');
+    // ID-FIRST classification (codex r27 pre-push P0): completion trusts
+    // service_id before the snapshot, so a FOREIGN id beats a semiannual
+    // snapshot (contradictory row — reject), while a semiannual id beats
+    // a stray snapshot (correct row — count). Provenance/commitment
+    // fallback remains only for rows the backfill can OWN: bare
+    // (name-only) or the KNOWN stale one-time identity.
+    const palmRowClass = (row) => {
+      if (row.service_id) {
+        if (semiannualPalmId && row.service_id === semiannualPalmId) return 'recurring';
+        if (oneTimePalmId && row.service_id === oneTimePalmId) return 'stale';
+        return 'foreign';
+      }
+      const snap = String(row.service_key_snapshot || '');
+      if (snap === 'palm_injection_semiannual') return 'recurring';
+      if (snap === 'palm_injection') return 'stale';
+      if (snap) return 'foreign';
+      return 'bare';
+    };
     // A row linked to ANOTHER term never counts (codex r21 pre-push P0,
     // fifth pass): even carrying the recurring identity, it belongs to
     // that term's coverage — counting it here seeds this term short while
     // attach/stamping refuse to move it.
     matching = matching.filter((row) => {
       if (rowLinkedToAnotherTerm(term, row)) return false;
-      if (carriesRecurringPalmIdentity(row)) return true;
-      if (carriesForeignIdentity(row)) return false;
+      const cls = palmRowClass(row);
+      if (cls === 'recurring') return true;
+      if (cls === 'foreign') return false;
       return rowCommittedToTerm(term, row);
     });
   }
@@ -1036,10 +1041,21 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // swallowed into prepaid coverage.
   const adoptableCoverageRow = (row) => serviceMatchesCoverage(row, coverageServiceType)
     && !rowLinkedToAnotherTerm(term, row)
-    && (!coverageIsPalm
-      || (coverageCatalogServiceId && row.service_id === coverageCatalogServiceId)
-      || String(row.service_key_snapshot || '') === 'palm_injection_semiannual'
-      || rowCommittedToTerm(term, row));
+    && (!coverageIsPalm || (() => {
+      // Same ID-FIRST classification as coverage matching (codex r27
+      // pre-push P0): a foreign id/snapshot never adopts, even beside a
+      // semiannual snapshot.
+      if (row.service_id) {
+        if (coverageCatalogServiceId && row.service_id === coverageCatalogServiceId) return true;
+        if (staleOneTimePalmId && row.service_id === staleOneTimePalmId) return rowCommittedToTerm(term, row);
+        return false;
+      }
+      const snap = String(row.service_key_snapshot || '');
+      if (snap === 'palm_injection_semiannual') return true;
+      if (snap === 'palm_injection') return rowCommittedToTerm(term, row);
+      if (snap) return false;
+      return rowCommittedToTerm(term, row);
+    })());
 
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
     let windowStart = firstVisitWindowStart;
