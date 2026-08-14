@@ -28,6 +28,7 @@ jest.mock('../services/customer-contact', () => ({
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
   markSendFailed: jest.fn(async () => true),
+  markDelivered: jest.fn(async () => true),
 }));
 // Consulted by the real rail-guard only when GATE_COLLECTIONS_POLICY==='true'.
 jest.mock('../services/collections/contact-policy', () => ({
@@ -406,6 +407,9 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     const channels = ContactLedger.recordContact.mock.calls.map(([args]) => args.channel);
     expect(channels).toEqual(['sms', 'email']);
     expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    // gh-r2: both delivered legs get the positive delivered stamp — the
+    // dunning-touch floor counts only confirmed deliveries.
+    expect(ContactLedger.markDelivered).toHaveBeenCalledTimes(2);
   });
 
   test('a blocked SMS stamps its ledger row send_failed and skips the email sidecar', async () => {

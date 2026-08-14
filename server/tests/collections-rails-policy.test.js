@@ -48,6 +48,7 @@ jest.mock('../services/collections/contact-policy', () => ({
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
   markSendFailed: jest.fn(async () => true),
+  markDelivered: jest.fn(async () => true),
 }));
 
 const db = require('../models/db');

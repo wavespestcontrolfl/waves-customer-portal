@@ -121,6 +121,7 @@ async function evalVoice(now = WED_11AM_EDT) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  db.raw = jest.fn((expr) => expr);
 });
 
 describe('baseline', () => {
@@ -769,7 +770,10 @@ describe('ledger-based dunning touches (balance-reminder workflow)', () => {
     });
     await evalVoice();
     expect(countChain.whereIn).toHaveBeenCalledWith('source', ['balance_reminder_workflow', 'balance_reminder_late_payment_check']);
-    expect(countChain.whereRaw).toHaveBeenCalledWith("COALESCE(metadata->>'send_failed', '') <> 'true'");
+    // gh-r2: only POSITIVELY delivered rows count, and the distinct key
+    // collapses the sms+email legs of one reminder run into one touch.
+    expect(countChain.whereRaw).toHaveBeenCalledWith("metadata->>'delivered' = 'true'");
+    expect(db.raw).toHaveBeenCalledWith("COUNT(DISTINCT COALESCE(metadata->>'template_key', id::text)) as count");
     expect(countChain.whereRaw).toHaveBeenCalledWith('invoice_ids @> ?::jsonb', ['["inv-1"]']);
   });
 });

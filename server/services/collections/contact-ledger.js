@@ -71,17 +71,19 @@ async function recordContact({
  * throws — an unstamped reserved row only ever over-suppresses, which is
  * the safe direction (same doctrine as markSendFailed).
  */
-async function markDelivered(idempotencyKey) {
-  if (!idempotencyKey) return false;
+async function markDelivered(target) {
+  if (!target) return false;
   try {
-    await db('collections_contact_ledger')
-      .where({ idempotency_key: idempotencyKey })
-      .update({
-        metadata: db.raw(`COALESCE(metadata, '{}'::jsonb) || '{"delivered": true}'::jsonb`),
-      });
+    const query = db('collections_contact_ledger');
+    if (typeof target === 'string') query.where({ idempotency_key: target });
+    else if (target.id) query.where({ id: target.id });
+    else return false;
+    await query.update({
+      metadata: db.raw(`COALESCE(metadata, '{}'::jsonb) || '{"delivered": true}'::jsonb`),
+    });
     return true;
   } catch (err) {
-    logger.warn(`[collections-ledger] delivered stamp failed for key ${idempotencyKey}: ${err.message}`);
+    logger.warn(`[collections-ledger] delivered stamp failed: ${err.message}`);
     return false;
   }
 }

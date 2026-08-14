@@ -120,16 +120,18 @@ async function deliveredDunningTouches(invoice) {
   // ledger (codex gh-r1) — without this arm, customers it dunned can never
   // satisfy the floor. Sources are restricted to that workflow because the
   // checker (activity_log) and followups engine (touches_sent) are already
-  // counted above — a wider source set would count one real touch twice and
-  // let a single reminder satisfy the two-touch floor. send_failed rows are
-  // not deliveries.
+  // counted above. A ledger ROW is a reservation, not a delivery (codex
+  // gh-r2): only rows the rail positively stamped delivered count, and the
+  // SMS + email legs of one reminder run share a template_key so a
+  // dual-channel run is ONE touch. A missing best-effort stamp under-counts
+  // ⇒ voice denied — the safe direction.
   const [led] = await db('collections_contact_ledger')
     .whereRaw('invoice_ids @> ?::jsonb', [JSON.stringify([invoice.id])])
     .whereIn('channel', ['sms', 'email'])
     .where({ purpose: 'late_payment' })
     .whereIn('source', ['balance_reminder_workflow', 'balance_reminder_late_payment_check'])
-    .whereRaw("COALESCE(metadata->>'send_failed', '') <> 'true'")
-    .count('* as count');
+    .whereRaw("metadata->>'delivered' = 'true'")
+    .select(db.raw("COUNT(DISTINCT COALESCE(metadata->>'template_key', id::text)) as count"));
   touches += parseInt(led?.count || 0, 10);
   return touches;
 }

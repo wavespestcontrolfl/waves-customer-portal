@@ -318,6 +318,7 @@ class BalanceReminder {
         `balance reminder SMS blocked: ${sendResult.code || sendResult.reason || "unknown"}`,
       );
     }
+    await ContactLedger.markDelivered(ledgerEntry);
 
     await db("customer_interactions").insert({
       customer_id: service.cust_id,
@@ -634,6 +635,10 @@ class BalanceReminder {
         );
         continue;
       }
+      // Positive delivery stamp (codex gh-r2): the dunning-touch floor
+      // counts only rows the rail CONFIRMED delivered — a bare reservation
+      // is not a touch. Best-effort; a missed stamp only under-counts.
+      await ContactLedger.markDelivered(smsLedger);
       // Email sidecar — its OWN channel consult and its own pre-send row.
       if (await collectionsChannelPermitted({
         customerId: customer.id,
@@ -672,6 +677,8 @@ class BalanceReminder {
           });
           if (emailResult?.ok !== true) {
             await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || "email_not_sent" });
+          } else {
+            await ContactLedger.markDelivered(emailLedger);
           }
         }
       }
