@@ -25,7 +25,7 @@ const state = {
 function makeBuilder(table) {
   const b = {};
   const chain = (name) => { b[name] = jest.fn(() => b); };
-  ['join', 'leftJoin', 'forUpdate', 'where', 'andWhere', 'whereNot', 'whereNotIn', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
+  ['join', 'leftJoin', 'joinRaw', 'forUpdate', 'where', 'andWhere', 'whereNot', 'whereNotIn', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
     'orderBy', 'limit', 'groupBy', 'groupByRaw', 'havingRaw', 'select', 'first'].forEach(chain);
   b.update = jest.fn((patch) => {
     // Only row-scoped updates (where({id,...})) are the matcher's claims and
@@ -45,6 +45,25 @@ function makeBuilder(table) {
     // the heal queries join payouts: one scans UNRECONCILED links, the
     // amount-mismatch scan targets RECONCILED ones (both skip pending rows)
     if (table === 'bank_transactions as bt') {
+      // the edited-expense-link heal returns only VIOLATIONS (window or
+      // net/gross amount) — mirror its SQL filter over the fixtures
+      const expenseHealScan = b.where.mock.calls.some(c => c[0] === 'bt.status' && c[1] === 'matched_expense');
+      if (expenseHealScan) {
+        const dayMs = 86400000;
+        return Promise.resolve(state.bankRows
+          .filter(r => r.status === 'matched_expense' && r.matched_expense_id)
+          .flatMap(r => {
+            const e = state.expenses.find(x => x.id === r.matched_expense_id);
+            if (!e) return [];
+            const rsum = state.bankRows
+              .filter(x => x.status === 'refund_applied' && x.suggestion?.refundAppliedTo === e.id)
+              .reduce((s, x) => s + Number(x.suggestion.refundAmount || 0), 0);
+            const windowOk = Math.abs(new Date(`${e.expense_date}T00:00:00Z`) - new Date(`${r.txn_date}T00:00:00Z`)) <= 5 * dayMs;
+            const amountOk = Math.abs(Number(e.amount) - Number(r.amount)) <= 0.011
+              || Math.abs(Number(e.amount) + rsum - Number(r.amount)) <= 0.011;
+            return (windowOk && amountOk) ? [] : [{ id: r.id, expense_id: r.matched_expense_id }];
+          })).then(resolve, reject);
+      }
       // the orphan-refund heal anti-joins expenses on the suggestion target
       const refundScan = b.where.mock.calls.some(c => c[0] === 'bt.status' && c[1] === 'refund_applied');
       if (refundScan) {
@@ -688,6 +707,61 @@ describe('runDeterministicMatching', () => {
     const sug = sugOf(parked);
     expect(sug.payoutCandidates.map(c => c.id)).toEqual(['po-near', 'po-mid', 'po-far']);
     expect(sug.payoutCandidatesTotal).toBe(3);
+  });
+
+  test('an EDITED linked expense that no longer matches is healed — the link reverts to review', async () => {
+    // linked at $100, operator later edits the expense to $120 → coverage
+    // would keep counting least(100, 120) while the unique index blocks the
+    // right expense from claiming the row
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-10', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', matched_expense_id: 'exp-1', suggestion: null }];
+    state.expenses = [{ id: 'exp-1', amount: '120.00', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.expenseLinksReverted).toBe(1);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_expense', matched_expense_id: 'exp-1' });
+    expect(sugOf(revert).autoRevert.reason).toContain('edited');
+  });
+
+  test('a refund-REDUCED linked expense is NOT healed away — its gross still matches the debit', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', matched_expense_id: 'exp-1', suggestion: null },
+      { id: 'bt-credit', txn_date: '2026-08-12', amount: 20, direction: 'credit', account_type: 'card', status: 'refund_applied', suggestion: { refundAppliedTo: 'exp-1', refundAmount: 20 } },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '80.00', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.expenseLinksReverted).toBe(0);
+    expect(state.updates.find(u => u.patch.status === 'unmatched')).toBeUndefined();
+  });
+
+  test('a phantom expense committing DURING the claim is caught by the post-claim verify', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', account_type: 'card', suggestion: null }];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' }];
+    // the phantom's insert commits while the claim transaction is open —
+    // invisible to the locked in-transaction recheck, visible to the
+    // fresh-snapshot verify that follows the commit
+    mockDb.transaction.mockImplementationOnce(async (cb) => {
+      const out = await cb(mockDb);
+      state.expenses.push({ id: 'exp-2', amount: '312.40', description: 'order 2', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' });
+      return out;
+    });
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(0);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert).toBeDefined();
+    expect(sugOf(revert).autoRevert.reason).toContain('ambiguous');
+  });
+
+  test('a linked payout that turned INELIGIBLE (webhook rewrote it) reverts instead of confirming', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
+    // the payout.failed webhook landed after matching — status is no longer paid
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'failed', reconciled: false }];
+    reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-1', skipped: true, reason: 'precondition' });
+    const summary = await runDeterministicMatching();
+    expect(summary.reconcileRetried).toBe(0);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert).toBeDefined();
+    expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
+    expect(sugOf(revert).autoRevert.reason).toContain('no longer eligible');
   });
 
   test('a full-price debit still matches its expense after a refund reduced it (GROSS matching)', async () => {

@@ -4096,6 +4096,11 @@ function BankImportTab() {
       setNotice({ error: true, text: "Set an account label before uploading" });
       return;
     }
+    // a NEW ordinary upload voids any prior duplicate confirmation — if
+    // this upload fails, a stale "Import skipped duplicates anyway" button
+    // would force-import rows from the PREVIOUS statement. The token is
+    // retained only across forceImportDuplicates retries.
+    setDupUpload(null);
     const reader = new FileReader();
     reader.onload = () => {
       const payload = {

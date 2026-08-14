@@ -461,6 +461,7 @@ async function healOrphanRefunds() {
 async function retryPendingReconciliations() {
   const healLinks = await healUnreconciledLinks();
   const orphanRefunds = await healOrphanRefunds();
+  const editedLinks = await healEditedExpenseLinks();
   const pending = await db('bank_transactions')
     .where({ status: 'matched_payout' })
     .whereNotNull('matched_payout_id')
@@ -495,7 +496,51 @@ async function retryPendingReconciliations() {
   // (Reversals need no sweep: the unlink route runs its unlink CAS inside
   // the reversal's own transaction, so a failed reversal rolls the unlink
   // back — there is never a committed unlink awaiting reversal.)
-  return { pending: pending.length, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds };
+  return { pending: pending.length, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds, expenseLinksReverted: editedLinks };
+}
+
+// An operator EDIT to a linked expense (amount/date via the Expenses or
+// job-expenses routes) can silently invalidate a SURVIVING link: the FK
+// stays, ledgerCoverage keeps counting least(bt.amount, e.amount), and the
+// partial unique index blocks the RIGHT expense from ever claiming the row.
+// ONE SQL pass returns only the violations — links whose expense no longer
+// matches at net OR gross (applied refunds legitimately reduce the net) or
+// fell out of the ±window — and reverts them. created_expense rows are
+// exempt by the status filter: that expense's identity IS this debit (it
+// was created from it), an amount edit there is a correction the coverage
+// cap already reflects, and unlinking would bait a duplicate create.
+async function healEditedExpenseLinks() {
+  const bad = await db('bank_transactions as bt')
+    .join('expenses as e', 'e.id', 'bt.matched_expense_id')
+    .joinRaw(`left join lateral (
+        select coalesce(sum((rbt.suggestion->>'refundAmount')::numeric), 0) as rsum
+        from bank_transactions rbt
+        where rbt.status = 'refund_applied'
+          and rbt.suggestion->>'refundAppliedTo' = e.id::text
+      ) rs on true`)
+    .where('bt.status', 'matched_expense')
+    .whereRaw(`not (
+        e.expense_date between bt.txn_date - make_interval(days => ?) and bt.txn_date + make_interval(days => ?)
+        and (abs(e.amount - bt.amount) <= ? or abs(e.amount + rs.rsum - bt.amount) <= ?)
+      )`, [EXPENSE_DATE_WINDOW_DAYS, EXPENSE_DATE_WINDOW_DAYS, CANDIDATE_AMOUNT_TOLERANCE, CANDIDATE_AMOUNT_TOLERANCE])
+    .select('bt.id as id', 'bt.matched_expense_id as expense_id');
+  let reverted = 0;
+  for (const row of bad) {
+    const changed = await db('bank_transactions')
+      .where({ id: row.id, status: 'matched_expense', matched_expense_id: row.expense_id })
+      .update({
+        status: 'unmatched',
+        matched_expense_id: null,
+        match_method: null,
+        matched_at: null,
+        suggestion: suggestionMerge({
+          autoRevert: { at: new Date().toISOString(), expenseId: row.expense_id, reason: 'the linked expense was edited and no longer matches this bank row (amount/date)' },
+        }),
+        updated_at: new Date(),
+      });
+    if (changed) reverted++;
+  }
+  return reverted;
 }
 
 // A deleted expense/payout SET-NULLs the FK but leaves the status behind —
@@ -534,9 +579,23 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
   const { reconcilePayout } = require('./stripe-banking');
   const result = await reconcilePayout(payoutId, Number(amount), note, `bank-import:${rowId}`, 'confirmed', {
     onlyIfUnreconciled: true,
-    precondition: (trx) => trx('bank_transactions')
-      .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
-      .forUpdate().first('id').then(Boolean),
+    precondition: async (trx) => {
+      const linked = await trx('bank_transactions')
+        .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+        .forUpdate().first('id', 'txn_date');
+      if (!linked) return false;
+      // Payout ELIGIBILITY re-read under the payout lock reconcilePayout is
+      // already holding: a payout webhook can rewrite status/amount/arrival
+      // between the unlocked candidate read and this echo, and confirming a
+      // reconciliation for a payout that no longer explains the credit
+      // would falsify the ledger mirror. A failure here surfaces as a
+      // precondition skip; the re-check transaction below decides whether
+      // the link itself must be reverted.
+      const sp = await trx('stripe_payouts').where('id', payoutId).first('id', 'status', 'amount', 'arrival_date', 'reconciled');
+      if (!sp || sp.status !== 'paid') return false;
+      const effective = await effectivePayoutAmount(sp, trx);
+      return isPlausiblePayoutLink({ txn_date: linked.txn_date, amount }, { amount: effective, arrival_date: sp.arrival_date });
+    },
   });
   // A skip for human_rejected/guard demands a REVERT decision — but the
   // reconcile transaction's payout lock is already released, so the state
@@ -553,10 +612,10 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
   if (result && result.skipped && result.reason === 'human_draft') {
     return result;
   }
-  if (result && result.skipped && (result.reason === 'human_rejected' || result.reason === 'guard')) {
+  if (result && result.skipped && (result.reason === 'human_rejected' || result.reason === 'guard' || result.reason === 'precondition')) {
     let outcome = null;
     await db.transaction(async (trx) => {
-      const sp = await trx('stripe_payouts').where('id', payoutId).forUpdate().first('id', 'amount', 'reconciled');
+      const sp = await trx('stripe_payouts').where('id', payoutId).forUpdate().first('id', 'status', 'amount', 'arrival_date', 'reconciled');
       if (!sp) return; // payout gone — FK SET NULL + self-heal own this case
       const latest = await trx('bank_reconciliation')
         .where('payout_id', payoutId)
@@ -606,6 +665,48 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
           return;
         }
       }
+      const cur = await trx('bank_transactions')
+        .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+        .first('id', 'txn_date');
+      if (!cur) {
+        // the row is no longer linked — keep the caller's original skip
+        // semantics (a concurrent unlink/re-match owns the row now)
+        outcome = 'skip_stands';
+        return;
+      }
+      // ELIGIBILITY revert for a still-unreconciled payout: a webhook
+      // rewrote its status/amount/arrival and it no longer explains the
+      // credit — the link must not survive on a payout the echo can never
+      // legitimately confirm. (A reconciled payout was already judged by
+      // the amount check above; a human ruling is never second-guessed.)
+      if (!sp.reconciled) {
+        const effective = await effectivePayoutAmount(sp, trx);
+        const eligible = sp.status === 'paid'
+          && isPlausiblePayoutLink({ txn_date: cur.txn_date, amount }, { amount: effective, arrival_date: sp.arrival_date });
+        if (!eligible) {
+          const changed = await trx('bank_transactions')
+            .where({ id: rowId, status: 'matched_payout', matched_payout_id: payoutId })
+            .update({
+              status: 'unmatched',
+              matched_payout_id: null,
+              match_method: null,
+              matched_at: null,
+              suggestion: suggestionMerge({
+                autoRevert: { at: new Date().toISOString(), payoutId, reason: 'the payout is no longer eligible (status/amount/arrival changed after matching)' },
+              }, ['reconcilePending']),
+              updated_at: new Date(),
+            });
+          if (changed) outcome = 'ineligible_reverted';
+          return;
+        }
+        if (result.reason === 'precondition') {
+          // transient precondition skip: the row is linked and the payout
+          // is eligible again, but NOTHING was echoed — keep the pending
+          // flag so the sweep retries, and hand the caller the skip as-is
+          outcome = 'skip_stands';
+          return;
+        }
+      }
       // benign: amount still matches (or nothing reconciled after all) —
       // resolve the pending flag inside the same locked transaction
       await trx('bank_transactions')
@@ -615,6 +716,8 @@ async function echoPayoutReconciliation(rowId, payoutId, amount, note) {
     });
     if (outcome === 'human_reverted') return { ...result, reason: 'human_rejected' };
     if (outcome === 'amount_reverted') return { ...result, amountMismatchReverted: true, reason: 'guard' };
+    if (outcome === 'ineligible_reverted') return { ...result, ineligibleReverted: true, reason: 'guard' };
+    if (outcome === 'skip_stands') return result;
     // re-check found the skip resolved benignly — report it as such so
     // callers don't act on a stale reason
     return { ...result, reason: 'resolved' };
@@ -762,7 +865,7 @@ async function runDeterministicMatching({ limit } = {}) {
     }
     moreRemaining = moreFresh || moreExamined;
   }
-  const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted };
+  const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted, expenseLinksReverted: reconciliation.expenseLinksReverted };
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);
@@ -914,6 +1017,9 @@ async function runDeterministicMatching({ limit } = {}) {
               } else if (echo && echo.amountMismatchReverted) {
                 summary.payoutsLinked--;
                 summary.amountMismatchReverted = (summary.amountMismatchReverted || 0) + 1;
+              } else if (echo && echo.ineligibleReverted) {
+                summary.payoutsLinked--;
+                summary.payoutIneligibleReverted = (summary.payoutIneligibleReverted || 0) + 1;
               }
             } catch (reconErr) {
               // flag already persisted with the claim — the sweep retries
@@ -959,8 +1065,11 @@ async function runDeterministicMatching({ limit } = {}) {
       let expenseQuery = dbOrTrx('expenses')
         .whereBetween('expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
         .whereRaw('abs(amount - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
+        // claims by OTHER rows only — excluding our own row's (nonexistent
+        // pre-claim) claim keeps this survey valid for the post-claim
+        // plurality verify below
         .whereNotExists(function claimed() {
-          this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = expenses.id');
+          this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = expenses.id').whereRaw('bt.id <> ?', [row.id]);
         })
         // A refund-REDUCED expense is never a net candidate: its remaining
         // net amount belongs to the original gross debit, and letting a
@@ -992,7 +1101,7 @@ async function runDeterministicMatching({ limit } = {}) {
         })
         .whereBetween('e.expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
         .whereNotExists(function claimed() {
-          this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = e.id');
+          this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = e.id').whereRaw('bt.id <> ?', [row.id]);
         })
         .groupBy('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method')
         .havingRaw("abs(e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) - ?) <= ?", [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
@@ -1019,6 +1128,7 @@ async function runDeterministicMatching({ limit } = {}) {
     // mislabeled.
     const strong = candidates.filter(c => centsEqual(matchAmount(c), row.amount) && vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
     if (candidates.length === 1 && strong.length === 1) {
+      let claimedExpense = false;
       try {
         // Claim with the candidate expense LOCKED and every matching
         // predicate revalidated against its CURRENT values — the earlier
@@ -1052,8 +1162,39 @@ async function runDeterministicMatching({ limit } = {}) {
           const changed = await trx('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
             .update({ status: 'matched_expense', matched_expense_id: strong[0].id, match_method: 'expense_amount_date_vendor', matched_at: new Date(), updated_at: new Date() });
-          if (changed) summary.expensesLinked++;
+          if (changed) claimedExpense = true;
         });
+        if (claimedExpense) {
+          // POST-CLAIM plurality verify: READ COMMITTED lets an expense
+          // whose insert COMMITS during the claim transaction slip past the
+          // locked recheck (a phantom — only the chosen expense row was
+          // locked). This fresh-snapshot survey sees every insert that
+          // committed before this statement; plural → revert the claim and
+          // let the next pass park the row with the full list. An insert
+          // committing after this point is simply a LATER expense — it
+          // never retro-invalidates a link (same line the edited-expense
+          // healer draws).
+          const after = await surveyExpenseCandidates(db);
+          if (after.length === 1 && after[0].id === strong[0].id) {
+            summary.expensesLinked++;
+          } else {
+            const undone = await db('bank_transactions')
+              .where({ id: row.id, status: 'matched_expense', matched_expense_id: strong[0].id })
+              .update({
+                status: 'unmatched',
+                matched_expense_id: null,
+                match_method: null,
+                matched_at: null,
+                suggestion: suggestionMerge({
+                  autoRevert: { at: new Date().toISOString(), expenseId: strong[0].id, reason: 'a concurrently added expense made the match ambiguous' },
+                }),
+                updated_at: new Date(),
+              });
+            // CAS no-op = someone else already changed the row (unlink or
+            // re-match) — their write owns the outcome, count nothing
+            if (undone) summary.ambiguous++;
+          }
+        }
       } catch (err) {
         if (!isUniqueViolation(err)) throw err; // lost the claim race — skip
       }

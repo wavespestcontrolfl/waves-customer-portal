@@ -2204,6 +2204,9 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
         // UI silently clear the selection while the link no longer exists
         return res.status(409).json({ error: "a human rejected this payout's reconciliation on the Banking page — the link was not kept, and this payout is now excluded for this row" });
       }
+      if (result && result.ineligibleReverted) {
+        return res.status(409).json({ error: 'that payout is no longer eligible (its status, amount, or arrival changed) — the link was not kept' });
+      }
       if (result && result.skipped && result.reason === 'precondition') {
         return res.status(409).json({ error: 'row changed mid-flight — reload' });
       }
