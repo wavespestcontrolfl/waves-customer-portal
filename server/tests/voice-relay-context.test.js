@@ -340,9 +340,9 @@ describe('GATE ON — caller recognition', () => {
       expect(await relayContext.beginRelaySessionClaim(CALL_SID, 'nonce-abc', 1799999999)).toBe(true);
       const raws = builders.call_log.whereRaw.mock.calls.map(([sql]) => String(sql));
       expect(raws.some((sql) => sql.includes("relay_session_claim_owner') IS DISTINCT FROM ?"))).toBe(true);
-      // …AND strictly newer: a delayed OLD socket (lower generation) cannot
-      // steal the claim back from the replacement.
-      expect(raws.some((sql) => sql.includes("relay_session_claim_gen')::bigint, 0) < ?"))).toBe(true);
+      // …AND equal-or-newer: a delayed OLD socket (strictly lower generation)
+      // cannot steal the claim back; a same-second retry (equal) still can.
+      expect(raws.some((sql) => sql.includes("relay_session_claim_gen')::bigint, 0) <= ?"))).toBe(true);
       const updateSql = String(builders.call_log.update.mock.calls[0][0].metadata.__raw || builders.call_log.update.mock.calls[0][0].metadata.sql || '');
       expect(updateSql).toContain('relay_session_claim_owner');
       expect(updateSql).toContain('relay_session_claim_gen');

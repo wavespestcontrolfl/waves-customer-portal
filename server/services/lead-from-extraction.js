@@ -194,6 +194,49 @@ async function fileContactInstructionNotification(customer, instruction, opts, d
       }))
       .digest('hex').slice(0, 16);
     if (opts.callSid) {
+      // ⭐ SERIALIZED, NOT JUST PROBED. A pre-insert SELECT alone is not
+      // cross-pod idempotency: the live delivery and the hourly sweep (or two
+      // scheduler pods) can both read "no row" and both notify. The advisory
+      // xact lock — keyed by (callSid, instructionKey) — makes probe→notify a
+      // critical section; the lock releases at commit, after the winner's
+      // notification exists for the loser's probe to find. A lock/transaction
+      // failure falls through to the unserialized path: a duplicate card
+      // beats a lost do-not-contact.
+      let serialized = null;
+      if (typeof db.transaction === 'function') {
+        try {
+          serialized = await db.transaction(async (trx) => {
+            await trx.raw(
+              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+              ['voice-contact-instruction', `${String(opts.callSid)}:${instructionKey}`],
+            );
+            const existing = await trx('notifications')
+              .whereRaw("metadata->>'callSid' = ?", [String(opts.callSid)])
+              .whereRaw("metadata->>'source' = ?", ['voice_agent'])
+              .whereRaw("metadata->>'instructionKey' = ?", [instructionKey])
+              .first('id');
+            if (existing) return { deduped: true, id: existing.id };
+            const NotificationServiceLocked = require('./notification-service');
+            const lockedNotif = await notifyContactInstruction(NotificationServiceLocked, customer, instruction, opts, dnc, instructionKey);
+            return { deduped: false, notif: lockedNotif };
+          });
+        } catch (err) {
+          logger.warn(`[voice-agent-lead] contact-instruction serialization failed (${err.message}) — proceeding unserialized`);
+          serialized = null;
+        }
+      }
+      if (serialized && serialized.deduped) {
+        logger.info(`[voice-agent-lead] contact instruction for customer ${customer.id} already persisted (notification ${serialized.id}) — not re-notifying`);
+        return { persisted: true, suppressed: false };
+      }
+      if (serialized && !serialized.deduped) {
+        return finishContactInstructionResult(serialized.notif, customer, dnc);
+      }
+    }
+    // Unserialized fallback (no callSid, or the lock/transaction failed):
+    // still probe best-effort — non-atomic, but a repaired marker beats an
+    // hourly duplicate, and a probe failure proceeds to notify.
+    if (opts.callSid) {
       const existing = await db('notifications')
         .whereRaw("metadata->>'callSid' = ?", [String(opts.callSid)])
         .whereRaw("metadata->>'source' = ?", ['voice_agent'])
@@ -206,62 +249,73 @@ async function fileContactInstructionNotification(customer, instruction, opts, d
       }
     }
     const NotificationService = require('./notification-service');
-    const notif = await NotificationService.notifyAdmin(
-      'service',
-      `${dnc ? '🚫 DO-NOT-CONTACT request' : '📞 Contact preference'} stated on a phone call`,
-      [
-        // ⭐ THE ALERT TELLS THE TRUTH ABOUT WHAT ALREADY HAPPENED. The voice
-        // agent applies an explicit, verified SMS opt-out itself (the one write
-        // it makes — relay-tools, via recordSuppression); telling staff
-        // "nothing was changed" over a suppression that already landed reports
-        // a false compliance state in the exact place they check it. Everything
-        // BEYOND that write (email, broader preferences) is still theirs.
-        dnc && opts.smsSuppressionApplied
-          ? 'The caller asked NOT to be contacted. Automated TEXTS to their number are ALREADY STOPPED '
-            + '(the voice agent applied the SMS opt-out). Any email or broader preference still needs a human — review and action the rest.'
-          : null,
-        dnc && !opts.smsSuppressionApplied
-          ? 'The caller asked NOT to be contacted. Nothing was changed automatically — review and action it.'
-          : null,
-        instruction.preferred_contact_method ? `Preferred method: ${instruction.preferred_contact_method}.` : null,
-        instruction.contact_preference ? `In their words: "${instruction.contact_preference}"` : null,
-      ].filter(Boolean).join('\n'),
-      {
-        icon: dnc ? '🚫' : '📞',
-        link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
-        // ⭐ THIS ROW IS THE ONLY ARTIFACT. A lifecycle customer gets no lead, so
-        // a stated contact instruction lives nowhere but this feed row — and the
-        // admin bell policy silences the whole 'service' category by default
-        // when it is on, which would have made a caller's "email only" (or the
-        // DNC's paper trail) vanish without a sound. `bell: true` is the
-        // policy's own site-level tag for "this specific notification must
-        // ring": a consent instruction is compliance, not FYI noise.
-        bell: true,
-        metadata: {
-          customerId: customer.id,
-          source: 'voice_agent',
-          callSid: opts.callSid || null,
-          instructionKey, // the sweep-retry dedupe key (normalized instruction)
-          ...instruction,
-        },
-      },
-    );
-    // ⭐ SUPPRESSED IS NOT PERSISTED. notifyAdmin's suppression sentinel is
-    // truthy on purpose (`{ id: null, suppressed: true }`), so a bare truthiness
-    // check here read "no row was written" as success. With `bell: true` the
-    // policy can no longer silence this site, so a suppressed return means the
-    // internal-test-customer gate — deliberate, but still zero artifact, and
-    // this function must never claim otherwise.
-    if (!notif || notif.suppressed) {
-      logger.error(`[voice-agent-lead] contact instruction for customer ${customer.id} did NOT persist to the admin feed (dnc=${dnc}${notif && notif.suppressed ? `, suppressed:${notif.reason || 'internal_test'}` : ''})`);
-      return { persisted: false, suppressed: !!(notif && notif.suppressed) };
-    }
-    logger.info(`[voice-agent-lead] contact instruction surfaced for existing customer ${customer.id} (dnc=${dnc})`);
-    return { persisted: true, suppressed: false };
+    const notif = await notifyContactInstruction(NotificationService, customer, instruction, opts, dnc, instructionKey);
+    return finishContactInstructionResult(notif, customer, dnc);
   } catch (err) {
     logger.error(`[voice-agent-lead] contact instruction surfacing FAILED for customer ${customer.id}: ${err.message}`);
     return { persisted: false, suppressed: false };
   }
+}
+
+// The single notifyAdmin composition — shared by the serialized (advisory-
+// locked) path and the unserialized fallback, so the card is identical
+// whichever rail delivered it.
+function notifyContactInstruction(NotificationService, customer, instruction, opts, dnc, instructionKey) {
+  return NotificationService.notifyAdmin(
+    'service',
+    `${dnc ? '🚫 DO-NOT-CONTACT request' : '📞 Contact preference'} stated on a phone call`,
+    [
+      // ⭐ THE ALERT TELLS THE TRUTH ABOUT WHAT ALREADY HAPPENED. The voice
+      // agent applies an explicit, verified SMS opt-out itself (the one write
+      // it makes — relay-tools, via recordSuppression); telling staff
+      // "nothing was changed" over a suppression that already landed reports
+      // a false compliance state in the exact place they check it. Everything
+      // BEYOND that write (email, broader preferences) is still theirs.
+      dnc && opts.smsSuppressionApplied
+        ? 'The caller asked NOT to be contacted. Automated TEXTS to their number are ALREADY STOPPED '
+          + '(the voice agent applied the SMS opt-out). Any email or broader preference still needs a human — review and action the rest.'
+        : null,
+      dnc && !opts.smsSuppressionApplied
+        ? 'The caller asked NOT to be contacted. Nothing was changed automatically — review and action it.'
+        : null,
+      instruction.preferred_contact_method ? `Preferred method: ${instruction.preferred_contact_method}.` : null,
+      instruction.contact_preference ? `In their words: "${instruction.contact_preference}"` : null,
+    ].filter(Boolean).join('\n'),
+    {
+      icon: dnc ? '🚫' : '📞',
+      link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+      // ⭐ THIS ROW IS THE ONLY ARTIFACT. A lifecycle customer gets no lead, so
+      // a stated contact instruction lives nowhere but this feed row — and the
+      // admin bell policy silences the whole 'service' category by default
+      // when it is on, which would have made a caller's "email only" (or the
+      // DNC's paper trail) vanish without a sound. `bell: true` is the
+      // policy's own site-level tag for "this specific notification must
+      // ring": a consent instruction is compliance, not FYI noise.
+      bell: true,
+      metadata: {
+        customerId: customer.id,
+        source: 'voice_agent',
+        callSid: opts.callSid || null,
+        instructionKey, // the sweep-retry dedupe key (normalized instruction)
+        ...instruction,
+      },
+    },
+  );
+}
+
+// ⭐ SUPPRESSED IS NOT PERSISTED. notifyAdmin's suppression sentinel is truthy
+// on purpose (`{ id: null, suppressed: true }`), so a bare truthiness check
+// read "no row was written" as success. With `bell: true` the policy can no
+// longer silence this site, so a suppressed return means the internal-test-
+// customer gate — deliberate, but still zero artifact, and this must never
+// claim otherwise.
+function finishContactInstructionResult(notif, customer, dnc) {
+  if (!notif || notif.suppressed) {
+    logger.error(`[voice-agent-lead] contact instruction for customer ${customer.id} did NOT persist to the admin feed (dnc=${dnc}${notif && notif.suppressed ? `, suppressed:${notif.reason || 'internal_test'}` : ''})`);
+    return { persisted: false, suppressed: !!(notif && notif.suppressed) };
+  }
+  logger.info(`[voice-agent-lead] contact instruction surfaced for existing customer ${customer.id} (dnc=${dnc})`);
+  return { persisted: true, suppressed: false };
 }
 
 const phoneDigits = (v) => String(v || '').replace(/\D/g, '');
