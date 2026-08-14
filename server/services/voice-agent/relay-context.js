@@ -1532,17 +1532,20 @@ async function servicesCatalogText() {
   const db = require('../../models/db');
   const { loadBookableCallServices } = require('../call-booking-catalog');
   const rows = await loadBookableCallServices(db);
-  // ⭐ THE SAME COMPLIANCE SCREEN THE REPORT SURFACES TAKE. A catalog NAME is
-  // admin free text too — "Pet-Safe Pest Control" spoken by the agent extends
-  // a banned claim onto a new customer surface. A name carrying banned copy
-  // is dropped, never paraphrased (relay-visit's rule).
+  // ⭐ THE SAME COMPLIANCE SCREENS THE REPORT SURFACES TAKE — BOTH claim
+  // classes. findBannedCustomerCopy is the OUTCOME list (eliminated/
+  // guaranteed/pest-free); reentrySafetyClaimFinding is the canonical SAFETY
+  // screen ("Pet-Safe", "Family-Safe", "EPA-Approved", fixed drying minutes).
+  // A catalog NAME is admin free text — a name carrying either claim class
+  // is dropped, never paraphrased.
   const { findBannedCustomerCopy } = require('../service-report/activity-indicators');
+  const { reentrySafetyClaimFinding } = require('../content/content-guardrails');
   const names = [...new Set(
     (Array.isArray(rows) ? rows : [])
       .map((row) => promptSafe(row && (row.name || row.short_name), 60))
       .filter(Boolean)
       .filter((name) => {
-        try { return findBannedCustomerCopy(name).length === 0; }
+        try { return findBannedCustomerCopy(name).length === 0 && !reentrySafetyClaimFinding(name); }
         catch { return false; } // fail closed — an unscreenable name is not spoken
       }),
   )];

@@ -566,6 +566,24 @@ describe('get_service_report', () => {
     expect(out).not.toMatch(/pest-free|guaranteed/i);
   });
 
+  // ⭐ BOTH CLAIM CLASSES SCREEN: outcome claims (findBannedCustomerCopy) AND
+  // safety/re-entry claims (reentrySafetyClaimFinding — "Pet-Safe",
+  // "EPA-Approved", fixed drying minutes). A safety-claim product name passed
+  // the outcome list and still must never be spoken.
+  test('a SAFETY-claim product name is withheld too — both claim classes screen', async () => {
+    primeDb({
+      scheduled_services: [],
+      service_records: [{ id: 'sr-9', service_date: '2026-08-01', service_type: 'Pest Control', technician_notes: null, structured_notes: null, status: 'completed' }],
+      service_products: [
+        { product_name: 'Pet-Safe Barrier Spray', application_area: 'perimeter', application_method: 'spray', targets: null },
+        { product_name: 'Termidor SC', application_area: 'exterior perimeter', application_method: 'spray', targets: JSON.stringify(['ants']) },
+      ],
+    });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).toContain('Termidor SC');
+    expect(out).not.toMatch(/pet-safe/i);
+  });
+
   // ⭐ PAPER-COMPLIANCE ARTIFACTS ARE NOT VOICE MATERIAL. A WDO inspection or a
   // pre-treat certificate is a regulated, signed document; an AI paraphrase of
   // it over the phone is a new compliance surface nothing reviews.

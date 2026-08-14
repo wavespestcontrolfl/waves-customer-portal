@@ -409,6 +409,13 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
   // to. A matched line is DROPPED, never paraphrased: the office can go over
   // it, and nothing here is worth inventing safer wording for.
   const { findBannedCustomerCopy } = require('../service-report/activity-indicators');
+  // BOTH claim classes: findBannedCustomerCopy is the OUTCOME list
+  // (eliminated/guaranteed/pest-free); reentrySafetyClaimFinding is the
+  // canonical SAFETY screen ("pet-safe", "family-safe", "EPA-approved",
+  // fixed drying minutes) — the compliance rule regex the content pipeline
+  // enforces. A "Pet-Safe Barrier" product name passes the first and must
+  // still never be spoken.
+  const { reentrySafetyClaimFinding } = require('../content/content-guardrails');
   const complianceSafe = (value, max) => {
     const text = promptSafeUntrusted(value, max);
     if (!text) return null;
@@ -416,6 +423,14 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
     if (hits.length) {
       logger.warn(`[voice-relay-visit] finding text withheld — banned customer copy (${hits.length} match(es)) on record ${record.id}`);
       return null;
+    }
+    try {
+      if (reentrySafetyClaimFinding(text)) {
+        logger.warn(`[voice-relay-visit] finding text withheld — safety/re-entry claim on record ${record.id}`);
+        return null;
+      }
+    } catch {
+      return null; // fail closed — an unscreenable line is not spoken
     }
     // ⭐ ACCESS CODES ARE REDACTED ON EVERY FREE-TEXT REPORT FIELD. The
     // provenance filter only suppresses TITLE-ONLY raw-note findings; a

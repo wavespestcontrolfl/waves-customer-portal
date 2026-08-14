@@ -624,12 +624,16 @@ describe('get_services_catalog — public, no tier gate', () => {
   // never spoken or paraphrased.
   test('a catalog name carrying banned customer copy is dropped from the spoken list', async () => {
     loadBookableCallServices.mockResolvedValue([
-      { name: 'Pest-Free Guarantee Plan' }, // banned: pest-free + guarantee
+      { name: 'Pest-Free Guarantee Plan' }, // OUTCOME claims: pest-free + guarantee
+      { name: 'Pet-Safe Pest Control' }, // SAFETY claim: the compliance-rule class
+      { name: 'EPA-Approved Barrier' }, // SAFETY claim: banned regulator phrasing
       { name: 'Quarterly Pest Control' },
     ]);
     const out = await executeTool('get_services_catalog', {}, { customerId: null });
     expect(out).toContain('Quarterly Pest Control');
     expect(out).not.toMatch(/pest-free|guarantee/i);
+    expect(out).not.toMatch(/pet-safe/i);
+    expect(out).not.toMatch(/EPA-Approved/i);
   });
 
   test('empty/unavailable catalog → general terms only, still no invented names', async () => {
