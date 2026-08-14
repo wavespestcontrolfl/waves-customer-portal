@@ -531,46 +531,66 @@ async function attemptedRecently(address) {
 // spend), bounded, fail-open — a reconciliation error must never sink the
 // sweep. Non-matching stamps (post-edit bookings) are re-read nightly;
 // that is a cheap indexed read, not churn.
-const RECONCILE_VISIT_LIMIT = 200;
+const RECONCILE_VISIT_PAGE = 200;
+const RECONCILE_VISIT_MAX_PAGES = 20;
 
 async function reconcileVisitCoordinates() {
   let filled = 0;
   try {
     const { addressKey } = require('./customer-properties');
-    const rows = await db('scheduled_services as ss')
-      .join('customer_properties as cp', 'cp.id', 'ss.property_id')
-      .whereNull('ss.lat')
-      .whereNull('ss.lng')
-      .whereNotNull('cp.latitude')
-      .whereNotNull('cp.longitude')
-      .where('cp.active', true)
-      .select(
-        'ss.id as visit_id',
-        'ss.service_address_line1', 'ss.service_address_line2',
-        'ss.service_address_city', 'ss.service_address_zip',
-        'cp.latitude', 'cp.longitude',
-        'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
-      )
-      .limit(RECONCILE_VISIT_LIMIT);
-    for (const r of rows || []) {
-      const propKey = addressKey(r);
-      const visitKey = addressKey({
-        address_line1: r.service_address_line1,
-        address_line2: r.service_address_line2,
-        city: r.service_address_city,
-        zip: r.service_address_zip,
-      });
-      if (!propKey || visitKey !== propKey) continue;
-      const lat = Number(r.latitude);
-      const lng = Number(r.longitude);
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
-      // Null-pair re-asserted: fill-only under concurrent writers.
-      await db('scheduled_services')
-        .where({ id: r.visit_id })
-        .whereNull('lat')
-        .whereNull('lng')
-        .update({ lat, lng });
-      filled += 1;
+    // Keyset pagination (ordered by ss.id) so rows the canonical filter
+    // skips cannot occupy a stable scan prefix and starve everything
+    // behind them — an unordered LIMIT did exactly that. The SQL prefilter
+    // mirrors the cheap canonical-key components: unstamped rows (key '')
+    // and different-zip5 stamps can never key-match, so the permanent
+    // residue the JS filter would re-skip nightly mostly never leaves the
+    // database. MAX_PAGES bounds a pathological night at 4k rows; the set
+    // shrinks as fills land, so the tail is reached on later nights.
+    let lastId = null;
+    for (let page = 0; page < RECONCILE_VISIT_MAX_PAGES; page += 1) {
+      const q = db('scheduled_services as ss')
+        .join('customer_properties as cp', 'cp.id', 'ss.property_id')
+        .whereNull('ss.lat')
+        .whereNull('ss.lng')
+        .whereNotNull('cp.latitude')
+        .whereNotNull('cp.longitude')
+        .where('cp.active', true)
+        .whereRaw("COALESCE(TRIM(ss.service_address_line1), '') <> ''")
+        .whereRaw("LEFT(TRIM(COALESCE(ss.service_address_zip, '')), 5) = LEFT(TRIM(COALESCE(cp.zip, '')), 5)")
+        .select(
+          'ss.id as visit_id',
+          'ss.service_address_line1', 'ss.service_address_line2',
+          'ss.service_address_city', 'ss.service_address_zip',
+          'cp.latitude', 'cp.longitude',
+          'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
+        )
+        .orderBy('ss.id', 'asc')
+        .limit(RECONCILE_VISIT_PAGE);
+      if (lastId) q.where('ss.id', '>', lastId);
+      const rows = (await q) || [];
+      if (!rows.length) break;
+      lastId = rows[rows.length - 1].visit_id;
+      for (const r of rows) {
+        const propKey = addressKey(r);
+        const visitKey = addressKey({
+          address_line1: r.service_address_line1,
+          address_line2: r.service_address_line2,
+          city: r.service_address_city,
+          zip: r.service_address_zip,
+        });
+        if (!propKey || visitKey !== propKey) continue;
+        const lat = Number(r.latitude);
+        const lng = Number(r.longitude);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+        // Null-pair re-asserted: fill-only under concurrent writers.
+        await db('scheduled_services')
+          .where({ id: r.visit_id })
+          .whereNull('lat')
+          .whereNull('lng')
+          .update({ lat, lng });
+        filled += 1;
+      }
+      if (rows.length < RECONCILE_VISIT_PAGE) break;
     }
   } catch (err) {
     logger.warn('[call-property-lookup] visit reconciliation failed', { error: errId(err) });
@@ -579,10 +599,17 @@ async function reconcileVisitCoordinates() {
 }
 
 async function sweepUnenrichedProperties({ limit } = {}) {
-  if (!gateEnvValue('GATE_PROPERTY_ENRICH_BACKFILL')) return { skipped: 'gated' };
+  const backfillOn = gateEnvValue('GATE_PROPERTY_ENRICH_BACKFILL');
+  // Reconciliation heals the CALL-TIME lane's enrich↔booking race, so it
+  // runs whenever EITHER lane is live: with only the call-time gate on,
+  // a backfill-gated reconciliation would never repair those visits. It
+  // is free (no lookup spend), so gating it on the paid sweep's budget
+  // gate was never the point.
+  const reconcileOn = backfillOn || gateEnvValue('GATE_CALL_PROPERTY_LOOKUP');
+  const visitCoordsReconciled = reconcileOn ? await reconcileVisitCoordinates() : 0;
+  if (!backfillOn) return { skipped: 'gated', visitCoordsReconciled };
   const batch = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : backfillBatchSize();
   const t0 = Date.now();
-  const visitCoordsReconciled = await reconcileVisitCoordinates();
   let processed = 0;
   let enriched = 0;
   let failed = 0;

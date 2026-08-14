@@ -362,10 +362,24 @@ describe('sweepUnenrichedProperties', () => {
     delete process.env.PROPERTY_BACKFILL_BATCH;
   });
 
-  test('gate off → skipped before any DB read (independent of the per-call gate)', async () => {
-    process.env.GATE_CALL_PROPERTY_LOOKUP = 'true'; // other lane's gate must not leak in
-    expect(await sweepUnenrichedProperties()).toEqual({ skipped: 'gated' });
+  test('both gates off → skipped before any DB read', async () => {
+    expect(await sweepUnenrichedProperties()).toEqual({ skipped: 'gated', visitCoordsReconciled: 0 });
     expect(db).not.toHaveBeenCalled();
+  });
+
+  test('backfill off + call gate on → sweep still gated (no paid spend) but reconciliation runs', async () => {
+    process.env.GATE_CALL_PROPERTY_LOOKUP = 'true';
+    const joined = builder([]);
+    db.mockImplementation((table) => {
+      if (String(table).startsWith('scheduled_services as ss')) return joined;
+      return builder([]);
+    });
+    const res = await sweepUnenrichedProperties();
+    expect(res).toEqual({ skipped: 'gated', visitCoordsReconciled: 0 });
+    // The race the reconciliation heals is created by the CALL-TIME lane,
+    // so the free scan must not hide behind the paid sweep's budget gate.
+    expect(joined.join).toHaveBeenCalled();
+    expect(performPropertyLookup).not.toHaveBeenCalled();
   });
 
   test('enriches candidates up to the batch cap; cooldown rows are skipped without spending', async () => {
