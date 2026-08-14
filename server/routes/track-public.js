@@ -488,8 +488,9 @@ router.get('/:token', async (req, res, next) => {
       // even though the customer is shown a terminal missed-visit card.
       vehicle: customerState === 'en_route' ? await buildVehicle(row) : null,
       // "N stops away" (GATE_STOPS_AWAY): bare count only — never other
-      // customers' info. Pre-arrival states only; fail-soft null otherwise.
-      stopsAhead: (customerState === 'scheduled' || customerState === 'en_route')
+      // customers' info. Scheduled state only (the en-route card's "on the
+      // way" copy owns later states); fail-soft null otherwise.
+      stopsAhead: customerState === 'scheduled'
         ? await computeStopsAhead(db, row.id)
         : null,
       summary: customerState === 'complete' ? await buildSummary(row) : null,

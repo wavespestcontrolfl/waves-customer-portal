@@ -72,33 +72,31 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     if (!svc || !svc.technician_id) return null;
     if (TERMINAL_STATUSES.includes(svc.status)) return null;
     const trackState = svc.track_state || 'scheduled';
-    // Once the tech is on the property (or later) the count is meaningless.
-    if (trackState !== 'scheduled' && trackState !== 'en_route') return null;
+    // Only the pre-dispatch scheduled state shows a count. en_route and
+    // later are null: both clients render stopsAhead exclusively on their
+    // scheduled cards ("on the way" copy owns the en-route state), and
+    // persisting an undisplayed en-route zero would let a same-day rewind
+    // back to scheduled clamp the real count to a floor no one ever saw.
+    if (trackState !== 'scheduled') return null;
     const svcDate = dateOnly(svc.scheduled_date);
     if (!svcDate || svcDate !== today) return null;
 
-    let raw;
-    if (trackState === 'en_route') {
-      // The truck is driving to THIS stop — nothing is ahead of it.
-      raw = 0;
-    } else {
-      const countRows = await db('scheduled_services')
-        .where({ technician_id: svc.technician_id })
-        .where('scheduled_date', svcDate)
-        .whereNot('id', svc.id)
-        .whereNotIn('status', NOT_A_STOP_STATUSES)
-        // Dead estimate-slot holds linger until the cleanup cron deletes
-        // them — same live-hold predicate as route-reorder LIVE_HOLD_SQL.
-        .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())')
-        .whereRaw(
-          `(COALESCE(route_order, 999), COALESCE(window_start, '23:59'::time), created_at, id)
-             < (COALESCE(?::int, 999), COALESCE(?::time, '23:59'::time), ?::timestamptz, ?::uuid)`,
-          [svc.route_order, svc.window_start, svc.created_at, svc.id]
-        )
-        .count('id as n');
-      raw = Number(countRows?.[0]?.n);
-      if (!Number.isFinite(raw)) return null;
-    }
+    const countRows = await db('scheduled_services')
+      .where({ technician_id: svc.technician_id })
+      .where('scheduled_date', svcDate)
+      .whereNot('id', svc.id)
+      .whereNotIn('status', NOT_A_STOP_STATUSES)
+      // Dead estimate-slot holds linger until the cleanup cron deletes
+      // them — same live-hold predicate as route-reorder LIVE_HOLD_SQL.
+      .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())')
+      .whereRaw(
+        `(COALESCE(route_order, 999), COALESCE(window_start, '23:59'::time), created_at, id)
+           < (COALESCE(?::int, 999), COALESCE(?::time, '23:59'::time), ?::timestamptz, ?::uuid)`,
+        [svc.route_order, svc.window_start, svc.created_at, svc.id]
+      )
+      .count('id as n');
+    const raw = Number(countRows?.[0]?.n);
+    if (!Number.isFinite(raw)) return null;
 
     // Clamp against the persisted floor — valid only for today's display.
     const minShownRaw = svc.stops_ahead_min_shown;

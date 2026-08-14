@@ -128,15 +128,9 @@ describe('computeStopsAhead', () => {
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBe(1);
   });
 
-  test('en_route → 0 without running the day-plan count', async () => {
-    const db = makeDb({ svcRow: baseSvc({ track_state: 'en_route' }), countN: 99 });
-    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBe(0);
-    expect(db.queries).toHaveLength(1); // fetch only — no count builder
-    expect(db.raw.mock.calls[0][1]).toEqual([TODAY, 0, 0, TODAY, 'svc-self']);
-  });
-
   test.each([
     ['no technician assigned', baseSvc({ technician_id: null })],
+    ['en route to this stop (scheduled card owns the count)', baseSvc({ track_state: 'en_route' })],
     ['terminal status', baseSvc({ status: 'completed' })],
     ['on the property already', baseSvc({ track_state: 'on_property' })],
     ['scheduled for a future date', baseSvc({ scheduled_date: '2026-08-15' })],
