@@ -1271,7 +1271,15 @@ export default function TimeGridDay({
           defaultDate={date}
           selectedServices={allServices
             .filter((s) => selection.has(s.id))
-            .map((s) => ({ id: s.id, windowStart: s.windowStart, windowEnd: s.windowEnd, durationMinutes: effectiveDuration(s) }))}
+            .map((s) => {
+              // Mirror handleBulkMove's submit derivation exactly: a
+              // windowless visit lands at DAY_START_HOUR and a missing end
+              // becomes start + duration, so the hint checks the window the
+              // move will actually book (not the stored nulls).
+              const startMin = parseHHMM(s.windowStart) ?? DAY_START_HOUR * 60;
+              const endMin = parseHHMM(s.windowEnd) ?? (startMin + effectiveDuration(s));
+              return { id: s.id, windowStart: minutesToHHMM(startMin), windowEnd: minutesToHHMM(endMin) };
+            })}
           busy={busy}
           onMove={handleBulkMove}
           onUnassign={handleBulkUnassign}
