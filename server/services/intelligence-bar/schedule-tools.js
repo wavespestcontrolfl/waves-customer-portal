@@ -1102,8 +1102,10 @@ async function findAvailableSlotsTool(input) {
     // Waves works weekends — without this, find-time's legacy default
     // silently dropped every Sunday from staff slot suggestions. Day-off
     // policy lives in the weekly days-off setting, and staff surfaces are
-    // deliberately unblocked anyway (matching admin-schedule-find-time.js).
+    // deliberately unblocked anyway (matching admin-schedule-find-time.js),
+    // so blackout/weekly-days-off dates stay visible here too.
     includeWeekends: true,
+    includeBlackoutDates: true,
   });
 }
 
