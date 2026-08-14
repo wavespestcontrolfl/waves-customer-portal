@@ -129,6 +129,9 @@ router.post('/', async (req, res) => {
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
       includeBlackoutDates: true,
+      // Same principle for Sundays: find-time's legacy default drops them,
+      // which hid real weekend capacity from the staff picker.
+      includeWeekends: true,
     });
 
     res.json({
