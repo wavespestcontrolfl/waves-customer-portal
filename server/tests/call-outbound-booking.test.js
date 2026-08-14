@@ -1158,7 +1158,7 @@ describe('field-confirm semantics cover day-of takeovers on BOTH status routes',
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
     const idx = src.indexOf('let fieldConfirmVerified = false');
     expect(idx).toBeGreaterThan(-1);
-    const recheck = src.slice(idx, idx + 800);
+    const recheck = src.slice(idx, idx + 2000);
     // One verification covers the EXPLICIT technician confirm AND the day-of
     // takeover — the confirm path finds the visit by ID with no ownership
     // predicate, so an unowned tech confirm must fall back to OFFICE-confirm
@@ -1170,5 +1170,11 @@ describe('field-confirm semantics cover day-of takeovers on BOTH status routes',
     expect(recheck).toContain("['pending', 'confirmed'].includes(String(locked.status))");
     // …and the explicit stamp is gated on that verification.
     expect(src).toMatch(/if \(explicitFieldConfirm && fieldConfirmVerified\) \{\s*\n\s*lifecycleUpdates\.field_confirmed_at = svc\.field_confirmed_at \|\| /);
+    // …and the post-commit activation keys skipCardRequest on the SAME
+    // verification, never on the token role alone — an unowned tech confirm
+    // must run the office funnel (customer_confirmed stamps; nothing restores
+    // a wrongly-skipped funnel).
+    expect(src).toMatch(/skipCardRequest: fieldConfirmVerified,/);
+    expect(src).not.toMatch(/skipCardRequest: req\.techRole === 'technician'/);
   });
 });

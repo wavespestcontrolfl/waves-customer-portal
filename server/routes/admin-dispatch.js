@@ -3564,6 +3564,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // technician token confirming ANOTHER technician's office-review visit
     // would stamp it field-confirmed and skip the card funnel.
     const explicitFieldConfirm = isOfficeReviewConfirm && req.techRole === 'technician';
+    // Hoisted: the post-commit activation below must key skipCardRequest on
+    // the SAME row-locked verification — a technician token alone is not
+    // proof, and passing skipCardRequest for an unowned confirm permanently
+    // suppressed the card funnel (customer_confirmed stamps, no retry rail).
+    let fieldConfirmVerified = false;
     try {
       await db.transaction(async (trx) => {
         // ⭐ OWNERSHIP IS PROVEN UNDER THE ROW LOCK, NOT THE SNAPSHOT. The
@@ -3577,7 +3582,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // takeover); an unverified explicit confirm still commits, just as an
         // OFFICE confirm — the card funnel runs, which is the fail-closed
         // direction.
-        let fieldConfirmVerified = false;
         if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
           const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
             .first('technician_id', 'customer_confirmed', 'status');
@@ -3679,15 +3683,19 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // reminders for them too.)
     if (isOfficeReviewConfirm) {
       const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
-      // A TECHNICIAN token on this route is a FIELD confirm (the endpoint is
-      // requireTechOrAdmin): the tech is driving to meet the customer and
-      // collects a card in person, so the office-only card-request funnel — and
-      // the clearance stamp that arms the pre-visit sweep behind it — must not
-      // fire. Same distinction admin-schedule and tech-track draw.
-      // (field_confirmed_at was stamped INSIDE the status transaction above —
-      // atomic with the confirmation, never swallowed.)
+      // A technician token alone is NOT a field confirm — only the
+      // row-locked ownership verification above is: an unowned technician
+      // confirm runs the OFFICE funnel (fail closed; passing skipCardRequest
+      // on the token alone permanently suppressed card collection, since
+      // customer_confirmed stamps and no retry rail restores the funnel).
+      // The tech that DOES own the visit collects the card in person, so the
+      // office-only funnel — and the clearance stamp that arms the pre-visit
+      // sweep behind it — must not fire. Same distinction admin-schedule and
+      // tech-track draw. (field_confirmed_at was stamped INSIDE the status
+      // transaction above under the same verification — atomic with the
+      // confirmation, never swallowed.)
       await runOfficeConfirmActivation(db, svc, 'admin-dispatch', {
-        skipCardRequest: req.techRole === 'technician',
+        skipCardRequest: fieldConfirmVerified,
       });
     }
 
