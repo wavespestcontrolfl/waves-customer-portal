@@ -1822,15 +1822,20 @@ router.post('/bank-import/upload', async (req, res, next) => {
       forceAlreadyPresent,
       forceFailed,
       duplicates: duplicateRows.length,
-      duplicateHashes: duplicateRows.map(r => r.row_hash),
+      // capped in lockstep with duplicateRows below — force selection
+      // operates on what is shown
+      duplicateHashes: duplicateRows.slice(0, 200).map(r => r.row_hash),
       // one-time confirmation identity for a force re-post (replay-safe)
       forceToken: duplicateRows.length > 0 ? nodeCrypto.randomUUID() : null,
       duplicateSamples: duplicateRows.slice(0, 10).map(r => ({ txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
-      // the FULL per-row list (bounded by the 500-row upload cap), hash
-      // included — the client offers per-row force selection, because one
-      // genuinely distinct same-tuple transaction must be recoverable
-      // WITHOUT also re-importing every ordinary overlap in the file
-      duplicateRows: duplicateRows.map(r => ({ row_hash: r.row_hash, txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
+      // per-row force selection payload, hash included — one genuinely
+      // distinct same-tuple transaction must be recoverable WITHOUT also
+      // re-importing every ordinary overlap. CAPPED: the parser accepts
+      // multi-thousand-row files, and a wholesale re-upload would otherwise
+      // ship a multi-megabyte checkbox list; the honest remainder is
+      // disclosed and force selection works on what is shown (a smaller
+      // re-upload slice reaches the rest).
+      duplicateRows: duplicateRows.slice(0, 200).map(r => ({ row_hash: r.row_hash, txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
       skipped,
       matching,
       matchingError,

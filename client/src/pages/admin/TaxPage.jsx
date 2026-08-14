@@ -4125,7 +4125,7 @@ function BankImportTab() {
         // the server-issued token makes that confirmation replay-safe
         setDupUpload(
           r.duplicates > 0
-            ? { ...payload, duplicateRows: r.duplicateRows || [], forceToken: r.forceToken }
+            ? { ...payload, duplicateRows: r.duplicateRows || [], duplicatesTotal: r.duplicates, forceToken: r.forceToken }
             : null,
         );
         setDupPicks({});
@@ -4291,6 +4291,7 @@ function BankImportTab() {
           <option value="matched_expense">Matched to expense</option>
           <option value="matched_payout">Stripe payout</option>
           <option value="created_expense">Created expense</option>
+          <option value="refund_applied">Refund applied</option>
           <option value="ignored">Ignored</option>
         </select>
         <select
@@ -4341,6 +4342,11 @@ function BankImportTab() {
                   {d.txn_date} · {String(d.description).slice(0, 40)} · ${d.amount} ({d.direction})
                 </label>
               ))}
+              {(dupUpload.duplicatesTotal || 0) > (dupUpload.duplicateRows || []).length && (
+                <div style={{ color: D.muted, marginTop: 4 }}>
+                  +{dupUpload.duplicatesTotal - dupUpload.duplicateRows.length} more duplicates not shown — re-upload a smaller slice of the statement to force those
+                </div>
+              )}
               <button
                 type="button"
                 disabled={!!busy || !Object.values(dupPicks).some(Boolean)}
