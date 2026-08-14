@@ -436,7 +436,7 @@ async function verifyPendingExpenseClaims() {
   for (const row of rows) {
     const rejected = rejectedTargets(row.suggestion);
     const candidates = await surveyExpenseCandidatesForRow(row, rejected);
-    if (candidates.length === 1 && candidates[0].id === row.matched_expense_id) {
+    if (candidates.length === 1 && candidates[0].id === row.matched_expense_id && strongExpenseMatch(row, candidates[0])) {
       const done = await db('bank_transactions')
         .where({ id: row.id, status: 'matched_expense', matched_expense_id: row.matched_expense_id })
         .whereRaw("suggestion->>'verifyPending' = 'true'")
@@ -973,8 +973,12 @@ async function healEditedExpenseLinks() {
     // edit voids the automatic justification); MANUAL links keep the
     // operator's one-cent tolerance, the same window link-expense accepts.
     const amountMatches = auto ? centsEqual : withinCandidateTolerance;
-    const amountOk = amountMatches(exp.amount, link.bt_amount)
-      || amountMatches(Number(exp.amount) + Number(rsum || 0), link.bt_amount);
+    // a refunded expense validates ONLY at its gross (net/gross exclusivity
+    // — the survey never offers refunded expenses as net candidates): an
+    // operator editing the net to equal the debit must not fake validity
+    const amountOk = Number(rsum || 0) > 0
+      ? amountMatches(Number(exp.amount) + Number(rsum), link.bt_amount)
+      : amountMatches(exp.amount, link.bt_amount);
     const autoOk = !auto || (vendorEvidence(link.description, exp)
       && !methodIncompatible(link.account_type, exp.payment_method));
     return windowOk && amountOk && autoOk;
@@ -1286,6 +1290,20 @@ function methodIncompatible(accountType, paymentMethod) {
   if (accountType === 'card') return ['ach', 'check', 'cash'].includes(method);
   if (accountType === 'bank') return method === 'cash';
   return false;
+}
+
+// The AUTOMATIC expense-match policy in one predicate — exact cents at the
+// candidate's match amount (gross when refunds already reduced it; a
+// refunded expense NEVER validates at net, matching the survey's net/gross
+// exclusivity), shared vendor evidence, and a compatible payment method.
+// Used by the matcher's strong filter and by BOTH claim verifications, so
+// clearing a verifyPending marker always re-proves the policy that
+// justified the claim.
+function strongExpenseMatch(row, c) {
+  const matchAmount = c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount);
+  return centsEqual(matchAmount, row.amount)
+    && vendorEvidence(row.description, c)
+    && !methodIncompatible(row.account_type, c.payment_method);
 }
 
 async function runDeterministicMatching({ limit } = {}) {
@@ -1647,16 +1665,13 @@ async function runDeterministicMatching({ limit } = {}) {
     // the claim), the post-claim verify, and the crash-recovery sweep.
     const surveyExpenseCandidates = (dbOrTrx = db) => surveyExpenseCandidatesForRow(row, rejected, dbOrTrx);
     const candidates = await surveyExpenseCandidates(db);
-    // The amount a candidate matches AT: its gross when refunds already
-    // reduced it, its current amount otherwise.
-    const matchAmount = (c) => (c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount));
     // Auto-link needs exact cents + vendor evidence + a compatible payment
     // method + a UNIQUE candidate set: one strong candidate among other
     // same-amount-window expenses still parks — the hands-off rule is that
     // any plurality goes to the operator, evidence or not. Incompatible-
     // method expenses PARK too — the operator may know the books are
     // mislabeled.
-    const strong = candidates.filter(c => centsEqual(matchAmount(c), row.amount) && vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
+    const strong = candidates.filter(c => strongExpenseMatch(row, c));
     if (candidates.length === 1 && strong.length === 1) {
       let claimedExpense = false;
       try {
@@ -1717,7 +1732,9 @@ async function runDeterministicMatching({ limit } = {}) {
           // never retro-invalidates a link (same line the edited-expense
           // healer draws).
           const after = await surveyExpenseCandidates(db);
-          if (after.length === 1 && after[0].id === strong[0].id) {
+          // identity AND the full automatic-match policy — a mid-flight
+          // edit (one cent, vendor, method) must park, not clear
+          if (after.length === 1 && after[0].id === strong[0].id && strongExpenseMatch(row, after[0])) {
             await db('bank_transactions')
               .where({ id: row.id, status: 'matched_expense', matched_expense_id: strong[0].id })
               .whereRaw("suggestion->>'verifyPending' = 'true'")

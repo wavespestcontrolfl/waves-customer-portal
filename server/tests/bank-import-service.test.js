@@ -900,6 +900,28 @@ describe('runDeterministicMatching', () => {
     expect(state.updates.find(u => u.patch.status === 'unmatched')).toBeUndefined();
   });
 
+  test('a refunded link whose NET was edited to equal the debit is healed — only the gross reading validates', async () => {
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-10', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', matched_expense_id: 'exp-1', suggestion: null },
+      { id: 'bt-credit', txn_date: '2026-08-12', amount: 20, direction: 'credit', account_type: 'card', status: 'refund_applied', suggestion: { refundAppliedTo: 'exp-1', refundAmount: 20 } },
+    ];
+    // operator edited the net UP to 100 — gross is now 120, which no longer
+    // explains the $100 debit; the net coincidence must not fake validity
+    state.expenses = [{ id: 'exp-1', amount: '100.00', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.expenseLinksReverted).toBe(1);
+  });
+
+  test('a crashed claim whose expense drifted one cent is NOT cleared — the sweep re-proves the full policy', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: '312.40', direction: 'debit', account_type: 'card', status: 'matched_expense', match_method: 'expense_amount_date_vendor', matched_expense_id: 'exp-1', suggestion: { verifyPending: true } }];
+    // within the one-cent candidate tolerance, so the survey still returns
+    // the sole id — but the exact-cent automatic policy no longer holds
+    state.expenses = [{ id: 'exp-1', amount: '312.41', description: 'order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.claimVerifyReverted).toBe(1);
+    expect(state.updates.find(u => typeof u.patch.suggestion === 'string' && u.patch.suggestion.includes('verifyPending') && !u.patch.status)).toBeUndefined(); // never cleared
+  });
+
   test('a refund-REDUCED linked expense is NOT healed away — its gross still matches the debit', async () => {
     state.bankRows = [
       { id: 'bt-1', txn_date: '2026-08-10', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', matched_expense_id: 'exp-1', suggestion: null },
