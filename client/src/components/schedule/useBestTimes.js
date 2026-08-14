@@ -69,6 +69,9 @@ export function useBestTimes({ date, customerId, durationMinutes, technicianId, 
             end: s.end_time,
             detourMinutes: s.detour_minutes,
             stopsThatDay: s.stops_that_day,
+            // Id always travels — a consumer that can assign (create modal
+            // auto mode) must adopt the tech the detour was scored for.
+            technicianId: s.technician?.id || null,
             technicianName: technicianId ? null : (s.technician?.name || null),
           })));
         }

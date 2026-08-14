@@ -512,7 +512,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const { bestTimes } = useBestTimes({
     date: landingDate,
     customerId: service.customerId || service.customer_id,
-    durationMinutes: service.estimatedDuration || service.duration || undefined,
+    // The sheet always books a fixed one-hour block (hourWindow / the
+    // preset options' server windows) — mirror THAT, not the service's own
+    // duration, so a recommended gap is one the move actually fits.
+    durationMinutes: 60,
     // Quick Move keeps the visit on its own tech's route.
     technicianId: service.technicianId || service.technician_id || undefined,
     excludeServiceIds: [service.id],

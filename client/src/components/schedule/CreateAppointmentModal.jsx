@@ -2951,7 +2951,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           <BestTimeHint
             bestTimes={bestTimes}
             currentStart={windowStart}
-            onPick={(slot) => setWindowStart(slot.start)}
+            onPick={(slot) => {
+              // Mirror applySlot: the detour was scored for a specific
+              // technician, so picking the chip adopts that tech too —
+              // leaving auto mode would let assignment land elsewhere and
+              // falsify the advertised detour.
+              setWindowStart(slot.start);
+              if (slot.technicianId) {
+                setTechMode('choose');
+                setTechId(slot.technicianId);
+              }
+            }}
             style={{ marginBottom: 10 }}
           />
 
