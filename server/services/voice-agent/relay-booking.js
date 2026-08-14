@@ -327,6 +327,16 @@ async function commitVoiceBooking({
       // this call means the call's one-booking budget is spent, whatever the
       // card's current status.
       if (callLogId) {
+        // Serialized on the CALL: two reconnect transactions for DIFFERENT
+        // dates take different date/customer advisory locks, so without this
+        // both could read "no prior row" and both commit (the card index
+        // stops conflicting once the office resolves the first card). The
+        // xact lock holds until commit — the second transaction reads only
+        // after the first's row is durable.
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['voice-booking-call', String(callLogId)],
+        );
         const priorForCall = await trx('scheduled_services')
           .where({ source_call_log_id: callLogId })
           .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])

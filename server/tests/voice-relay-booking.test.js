@@ -671,6 +671,11 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(out).toMatch(/already in/i);
     expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
     expect(trxBuilders.triage_items.insert).not.toHaveBeenCalled();
+    // …and the read ran under a CALL-scoped advisory lock: two reconnect
+    // transactions on different dates hold different date/customer locks, so
+    // only this lock serializes them (read-then-insert alone still raced).
+    const rawCalls = trx.raw.mock.calls.map(([sql, bindings]) => JSON.stringify([sql, bindings || []]));
+    expect(rawCalls.some((c) => c.includes('voice-booking-call'))).toBe(true);
     assertNoComms();
   });
 

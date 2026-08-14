@@ -791,16 +791,23 @@ async function executeTool(name, input = {}, ctx = {}) {
           return '[detail unavailable]';
         }
       };
+      // EVERY unconstrained model-authored string takes the scrub — the model
+      // classifies caller speech into whichever field fits, so a card number
+      // can land in the scheduling note or the address as easily as the
+      // summary. (contact_preference is scrubbed at ITS source in
+      // lead-from-extraction, where the verbatim text first persists; the
+      // opt-out classifier above reads input.contact_preference directly and
+      // is unaffected.)
       const extracted = {
-        first_name: input.first_name || null,
-        last_name: input.last_name || null,
-        email: input.email || null,
-        address_line1: input.address_line1 || null,
-        city: input.city || null,
-        zip: input.zip || null,
+        first_name: scrubbedField(input.first_name),
+        last_name: scrubbedField(input.last_name),
+        email: scrubbedField(input.email),
+        address_line1: scrubbedField(input.address_line1),
+        city: scrubbedField(input.city),
+        zip: scrubbedField(input.zip),
         requested_service: scrubbedField(input.requested_service),
         matched_service: null,
-        preferred_date_time: input.preferred_date_time || null,
+        preferred_date_time: scrubbedField(input.preferred_date_time),
         pain_points: scrubbedField(input.pain_points),
         call_summary: scrubbedField(input.call_summary),
         lead_quality: LEAD_QUALITIES.includes(input.lead_quality) ? input.lead_quality : null,

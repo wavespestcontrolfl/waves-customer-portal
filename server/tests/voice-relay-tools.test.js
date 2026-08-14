@@ -218,6 +218,10 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
         call_summary: 'Wants pest control; read out card 4111 1111 1111 1111 by mistake',
         pain_points: 'charged on 4111 1111 1111 1111 twice',
         requested_service: 'refund to 4111 1111 1111 1111',
+        // The model classifies caller speech into WHICHEVER field fits —
+        // the scheduling note and address are free text too.
+        preferred_date_time: 'after the 4111 1111 1111 1111 charge clears',
+        address_line1: 'unit 4111 1111 1111 1111 somewhere',
       },
       { from: '+19415551234', callSid: 'CA-pan-capture', markCaptured: jest.fn() },
     );

@@ -1129,6 +1129,17 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(generateEstimate).not.toHaveBeenCalled();
   });
 
+  // ⭐ THE REFUSAL RUNS BEFORE THE INPUT CHECKS — a commercial caller is never
+  // asked for residential sizing the tool will refuse to price anyway.
+  test('commercial with NO square footage refuses immediately, never asks for home_sqft', async () => {
+    const out = await executeTool('get_pricing', {
+      service: 'pest_control', property_type: 'commercial',
+    }, { customerId: null });
+    expect(out).toMatch(/custom quote/i);
+    expect(out).not.toMatch(/home_sqft/);
+    expect(generateEstimate).not.toHaveBeenCalled();
+  });
+
   test('a building beyond the residential bounds refuses instead of clamping down', async () => {
     const out = await executeTool('get_pricing', {
       service: 'pest_control', home_sqft: 50000,
