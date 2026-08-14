@@ -144,8 +144,11 @@ function makeBuilder(table) {
       if (b.whereRaw.mock.calls.some(c => String(c[0]).includes('reconcilePending'))) {
         rows = rows.filter(r => r.suggestion && r.suggestion.reconcilePending === true);
       }
-      if (b.whereRaw.mock.calls.some(c => String(c[0]).includes('verifyPending'))) {
-        rows = rows.filter(r => r.suggestion && r.suggestion.verifyPending === true);
+      for (const c of b.whereRaw.mock.calls.filter(cc => String(cc[0]).includes('verifyPending'))) {
+        // "= 'true'" selects pending-verify rows (the sweeps); "<> 'true'"
+        // EXCLUDES them (the echo retry fetch)
+        if (String(c[0]).includes('<>')) rows = rows.filter(r => !(r.suggestion && r.suggestion.verifyPending === true));
+        else rows = rows.filter(r => r.suggestion && r.suggestion.verifyPending === true);
       }
       // mirror the bounded pass's fresh-vs-examined split
       const isExamined = (r) => !!(r.suggestion && (r.suggestion.ignore || r.suggestion.candidates || r.suggestion.payoutCandidates || r.suggestion.refundCandidates || r.suggestion.noMatch));
@@ -565,7 +568,9 @@ describe('runDeterministicMatching', () => {
     // failed echo adds no clearing update
     const link = state.updates.find(u => u.patch.status === 'matched_payout');
     expect(sugOf(link).reconcilePending).toBe(true);
-    expect(state.updates.find(u => typeof u.patch.suggestion === 'string')).toBeUndefined(); // no clearing update (raw-minus is a plain string)
+    // no update clears reconcilePending (raw-minus is a plain string; the
+    // verifyPending clear after the successful uniqueness check is fine)
+    expect(state.updates.find(u => typeof u.patch.suggestion === 'string' && u.patch.suggestion.includes('reconcilePending'))).toBeUndefined();
 
     // Pass 2: the row is matched_payout + flagged → sweep retries and clears
     state.updates = [];
@@ -1005,6 +1010,32 @@ describe('runDeterministicMatching', () => {
     expect(summary.expenseLinksReverted).toBe(1);
     const revert = state.updates.find(u => u.patch.status === 'unmatched');
     expect(revert.where).toContainEqual({ id: 'bt-auto', status: 'matched_expense', matched_expense_id: 'exp-1' });
+  });
+
+  test('a payout claim that crashed before its verify is finished by the sweep — plural reverts, never echoes', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE DEPOSIT', amount: '500.00', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true, verifyPending: true } }];
+    state.payouts = [
+      { id: 'po-1', amount: '500.00', arrival_date: '2026-08-11', status: 'paid', reconciled: false },
+      { id: 'po-2', amount: '500.00', arrival_date: '2026-08-11', status: 'paid', reconciled: false },
+    ];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutVerifyReverted).toBe(1);
+    expect(reconcilePayout).not.toHaveBeenCalled(); // the pending retry never echoed the unverified claim
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
+    expect(sugOf(revert).autoRevert.reason).toContain('ambiguous');
+  });
+
+  test('a crashed-but-still-unique payout claim clears its marker (the echo then reaches it next fetch)', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE DEPOSIT', amount: '500.00', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true, verifyPending: true } }];
+    state.payouts = [{ id: 'po-1', amount: '500.00', arrival_date: '2026-08-11', status: 'paid', reconciled: false }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutVerifyReverted).toBe(0);
+    expect(state.updates.find(u => u.patch.status === 'unmatched')).toBeUndefined();
+    const clear = state.updates.find(u => typeof u.patch.suggestion === 'string' && u.patch.suggestion.includes('verifyPending'));
+    expect(clear).toBeDefined();
+    // the retry fetch EXCLUDES unverified rows — nothing echoed this pass
+    expect(reconcilePayout).not.toHaveBeenCalled();
   });
 
   test('a RECONCILED payout whose status flipped (amount unchanged) reverts at the echo re-check too', async () => {

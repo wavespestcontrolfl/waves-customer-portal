@@ -353,6 +353,63 @@ async function surveyExpenseCandidatesForRow(row, rejected, dbOrTrx = db) {
   return found;
 }
 
+// The COMPLETE payout-candidate survey for one bank row — amount-aware
+// against the effective banked amount, excluding only OTHER rows' claims.
+// Used by the matcher, its post-claim ambiguity verify, and the
+// crash-recovery sweep for verifyPending payout claims.
+async function surveyPayoutCandidatesForRow(row, rejected, dbOrTrx = db) {
+  const txnDate = toDateStr(row.txn_date);
+  let payoutQuery = dbOrTrx('stripe_payouts')
+    // Only money that actually REACHED the bank can explain a bank
+    // credit — pending/in-transit/canceled/failed payouts are excluded.
+    .where('status', 'paid')
+    // [D-3, D+3] inclusive: lower bound inclusive, upper bound strictly
+    // below the D+4 midnight so the window matches its documentation.
+    .where('arrival_date', '>=', new Date(`${addDays(txnDate, -PAYOUT_DATE_WINDOW_DAYS)}T00:00:00Z`))
+    .andWhere('arrival_date', '<', new Date(`${addDays(txnDate, PAYOUT_DATE_WINDOW_DAYS + 1)}T00:00:00Z`))
+    // Amount-aware against the EFFECTIVE banked amount (a reconciled
+    // payout's latest confirmed actual_amount, else its expected
+    // amount — same ordering as effectivePayoutAmount; keep in sync).
+    // A bare expected-amount filter would drop the real candidate,
+    // and NO filter meant the fetch cap could truncate the window
+    // BEFORE amount filtering and miss the matching payout entirely.
+    .joinRaw(`left join lateral (
+        select actual_amount from bank_reconciliation br
+        where br.payout_id = stripe_payouts.id and br.status = 'confirmed'
+        order by br.reconciled_at desc, br.created_at desc, br.id desc
+        limit 1
+      ) latest on true`)
+    // the confirmed actual applies only while the payout is CURRENTLY
+    // reconciled (effectivePayoutAmount's exact semantics): after a
+    // rejection/unlink the stale confirmed amount would bait an
+    // exact-match claim the echo immediately reverts — an endless
+    // claim/revert loop on the same credit
+    .whereRaw('abs((case when stripe_payouts.reconciled then coalesce(latest.actual_amount, stripe_payouts.amount) else stripe_payouts.amount end) - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
+    .whereNotExists(function claimed() {
+      this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_payout_id = stripe_payouts.id').whereRaw('bt.id <> ?', [row.id]);
+    })
+    .select('id', 'amount', 'arrival_date', 'reconciled', 'bank_last_four',
+      db.raw('(case when stripe_payouts.reconciled then coalesce(latest.actual_amount, stripe_payouts.amount) else stripe_payouts.amount end) as effective_amount'))
+    // 50 + 1 overflow sentinel over the now amount-filtered set, far
+    // above any real same-amount count: a 51st row means uniqueness
+    // would be a guess, so the row parks its candidates instead of
+    // auto-linking — and still leaves the fresh pool (a bare
+    // `continue` kept re-selecting it, starving newer imports while
+    // offering the operator nothing).
+    .limit(51);
+  if (rejected.payoutIds.length) payoutQuery = payoutQuery.whereNotIn('id', rejected.payoutIds);
+  const fetched = await payoutQuery;
+  const bankingRejected = new Set(rejected.bankingPayoutIds);
+  const found = fetched
+    .map(c => ({ ...c, effective_amount: Number(c.effective_amount) }))
+    .filter(c => withinCandidateTolerance(c.effective_amount, row.amount))
+    // a Banking-derived rejection excludes the payout only while it
+    // stands: once a corrected 'confirmed' reconciliation flips the
+    // payout back to reconciled, it is eligible again
+    .filter(c => !(bankingRejected.has(c.id) && !c.reconciled));
+  return { candidates: found, overflow: fetched.length > 50 };
+}
+
 // Crash-recovery sweep for the post-claim plurality verify: a claim commits
 // with suggestion.verifyPending, and a process exit before the verify would
 // otherwise leave a possibly-ambiguous link nothing ever revisits. Bounded
@@ -390,6 +447,62 @@ async function verifyPendingExpenseClaims() {
           updated_at: new Date(),
         });
       if (changed) reverted++;
+    }
+  }
+  return { cleared, reverted };
+}
+
+// Crash-recovery sweep for PAYOUT claims (mirror of the expense sweep): a
+// payout claim commits with verifyPending + reconcilePending; a crash
+// before the post-claim ambiguity verify must not let the echo retries
+// confirm a possibly-ambiguous payout — the retry query skips verifyPending
+// rows, and this sweep (run first) finishes the verification: unique →
+// clear the marker so the echo may proceed; plural/overflow → atomic
+// rollback with the reconciliation reversal, same shape as the inline path.
+async function verifyPendingPayoutClaims() {
+  const rows = await db('bank_transactions')
+    .where({ status: 'matched_payout' })
+    .whereRaw("suggestion->>'verifyPending' = 'true'")
+    .orderBy('updated_at', 'asc')
+    .orderBy('id', 'asc')
+    .limit(25)
+    .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion', 'matched_payout_id');
+  let cleared = 0;
+  let reverted = 0;
+  for (const row of rows) {
+    const rejected = rejectedTargets(row.suggestion);
+    const { candidates, overflow } = await surveyPayoutCandidatesForRow(row, rejected);
+    if (!overflow && candidates.length === 1 && candidates[0].id === row.matched_payout_id) {
+      const done = await db('bank_transactions')
+        .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+        .update({ suggestion: db.raw("suggestion - 'verifyPending'"), updated_at: new Date() });
+      if (done) cleared++;
+      continue;
+    }
+    try {
+      await db.transaction(async (trx) => {
+        const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('reconciled', 'reconciled_by');
+        const undone = await trx('bank_transactions')
+          .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+          .update({
+            status: 'unmatched',
+            matched_payout_id: null,
+            match_method: null,
+            matched_at: null,
+            suggestion: suggestionMerge({
+              autoRevert: { at: new Date().toISOString(), payoutId: row.matched_payout_id, reason: 'a concurrently arrived payout made the match ambiguous' },
+            }, ['reconcilePending', 'verifyPending']),
+            updated_at: new Date(),
+          });
+        if (!undone) return;
+        reverted++;
+        if (sp && sp.reconciled && sp.reconciled_by === `bank-import:${row.id}`) {
+          const { reconcilePayout } = require('./stripe-banking');
+          await reconcilePayout(row.matched_payout_id, Number(row.amount), `Ambiguity rollback for bank import row ${row.id}`, `bank-import:${row.id}`, 'rejected', { trx });
+        }
+      });
+    } catch (err) {
+      logger.warn(`[bank-import] payout verify rollback for row ${row.id} failed — link kept: ${err.message}`);
     }
   }
   return { cleared, reverted };
@@ -600,6 +713,9 @@ async function retryPendingReconciliations() {
   const orphanRefunds = await healOrphanRefunds();
   const editedLinks = await healEditedExpenseLinks();
   const claimVerify = await verifyPendingExpenseClaims();
+  // BEFORE the echo retries below — an unverified payout claim must be
+  // verified (or rolled back) before anything confirms its reconciliation
+  const payoutVerify = await verifyPendingPayoutClaims();
   // BOUNDED batch + sentinel: during a reconciliation outage a large
   // backfill can leave hundreds of pending echoes, and retrying them all
   // serially would starve the (separately bounded) unmatched-row scan on
@@ -610,6 +726,9 @@ async function retryPendingReconciliations() {
     .where({ status: 'matched_payout' })
     .whereNotNull('matched_payout_id')
     .whereRaw("suggestion->>'reconcilePending' = 'true'")
+    // never echo a claim whose ambiguity verification hasn't finished —
+    // the verify sweep above owns those rows (belt for the >25 overflow)
+    .whereRaw("coalesce(suggestion->>'verifyPending', '') <> 'true'")
     .orderBy('updated_at', 'asc')
     .orderBy('id', 'asc') // deterministic tie-breaker
     .limit(PENDING_RETRY_LIMIT + 1)
@@ -658,7 +777,7 @@ async function retryPendingReconciliations() {
   // the reversal's own transaction, so a failed reversal rolls the unlink
   // back — there is never a committed unlink awaiting reversal.)
   const morePending = pendingFetch.length > PENDING_RETRY_LIMIT || unresolved > 0;
-  return { pending: pending.length, morePending, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds, expenseLinksReverted: editedLinks, claimVerifyReverted: claimVerify.reverted };
+  return { pending: pending.length, morePending, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds, expenseLinksReverted: editedLinks, claimVerifyReverted: claimVerify.reverted, payoutVerifyReverted: payoutVerify.reverted };
 }
 
 // An operator EDIT to a linked expense (amount/date via the Expenses or
@@ -1086,7 +1205,7 @@ async function runDeterministicMatching({ limit } = {}) {
   // pending echoes beyond the retry batch are unfinished work too — the
   // caller's "more rows pending" surface must not read as done
   moreRemaining = moreRemaining || reconciliation.morePending;
-  const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted, expenseLinksReverted: reconciliation.expenseLinksReverted, claimVerifyReverted: reconciliation.claimVerifyReverted };
+  const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted, expenseLinksReverted: reconciliation.expenseLinksReverted, claimVerifyReverted: reconciliation.claimVerifyReverted, payoutVerifyReverted: reconciliation.payoutVerifyReverted };
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);
@@ -1170,58 +1289,8 @@ async function runDeterministicMatching({ limit } = {}) {
         continue;
       }
       // The COMPLETE payout survey — reused for the post-claim ambiguity
-      // verify below, so it excludes only OTHER rows' claims.
-      const surveyPayoutCandidates = async () => {
-        let payoutQuery = db('stripe_payouts')
-          // Only money that actually REACHED the bank can explain a bank
-          // credit — pending/in-transit/canceled/failed payouts are excluded.
-          .where('status', 'paid')
-          // [D-3, D+3] inclusive: lower bound inclusive, upper bound strictly
-          // below the D+4 midnight so the window matches its documentation.
-          .where('arrival_date', '>=', new Date(`${addDays(txnDate, -PAYOUT_DATE_WINDOW_DAYS)}T00:00:00Z`))
-          .andWhere('arrival_date', '<', new Date(`${addDays(txnDate, PAYOUT_DATE_WINDOW_DAYS + 1)}T00:00:00Z`))
-          // Amount-aware against the EFFECTIVE banked amount (a reconciled
-          // payout's latest confirmed actual_amount, else its expected
-          // amount — same ordering as effectivePayoutAmount; keep in sync).
-          // A bare expected-amount filter would drop the real candidate,
-          // and NO filter meant the fetch cap could truncate the window
-          // BEFORE amount filtering and miss the matching payout entirely.
-          .joinRaw(`left join lateral (
-              select actual_amount from bank_reconciliation br
-              where br.payout_id = stripe_payouts.id and br.status = 'confirmed'
-              order by br.reconciled_at desc, br.created_at desc, br.id desc
-              limit 1
-            ) latest on true`)
-          // the confirmed actual applies only while the payout is CURRENTLY
-          // reconciled (effectivePayoutAmount's exact semantics): after a
-          // rejection/unlink the stale confirmed amount would bait an
-          // exact-match claim the echo immediately reverts — an endless
-          // claim/revert loop on the same credit
-          .whereRaw('abs((case when stripe_payouts.reconciled then coalesce(latest.actual_amount, stripe_payouts.amount) else stripe_payouts.amount end) - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
-          .whereNotExists(function claimed() {
-            this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_payout_id = stripe_payouts.id').whereRaw('bt.id <> ?', [row.id]);
-          })
-          .select('id', 'amount', 'arrival_date', 'reconciled', 'bank_last_four',
-            db.raw('(case when stripe_payouts.reconciled then coalesce(latest.actual_amount, stripe_payouts.amount) else stripe_payouts.amount end) as effective_amount'))
-          // 50 + 1 overflow sentinel over the now amount-filtered set, far
-          // above any real same-amount count: a 51st row means uniqueness
-          // would be a guess, so the row parks its candidates instead of
-          // auto-linking — and still leaves the fresh pool (a bare
-          // `continue` kept re-selecting it, starving newer imports while
-          // offering the operator nothing).
-          .limit(51);
-        if (rejected.payoutIds.length) payoutQuery = payoutQuery.whereNotIn('id', rejected.payoutIds);
-        const fetched = await payoutQuery;
-        const bankingRejected = new Set(rejected.bankingPayoutIds);
-        const found = fetched
-          .map(c => ({ ...c, effective_amount: Number(c.effective_amount) }))
-          .filter(c => withinCandidateTolerance(c.effective_amount, row.amount))
-          // a Banking-derived rejection excludes the payout only while it
-          // stands: once a corrected 'confirmed' reconciliation flips the
-          // payout back to reconciled, it is eligible again
-          .filter(c => !(bankingRejected.has(c.id) && !c.reconciled));
-        return { candidates: found, overflow: fetched.length > 50 };
-      };
+      // verify below and the crash-recovery sweep.
+      const surveyPayoutCandidates = () => surveyPayoutCandidatesForRow(row, rejected);
       const { candidates, overflow: surveyOverflow } = await surveyPayoutCandidates();
       const exact = candidates.filter(c => centsEqual(c.effective_amount, row.amount));
       if (!surveyOverflow && candidates.length === 1 && exact.length === 1 && payoutProvenance(row, exact[0])) {
@@ -1241,7 +1310,11 @@ async function runDeterministicMatching({ limit } = {}) {
               match_method: 'payout_amount_date',
               matched_at: new Date(),
               updated_at: new Date(),
-              suggestion: suggestionMerge({ reconcilePending: true }),
+              // verifyPending rides too (mirror of the expense claim): a
+              // crash before the post-claim verify must leave a marker the
+              // sweep can finish, and the echo retries SKIP verifyPending
+              // rows so an unverified claim is never confirmed first
+              suggestion: suggestionMerge({ reconcilePending: true, verifyPending: true }),
             });
           if (changed) {
             // POST-CLAIM ambiguity verify (mirror of the expense path): a
@@ -1252,7 +1325,11 @@ async function runDeterministicMatching({ limit } = {}) {
             // turned plural; payouts arriving after this point are LATER
             // arrivals and never retro-invalidate a link.
             const after = await surveyPayoutCandidates();
-            if (!(!after.overflow && after.candidates.length === 1 && after.candidates[0].id === exact[0].id)) {
+            if (!after.overflow && after.candidates.length === 1 && after.candidates[0].id === exact[0].id) {
+              await db('bank_transactions')
+                .where({ id: row.id, status: 'matched_payout', matched_payout_id: exact[0].id })
+                .update({ suggestion: db.raw("suggestion - 'verifyPending'"), updated_at: new Date() });
+            } else {
               // Atomic rollback, SAME shape as the unlink route: payout
               // locked FIRST, the CAS unlink inside, and — when a
               // concurrent pending-retry already confirmed our echo between
@@ -1273,7 +1350,7 @@ async function runDeterministicMatching({ limit } = {}) {
                       matched_at: null,
                       suggestion: suggestionMerge({
                         autoRevert: { at: new Date().toISOString(), payoutId: exact[0].id, reason: 'a concurrently arrived payout made the match ambiguous' },
-                      }, ['reconcilePending']),
+                      }, ['reconcilePending', 'verifyPending']),
                       updated_at: new Date(),
                     });
                   // CAS no-op = someone else already changed the row —
