@@ -18,11 +18,14 @@ function authHeaders() {
   };
 }
 
-// The engine's own default span: a start with no end occupies 60 minutes.
-function deriveEnd(hhmm) {
+// The engine's null-end derivation: start + the visit's own
+// estimated_duration_minutes, falling back to 60 only when there's none —
+// mirroring occupancy.js's COALESCE(NULLIF(estimated_duration_minutes,0), 60).
+function deriveEnd(hhmm, durationMinutes) {
   const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/);
   if (!m) return null;
-  const total = Math.min(23 * 60 + 59, parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + 60);
+  const dur = Number(durationMinutes) > 0 ? Number(durationMinutes) : 60;
+  const total = Math.min(23 * 60 + 59, parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + dur);
   return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
 }
 
@@ -38,14 +41,14 @@ async function fetchSlotCheck(targets, signal) {
   return data.results;
 }
 
-export function useSlotConflicts({ date, windowStart, windowEnd, excludeServiceIds, enabled = true }) {
+export function useSlotConflicts({ date, windowStart, windowEnd, durationMinutes, excludeServiceIds, enabled = true }) {
   const [conflicts, setConflicts] = useState([]);
   const [checking, setChecking] = useState(false);
   // Stable dep for the (usually tiny) id array.
   const excludeKey = (excludeServiceIds || []).map(String).join(',');
   useEffect(() => {
     setConflicts([]);
-    const end = windowEnd || deriveEnd(windowStart);
+    const end = windowEnd || deriveEnd(windowStart, durationMinutes);
     if (!enabled || !date || !windowStart || !end) {
       setChecking(false);
       return undefined;
@@ -66,7 +69,7 @@ export function useSlotConflicts({ date, windowStart, windowEnd, excludeServiceI
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, windowStart, windowEnd, excludeKey]);
+  }, [enabled, date, windowStart, windowEnd, durationMinutes, excludeKey]);
   return { conflicts, checking };
 }
 
@@ -77,7 +80,8 @@ function hhmmToMin(hhmm) {
 }
 
 // Bulk-move variant: N selected services landing on one new date, each
-// keeping its own time window. Two conflict sources, unioned per visit:
+// keeping its own time window (`durationMinutes` per service drives the
+// null-end derivation, matching occupancy). Two conflict sources, unioned per visit:
 // the batched server check against everything ALREADY on the landing date
 // (every selected id excluded — their stored rows are the ones moving), and
 // a client-side pairwise pass among the selected windows themselves, since
@@ -90,7 +94,7 @@ export function useBulkSlotConflicts({ date, services, enabled = true }) {
   const [result, setResult] = useState({ conflictCount: 0, checkedCount: 0, truncated: false });
   const [checking, setChecking] = useState(false);
   const key = (services || [])
-    .map((s) => `${s.id}|${s.windowStart || ''}|${s.windowEnd || ''}`)
+    .map((s) => `${s.id}|${s.windowStart || ''}|${s.windowEnd || ''}|${s.durationMinutes || ''}`)
     .join(';');
   useEffect(() => {
     setResult({ conflictCount: 0, checkedCount: 0, truncated: false });
@@ -103,7 +107,7 @@ export function useBulkSlotConflicts({ date, services, enabled = true }) {
     // 25-target cap so they never crowd out timed visits behind them, and
     // so `truncated` reflects checkable visits only.
     const checkable = services
-      .map((s) => ({ service: s, end: s.windowEnd || deriveEnd(s.windowStart) }))
+      .map((s) => ({ service: s, end: s.windowEnd || deriveEnd(s.windowStart, s.durationMinutes) }))
       .filter(({ service, end }) => service.windowStart && end);
     const checked = checkable.slice(0, 25);
     if (!checked.length) {

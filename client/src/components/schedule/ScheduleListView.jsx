@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Badge, Button, cn } from '../ui';
 import { addETDays, etDateString } from '../../lib/timezone';
 import { useBulkSlotConflicts } from './useSlotConflicts';
@@ -41,6 +41,20 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(new Set());
+  // Scheduling metadata for every selected id, captured at selection time —
+  // the selection survives pagination/filter changes while `services` only
+  // holds the current page, and Apply submits EVERY selected id, so the
+  // bulk conflict check must cover rows no longer loaded. Entries follow
+  // the selection: deleted on deselect, cleared when it empties.
+  const selectedMetaRef = useRef(new Map());
+  const rememberSelectedMeta = (s) => {
+    selectedMetaRef.current.set(s.id, {
+      id: s.id,
+      windowStart: s.windowStart,
+      windowEnd: s.windowEnd,
+      durationMinutes: s.estimatedDuration,
+    });
+  };
   const [bulkBusy, setBulkBusy] = useState(false);
   const [sortCol, setSortCol] = useState('scheduledDate');
   const [sortDir, setSortDir] = useState('asc');
@@ -118,31 +132,46 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
   const toggleSelect = (id) => {
     setSelected(prev => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+        selectedMetaRef.current.delete(id);
+      } else {
+        next.add(id);
+        const row = services.find((s) => s.id === id);
+        if (row) rememberSelectedMeta(row);
+      }
       return next;
     });
   };
 
   const toggleAll = () => {
     if (selected.size === sorted.length) setSelected(new Set());
-    else setSelected(new Set(sorted.map(s => s.id)));
+    else {
+      sorted.forEach(rememberSelectedMeta);
+      setSelected(new Set(sorted.map(s => s.id)));
+    }
   };
 
   // A checked waive must never outlive the selection it was decided for:
   // Clear, deselecting the last row, and Apply all empty the selection and
   // drop the flag here (Apply also resets it explicitly on success).
   useEffect(() => {
-    if (selected.size === 0) setBulkWaiveCardHoldFee(false);
+    if (selected.size === 0) {
+      setBulkWaiveCardHoldFee(false);
+      selectedMetaRef.current.clear();
+    }
   }, [selected]);
 
   // Advisory overlap summary for a bulk reschedule — each selected visit
   // keeps its own window on the new date, all selected ids excluded so
-  // intra-selection overlap isn't noise. Warn-only: Apply never disables.
+  // intra-selection overlap isn't noise. Sourced from the captured metadata,
+  // not the current page's rows, so selections retained from other pages are
+  // still checked. Warn-only: Apply never disables.
   const bulkConflicts = useBulkSlotConflicts({
     date: bulkDate,
-    services: services
-      .filter((s) => selected.has(s.id))
-      .map((s) => ({ id: s.id, windowStart: s.windowStart, windowEnd: s.windowEnd })),
+    services: Array.from(selected)
+      .map((id) => selectedMetaRef.current.get(id))
+      .filter(Boolean),
     enabled: bulkAction === 'reschedule' && !!bulkDate,
   });
 

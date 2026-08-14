@@ -1271,7 +1271,7 @@ export default function TimeGridDay({
           defaultDate={date}
           selectedServices={allServices
             .filter((s) => selection.has(s.id))
-            .map((s) => ({ id: s.id, windowStart: s.windowStart, windowEnd: s.windowEnd }))}
+            .map((s) => ({ id: s.id, windowStart: s.windowStart, windowEnd: s.windowEnd, durationMinutes: effectiveDuration(s) }))}
           busy={busy}
           onMove={handleBulkMove}
           onUnassign={handleBulkUnassign}
