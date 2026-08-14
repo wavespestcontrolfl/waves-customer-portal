@@ -2932,4 +2932,132 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });
+
+  describe('checkSlots (GATE_SLOT_CONFLICT_HINTS batch advisory)', () => {
+    const { listOccupiedWindows } = require('../services/scheduling/occupancy');
+    const ADMIN = { isAdmin: true, technicianId: 'tech-1' };
+
+    beforeEach(() => { process.env.GATE_SLOT_CONFLICT_HINTS = 'true'; });
+    afterEach(() => {
+      delete process.env.GATE_SLOT_CONFLICT_HINTS;
+      listOccupiedWindows.mockReset();
+      listOccupiedWindows.mockResolvedValue([]);
+    });
+
+    test('gate off: answers gated with no results and never touches the DB', async () => {
+      delete process.env.GATE_SLOT_CONFLICT_HINTS;
+      const result = await RainOut.checkSlots({
+        targets: [{ date: '2026-08-20', window: { start: '14:00', end: '15:00' } }],
+        caller: ADMIN,
+      });
+      expect(result).toEqual({ ok: true, gated: true, results: [] });
+      expect(listOccupiedWindows).not.toHaveBeenCalled();
+      expect(db).not.toHaveBeenCalled();
+    });
+
+    test('batch: results align by index — overlap flags, back-to-back (half-open) does not', async () => {
+      listOccupiedWindows.mockResolvedValue(occ('2026-08-20', [{
+        id: 'svc-9', customer_id: 'cust-9', status: 'confirmed', service_type: 'Mosquito Treatment',
+        window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
+      }]));
+      wireDb({
+        customers: [chain({ rows: [{ id: 'cust-9', first_name: 'cust-9a', last_name: 'cust-9b' }] })],
+      });
+
+      const result = await RainOut.checkSlots({
+        targets: [
+          // Ends exactly where the row starts — clear under the half-open predicate.
+          { date: '2026-08-20', window: { start: '13:00', end: '14:00' } },
+          { date: '2026-08-20', window: { start: '14:30', end: '15:30' } },
+        ],
+        caller: ADMIN,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.gated).toBeUndefined();
+      expect(result.results[0].conflicts).toEqual([]);
+      expect(result.results[1].conflicts).toEqual([{
+        id: 'svc-9',
+        windowStart: '14:00',
+        windowEnd: '15:00',
+        customerName: 'cust-9a cust-9b',
+        serviceType: 'Mosquito Treatment',
+        isHold: false,
+        isRouteSibling: false,
+      }]);
+      // One occupancy snapshot per DISTINCT date, with the commit-gate
+      // status exclusions (cancelled/completed don't occupy).
+      expect(listOccupiedWindows).toHaveBeenCalledTimes(1);
+      expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({
+        dateFrom: '2026-08-20',
+        dateTo: '2026-08-20',
+        excludeStatuses: ['cancelled', 'completed'],
+      }));
+    });
+
+    test('excludeServiceIds drops the named rows (the visit being edited / a bulk selection)', async () => {
+      listOccupiedWindows.mockResolvedValue(occ('2026-08-20', [{
+        id: 'svc-9', customer_id: 'cust-9', status: 'confirmed', service_type: 'Lawn Treatment',
+        window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
+      }]));
+      wireDb({
+        customers: [chain({ rows: [{ id: 'cust-9', first_name: 'cust-9', last_name: null }] })],
+      });
+
+      const result = await RainOut.checkSlots({
+        targets: [{
+          date: '2026-08-20',
+          window: { start: '14:00', end: '15:00' },
+          excludeServiceIds: ['svc-9'],
+        }],
+        caller: ADMIN,
+      });
+
+      expect(result.results[0].conflicts).toEqual([]);
+    });
+
+    test('a non-admin caller gets window-only rows (fail-closed name scope)', async () => {
+      listOccupiedWindows.mockResolvedValue(occ('2026-08-20', [{
+        id: 'svc-9', customer_id: 'cust-9', technician_id: 'tech-1', status: 'confirmed',
+        service_type: 'Mosquito Treatment', window_start: '14:00:00', window_end: '15:00:00',
+        estimated_duration_minutes: 60, reservation_expires_at: null,
+      }]));
+      wireDb({
+        customers: [chain({ rows: [] })],
+      });
+
+      const result = await RainOut.checkSlots({
+        targets: [{ date: '2026-08-20', window: { start: '14:00', end: '15:00' } }],
+        caller: { isAdmin: false, technicianId: 'tech-1' },
+      });
+
+      expect(result.results[0].conflicts).toEqual([expect.objectContaining({
+        customerName: null, serviceType: null, windowStart: '14:00',
+      })]);
+    });
+
+    test('more than 25 targets is refused (the route maps !ok to 400)', async () => {
+      const targets = Array.from({ length: 26 }, () => ({
+        date: '2026-08-20', window: { start: '14:00', end: '15:00' },
+      }));
+      const result = await RainOut.checkSlots({ targets, caller: ADMIN });
+      expect(result).toEqual({ ok: false, reason: 'too_many_targets' });
+      expect(listOccupiedWindows).not.toHaveBeenCalled();
+    });
+
+    test('malformed dates and windows are refused before any query', async () => {
+      for (const target of [
+        { date: 'not-a-date', window: { start: '14:00', end: '15:00' } },
+        { date: '2026-08-20', window: { start: 'nope', end: '15:00' } },
+        { date: '2026-08-20', window: { start: '14:00' } },
+        { date: '2026-08-20' },
+      ]) {
+        const result = await RainOut.checkSlots({ targets: [target], caller: ADMIN });
+        expect(result).toEqual({ ok: false, reason: 'bad_target' });
+      }
+      const empty = await RainOut.checkSlots({ targets: [], caller: ADMIN });
+      expect(empty).toEqual({ ok: false, reason: 'bad_target' });
+      expect(listOccupiedWindows).not.toHaveBeenCalled();
+    });
+  });
 });

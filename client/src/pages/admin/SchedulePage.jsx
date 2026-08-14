@@ -42,6 +42,8 @@ import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import TechTreatmentZoneModal from "../../components/tech/TechTreatmentZoneModal";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
+import SlotConflictNotice from "../../components/schedule/SlotConflictNotice";
+import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import {
   describeCardRequestState,
   describeCardRequestResult,
@@ -1192,6 +1194,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
       return String(total);
     })(),
+  });
+  // Advisory only — the save button never keys off this (warn, don't block).
+  const { conflicts: slotConflicts } = useSlotConflicts({
+    date: form.scheduledDate,
+    windowStart: form.windowStart,
+    windowEnd: form.windowEnd,
+    excludeServiceIds: [service.id],
   });
   const [saving, setSaving] = useState(false);
   // Recorded time on-site for a COMPLETED visit (forgotten-closeout fix,
@@ -3344,6 +3353,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   />{" "}
                 </div>{" "}
               </div>{" "}
+              <SlotConflictNotice
+                conflicts={slotConflicts}
+                style={{ marginTop: -2, marginBottom: 14 }}
+              />{" "}
               {isCompletedVisit && isAdminUser && (
                 <div style={{ marginBottom: 14 }}>
                   {" "}
@@ -5699,6 +5712,19 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     ? String(service.windowStart).slice(0, 5)
     : "";
 
+  // Advisory overlap hint for the custom picker — same block derivation the
+  // submit uses (windowFor), warn-only (the Reschedule button never keys off
+  // it). Suggested options are left unannotated: the server already ranks
+  // them.
+  const manualBlock = windowFor(manualTime);
+  const { conflicts: manualConflicts } = useSlotConflicts({
+    date: manualDate,
+    windowStart: manualBlock?.start || manualTime,
+    windowEnd: manualBlock?.end,
+    excludeServiceIds: [service.id],
+    enabled: showManual && !!manualDate,
+  });
+
   const handleReschedule = async (opt) => {
     // Suggested starts are morning slots, but stay consistent with the
     // manual path: never submit a midnight-truncated block.
@@ -6110,6 +6136,12 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 </button>{" "}
               </div>{" "}
             </div>
+          )}
+          {showManual && (
+            <SlotConflictNotice
+              conflicts={manualConflicts}
+              style={{ marginTop: 10 }}
+            />
           )}
         </div>{" "}
         <button

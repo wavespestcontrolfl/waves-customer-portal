@@ -18,6 +18,7 @@ import {
 import { BookOpen, Leaf, ShieldCheck } from 'lucide-react';
 import { Badge, cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
+import { useBulkSlotConflicts } from './useSlotConflicts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -869,9 +870,17 @@ function UnassignedRail({ services, onEdit, onProtocol, onTreatmentPlan, onViewA
   );
 }
 
-function BulkActionBar({ count, defaultDate, onMove, onUnassign, onClear, busy }) {
+function BulkActionBar({ count, defaultDate, selectedServices, onMove, onUnassign, onClear, busy }) {
   const [targetDate, setTargetDate] = useState(defaultDate);
   useEffect(() => { setTargetDate(defaultDate); }, [defaultDate]);
+  // Advisory overlap summary for the picked landing date — each selected
+  // visit keeps its own window, all selected ids excluded so
+  // intra-selection overlap isn't noise. Warn-only: Apply never disables.
+  const bulkConflicts = useBulkSlotConflicts({
+    date: targetDate,
+    services: selectedServices,
+    enabled: !!targetDate && targetDate !== defaultDate,
+  });
   return (
     <div
       className="flex flex-wrap items-center gap-2 px-3 py-2 bg-zinc-900 text-white text-12"
@@ -917,6 +926,12 @@ function BulkActionBar({ count, defaultDate, onMove, onUnassign, onClear, busy }
       >
         Clear
       </button>
+      {bulkConflicts.conflictCount > 0 && (
+        <span className="basis-full text-11" style={{ color: '#FDE68A' }}>
+          {`⚠️ ${bulkConflicts.conflictCount} of the selected visits overlap existing appointments on ${targetDate}.`}
+          {bulkConflicts.truncated ? ' (checked first 25)' : ''}
+        </span>
+      )}
     </div>
   );
 }
@@ -1252,6 +1267,9 @@ export default function TimeGridDay({
         <BulkActionBar
           count={selection.size}
           defaultDate={date}
+          selectedServices={allServices
+            .filter((s) => selection.has(s.id))
+            .map((s) => ({ id: s.id, windowStart: s.windowStart, windowEnd: s.windowEnd }))}
           busy={busy}
           onMove={handleBulkMove}
           onUnassign={handleBulkUnassign}
@@ -1318,6 +1336,8 @@ export default function TimeGridDay({
         toMinutes={pending?.toMin}
         isRecurring={!!pending?.svc?.isRecurring && !pending?.technicianChange}
         technicianChange={pending?.technicianChange}
+        serviceId={pending?.svc?.id}
+        toWindow={pending?.newWindow}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
       />

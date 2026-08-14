@@ -12403,6 +12403,30 @@ router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/dispatch/slot-check
+// body: { targets: [{ date, window: { start, end }, excludeServiceIds? }] }
+//
+// Batch advisory overlap probe for the generic date/time pickers (edit,
+// reschedule, create, bulk move) — the picker-agnostic sibling of
+// target-check above, same requireTechOrAdmin inheritance and the same
+// caller-driven nameScope (admins get names, everyone else window-only).
+// Warn-only + read-only: none of these surfaces disable saving on this
+// data. Gated behind GATE_SLOT_CONFLICT_HINTS inside checkSlots — while
+// off it answers { ok, gated: true, results: [] } and clients render
+// nothing. Validation (cap 25, YYYY-MM-DD dates, HH:MM windows) also
+// lives in checkSlots; !ok maps to 400 here.
+router.post('/slot-check', async (req, res, next) => {
+  try {
+    const RainOut = require('../services/rain-out');
+    const result = await RainOut.checkSlots({
+      targets: req.body?.targets,
+      caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
+    });
+    if (!result.ok) return res.status(400).json({ error: result.reason });
+    return res.json(result);
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:serviceId/tree-shrub/assess-preview
 // body: { photos: [{ data: <dataURL> }] }
 // Scores the closeout photos with dual-vision (NO persistence) and returns the

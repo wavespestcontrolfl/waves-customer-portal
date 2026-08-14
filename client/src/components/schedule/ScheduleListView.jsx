@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Badge, Button, cn } from '../ui';
 import { addETDays, etDateString } from '../../lib/timezone';
+import { useBulkSlotConflicts } from './useSlotConflicts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -133,6 +134,17 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
   useEffect(() => {
     if (selected.size === 0) setBulkWaiveCardHoldFee(false);
   }, [selected]);
+
+  // Advisory overlap summary for a bulk reschedule — each selected visit
+  // keeps its own window on the new date, all selected ids excluded so
+  // intra-selection overlap isn't noise. Warn-only: Apply never disables.
+  const bulkConflicts = useBulkSlotConflicts({
+    date: bulkDate,
+    services: services
+      .filter((s) => selected.has(s.id))
+      .map((s) => ({ id: s.id, windowStart: s.windowStart, windowEnd: s.windowEnd })),
+    enabled: bulkAction === 'reschedule' && !!bulkDate,
+  });
 
   const executeBulkAction = async () => {
     if (!bulkAction || selected.size === 0) return;
@@ -306,6 +318,12 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
           <div className="flex-1" />
           <button type="button" onClick={() => setSelected(new Set())}
             className="text-11 text-zinc-400 hover:text-white">Clear</button>
+          {bulkAction === 'reschedule' && bulkConflicts.conflictCount > 0 && (
+            <span className="basis-full text-11" style={{ color: '#FDE68A' }}>
+              {`⚠️ ${bulkConflicts.conflictCount} of the selected visits overlap existing appointments on ${bulkDate}.`}
+              {bulkConflicts.truncated ? ' (checked first 25)' : ''}
+            </span>
+          )}
         </div>
       )}
 

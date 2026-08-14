@@ -1467,6 +1467,17 @@ const gates = {
   // entry uses the SAME parser so the startup gate report can never
   // disagree with request-time enforcement ('1'/'on' variants included).
   bankImport: gateEnvValue('GATE_BANK_IMPORT'),
+
+  // Slot-conflict hints (2026-08-14): advisory "an existing appointment
+  // occupies this slot" notices on every admin date/time picker (edit,
+  // reschedule, create, bulk move), backed by the same read-only occupancy
+  // probe the Quick Move sheet already uses. Warn-only by design — no save
+  // is ever blocked or disabled on this data. OFF in every environment
+  // until Adam flips it; the slot-check endpoint reads the env through
+  // gateEnvValue() at call time (rain-out.checkSlots) so a flip needs no
+  // redeploy. Kill switch: unset — the endpoint answers gated:true with no
+  // conflict data and every picker renders exactly as today.
+  slotConflictHints: gateEnvValue('GATE_SLOT_CONFLICT_HINTS'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

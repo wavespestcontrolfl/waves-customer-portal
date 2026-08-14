@@ -9,6 +9,8 @@
 // revert via onCancel.
 import { useEffect, useState } from 'react';
 import { Button } from '../ui';
+import { useSlotConflicts } from './useSlotConflicts';
+import SlotConflictNotice from './SlotConflictNotice';
 
 function formatDateLong(dateStr) {
   if (!dateStr) return '';
@@ -37,11 +39,25 @@ export default function RescheduleConfirmModal({
   toMinutes,
   isRecurring,
   technicianChange, // optional { fromName, toName }
+  serviceId, // optional — enables the advisory slot-conflict check
+  toWindow, // optional 'HH:MM-HH:MM' landing window (pending.newWindow)
   onConfirm,
   onCancel,
 }) {
   const [notificationType, setNotificationType] = useState('none');
   const [busy, setBusy] = useState(false);
+
+  // Advisory overlap check on the fixed drag-drop target — warn-only, the
+  // confirm buttons never key off it. On a series reschedule the check only
+  // covers this first occurrence (copy stays singular by design).
+  const [toStart, toEnd] = String(toWindow || '').split('-');
+  const { conflicts } = useSlotConflicts({
+    date: /^\d{4}-\d{2}-\d{2}$/.test(String(toDate || '')) ? toDate : null,
+    windowStart: toStart || null,
+    windowEnd: toEnd || null,
+    excludeServiceIds: serviceId != null ? [serviceId] : [],
+    enabled: open && !!toStart,
+  });
 
   // The modal stays mounted between drags (open just flips), so a previous
   // reschedule's notification choice would silently carry into the next one —
@@ -145,6 +161,8 @@ export default function RescheduleConfirmModal({
               </select>
             </div>
           </div>
+
+          <SlotConflictNotice conflicts={conflicts} />
         </div>
 
         {/* Footer */}
