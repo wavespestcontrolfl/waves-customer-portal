@@ -380,8 +380,11 @@ function getVoiceProfileTextNonBlocking() {
 }
 
 class RelayConversation {
-  constructor({ callSid, from, to, language, send, endSession }) {
+  constructor({ callSid, sessionKey, from, to, language, send, endSession }) {
     this.callSid = callSid || null;
+    // The upgrade token's nonce — the per-session key the CallSid claim is
+    // owned by, so a fresh-token reconnect can reclaim the live call.
+    this.sessionKey = sessionKey || null;
     this.from = from || null;
     this.to = to || null;
     this.language = language || null;
@@ -447,6 +450,7 @@ class RelayConversation {
     // The recent-texts DATA TURN — customer-AUTHORED SMS bodies, seeded into
     // the USER role ahead of the first caller turn, never into `system`.
     this._dataTurnSeeded = false;
+    this._lateContextBlockPending = false;
     // Phase E — the audit trail. Ordered turn list (caller / agent / tool) for
     // the call_log transcript written at close, the model's own capture_lead
     // summary (so the close needs no second LLM round trip), and the
@@ -484,13 +488,22 @@ class RelayConversation {
       // The callback fires inside the bounded work, after every rule.
       this._contextReady = resolveCallerContext(this.from, {
         callSid: this.callSid,
+        sessionKey: this.sessionKey,
         onVerified: (ok) => { this._callerVerified = ok === true; },
         // A hydration that settles AFTER the 4s race still upgrades the
         // session (the late-verification doctrine): without this, a slow
         // optional loader left a VERIFIED caller with no customerId and the
         // history tools asserted "no matching account". Guarded so a late
         // result never clobbers a context already published.
-        onLateContext: (ctx) => { if (!this._callerContext) this._callerContext = ctx; },
+        onLateContext: (ctx) => {
+          if (!this._callerContext) {
+            this._callerContext = ctx;
+            // The system prompt may already be FROZEN (prompt-cache prefix
+            // stability) — the KNOWN CALLER block then rides the next user
+            // turn instead, like the recent-texts data turn.
+            if (this._systemBlocks) this._lateContextBlockPending = true;
+          }
+        },
       })
         .then((ctx) => { this._callerContext = this._callerContext || ctx; })
         .catch(() => {});
@@ -772,6 +785,20 @@ class RelayConversation {
       this.messages.push(
         { role: 'user', content: this._callerContext.dataTurn },
         { role: 'assistant', content: 'Noted — I have the recent text history for this number.' },
+      );
+    }
+    // ⭐ A LATE-HYDRATED KNOWN CALLER BLOCK STILL REACHES THE MODEL. The system
+    // prompt is frozen per call (cache-prefix stability), so a context that
+    // settled after the first round would upgrade the tool ctx but never the
+    // prompt — the model kept treating a matched caller as a stranger. The
+    // block rides a one-time user/assistant pair instead (the recent-texts
+    // pattern); its content already passed the same injection filters the
+    // system placement uses.
+    if (this._lateContextBlockPending && this._callerContext && this._callerContext.block) {
+      this._lateContextBlockPending = false;
+      this.messages.push(
+        { role: 'user', content: `ACCOUNT CONTEXT (hydrated after the call started — same rules as a KNOWN CALLER block):\n\n${this._callerContext.block}` },
+        { role: 'assistant', content: 'Noted — I have the account context for this caller now.' },
       );
     }
 

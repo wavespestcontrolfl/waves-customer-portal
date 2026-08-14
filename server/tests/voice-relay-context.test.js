@@ -331,6 +331,26 @@ describe('GATE ON — caller recognition', () => {
       expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID })).toBeNull();
     });
 
+    // ⭐ A FRESH TOKEN MAY RECLAIM A LIVE CALL. The claim is owned by the
+    // upgrade token's nonce: a ConversationRelay retry mints a NEW token and
+    // takes over the CallSid; a duplicate setup frame on the SAME socket
+    // (same nonce) still cannot claim twice.
+    test('with a sessionKey the claim is nonce-owned: takeover allowed, same-nonce replay refused', async () => {
+      primeDb({ customers: [CUSTOMER] });
+      expect(await relayContext.beginRelaySessionClaim(CALL_SID, 'nonce-abc')).toBe(true);
+      const raws = builders.call_log.whereRaw.mock.calls.map(([sql]) => String(sql));
+      expect(raws.some((sql) => sql.includes("relay_session_claim_owner') IS DISTINCT FROM ?"))).toBe(true);
+      const updateSql = String(builders.call_log.update.mock.calls[0][0].metadata.__raw || builders.call_log.update.mock.calls[0][0].metadata.sql || '');
+      expect(updateSql).toContain('relay_session_claim_owner');
+    });
+
+    test('without a sessionKey the legacy strict one-claim predicate holds', async () => {
+      primeDb({ customers: [CUSTOMER] });
+      await relayContext.beginRelaySessionClaim(CALL_SID);
+      const raws = builders.call_log.whereRaw.mock.calls.map(([sql]) => String(sql));
+      expect(raws.some((sql) => sql.includes("relay_session_claimed_at') IS NULL") && !sql.includes('IS DISTINCT FROM'))).toBe(true);
+    });
+
     test('a claim that cannot be proven fails CLOSED', async () => {
       primeDb({ customers: [CUSTOMER] });
       builders.call_log.update = jest.fn(() => { throw new Error('pool exhausted'); });
@@ -569,6 +589,28 @@ describe('GATE ON — account tools', () => {
     expect(out).toContain('Friday July 31');
     expect(out).toContain('$49.50');
     assertNoWrites();
+  });
+
+  // ⭐ A FAILED READ IS NOT AN EMPTY ACCOUNT. A loader rejection must never
+  // render as an authoritative negative ("none on file" / "no upcoming
+  // appointment") — infrastructure uncertainty says "couldn't check".
+  test('a FAILED services read is indeterminate — never "none on file"', async () => {
+    primeDb({});
+    loadOwnedRecurringServiceKeys.mockRejectedValue(new Error('pool exhausted'));
+    openBalanceSummary.mockResolvedValue({ total: 0, count: 0, moreCount: 0, invoices: [] });
+    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full', callerAttested: true });
+    expect(out).toMatch(/services could not be checked right now/i);
+    expect(out).not.toMatch(/none on file/);
+  });
+
+  test('a FAILED schedule read is indeterminate — never "no upcoming appointment"', async () => {
+    primeDb({});
+    loadOwnedRecurringServiceKeys.mockResolvedValue([]);
+    openBalanceSummary.mockResolvedValue({ total: 0, count: 0, moreCount: 0, invoices: [] });
+    builders.scheduled_services.first = jest.fn(() => Promise.reject(new Error('pool exhausted')));
+    const out = await executeTool('get_account_overview', {}, { customerId: 'c-1111', customerTier: 'full', callerAttested: true });
+    expect(out).toMatch(/schedule could not be checked right now/i);
+    expect(out).not.toMatch(/No upcoming appointment/);
   });
 
   // ⭐ THE AMOUNT HAS TWO DOORS, AND BOTH TAKE THE SAME LOCK. get_invoice_history

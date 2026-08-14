@@ -481,6 +481,35 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(storedAssistant.content.every((b) => b.type !== 'text')).toBe(true);
   });
 
+  // ⭐ A LATE-HYDRATED KNOWN CALLER BLOCK STILL REACHES THE MODEL. The system
+  // prompt is frozen per call (cache-prefix stability) — a context settling
+  // after the freeze rides the next user turn as an ACCOUNT CONTEXT pair.
+  test('a context hydrated after the prompt froze rides the next turn as an ACCOUNT CONTEXT data turn', async () => {
+    let IsolatedConvo;
+    jest.isolateModules(() => {
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() {
+        return {
+          messages: {
+            stream: () => ({
+              finalMessage: async () => ({ content: [{ type: 'text', text: 'Hi there!' }], stop_reason: 'end_turn' }),
+            }),
+          },
+        };
+      });
+      jest.doMock('../services/voice-agent/relay-tools', () => ({
+        TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: jest.fn(async () => 'ok'),
+      }));
+      IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
+    });
+    const convo = new IsolatedConvo({ callSid: 'CA-late-block', from: '+19415551234', send: jest.fn() });
+    convo._lateContextBlockPending = true; // what onLateContext sets when blocks were frozen
+    convo._callerContext = { block: 'KNOWN CALLER: Pat Smith, full tier.', customer: { id: 'c-9' }, tier: 'full' };
+    await convo._runLoop('hi').catch(() => {});
+    const userTurns = convo.messages.filter((m) => m.role === 'user').map((m) => JSON.stringify(m.content));
+    expect(userTurns.some((t) => t.includes('ACCOUNT CONTEXT (hydrated after the call started'))).toBe(true);
+    expect(convo._lateContextBlockPending).toBe(false); // one-time seed
+  });
+
   test('text on a READ-tool turn is still spoken (filler is fine when nothing can be falsely promised)', async () => {
     let IsolatedConvo;
     jest.isolateModules(() => {

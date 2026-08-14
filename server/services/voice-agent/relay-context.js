@@ -71,6 +71,7 @@ const VERIFY_RESOLVE_TIMEOUT_MS = 4000;
 const VERIFY_CALL_MAX_AGE_MS = 10 * 60 * 1000;
 // The jsonb key the claim burns on the call's own signature-verified row.
 const RELAY_CLAIM_KEY = 'relay_session_claimed_at';
+const RELAY_CLAIM_OWNER_KEY = 'relay_session_claim_owner';
 
 /**
  * Claim a CallSid for ONE relay session — ATOMICALLY, AND IN SHARED STORAGE.
@@ -90,18 +91,38 @@ const RELAY_CLAIM_KEY = 'relay_session_claimed_at';
  * Fails CLOSED: any error means the claim is unproven, which is treated as
  * already-claimed rather than "probably fine".
  */
-async function beginRelaySessionClaim(callSid) {
+async function beginRelaySessionClaim(callSid, sessionKey = null) {
   const key = String(callSid || '').trim();
   if (!key) return false;
+  const owner = sessionKey ? String(sessionKey) : null;
   try {
     const db = require('../../models/db');
-    const claimed = await db('call_log')
-      .where({ twilio_call_sid: key })
-      .whereRaw(`(metadata->>'${RELAY_CLAIM_KEY}') IS NULL`)
+    // ⭐ A FRESH TOKEN MAY RECLAIM A LIVE CALL. ConversationRelay retries a
+    // dropped session by rendering fresh TwiML — a NEW single-use token for
+    // the SAME CallSid. The claim is therefore owned by the token's nonce:
+    //   - no claim yet                → any session claims (first winner);
+    //   - claim held by ANOTHER nonce → a fresh authenticated token takes
+    //     over (the retry is the live session; the old socket is dead);
+    //   - claim held by THIS nonce    → refused — a duplicate setup frame on
+    //     the same socket still cannot claim twice (the r25 race).
+    // Legacy shape (no sessionKey) keeps the strict one-claim predicate.
+    const predicate = owner
+      ? `((metadata->>'${RELAY_CLAIM_KEY}') IS NULL OR (metadata->>'${RELAY_CLAIM_OWNER_KEY}') IS DISTINCT FROM ?)`
+      : `(metadata->>'${RELAY_CLAIM_KEY}') IS NULL`;
+    const q = db('call_log').where({ twilio_call_sid: key });
+    if (owner) q.whereRaw(predicate, [owner]);
+    else q.whereRaw(predicate);
+    const claimed = await q
       .update({
-        metadata: db.raw(
-          `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${RELAY_CLAIM_KEY}}', to_jsonb(now()::text), true)`,
-        ),
+        metadata: owner
+          ? db.raw(
+            `jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${RELAY_CLAIM_KEY}}', to_jsonb(now()::text), true), `
+            + `'{${RELAY_CLAIM_OWNER_KEY}}', to_jsonb(?::text), true)`,
+            [owner],
+          )
+          : db.raw(
+            `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${RELAY_CLAIM_KEY}}', to_jsonb(now()::text), true)`,
+          ),
       })
       .returning('id');
     const rows = Array.isArray(claimed) ? claimed.length : Number(claimed) || 0;
@@ -528,7 +549,7 @@ async function findUniqueCustomerByAni(phone) {
  * customers. It is LOGGED here so the distribution can be measured before
  * anyone decides.
  */
-async function verifyInboundCaller({ callSid, from } = {}) {
+async function verifyInboundCaller({ callSid, from, sessionKey = null } = {}) {
   const aniKey = aniDigitKey(from);
   if (!callSid || !aniKey) return { verified: false, reason: 'no_call_sid_or_ani' };
   try {
@@ -548,7 +569,7 @@ async function verifyInboundCaller({ callSid, from } = {}) {
     // cheap check and before the caller is recognised, so a replay is refused
     // before it reads anything — and it is refused on every instance, not just
     // the one that saw the first session.
-    if (!(await beginRelaySessionClaim(callSid))) {
+    if (!(await beginRelaySessionClaim(callSid, sessionKey))) {
       return { verified: false, reason: 'call_sid_already_claimed' };
     }
     let attestation = null;
@@ -569,7 +590,10 @@ async function verifyInboundCaller({ callSid, from } = {}) {
 async function loadRecurringServiceNames(customerId) {
   const db = require('../../models/db');
   const { loadOwnedRecurringServiceKeys } = require('../waveguard-existing-services');
-  const keys = await loadOwnedRecurringServiceKeys(db, customerId).catch(() => []);
+  // No internal catch — a failure PROPAGATES so the caller renders "couldn't
+  // check" instead of the confident "none on file" a swallowed error produced
+  // (the inherited-error-policy trap, one level down).
+  const keys = await loadOwnedRecurringServiceKeys(db, customerId);
   return keys.map(serviceKeyName);
 }
 
@@ -756,8 +780,14 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
   if (first) lines.push(`First name: ${first}`);
   const sinceYear = customer.member_since ? new Date(customer.member_since).getUTCFullYear() : null;
   if (Number.isFinite(sinceYear)) lines.push(`Customer since: ${sinceYear}`);
-  const serviceNames = (services || []).map((s) => systemBlockSafe(s, 40)).filter(Boolean);
-  lines.push(`Active recurring services: ${serviceNames.length ? serviceNames.join('; ') : 'none on file'}`);
+  if (services === null) {
+    // A FAILED read is not an empty account — the block must not teach the
+    // model "none on file" during a transient DB blip.
+    lines.push('Active recurring services: could not be checked right now — do not say none are on file.');
+  } else {
+    const serviceNames = (services || []).map((s) => systemBlockSafe(s, 40)).filter(Boolean);
+    lines.push(`Active recurring services: ${serviceNames.length ? serviceNames.join('; ') : 'none on file'}`);
+  }
   if (redacted) {
     // Same rule as the redacted tool tier: this caller's number matched only a
     // service-contact slot (spouse, tenant, PRIOR OCCUPANT), so the block says
@@ -811,7 +841,7 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
  * instruction is most likely to be obeyed — it is injected as a user-role data
  * turn by relay-conversation instead.
  */
-async function resolveCallerContext(from, { callSid = null, onVerified = null, onLateContext = null } = {}) {
+async function resolveCallerContext(from, { callSid = null, sessionKey = null, onVerified = null, onLateContext = null } = {}) {
   // Reported to the SESSION, not returned: a caller can be verified and still
   // match no account (an unmatched-but-real caller may use lookup_customer; a
   // WS client that declared an ANI may not), and it is decided only after
@@ -847,7 +877,7 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null, o
     // signature-verified /voice webhook's call_log row BEFORE any account read.
     // Bounded on its own below: a stalled call_log read or claim degrades to
     // "unknown caller", never hangs the first turn.
-    const verification = await verifyInboundCaller({ callSid, from });
+    const verification = await verifyInboundCaller({ callSid, from, sessionKey });
     if (!verification.verified) {
       logger.info(`[voice-relay-context] caller ${maskPhone(from)} NOT verified against call_log (${verification.reason}) — treating as unknown, no account access`);
       return { verified: false };
@@ -933,7 +963,9 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null, o
     const customer = await findUniqueCustomerByAni(from);
     if (!customer) return null;
     const [services, nextAppointment, visits, balance, priorCall, recentTexts] = await Promise.all([
-      loadRecurringServiceNames(customer.id).catch(() => []),
+      // null = "couldn't check" (rendered as indeterminate), NEVER an empty
+      // list — the same failed-read-is-not-an-empty-account rule as the tool.
+      loadRecurringServiceNames(customer.id).catch(() => null),
       loadNextAppointment(customer.id).catch(() => null),
       loadCompletedVisits(customer.id, 1).catch(() => []),
       // The figure is only LOADED for a caller who may hear it (full tier +
@@ -1031,17 +1063,29 @@ async function resolveCallerContext(from, { callSid = null, onVerified = null, o
 // a balance EXISTS) is receptionist-level and stays on the ANI match.
 async function accountOverviewText(customerId, { tier = 'redacted', attested = false } = {}) {
   const redacted = tier !== 'full';
-  const [services, nextAppointment, visits, balance] = await Promise.all([
-    loadRecurringServiceNames(customerId).catch(() => []),
-    loadNextAppointment(customerId).catch(() => null),
-    loadCompletedVisits(customerId, 1).catch(() => []),
+  // ⭐ A FAILED READ IS NOT AN EMPTY ACCOUNT. Collapsing a loader rejection to
+  // []/null made the renderer state "none on file" / "no upcoming
+  // appointment" as authoritative account data during a transient DB blip —
+  // the inherited-error-policy trap. Each read keeps its ok/value shape and
+  // the copy for a failure is "couldn't check", never a confident negative.
+  const settle = (p) => p.then((value) => ({ ok: true, value })).catch(() => ({ ok: false, value: null }));
+  const [servicesR, nextAppointmentR, visitsR, balanceR] = await Promise.all([
+    settle(loadRecurringServiceNames(customerId)),
+    settle(loadNextAppointment(customerId)),
+    settle(loadCompletedVisits(customerId, 1)),
     // Existence only unless this caller may actually hear the figure — the
     // amount must not be fetched for a tier that is forbidden to speak it.
-    loadOpenBalance(customerId, { amounts: !redacted && attested }).catch(() => null),
+    settle(loadOpenBalance(customerId, { amounts: !redacted && attested })),
   ]);
-  const lastVisit = visits[0] || null;
+  const services = servicesR.ok ? (servicesR.value || []) : null;
+  const nextAppointment = nextAppointmentR.ok ? nextAppointmentR.value : null;
+  const visits = visitsR.ok ? (visitsR.value || []) : null;
+  const balance = balanceR.ok ? balanceR.value : null;
+  const lastVisit = visits && visits[0] ? visits[0] : null;
   const parts = [
-    `Active recurring services: ${services.length ? services.join('; ') : 'none on file'}.`,
+    services === null
+      ? 'Active recurring services could not be checked right now — do not say none are on file; a team member can confirm.'
+      : `Active recurring services: ${services.length ? services.join('; ') : 'none on file'}.`,
     // ⭐ AN UPCOMING VISIT IS A PHYSICAL-SECURITY FACT, NOT A SCHEDULE DETAIL.
     // Withholding only the WINDOW still told an unverified caller that somebody
     // WILL be at that property, and on which day — the same disclosure
@@ -1053,12 +1097,16 @@ async function accountOverviewText(customerId, { tier = 'redacted', attested = f
       ? 'Upcoming appointments: not available for this caller. Do NOT say whether one is scheduled, and do NOT '
         + 'give a date or a window — the account holder can see it in their portal, or the office can go over it '
         + 'with them directly.'
-      : (nextAppointment && nextAppointment.date
-        ? `Next appointment: ${nextAppointment.date}${nextAppointment.service ? ` for ${nextAppointment.service}` : ''}${nextAppointment.window ? `, arrival window ${nextAppointment.window}` : ''}.`
-        : 'No upcoming appointment on the schedule.'),
-    lastVisit && lastVisit.date
-      ? `Last completed visit: ${lastVisit.date}${lastVisit.service ? ` (${lastVisit.service})` : ''}.`
-      : 'No completed visits on file.',
+      : (!nextAppointmentR.ok
+        ? 'The schedule could not be checked right now — do not say whether a visit is coming; a team member can confirm.'
+        : (nextAppointment && nextAppointment.date
+          ? `Next appointment: ${nextAppointment.date}${nextAppointment.service ? ` for ${nextAppointment.service}` : ''}${nextAppointment.window ? `, arrival window ${nextAppointment.window}` : ''}.`
+          : 'No upcoming appointment on the schedule.')),
+    visits === null
+      ? 'Visit history could not be checked right now — do not say there are none; a team member can confirm.'
+      : (lastVisit && lastVisit.date
+        ? `Last completed visit: ${lastVisit.date}${lastVisit.service ? ` (${lastVisit.service})` : ''}.`
+        : 'No completed visits on file.'),
   ];
   if (redacted) {
     // Yes/no ONLY — the amount belongs to the account holder's own matched line.

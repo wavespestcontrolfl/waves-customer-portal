@@ -659,6 +659,29 @@ describe('existing-customer contact instructions still reach a human', () => {
     expect(clears).toHaveLength(0); // a transient failure never clears the debt
   });
 
+  // ⭐ THE FEED ROW IS DELIVERY EVIDENCE — a sweep retry probes before
+  // re-notifying. A persisted notification whose marker clear failed must be
+  // repaired, not duplicated hourly forever.
+  test('a sweep retry whose notification ALREADY persisted repairs the marker without re-notifying', async () => {
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const { sweepUnsurfacedContactInstructions } = require('../services/lead-from-extraction');
+    tables.call_log = makeBuilder('call_log', [{
+      id: 'cl-9', twilio_call_sid: 'CA-dnc-dup',
+      metadata: {
+        relay_contact_instruction_needed: 'true',
+        relay_contact_instruction: { customerId: 'c-777', do_not_contact_request: true },
+      },
+    }]);
+    tables.customers = makeBuilder('customers', [{ id: 'c-777', pipeline_stage: 'active_customer', first_name: 'Pat' }]);
+    tables.notifications = makeBuilder('notifications', [{ id: 'n-existing' }]);
+    const out = await sweepUnsurfacedContactInstructions();
+    expect(out).toMatchObject({ scanned: 1, recovered: 1 });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled(); // the delivered row was found
+    const clears = writes.filter((w) => w.table === 'call_log' && w.verb === 'update'
+      && String((w.payload && w.payload.metadata && w.payload.metadata.sql) || '').includes("- 'relay_contact_instruction_needed'"));
+    expect(clears).toHaveLength(1); // marker repaired
+  });
+
   // ⭐ THE MARKER OUTLIVES ANY OUTAGE — no attempt cap ever clears it. A high
   // attempt count keeps retrying; only success or a deliberate suppression
   // (or a deleted customer) clears the obligation.

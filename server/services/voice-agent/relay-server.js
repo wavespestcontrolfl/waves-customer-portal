@@ -201,6 +201,12 @@ function attachVoiceRelay(httpServer) {
       // downstream check (call_log verification, the session claim, the
       // transcript write) would then be aimed at B.
       req.authenticatedCallSid = callSid;
+      // The token's nonce doubles as the SESSION KEY for the CallSid claim: a
+      // legitimate ConversationRelay retry renders fresh TwiML and mints a
+      // NEW token, and that fresh nonce is what lets the reconnect reclaim
+      // the live CallSid — while a duplicate setup frame on the SAME socket
+      // (same nonce) still cannot claim twice.
+      req.relaySessionKey = String(token).split('.')[2] || null;
       wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
     }).catch(() => {
       try { socket.destroy(); } catch { /* socket already gone */ }
@@ -213,6 +219,7 @@ function attachVoiceRelay(httpServer) {
     // socket is allowed to be. Absent only if something bypassed the upgrade
     // path, which the setup handler treats as unauthenticated.
     const authenticatedCallSid = (req && req.authenticatedCallSid) || null;
+    const relaySessionKey = (req && req.relaySessionKey) || null;
 
     // Idle + max-duration backstops. All cleanup funnels through teardown()
     // (idempotent) so a leaked-key client can't pin an open socket — and keep
@@ -303,6 +310,7 @@ function attachVoiceRelay(httpServer) {
           convo = new RelayConversation({
             // ALWAYS the authenticated one — never the frame's.
             callSid: authenticatedCallSid,
+            sessionKey: relaySessionKey,
             from: msg.from || p.from || null,
             to: msg.to || p.to || null,
             language: msg.lang || p.lang || null,

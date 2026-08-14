@@ -169,6 +169,24 @@ async function surfaceContactInstructionForCustomer(customer, extracted = {}, op
 
 async function fileContactInstructionNotification(customer, instruction, opts, dnc) {
   try {
+    // ⭐ THE FEED ROW IS THE DELIVERY EVIDENCE — probe before re-notifying
+    // (the reservice lane's rule). A notification that persisted while the
+    // marker clear failed (or the process died between them) left the
+    // obligation standing; without this probe every hourly sweep re-inserted
+    // the same admin card. A probe failure proceeds to notify — a duplicate
+    // card beats a lost do-not-contact.
+    if (opts.callSid) {
+      const existing = await db('notifications')
+        .whereRaw("metadata->>'callSid' = ?", [String(opts.callSid)])
+        .whereRaw("metadata->>'source' = ?", ['voice_agent'])
+        .where('title', 'like', '%stated on a phone call')
+        .first('id')
+        .catch(() => null);
+      if (existing) {
+        logger.info(`[voice-agent-lead] contact instruction for customer ${customer.id} already persisted (notification ${existing.id}) — not re-notifying`);
+        return { persisted: true, suppressed: false };
+      }
+    }
     const NotificationService = require('./notification-service');
     const notif = await NotificationService.notifyAdmin(
       'service',
