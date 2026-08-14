@@ -54,7 +54,7 @@ function mockRowDb(row, updateBuilder, extra = {}) {
 
 function builder(result) {
   const b = {};
-  for (const m of ['where', 'first', 'update', 'join', 'whereIn', 'whereRaw', 'whereNull', 'orWhereNull', 'select', 'orderBy', 'limit', 'offset']) b[m] = jest.fn(() => b);
+  for (const m of ['where', 'first', 'update', 'join', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'orWhereNull', 'select', 'orderBy', 'limit', 'offset']) b[m] = jest.fn(() => b);
   b.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return b;
 }
@@ -384,6 +384,7 @@ describe('sweepUnenrichedProperties', () => {
     let ledgerCalls = 0;
     let rowFetches = 0;
     db.mockImplementation((table) => {
+      if (String(table).startsWith('scheduled_services as ss')) return builder([]);
       if (String(table).startsWith('customer_properties as cp')) return builder(candidates);
       if (table === 'property_lookups') {
         ledgerCalls += 1;
@@ -418,6 +419,7 @@ describe('sweepUnenrichedProperties', () => {
     const candidates = [mkRow('p1'), mkRow('p2')];
     let rowFetch = 0;
     db.mockImplementation((table) => {
+      if (String(table).startsWith('scheduled_services as ss')) return builder([]);
       if (String(table).startsWith('customer_properties as cp')) return builder(candidates);
       if (table === 'property_lookups') return builder(undefined);
       if (table === 'customer_properties') { rowFetch += 1; return builder(candidates[rowFetch <= 1 ? 0 : 1]); }
@@ -485,6 +487,45 @@ describe('fetchBackfillCandidates', () => {
       { column: 'has_estimate', order: 'desc' },
       { column: 'cp.created_at', order: 'desc' },
     ]);
+  });
+});
+
+describe('reconcileVisitCoordinates', () => {
+  const { _private } = require('../services/call-property-lookup');
+
+  test('fills race-inserted null-coordinate visits from the visit side, canonical fence held', async () => {
+    // v1: linked stamp is a designator variant of the enriched property
+    // ("Apt 4" vs "Unit 4") → reconciled. v2: stamped with a different
+    // (pre-edit) address → never touched.
+    const prop = {
+      latitude: '27.5', longitude: '-82.4',
+      address_line1: '123 SAMPLE COVE', address_line2: 'Unit 4', city: 'Bradenton', zip: '34212',
+    };
+    const joined = builder([
+      {
+        visit_id: 'v1',
+        service_address_line1: '123 Sample Cove', service_address_line2: 'Apt 4',
+        service_address_city: 'Bradenton', service_address_zip: '34212',
+        ...prop,
+      },
+      {
+        visit_id: 'v2',
+        service_address_line1: '9 Elsewhere Rd', service_address_line2: null,
+        service_address_city: 'Bradenton', service_address_zip: '34212',
+        ...prop,
+      },
+    ]);
+    const upd = builder(1);
+    db.mockImplementation((table) => {
+      if (String(table).startsWith('scheduled_services as ss')) return joined;
+      if (table === 'scheduled_services') return upd;
+      return builder(1);
+    });
+    const filled = await _private.reconcileVisitCoordinates();
+    expect(filled).toBe(1);
+    expect(upd.where).toHaveBeenCalledTimes(1);
+    expect(upd.where).toHaveBeenCalledWith({ id: 'v1' });
+    expect(upd.update).toHaveBeenCalledWith({ lat: 27.5, lng: -82.4 });
   });
 });
 

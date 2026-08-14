@@ -519,10 +519,70 @@ async function attemptedRecently(address) {
  * batch cap is the budget. Serial by design: the lookup fan-out is heavy
  * enough without concurrency, and a nightly batch has no latency budget.
  */
+// Nightly reconciliation for the enrich↔booking ordering race: the
+// fire-and-forget call-time lookup can finish (visit mirror scan included)
+// BEFORE call booking inserts its null-coordinate visit row — and a fully
+// enriched property leaves the sweep's candidate set, so nothing would
+// ever repair that visit and a secondary-property dispatch would fall
+// back to the customer's PRIMARY pin. This scans from the VISIT side:
+// null-coordinate rows linked to a property that HAS coordinates, fenced
+// by the same canonical addressKey comparison as the mirror fill (raw
+// stamps legitimately differ from the property row). Free (no lookup
+// spend), bounded, fail-open — a reconciliation error must never sink the
+// sweep. Non-matching stamps (post-edit bookings) are re-read nightly;
+// that is a cheap indexed read, not churn.
+const RECONCILE_VISIT_LIMIT = 200;
+
+async function reconcileVisitCoordinates() {
+  let filled = 0;
+  try {
+    const { addressKey } = require('./customer-properties');
+    const rows = await db('scheduled_services as ss')
+      .join('customer_properties as cp', 'cp.id', 'ss.property_id')
+      .whereNull('ss.lat')
+      .whereNull('ss.lng')
+      .whereNotNull('cp.latitude')
+      .whereNotNull('cp.longitude')
+      .where('cp.active', true)
+      .select(
+        'ss.id as visit_id',
+        'ss.service_address_line1', 'ss.service_address_line2',
+        'ss.service_address_city', 'ss.service_address_zip',
+        'cp.latitude', 'cp.longitude',
+        'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
+      )
+      .limit(RECONCILE_VISIT_LIMIT);
+    for (const r of rows || []) {
+      const propKey = addressKey(r);
+      const visitKey = addressKey({
+        address_line1: r.service_address_line1,
+        address_line2: r.service_address_line2,
+        city: r.service_address_city,
+        zip: r.service_address_zip,
+      });
+      if (!propKey || visitKey !== propKey) continue;
+      const lat = Number(r.latitude);
+      const lng = Number(r.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      // Null-pair re-asserted: fill-only under concurrent writers.
+      await db('scheduled_services')
+        .where({ id: r.visit_id })
+        .whereNull('lat')
+        .whereNull('lng')
+        .update({ lat, lng });
+      filled += 1;
+    }
+  } catch (err) {
+    logger.warn('[call-property-lookup] visit reconciliation failed', { error: errId(err) });
+  }
+  return filled;
+}
+
 async function sweepUnenrichedProperties({ limit } = {}) {
   if (!gateEnvValue('GATE_PROPERTY_ENRICH_BACKFILL')) return { skipped: 'gated' };
   const batch = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : backfillBatchSize();
   const t0 = Date.now();
+  const visitCoordsReconciled = await reconcileVisitCoordinates();
   let processed = 0;
   let enriched = 0;
   let failed = 0;
@@ -566,9 +626,12 @@ async function sweepUnenrichedProperties({ limit } = {}) {
     enriched,
     failed,
     cooledDown: cooled,
+    visitCoordsReconciled,
     elapsedMs: Date.now() - t0,
   });
-  return { candidates: seen, processed, enriched, failed, cooledDown: cooled };
+  return {
+    candidates: seen, processed, enriched, failed, cooledDown: cooled, visitCoordsReconciled,
+  };
 }
 
 module.exports = {
@@ -577,6 +640,6 @@ module.exports = {
   sweepUnenrichedProperties,
   _private: {
     snakePropertyType, propertyRowAddress, fetchBackfillCandidates, attemptedRecently, backfillBatchSize,
-    SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
+    reconcileVisitCoordinates, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
   },
 };
