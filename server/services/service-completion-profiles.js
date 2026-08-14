@@ -262,7 +262,7 @@ function serviceNameCandidates(serviceType) {
 // Called ONLY on the slow path — after service_id and exact-name matching have
 // both missed — so the hot path (dispatch list views resolving many visits)
 // pays nothing.
-async function reloadIdentityEvidence(scheduledService, knex) {
+async function reloadIdentityEvidence(scheduledService, knex, { strict = false } = {}) {
   const needsSnapshot = scheduledService.service_key_snapshot === undefined;
   const needsRecurring = scheduledService.is_recurring === undefined;
   if (!scheduledService.id || (!needsSnapshot && !needsRecurring)) return scheduledService;
@@ -272,11 +272,15 @@ async function reloadIdentityEvidence(scheduledService, knex) {
       .first('service_key_snapshot', 'is_recurring');
     return reloaded ? { ...scheduledService, ...reloaded } : scheduledService;
   } catch (err) {
+    // strict callers (pre-visit brief) hash the resolved companions —
+    // a swallowed identity failure would resolve the DEFAULT profile
+    // and persist an outage-shaped empty companion list.
+    if (strict) throw err;
     return scheduledService;
   }
 }
 
-async function lookupServiceForScheduledService(scheduledService = {}, knex = db) {
+async function lookupServiceForScheduledService(scheduledService = {}, knex = db, { strict = false } = {}) {
   if (!scheduledService) return null;
   if (scheduledService.service_id) {
     const byId = await knex('services')
@@ -315,7 +319,7 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
   // without evidence. Reload what the caller's projection left out, then retry
   // the snapshot with it. Costs one query, and only for rows that would
   // otherwise fail closed.
-  const row = await reloadIdentityEvidence(scheduledService, knex);
+  const row = await reloadIdentityEvidence(scheduledService, knex, { strict });
   const reloadedSnapshotKey = String(row.service_key_snapshot || '').trim();
   if (reloadedSnapshotKey && reloadedSnapshotKey !== snapshotKey) {
     const bySnapshot = await knex('services')
@@ -360,6 +364,9 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
       .whereRaw('lower(short_name) = lower(?)', [serviceType])
       .select('service_key', 'name', 'category', 'billing_type');
   } catch (err) {
+    // strict callers must see the outage (see reloadIdentityEvidence) —
+    // an empty collision set here resolves the default profile.
+    if (strict) throw err;
     shortNameMatches = [];
   }
   if (!Array.isArray(shortNameMatches)) shortNameMatches = [];
@@ -391,7 +398,7 @@ async function profileByServiceKey(serviceKey, knex = db, { strict = false } = {
 }
 
 async function resolveCompletionProfileForScheduledService(scheduledService = {}, knex = db, { strict = false } = {}) {
-  const service = await lookupServiceForScheduledService(scheduledService, knex);
+  const service = await lookupServiceForScheduledService(scheduledService, knex, { strict });
   const profile = service?.service_key
     ? await profileByServiceKey(service.service_key, knex, { strict })
     : null;
