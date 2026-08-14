@@ -685,6 +685,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     await resolveExistingLead(q);
     await mergeAndStamp(q);
   };
+  let superseded = false;
   if (serializeCapture) {
     try {
       await db.transaction(async (trx) => {
@@ -692,8 +693,22 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
           ['voice-lead-capture', String(opts.callSid)],
         );
+        // ⭐ OWNERSHIP RE-PROVEN INSIDE THE WRITE TRANSACTION — a takeover
+        // landing mid-capture (or a superseded socket's floor racing the
+        // replacement's) aborts before any lead state is written.
+        if (opts.sessionKey) {
+          const { claimOwnedElsewhere } = require('./voice-agent/relay-context');
+          if (await claimOwnedElsewhere(trx, opts.callSid, opts.sessionKey)) {
+            superseded = true;
+            return;
+          }
+        }
         await runCapture(trx);
       });
+      if (superseded) {
+        logger.warn(`[voice-agent-lead] capture skipped — session superseded callSid=${opts.callSid}`);
+        return { leadId: null, customerId, created: false, superseded: true };
+      }
     } catch (err) {
       logger.warn(`[voice-agent-lead] capture serialization failed for callSid=${opts.callSid} (${err.message}) — proceeding unserialized`);
       leadId = undefined;

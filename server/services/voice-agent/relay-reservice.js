@@ -293,6 +293,15 @@ async function requestReserviceText(input = {}, ctx = {}) {
       .orderBy('created_at', 'desc')
       .first('id', 'created_at', 'source', 'owner_alerted_at', 'subject', 'description', 'urgency', 'category', 'customer_id');
     if (raced) return { status: 'already_open', row: raced };
+    // ⭐ OWNERSHIP RE-PROVEN INSIDE THE WRITE TRANSACTION (the atomic half of
+    // the supersession boundary): a takeover landing mid-write aborts before
+    // the ticket commits.
+    if (ctx.sessionKey && ctx.callSid) {
+      const { claimOwnedElsewhere } = require('./relay-context');
+      if (await claimOwnedElsewhere(trx, ctx.callSid, ctx.sessionKey)) {
+        return { status: 'superseded' };
+      }
+    }
     const [row] = await trx('service_requests')
       .insert({
         customer_id: customerId,
@@ -317,6 +326,10 @@ async function requestReserviceText(input = {}, ctx = {}) {
     return 'A free re-service visit is ALREADY on the schedule for this account. Do NOT file another request '
       + 'and do NOT state a date or arrival window. Tell the caller it is already booked and that a Waves team '
       + 'member can go over the details. Never read out a link or a code.';
+  }
+  if (filedTicket.status === 'superseded') {
+    return 'This session was superseded by a reconnect — NOTHING was filed. Do NOT call any more '
+      + 'tools and do not answer account questions; say goodbye briefly.';
   }
   if (filedTicket.status === 'dedupe_failed') {
     return 'I could not check whether a re-service is already on the schedule for this account, so nothing was '

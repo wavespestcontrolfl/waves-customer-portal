@@ -1198,6 +1198,9 @@ async function executeTool(name, input = {}, ctx = {}) {
         // its lead stays unlinked. Live getter: a late-landing verification
         // upgrades this at read time.
         aniVerified: ctx.callerVerified === true,
+        // The claim-owner nonce — the capture transaction re-proves ownership
+        // against it inside its own lock (the atomic supersession check).
+        sessionKey: ctx.sessionKey || null,
         // The lifecycle-customer notification must not tell staff "nothing was
         // changed" over a suppression that already landed.
         smsSuppressionApplied,

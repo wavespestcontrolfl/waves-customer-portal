@@ -259,6 +259,7 @@ const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../call-booking-source-ac
 async function commitVoiceBooking({
   db, customerId, dateStr, windowStart, windowEnd, insertData, callLogId,
   catalogRow, slot, thirdParty, unverifiedNote, leadId,
+  callSid = null, sessionKey = null,
 }) {
   const { acquireOccupancyLock, findConflictingVisits } = require('../scheduling/occupancy');
   const { acquireSelfBookingDayCapLock, countActiveSelfBookingsForDay } = require('../availability');
@@ -301,6 +302,16 @@ async function commitVoiceBooking({
       await acquireSelfBookingDayCapLock(trx, dateStr);
       // Rung 6 — every scheduled_services INSERT owes this one.
       await lockCustomerComms(trx, customerId);
+
+      // ⭐ OWNERSHIP RE-PROVEN INSIDE THE WRITE TRANSACTION. The tool-entry
+      // fence is check-then-act — a takeover landing mid-write must abort
+      // BEFORE the commit, not after it.
+      if (sessionKey && callSid) {
+        const { claimOwnedElsewhere } = require('./relay-context');
+        if (await claimOwnedElsewhere(trx, callSid, sessionKey)) {
+          return { status: 'superseded' };
+        }
+      }
 
       // DEDUPE, now under rung 2. Widened past the old
       // source_action='voice_agent' scope: the point is not "no second VOICE
@@ -888,7 +899,12 @@ async function requestBookingText(input = {}, ctx = {}) {
     db, customerId, dateStr, windowStart, windowEnd: insertData.window_end,
     insertData, callLogId, catalogRow, slot, thirdParty, unverifiedNote,
     leadId: leadIdAtCommit,
+    callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null,
   });
+  if (commit.status === 'superseded') {
+    return 'This session was superseded by a reconnect — NOTHING was booked. Do NOT call any more '
+      + 'tools and do not answer account questions; say goodbye briefly.';
+  }
   if (commit.status === 'duplicate') {
     return 'A booking request for this caller and day is already in — do not create another. '
       + 'Tell the caller a Waves team member will text or call to confirm the time — set WHEN '

@@ -672,6 +672,10 @@ class RelayConversation {
       // only showed on the normal path).
       to: this.to,
       callSid: this.callSid,
+      // The claim-owner nonce — every WRITE transaction re-proves ownership
+      // against it INSIDE the transaction (the supersession fences outside
+      // are check-then-act; the in-trx check is the atomic one).
+      sessionKey: this.sessionKey,
       language: this.language,
       // Live getters like callerVerified below: a late-landing verification
       // UPGRADES the session context after this turn's ctx was built, and a
@@ -1212,6 +1216,7 @@ class RelayConversation {
         // stays UNLINKED instead of resolving the claimed number's account.
         aniPhone: callerPhone,
         aniVerified: this._callerVerified === true,
+        sessionKey: this.sessionKey || null,
       }
     ).then(
       async (result) => {

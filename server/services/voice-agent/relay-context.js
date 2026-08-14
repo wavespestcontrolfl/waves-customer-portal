@@ -181,6 +181,35 @@ async function relaySessionClaimOwner(callSid) {
   }
 }
 
+/**
+ * ⭐ THE IN-TRANSACTION OWNERSHIP CHECK — the atomic half of the supersession
+ * boundary. The conversation-level fences are check-then-act; a write that
+ * matters re-reads the claim owner THROUGH ITS OWN TRANSACTION (after its
+ * locks), so a takeover that lands mid-write is seen before the commit.
+ * Returns true when the claim is PROVENLY held by a DIFFERENT nonce.
+ * Unparseable metadata on a keyed row fails closed (true); a read error
+ * proceeds (false) — aborting a live write on a blip is the outer fences'
+ * call, not this one's.
+ */
+async function claimOwnedElsewhere(q, callSid, sessionKey) {
+  const key = String(callSid || '').trim();
+  if (!key || !sessionKey) return false;
+  try {
+    const row = await q('call_log').where({ twilio_call_sid: key }).first('metadata');
+    if (!row) return false;
+    let meta;
+    try {
+      meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+    } catch {
+      return true;
+    }
+    const owner = meta && meta[RELAY_CLAIM_OWNER_KEY];
+    return !!(owner && owner !== String(sessionKey));
+  } catch {
+    return false;
+  }
+}
+
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -1661,6 +1690,7 @@ module.exports = {
   isFullAttestation,
   beginRelaySessionClaim,
   relaySessionClaimOwner,
+  claimOwnedElsewhere,
   servicesCatalogText,
   loadOfficeHours,
   renderClockBlock,

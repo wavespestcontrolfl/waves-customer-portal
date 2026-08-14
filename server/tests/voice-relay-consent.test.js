@@ -264,6 +264,29 @@ describe('authenticated caller + alternate callback number — lead reuse bounda
     }
   });
 
+  // ⭐ OWNERSHIP IS RE-PROVEN INSIDE THE CAPTURE TRANSACTION — a takeover
+  // landing mid-write aborts before any lead state is touched.
+  test('a capture whose claim was taken over aborts INSIDE the lock — nothing written', async () => {
+    primeDb();
+    tables.call_log = makeBuilder('call_log', [{ metadata: { relay_session_claim_owner: 'nonce-NEW' } }]);
+    const raw = jest.fn(async () => {});
+    db.transaction = jest.fn(async (cb) => {
+      const trx = (table) => db(table);
+      trx.raw = raw;
+      return cb(trx);
+    });
+    try {
+      const out = await createLeadFromExtraction(
+        { call_summary: 'superseded capture' },
+        { phone: CALLER, aniPhone: CALLER, aniVerified: true, callSid: 'CA-locked-2', sessionKey: 'nonce-OLD' },
+      );
+      expect(out).toMatchObject({ leadId: null, created: false, superseded: true });
+      expect(writes.find((w) => w.table === 'leads')).toBeFalsy();
+    } finally {
+      delete db.transaction;
+    }
+  });
+
   // ⭐ AND AN UNVERIFIED SESSION REUSES NOTHING. Leads resolve by phone, so
   // without this an unverified caller claiming a victim's number would land on
   // the victim's customer-linked lead and overwrite its rolling fields.
