@@ -41,6 +41,10 @@ jest.mock('../services/appointment-tagger', () => ({
       : { tag: 'pest_general', label: 'Pest Control' }
   ),
 }));
+const mockResolveProfile = jest.fn();
+jest.mock('../services/service-completion-profiles', () => ({
+  resolveCompletionProfileForScheduledService: (...args) => mockResolveProfile(...args),
+}));
 jest.mock('../services/service-report/since-last-visit', () => ({
   buildSinceLastVisitContext: jest.fn(async () => ({
     pressureLine: 'Pressure: 2.0 -> 1.0',
@@ -54,7 +58,12 @@ jest.mock('../services/service-report/service-line-configs', () => ({
     const s = String(serviceType || '');
     if (/tree|shrub|palm/i.test(s)) return 'tree_shrub';
     if (/termite|wdo/i.test(s)) return 'termite';
-    return /lawn|turf/i.test(s) ? 'lawn' : 'pest';
+    if (/lawn|turf/i.test(s)) return 'lawn';
+    // Real-classifier precedence: a pest mention wins over a rodent
+    // token ("Pest & Rodent Control" is the pest line).
+    if (/pest/i.test(s)) return 'pest';
+    if (/rodent|rat|mouse|mice/i.test(s)) return 'rodent';
+    return 'pest';
   },
 }));
 const mockGrassContext = jest.fn(async () => ({ trackKey: 'st_augustine' }));
@@ -180,11 +189,15 @@ function baseResponses(overrides = {}) {
   };
 }
 
+// Priorities are a noun phrase and the summary carries no digits: every
+// imperative verb-object is now strictly grounded in instruction fields
+// and every digit-run must appear in the grounding, so the CLEAN fixture
+// must not depend on words/numbers absent from the minimal groundings.
 const CLEAN_LLM_JSON = {
-  priorities: ['Check garage corner ant trail'],
+  priorities: ['Ant activity near the garage'],
   mentioned_terms: ['ants'],
   watch_items: ['Chemical-sensitivity note on file'],
-  last_visit_summary: 'Routine pest service on July 15.',
+  last_visit_summary: 'Routine pest service in July.',
   open_scope: '',
   customer_context: 'Prefers a text before arrival.',
 };
@@ -199,6 +212,7 @@ beforeEach(() => {
   // consulted twice per generation.
   mockGrassContext.mockResolvedValue({ trackKey: 'st_augustine' });
   mockWindowContext.mockResolvedValue({});
+  mockResolveProfile.mockResolvedValue({ companions: [] });
   mockSummarize.mockReturnValue(null);
   mockGetContext.mockResolvedValue({
     serviceHistory: [{ type: 'Pest Control Service', date: '2026-07-15', notes: 'Treated exterior perimeter.' }],
@@ -420,6 +434,58 @@ describe('grounded allowlist validation of LLM output', () => {
     expect(verdict.reason).toBe('ungrounded_instruction:interior');
   });
 
+  test('non-treatment imperatives are grounded too — "Inspect interior" rejects on an exterior-only grounding (codex P1)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const directive of ['Inspect interior', 'Check the interior']) {
+      const verdict = validateBriefJson(
+        { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [directive] },
+        grounding,
+      );
+      expect(verdict.reason).toBe('ungrounded_instruction:interior');
+    }
+  });
+
+  test('a grounded non-treatment imperative passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer asked for an interior look this visit' }] },
+    };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Inspect interior'] },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('an invented dollar amount is rejected; a grounded one passes (codex P1)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { pendingEstimate: { monthlyTotal: 100 } } },
+    };
+    const invented = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], open_scope: '$500 monthly estimate pending' },
+      grounding,
+    );
+    expect(invented.reason).toBe('ungrounded_numeric:500');
+    const grounded = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], open_scope: '$100 monthly estimate pending' },
+      grounding,
+    );
+    expect(grounded.body).toBeTruthy();
+    // "$100.00" grounds on the bare 100; "$100.50" must not.
+    expect(validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], open_scope: '$100.00 monthly estimate pending' },
+      grounding,
+    ).body).toBeTruthy();
+    expect(validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], open_scope: '$100.50 monthly estimate pending' },
+      grounding,
+    ).reason).toBe('ungrounded_numeric:100.50');
+  });
+
   test('a short (≤3-letter) ungrounded product in an instruction is rejected, not vacuously grounded', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     // 'ddt' is under every length-gated pass (rare-word scan and catalog
@@ -540,6 +606,63 @@ describe('serviceHistory is line-scoped from the paged walk', () => {
   });
 });
 
+describe('combined visits (completion-profile companions)', () => {
+  test('a companion line gets its own line-scoped guidance block (hashed + stored)', async () => {
+    // "Pest & Rodent Control" — ONE appointment, pest primary + rodent
+    // bait companion (docs/design/combined-service-completions.md). The
+    // companion's guidance must ride the brief instead of being dropped
+    // by the single-category branch.
+    mockResolveProfile.mockResolvedValue({ companions: [{ type: 'rodent_bait_station', delivery: 'internal_only' }] });
+    const RODENT_RECORD = { id: 'rec-rb', customer_id: 'cust-1', service_type: 'Rodent Bait Station Check', service_line: 'rodent', service_date: '2026-07-20', started_at: null, pressure_index: null };
+    const RODENT_PRODUCT = {
+      ...PRODUCT_ROW,
+      service_record_id: 'rec-rb',
+      product_name: 'ContraPest',
+      catalog_name: 'ContraPest',
+      active_ingredient: 'Triptolide',
+      catalog_active_ingredient: 'Triptolide',
+      targets: ['rodents'],
+    };
+    const state = useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'Pest & Rodent Control' }],
+      service_records: [SERVICE_RECORD, RODENT_RECORD],
+      // Honor the whereIn — the primary and companion walks must not
+      // leak each other's product rows through the mock.
+      service_products: (rec) => {
+        const whereIn = rec.ops.find(([m, a]) => m === 'whereIn' && a[0] === 'sp.service_record_id');
+        const ids = whereIn ? whereIn[1][1] : [];
+        return [PRODUCT_ROW, RODENT_PRODUCT].filter((p) => ids.includes(p.service_record_id));
+      },
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const text = global.__dispatch.mock.calls[0][1].text;
+    const facts = JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
+    expect(facts.productGuidance.companions).toEqual([
+      { line: 'rodent', source: 'service_history', productNames: ['ContraPest'] },
+    ]);
+    // Primary guidance unchanged — the pest line's own history.
+    expect(facts.productGuidance.productNames).toEqual(['Bifen IT']);
+    const stored = JSON.parse(state.updates.scheduled_services.at(-1).pre_service_brief);
+    expect(stored.product_guidance.companions[0].line).toBe('rodent');
+    expect(stored.product_guidance.companions[0].products[0].name).toBe('ContraPest');
+  });
+
+  test('a companion on the visit\'s own line adds no duplicate block', async () => {
+    mockResolveProfile.mockResolvedValue({ companions: [{ type: 'rodent_bait_station', delivery: 'internal_only' }] });
+    const state = useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'Rodent Control' }],
+      service_records: [{ ...SERVICE_RECORD, service_type: 'Rodent Control', service_line: 'rodent' }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const text = global.__dispatch.mock.calls[0][1].text;
+    const facts = JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
+    expect(facts.productGuidance.companions).toBeUndefined();
+    expect(state.updates.scheduled_services.length).toBeGreaterThan(0);
+  });
+});
+
 describe('briefClearOnReclassification (update-details service switch)', () => {
   const { briefClearOnReclassification } = PrevisitBrief;
   const CLEAR = {
@@ -653,7 +776,9 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
       { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Inspect unicorn beetles near the garage'] },
       GROUNDING,
     );
-    expect(verdict.reason).toMatch(/^ungrounded_novel_term:/);
+    // The directive pass (imperative-verb grounding) may claim this
+    // first; either way the invented organism must reject the leg.
+    expect(verdict.reason).toMatch(/^ungrounded_(novel_term|instruction):/);
   });
 
   test('a recombined product name never rides on a grounded sibling', () => {
@@ -690,7 +815,7 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
     expect(rejected.reason).toMatch(/^ungrounded_novel_product:/);
 
     const descriptive = validateBriefJson(
-      { ...CLEAN_LLM_JSON, mentioned_terms: ['prodiamine 65 wdg'], priorities: [], last_visit_summary: 'Applied Prodiamine 65 WDG across the lawn on July 15.' },
+      { ...CLEAN_LLM_JSON, mentioned_terms: ['prodiamine 65 wdg'], priorities: [], last_visit_summary: 'Applied Prodiamine 65 WDG across the lawn in July.' },
       grounding,
     );
     expect(descriptive.reason).toBeUndefined();
@@ -720,7 +845,7 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
       { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Inspect mice near the garage'] },
       GROUNDING,
     );
-    expect(verdict.reason).toMatch(/^ungrounded_novel_(term|target):mice/);
+    expect(verdict.reason).toMatch(/^ungrounded_(novel_(term|target)|instruction):mice/);
   });
 
   test('short ungrounded organisms are caught with word-boundary grounding', () => {
@@ -729,7 +854,7 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
         { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [prose] },
         GROUNDING,
       );
-      expect(verdict.reason).toMatch(/^ungrounded_novel_target:/);
+      expect(verdict.reason).toMatch(/^ungrounded_(novel_target|instruction):/);
     }
     // Grounded short organisms still pass ('ants' is in the call summary).
     const ok = validateBriefJson(

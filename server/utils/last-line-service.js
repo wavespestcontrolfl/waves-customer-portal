@@ -51,8 +51,11 @@ async function loadLastServices(db, customerId, serviceType) {
 // same-line records within the MAX_ROWS walk; past that depth the caller
 // gets what was found — never a cross-line fallback. Throws on a query
 // failure so callers can distinguish an outage from empty history.
-async function loadRecentLineServices(db, customerId, serviceType, { limit = 5 } = {}) {
-  const visitLine = detectServiceLine(serviceType);
+// opts.line overrides the label-derived verdict — combined-visit briefs
+// walk a COMPANION line (tree_shrub/termite/rodent) that no single label
+// on the appointment classifies to.
+async function loadRecentLineServices(db, customerId, serviceType, { limit = 5, line = null } = {}) {
+  const visitLine = line || detectServiceLine(serviceType);
   const lineRecords = [];
   let last = null;
   for (let offset = 0; offset < MAX_ROWS; offset += PAGE_SIZE) {

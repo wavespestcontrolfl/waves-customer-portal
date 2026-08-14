@@ -169,6 +169,31 @@ function shapeHistoryProduct(row) {
   };
 }
 
+// Newest-first product dedupe (by name, cap 8) shared by the primary
+// history-guidance path and combined-visit companion blocks.
+function dedupeHistoryProducts(productRows) {
+  const seen = new Set();
+  const products = [];
+  for (const row of productRows) {
+    const shaped = shapeHistoryProduct(row);
+    const key = (shaped.name || '').toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    products.push(shaped);
+    if (products.length >= 8) break;
+  }
+  return products;
+}
+
+// Completion-profile companion type → the service line whose history
+// backs its guidance block. Companion types whose sections carry no
+// product history semantics simply don't map.
+const COMPANION_TYPE_LINES = {
+  tree_shrub: 'tree_shrub',
+  termite_bait_station: 'termite',
+  rodent_bait_station: 'rodent',
+};
+
 // ── Deterministic grounding assembly ────────────────────────────────────────
 
 // Returns { available, last, lineRecords }. STRICTLY line-scoped via the
@@ -568,18 +593,38 @@ async function assembleGrounding(svc, dbh = db) {
   if (category === 'lawn') {
     productGuidance = await loadLawnWindowGuidance(dbh, svc);
   } else {
-    const seen = new Set();
-    const products = [];
-    for (const row of productRows) {
-      const shaped = shapeHistoryProduct(row);
-      const key = (shaped.name || '').toLowerCase();
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      products.push(shaped);
-      if (products.length >= 8) break;
-    }
-    productGuidance = { source: 'service_history', products };
+    productGuidance = { source: 'service_history', products: dedupeHistoryProducts(productRows) };
   }
+
+  // Combined visits ("Lawn + Tree & Shrub", "Pest & Rodent Control", …)
+  // are ONE appointment covering every declared section — the completion
+  // profile's companion list is the EXISTING mechanism that declares
+  // them (docs/design/combined-service-completions.md), so the brief
+  // resolves the same profile instead of re-deriving combos from label
+  // tokens. Each companion line gets its own line-scoped history
+  // guidance block; the single-category primary guidance is unchanged.
+  // Resolution/walk failures propagate — companion guidance is hashed,
+  // and an outage-shaped empty must abort rather than overwrite a
+  // complete cached brief (same sentinel rule as the primary walk).
+  const companionGuidance = [];
+  {
+    const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
+    const profile = await resolveCompletionProfileForScheduledService(svc, dbh);
+    const seenLines = new Set([history.visitLine].filter(Boolean));
+    for (const companion of profile?.companions || []) {
+      const line = COMPANION_TYPE_LINES[companion.type];
+      // Unknown companion types carry no product semantics here (their
+      // typed findings section still rides the completion flow); a
+      // companion on the visit's own line adds nothing.
+      if (!line || seenLines.has(line)) continue;
+      seenLines.add(line);
+      const { loadRecentLineServices } = require('../utils/last-line-service');
+      const companionHistory = await loadRecentLineServices(dbh, svc.customer_id, svc.service_type, { limit: 5, line });
+      const companionRows = await loadProductHistory(dbh, companionHistory.lineRecords.map((r) => r.id));
+      companionGuidance.push({ line, source: 'service_history', products: dedupeHistoryProducts(companionRows) });
+    }
+  }
+  if (companionGuidance.length) productGuidance = { ...productGuidance, companions: companionGuidance };
 
   const openScope = {
     sourceEstimate: await loadEstimateSource(dbh, svc.source_estimate_id),
@@ -658,6 +703,15 @@ async function assembleGrounding(svc, dbh = db) {
       // brief's conditional_products).
       productNames: (productGuidance.products || []).map((p) => p.name).filter(Boolean),
       window: productGuidance.window || null,
+      // Combined-visit companion lines (hashed facts — a companion
+      // change regenerates like any other grounding change).
+      ...(productGuidance.companions ? {
+        companions: productGuidance.companions.map((c) => ({
+          line: c.line,
+          source: c.source,
+          productNames: (c.products || []).map((p) => p.name).filter(Boolean),
+        })),
+      } : {}),
     },
   };
 
@@ -862,6 +916,7 @@ function isGroundedReference(candidate, groundedText) {
 function extractOutputReferences(text) {
   const products = new Set();
   const instructed = new Set();
+  const directives = new Set();
   const targets = new Set();
   const push = (set, value) => {
     const t = String(value || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
@@ -877,6 +932,13 @@ function extractOutputReferences(text) {
   // validator keeps ordinary prose objects ("use caution") from
   // over-rejecting.
   for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(instructed, m[1]);
+  // NON-treatment imperatives ("Inspect interior", "Check attic",
+  // "Monitor bait stations"): instruction fields must ground these
+  // objects too — the treatment-verb capture above covers only
+  // apply/spray/use/treat, and an ungrounded "Inspect interior" on an
+  // exterior-only visit is exactly as contradictory as "Treat interior".
+  // Same connector skip and follower-stop as the treatment capture.
+  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(directives, m[1]);
   for (const m of text.matchAll(/\b(?:for|targeting|against)\s+((?:[a-z][a-z'-]*\s+){0,3}[a-z][a-z'-]*)/g)) push(targets, m[1]);
   // Organism references that never pass a preposition: "<X> activity/
   // damage/infestation" and "signs/evidence of <X>" ("Emerald ash borer
@@ -885,7 +947,7 @@ function extractOutputReferences(text) {
   // modifiers ("increased", "ongoing") the captures drag in.
   for (const m of text.matchAll(/\b((?:[A-Za-z][\w'-]*\s+){0,3}[A-Za-z][\w'-]*?)\s+(?:activity|infestation|damage|pressure|droppings|nesting|sightings?)\b/g)) push(targets, m[1]);
   for (const m of text.matchAll(/\b(?:signs?|evidence|presence|history)\s+of\s+((?:[A-Za-z][\w'-]*\s+){0,3}[A-Za-z][\w'-]*)/g)) push(targets, m[1]);
-  return { products: [...products], instructed: [...instructed], targets: [...targets] };
+  return { products: [...products], instructed: [...instructed], directives: [...directives], targets: [...targets] };
 }
 
 // Ungrounded-claim scan: the model may only mention product names and pest
@@ -946,7 +1008,13 @@ function findUngroundedClaim(body, grounding) {
   // become an instruction when the current window excludes it
   // (lawn-protocol authority rule). Descriptive fields (last-visit
   // summary, context) may reference any grounded product.
-  const fixedNames = (grounding.llmFacts?.productGuidance?.productNames || [])
+  // Companion-line guidance products count as fixed too: on a combined
+  // visit they were handed to the LLM as that line's guidance, so an
+  // instruction naming them is grounded direction, not a violation.
+  const fixedNames = [
+    ...(grounding.llmFacts?.productGuidance?.productNames || []),
+    ...(grounding.llmFacts?.productGuidance?.companions || []).flatMap((c) => c.productNames || []),
+  ]
     .map((n) => String(n).toLowerCase().replace(/\s+/g, ' ').trim())
     .filter(Boolean);
   // EXACT normalized name only — either-side substring would let
@@ -979,14 +1047,22 @@ function findUngroundedClaim(body, grounding) {
     if (!phrase) return true;
     if (groundedText.includes(phrase)) return true;
     const words = phrase.split(' ').filter((w) => w.length >= 4);
-    // No 4+-letter words left does NOT make the claim grounded: a short
-    // verb object ("Use DDT" → 'ddt') is exactly the shape every
+    // No 4+-letter words at all does NOT make the claim grounded: a
+    // short verb object ("Use DDT" → 'ddt') is exactly the shape every
     // length-gated pass ignores (rare-word scan starts at 4, catalog
     // vocabulary at 4) — and the whole-phrase check above already
     // failed, so the claim appears nowhere in the grounding. Fail
     // closed rather than accept it vacuously.
     if (!words.length) return false;
-    return words.every((w) => wordVariants(w).some((v) => groundedText.includes(v)));
+    // Ordinary prose vocabulary self-grounds ("treated", "carefully") —
+    // requiring it verbatim would template-fallback normal sentences.
+    // Reference STOPWORDS do NOT: they carry the direction of the claim
+    // (interior/exterior/perimeter-class words), which is exactly what
+    // an ungrounded instruction smuggles. An object left with only
+    // prose words asserts nothing beyond its verb.
+    const significant = words.filter((w) => !COMMON_PROSE_WORDS.has(w));
+    if (!significant.length) return true;
+    return significant.every((w) => wordVariants(w).some((v) => groundedText.includes(v)));
   };
   const labeledFields = [
     ...(body.priorities || []).map((text) => ({ text, instructional: true })),
@@ -1046,6 +1122,15 @@ function findUngroundedClaim(body, grounding) {
         return { kind: 'novel_product', term };
       }
     }
+    // Non-treatment imperatives direct the technician exactly like
+    // application verbs — "Inspect interior" on an exterior-only visit
+    // is as contradictory as "Treat interior". Same strict grounding
+    // (scope words significant); descriptive prose is not a directive.
+    if (field.instructional) {
+      for (const term of refs.directives) {
+        if (!instructedClaimGrounded(term)) return { kind: 'instruction', term };
+      }
+    }
     for (const term of refs.targets) {
       if (!isGroundedReference(term, groundedText)) return { kind: 'novel_target', term };
     }
@@ -1090,6 +1175,22 @@ function findUngroundedClaim(body, grounding) {
         ? parts.every((part) => part.length < 4 || wordKnown(part))
         : wordKnown(word);
       if (!known) return { kind: 'novel_term', term: word };
+    }
+  }
+  // Numeric claims: every digit-run in the output must appear
+  // digit-bounded in the grounding — the scans above are alphabetic, so
+  // an invented "$500" in quote context would be cached and repeated to
+  // staff as pricing. Thousand-separator commas are folded on both
+  // sides; trailing ".00" grounds on the bare integer.
+  const groundedNumeric = groundedText.replace(/(\d),(?=\d{3}\b)/g, '$1');
+  for (const field of outputFields) {
+    for (const m of String(field).replace(/(\d),(?=\d{3}\b)/g, '$1').matchAll(/\d+(?:\.\d+)?/g)) {
+      const token = m[0];
+      // Trailing-zero decimals only ("100.00" → "100") — "100.50" must
+      // never ground on a bare 100.
+      const variants = [...new Set([token, token.replace(/\.0+$/, '')])].filter(Boolean);
+      const grounded = variants.some((v) => new RegExp(`(?<!\\d)${v.replace('.', '\\.')}(?![\\d.])`).test(groundedNumeric));
+      if (!grounded) return { kind: 'numeric', term: token };
     }
   }
   return null;
