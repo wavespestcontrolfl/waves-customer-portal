@@ -1823,6 +1823,11 @@ router.post('/bank-import/upload', async (req, res, next) => {
       // one-time confirmation identity for a force re-post (replay-safe)
       forceToken: duplicateRows.length > 0 ? nodeCrypto.randomUUID() : null,
       duplicateSamples: duplicateRows.slice(0, 10).map(r => ({ txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
+      // the FULL per-row list (bounded by the 500-row upload cap), hash
+      // included — the client offers per-row force selection, because one
+      // genuinely distinct same-tuple transaction must be recoverable
+      // WITHOUT also re-importing every ordinary overlap in the file
+      duplicateRows: duplicateRows.map(r => ({ row_hash: r.row_hash, txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction })),
       skipped,
       matching,
       matchingError,

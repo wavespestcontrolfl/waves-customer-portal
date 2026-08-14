@@ -4044,6 +4044,10 @@ function BankImportTab() {
   // last upload payload, kept only while its result reported duplicates —
   // fuels the explicit force-import path for identical-but-distinct rows
   const [dupUpload, setDupUpload] = useState(null);
+  // per-row force selection: hash → checked. Default UNCHECKED — the
+  // operator names exactly which skipped tuples were genuinely separate
+  // purchases; forcing the whole set would re-import ordinary overlaps too.
+  const [dupPicks, setDupPicks] = useState({});
 
   // offset pagination with APPEND semantics — the server caps limit at 500,
   // so growing a single limit stalls there; offset pages don't
@@ -4121,9 +4125,10 @@ function BankImportTab() {
         // the server-issued token makes that confirmation replay-safe
         setDupUpload(
           r.duplicates > 0
-            ? { ...payload, forceRowHashes: r.duplicateHashes || [], forceToken: r.forceToken }
+            ? { ...payload, duplicateRows: r.duplicateRows || [], forceToken: r.forceToken }
             : null,
         );
+        setDupPicks({});
         setNotice({
           text:
             `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skipped.length} skipped)` +
@@ -4151,22 +4156,26 @@ function BankImportTab() {
   };
 
   // Re-post the same file with forceDuplicates: rows already present stay
-  // deduped; ONLY the skipped identical rows import as additional copies.
+  // deduped; ONLY the operator-checked identical rows import as additional
+  // copies — never the whole skipped set.
   const forceImportDuplicates = () => {
     if (!dupUpload) return;
+    const selected = (dupUpload.duplicateRows || []).filter((d) => dupPicks[d.row_hash]).map((d) => d.row_hash);
+    if (!selected.length) return;
     if (
       !window.confirm(
-        "Import the skipped identical rows as ADDITIONAL transactions? Only do this when they were genuinely separate purchases, not a re-upload of the same statement.",
+        `Import the ${selected.length} checked row${selected.length === 1 ? "" : "s"} as ADDITIONAL transactions? Only do this when they were genuinely separate purchases, not a re-upload of the same statement.`,
       )
     )
       return;
-    const payload = { ...dupUpload, forceDuplicates: true };
+    const payload = { ...dupUpload, forceDuplicates: true, forceRowHashes: selected };
     // dupUpload is kept until the request SUCCEEDS: it holds the only copy
     // of the forceToken, and the server's replay protection only works when
     // a failed/lost confirmation retries under the SAME token
     act("upload", "/admin/tax/bank-import/upload", payload).then((r) => {
-      if (!r) return; // failed — token retained, the button retries this confirmation
+      if (!r) return; // failed — token + selection retained, the button retries this confirmation
       setDupUpload(null);
+      setDupPicks({});
       setNotice({
         text:
           `Force-imported ${r.forced} duplicate row${r.forced === 1 ? "" : "s"}` +
@@ -4315,17 +4324,33 @@ function BankImportTab() {
         >
           {notice.text}
           {/* rendered on error notices too — a failed force confirmation
-              must retry under the SAME retained token */}
+              must retry under the SAME retained token and selection */}
           {dupUpload && (
-            <button
-              type="button"
-              disabled={!!busy}
-              style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginLeft: 10 }}
-              onClick={forceImportDuplicates}
-              title="Only when the skipped rows were genuinely separate identical purchases, not a re-upload"
-            >
-              Import skipped duplicates anyway
-            </button>
+            <div style={{ marginTop: 8 }}>
+              <div style={{ color: D.muted, marginBottom: 4 }}>
+                Skipped as re-uploads — check ONLY the rows that were genuinely separate purchases, then import:
+              </div>
+              {(dupUpload.duplicateRows || []).map((d) => (
+                <label key={d.row_hash} style={{ display: "block", cursor: "pointer", padding: "1px 0" }}>
+                  <input
+                    type="checkbox"
+                    checked={!!dupPicks[d.row_hash]}
+                    onChange={(e) => setDupPicks((p) => ({ ...p, [d.row_hash]: e.target.checked }))}
+                    style={{ marginRight: 6 }}
+                  />
+                  {d.txn_date} · {String(d.description).slice(0, 40)} · ${d.amount} ({d.direction})
+                </label>
+              ))}
+              <button
+                type="button"
+                disabled={!!busy || !Object.values(dupPicks).some(Boolean)}
+                style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginTop: 6 }}
+                onClick={forceImportDuplicates}
+                title="Imports only the checked rows as additional transactions"
+              >
+                Import selected duplicates
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -4419,7 +4444,8 @@ function BankImportTab() {
                       </option>
                       {r.suggestion.candidates.map((c) => (
                         <option key={c.id} value={c.id}>
-                          {(c.vendor_name || c.description || "expense").slice(0, 40)} · {fmtD(c.expense_date)}
+                          {(c.vendor_name || c.description || "expense").slice(0, 34)}
+                          {c.amount != null ? ` · ${fmtM(c.amount)}` : ""} · {fmtD(c.expense_date)}
                         </option>
                       ))}
                       {(r.suggestion.candidatesTotal || 0) > r.suggestion.candidates.length && (

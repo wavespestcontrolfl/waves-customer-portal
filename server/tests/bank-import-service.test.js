@@ -227,6 +227,14 @@ describe('parseStatementCsv', () => {
     expect(rows[1]).toMatchObject({ amount: 15, direction: 'credit' });
   });
 
+  test('a NUL byte in the description skips the row — one corrupted cell must not abort the bulk insert', () => {
+    const csv = 'Transaction Date,Description,Debit,Credit\n08/01/2026,GOOD VENDOR,10.00,\n08/02/2026,BAD\u0000VENDOR,20.00,\n';
+    const { rows, skipped } = parseStatementCsv(csv);
+    expect(rows).toHaveLength(1);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0].reason).toContain('NUL');
+  });
+
   test('bad rows skip with a line + reason instead of throwing', () => {
     const csv = [
       'Date,Description,Amount',
@@ -715,6 +723,9 @@ describe('runDeterministicMatching', () => {
     const parked = state.updates.find(u => sugOf(u) && sugOf(u).candidates);
     expect(parked).toBeDefined();
     expect(String(parked.patch.suggestion.sql)).toContain("'noMatch'"); // subtracted in the same write
+    // each parked candidate carries its amount — one-cent near-misses are
+    // otherwise indistinguishable in the picker
+    expect(sugOf(parked).candidates[0].amount).toBe(312.4);
   });
 
   test('a retry the batch could NOT resolve (human draft) still reports more work remaining', async () => {

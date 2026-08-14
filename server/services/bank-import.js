@@ -109,6 +109,9 @@ function parseStatementCsv(csvText) {
     const description = String(pick(rec, ['description', 'transaction description', 'payee', 'memo']) || '').trim().slice(0, 500);
     if (!date) { skipped.push({ line, reason: 'unparseable date' }); return; }
     if (!description) { skipped.push({ line, reason: 'missing description' }); return; }
+    // PostgreSQL rejects NUL bytes in varchar — one corrupted cell would
+    // abort the whole bulk-insert transaction instead of landing here.
+    if (description.includes('\u0000')) { skipped.push({ line, reason: 'description contains a NUL byte' }); return; }
 
     let amount = null;
     let direction = null;
@@ -1363,7 +1366,12 @@ async function runDeterministicMatching({ limit } = {}) {
       // disappeared. The two states are mutually exclusive by construction.
       await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
         suggestion: suggestionMerge({
-          candidates: candidates.slice(0, 20).map(c => ({ id: c.id, description: c.description, vendor_name: c.vendor_name, expense_date: toDateStr(c.expense_date) })),
+          // amount included (the GROSS reading for refund-reduced
+          // candidates — that is the figure the statement debit carries):
+          // same-vendor same-day near-misses inside the one-cent tolerance
+          // are otherwise indistinguishable in the picker, and manually
+          // linking the wrong one consumes the wrong ledger expense
+          candidates: candidates.slice(0, 20).map(c => ({ id: c.id, amount: c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount), description: c.description, vendor_name: c.vendor_name, expense_date: toDateStr(c.expense_date) })),
           candidatesTotal: candidates.length,
         }, ['noMatch']),
         updated_at: new Date(),
