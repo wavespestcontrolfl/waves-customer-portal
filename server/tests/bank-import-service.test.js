@@ -1390,6 +1390,18 @@ describe('runDeterministicMatching', () => {
     expect(between.b.whereBetween.mock.calls[0][1][0]).toBe('2026-01-01');
   });
 
+  test('a draft-paused pending link is reverted on page load once the human FINALIZES the rejection', async () => {
+    // payout stays paid/eligible — only the human ruling changed
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '500.00', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
+    state.payouts = [{ id: 'po-1', amount: '500.00', arrival_date: '2026-08-11', status: 'paid', reconciled: false }];
+    state.reconRows = [{ payout_id: 'po-1', status: 'rejected', reconciled_by: 'adam' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.linksReverted).toBe(1);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(sugOf(revert).bankingRejectedPayoutIds).toEqual(['po-1']); // the ruling stands as an exclusion
+    expect(sugOf(revert).autoRevert.reason).toContain('rejected by a human');
+  });
+
   test('a PENDING link whose payout turned ineligible is healed WITHOUT the retry path (page-load healer)', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '500.00', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
     state.payouts = [{ id: 'po-1', amount: '500.00', arrival_date: '2026-08-11', status: 'failed', reconciled: false }];

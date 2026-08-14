@@ -4076,6 +4076,12 @@ function BankImportTab() {
     [filter],
   );
   const load = useCallback(() => {
+    // expanded candidate caches are snapshots of a suggestion state that a
+    // reload replaces — keeping them would pin stale targets (and hide
+    // newly valid ones) with no load-all option left to refresh
+    setFullRefunds({});
+    setFullExpenseCands({});
+    setFullPayouts({});
     adminFetch("/admin/tax/bank-import/status")
       .then((s) => setCounts(s?.counts || {}))
       .catch(() => {});

@@ -729,17 +729,71 @@ async function healUnreconciledLinks() {
     .whereRaw("bt.suggestion->>'reconcilePending' = 'true'")
     .select('bt.id as id', 'bt.amount as amount', 'bt.txn_date as txn_date', 'bt.matched_payout_id as matched_payout_id',
       'sp.amount as payout_amount', 'sp.status as payout_status', 'sp.arrival_date as arrival_date', 'sp.reconciled as payout_reconciled');
+  // Latest reconciliation ruling per pending payout, batched (same
+  // distinct-on shape as the confirmed-amount lookup): a human draft that
+  // paused the echo can later be FINALIZED as rejected on the Banking
+  // page — an otherwise-eligible pending link must not survive that
+  // ruling until an explicit matching pass happens to run.
+  const pendingIds = [...new Set(pendingLinks.map(r => r.matched_payout_id))];
+  const latestByPayout = new Map();
+  if (pendingIds.length) {
+    const latestRulings = await db('bank_reconciliation')
+      .select(db.raw('distinct on (payout_id) payout_id, status, reconciled_by'))
+      .whereIn('payout_id', pendingIds)
+      .orderBy('payout_id')
+      .orderBy('reconciled_at', 'desc')
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc');
+    for (const r of latestRulings) {
+      if (!latestByPayout.has(r.payout_id)) latestByPayout.set(r.payout_id, r);
+    }
+  }
+  const isHumanRejection = (latest) => !!(latest && latest.status === 'rejected' && !String(latest.reconciled_by || '').startsWith('bank-import'));
   let pendingReverts = 0;
   for (const row of pendingLinks) {
     // an UNRECONCILED pending row that is still eligible by its expected
-    // amount is the echo retries' normal work — skip without a lock. A
-    // RECONCILED pending row (echo committed, crash before the flag
-    // cleared) always takes the locked path: its effective amount is the
-    // confirmed actual, which only the lock can read consistently.
-    if (!row.payout_reconciled && linkStillEligible(row, Number(row.payout_amount))) continue;
+    // amount AND carries no standing human rejection is the echo retries'
+    // normal work — skip without a lock. A RECONCILED pending row (echo
+    // committed, crash before the flag cleared) always takes the locked
+    // path: its effective amount is the confirmed actual, which only the
+    // lock can read consistently.
+    if (!row.payout_reconciled
+      && !isHumanRejection(latestByPayout.get(row.matched_payout_id))
+      && linkStillEligible(row, Number(row.payout_amount))) continue;
     await db.transaction(async (trx) => {
       const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('id', 'amount', 'status', 'arrival_date', 'reconciled', 'reconciled_by');
       if (!sp) return; // payout gone — FK SET NULL + the dangling heal own this
+      // a human rejection re-read under the lock outranks everything —
+      // revert the link and exclude the payout while the ruling stands
+      // (the exact outcome the echo's own re-check produces)
+      const lockedRuling = await trx('bank_reconciliation')
+        .where('payout_id', row.matched_payout_id)
+        .orderBy('reconciled_at', 'desc')
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .first('status', 'reconciled_by');
+      if (!sp.reconciled && isHumanRejection(lockedRuling)) {
+        const cur = await trx('bank_transactions')
+          .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+          .first('suggestion');
+        if (!cur) return;
+        const rest = cur.suggestion || {};
+        const changed = await trx('bank_transactions')
+          .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+          .update({
+            status: 'unmatched',
+            matched_payout_id: null,
+            match_method: null,
+            matched_at: null,
+            suggestion: suggestionMerge({
+              bankingRejectedPayoutIds: [...new Set([...(rest.bankingRejectedPayoutIds || []), row.matched_payout_id])],
+              autoRevert: { at: new Date().toISOString(), payoutId: row.matched_payout_id, reason: 'reconciliation rejected by a human on the Banking page' },
+            }, ['reconcilePending', 'verifyPending']),
+            updated_at: new Date(),
+          });
+        if (changed) pendingReverts++;
+        return;
+      }
       const lockedEffective = await effectivePayoutAmount(sp, trx);
       if (linkStillEligible({ ...row, payout_status: sp.status, arrival_date: sp.arrival_date }, lockedEffective)) return;
       const changed = await trx('bank_transactions')
@@ -785,6 +839,10 @@ async function healOrphanRefunds() {
   for (const row of orphans) {
     const changed = await db('bank_transactions')
       .where({ id: row.id, status: 'refund_applied' })
+      // bound to the SCANNED target: a concurrent heal + operator re-apply
+      // to a different expense must not have this stale update clear the
+      // newer association while its ledger adjustment stays applied
+      .whereRaw("suggestion->>'refundAppliedTo' = ?", [String(row.target)])
       .update({
         status: 'unmatched',
         match_method: null,
@@ -1524,8 +1582,11 @@ async function runDeterministicMatching({ limit } = {}) {
                 summary.payoutIneligibleReverted = (summary.payoutIneligibleReverted || 0) + 1;
               }
             } catch (reconErr) {
-              // flag already persisted with the claim — the sweep retries
+              // flag already persisted with the claim — the sweep retries,
+              // and this NEW retry work must read as remaining (the sweep
+              // already ran this pass, so nothing else would report it)
               logger.warn(`[bank-import] payout ${exact[0].id} linked but reconciliation write failed (sweep will retry): ${reconErr.message}`);
+              summary.moreRemaining = true;
             }
           }
         } catch (err) {
