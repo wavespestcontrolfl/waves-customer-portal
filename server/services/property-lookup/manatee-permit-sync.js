@@ -242,8 +242,19 @@ function normalizeRow(row) {
   };
 }
 
+// csv-parse errors quote the offending line — permit rows carry owner
+// names and addresses, and sync errors propagate into scheduler logs
+// (AGENTS.md PII rule). Rethrow the machine code only.
+function parseCsvSanitized(text, options) {
+  try {
+    return parseCsv(text, options);
+  } catch (err) {
+    throw new Error(`report CSV parse failed: ${err?.code || err?.name || 'parse_error'}`);
+  }
+}
+
 function parsePoolPermitCsv(csvText) {
-  const records = parseCsv(csvText.replace(/^﻿/, ''), {
+  const records = parseCsvSanitized(csvText.replace(/^﻿/, ''), {
     columns: true,
     skip_empty_lines: true,
     relax_column_count: true,
@@ -454,7 +465,7 @@ function normalizeConstructionRow(row, reportKey) {
 }
 
 function parseConstructionCsv(csvText, reportKey) {
-  const records = parseCsv(stripReportPreamble(csvText), {
+  const records = parseCsvSanitized(stripReportPreamble(csvText), {
     columns: true,
     skip_empty_lines: true,
     relax_column_count: true,
