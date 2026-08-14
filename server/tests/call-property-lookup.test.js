@@ -693,7 +693,10 @@ describe('reconcileVisitCoordinates', () => {
     // A permanent residue of unreconcilable rows bigger than one night's
     // page budget must not pin every scan to the same head — the cursor
     // stored in system_settings makes successive nights cover the tail.
-    const settingsRead = builder({ value: 'v-500' });
+    // CHRONOLOGICAL (created_at, id), not id alone: ids are random UUIDs,
+    // so an id keyset would exclude rows created after the cursor was
+    // persisted whenever the new UUID sorts below it.
+    const settingsRead = builder({ value: '2026-08-14T00:00:00.000Z|v-500' });
     const settingsWrite = builder(1);
     let settingsCalls = 0;
     const joinedResumed = builder([]);
@@ -707,15 +710,49 @@ describe('reconcileVisitCoordinates', () => {
       return builder(1);
     });
     await _private.reconcileVisitCoordinates();
-    // Resumed from the stored cursor…
-    expect(joinedResumed.where).toHaveBeenCalledWith('ss.id', '>', 'v-500');
+    // Resumed from the stored chronological cursor…
+    expect(joinedResumed.whereRaw).toHaveBeenCalledWith(
+      '(ss.created_at, ss.id) > (?, ?)',
+      [new Date('2026-08-14T00:00:00.000Z'), 'v-500'],
+    );
     // …an empty page past the cursor wraps to the top ONCE (no keyset)…
-    expect(joinedFromTop.where).not.toHaveBeenCalledWith('ss.id', '>', expect.anything());
+    const fromTopKeyset = joinedFromTop.whereRaw.mock.calls
+      .some((c) => String(c[0]).includes('(ss.created_at, ss.id)'));
+    expect(fromTopKeyset).toBe(false);
     // …and the completed scan clears the cursor for the next night.
     expect(settingsWrite.insert).toHaveBeenCalledWith(expect.objectContaining({
       key: 'call_property_lookup.reconcile_visit_cursor', value: null,
     }));
     expect(settingsWrite.merge).toHaveBeenCalledWith(expect.objectContaining({ value: null }));
+  });
+
+  test('page-capped scan persists a chronological cursor built from the tail row', async () => {
+    // 20 full pages (the nightly cap) → the run is page-capped, so the
+    // NEXT night must resume from tonight's tail, serialized ts|id.
+    const fullPage = Array.from({ length: 200 }, (_, i) => ({
+      visit_id: `v-${i}`,
+      visit_created_at: '2026-08-10T12:00:00.000Z',
+      service_address_line1: '9 Elsewhere Rd',
+      service_address_city: 'Bradenton',
+      service_address_zip: '34212',
+      latitude: '27.5',
+      longitude: '-82.4',
+      address_line1: '123 Sample Cove',
+      city: 'Bradenton',
+      zip: '34212',
+    }));
+    const settingsWrite = builder(1);
+    let settingsCalls = 0;
+    db.mockImplementation((table) => {
+      if (String(table).startsWith('scheduled_services as ss')) return builder(fullPage);
+      if (table === 'system_settings') return settingsCalls++ === 0 ? builder(undefined) : settingsWrite;
+      return builder(1);
+    });
+    await _private.reconcileVisitCoordinates();
+    expect(settingsWrite.insert).toHaveBeenCalledWith(expect.objectContaining({
+      key: 'call_property_lookup.reconcile_visit_cursor',
+      value: '2026-08-10T12:00:00.000Z|v-199',
+    }));
   });
 });
 

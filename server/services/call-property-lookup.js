@@ -593,19 +593,44 @@ const RECONCILE_VISIT_MAX_PAGES = 20;
 
 // Durable scan cursors (system_settings, the portal's generic KV): a night
 // that exhausts MAX_PAGES persists where it stopped, so the next night
-// resumes PAST the scanned prefix instead of restarting at id=null — a
+// resumes PAST the scanned prefix instead of restarting from the top — a
 // permanent residue of unreconcilable rows (canonical mismatches the SQL
 // prefilter can't express) larger than one night's budget would otherwise
 // pin every scan to the same head and the tail would never be examined.
+// The cursor is CHRONOLOGICAL — (created_at, id), not id alone: ids are
+// random UUIDs, so an id-keyset cursor would exclude a row created AFTER
+// it was persisted whenever the new UUID happens to sort below it, leaving
+// a fresh booking without coordinates for however many nights the wrap
+// takes — the exact enrich-before-booking race this pass repairs. Ordered
+// by creation time, new rows always sort past any persisted position.
 // A completed scan clears the cursor (wrap to the top). Best-effort +
-// fail-open: a KV error just means one night rescans from the top.
+// fail-open: a KV error or malformed value just means one night rescans
+// from the top. Serialized as '<ISO timestamp>|<id>'; JS Date truncates
+// timestamptz to milliseconds, which can only RE-INCLUDE boundary rows on
+// resume (a safe rescan), never skip them.
 const RECONCILE_VISIT_CURSOR_KEY = 'call_property_lookup.reconcile_visit_cursor';
 const RECONCILE_CUSTOMER_CURSOR_KEY = 'call_property_lookup.reconcile_customer_cursor';
+
+function encodeReconcileCursor(createdAt, id) {
+  const ts = new Date(createdAt);
+  if (!id || Number.isNaN(ts.getTime())) return null;
+  return `${ts.toISOString()}|${id}`;
+}
+
+function parseReconcileCursor(value) {
+  const s = String(value || '');
+  const i = s.indexOf('|');
+  if (i <= 0) return null;
+  const ts = new Date(s.slice(0, i));
+  const id = s.slice(i + 1);
+  if (!id || Number.isNaN(ts.getTime())) return null;
+  return { ts, id };
+}
 
 async function readReconcileCursor(key) {
   try {
     const row = await db('system_settings').where({ key }).first();
-    return (row && row.value) || null;
+    return parseReconcileCursor(row && row.value);
   } catch (err) {
     logger.warn('[call-property-lookup] cursor read failed', { key, error: errId(err) });
     return null;
@@ -638,11 +663,12 @@ async function reconcileVisitCoordinates() {
     // mirrors the cheap canonical-key components: unstamped rows (key '')
     // and different-zip5 stamps can never key-match, so the permanent
     // residue the JS filter would re-skip nightly mostly never leaves the
-    // database. MAX_PAGES bounds a night at 4k rows; the DURABLE CURSOR
-    // makes successive nights cover the whole set even when the residue
-    // exceeds one night's budget (see cursor comment above).
-    let lastId = await readReconcileCursor(RECONCILE_VISIT_CURSOR_KEY);
-    let resumed = Boolean(lastId);
+    // database. MAX_PAGES bounds a night at 4k rows; the DURABLE
+    // CHRONOLOGICAL CURSOR makes successive nights cover the whole set even
+    // when the residue exceeds one night's budget, without ever excluding
+    // rows created after it was persisted (see cursor comment above).
+    let cursor = await readReconcileCursor(RECONCILE_VISIT_CURSOR_KEY);
+    let resumed = Boolean(cursor);
     let exhausted = false;
     for (let page = 0; page < RECONCILE_VISIT_MAX_PAGES; page += 1) {
       const q = db('scheduled_services as ss')
@@ -655,29 +681,30 @@ async function reconcileVisitCoordinates() {
         .whereRaw("COALESCE(TRIM(ss.service_address_line1), '') <> ''")
         .whereRaw("LEFT(TRIM(COALESCE(ss.service_address_zip, '')), 5) = LEFT(TRIM(COALESCE(cp.zip, '')), 5)")
         .select(
-          'ss.id as visit_id',
+          'ss.id as visit_id', 'ss.created_at as visit_created_at',
           'ss.service_address_line1', 'ss.service_address_line2',
           'ss.service_address_city', 'ss.service_address_zip',
           'cp.latitude', 'cp.longitude',
           'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
         )
-        .orderBy('ss.id', 'asc')
+        .orderBy([{ column: 'ss.created_at', order: 'asc' }, { column: 'ss.id', order: 'asc' }])
         .limit(RECONCILE_VISIT_PAGE);
-      if (lastId) q.where('ss.id', '>', lastId);
+      if (cursor) q.whereRaw('(ss.created_at, ss.id) > (?, ?)', [cursor.ts, cursor.id]);
       const rows = (await q) || [];
       if (!rows.length) {
         // A resumed cursor past the current tail wraps to the top ONCE so
         // the night isn't wasted; an empty page from the top means done.
         if (resumed) {
           resumed = false;
-          lastId = null;
+          cursor = null;
           page -= 1;
           continue;
         }
         exhausted = true;
         break;
       }
-      lastId = rows[rows.length - 1].visit_id;
+      const tail = rows[rows.length - 1];
+      cursor = { ts: tail.visit_created_at, id: tail.visit_id };
       for (const r of rows) {
         const propKey = addressKey(r);
         const visitKey = addressKey({
@@ -705,7 +732,10 @@ async function reconcileVisitCoordinates() {
     }
     // Completed the set → next night starts from the top; page-capped →
     // resume past tonight's prefix.
-    await writeReconcileCursor(RECONCILE_VISIT_CURSOR_KEY, exhausted ? null : lastId);
+    await writeReconcileCursor(
+      RECONCILE_VISIT_CURSOR_KEY,
+      exhausted || !cursor ? null : encodeReconcileCursor(cursor.ts, cursor.id),
+    );
   } catch (err) {
     logger.warn('[call-property-lookup] visit reconciliation failed', { error: errId(err) });
   }
@@ -725,11 +755,12 @@ async function reconcileCustomerMirrors() {
   let filled = 0;
   try {
     const { addressKey } = require('./customer-properties');
-    // Same durable-cursor shape as the visit sweep: a permanent residue
-    // (JS-fenced mismatches, commercial-type skips) larger than one
-    // night's page budget must not pin the scan head forever.
-    let lastId = await readReconcileCursor(RECONCILE_CUSTOMER_CURSOR_KEY);
-    let resumed = Boolean(lastId);
+    // Same durable chronological-cursor shape as the visit sweep: a
+    // permanent residue (JS-fenced mismatches, commercial-type skips)
+    // larger than one night's page budget must not pin the scan head
+    // forever, and new customers must never land behind the cursor.
+    let cursor = await readReconcileCursor(RECONCILE_CUSTOMER_CURSOR_KEY);
+    let resumed = Boolean(cursor);
     let exhausted = false;
     for (let page = 0; page < RECONCILE_VISIT_MAX_PAGES; page += 1) {
       const q = db('customers as c')
@@ -742,26 +773,27 @@ async function reconcileCustomerMirrors() {
           OR (NULLIF(TRIM(c.property_type), '') IS NULL AND NULLIF(TRIM(cp.property_type), '') IS NOT NULL AND cp.property_type <> 'commercial')
         )`)
         .select(
-          'c.id as customer_id',
+          'c.id as customer_id', 'c.created_at as customer_created_at',
           'c.address_line1 as c_line1', 'c.address_line2 as c_line2', 'c.city as c_city', 'c.zip as c_zip',
           'cp.latitude', 'cp.longitude', 'cp.property_type as cp_type',
           'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
         )
-        .orderBy('c.id', 'asc')
+        .orderBy([{ column: 'c.created_at', order: 'asc' }, { column: 'c.id', order: 'asc' }])
         .limit(RECONCILE_VISIT_PAGE);
-      if (lastId) q.where('c.id', '>', lastId);
+      if (cursor) q.whereRaw('(c.created_at, c.id) > (?, ?)', [cursor.ts, cursor.id]);
       const rows = (await q) || [];
       if (!rows.length) {
         if (resumed) {
           resumed = false;
-          lastId = null;
+          cursor = null;
           page -= 1;
           continue;
         }
         exhausted = true;
         break;
       }
-      lastId = rows[rows.length - 1].customer_id;
+      const tail = rows[rows.length - 1];
+      cursor = { ts: tail.customer_created_at, id: tail.customer_id };
       for (const r of rows) {
         const propKey = addressKey(r);
         const custKey = addressKey({
@@ -797,7 +829,10 @@ async function reconcileCustomerMirrors() {
         break;
       }
     }
-    await writeReconcileCursor(RECONCILE_CUSTOMER_CURSOR_KEY, exhausted ? null : lastId);
+    await writeReconcileCursor(
+      RECONCILE_CUSTOMER_CURSOR_KEY,
+      exhausted || !cursor ? null : encodeReconcileCursor(cursor.ts, cursor.id),
+    );
   } catch (err) {
     logger.warn('[call-property-lookup] customer mirror reconciliation failed', { error: errId(err) });
   }
