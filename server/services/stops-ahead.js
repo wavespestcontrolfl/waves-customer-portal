@@ -115,6 +115,14 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     // real stop. Only the target's OWN sibling group is excluded, so a
     // sibling of the target never counts as ahead of itself but the
     // customer's genuinely-earlier other appointment still does.
+    // Do NOT add property_id/service_address_* to this key: the stamp is
+    // not sibling-uniform (admin add-a-line, dispatch follow-ups, and
+    // estimate-converter same-trip rows leave it NULL next to a stamped
+    // sibling), so a property-qualified key would split one real visit
+    // into two stops — and count the target's own line item as ahead of
+    // it. The cost of the current key is only the same-customer,
+    // same-window, different-property collapse, unreachable for a
+    // single-tech route.
     // Three figures from the same rows in one pass:
     //   ahead      — live (not-yet-serviced) stops sorting before the target;
     //                this is the number the cap and clamp govern.
