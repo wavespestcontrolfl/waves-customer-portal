@@ -1422,9 +1422,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Advisory slot-conflict hint for the manual Date/Time row (also re-runs
   // when applySlot writes apptDate/windowStart). Warn-only — Book never
-  // keys off it. Span mirrors the submit: all lines' durations summed.
-  const slotCheckDuration = services.reduce(
-    (sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0,
+  // keys off it. Span mirrors the submit: groups all POST the same
+  // scheduledDate + windowStart with their own summed duration, so the
+  // union of booked windows is start + the LARGEST group's duration —
+  // summing across groups would warn about time never booked.
+  const slotCheckDuration = groupServicesForAppointmentSubmit(services).reduce(
+    (max, group) => Math.max(
+      max,
+      group.lines.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0),
+    ), 0,
   );
   const { conflicts: slotConflicts } = useSlotConflicts({
     date: apptDate ? String(apptDate).split('T')[0] : null,

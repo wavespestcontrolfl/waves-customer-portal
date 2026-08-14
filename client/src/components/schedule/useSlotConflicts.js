@@ -88,9 +88,13 @@ export function useBulkSlotConflicts({ date, services, enabled = true }) {
       return undefined;
     }
     const allIds = services.map((s) => String(s.id));
-    const checked = services.slice(0, 25)
+    // Windowless (anytime) visits can't be checked — drop them BEFORE the
+    // 25-target cap so they never crowd out timed visits behind them, and
+    // so `truncated` reflects checkable visits only.
+    const checkable = services
       .map((s) => ({ service: s, end: s.windowEnd || deriveEnd(s.windowStart) }))
       .filter(({ service, end }) => service.windowStart && end);
+    const checked = checkable.slice(0, 25);
     if (!checked.length) {
       setChecking(false);
       return undefined;
@@ -108,7 +112,7 @@ export function useBulkSlotConflicts({ date, services, enabled = true }) {
           setResult({
             conflictCount: results.filter((r) => r?.conflicts?.length > 0).length,
             checkedCount: checked.length,
-            truncated: services.length > 25,
+            truncated: checkable.length > 25,
           });
         }
       } catch { /* advisory only */ }
