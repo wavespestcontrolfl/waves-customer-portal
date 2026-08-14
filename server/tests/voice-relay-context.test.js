@@ -335,13 +335,17 @@ describe('GATE ON — caller recognition', () => {
     // upgrade token's nonce: a ConversationRelay retry mints a NEW token and
     // takes over the CallSid; a duplicate setup frame on the SAME socket
     // (same nonce) still cannot claim twice.
-    test('with a sessionKey the claim is nonce-owned: takeover allowed, same-nonce replay refused', async () => {
+    test('with a sessionKey the claim is nonce-owned and GENERATION-ordered: only a provably newer token takes over', async () => {
       primeDb({ customers: [CUSTOMER] });
-      expect(await relayContext.beginRelaySessionClaim(CALL_SID, 'nonce-abc')).toBe(true);
+      expect(await relayContext.beginRelaySessionClaim(CALL_SID, 'nonce-abc', 1799999999)).toBe(true);
       const raws = builders.call_log.whereRaw.mock.calls.map(([sql]) => String(sql));
       expect(raws.some((sql) => sql.includes("relay_session_claim_owner') IS DISTINCT FROM ?"))).toBe(true);
+      // …AND strictly newer: a delayed OLD socket (lower generation) cannot
+      // steal the claim back from the replacement.
+      expect(raws.some((sql) => sql.includes("relay_session_claim_gen')::bigint, 0) < ?"))).toBe(true);
       const updateSql = String(builders.call_log.update.mock.calls[0][0].metadata.__raw || builders.call_log.update.mock.calls[0][0].metadata.sql || '');
       expect(updateSql).toContain('relay_session_claim_owner');
+      expect(updateSql).toContain('relay_session_claim_gen');
     });
 
     test('without a sessionKey the legacy strict one-claim predicate holds', async () => {

@@ -207,6 +207,11 @@ function attachVoiceRelay(httpServer) {
       // the live CallSid — while a duplicate setup frame on the SAME socket
       // (same nonce) still cannot claim twice.
       req.relaySessionKey = String(token).split('.')[2] || null;
+      // The token's expiry doubles as a MONOTONIC GENERATION: every retry
+      // mints a fresh token with a later exp, so a takeover can require the
+      // claimant to be provably NEWER — a delayed old socket can no longer
+      // steal the claim back from the replacement.
+      req.relaySessionGeneration = Number(String(token).split('.')[1]) || null;
       wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
     }).catch(() => {
       try { socket.destroy(); } catch { /* socket already gone */ }
@@ -220,6 +225,7 @@ function attachVoiceRelay(httpServer) {
     // path, which the setup handler treats as unauthenticated.
     const authenticatedCallSid = (req && req.authenticatedCallSid) || null;
     const relaySessionKey = (req && req.relaySessionKey) || null;
+    const relaySessionGeneration = (req && req.relaySessionGeneration) || null;
 
     // Idle + max-duration backstops. All cleanup funnels through teardown()
     // (idempotent) so a leaked-key client can't pin an open socket — and keep
@@ -311,6 +317,7 @@ function attachVoiceRelay(httpServer) {
             // ALWAYS the authenticated one — never the frame's.
             callSid: authenticatedCallSid,
             sessionKey: relaySessionKey,
+            sessionGeneration: relaySessionGeneration,
             from: msg.from || p.from || null,
             to: msg.to || p.to || null,
             language: msg.lang || p.lang || null,

@@ -642,6 +642,29 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(builder.update).not.toHaveBeenCalled(); // transcript/outcome reconcile skipped
   });
 
+  // ⭐ THE OWNER FENCE RIDES THE RECONCILE STATEMENT ITSELF — check-then-act
+  // is not enough at close: the claim can move between the pre-check and the
+  // UPDATE, so the WHERE proves ownership atomically (0 rows for a foreign
+  // owner; NULL owner allowed — an unverified session still owns its honest
+  // reconcile).
+  test('a keyed session\'s close reconcile carries the atomic owner fence', async () => {
+    const builder = {};
+    builder.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(builder, builder); return builder; });
+    builder.whereNull = jest.fn(() => builder);
+    builder.orWhereNot = jest.fn(() => builder);
+    builder.whereRaw = jest.fn(() => builder);
+    // Owner read (supersession pre-check): our own nonce — not superseded.
+    builder.first = jest.fn(async () => ({ metadata: { relay_session_claim_owner: 'nonce-MINE' } }));
+    builder.update = jest.fn(async () => 1);
+    db.mockImplementation(() => builder);
+    const convo = new RelayConversation({
+      callSid: 'CA-owned-close', sessionKey: 'nonce-MINE', from: '+19415551234', send: jest.fn(), endSession: jest.fn(),
+    });
+    await convo.end('socket_closed');
+    const fences = builder.whereRaw.mock.calls.map(([sql]) => String(sql));
+    expect(fences.some((sql) => sql.includes("relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?"))).toBe(true);
+  });
+
   test('a session that still OWNS the claim executes tools normally', async () => {
     const builder = {};
     builder.where = jest.fn(() => builder);

@@ -72,6 +72,7 @@ const VERIFY_CALL_MAX_AGE_MS = 10 * 60 * 1000;
 // The jsonb key the claim burns on the call's own signature-verified row.
 const RELAY_CLAIM_KEY = 'relay_session_claimed_at';
 const RELAY_CLAIM_OWNER_KEY = 'relay_session_claim_owner';
+const RELAY_CLAIM_GEN_KEY = 'relay_session_claim_gen';
 
 /**
  * Claim a CallSid for ONE relay session — ATOMICALLY, AND IN SHARED STORAGE.
@@ -91,34 +92,43 @@ const RELAY_CLAIM_OWNER_KEY = 'relay_session_claim_owner';
  * Fails CLOSED: any error means the claim is unproven, which is treated as
  * already-claimed rather than "probably fine".
  */
-async function beginRelaySessionClaim(callSid, sessionKey = null) {
+async function beginRelaySessionClaim(callSid, sessionKey = null, sessionGeneration = null) {
   const key = String(callSid || '').trim();
   if (!key) return false;
   const owner = sessionKey ? String(sessionKey) : null;
+  const generation = Number(sessionGeneration) || 0;
   try {
     const db = require('../../models/db');
-    // ⭐ A FRESH TOKEN MAY RECLAIM A LIVE CALL. ConversationRelay retries a
-    // dropped session by rendering fresh TwiML — a NEW single-use token for
-    // the SAME CallSid. The claim is therefore owned by the token's nonce:
-    //   - no claim yet                → any session claims (first winner);
-    //   - claim held by ANOTHER nonce → a fresh authenticated token takes
-    //     over (the retry is the live session; the old socket is dead);
-    //   - claim held by THIS nonce    → refused — a duplicate setup frame on
+    // ⭐ A PROVABLY NEWER TOKEN MAY RECLAIM A LIVE CALL. ConversationRelay
+    // retries a dropped session by rendering fresh TwiML — a NEW single-use
+    // token for the SAME CallSid, with a LATER expiry. The claim is owned by
+    // the token's nonce and stamped with its generation (the expiry):
+    //   - no claim yet → any session claims (first winner);
+    //   - claim held by ANOTHER nonce → takeover ONLY with a strictly newer
+    //     generation — a delayed OLD socket can no longer steal the claim
+    //     back from the replacement (same-generation ties refuse: first won);
+    //   - claim held by THIS nonce → refused — a duplicate setup frame on
     //     the same socket still cannot claim twice (the r25 race).
     // Legacy shape (no sessionKey) keeps the strict one-claim predicate.
-    const predicate = owner
-      ? `((metadata->>'${RELAY_CLAIM_KEY}') IS NULL OR (metadata->>'${RELAY_CLAIM_OWNER_KEY}') IS DISTINCT FROM ?)`
-      : `(metadata->>'${RELAY_CLAIM_KEY}') IS NULL`;
     const q = db('call_log').where({ twilio_call_sid: key });
-    if (owner) q.whereRaw(predicate, [owner]);
-    else q.whereRaw(predicate);
+    if (owner) {
+      q.whereRaw(
+        `((metadata->>'${RELAY_CLAIM_KEY}') IS NULL `
+        + `OR ((metadata->>'${RELAY_CLAIM_OWNER_KEY}') IS DISTINCT FROM ? `
+        + `AND COALESCE((metadata->>'${RELAY_CLAIM_GEN_KEY}')::bigint, 0) < ?))`,
+        [owner, generation],
+      );
+    } else {
+      q.whereRaw(`(metadata->>'${RELAY_CLAIM_KEY}') IS NULL`);
+    }
     const claimed = await q
       .update({
         metadata: owner
           ? db.raw(
-            `jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${RELAY_CLAIM_KEY}}', to_jsonb(now()::text), true), `
-            + `'{${RELAY_CLAIM_OWNER_KEY}}', to_jsonb(?::text), true)`,
-            [owner],
+            `jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${RELAY_CLAIM_KEY}}', to_jsonb(now()::text), true), `
+            + `'{${RELAY_CLAIM_OWNER_KEY}}', to_jsonb(?::text), true), `
+            + `'{${RELAY_CLAIM_GEN_KEY}}', to_jsonb(?::bigint), true)`,
+            [owner, generation],
           )
           : db.raw(
             `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${RELAY_CLAIM_KEY}}', to_jsonb(now()::text), true)`,
@@ -579,7 +589,7 @@ async function findUniqueCustomerByAni(phone) {
  * customers. It is LOGGED here so the distribution can be measured before
  * anyone decides.
  */
-async function verifyInboundCaller({ callSid, from, sessionKey = null } = {}) {
+async function verifyInboundCaller({ callSid, from, sessionKey = null, sessionGeneration = null } = {}) {
   const aniKey = aniDigitKey(from);
   if (!callSid || !aniKey) return { verified: false, reason: 'no_call_sid_or_ani' };
   try {
@@ -599,7 +609,7 @@ async function verifyInboundCaller({ callSid, from, sessionKey = null } = {}) {
     // cheap check and before the caller is recognised, so a replay is refused
     // before it reads anything — and it is refused on every instance, not just
     // the one that saw the first session.
-    if (!(await beginRelaySessionClaim(callSid, sessionKey))) {
+    if (!(await beginRelaySessionClaim(callSid, sessionKey, sessionGeneration))) {
       return { verified: false, reason: 'call_sid_already_claimed' };
     }
     let attestation = null;
@@ -871,7 +881,7 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
  * instruction is most likely to be obeyed — it is injected as a user-role data
  * turn by relay-conversation instead.
  */
-async function resolveCallerContext(from, { callSid = null, sessionKey = null, onVerified = null, onLateContext = null } = {}) {
+async function resolveCallerContext(from, { callSid = null, sessionKey = null, sessionGeneration = null, onVerified = null, onLateContext = null } = {}) {
   // Reported to the SESSION, not returned: a caller can be verified and still
   // match no account (an unmatched-but-real caller may use lookup_customer; a
   // WS client that declared an ANI may not), and it is decided only after
@@ -907,7 +917,7 @@ async function resolveCallerContext(from, { callSid = null, sessionKey = null, o
     // signature-verified /voice webhook's call_log row BEFORE any account read.
     // Bounded on its own below: a stalled call_log read or claim degrades to
     // "unknown caller", never hangs the first turn.
-    const verification = await verifyInboundCaller({ callSid, from, sessionKey });
+    const verification = await verifyInboundCaller({ callSid, from, sessionKey, sessionGeneration });
     if (!verification.verified) {
       logger.info(`[voice-relay-context] caller ${maskPhone(from)} NOT verified against call_log (${verification.reason}) — treating as unknown, no account access`);
       return { verified: false };

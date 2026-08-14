@@ -380,11 +380,13 @@ function getVoiceProfileTextNonBlocking() {
 }
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, from, to, language, send, endSession }) {
+  constructor({ callSid, sessionKey, sessionGeneration, from, to, language, send, endSession }) {
     this.callSid = callSid || null;
     // The upgrade token's nonce — the per-session key the CallSid claim is
-    // owned by, so a fresh-token reconnect can reclaim the live call.
+    // owned by, so a fresh-token reconnect can reclaim the live call — and
+    // its expiry, the monotonic generation a takeover must beat.
     this.sessionKey = sessionKey || null;
+    this.sessionGeneration = Number(sessionGeneration) || null;
     this.from = from || null;
     this.to = to || null;
     this.language = language || null;
@@ -489,6 +491,7 @@ class RelayConversation {
       this._contextReady = resolveCallerContext(this.from, {
         callSid: this.callSid,
         sessionKey: this.sessionKey,
+        sessionGeneration: this.sessionGeneration,
         onVerified: (ok) => { this._callerVerified = ok === true; },
         // A hydration that settles AFTER the 4s race still upgrades the
         // session (the late-verification doctrine): without this, a slow
@@ -961,6 +964,16 @@ class RelayConversation {
           ? msg.content.filter((b) => b.type !== 'text')
           : msg.content,
       });
+      // ⭐ RE-PROVEN IMMEDIATELY BEFORE SPEAKING. The turn-entry check is
+      // check-then-act — a reconnect can take the claim during the model
+      // round, and this socket would then speak from cached account context.
+      // One more read right before emission closes that window.
+      if (text && this.sessionKey && await this._sessionSuperseded().catch(() => false)) {
+        logger.warn(`[voice-relay] speech withheld — session superseded mid-turn callSid=${this.callSid}`);
+        this._ending = true;
+        try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
+        return;
+      }
       if (text && !hasPendingWrite) this.say(text);
       else if (text && hasPendingWrite) {
         logger.info(`[voice-relay] suppressed pre-write text on a write-tool turn callSid=${this.callSid}`);
@@ -1092,9 +1105,24 @@ class RelayConversation {
           model: MODEL,
           startedAt: this._startedAt,
         });
-        const updated = await db('call_log')
+        const reconcileQuery = db('call_log')
           .where('twilio_call_sid', this.callSid)
-          .where((q) => q.whereNull('call_outcome').orWhereNot('call_outcome', 'voicemail'))
+          .where((q) => q.whereNull('call_outcome').orWhereNot('call_outcome', 'voicemail'));
+        // ⭐ THE OWNER FENCE RIDES THE SAME STATEMENT. The pre-close
+        // supersession check is check-then-act — a reconnect can take the
+        // claim between it and this UPDATE. For a keyed session the write
+        // itself proves ownership: a row whose claim owner is no longer this
+        // nonce matches 0 rows atomically (the voicemail-guard pattern).
+        if (this.sessionKey) {
+          // NULL owner allowed: an unverified session (claim never won — the
+          // row is unclaimed) still owns its own honest reconcile; only a
+          // FOREIGN owner means the record belongs to a replacement.
+          reconcileQuery.whereRaw(
+            "((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)",
+            [this.sessionKey],
+          );
+        }
+        const updated = await reconcileQuery
           .update({
             status: 'completed',
             answered_by: 'ai_agent',
