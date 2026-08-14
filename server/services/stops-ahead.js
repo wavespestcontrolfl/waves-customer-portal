@@ -10,8 +10,10 @@
  *      helper returns null and the UI stays in its generic
  *      "on today's route" state.
  *   3. CLAMP: once a customer has seen a number it never increases. The
- *      floor persists on the visit row (stops_ahead_min_shown +
- *      stops_ahead_shown_date) so both surfaces agree across reloads.
+ *      floor persists on EVERY sibling row of the visit's stop
+ *      (stops_ahead_min_shown + stops_ahead_shown_date) — siblings are
+ *      one physical stop but each row has its own track token — so all
+ *      surfaces and all sibling links agree across reloads.
  *      The floor is only honored for its own display date — a visit
  *      rescheduled to another day starts fresh.
  *
@@ -75,10 +77,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     const today = opts.today || etDateString();
     const svc = await db('scheduled_services')
       .where({ id: serviceId })
-      .first(
-        'id', 'technician_id', 'scheduled_date', 'status', 'track_state',
-        'stops_ahead_min_shown', 'stops_ahead_shown_date'
-      );
+      .first('id', 'technician_id', 'scheduled_date', 'status', 'track_state');
     if (!svc || !svc.technician_id) return null;
     // The target itself must be a real upcoming stop — terminal visits AND
     // rescheduled placeholders (which can retain track_state='scheduled')
@@ -158,7 +157,14 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
        ),
        target AS (
          SELECT tr.customer_id, tr.technician_id, tr.scheduled_date, tr.window_start,
-                g.route_order, g.created_at, g.id
+                g.route_order, g.created_at, g.id,
+                (SELECT MIN(ss.stops_ahead_min_shown)
+                   FROM scheduled_services ss
+                  WHERE ss.technician_id = tr.technician_id
+                    AND ss.scheduled_date = tr.scheduled_date
+                    AND ss.customer_id = tr.customer_id
+                    AND ss.window_start IS NOT DISTINCT FROM tr.window_start
+                    AND ss.stops_ahead_shown_date = ?::date) AS group_floor
            FROM target_row tr
            JOIN LATERAL (
              SELECT s.route_order, s.created_at, s.id
@@ -206,15 +212,17 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
              AND (s.status = 'en_route' OR s.track_state = 'en_route')
              AND s.status NOT IN (${liveExcl})
              AND (s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))
-         )::int AS enroute_before
+         )::int AS enroute_before,
+         MIN(t.group_floor)::int AS group_floor
          FROM scheduled_services s, target t
         WHERE s.technician_id = t.technician_id
           AND s.scheduled_date = t.scheduled_date
           AND NOT (s.customer_id = t.customer_id
                    AND s.window_start IS NOT DISTINCT FROM t.window_start)
           AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())`,
-      // Binding order mirrors the SQL order: the sibling-anchor lateral
-      // (route-excluded), then the FILTERs — ahead (live-excluded),
+      // Binding order mirrors the SQL order: the group_floor subquery's
+      // display date, the sibling-anchor lateral (route-excluded), then
+      // the FILTERs — ahead (live-excluded),
       // before_all / others_all / done_before (route-excluded), and
       // at_before / enroute_before (live-excluded again — terminal-status
       // precedence: a completed/cancelled row with a stale active
@@ -222,6 +230,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
       // tracking routes).
       [
         svc.id,
+        today,
         ...NOT_A_ROUTE_STOP_STATUSES,
         ...NOT_A_STOP_STATUSES,
         ...NOT_A_ROUTE_STOP_STATUSES,
@@ -252,47 +261,71 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
       + (atStop || headingToStop ? 1 : 0);
     if (!Number.isFinite(raw) || !Number.isFinite(yourStop) || !Number.isFinite(totalStops)) return null;
 
-    // Clamp against the persisted floor — valid only for today's display.
-    const minShownRaw = svc.stops_ahead_min_shown;
-    const minShown = minShownRaw == null ? null : Number(minShownRaw);
-    const floorIsToday = Number.isInteger(minShown)
-      && dateOnly(svc.stops_ahead_shown_date) === today;
+    // Clamp against the persisted floor — the GROUP's smallest same-day
+    // floor (fetched in the same snapshot as the count), not the requested
+    // row's own: siblings are one stop with separate tokens, and a sibling
+    // row added mid-day starts with a NULL floor — clamping on the row
+    // alone would leave its link above the cap (generic state) while the
+    // older sibling's link keeps showing a number. The SQL already
+    // restricted the MIN to rows whose shown_date is today, so a stale
+    // floor from another day never clamps.
+    const groupFloorRaw = agg?.group_floor;
+    const groupFloor = groupFloorRaw == null ? null : Number(groupFloorRaw);
     let clamped = raw;
-    if (floorIsToday) clamped = Math.min(raw, minShown);
+    if (Number.isInteger(groupFloor)) clamped = Math.min(raw, groupFloor);
     if (clamped > STOPS_AHEAD_DISPLAY_CAP) return null;
 
     // Persist the floor ATOMICALLY (single conditional UPDATE, no
     // read-modify-write): concurrent portal/public polls can interleave, and
     // a stale request re-persisting its larger value would both regress the
-    // floor and let the displayed count go up. LEAST() keeps the stored
-    // floor monotone for the day (LEAST ignores a NULL column), the CASE
-    // resets it on a new display date, and RETURNING hands back the
-    // authoritative minimum so every racer displays the same floor. Only
-    // values that were actually SHOWN (≤ cap) reach this statement, so a
-    // raw count of 7 never stores. A value is only DISPLAYED once it is
-    // durably the floor: if the UPDATE fails or returns no row, return
-    // null (generic state) rather than show a number the clamp never
-    // recorded — an unrecorded number could be exceeded by a later poll,
-    // violating the never-increase contract.
+    // floor and let the displayed count go up. The floor lives on the whole
+    // SIBLING GROUP, not just the requested row: siblings are one physical
+    // stop but each row has its own public token (and the authenticated
+    // canonical query can select either), so a per-row floor would let one
+    // sibling's link display a number another sibling's link already
+    // clamped below. floor_val folds this request's clamped value with the
+    // group's smallest same-day stored floor (LEAST ignores a NULL MIN);
+    // the UPDATE stamps that value onto every sibling row, and RETURNING
+    // hands back the authoritative minimum so every racer displays the
+    // same floor. Only values that were actually SHOWN (≤ cap) reach this
+    // statement, so a raw count of 7 never stores. A value is only
+    // DISPLAYED once it is durably the floor: if the UPDATE fails or
+    // returns no row, return null (generic state) rather than show a
+    // number the clamp never recorded — an unrecorded number could be
+    // exceeded by a later poll, violating the never-increase contract.
     try {
       // Guarded so an unchanged floor writes nothing (this runs on the 15s
       // tracker poll — an unconditional UPDATE would churn row versions,
       // locks, and WAL on every poll of every open portal). A write is
       // needed only when the date rolls over or the floor lowers.
       const res = await db.raw(
-        `UPDATE scheduled_services
-            SET stops_ahead_min_shown = CASE
-                  WHEN stops_ahead_shown_date = ?::date
-                    THEN LEAST(stops_ahead_min_shown, ?::int)
-                  ELSE ?::int
-                END,
+        `WITH grp AS (
+           SELECT customer_id, technician_id, scheduled_date, window_start
+             FROM scheduled_services
+            WHERE id = ?::uuid
+         ),
+         floor_val AS (
+           SELECT LEAST(?::int, MIN(CASE WHEN s.stops_ahead_shown_date = ?::date
+                                         THEN s.stops_ahead_min_shown END)) AS v
+             FROM scheduled_services s, grp g
+            WHERE s.technician_id = g.technician_id
+              AND s.scheduled_date = g.scheduled_date
+              AND s.customer_id = g.customer_id
+              AND s.window_start IS NOT DISTINCT FROM g.window_start
+         )
+         UPDATE scheduled_services u
+            SET stops_ahead_min_shown = f.v,
                 stops_ahead_shown_date = ?::date
-          WHERE id = ?::uuid
-            AND (stops_ahead_shown_date IS DISTINCT FROM ?::date
-                 OR stops_ahead_min_shown IS NULL
-                 OR stops_ahead_min_shown > ?::int)
-          RETURNING stops_ahead_min_shown`,
-        [today, clamped, clamped, today, svc.id, today, clamped]
+           FROM floor_val f, grp g
+          WHERE u.technician_id = g.technician_id
+            AND u.scheduled_date = g.scheduled_date
+            AND u.customer_id = g.customer_id
+            AND u.window_start IS NOT DISTINCT FROM g.window_start
+            AND (u.stops_ahead_shown_date IS DISTINCT FROM ?::date
+                 OR u.stops_ahead_min_shown IS NULL
+                 OR u.stops_ahead_min_shown > f.v)
+          RETURNING f.v AS stops_ahead_min_shown`,
+        [svc.id, clamped, today, today, today]
       );
       if (res?.rows?.[0]) {
         const persisted = Number(res.rows[0].stops_ahead_min_shown);
@@ -300,14 +333,24 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
           ? { stopsAhead: Math.min(persisted, clamped), yourStop, totalStops, currentStop, atStop, headingToStop }
           : null;
       }
-      // Zero rows updated = today's stored floor is already ≤ this value
-      // (nothing needed writing) — or the visit vanished mid-poll. Re-read
-      // to tell them apart and display the authoritative floor.
-      const cur = await db('scheduled_services')
-        .where({ id: svc.id })
-        .first('stops_ahead_min_shown', 'stops_ahead_shown_date');
-      const curMin = cur?.stops_ahead_min_shown == null ? null : Number(cur.stops_ahead_min_shown);
-      if (Number.isInteger(curMin) && dateOnly(cur?.stops_ahead_shown_date) === today) {
+      // Zero rows updated = every sibling row's same-day floor is already
+      // ≤ this value (nothing needed writing) — or the visit vanished
+      // mid-poll. Re-read the GROUP minimum to tell them apart and display
+      // the authoritative floor.
+      const reRead = await db.raw(
+        `SELECT MIN(s.stops_ahead_min_shown)::int AS min_shown
+           FROM scheduled_services s, scheduled_services t
+          WHERE t.id = ?::uuid
+            AND s.technician_id = t.technician_id
+            AND s.scheduled_date = t.scheduled_date
+            AND s.customer_id = t.customer_id
+            AND s.window_start IS NOT DISTINCT FROM t.window_start
+            AND s.stops_ahead_shown_date = ?::date`,
+        [svc.id, today]
+      );
+      const curMinRaw = reRead?.rows?.[0]?.min_shown;
+      const curMin = curMinRaw == null ? null : Number(curMinRaw);
+      if (Number.isInteger(curMin)) {
         return { stopsAhead: Math.min(curMin, clamped), yourStop, totalStops, currentStop, atStop, headingToStop };
       }
     } catch (err) {

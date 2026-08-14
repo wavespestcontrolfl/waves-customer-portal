@@ -20,23 +20,23 @@ function baseSvc(overrides = {}) {
     route_order: null,
     window_start: '10:00:00',
     created_at: '2026-08-01T12:00:00.000Z',
-    stops_ahead_min_shown: null,
-    stops_ahead_shown_date: null,
     ...overrides,
   };
 }
 
-// db mock: builder calls fetch the visit row (and the fallback floor
-// re-read); db.raw serves BOTH the single-snapshot CTE aggregate and the
-// atomic floor UPDATE … RETURNING, dispatched on the SQL text. The CTE
-// returns { ahead, before_all, others_all } — ahead defaults from countN,
-// before_all/others_all from beforeAll/othersAll (completed stops earlier
-// on the route make before_all exceed ahead). The UPDATE mock echoes back
-// the bound clamped value by default; `rawFloor` overrides it to emulate a
-// concurrent racer's smaller floor, or null for the guarded no-op write.
+// db mock: builder calls fetch the visit row; db.raw serves the
+// single-snapshot CTE aggregate (which now carries the group's same-day
+// floor as group_floor), the group-minimum fallback re-read (reReadFloor),
+// and the atomic group-floor UPDATE … RETURNING, dispatched on the SQL
+// text. ahead defaults from countN, before_all/others_all from
+// beforeAll/othersAll (completed stops earlier on the route make
+// before_all exceed ahead). The UPDATE mock echoes back the bound clamped
+// value by default; `rawFloor` overrides it to emulate a concurrent
+// racer's smaller floor, or null for the guarded no-op write.
 function makeDb({
   svcRow, countN = 0, beforeAll, othersAll, doneBefore = 0, atBefore = 0,
-  enrouteBefore = 0, rawFloor, rawError = null,
+  enrouteBefore = 0, groupFloor = null, reReadFloor = null, rawFloor,
+  rawError = null,
 } = {}) {
   const queries = [];
   const dbFn = jest.fn(() => {
@@ -60,8 +60,13 @@ function makeDb({
           done_before: doneBefore,
           at_before: atBefore,
           enroute_before: enrouteBefore,
+          group_floor: groupFloor,
         }],
       });
+    }
+    if (/SELECT MIN\(s\.stops_ahead_min_shown\)/.test(sql)) {
+      // Group-minimum fallback re-read after a guarded no-op UPDATE.
+      return Promise.resolve({ rows: [{ min_shown: reReadFloor }] });
     }
     if (rawError) return Promise.reject(rawError);
     if (rawFloor === null) return Promise.resolve({ rows: [] }); // guarded no-op write
@@ -97,15 +102,21 @@ describe('computeStopsAhead', () => {
     const db = makeDb({ svcRow: baseSvc(), countN: 2, beforeAll: 5, othersAll: 7, doneBefore: 3 });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY }))
       .toEqual({ stopsAhead: 2, yourStop: 6, totalStops: 8, currentStop: 3, atStop: false, headingToStop: false });
-    // Single conditional UPDATE — (today, clamped, clamped, today, id) for
-    // the SET, plus (today, clamped) for the skip-unchanged-write guard.
+    // Single conditional group UPDATE — (id, clamped, today) feed the
+    // grp/floor_val CTEs, (today, today) the SET stamp + date guard. The
+    // floor lands on EVERY sibling row, not just the requested one.
     expect(db.updateCalls()).toHaveLength(1);
-    expect(db.updateCalls()[0][1]).toEqual([TODAY, 2, 2, TODAY, 'svc-self', TODAY, 2]);
-    // Single-snapshot CTE aggregate: bound to (target id, live-excluded
-    // statuses, route-excluded statuses ×2).
+    expect(db.updateCalls()[0][1]).toEqual(['svc-self', 2, TODAY, TODAY, TODAY]);
+    const [updateSql] = db.updateCalls()[0];
+    expect(updateSql).toContain('WITH grp AS');
+    expect(updateSql).toContain('u.window_start IS NOT DISTINCT FROM g.window_start');
+    expect(updateSql).toContain('RETURNING f.v AS stops_ahead_min_shown');
+    // Single-snapshot CTE aggregate: bound to (target id, group-floor
+    // date, sibling-anchor route-excluded statuses, then the FILTERs).
     const [countSql, countBindings] = db.countCall();
     expect(countBindings).toEqual([
       'svc-self',
+      TODAY,                           // group_floor display date
       ...NOT_A_ROUTE_STOP_STATUSES,    // sibling-anchor lateral
       ...NOT_A_STOP_STATUSES,          // ahead (live-excluded)
       ...NOT_A_ROUTE_STOP_STATUSES,    // before_all
@@ -146,12 +157,15 @@ describe('computeStopsAhead', () => {
     expect(db.updateCalls()).toHaveLength(0);
   });
 
-  test('clamp: a same-day floor caps a count that grew (2 shown, truth now 4 → 2) with no write', async () => {
-    // The guarded UPDATE no-ops (floor unchanged) and the fallback re-read
-    // returns the stored floor — the displayed count never increases.
+  test('clamp: a same-day GROUP floor caps a count that grew (2 shown, truth now 4 → 2) with no write', async () => {
+    // The floor arrives with the count snapshot (group MIN over sibling
+    // rows), the guarded UPDATE no-ops (floor unchanged), and the group
+    // fallback re-read returns the stored floor — the displayed count
+    // never increases, on ANY sibling's link.
     const db = makeDb({
-      svcRow: baseSvc({ stops_ahead_min_shown: 2, stops_ahead_shown_date: TODAY }),
+      svcRow: baseSvc(),
       countN: 4, beforeAll: 4, othersAll: 6,
+      groupFloor: 2, reReadFloor: 2,
       rawFloor: null,
     });
     const res = await computeStopsAhead(db, 'svc-self', { today: TODAY });
@@ -159,20 +173,18 @@ describe('computeStopsAhead', () => {
   });
 
   test('a floor from a previous date is superseded (re-date resets the clamp)', async () => {
-    const db = makeDb({
-      svcRow: baseSvc({ stops_ahead_min_shown: 1, stops_ahead_shown_date: '2026-08-13' }),
-      countN: 3,
-    });
-    // Stale-date floor is ignored for clamping; the atomic UPDATE's CASE
-    // resets it (mock echoes the ELSE branch).
+    // The group_floor subquery only reads rows whose shown_date is today,
+    // so a stale-date floor never reaches the clamp; the group UPDATE's
+    // date guard re-stamps it.
+    const db = makeDb({ svcRow: baseSvc(), countN: 3, groupFloor: null });
     expect((await computeStopsAhead(db, 'svc-self', { today: TODAY }))?.stopsAhead).toBe(3);
-    expect(db.updateCalls()[0][1]).toEqual([TODAY, 3, 3, TODAY, 'svc-self', TODAY, 3]);
+    expect(db.updateCalls()[0][1]).toEqual(['svc-self', 3, TODAY, TODAY, TODAY]);
   });
 
   test('floor only lowers: stored 3, truth 1 → 1', async () => {
     const db = makeDb({
-      svcRow: baseSvc({ stops_ahead_min_shown: 3, stops_ahead_shown_date: TODAY }),
-      countN: 1,
+      svcRow: baseSvc(),
+      countN: 1, groupFloor: 3,
       rawFloor: 1,
     });
     expect((await computeStopsAhead(db, 'svc-self', { today: TODAY }))?.stopsAhead).toBe(1);
