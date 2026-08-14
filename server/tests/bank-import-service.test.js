@@ -834,6 +834,22 @@ describe('runDeterministicMatching', () => {
     expect(sugOf(revert).autoRevert.reason).toContain('ambiguous');
   });
 
+  test('a stale confirmed actual on an UNRECONCILED payout is ignored — expected amount governs (no claim/revert loop)', async () => {
+    // historical confirmed discrepancy (2400 actual), later rejected/unlinked
+    // → reconciled is false, and the stale 2400 must NOT bait a claim the
+    // echo would immediately revert
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: false }];
+    state.reconRows = [{ payout_id: 'po-1', status: 'confirmed', actual_amount: '2400.00' }];
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE DEPOSIT', amount: 2400.0, direction: 'credit', account_type: 'bank', suggestion: null }];
+    let summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    // the EXPECTED amount still matches normally
+    state.updates = [];
+    state.bankRows = [{ id: 'bt-2', txn_date: '2026-08-11', description: 'STRIPE DEPOSIT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
+    summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(1);
+  });
+
   test('the matching payout is found even when 50+ other payouts crowd the window (amount-aware survey)', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE DEPOSIT', amount: 500, direction: 'credit', account_type: 'bank', suggestion: null }];
     state.payouts = [

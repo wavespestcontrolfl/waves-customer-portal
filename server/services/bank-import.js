@@ -1014,12 +1014,17 @@ async function runDeterministicMatching({ limit } = {}) {
               order by br.reconciled_at desc, br.created_at desc, br.id desc
               limit 1
             ) latest on true`)
-          .whereRaw('abs(coalesce(latest.actual_amount, stripe_payouts.amount) - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
+          // the confirmed actual applies only while the payout is CURRENTLY
+          // reconciled (effectivePayoutAmount's exact semantics): after a
+          // rejection/unlink the stale confirmed amount would bait an
+          // exact-match claim the echo immediately reverts — an endless
+          // claim/revert loop on the same credit
+          .whereRaw('abs((case when stripe_payouts.reconciled then coalesce(latest.actual_amount, stripe_payouts.amount) else stripe_payouts.amount end) - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
           .whereNotExists(function claimed() {
             this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_payout_id = stripe_payouts.id').whereRaw('bt.id <> ?', [row.id]);
           })
           .select('id', 'amount', 'arrival_date', 'reconciled', 'bank_last_four',
-            db.raw('coalesce(latest.actual_amount, stripe_payouts.amount) as effective_amount'))
+            db.raw('(case when stripe_payouts.reconciled then coalesce(latest.actual_amount, stripe_payouts.amount) else stripe_payouts.amount end) as effective_amount'))
           // 50 + 1 overflow sentinel over the now amount-filtered set, far
           // above any real same-amount count: a 51st row means uniqueness
           // would be a guess, so the row parks its candidates instead of
