@@ -799,20 +799,24 @@ class RelayConversation {
       if (!anthropic) this.say('Sorry, I am unable to help right now. A team member will call you back.');
       return;
     }
-    // The boundary covers the MODEL too, not just tools: a superseded socket
-    // could otherwise keep answering account questions straight from its
-    // frozen KNOWN CALLER block without ever touching a tool.
-    if (this.sessionKey && await this._sessionSuperseded().catch(() => false)) {
-      logger.warn(`[voice-relay] turn refused — session superseded callSid=${this.callSid}`);
-      this._ending = true;
-      try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
-      return;
-    }
     // Identity must be settled before the first model round: the tool ctx and
     // the KNOWN CALLER block both come from it (bounded inside
     // resolveCallerContext; a timeout just means unknown caller).
     if (this._contextReady) {
       try { await this._contextReady; } catch { /* fail closed to unknown */ }
+    }
+    // The boundary covers the MODEL too, not just tools: a superseded socket
+    // could otherwise keep answering account questions straight from its
+    // frozen KNOWN CALLER block without ever touching a tool. Checked AFTER
+    // _contextReady settles — that await is what performs THIS session's own
+    // claim, and fencing before it made a fresh reconnect read the PREVIOUS
+    // socket's owner, classify itself as superseded, and die (its pending
+    // claim then superseding the old socket too: both sessions dead).
+    if (this.sessionKey && await this._sessionSuperseded().catch(() => false)) {
+      logger.warn(`[voice-relay] turn refused — session superseded callSid=${this.callSid}`);
+      this._ending = true;
+      try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
+      return;
     }
 
     // RECENT TEXTS ride the USER role, not `system`. SMS bodies are the only

@@ -626,6 +626,43 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
   });
 
+  // ⭐ THE FENCE WAITS FOR THIS SESSION'S OWN CLAIM. Fencing before
+  // _contextReady made a fresh reconnect read the PREVIOUS socket's owner,
+  // classify itself as superseded, and die — its pending claim then killing
+  // the old socket too (both sessions dead).
+  test('a fresh reconnect is fenced only AFTER its own claim settles', async () => {
+    let owner = 'nonce-OLD';
+    let IsolatedConvo;
+    jest.isolateModules(() => {
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() {
+        return {
+          messages: {
+            stream: () => ({
+              finalMessage: async () => ({ content: [{ type: 'text', text: 'Hi there!' }], stop_reason: 'end_turn' }),
+            }),
+          },
+        };
+      });
+      jest.doMock('../services/voice-agent/relay-tools', () => ({
+        TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: jest.fn(async () => 'ok'),
+      }));
+      IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
+    });
+    const builder = {};
+    builder.where = jest.fn(() => builder);
+    builder.first = jest.fn(async () => ({ metadata: { relay_session_claim_owner: owner } }));
+    db.mockImplementation(() => builder);
+    const send = jest.fn();
+    const convo = new IsolatedConvo({
+      callSid: 'CA-reclaim', sessionKey: 'nonce-NEW', from: '+19415551234', send, endSession: jest.fn(),
+    });
+    // The claim lands while _contextReady is awaited — before the fence runs.
+    convo._contextReady = Promise.resolve().then(() => { owner = 'nonce-NEW'; });
+    await convo._runLoop('hi').catch(() => {});
+    const spoken = send.mock.calls.map(([t]) => String(t)).join(' ');
+    expect(spoken).toMatch(/Hi there/i); // the turn ran — never refused pre-claim
+  });
+
   test('a superseded session skips its close-time writes — no floor lead, no reconcile', async () => {
     const builder = {};
     builder.where = jest.fn(() => builder);
