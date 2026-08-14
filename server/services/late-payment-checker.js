@@ -46,7 +46,7 @@ function isTransientSmsResult(result) {
  *
  * Returns: 'sent' | 'deduped' | 'skip' | 'not_pending' (fall through to dunning).
  */
-async function maybeDivertToMicrodepositReminder(inv, daysSince, domain) {
+async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = new Date()) {
   const pending = await StripeService.isInvoiceAwaitingMicrodepositVerification(inv);
   if (!pending) return 'not_pending';
 
@@ -72,7 +72,29 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain) {
   // customer mid-verification is exactly the message this diversion exists to stop.
   if (!body) return 'skip';
 
+  // Collections policy runs AHEAD of every diversion delivery too (codex
+  // 2026-08-14 P1): flags/frequency apply to the verification re-nudge the
+  // same as to dunning. Gate off ⇒ true without consulting.
+  if (!(await collectionsChannelPermitted(customer.id, inv.id, 'sms', now))) return 'skip';
+
+  const ContactLedger = require('./collections/contact-ledger');
+  let smsLedger = null;
   try {
+    // RECORD-THEN-SEND: the ledger row precedes the delivery attempt; an
+    // insert failure skips the send (no unledgered customer contact, ever).
+    try {
+      smsLedger = await ContactLedger.recordContact({
+        customerId: customer.id,
+        channel: 'sms',
+        purpose: 'payment_verification',
+        invoiceIds: [inv.id],
+        source: 'late_payment_checker',
+        metadata: { microdeposit: true, tier_days: tierDays },
+      });
+    } catch (ledgerErr) {
+      logger.warn(`[late-payment] micro-deposit re-nudge skipped for invoice ${inv.id} — ledger unavailable: ${ledgerErr.message}`);
+      return 'skip';
+    }
     const sendResult = await sendCustomerMessage({
       to: customer.phone,
       body,
@@ -84,21 +106,35 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain) {
       entryPoint: 'late_payment_checker_microdeposit',
       metadata: { original_message_type: 'bank_verification_incomplete' },
     });
-    if (sendResult.blocked || sendResult.sent === false) return 'skip';
-    // Collections contact ledger (additive, safe ungated): the verification
-    // re-nudge still reached the customer about this invoice.
-    await require('./collections/contact-ledger').recordContact({
-      customerId: customer.id,
-      channel: 'sms',
-      purpose: 'payment_verification',
-      invoiceIds: [inv.id],
-      source: 'late_payment_checker',
-      metadata: { microdeposit: true, tier_days: tierDays },
-    });
+    if (sendResult.blocked || sendResult.sent === false) {
+      await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'blocked' });
+      return 'skip';
+    }
     // Branded email sidecar — best-effort; the SMS re-nudge already succeeded, so a
     // missing email address or send failure must NOT downgrade the 'sent' outcome.
-    await sendMicrodepositVerificationEmail({ invoice: inv, customer, touchKey: `${tierDays}d` })
-      .catch((e) => logger.warn(`[late-payment] micro-deposit email sidecar failed for invoice ${inv.id}: ${e.message}`));
+    // Independently policy-gated (email channel) and pre-ledgered like the SMS leg.
+    if (await collectionsChannelPermitted(customer.id, inv.id, 'email', now)) {
+      let emailLedger = null;
+      try {
+        emailLedger = await ContactLedger.recordContact({
+          customerId: customer.id,
+          channel: 'email',
+          purpose: 'payment_verification',
+          invoiceIds: [inv.id],
+          source: 'late_payment_checker',
+          metadata: { microdeposit: true, tier_days: tierDays },
+        });
+      } catch (ledgerErr) {
+        logger.warn(`[late-payment] micro-deposit email sidecar skipped for invoice ${inv.id} — ledger unavailable: ${ledgerErr.message}`);
+      }
+      if (emailLedger) {
+        await sendMicrodepositVerificationEmail({ invoice: inv, customer, touchKey: `${tierDays}d` })
+          .catch(async (e) => {
+            logger.warn(`[late-payment] micro-deposit email sidecar failed for invoice ${inv.id}: ${e.message}`);
+            await ContactLedger.markSendFailed(emailLedger, { error: 'sidecar_failed' });
+          });
+      }
+    }
     await db('activity_log').insert({
       customer_id: customer.id,
       action: 'microdeposit_verification_reminder',
@@ -108,12 +144,40 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain) {
     return 'sent';
   } catch (e) {
     logger.error(`[late-payment] micro-deposit re-nudge failed for invoice ${inv.id}: ${e.message}`);
+    if (smsLedger) await ContactLedger.markSendFailed(smsLedger, { error: 'send_threw' });
     return 'skip';
   }
 }
 
 function templateKeyForOverdue(daysSince) {
   return `late_payment_${tierDaysForOverdue(daysSince)}d`;
+}
+
+/**
+ * Collections contact policy consult for ONE channel (PR A). Enforced ONLY
+ * while GATE_COLLECTIONS_POLICY is exactly 'true' — gate off/unset returns
+ * true without loading the policy module, so this rail stays byte-identical
+ * (pinned by test). Two requirements when the gate is on (codex 2026-08-14):
+ *   - the verdict must allow the channel (each channel evaluated
+ *     independently: do_not_text blocks only sms, do_not_email only email);
+ *   - THIS invoice must be in the verdict's eligible set — an allowed
+ *     verdict about a different invoice is not permission to dun this one.
+ * evaluate() fails closed internally (an error is a denial), so a policy
+ * blip skips the send rather than bypassing the policy.
+ */
+async function collectionsChannelPermitted(customerId, invoiceId, channel, now) {
+  if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return true;
+  const ContactPolicy = require('./collections/contact-policy');
+  const verdict = await ContactPolicy.evaluate(customerId, {
+    channel, purpose: 'late_payment', now,
+  });
+  const member = (verdict.eligibleInvoiceIds || []).map(String).includes(String(invoiceId));
+  if (!verdict.allowed || !member) {
+    const why = !verdict.allowed ? verdict.denialReasons.join(', ') : 'invoice_not_eligible';
+    logger.info(`[late-payment] collections policy denied ${channel} for customer ${customerId} invoice ${invoiceId}: ${why}`);
+    return false;
+  }
+  return true;
 }
 
 const LatePaymentService = {
@@ -167,7 +231,7 @@ const LatePaymentService = {
       // of the "overdue" dunning below. Gated to invoices that actually have a PI
       // so the Stripe read only runs where a payment was started.
       if (gates.divertMicrodepositDunning && inv.stripe_payment_intent_id) {
-        const outcome = await maybeDivertToMicrodepositReminder(inv, daysSince, domain);
+        const outcome = await maybeDivertToMicrodepositReminder(inv, daysSince, domain, now);
         if (outcome === 'sent') { notified++; continue; }
         if (outcome === 'deduped' || outcome === 'skip') { skipped++; continue; }
         // 'not_pending' → fall through to the normal late-payment dunning below.
@@ -215,23 +279,6 @@ const LatePaymentService = {
         continue;
       }
 
-      // Collections contact policy (PR A): consult-and-skip ONLY while
-      // GATE_COLLECTIONS_POLICY is exactly 'true' — gate off/unset leaves this
-      // rail byte-identical (pinned by test). evaluate() fails closed
-      // internally (an error is a denial), so a policy blip skips the send
-      // rather than bypassing the policy.
-      if (process.env.GATE_COLLECTIONS_POLICY === 'true') {
-        const ContactPolicy = require('./collections/contact-policy');
-        const verdict = await ContactPolicy.evaluate(customer.id, {
-          channel: 'sms', purpose: 'late_payment', now,
-        });
-        if (!verdict.allowed) {
-          logger.info(`[late-payment] collections policy denied reminder for customer ${customer.id}: ${verdict.denialReasons.join(', ')}`);
-          skipped++;
-          continue;
-        }
-      }
-
       const name = customer.first_name || 'there';
       const invoiceTitle = inv.title || 'your service';
       const payUrl = await shortenOrPassthrough(`${domain}/pay/${inv.token}`, {
@@ -269,17 +316,51 @@ const LatePaymentService = {
       }
 
       try {
-        const sendResult = await sendCustomerMessage({
-          to: customer.phone,
-          body,
-          channel: 'sms',
-          audience: 'customer',
-          purpose: 'payment_link',
-          customerId: customer.id,
-          invoiceId: inv.id,
-          entryPoint: 'late_payment_checker',
-          metadata: { original_message_type: 'late_payment' },
-        });
+        const ContactLedger = require('./collections/contact-ledger');
+
+        // SMS leg. Per-channel collections consult (gate off ⇒ permitted
+        // without loading the policy — byte-identical sends, pinned) and
+        // RECORD-THEN-SEND: the ledger row precedes the delivery attempt; a
+        // ledger insert failure skips the send (no unledgered contact, ever)
+        // and the row is stamped send_failed if the delivery then fails.
+        let sendResult;
+        let smsLedger = null;
+        if (!(await collectionsChannelPermitted(customer.id, inv.id, 'sms', now))) {
+          // Terminal (non-transient) non-delivery for this run; the email
+          // leg below decides for itself (codex 2026-08-14: channels are
+          // independent — do_not_text must not silence the email).
+          sendResult = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' };
+        } else {
+          try {
+            smsLedger = await ContactLedger.recordContact({
+              customerId: customer.id,
+              channel: 'sms',
+              purpose: 'late_payment',
+              invoiceIds: [inv.id],
+              source: 'late_payment_checker',
+              metadata: { tier_days: tierDays, days_overdue: daysSince },
+            });
+          } catch (ledgerErr) {
+            logger.warn(`[late-payment] SMS skipped for customer ${customer.id} — contact ledger unavailable: ${ledgerErr.message}`);
+            sendResult = { sent: false, blocked: true, code: 'LEDGER_UNAVAILABLE' };
+          }
+          if (smsLedger) {
+            sendResult = await sendCustomerMessage({
+              to: customer.phone,
+              body,
+              channel: 'sms',
+              audience: 'customer',
+              purpose: 'payment_link',
+              customerId: customer.id,
+              invoiceId: inv.id,
+              entryPoint: 'late_payment_checker',
+              metadata: { original_message_type: 'late_payment' },
+            });
+            if (sendResult.sent !== true) {
+              await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'blocked' });
+            }
+          }
+        }
 
         const smsSent = sendResult.sent === true;
         const smsWillRetry = !smsSent && isTransientSmsResult(sendResult);
@@ -298,25 +379,49 @@ const LatePaymentService = {
         // non-mobile suppression, wrong-number, opt-out, or a terminal carrier
         // rejection) and the email is the only channel left — so a customer we
         // can't reach by text still gets the reminder instead of nothing.
+        // Email leg — its OWN policy consult immediately before the send
+        // (codex 2026-08-14: evaluating only 'sms' let the email sidecar/
+        // fallback ride a verdict about a different channel), and its own
+        // pre-send ledger row.
         let emailResult = null;
-        try {
-          const BalanceReminder = require('./workflows/balance-reminder');
-          if (typeof BalanceReminder.sendLatePaymentEmail === 'function') {
-            emailResult = await BalanceReminder.sendLatePaymentEmail({
-              customer,
-              invoice: inv,
-              balance: {
-                totalBalance: totalAmount,
-                oldestDueDate: inv.due_date || inv.created_at,
-              },
-              smsTemplateKey: templateKey,
-              invoiceTitle,
-              serviceDateClause: dateClause,
-              payUrl,
+        if (await collectionsChannelPermitted(customer.id, inv.id, 'email', now)) {
+          let emailLedger = null;
+          try {
+            emailLedger = await ContactLedger.recordContact({
+              customerId: customer.id,
+              channel: 'email',
+              purpose: 'late_payment',
+              invoiceIds: [inv.id],
+              source: 'late_payment_checker',
+              metadata: { tier_days: tierDays, days_overdue: daysSince },
             });
+          } catch (ledgerErr) {
+            logger.warn(`[late-payment] email leg skipped for customer ${customer.id} — contact ledger unavailable: ${ledgerErr.message}`);
           }
-        } catch (emailErr) {
-          logger.error(`[late-payment] Email sidecar failed for invoice ${inv.id}: ${emailErr.message}`);
+          if (emailLedger) {
+            try {
+              const BalanceReminder = require('./workflows/balance-reminder');
+              if (typeof BalanceReminder.sendLatePaymentEmail === 'function') {
+                emailResult = await BalanceReminder.sendLatePaymentEmail({
+                  customer,
+                  invoice: inv,
+                  balance: {
+                    totalBalance: totalAmount,
+                    oldestDueDate: inv.due_date || inv.created_at,
+                  },
+                  smsTemplateKey: templateKey,
+                  invoiceTitle,
+                  serviceDateClause: dateClause,
+                  payUrl,
+                });
+              }
+            } catch (emailErr) {
+              logger.error(`[late-payment] Email sidecar failed for invoice ${inv.id}: ${emailErr.message}`);
+            }
+            if (emailResult?.ok !== true) {
+              await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
+            }
+          }
         }
 
         const emailDelivered = emailResult?.ok === true;
@@ -342,18 +447,6 @@ const LatePaymentService = {
           skipped++;
           continue;
         }
-
-        // Collections contact ledger (additive/observational, safe ungated):
-        // a delivered reminder is a balance contact the policy's frequency
-        // windows must see. Never throws.
-        await require('./collections/contact-ledger').recordContact({
-          customerId: customer.id,
-          channel: smsSent ? 'sms' : 'email',
-          purpose: 'late_payment',
-          invoiceIds: [inv.id],
-          source: 'late_payment_checker',
-          metadata: { tier_days: tierDays, days_overdue: daysSince },
-        });
 
         await db('activity_log').insert({
           customer_id: customer.id,

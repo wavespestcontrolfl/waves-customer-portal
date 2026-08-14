@@ -1,14 +1,18 @@
 /**
- * Collections policy wiring on the two SMS dunning rails (PR A).
+ * Collections policy wiring on the two SMS dunning rails (PR A, hardened by
+ * the 2026-08-14 codex round).
  *
  * Pins:
  *   - GATE_COLLECTIONS_POLICY unset/off ⇒ BYTE-IDENTICAL send behavior on
  *     both rails: the policy module is never consulted and the send args are
  *     exactly the pre-lane shape (asserted with toEqual, not objectContaining).
- *   - Gate on ⇒ a denial skips the send; an allow leaves the send unchanged.
- *   - Both rails ALWAYS write a collections_contact_ledger row (via the
- *     never-throw recordContact) after a delivered touch — gate state
- *     irrelevant — and never for an undelivered one.
+ *   - Gate on ⇒ each channel is evaluated INDEPENDENTLY at its leg (sms
+ *     denied must not silence the email leg and vice versa), and the target
+ *     invoice must be IN the verdict's eligible set (an allowed verdict
+ *     about a sibling invoice is not permission).
+ *   - RECORD-THEN-SEND: the ledger row precedes every delivery attempt; a
+ *     ledger insert failure means NO send is attempted; a failed delivery
+ *     stamps the standing row via markSendFailed.
  */
 
 jest.mock('../models/db', () => jest.fn());
@@ -39,15 +43,18 @@ jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'billing@example.com', name: 'Taylor' }]),
 }));
 jest.mock('../services/collections/contact-policy', () => ({
-  evaluate: jest.fn(async () => ({ allowed: true, denialReasons: [] })),
+  evaluate: jest.fn(async () => ({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-1'] })),
 }));
 jest.mock('../services/collections/contact-ledger', () => ({
-  recordContact: jest.fn(async () => true),
+  recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
+  markSendFailed: jest.fn(async () => true),
 }));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const BalanceReminder = require('../services/workflows/balance-reminder');
+const EmailTemplates = require('../services/email-template-library');
+const smsTemplates = require('../routes/admin-sms-templates');
 const ContactPolicy = require('../services/collections/contact-policy');
 const ContactLedger = require('../services/collections/contact-ledger');
 const LatePaymentChecker = require('../services/late-payment-checker');
@@ -81,6 +88,9 @@ function setDbQueues(queues) {
   });
 }
 
+const ALLOWED = { allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-1'] };
+const DENIED = { allowed: false, denialReasons: ['flag_do_not_collect'], eligibleInvoiceIds: [] };
+
 const savedGate = process.env.GATE_COLLECTIONS_POLICY;
 afterAll(() => {
   if (savedGate === undefined) delete process.env.GATE_COLLECTIONS_POLICY;
@@ -96,8 +106,14 @@ beforeEach(() => {
   // clearAllMocks keeps per-test mockResolvedValue overrides — re-pin defaults.
   sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false });
   BalanceReminder.sendLatePaymentEmail.mockResolvedValue({ ok: true });
-  ContactPolicy.evaluate.mockResolvedValue({ allowed: true, denialReasons: [] });
-  ContactLedger.recordContact.mockResolvedValue(true);
+  EmailTemplates.sendTemplate.mockResolvedValue({
+    sent: true,
+    message: { provider_message_id: 'sg-1', sent_at: '2026-05-26T14:00:00.000Z' },
+  });
+  smsTemplates.getTemplate.mockResolvedValue('invoice follow-up sms');
+  ContactPolicy.evaluate.mockResolvedValue(ALLOWED);
+  ContactLedger.recordContact.mockResolvedValue({ id: 'led-1', metadata: {} });
+  ContactLedger.markSendFailed.mockResolvedValue(true);
 });
 
 afterEach(() => jest.useRealTimers());
@@ -159,9 +175,9 @@ describe('late-payment-checker rail', () => {
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
-  test("gate 'true' + denial: reminder skipped, nothing sent", async () => {
+  test("gate 'true' + both channels denied: nothing sent, nothing ledgered, invoice skipped without burning the tier", async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['flag_do_not_text'] });
+    ContactPolicy.evaluate.mockResolvedValue(DENIED);
     setDbQueues({
       invoices: [chain({ result: [LP_INVOICE] })],
       activity_log: [chain({ first: null })],
@@ -172,24 +188,60 @@ describe('late-payment-checker rail', () => {
     expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', {
       channel: 'sms', purpose: 'late_payment', now: expect.any(Date),
     });
+    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', {
+      channel: 'email', purpose: 'late_payment', now: expect.any(Date),
+    });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
     expect(ContactLedger.recordContact).not.toHaveBeenCalled();
     expect(result).toMatchObject({ notified: 0, skipped: 1 });
   });
 
   test("gate 'true' + allowed: the send is unchanged from the gate-off shape", async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, denialReasons: [] });
     armLatePaymentHappyPath();
     await LatePaymentChecker.checkAndNotify();
     expect(sendCustomerMessage.mock.calls[0][0]).toEqual(LP_EXPECTED_SEND);
   });
 
-  test('a delivered SMS reminder writes a ledger row (gate state irrelevant)', async () => {
+  test('CHANNEL INDEPENDENCE: sms denied but email allowed ⇒ no text, email fallback still delivers', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockImplementation(async (cid, { channel }) => (
+      channel === 'email' ? ALLOWED : { allowed: false, denialReasons: ['flag_do_not_text'], eligibleInvoiceIds: ['inv-1'] }
+    ));
+    armLatePaymentHappyPath();
+    const result = await LatePaymentChecker.checkAndNotify();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(BalanceReminder.sendLatePaymentEmail).toHaveBeenCalledTimes(1);
+    expect(result.emailedFallback).toBe(1);
+    // Only the delivered channel is ledgered — the policy-denied sms leg
+    // never reached the record-then-send step.
+    expect(ContactLedger.recordContact).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ channel: 'email' }));
+  });
+
+  test('INVOICE MEMBERSHIP: an allowed verdict about a DIFFERENT invoice is not permission for this one', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    // Two-invoice account: the target inv-1 was payer-dropped from the
+    // eligible set; sibling inv-2 is the one the verdict allows.
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-2'] });
+    setDbQueues({
+      invoices: [chain({ result: [LP_INVOICE] })],
+      activity_log: [chain({ first: null })],
+      customers: [chain({ first: LP_CUSTOMER })],
+      invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
+    });
+    const result = await LatePaymentChecker.checkAndNotify();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ notified: 0, skipped: 1 });
+  });
+
+  test('RECORD-THEN-SEND: the sms ledger row is written BEFORE the send, and the email row before the sidecar', async () => {
     armLatePaymentHappyPath();
     await LatePaymentChecker.checkAndNotify();
-    expect(ContactLedger.recordContact).toHaveBeenCalledTimes(1);
-    expect(ContactLedger.recordContact).toHaveBeenCalledWith({
+    expect(ContactLedger.recordContact).toHaveBeenCalledTimes(2);
+    expect(ContactLedger.recordContact.mock.calls[0][0]).toEqual({
       customerId: 'cust-1',
       channel: 'sms',
       purpose: 'late_payment',
@@ -197,29 +249,43 @@ describe('late-payment-checker rail', () => {
       source: 'late_payment_checker',
       metadata: { tier_days: 14, days_overdue: 16 },
     });
-  });
-
-  test('an email-only fallback delivery writes an email-channel ledger row', async () => {
-    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'NON_MOBILE' });
-    BalanceReminder.sendLatePaymentEmail.mockResolvedValue({ ok: true });
-    armLatePaymentHappyPath();
-    await LatePaymentChecker.checkAndNotify();
-    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({
+    expect(ContactLedger.recordContact.mock.calls[1][0]).toEqual(expect.objectContaining({
       channel: 'email', purpose: 'late_payment', invoiceIds: ['inv-1'],
     }));
+    // Strict ordering: sms record < sms send < email record < email send.
+    const smsRecordAt = ContactLedger.recordContact.mock.invocationCallOrder[0];
+    const smsSendAt = sendCustomerMessage.mock.invocationCallOrder[0];
+    const emailRecordAt = ContactLedger.recordContact.mock.invocationCallOrder[1];
+    const emailSendAt = BalanceReminder.sendLatePaymentEmail.mock.invocationCallOrder[0];
+    expect(smsRecordAt).toBeLessThan(smsSendAt);
+    expect(emailRecordAt).toBeLessThan(emailSendAt);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
   });
 
-  test('no channel delivered → NO ledger row (only delivered touches count)', async () => {
-    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'NON_MOBILE' });
-    BalanceReminder.sendLatePaymentEmail.mockResolvedValue({ ok: false, reason: 'missing_email' });
+  test('LEDGER FAILURE ⇒ NO SEND: an unledgerable contact is never attempted (and retries next run — no dedupe row)', async () => {
+    ContactLedger.recordContact.mockRejectedValue(new Error('ledger down'));
     setDbQueues({
       invoices: [chain({ result: [LP_INVOICE] })],
       activity_log: [chain({ first: null })],
       customers: [chain({ first: LP_CUSTOMER })],
       invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
     });
-    await LatePaymentChecker.checkAndNotify();
-    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+    const result = await LatePaymentChecker.checkAndNotify();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ notified: 0, skipped: 1 });
+  });
+
+  test('SEND FAILURE ⇒ the standing ledger row is stamped send_failed (over-suppression is the safe direction)', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'NON_MOBILE' });
+    BalanceReminder.sendLatePaymentEmail.mockResolvedValue({ ok: true });
+    armLatePaymentHappyPath();
+    const result = await LatePaymentChecker.checkAndNotify();
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      { id: 'led-1', metadata: {} },
+      { code: 'NON_MOBILE' },
+    );
+    expect(result.emailedFallback).toBe(1); // email leg still delivered, with its own row
   });
 });
 
@@ -272,7 +338,12 @@ const FU_EXPECTED_SEND = {
   metadata: { original_message_type: 'invoice_followup' },
 };
 
-function armFollowupHappyPath() {
+const FU_LIVE_SEQ = {
+  id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0,
+  next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null,
+};
+
+function armFollowupHappyPath({ sequenceUpdate = chain() } = {}) {
   setDbQueues({
     'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
     customers: [chain({ first: FU_CUSTOMER })],
@@ -285,12 +356,13 @@ function armFollowupHappyPath() {
     notification_prefs: [chain({ first: { email_enabled: true } })],
     customer_interactions: [chain(), chain()],
     invoice_followup_sequences: [
-      chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+      chain({ first: FU_LIVE_SEQ }), // post-lock revalidation
       chain({ result: 1 }), // touch claim
-      chain(), // cadence advance
+      sequenceUpdate, // cadence advance
       chain({ result: 1 }), // claim clear
     ],
   });
+  return sequenceUpdate;
 }
 
 describe('invoice-followups rail', () => {
@@ -303,41 +375,104 @@ describe('invoice-followups rail', () => {
     expect(result).toEqual({ sent: 1, skipped: 0 });
   });
 
-  test("gate 'true' + denial: the touch is skipped before any invoice work, nothing sent", async () => {
+  test("gate 'true' + both channels denied: no sends, no ledger rows, sequence left armed (not paused) for a later run", async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['contact_within_24h'] });
+    ContactPolicy.evaluate.mockResolvedValue(DENIED);
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      customers: [chain({ first: FU_CUSTOMER })],
+      invoices: [chain({ first: FU_INVOICE })], // claim-txn row lock read only
+      invoice_followup_sequences: [
+        chain({ first: FU_LIVE_SEQ }),
+        chain({ result: 1 }), // touch claim
+        chain({ result: 1 }), // claim clear (finally)
+      ],
     });
-    const result = await InvoiceFollowUps.runPending();
-    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', {
-      channel: 'sms', purpose: 'late_payment', now: expect.any(Date),
-    });
+    await InvoiceFollowUps.runPending();
+    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ channel: 'sms' }));
+    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ channel: 'email' }));
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(smsTemplates.getTemplate).not.toHaveBeenCalled();
     expect(ContactLedger.recordContact).not.toHaveBeenCalled();
-    expect(result).toEqual({ sent: 0, skipped: 1 });
+    // No cadence advance and no pause happened: the sequence queue's only
+    // consumed entries were revalidate/claim/clear (a 4th access would throw).
   });
 
   test("gate 'true' + allowed: the touch fires with the unchanged send shape", async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, denialReasons: [] });
     armFollowupHappyPath();
     const result = await InvoiceFollowUps.runPending();
     expect(sendCustomerMessage.mock.calls[0][0]).toEqual(FU_EXPECTED_SEND);
     expect(result).toEqual({ sent: 1, skipped: 0 });
   });
 
-  test('a delivered touch writes a ledger row (gate state irrelevant)', async () => {
+  test('CHANNEL INDEPENDENCE: sms denied but email allowed ⇒ email leg delivers and the step advances', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockImplementation(async (cid, { channel }) => (
+      channel === 'email' ? ALLOWED : { allowed: false, denialReasons: ['flag_do_not_text'], eligibleInvoiceIds: ['inv-1'] }
+    ));
+    const sequenceUpdate = armFollowupHappyPath();
+    await InvoiceFollowUps.runPending();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
+    expect(ContactLedger.recordContact).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ channel: 'email' }));
+  });
+
+  test('RECORD-THEN-SEND: email and sms rows precede their delivery attempts on a delivered touch', async () => {
     armFollowupHappyPath();
     await InvoiceFollowUps.runPending();
-    expect(ContactLedger.recordContact).toHaveBeenCalledTimes(1);
-    expect(ContactLedger.recordContact).toHaveBeenCalledWith({
+    expect(ContactLedger.recordContact).toHaveBeenCalledTimes(2);
+    expect(ContactLedger.recordContact.mock.calls[0][0]).toEqual({
       customerId: 'cust-1',
-      channel: 'sms',
+      channel: 'email',
       purpose: 'invoice_followup',
       invoiceIds: ['inv-1'],
       source: 'invoice_followups',
-      metadata: { step_id: 'd3_friendly', sms_sent: true, email_sent: true },
+      metadata: { step_id: 'd3_friendly' },
     });
+    expect(ContactLedger.recordContact.mock.calls[1][0]).toEqual(expect.objectContaining({
+      channel: 'sms', purpose: 'invoice_followup',
+    }));
+    const emailRecordAt = ContactLedger.recordContact.mock.invocationCallOrder[0];
+    const emailSendAt = EmailTemplates.sendTemplate.mock.invocationCallOrder[0];
+    const smsRecordAt = ContactLedger.recordContact.mock.invocationCallOrder[1];
+    const smsSendAt = sendCustomerMessage.mock.invocationCallOrder[0];
+    expect(emailRecordAt).toBeLessThan(emailSendAt);
+    expect(smsRecordAt).toBeLessThan(smsSendAt);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  });
+
+  test('LEDGER FAILURE ⇒ NO SENDS, and the sequence is NOT paused (transient hold, retried later)', async () => {
+    ContactLedger.recordContact.mockRejectedValue(new Error('ledger down'));
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      customers: [chain({ first: FU_CUSTOMER })],
+      invoices: [
+        chain({ first: FU_INVOICE }), // claim-txn row lock read
+        chain({ first: FU_INVOICE }), // credit path's own invoice read
+        chain({ first: FU_INVOICE }), // pre-dun refresh
+      ],
+      invoice_followup_sequences: [
+        chain({ first: FU_LIVE_SEQ }),
+        chain({ result: 1 }), // touch claim
+        chain({ result: 1 }), // claim clear — NO pause/advance writes in between
+      ],
+    });
+    await InvoiceFollowUps.runPending();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('SEND FAILURE ⇒ the sms ledger row is stamped send_failed', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'NON_MOBILE' });
+    armFollowupHappyPath();
+    await InvoiceFollowUps.runPending();
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      { id: 'led-1', metadata: {} },
+      { code: 'NON_MOBILE' },
+    );
   });
 });

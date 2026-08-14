@@ -1,10 +1,24 @@
 /**
  * collections_contact_ledger writer — the one place the dunning rails record
- * "this customer was reached about an open balance". Additive/observational
- * (safe ungated): the ledger only ever makes the contact policy MORE
- * conservative, so a write failure must never block or fail a send that
- * already happened — hence the deliberate never-throw here, unlike the
- * fail-closed READS in contact-policy.js.
+ * "this customer was (about to be) reached about an open balance".
+ *
+ * RECORD-THEN-SEND (codex 2026-08-14 P1, inverted from the original
+ * write-after-delivery design): the rails insert the ledger row BEFORE
+ * attempting delivery. A swallowed post-send insert failure would silently
+ * WIDEN later eligibility — a missing touch makes the policy's frequency
+ * windows look clear — so the failure direction is inverted:
+ *
+ *   - recordContact THROWS on insert failure. The caller must then SKIP the
+ *     send: no unledgered customer contact, ever.
+ *   - If the send subsequently fails, markSendFailed() best-effort stamps
+ *     `send_failed: true` into the row's metadata, but the row STANDS.
+ *     Over-suppression (a frequency window blocked by a touch that never
+ *     delivered) is the correct failure direction; under-suppression is not.
+ *
+ * None of this runs inside a knex transaction on the rails — a thrown insert
+ * error here is caught by callers in plain (non-trx) flow, so the
+ * caught-error-still-aborts-the-trx trap does not apply. Keep it that way:
+ * never call recordContact inside a trx without a SAVEPOINT.
  */
 
 const db = require('../../models/db');
@@ -19,8 +33,10 @@ async function recordContact({
   metadata = null,
   occurredAt = new Date(),
 }) {
-  try {
-    await db('collections_contact_ledger').insert({
+  // Deliberately NOT wrapped: an insert failure must propagate so the caller
+  // skips the delivery it was about to make.
+  const inserted = await db('collections_contact_ledger')
+    .insert({
       customer_id: customerId,
       channel,
       purpose,
@@ -28,12 +44,31 @@ async function recordContact({
       occurred_at: occurredAt,
       source,
       metadata: metadata ? JSON.stringify(metadata) : null,
-    });
+    })
+    .returning('id');
+  const first = Array.isArray(inserted) ? inserted[0] : inserted;
+  const id = first && typeof first === 'object' ? first.id : first;
+  return { id, metadata: metadata || {} };
+}
+
+/**
+ * Stamp a pre-recorded contact as undelivered. Best-effort and never throws —
+ * the row standing un-stamped only ever over-suppresses, which is safe.
+ * `entry` is the return value of recordContact (id + original metadata).
+ */
+async function markSendFailed(entry, extra = {}) {
+  if (!entry || !entry.id) return false;
+  try {
+    await db('collections_contact_ledger')
+      .where({ id: entry.id })
+      .update({
+        metadata: JSON.stringify({ ...(entry.metadata || {}), send_failed: true, ...extra }),
+      });
     return true;
   } catch (err) {
-    logger.warn(`[collections-ledger] contact record failed for customer ${customerId} (${source}/${channel}): ${err.message}`);
+    logger.warn(`[collections-ledger] send-failed stamp failed for ledger row ${entry.id}: ${err.message}`);
     return false;
   }
 }
 
-module.exports = { recordContact };
+module.exports = { recordContact, markSendFailed };
