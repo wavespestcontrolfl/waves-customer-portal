@@ -2886,6 +2886,12 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   ];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Service-day tracker leads the dashboard (owner ruling 2026-08-14):
+          on the day of service, where the tech is matters more than the
+          greeting. ServiceTracker renders null on every other day, so
+          non-service-day layout is unchanged. */}
+      <ServiceTracker />
+
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
@@ -3220,8 +3226,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
           </div>
         </section>
       </div>
-
-      <ServiceTracker />
 
       {lastServiceStatus === 'loading' ? (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
