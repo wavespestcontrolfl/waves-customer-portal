@@ -833,6 +833,20 @@ describe('runDeterministicMatching', () => {
     expect(sugOf(revert).autoRevert.reason).toContain('edited');
   });
 
+  test('an expense corrected back BETWEEN the heal scan and the lock keeps its link', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-10', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', matched_expense_id: 'exp-1', suggestion: null }];
+    state.expenses = [{ id: 'exp-1', amount: '120.00', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' }];
+    // the operator fixes the typo while the heal pass is mid-flight — the
+    // locked re-read must see the corrected value and keep the link
+    mockDb.transaction.mockImplementationOnce(async (cb) => {
+      state.expenses[0] = { ...state.expenses[0], amount: '100.00' };
+      return cb(mockDb);
+    });
+    const summary = await runDeterministicMatching();
+    expect(summary.expenseLinksReverted).toBe(0);
+    expect(state.updates.find(u => u.patch.status === 'unmatched')).toBeUndefined();
+  });
+
   test('a refund-REDUCED linked expense is NOT healed away — its gross still matches the debit', async () => {
     state.bankRows = [
       { id: 'bt-1', txn_date: '2026-08-10', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', matched_expense_id: 'exp-1', suggestion: null },

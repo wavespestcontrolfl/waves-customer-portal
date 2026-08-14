@@ -589,30 +589,46 @@ async function healEditedExpenseLinks() {
       'bt.account_type as account_type', 'bt.match_method as match_method', 'bt.matched_expense_id as expense_id',
       'e.amount as e_amount', 'e.expense_date as e_date', 'e.vendor_name as vendor_name', 'e.payment_method as payment_method',
       db.raw('rs.rsum as rsum'));
+  const linkOk = (link, exp, rsum) => {
+    const txn = toDateStr(link.txn_date);
+    const expDate = toDateStr(exp.expense_date);
+    const windowOk = expDate >= addDays(txn, -EXPENSE_DATE_WINDOW_DAYS) && expDate <= addDays(txn, EXPENSE_DATE_WINDOW_DAYS);
+    const amountOk = withinCandidateTolerance(exp.amount, link.bt_amount)
+      || withinCandidateTolerance(Number(exp.amount) + Number(rsum || 0), link.bt_amount);
+    const auto = link.match_method === 'expense_amount_date_vendor';
+    const autoOk = !auto || (vendorEvidence(link.description, exp)
+      && !methodIncompatible(link.account_type, exp.payment_method));
+    return windowOk && amountOk && autoOk;
+  };
   let reverted = 0;
   for (const link of links) {
-    const txn = toDateStr(link.txn_date);
-    const expDate = toDateStr(link.e_date);
-    const windowOk = expDate >= addDays(txn, -EXPENSE_DATE_WINDOW_DAYS) && expDate <= addDays(txn, EXPENSE_DATE_WINDOW_DAYS);
-    const amountOk = withinCandidateTolerance(link.e_amount, link.bt_amount)
-      || withinCandidateTolerance(Number(link.e_amount) + Number(link.rsum || 0), link.bt_amount);
-    const auto = link.match_method === 'expense_amount_date_vendor';
-    const autoOk = !auto || (vendorEvidence(link.description, { vendor_name: link.vendor_name })
-      && !methodIncompatible(link.account_type, link.payment_method));
-    if (windowOk && amountOk && autoOk) continue;
-    const changed = await db('bank_transactions')
-      .where({ id: link.id, status: 'matched_expense', matched_expense_id: link.expense_id })
-      .update({
-        status: 'unmatched',
-        matched_expense_id: null,
-        match_method: null,
-        matched_at: null,
-        suggestion: suggestionMerge({
-          autoRevert: { at: new Date().toISOString(), expenseId: link.expense_id, reason: 'the linked expense was edited and no longer matches this bank row (amount/date/vendor/method)' },
-        }),
-        updated_at: new Date(),
-      });
-    if (changed) reverted++;
+    if (linkOk(link, { amount: link.e_amount, expense_date: link.e_date, vendor_name: link.vendor_name, payment_method: link.payment_method }, link.rsum)) continue;
+    // The scan is only a HINT — the revert decision is re-made with the
+    // expense row LOCKED and its current values (including the applied-
+    // refund total) re-read in the same transaction as the unlink, the
+    // pattern every other writer uses: an operator correcting the expense
+    // between the scan and this point must not lose a now-valid link.
+    await db.transaction(async (trx) => {
+      const fresh = await trx('expenses').where({ id: link.expense_id }).forUpdate()
+        .first('id', 'amount', 'expense_date', 'vendor_name', 'payment_method');
+      if (fresh) {
+        const lockedRsum = await appliedRefundTotal(fresh.id, trx);
+        if (linkOk(link, fresh, lockedRsum)) return; // corrected mid-scan — the link is valid again
+      }
+      const changed = await trx('bank_transactions')
+        .where({ id: link.id, status: 'matched_expense', matched_expense_id: link.expense_id })
+        .update({
+          status: 'unmatched',
+          matched_expense_id: null,
+          match_method: null,
+          matched_at: null,
+          suggestion: suggestionMerge({
+            autoRevert: { at: new Date().toISOString(), expenseId: link.expense_id, reason: 'the linked expense was edited and no longer matches this bank row (amount/date/vendor/method)' },
+          }),
+          updated_at: new Date(),
+        });
+      if (changed) reverted++;
+    });
   }
   return reverted;
 }
