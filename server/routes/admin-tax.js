@@ -2426,6 +2426,13 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
 
 router.get('/bank-import/coverage', async (req, res, next) => {
   try {
+    // Coverage is a money CLAIM — self-heal stale links first, exactly as a
+    // matching pass would: an expense edited (or deleted) since the last
+    // pass must not keep reporting covered outflow until someone happens to
+    // upload a statement or click Run matching. Cheap: fixed-count scans,
+    // writes only on actual violations.
+    await bankImport.resetDanglingLinks();
+    await bankImport.healEditedExpenseLinks();
     const year = /^\d{4}$/.test(String(req.query.year || '')) ? String(req.query.year) : String(etParts().year);
     res.json({ year, months: await bankImport.ledgerCoverage(year) });
   } catch (err) { next(err); }

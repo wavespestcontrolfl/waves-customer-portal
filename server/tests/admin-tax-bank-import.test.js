@@ -157,6 +157,10 @@ jest.mock('../services/bank-import', () => ({
   ...jest.requireActual('../services/bank-import'),
   runDeterministicMatching: jest.fn(() => Promise.resolve({ scanned: 0, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0 })),
   ledgerCoverage: jest.fn(() => Promise.resolve([])),
+  // heal passes are unit-tested in the service suite; here we assert the
+  // coverage endpoint INVOKES them (coverage is a money claim)
+  resetDanglingLinks: jest.fn(() => Promise.resolve(0)),
+  healEditedExpenseLinks: jest.fn(() => Promise.resolve(0)),
 }));
 
 const express = require('express');
@@ -176,6 +180,9 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
+const get = (path) => fetch(`${baseUrl}${path}`, {
+  headers: { 'Content-Type': 'application/json' },
+});
 const post = (path, body) => fetch(`${baseUrl}${path}`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
 });
@@ -544,6 +551,20 @@ describe('force-duplicates upload (gate on)', () => {
     expect(body.forced).toBe(1); // …but only the scoped one was forced
     expect(state.insertedBank).toHaveLength(3); // 2 bulk attempts + 1 force
     expect(state.insertedBank[2]).toMatchObject({ description: 'HD SUPPLY' });
+  });
+});
+
+describe('coverage (gate on)', () => {
+  beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; });
+
+  test('coverage SELF-HEALS stale links before reporting — an edited expense cannot keep counting as covered', async () => {
+    const { resetDanglingLinks, healEditedExpenseLinks } = require('../services/bank-import');
+    resetDanglingLinks.mockClear();
+    healEditedExpenseLinks.mockClear();
+    const res = await get('/admin/tax/bank-import/coverage?year=2026');
+    expect(res.status).toBe(200);
+    expect(resetDanglingLinks).toHaveBeenCalled();
+    expect(healEditedExpenseLinks).toHaveBeenCalled();
   });
 });
 

@@ -370,6 +370,13 @@ describe('date helpers', () => {
     expect(parseDateCell('01/01/0000')).toBeNull();
   });
 
+  test('trailing garbage after an ISO date is rejected, not silently truncated; ISO datetimes still parse', () => {
+    expect(parseDateCell('2026-04-15junk')).toBeNull();
+    expect(parseDateCell('2026-04-150')).toBeNull();
+    expect(parseDateCell('2026-04-15 10:30:00')).toBe('2026-04-15');
+    expect(parseDateCell('2026-04-15T10:30:00Z')).toBe('2026-04-15');
+  });
+
   test('shape-valid but impossible calendar dates are rejected (would abort the bulk insert)', () => {
     expect(parseDateCell('02/31/2026')).toBeNull();
     expect(parseDateCell('2026-99-01')).toBeNull();

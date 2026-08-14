@@ -62,7 +62,11 @@ function isRealCalendarDate(y, m, d) {
 function parseDateCell(raw) {
   const s = String(raw || '').trim();
   let y; let mo; let d;
-  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  // Anchored to the END of the cell (an optional ISO time part is the only
+  // allowed suffix): an unanchored prefix match silently imported
+  // '2026-04-150' or '2026-04-15junk' as 2026-04-15 instead of skipping
+  // the row with a reason like every other malformed cell.
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})([T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/);
   if (m) { [, y, mo, d] = m; } else {
     m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
     if (!m) return null;
@@ -1353,6 +1357,8 @@ module.exports = {
   isPlausiblePayoutLink,
   isPlausibleRefundTarget,
   appliedRefundTotal,
+  resetDanglingLinks,
+  healEditedExpenseLinks,
   methodIncompatible,
   effectivePayoutAmount,
   suggestionMerge,
