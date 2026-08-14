@@ -1154,14 +1154,21 @@ describe('field-confirm semantics cover day-of takeovers on BOTH status routes',
   // admin-dispatch is not ownership-scoped, so it re-reads the row FOR UPDATE
   // inside the transaction and re-verifies assignment + the owed-activation
   // state there — a pre-transaction snapshot races reassignment.
-  test('admin-dispatch.js: ownership + state are re-verified under the transaction row lock', () => {
+  test('admin-dispatch.js: ownership + state are re-verified under the transaction row lock for BOTH stamp paths', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
-    const idx = src.indexOf('let isFieldLifecycleTakeover = false');
+    const idx = src.indexOf('let fieldConfirmVerified = false');
     expect(idx).toBeGreaterThan(-1);
-    const recheck = src.slice(idx, idx + 700);
+    const recheck = src.slice(idx, idx + 800);
+    // One verification covers the EXPLICIT technician confirm AND the day-of
+    // takeover — the confirm path finds the visit by ID with no ownership
+    // predicate, so an unowned tech confirm must fall back to OFFICE-confirm
+    // semantics (no field stamp, card funnel intact).
+    expect(recheck).toContain('takeoverCandidate || explicitFieldConfirm');
     expect(recheck).toContain('.forUpdate()');
     expect(recheck).toContain("String(locked.technician_id || '') === String(req.technicianId)");
     expect(recheck).toContain('locked.customer_confirmed !== true');
     expect(recheck).toContain("['pending', 'confirmed'].includes(String(locked.status))");
+    // …and the explicit stamp is gated on that verification.
+    expect(src).toMatch(/if \(explicitFieldConfirm && fieldConfirmVerified\) \{\s*\n\s*lifecycleUpdates\.field_confirmed_at = svc\.field_confirmed_at \|\| /);
   });
 });

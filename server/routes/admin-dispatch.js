@@ -3559,6 +3559,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
       && svc.customer_confirmed !== true
       && ['pending', 'confirmed'].includes(fromStatus)
       && ['en_route', 'on_site', 'completed'].includes(toStatus);
+    // The EXPLICIT technician confirm owes the same proof as the takeover:
+    // this route finds the visit by ID with no ownership predicate, so a
+    // technician token confirming ANOTHER technician's office-review visit
+    // would stamp it field-confirmed and skip the card funnel.
+    const explicitFieldConfirm = isOfficeReviewConfirm && req.techRole === 'technician';
     try {
       await db.transaction(async (trx) => {
         // ⭐ OWNERSHIP IS PROVEN UNDER THE ROW LOCK, NOT THE SNAPSHOT. The
@@ -3567,16 +3572,21 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // transaction, and the FORMER tech's transition would still stamp the
         // field confirm. Re-read FOR UPDATE and re-verify assignment + the
         // owed-activation state here — the same row-locked re-check
-        // admin-schedule runs for its technician requests.
-        let isFieldLifecycleTakeover = false;
-        if (takeoverCandidate) {
+        // admin-schedule runs for its technician requests. ONE verification
+        // covers BOTH field-stamp paths (explicit confirm and day-of
+        // takeover); an unverified explicit confirm still commits, just as an
+        // OFFICE confirm — the card funnel runs, which is the fail-closed
+        // direction.
+        let fieldConfirmVerified = false;
+        if ((takeoverCandidate || explicitFieldConfirm) && req.technicianId) {
           const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
             .first('technician_id', 'customer_confirmed', 'status');
-          isFieldLifecycleTakeover = !!locked
+          fieldConfirmVerified = !!locked
             && String(locked.technician_id || '') === String(req.technicianId)
             && locked.customer_confirmed !== true
             && ['pending', 'confirmed'].includes(String(locked.status));
         }
+        const isFieldLifecycleTakeover = takeoverCandidate && fieldConfirmVerified;
         // Lifecycle timestamps live on the same row as status; flip
         // them inside the same trx so a rollback also rolls back the
         // timestamp change. transitionJobStatus owns the status +
@@ -3589,7 +3599,10 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // everything after the commit dies — the hourly retry has ONLY this
         // marker to know the card funnel is skipped. Same-trx, never
         // swallowed: a stamp failure rolls the confirmation back with it.
-        if (isOfficeReviewConfirm && req.techRole === 'technician') {
+        // Owner-proven under the row lock above — a tech token that does NOT
+        // own the visit confirms it as an OFFICE confirm (no stamp, card
+        // funnel intact).
+        if (explicitFieldConfirm && fieldConfirmVerified) {
           lifecycleUpdates.field_confirmed_at = svc.field_confirmed_at || lifecycleAt;
         }
         if (toStatus === 'confirmed' && !isOfficeReviewConfirm) {
