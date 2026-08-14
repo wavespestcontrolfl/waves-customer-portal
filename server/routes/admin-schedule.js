@@ -5122,6 +5122,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
+    // Notify + past date is always a mistake (a week-off click in the
+    // calendar): the reschedule text would announce the impossible date
+    // verbatim (2026-08-13: a customer was texted "now set for Friday,
+    // August 7" six days after Aug 7). validScheduleDate is the canonical
+    // check (malformed / impossible-calendar / past-ET in one place).
+    // Silent edits into the past stay allowed — record corrections and
+    // backfills are legitimate; TEXTING a customer a past date never is.
+    // Same-day moves stay allowed.
+    if (notifyCustomer === true && updates.scheduled_date !== undefined) {
+      const movedTo = validScheduleDate(updates.scheduled_date);
+      if (!movedTo) {
+        throw httpError(400, `That date (${String(updates.scheduled_date).split('T')[0]}) isn't a valid upcoming date — pick a current or future date, or turn off the booking notification for a record correction.`);
+      }
+      // Persist the validator's normalized YYYY-MM-DD — a raw suffix
+      // ('2026-08-14Tgarbage') passes the date-part check but would still
+      // hit the PG DATE cast downstream (codex P1).
+      updates.scheduled_date = movedTo;
+    }
     if (windowStart !== undefined) updates.window_start = windowStart || null;
     if (windowEnd !== undefined) updates.window_end = windowEnd || null;
     if (notes !== undefined) updates.notes = notes;
@@ -6745,6 +6763,46 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // immediate text is suppressed rather than fabricating an 8 AM slot.
         notificationSent = false;
         notificationError = 'No arrival time is set for this visit, so no reschedule text was sent';
+      } else if (String(scheduleMoveForNotice.date) < etDateString()) {
+        // The EFFECTIVE date can be in the past even when the early guard
+        // passed — a window-only edit inherits the row's stored date (codex
+        // pre-push P1). The edit itself may be a legitimate record
+        // correction, but a customer text announcing a past date never is:
+        // suppress the notice, keep the committed edit. Still close the
+        // reminder windows the rewrite re-armed — a past appointment can
+        // never satisfy the cron's hoursUntil > 0 delivery gates, so a
+        // false flag would park the row in the 15-minute rescan forever
+        // (codex r1+r2 P2). This must be an EXPLICIT close:
+        // reminderFlagsCoveredByNotice (and thus coverDueWindows /
+        // markRescheduleNoticeSent) only covers windows with hoursUntil > 0,
+        // so every existing helper writes these flags false for a past time.
+        // Guard on the appointment_time the rewrite just stamped (same
+        // derivation) + the marker carve-outs, so a newer reschedule that
+        // re-armed the row for its own future slot is never clobbered.
+        const pastApptTime = appointmentReminderTime(scheduleMoveForNotice.date, scheduleMoveForNotice.start);
+        if (pastApptTime) {
+          const closeNow = new Date();
+          try {
+            await db('appointment_reminders')
+              .where({
+                scheduled_service_id: req.params.id,
+                suppressed_by_sibling: false,
+                windows_preclosed: false,
+                appointment_time: pastApptTime,
+              })
+              .update({
+                reminder_72h_sent: true,
+                reminder_72h_sent_at: closeNow,
+                reminder_24h_sent: true,
+                reminder_24h_sent_at: closeNow,
+                updated_at: closeNow,
+              });
+          } catch (e) {
+            logger.warn(`[schedule/update-details] reminder close on suppressed past-date notice failed for ${req.params.id}: ${e.message}`);
+          }
+        }
+        notificationSent = false;
+        notificationError = `The visit date (${scheduleMoveForNotice.date}) is in the past, so no reschedule text was sent`;
       } else {
         const AppointmentReminders = require('../services/appointment-reminders');
         try {

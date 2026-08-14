@@ -148,10 +148,12 @@ async function loadLaneCatalog() {
       serviceId: row.id,
       serviceKey: row.service_key,
       serviceType: row.name || meta.label,
-      // Clamp to the availability engine's sane band (45–90, the same range
-      // resolveBookingDuration honors) so a fat-fingered catalog edit can't
-      // shrink the overlap window or block whole days.
-      durationMinutes: Number.isInteger(rawDuration) && rawDuration >= 45 && rawDuration <= 90
+      // Clamp to the callback band (15–90, the same range
+      // resolveCallbackDuration honors) so a fat-fingered catalog edit can't
+      // shrink the overlap window or block whole days. Floor is 15, not the
+      // funnel's 45 — re-services are true 15–30 min visits and the shorter
+      // duration is what lets the slot search fit them into route gaps.
+      durationMinutes: Number.isInteger(rawDuration) && rawDuration >= 15 && rawDuration <= 90
         ? rawDuration
         : meta.fallbackDuration,
     };

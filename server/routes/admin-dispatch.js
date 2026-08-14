@@ -8,7 +8,7 @@ const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const StripeService = require('../services/stripe');
-const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, formatETTime, validScheduleDate } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -12539,9 +12539,32 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 });
 
 // POST /api/admin/dispatch/:serviceId/reschedule
+// A reschedule to a date already in the past is always a mistake (a
+// week-off click in the calendar UI) — and the customer notice would
+// announce that impossible date verbatim (2026-08-13: a customer was
+// texted "now set for Friday, August 7" six days after Aug 7). Fail
+// closed via the canonical validScheduleDate (rejects malformed,
+// impossible-calendar, and past-ET dates in one place — no divergent
+// date mechanism, no raw PG cast 500 on 2099-99-99); same-day moves
+// stay allowed. Returns an operator-facing error string, or null.
+function pastRescheduleDateError(newDate) {
+  if (validScheduleDate(newDate)) return null;
+  const newDateStr = String(newDate || '').split('T')[0];
+  return `That date (${newDateStr}) isn't a valid upcoming date — pick a current or future date.`;
+}
+
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
-    const { newDate, newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+    const { newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+
+    const pastDateError = pastRescheduleDateError(req.body.newDate);
+    if (pastDateError) {
+      return res.status(400).json({ error: pastDateError });
+    }
+    // The validator's normalized YYYY-MM-DD — downstream (rebooker, reminder
+    // sync) must never see a raw suffix ('2026-08-14Tgarbage' passes the
+    // guard's date-part check but would still hit the PG DATE cast, codex P1).
+    const newDate = validScheduleDate(req.body.newDate);
 
     // Series scope shifts every future occurrence — skip the customer-confirm
     // SMS path (which only handles a single appt) and commit directly.
@@ -13964,6 +13987,7 @@ module.exports = router;
 module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
+  pastRescheduleDateError,
   ensureSmsContainsReportLink,
   reportReconcileBlockPayload,
   lawnAssessmentCompletionBlockPayload,
