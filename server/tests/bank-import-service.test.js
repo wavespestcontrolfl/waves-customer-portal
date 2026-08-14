@@ -25,7 +25,7 @@ const state = {
 function makeBuilder(table) {
   const b = {};
   const chain = (name) => { b[name] = jest.fn(() => b); };
-  ['join', 'forUpdate', 'where', 'andWhere', 'whereNot', 'whereNotIn', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
+  ['join', 'leftJoin', 'forUpdate', 'where', 'andWhere', 'whereNot', 'whereNotIn', 'whereBetween', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotExists',
     'orderBy', 'limit', 'groupBy', 'groupByRaw', 'havingRaw', 'select', 'first'].forEach(chain);
   b.update = jest.fn((patch) => {
     // Only row-scoped updates (where({id,...})) are the matcher's claims and
@@ -45,11 +45,20 @@ function makeBuilder(table) {
     // the heal queries join payouts: one scans UNRECONCILED links, the
     // amount-mismatch scan targets RECONCILED ones (both skip pending rows)
     if (table === 'bank_transactions as bt') {
-      const wantReconciled = b.where.mock.calls.some(c => c[0] === 'sp.reconciled' && c[1] === true);
-      rows = state.bankRows.filter(r => r.status === 'matched_payout'
-        && r.matched_payout_id
-        && !(r.suggestion && r.suggestion.reconcilePending)
-        && state.payouts.some(p => p.id === r.matched_payout_id && p.reconciled === wantReconciled));
+      // the orphan-refund heal anti-joins expenses on the suggestion target
+      const refundScan = b.where.mock.calls.some(c => c[0] === 'bt.status' && c[1] === 'refund_applied');
+      if (refundScan) {
+        rows = state.bankRows
+          .filter(r => r.status === 'refund_applied' && r.suggestion?.refundAppliedTo
+            && !state.expenses.some(e => e.id === r.suggestion.refundAppliedTo))
+          .map(r => ({ id: r.id, target: r.suggestion.refundAppliedTo }));
+      } else {
+        const wantReconciled = b.where.mock.calls.some(c => c[0] === 'sp.reconciled' && c[1] === true);
+        rows = state.bankRows.filter(r => r.status === 'matched_payout'
+          && r.matched_payout_id
+          && !(r.suggestion && r.suggestion.reconcilePending)
+          && state.payouts.some(p => p.id === r.matched_payout_id && p.reconciled === wantReconciled));
+      }
     }
     // the gross-candidate scan joins applied refunds back onto expenses —
     // mirror the join + having filter (gross within tolerance of the bound
@@ -69,7 +78,11 @@ function makeBuilder(table) {
     if (table === 'expenses') {
       const absCall = b.whereRaw.mock.calls.find(c => String(c[0]).includes('abs(amount'));
       if (absCall && Array.isArray(absCall[1])) {
-        rows = rows.filter(e => Math.abs(Number(e.amount) - Number(absCall[1][0])) <= Number(absCall[1][1]) + 0.001);
+        rows = rows
+          .filter(e => Math.abs(Number(e.amount) - Number(absCall[1][0])) <= Number(absCall[1][1]) + 0.001)
+          // refund-reduced expenses are excluded from NET matching in SQL —
+          // they participate only through the gross path
+          .filter(e => !state.bankRows.some(r => r.status === 'refund_applied' && r.suggestion?.refundAppliedTo === e.id));
       }
     }
     // mirror the status + pending-flag filters so the unmatched loop and the
@@ -314,6 +327,11 @@ describe('date helpers', () => {
     expect(parseDateCell('8/9/26')).toBe('2026-08-09');
     expect(parseDateCell('2026-08-09')).toBe('2026-08-09');
     expect(parseDateCell('garbage')).toBeNull();
+  });
+
+  test('year zero is rejected — PostgreSQL has no year 0 and it would abort the whole bulk insert', () => {
+    expect(parseDateCell('0000-01-01')).toBeNull();
+    expect(parseDateCell('01/01/0000')).toBeNull();
   });
 
   test('shape-valid but impossible calendar dates are rejected (would abort the bulk insert)', () => {
@@ -618,6 +636,48 @@ describe('runDeterministicMatching', () => {
     expect(second.transferFlagged).toBe(1);
   });
 
+  test('a refund-REDUCED expense is never a net candidate — a coincidental same-net debit cannot consume it', async () => {
+    // $100 purchase refunded $20 → expense now $80 net; a DISTINCT $80
+    // debit from the same vendor must not auto-link to it (the expense
+    // belongs to the original $100 debit via the gross path)
+    state.bankRows = [
+      { id: 'bt-credit', txn_date: '2026-08-05', description: 'WAWA 5211 REFUND', amount: 20, direction: 'credit', account_type: 'card', status: 'refund_applied', suggestion: { refundAppliedTo: 'exp-1', refundAmount: 20 } },
+      { id: 'bt-debit', txn_date: '2026-08-02', description: 'WAWA 5211', amount: 80, direction: 'debit', account_type: 'card', suggestion: null },
+    ];
+    state.expenses = [{ id: 'exp-1', amount: '80.00', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-01', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(0);
+    expect(state.updates.find(u => u.patch.status === 'matched_expense')).toBeUndefined();
+  });
+
+  test('candidate uniqueness is re-judged INSIDE the claim transaction — a mid-flight insert parks, not links', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', account_type: 'card', suggestion: null }];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' }];
+    // a second same-amount, same-vendor expense lands AFTER the unlocked
+    // survey but BEFORE the claim transaction acquires the lock
+    mockDb.transaction.mockImplementationOnce(async (cb) => {
+      state.expenses.push({ id: 'exp-2', amount: '312.40', description: 'order 2', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' });
+      return cb(mockDb);
+    });
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(0);
+    expect(state.updates.find(u => u.patch.status === 'matched_expense')).toBeUndefined();
+  });
+
+  test('ambiguous payout candidates park nearest-arrival-first with an honest total', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'DEPOSIT', amount: 500, direction: 'credit', account_type: 'bank', suggestion: null }];
+    state.payouts = [
+      { id: 'po-far', amount: '500.00', arrival_date: '2026-08-09', reconciled: false },
+      { id: 'po-near', amount: '500.00', arrival_date: '2026-08-11', reconciled: false },
+      { id: 'po-mid', amount: '500.00', arrival_date: '2026-08-10', reconciled: false },
+    ];
+    await runDeterministicMatching();
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).payoutCandidates);
+    const sug = sugOf(parked);
+    expect(sug.payoutCandidates.map(c => c.id)).toEqual(['po-near', 'po-mid', 'po-far']);
+    expect(sug.payoutCandidatesTotal).toBe(3);
+  });
+
   test('a full-price debit still matches its expense after a refund reduced it (GROSS matching)', async () => {
     // refund applied BEFORE the original debit was imported: expense is now
     // $38.12 net, but the statement debit carries the gross $58.12
@@ -683,7 +743,8 @@ describe('runDeterministicMatching', () => {
     const parked = state.updates.find(u => sugOf(u) && sugOf(u).payoutCandidates);
     expect(sugOf(parked).payoutCandidates).toHaveLength(2);
     expect(sugOf(parked).payoutCandidatesTotal).toBe(2);
-    expect(sugOf(parked).payoutCandidates[0]).toEqual({ id: 'po-1', amount: 2418.66, arrival_date: '2026-08-10' });
+    // nearest arrival to the posting date parks first
+    expect(sugOf(parked).payoutCandidates[0]).toEqual({ id: 'po-2', amount: 2418.66, arrival_date: '2026-08-11' });
   });
 
   test('parked/flagged rows cannot starve fresh imports out of a bounded pass', async () => {

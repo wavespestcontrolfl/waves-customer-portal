@@ -4446,6 +4446,11 @@ function BankImportTab() {
                           {fmtM(c.amount)} · arrived {fmtD(c.arrival_date)}
                         </option>
                       ))}
+                      {(r.suggestion.payoutCandidatesTotal || 0) > r.suggestion.payoutCandidates.length && (
+                        <option value="" disabled>
+                          +{r.suggestion.payoutCandidatesTotal - r.suggestion.payoutCandidates.length} more — nearest arrivals shown; identify it on the Banking page
+                        </option>
+                      )}
                     </select>
                   ) : (
                     r.suggestion?.categoryName || ""

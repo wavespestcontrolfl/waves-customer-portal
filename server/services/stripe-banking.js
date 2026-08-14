@@ -1107,7 +1107,9 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
       // Timestamp AFTER the lock: writers commit in lock order, so
       // reconciled_at ordering matches commit ordering and the
       // latest-history checks can trust it. (A pre-lock timestamp could
-      // make a later-committing writer look older.)
+      // make a later-committing writer look older.) This app-clock value
+      // stamps only the payout row and the return payload; the HISTORY row
+      // the ordering queries read gets the DB clock at insert (below).
       now = new Date().toISOString();
       if (opts.onlyIfReconciledBy !== undefined || opts.onlyIfUnreconciled) {
         const authorOk = opts.onlyIfReconciledBy === undefined
@@ -1150,7 +1152,13 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
         discrepancy,
         notes,
         status,
-        reconciled_at: now,
+        // DB clock, evaluated at insert time — AFTER the payout lock: one
+        // clock for every pod (app clocks can skew across writers) at
+        // microsecond precision (toISOString ties at milliseconds), so the
+        // latest-history ordering follows lock/commit order. The payout row
+        // and the return value keep the app-clock stamp below — nothing
+        // orders by them.
+        reconciled_at: db.raw('clock_timestamp()'),
         reconciled_by: reconciledBy,
       };
       await trx('bank_reconciliation').insert(reconRow);

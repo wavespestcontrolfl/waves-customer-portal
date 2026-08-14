@@ -48,7 +48,10 @@ function parseAmount(raw) {
 const MAX_AMOUNT = 9999999999.99;
 
 function isRealCalendarDate(y, m, d) {
-  if (m < 1 || m > 12 || d < 1) return false;
+  // y < 1: PostgreSQL has no year zero — '0000-01-01' would pass shape
+  // checks here and then abort the whole bulk-insert transaction at the DB
+  // instead of landing in the skipped list like every other bad row.
+  if (y < 1 || m < 1 || m > 12 || d < 1) return false;
   return d <= new Date(Date.UTC(y, m, 0)).getUTCDate(); // day 0 of next month = last day of m
 }
 
@@ -426,17 +429,19 @@ async function healUnreconciledLinks() {
 // A refund_applied credit whose target expense was DELETED must leave that
 // state — its netting would keep skewing coverage while the adjustment it
 // represents no longer exists. (The link lives in suggestion JSON, so the
-// FK SET NULL self-heal can't see it.)
+// FK SET NULL self-heal can't see it.) ONE anti-join query finds the
+// orphans — refund history grows forever, and a serial per-row expense
+// lookup would pile round trips onto every matching pass; only actual
+// orphans (rare — a deliberate Expenses-tab delete) pay a revert write.
 async function healOrphanRefunds() {
-  const rows = await db('bank_transactions')
-    .where({ status: 'refund_applied' })
-    .select('id', 'suggestion');
+  const orphans = await db('bank_transactions as bt')
+    .leftJoin('expenses as e', db.raw("e.id::text = bt.suggestion->>'refundAppliedTo'"))
+    .where('bt.status', 'refund_applied')
+    .whereRaw("bt.suggestion->>'refundAppliedTo' is not null")
+    .whereNull('e.id')
+    .select('bt.id as id', db.raw("bt.suggestion->>'refundAppliedTo' as target"));
   let reverted = 0;
-  for (const row of rows) {
-    const target = row.suggestion?.refundAppliedTo;
-    if (!target) continue;
-    const expense = await db('expenses').where({ id: target }).first('id');
-    if (expense) continue;
+  for (const row of orphans) {
     const changed = await db('bank_transactions')
       .where({ id: row.id, status: 'refund_applied' })
       .update({
@@ -444,7 +449,7 @@ async function healOrphanRefunds() {
         match_method: null,
         matched_at: null,
         suggestion: suggestionMerge({
-          autoRevert: { at: new Date().toISOString(), expenseId: target, reason: 'the refunded expense was deleted' },
+          autoRevert: { at: new Date().toISOString(), expenseId: row.target, reason: 'the refunded expense was deleted' },
         }, ['refundAppliedTo', 'refundAmount', 'refundRestore']),
         updated_at: new Date(),
       });
@@ -919,11 +924,17 @@ async function runDeterministicMatching({ limit } = {}) {
         // Ambiguous (or near-miss-only) payout credits park their candidates
         // so the operator has a manual link path — without this the credit
         // is permanently unmatched even when the right payout is obvious.
+        // Likeliest-first, deterministic (nearest arrival to the posting
+        // date, then id) and bounded at 20 with the honest total — the
+        // link-payout route validates by the matcher's plausibility RULES,
+        // not slice membership, so an off-slice payout stays linkable.
         // Stale refund keys subtracted for the same reason as the inverse.
         summary.ambiguous++;
+        const arrivalDistance = (c) => Math.abs(new Date(`${toDateStr(c.arrival_date)}T00:00:00Z`) - new Date(`${txnDate}T00:00:00Z`));
+        const parkedPayouts = [...candidates].sort((a, b) => (arrivalDistance(a) - arrivalDistance(b)) || String(a.id).localeCompare(String(b.id)));
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
           suggestion: suggestionMerge({
-            payoutCandidates: candidates.slice(0, 8).map(c => ({ id: c.id, amount: c.effective_amount, arrival_date: toDateStr(c.arrival_date) })),
+            payoutCandidates: parkedPayouts.slice(0, 20).map(c => ({ id: c.id, amount: c.effective_amount, arrival_date: toDateStr(c.arrival_date) })),
             payoutCandidatesTotal: candidates.length,
           }, ['refundCandidates', 'refundCandidatesTotal']),
           updated_at: new Date(),
@@ -938,46 +949,62 @@ async function runDeterministicMatching({ limit } = {}) {
       continue;
     }
 
-    let expenseQuery = db('expenses')
-      .whereBetween('expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
-      .whereRaw('abs(amount - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
-      .whereNotExists(function claimed() {
-        this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = expenses.id');
-      })
-      // UNBOUNDED on purpose: uniqueness must be judged over the COMPLETE
-      // candidate set — a cap could hide a second strong candidate and fake
-      // "exactly one". The ±5-day amount-filtered window keeps this small;
-      // only the operator-facing suggestion list below is bounded.
-      .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
-    if (rejected.expenseIds.length) expenseQuery = expenseQuery.whereNotIn('id', rejected.expenseIds);
-    const candidates = await expenseQuery;
-    // GROSS-amount candidates: an applied refund already REDUCED the ledger
-    // expense, so a later-imported full-price debit no longer matches its
-    // net amount and the row would stay unexplained (or bait a duplicate
-    // create). The refund credit's suggestion carries the association —
-    // join it back and match against amount + applied refunds. Coverage is
-    // already refund-aware: covered caps at the CURRENT amount and the
-    // refund credit nets the difference in the purchase month.
-    let grossQuery = db('expenses as e')
-      .join('bank_transactions as rbt', function refundLink() {
-        this.on(db.raw("rbt.status = 'refund_applied'"))
-          .andOn(db.raw("rbt.suggestion->>'refundAppliedTo' = e.id::text"));
-      })
-      .whereBetween('e.expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
-      .whereNotExists(function claimed() {
-        this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = e.id');
-      })
-      .groupBy('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method')
-      .havingRaw("abs(e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) - ?) <= ?", [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
-      .select('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method',
-        db.raw("e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) as gross_amount"));
-    if (rejected.expenseIds.length) grossQuery = grossQuery.whereNotIn('e.id', rejected.expenseIds);
-    const netIds = new Set(candidates.map(c => c.id));
-    for (const g of await grossQuery) {
-      // a net match wins over its own gross reading — uniqueness is judged
-      // over expense IDENTITIES, never the same expense twice
-      if (!netIds.has(g.id)) candidates.push({ ...g, gross_amount: Number(g.gross_amount) });
-    }
+    // The COMPLETE candidate survey — net and gross identities. Reused
+    // inside the claim transaction so uniqueness is re-judged atomically
+    // with the claim (see below).
+    const surveyExpenseCandidates = async (dbOrTrx) => {
+      let expenseQuery = dbOrTrx('expenses')
+        .whereBetween('expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
+        .whereRaw('abs(amount - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
+        .whereNotExists(function claimed() {
+          this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = expenses.id');
+        })
+        // A refund-REDUCED expense is never a net candidate: its remaining
+        // net amount belongs to the original gross debit, and letting a
+        // coincidental same-net debit consume it would strand that debit
+        // unexplained. Refunded expenses match ONLY through the gross path.
+        .whereNotExists(function refunded() {
+          this.select(1).from('bank_transactions as rbt')
+            .whereRaw("rbt.status = 'refund_applied'")
+            .whereRaw("rbt.suggestion->>'refundAppliedTo' = expenses.id::text");
+        })
+        // UNBOUNDED on purpose: uniqueness must be judged over the COMPLETE
+        // candidate set — a cap could hide a second strong candidate and fake
+        // "exactly one". The ±5-day amount-filtered window keeps this small;
+        // only the operator-facing suggestion list below is bounded.
+        .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
+      if (rejected.expenseIds.length) expenseQuery = expenseQuery.whereNotIn('id', rejected.expenseIds);
+      const found = await expenseQuery;
+      // GROSS-amount candidates: an applied refund already REDUCED the ledger
+      // expense, so a later-imported full-price debit no longer matches its
+      // net amount and the row would stay unexplained (or bait a duplicate
+      // create). The refund credit's suggestion carries the association —
+      // join it back and match against amount + applied refunds. Coverage is
+      // already refund-aware: covered caps at the CURRENT amount and the
+      // refund credit nets the difference in the purchase month.
+      let grossQuery = dbOrTrx('expenses as e')
+        .join('bank_transactions as rbt', function refundLink() {
+          this.on(db.raw("rbt.status = 'refund_applied'"))
+            .andOn(db.raw("rbt.suggestion->>'refundAppliedTo' = e.id::text"));
+        })
+        .whereBetween('e.expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
+        .whereNotExists(function claimed() {
+          this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = e.id');
+        })
+        .groupBy('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method')
+        .havingRaw("abs(e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) - ?) <= ?", [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
+        .select('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method',
+          db.raw("e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) as gross_amount"));
+      if (rejected.expenseIds.length) grossQuery = grossQuery.whereNotIn('e.id', rejected.expenseIds);
+      const netIds = new Set(found.map(c => c.id));
+      for (const g of await grossQuery) {
+        // a net match wins over its own gross reading — uniqueness is judged
+        // over expense IDENTITIES, never the same expense twice
+        if (!netIds.has(g.id)) found.push({ ...g, gross_amount: Number(g.gross_amount) });
+      }
+      return found;
+    };
+    const candidates = await surveyExpenseCandidates(db);
     // The amount a candidate matches AT: its gross when refunds already
     // reduced it, its current amount otherwise.
     const matchAmount = (c) => (c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount));
@@ -1000,6 +1027,12 @@ async function runDeterministicMatching({ limit } = {}) {
           const fresh = await trx('expenses').where({ id: strong[0].id }).forUpdate()
             .first('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
           if (!fresh) return;
+          // Uniqueness re-judged ATOMICALLY with the claim: an expense
+          // inserted between the unlocked survey and this lock can make the
+          // set plural, and the plurality rule says park, not link. The
+          // next pass re-parks the row with the fuller candidate list.
+          const recheck = await surveyExpenseCandidates(trx);
+          if (!(recheck.length === 1 && recheck[0].id === fresh.id)) return;
           const freshDate = toDateStr(fresh.expense_date);
           // a gross candidate revalidates at amount + CURRENT applied
           // refunds (re-summed under the lock — an undo since the read

@@ -113,6 +113,8 @@ describe('stripe banking service', () => {
       throw new Error(`Unexpected table ${table}`);
     });
     db.transaction = jest.fn(async (callback) => callback(db));
+    // the history row's reconciled_at is a DB-clock expression
+    db.raw = jest.fn((sql) => ({ __raw: sql }));
 
     jest.doMock('../models/db', () => db);
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_123', apiVersion: '2024-06-20' }));
