@@ -162,7 +162,7 @@ describe('case + card creation', () => {
     await ShadowSweep.runShadowSweep({ now: NOW });
 
     const [category, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
-    expect(category).toBe('billing_followup');
+    expect(category).toBe('billing'); // existing bell-allowlisted category — GATE_ADMIN_BELL_POLICY is ON in prod; a novel category would be silently suppressed
     expect(title).toContain('Billing follow-up proposal');
     expect(title).toContain('$128.00');
     expect(body).toContain('***-***-0100');

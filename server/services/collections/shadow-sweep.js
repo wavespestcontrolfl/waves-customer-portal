@@ -102,7 +102,7 @@ async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, daysOve
 
   const NotificationService = require('../notification-service');
   await NotificationService.notifyAdmin(
-    'billing_followup',
+    'billing',
     `Billing follow-up proposal - $${amountDollars} open balance`,
     [
       'Shadow mode: no call will be placed. This is what the policy would propose.',
