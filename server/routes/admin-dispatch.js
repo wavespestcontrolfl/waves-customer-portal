@@ -8,7 +8,7 @@ const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 const StripeService = require('../services/stripe');
-const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, formatETTime, validScheduleDate } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -12451,15 +12451,14 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 // week-off click in the calendar UI) — and the customer notice would
 // announce that impossible date verbatim (2026-08-13: a customer was
 // texted "now set for Friday, August 7" six days after Aug 7). Fail
-// closed; same-day moves stay allowed. Returns a customer-safe error
-// string, or null when the date is valid.
+// closed via the canonical validScheduleDate (rejects malformed,
+// impossible-calendar, and past-ET dates in one place — no divergent
+// date mechanism, no raw PG cast 500 on 2099-99-99); same-day moves
+// stay allowed. Returns an operator-facing error string, or null.
 function pastRescheduleDateError(newDate) {
+  if (validScheduleDate(newDate)) return null;
   const newDateStr = String(newDate || '').split('T')[0];
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(newDateStr)) return 'Invalid newDate';
-  if (newDateStr < etDateString()) {
-    return `That date (${newDateStr}) has already passed — pick a current or future date.`;
-  }
-  return null;
+  return `That date (${newDateStr}) isn't a valid upcoming date — pick a current or future date.`;
 }
 
 router.post('/:serviceId/reschedule', async (req, res, next) => {

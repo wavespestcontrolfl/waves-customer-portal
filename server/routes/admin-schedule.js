@@ -5150,14 +5150,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // Notify + past date is always a mistake (a week-off click in the
     // calendar): the reschedule text would announce the impossible date
     // verbatim (2026-08-13: a customer was texted "now set for Friday,
-    // August 7" six days after Aug 7). Silent edits into the past stay
-    // allowed — record corrections/backfills are legitimate; TEXTING a
-    // customer a past date never is. Same-day moves stay allowed.
-    if (notifyCustomer === true && updates.scheduled_date !== undefined) {
+    // August 7" six days after Aug 7). validScheduleDate is the canonical
+    // check (malformed / impossible-calendar / past-ET in one place).
+    // Silent edits into the past stay allowed — record corrections and
+    // backfills are legitimate; TEXTING a customer a past date never is.
+    // Same-day moves stay allowed.
+    if (notifyCustomer === true && updates.scheduled_date !== undefined
+        && !validScheduleDate(updates.scheduled_date)) {
       const movedTo = String(updates.scheduled_date).split('T')[0];
-      if (/^\d{4}-\d{2}-\d{2}$/.test(movedTo) && movedTo < etDateString()) {
-        throw httpError(400, `That date (${movedTo}) has already passed — pick a current or future date, or turn off the booking notification for a record correction.`);
-      }
+      throw httpError(400, `That date (${movedTo}) isn't a valid upcoming date — pick a current or future date, or turn off the booking notification for a record correction.`);
     }
     if (windowStart !== undefined) updates.window_start = windowStart || null;
     if (windowEnd !== undefined) updates.window_end = windowEnd || null;
@@ -6773,7 +6774,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // passed — a window-only edit inherits the row's stored date (codex
         // pre-push P1). The edit itself may be a legitimate record
         // correction, but a customer text announcing a past date never is:
-        // suppress the notice, keep the committed edit.
+        // suppress the notice, keep the committed edit. Still close the
+        // reminder windows the rewrite re-armed — a past appointment can
+        // never satisfy the cron's hoursUntil > 0 delivery gates, so
+        // leaving a flag false would park the row in the 15-minute rescan
+        // forever (codex r1 P2). coverDueWindows marks both already-due
+        // windows sent for a past appointment time.
+        const AppointmentReminders = require('../services/appointment-reminders');
+        try {
+          await AppointmentReminders.handleReschedule(req.params.id, `${scheduleMoveForNotice.date}T${scheduleMoveForNotice.start}`, {
+            sendNotification: false,
+            coverDueWindows: true,
+          });
+        } catch (e) {
+          logger.warn(`[schedule/update-details] reminder close on suppressed past-date notice failed for ${req.params.id}: ${e.message}`);
+        }
         notificationSent = false;
         notificationError = `The visit date (${scheduleMoveForNotice.date}) is in the past, so no reschedule text was sent`;
       } else {

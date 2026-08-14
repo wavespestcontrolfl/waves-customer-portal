@@ -10,11 +10,11 @@
 const { pastRescheduleDateError } = require('../routes/admin-dispatch')._test;
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
-describe('pastRescheduleDateError', () => {
-  test('a past date is refused with a customer-safe message naming the date', () => {
+describe('pastRescheduleDateError (validScheduleDate-backed)', () => {
+  test('a past date is refused with an operator-facing message naming the date', () => {
     const yesterday = etDateString(addETDays(new Date(), -1));
-    expect(pastRescheduleDateError(yesterday)).toMatch(new RegExp(`${yesterday}.*already passed`));
-    expect(pastRescheduleDateError('2020-01-01')).toMatch(/already passed/);
+    expect(pastRescheduleDateError(yesterday)).toMatch(new RegExp(`${yesterday}.*valid upcoming date`));
+    expect(pastRescheduleDateError('2020-01-01')).toMatch(/valid upcoming date/);
   });
 
   test('today (ET) and future dates pass', () => {
@@ -25,12 +25,13 @@ describe('pastRescheduleDateError', () => {
 
   test('an ISO datetime is judged by its date part', () => {
     expect(pastRescheduleDateError(`${etDateString(addETDays(new Date(), 1))}T10:00:00`)).toBeNull();
-    expect(pastRescheduleDateError('2020-01-01T10:00:00')).toMatch(/already passed/);
+    expect(pastRescheduleDateError('2020-01-01T10:00:00')).toMatch(/valid upcoming date/);
   });
 
-  test('malformed / missing dates fail closed', () => {
-    for (const bad of [undefined, null, '', 'not-a-date', '08/07/2026', '2026-8-7', 42]) {
-      expect(pastRescheduleDateError(bad)).toBe('Invalid newDate');
+  test('malformed, missing, and impossible-calendar dates fail closed — no raw PG cast 500', () => {
+    for (const bad of [undefined, null, '', 'not-a-date', '08/07/2026', '2026-8-7', 42,
+      '2099-99-99', '2099-02-31', '2027-13-01', '2027-00-10']) {
+      expect(pastRescheduleDateError(bad)).toMatch(/valid upcoming date/);
     }
   });
 });
