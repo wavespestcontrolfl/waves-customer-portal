@@ -715,6 +715,34 @@ router.post('/cards', async (req, res, next) => {
     // saved-only method with no retry or error path. already_enrolled is
     // the benign incumbent case. The method row itself stays saved either
     // way — a retry re-enters through the lookup-first save above.
+    if (!enrollment.enrolled && enrollment.reason === 'payer_billed') {
+      // The in-transaction authority caught a payer assignment that landed
+      // after the pre-check above (r10 race) — same permanent-skip contract
+      // as the pre-check: saved, consented, not enrolled, office exception.
+      await require('../services/notification-service').notifyAdmin(
+        'billing',
+        'Card saved without Auto Pay (payer-billed)',
+        'A portal card save skipped Auto Pay enrollment because this account’s invoices route to a third-party payer — enrolling the saved card would charge the wrong party on self-pay invoices.',
+        { link: `/admin/customers/${req.customerId}`, metadata: { customerId: req.customerId, paymentMethodId: card.id } },
+      ).catch(() => {});
+      return res.json({
+        success: true,
+        enrolled: false,
+        enrollReason: 'payer_billed',
+        card: {
+          id: card.id,
+          processor: 'stripe',
+          methodType: card.method_type || 'card',
+          brand: card.card_brand,
+          lastFour: card.last_four,
+          expMonth: card.exp_month,
+          expYear: card.exp_year,
+          isDefault: card.is_default,
+          bankName: card.bank_name || null,
+          bankLastFour: card.bank_last_four || null,
+        },
+      });
+    }
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
       logger.warn(`[billing-v2] add-card enrollment refused (${enrollment.reason}) for customer ${req.customerId} pm ${card.id}`);
       return res.status(409).json({

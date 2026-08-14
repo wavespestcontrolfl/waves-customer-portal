@@ -9,11 +9,15 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(async () => {}) }));
+jest.mock('../services/payer', () => ({
+  resolveForInvoice: jest.fn(async () => ({ payerId: null })),
+}));
 jest.mock('../services/card-enrollment-email', () => ({ sendAutopayEnrollmentConfirmation: jest.fn(async () => {}) }));
 
 const db = require('../models/db');
 const { logAutopay } = require('../services/autopay-log');
 const { sendAutopayEnrollmentConfirmation } = require('../services/card-enrollment-email');
+const PayerService = require('../services/payer');
 const { enrollConsentedMethod } = require('../services/autopay-enrollment');
 
 // A caller-owned transaction handle (the appointment auto-secure passes its
@@ -55,7 +59,32 @@ const custRow = (over = {}) => ({
 });
 
 describe('enrollConsentedMethod', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+  });
+
+  // Payer authority UNDER the enrollment lock (Codex #3395 r10 P1): caller
+  // pre-checks run outside this transaction; an admin payer assignment
+  // committing in between must still refuse here.
+  test('a payer-billed account refuses inside the lock — no flags flipped, no log', async () => {
+    setQueues({ customers: [qb({ first: custRow() })] });
+    PayerService.resolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
+    const out = await enrollConsentedMethod({ customerId: 'cust-1', paymentMethodId: 'pm-new', source: 'test' });
+    expect(out).toEqual({ enrolled: false, reason: 'payer_billed' });
+    expect(PayerService.resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1', throwOnError: true,
+    }));
+    expect(logAutopay).not.toHaveBeenCalled();
+  });
+
+  test('a payer-resolver failure THROWS (fail closed, transaction rolls back, caller retries)', async () => {
+    setQueues({ customers: [qb({ first: custRow() })] });
+    PayerService.resolveForInvoice.mockRejectedValue(new Error('payer lookup down'));
+    await expect(enrollConsentedMethod({ customerId: 'cust-1', paymentMethodId: 'pm-new', source: 'test' }))
+      .rejects.toThrow('payer lookup down');
+    expect(logAutopay).not.toHaveBeenCalled();
+  });
 
   test('no incumbent → target enrolls, claims default, customer flag + pointer set, logged', async () => {
     const unsetOthers = qb();

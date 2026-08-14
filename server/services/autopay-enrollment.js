@@ -78,6 +78,22 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
       .first('id', 'ach_status', 'autopay_enabled', 'autopay_payment_method_id');
     if (!custRow) return { enrolled: false, reason: 'customer_not_found' };
 
+    // Payer routing UNDER the enrollment lock (Codex #3395 r10 P1): the
+    // callers' payer pre-checks run outside this transaction, so an admin
+    // payer assignment can commit between their read and this lock —
+    // enrolling the homeowner's method on a payer-billed account points
+    // self-pay charging at the wrong party. Re-check against the locked
+    // snapshot; a resolver failure THROWS (fail closed) so the transaction
+    // rolls back and each caller's retry semantics apply.
+    const resolvedPayer = await require('./payer').resolveForInvoice({
+      database: trx,
+      customerId,
+      throwOnError: true,
+    });
+    if (resolvedPayer?.payerId) {
+      return { enrolled: false, reason: 'payer_billed' };
+    }
+
     if (authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime())) {
       const laterOptOut = await trx('autopay_log')
         .where({ customer_id: customerId, event_type: 'autopay_disabled' })

@@ -267,6 +267,8 @@ beforeEach(() => {
     estimates: [],
     one_tap_purchases: [],
     scheduled_services: [],
+    // The confirm transaction forUpdate-locks the consented card's row.
+    payment_methods: [{ id: 'pm-1', customer_id: 'cust-1' }],
   };
   buildPortalPurchaseBasis.mockResolvedValue({
     ...BASIS,
@@ -471,6 +473,17 @@ describe('initPurchase — GH r5 hardening', () => {
     const purchase = db.__state.tables.one_tap_purchases[0];
     expect(purchase.consent_ip == null).toBe(true);
     expect(purchase.consent_user_agent == null).toBe(true);
+  });
+
+  test('a slot-load failure after the insert voids + archives the fresh purchase (GH r10 P2)', async () => {
+    getAvailableSlots.mockRejectedValue(new Error('availability down'));
+    await expect(oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED }))
+      .rejects.toMatchObject({ status: 503 });
+    // The client never learned purchaseId — nothing can release it, so init
+    // must clean up its own litter instead of leaving it for the 24h sweep.
+    expect(db.__state.tables.one_tap_purchases[0].status).toBe('voided');
+    expect(db.__state.tables.estimates[0].archived_at).toBeTruthy();
+    getAvailableSlots.mockResolvedValue({ primary: [SLOT], expander: [], nearby: true });
   });
 
   test('an engine run that produces a due-at-start/one-time component refuses (belt to the offer demotion)', async () => {
@@ -717,6 +730,30 @@ describe('confirm', () => {
     expect(out.emailQueued).toBe(false);
     const body = NotificationService.notifyCustomer.mock.calls[0][3];
     expect(body).not.toMatch(/confirmation email/i);
+  });
+
+  // ── In-transaction card revalidation (GH r10 P1): a card removed after
+  // the advisory pre-check must fail the confirm, never book an
+  // unprotected series.
+  test('a card removed mid-confirm 402s inside the transaction — nothing accepted', async () => {
+    findConsentedChargeableCard
+      .mockResolvedValueOnce({ id: 'pm-1' }) // advisory pre-check
+      .mockResolvedValueOnce(null); // in-transaction authority
+    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
+      .rejects.toMatchObject({ status: 402, needsCard: true });
+    expect(db.__state.tables.estimates[0].status).toBe('draft');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  // ── Opt-out preservation (GH r10 P1): enrollment carries the
+  // confirmation moment so a disable committed after it wins.
+  test('post-commit enrollment passes the confirmation moment as authorizedAt', async () => {
+    const before = new Date();
+    await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    const args = enrollConsentedMethod.mock.calls[0][0];
+    expect(args.authorizedAt).toBeInstanceOf(Date);
+    expect(args.authorizedAt.getTime()).toBeGreaterThanOrEqual(before.getTime() - 5);
+    expect(args.authorizedAt.getTime()).toBeLessThanOrEqual(Date.now() + 5);
   });
 
   // ── Per-property membership scoping (pre-push P0): the qualifying

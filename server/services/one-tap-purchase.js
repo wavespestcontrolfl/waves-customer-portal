@@ -406,7 +406,18 @@ async function initPurchase({ customerId, clicked }) {
     hasCardOnFile = false;
   }
 
-  const slots = await loadSlots(estimate.id);
+  // Slot loading is the last await before the client learns purchaseId —
+  // if it throws, the overlay can never call release and the just-created
+  // draft sits in the admin pipeline until the 24h sweep (r10 P2). Void +
+  // archive the fresh attempt and surface a retryable failure instead.
+  let slots;
+  try {
+    slots = await loadSlots(estimate.id);
+  } catch (slotErr) {
+    logger.warn(`[one-tap-purchase] init slot load failed — voiding fresh purchase (code=${slotErr?.code || 'none'})`);
+    await voidPurchase(purchase);
+    throw httpError(503, 'Available times could not be loaded just now — please try again shortly.');
+  }
 
   return {
     purchaseId: purchase.id,
@@ -800,6 +811,11 @@ async function completedRetryResponse(customerId, completedPurchase) {
 // ── confirm ──────────────────────────────────────────────────────────────
 async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent }) {
   if (termsAccepted !== true) throw httpError(400, 'You must agree to the terms to confirm.');
+  // The moment of the customer's authorization (terms + card consent). The
+  // post-commit Auto Pay enrollment passes this as authorizedAt so an
+  // opt-out committed AFTER this instant (another tab disabling Auto Pay
+  // mid-confirm) wins over the enrollment (opted_out_after_authorization).
+  const confirmAuthorizedAt = new Date();
   const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
   // Idempotent retry (P1): a conversion that committed but whose HTTP
   // response was lost leaves the customer on the confirm button. Their
@@ -884,8 +900,35 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
         return { alreadyCompleted: purchaseRow };
       }
       if (!purchaseRow || purchaseRow.status !== 'reserved') throw httpError(409, OFFER_CHANGED);
-      const freshCustomer = await trx('customers').where({ id: customerId }).first();
+      // Customer row LOCKED before the billing-lane fence (r10 P1): an
+      // admin edit to billing_mode/monthly_rate (or a payer assignment)
+      // committing mid-confirm could otherwise pass this fence and then be
+      // observed by the converter — the accepted "per application" terms
+      // disagreeing with the persisted billing model. The converter's own
+      // later customer lock re-locks the same row on this trx (no-op).
+      const freshCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
       await assertTargetStillPurchasable(trx, freshCustomer, purchase.service_key);
+
+      // Card revalidated + LOCKED inside the transaction (r10 P1): the
+      // pre-transaction lookup is advisory — a card removed between it and
+      // this point would book the series with no charging protection (the
+      // post-commit enrollment would just park method_not_found). The row
+      // lock holds the method in place until the conversion commits.
+      let lockedCard = null;
+      try {
+        const freshCard = await findConsentedChargeableCard(customerId);
+        if (freshCard) {
+          lockedCard = await trx('payment_methods')
+            .where({ id: freshCard.id, customer_id: customerId })
+            .forUpdate()
+            .first('id');
+        }
+      } catch (cardErr) {
+        logger.warn(`[one-tap-purchase] in-transaction card re-check failed (code=${cardErr?.code || 'none'})`);
+        lockedCard = null;
+      }
+      if (!lockedCard) throw httpError(402, 'A saved payment method is required to confirm.', { needsCard: true });
+      card = { id: lockedCard.id };
 
       const est = await trx('estimates')
         .where({ id: purchase.estimate_id })
@@ -1111,6 +1154,11 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
         paymentMethodId: card.id,
         source: 'one_tap_purchase',
         details: { via: 'one_tap_confirm', estimate_id: purchase.estimate_id, purchase_id: purchase.id },
+        // The confirmation moment: an Auto Pay opt-out committed AFTER the
+        // customer authorized this purchase must win over the enrollment
+        // (r10 P1 — enrollConsentedMethod's opted_out_after_authorization
+        // guard only runs when authorizedAt is passed).
+        authorizedAt: confirmAuthorizedAt,
       });
       if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
         await require('./notification-service').notifyAdmin(
