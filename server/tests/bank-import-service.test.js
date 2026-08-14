@@ -705,6 +705,15 @@ describe('runDeterministicMatching', () => {
     expect(String(parked.patch.suggestion.sql)).toContain("'noMatch'"); // subtracted in the same write
   });
 
+  test('a retry the batch could NOT resolve (human draft) still reports more work remaining', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '100.00', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
+    state.payouts = [{ id: 'po-1', amount: '100.00', arrival_date: '2026-08-11', status: 'paid', reconciled: false }];
+    reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-1', skipped: true, reason: 'human_draft' });
+    const summary = await runDeterministicMatching();
+    expect(summary.reconcileRetried).toBe(0);
+    expect(summary.moreRemaining).toBe(true); // the pending flag stayed — matching is NOT done
+  });
+
   test('pending reconciliation retries are BOUNDED per pass with an honest morePending signal', async () => {
     state.bankRows = Array.from({ length: 27 }, (_, i) => ({
       id: `bt-${String(i).padStart(2, '0')}`, txn_date: '2026-08-11', amount: '100.00', direction: 'credit', account_type: 'bank',

@@ -480,10 +480,15 @@ async function retryPendingReconciliations() {
     .orderBy('id', 'asc') // deterministic tie-breaker
     .limit(PENDING_RETRY_LIMIT + 1)
     .select('id', 'amount', 'matched_payout_id', 'suggestion');
-  const morePending = pendingFetch.length > PENDING_RETRY_LIMIT;
   const pending = pendingFetch.slice(0, PENDING_RETRY_LIMIT);
   let retried = 0;
   let humanRejected = 0;
+  // rows whose retry left the pending flag IN PLACE (a failure, an active
+  // human draft, or a transient precondition skip) are unfinished work just
+  // like the rows beyond the sentinel — both must feed morePending, or the
+  // caller reports "done" while linked payouts stay unreconciled until some
+  // future pass happens to run.
+  let unresolved = 0;
   for (const row of pending) {
     const payout = await db('stripe_payouts').where({ id: row.matched_payout_id }).first('id', 'reconciled');
     if (payout) {
@@ -496,8 +501,10 @@ async function retryPendingReconciliations() {
         const result = await echoPayoutReconciliation(row.id, row.matched_payout_id, Number(row.amount), `Auto-matched to bank import row ${row.id} (retry)`);
         if (!(result && result.skipped)) retried++;
         else if (result.reason === 'human_rejected') humanRejected++;
+        else if (result.reason === 'human_draft' || result.reason === 'precondition') unresolved++;
       } catch (err) {
         logger.warn(`[bank-import] reconciliation retry for payout ${payout.id} failed again: ${err.message}`);
+        unresolved++;
         // rotation: the failed row goes to the back of the bounded batch
         // order so it can't monopolize every subsequent pass
         await db('bank_transactions')
@@ -516,6 +523,7 @@ async function retryPendingReconciliations() {
   // (Reversals need no sweep: the unlink route runs its unlink CAS inside
   // the reversal's own transaction, so a failed reversal rolls the unlink
   // back — there is never a committed unlink awaiting reversal.)
+  const morePending = pendingFetch.length > PENDING_RETRY_LIMIT || unresolved > 0;
   return { pending: pending.length, morePending, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds, expenseLinksReverted: editedLinks };
 }
 
