@@ -89,6 +89,11 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
       // Dead estimate-slot holds linger until the cleanup cron deletes
       // them — same live-hold predicate as route-reorder LIVE_HOLD_SQL.
       .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())')
+      // track_state can lead or permanently diverge from status (e.g.
+      // markComplete leaves status='confirmed' with track_state='complete'),
+      // so tracker-terminal rows must drop out by track_state too.
+      // NULL-safe: NOT IN alone would silently drop NULL-track_state rows.
+      .whereRaw("(track_state IS NULL OR track_state NOT IN ('complete', 'cancelled'))")
       .whereRaw(
         `(COALESCE(route_order, 999), COALESCE(window_start, '23:59'::time), created_at, id)
            < (COALESCE(?::int, 999), COALESCE(?::time, '23:59'::time), ?::timestamptz, ?::uuid)`,
@@ -121,6 +126,10 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     // recorded — an unrecorded number could be exceeded by a later poll,
     // violating the never-increase contract.
     try {
+      // Guarded so an unchanged floor writes nothing (this runs on the 15s
+      // tracker poll — an unconditional UPDATE would churn row versions,
+      // locks, and WAL on every poll of every open portal). A write is
+      // needed only when the date rolls over or the floor lowers.
       const res = await db.raw(
         `UPDATE scheduled_services
             SET stops_ahead_min_shown = CASE
@@ -130,11 +139,26 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
                 END,
                 stops_ahead_shown_date = ?::date
           WHERE id = ?::uuid
+            AND (stops_ahead_shown_date IS DISTINCT FROM ?::date
+                 OR stops_ahead_min_shown IS NULL
+                 OR stops_ahead_min_shown > ?::int)
           RETURNING stops_ahead_min_shown`,
-        [today, clamped, clamped, today, svc.id]
+        [today, clamped, clamped, today, svc.id, today, clamped]
       );
-      const persisted = Number(res?.rows?.[0]?.stops_ahead_min_shown);
-      if (Number.isFinite(persisted)) return Math.min(persisted, clamped);
+      if (res?.rows?.[0]) {
+        const persisted = Number(res.rows[0].stops_ahead_min_shown);
+        return Number.isFinite(persisted) ? Math.min(persisted, clamped) : null;
+      }
+      // Zero rows updated = today's stored floor is already ≤ this value
+      // (nothing needed writing) — or the visit vanished mid-poll. Re-read
+      // to tell them apart and display the authoritative floor.
+      const cur = await db('scheduled_services')
+        .where({ id: svc.id })
+        .first('stops_ahead_min_shown', 'stops_ahead_shown_date');
+      const curMin = cur?.stops_ahead_min_shown == null ? null : Number(cur.stops_ahead_min_shown);
+      if (Number.isInteger(curMin) && dateOnly(cur?.stops_ahead_shown_date) === today) {
+        return Math.min(curMin, clamped);
+      }
     } catch (err) {
       logger.warn(`[stops-ahead] floor persist failed for ${svc.id}: ${err.message}`);
     }
