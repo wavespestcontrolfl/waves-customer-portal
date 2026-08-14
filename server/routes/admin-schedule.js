@@ -6768,6 +6768,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // immediate text is suppressed rather than fabricating an 8 AM slot.
         notificationSent = false;
         notificationError = 'No arrival time is set for this visit, so no reschedule text was sent';
+      } else if (String(scheduleMoveForNotice.date) < etDateString()) {
+        // The EFFECTIVE date can be in the past even when the early guard
+        // passed — a window-only edit inherits the row's stored date (codex
+        // pre-push P1). The edit itself may be a legitimate record
+        // correction, but a customer text announcing a past date never is:
+        // suppress the notice, keep the committed edit.
+        notificationSent = false;
+        notificationError = `The visit date (${scheduleMoveForNotice.date}) is in the past, so no reschedule text was sent`;
       } else {
         const AppointmentReminders = require('../services/appointment-reminders');
         try {
