@@ -17,7 +17,11 @@ function fmtTime(hhmm) {
 
 export function bestTimeLabel(slot) {
   const detour = Math.round(Number(slot.detourMinutes) || 0);
-  return `${fmtTime(slot.start)} · ${detour > 0 ? `+${detour} min drive` : 'no detour'}`;
+  const base = `${fmtTime(slot.start)} · ${detour > 0 ? `+${detour} min drive` : 'no detour'}`;
+  // Present only on unscoped (all-tech) searches: the detour is that
+  // technician's, and picking the chip changes the time alone — the name
+  // tells the operator whose route made it cheap.
+  return slot.technicianName ? `${base} · ${slot.technicianName}` : base;
 }
 
 export default function BestTimeHint({ bestTimes, onPick, currentStart, style }) {

@@ -22,6 +22,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { loadOccupancy, conflictsForTarget } = require('../services/rain-out');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -150,6 +151,7 @@ router.post('/', async (req, res) => {
 
     const target = await resolveFindTimeTarget({ customerId, address, lat, lng });
 
+    const requestedTopN = Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100);
     const result = await findAvailableSlots({
       lat: target.lat,
       lng: target.lng,
@@ -157,7 +159,9 @@ router.post('/', async (req, res) => {
       dateFrom: from,
       dateTo: clampedTo,
       technicianId: technicianId || undefined,
-      topN: Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100),
+      // Hint mode over-fetches so the occupancy guard below can drop hours
+      // without leaving the chips row short.
+      topN: hint ? Math.min(requestedTopN * 3, 30) : requestedTopN,
       // undefined = the engine's own defaults ([] / exact-minute starts).
       excludeServiceIds,
       slotStepMinutes: slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined,
@@ -168,6 +172,31 @@ router.post('/', async (req, res) => {
       // which hid real weekend capacity from the staff picker.
       includeWeekends: true,
     });
+
+    if (hint && Array.isArray(result?.slots) && result.slots.length) {
+      // The engine walks per-technician routes, so a scheduled row with NO
+      // assigned tech occupies no route and is invisible to it — an hour it
+      // recommends can sit on an unassigned visit the commit will still
+      // reject. Mirror the dispatch slot-check occupancy guard (tech-blind,
+      // same overlap predicate, excludeServiceIds honored) and veto those
+      // hours. Fail-open like checkSlots: a snapshot failure keeps the
+      // engine's answer — this whole path is advisory.
+      try {
+        const occupancyByDate = new Map();
+        await Promise.all([...new Set(result.slots.map((s) => s.date))].map(async (d) => {
+          occupancyByDate.set(d, await loadOccupancy({ dateFrom: d, dateTo: d }));
+        }));
+        const excluded = (excludeServiceIds || []).map(String);
+        result.slots = result.slots.filter((s) => conflictsForTarget(
+          occupancyByDate.get(s.date), null, s.date,
+          { start: s.start_time, end: s.end_time },
+          { excludeServiceIds: excluded },
+        ).length === 0);
+      } catch (guardErr) {
+        logger.warn('[find-time] hint occupancy guard failed (fail-open):', guardErr.message);
+      }
+      result.slots = result.slots.slice(0, requestedTopN);
+    }
 
     res.json({
       ...result,

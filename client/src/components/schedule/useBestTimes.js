@@ -53,11 +53,23 @@ export function useBestTimes({ date, customerId, durationMinutes, technicianId, 
         });
         const data = await res.json().catch(() => null);
         if (!controller.signal.aborted && res.ok && !data?.gated && Array.isArray(data?.slots)) {
-          setBestTimes(data.slots.map((s) => ({
+          // Unscoped searches rank technician/time PAIRS, so two techs can
+          // surface the same hour — keep only the best-ranked slot per
+          // start (the engine sorts ascending) and carry whose route the
+          // detour belongs to so the chip can say so. Scoped searches have
+          // one tech; no name needed.
+          const seen = new Set();
+          const deduped = data.slots.filter((s) => {
+            if (seen.has(s.start_time)) return false;
+            seen.add(s.start_time);
+            return true;
+          });
+          setBestTimes(deduped.map((s) => ({
             start: s.start_time,
             end: s.end_time,
             detourMinutes: s.detour_minutes,
             stopsThatDay: s.stops_that_day,
+            technicianName: technicianId ? null : (s.technician?.name || null),
           })));
         }
       } catch { /* advisory only — a failed search just shows no hint */ }

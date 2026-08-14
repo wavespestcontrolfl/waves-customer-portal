@@ -10,6 +10,11 @@
  *  3. excludeServiceIds / slotStepMinutes validation 400s on garbage.
  *  4. A request WITHOUT the hint flag is NEVER gated — the existing
  *     Find-a-Time button stays ungated regardless of env.
+ *  5. The hint occupancy guard: the engine walks per-technician routes, so
+ *     technician-null rows are invisible to it — hint mode must veto hours
+ *     the tech-blind occupancy snapshot flags, honor excludeServiceIds,
+ *     over-fetch then slice to the requested topN, fail OPEN on snapshot
+ *     errors, and never run for non-hint requests.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -30,9 +35,16 @@ jest.mock('../services/scheduling/find-time', () => ({
   ...jest.requireActual('../services/scheduling/find-time'),
   findAvailableSlots: jest.fn(),
 }));
+// Only the snapshot loader is stubbed — conflictsForTarget stays REAL so
+// the guard's overlap semantics are the production ones.
+jest.mock('../services/rain-out', () => ({
+  ...jest.requireActual('../services/rain-out'),
+  loadOccupancy: jest.fn(),
+}));
 
 const express = require('express');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { loadOccupancy } = require('../services/rain-out');
 const findTimeRouter = require('../routes/admin-schedule-find-time');
 
 let server;
@@ -54,6 +66,14 @@ afterAll(() => {
   else process.env.GATE_BEST_TIME_HINTS = ORIGINAL_GATE;
 });
 
+const emptyOccupancy = () => ({ rows: [], canName: () => false, nameById: new Map() });
+// Row shape mirrors listOccupiedWindows output (precomputed startMin/endMin).
+const occupiedRow = (over = {}) => ({
+  id: 'unassigned-1', date: '2026-09-01', startMin: 9 * 60, endMin: 10 * 60,
+  customer_id: 'c1', technician_id: null, service_type: 'Pest Control',
+  reservation_expires_at: null, ...over,
+});
+
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_BEST_TIME_HINTS;
@@ -61,6 +81,7 @@ beforeEach(() => {
     slots: [{ rank: 1, date: '2026-09-01', start_time: '09:00', end_time: '10:00', detour_minutes: 4, stops_that_day: 3 }],
     evaluated: 1,
   });
+  loadOccupancy.mockResolvedValue(emptyOccupancy());
 });
 
 function post(body) {
@@ -96,7 +117,9 @@ test('hint with the gate on runs a single-day search with the new params passed 
   expect(opts.dateTo).toBe('2026-09-01');
   expect(opts.excludeServiceIds).toEqual(['svc-1']);
   expect(opts.slotStepMinutes).toBe(60);
-  expect(opts.topN).toBe(3);
+  // Hint mode over-fetches (3×) so the occupancy guard can drop hours
+  // without leaving the chips row short; the response is sliced back.
+  expect(opts.topN).toBe(9);
 });
 
 test('garbage excludeServiceIds / slotStepMinutes 400 before the engine runs', async () => {
@@ -126,4 +149,40 @@ test('without the hint flag the search is never gated, regardless of env', async
     expect((await res.json()).gated).toBeUndefined();
   }
   expect(findAvailableSlots).toHaveBeenCalledTimes(2);
+  // The occupancy guard is a hint-mode construct — the ranged button's
+  // results must not change shape or cost.
+  expect(loadOccupancy).not.toHaveBeenCalled();
+});
+
+test('hint vetoes an hour occupied by a technician-null row the engine cannot see', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({
+    slots: [
+      { rank: 1, date: '2026-09-01', start_time: '09:00', end_time: '10:00', detour_minutes: 4 },
+      { rank: 2, date: '2026-09-01', start_time: '10:00', end_time: '11:00', detour_minutes: 6 },
+    ],
+    evaluated: 2,
+  });
+  loadOccupancy.mockResolvedValue({ ...emptyOccupancy(), rows: [occupiedRow()] });
+  const res = await post({ ...BASE, hint: true, topN: 3 });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.slots.map((s) => s.start_time)).toEqual(['10:00']);
+  expect(loadOccupancy).toHaveBeenCalledWith({ dateFrom: '2026-09-01', dateTo: '2026-09-01' });
+});
+
+test('the guard honors excludeServiceIds — a reschedule never collides with its own row', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  loadOccupancy.mockResolvedValue({ ...emptyOccupancy(), rows: [occupiedRow({ id: 'svc-self' })] });
+  const res = await post({ ...BASE, hint: true, excludeServiceIds: ['svc-self'] });
+  const body = await res.json();
+  expect(body.slots.map((s) => s.start_time)).toEqual(['09:00']);
+});
+
+test('the guard fails OPEN — a snapshot error keeps the engine answer', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  loadOccupancy.mockRejectedValue(new Error('snapshot down'));
+  const res = await post({ ...BASE, hint: true });
+  expect(res.status).toBe(200);
+  expect((await res.json()).slots).toHaveLength(1);
 });
