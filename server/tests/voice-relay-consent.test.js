@@ -239,6 +239,31 @@ describe('authenticated caller + alternate callback number — lead reuse bounda
     expect(writes.find((w) => w.table === 'leads' && w.verb === 'insert')).toBeTruthy(); // the lead still exists — unlinked
   });
 
+  // ⭐ RELAY LEAD RESOLUTION IS SERIALIZED PER CALL — read-then-insert alone
+  // is not idempotent across a dropped socket's floor racing its replacement.
+  test('a relay capture takes the per-call advisory lock around lookup+insert', async () => {
+    primeDb();
+    const raw = jest.fn(async () => {});
+    db.transaction = jest.fn(async (cb) => {
+      const trx = (table) => db(table);
+      trx.raw = raw;
+      return cb(trx);
+    });
+    try {
+      await createLeadFromExtraction(
+        { call_summary: 'locked capture' },
+        { phone: CALLER, aniPhone: CALLER, aniVerified: true, callSid: 'CA-locked-1' },
+      );
+      expect(raw).toHaveBeenCalledWith(
+        expect.stringContaining('pg_advisory_xact_lock'),
+        ['voice-lead-capture', 'CA-locked-1'],
+      );
+      expect(writes.find((w) => w.table === 'leads' && w.verb === 'insert')).toBeTruthy();
+    } finally {
+      delete db.transaction;
+    }
+  });
+
   // ⭐ AND AN UNVERIFIED SESSION REUSES NOTHING. Leads resolve by phone, so
   // without this an unverified caller claiming a victim's number would land on
   // the victim's customer-linked lead and overwrite its rolling fields.

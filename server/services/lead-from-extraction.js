@@ -217,7 +217,11 @@ async function fileContactInstructionNotification(customer, instruction, opts, d
               .first('id');
             if (existing) return { deduped: true, id: existing.id };
             const NotificationServiceLocked = require('./notification-service');
-            const lockedNotif = await notifyContactInstruction(NotificationServiceLocked, customer, instruction, opts, dnc, instructionKey);
+            // The insert rides the SAME locked transaction (connection: trx) —
+            // a second pool connection per lock-holder could otherwise occupy
+            // the pool with waiting transactions and stall every compliance
+            // notification.
+            const lockedNotif = await notifyContactInstruction(NotificationServiceLocked, customer, instruction, opts, dnc, instructionKey, trx);
             return { deduped: false, notif: lockedNotif };
           });
         } catch (err) {
@@ -260,7 +264,7 @@ async function fileContactInstructionNotification(customer, instruction, opts, d
 // The single notifyAdmin composition — shared by the serialized (advisory-
 // locked) path and the unserialized fallback, so the card is identical
 // whichever rail delivered it.
-function notifyContactInstruction(NotificationService, customer, instruction, opts, dnc, instructionKey) {
+function notifyContactInstruction(NotificationService, customer, instruction, opts, dnc, instructionKey, connection = null) {
   return NotificationService.notifyAdmin(
     'service',
     `${dnc ? '🚫 DO-NOT-CONTACT request' : '📞 Contact preference'} stated on a phone call`,
@@ -292,6 +296,9 @@ function notifyContactInstruction(NotificationService, customer, instruction, op
       // policy's own site-level tag for "this specific notification must
       // ring": a consent instruction is compliance, not FYI noise.
       bell: true,
+      // Inside the advisory-locked path the insert uses the LOCKED
+      // transaction's connection — never a second pool checkout.
+      ...(connection ? { connection } : {}),
       metadata: {
         customerId: customer.id,
         source: 'voice_agent',
@@ -498,9 +505,20 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     return { leadId: null, customerId, created: false };
   }
 
-  let existingLead = phone
-    ? await db('leads').where('phone', phone).whereNull('deleted_at').orderBy('created_at', 'desc').first()
-    : null;
+  // ⭐ RELAY LEAD RESOLUTION IS SERIALIZED PER CALL. Two sessions on the same
+  // CallSid (a dropped socket closing while its replacement runs the same
+  // capture, or the hangup floor racing capture_lead cross-instance) can both
+  // read "no lead" and both insert — the read-then-insert is not idempotent
+  // on its own. Relay calls take an advisory xact lock keyed by CallSid
+  // around the lookup+insert; the second holder reads after the first's
+  // commit and reuses the same-call lead (twilio_call_sid reuse rule below).
+  // Lock/transaction failure falls through unserialized — a duplicate lead
+  // beats a lost capture.
+  let existingLead = null;
+  const resolveExistingLead = async (q) => {
+    existingLead = phone
+      ? await q('leads').where('phone', phone).whereNull('deleted_at').orderBy('created_at', 'desc').first()
+      : null;
   // ⭐ AN UNVERIFIED SESSION REUSES NOTHING. Nulling identity resolution above
   // is not enough: leads resolve BY PHONE, so an unverified relay caller
   // claiming a victim's number would still land on — and overwrite the rolling
@@ -556,30 +574,50 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     existingLead = null;
   }
 
-  if (existingLead) {
-    leadId = existingLead.id;
+    if (existingLead) {
+      leadId = existingLead.id;
+    } else {
+      const leadSourceId = await resolveLeadSourceId(opts.toPhone);
+      const insert = {
+        lead_source_id: leadSourceId,
+        customer_id: customerId,
+        phone,
+        first_name: nameCase(extracted.first_name),
+        last_name: nameCase(extracted.last_name) || '',
+        email: extracted.email || null,
+        lead_type: 'inbound_call',
+        first_contact_at: new Date(),
+        first_contact_channel: 'call',
+        status: 'new',
+      };
+      if (opts.callSid) insert.twilio_call_sid = opts.callSid;
+      if (opts.callDurationSeconds != null) insert.call_duration_seconds = opts.callDurationSeconds;
+      const [newLead] = await q('leads').insert(insert).returning('*');
+      leadId = newLead.id;
+      created = true;
+      // Log IDs/masked phone only — `service` is caller-provided free text and
+      // can contain names/addresses; it belongs in the row, not plain logs.
+      logger.info(`[voice-agent-lead] Created lead ${leadId} for ${maskPhone(phone)}`);
+    }
+  };
+  const serializeCapture = opts.callSid && opts.aniPhone && typeof db.transaction === 'function';
+  if (serializeCapture) {
+    try {
+      await db.transaction(async (trx) => {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['voice-lead-capture', String(opts.callSid)],
+        );
+        await resolveExistingLead(trx);
+      });
+    } catch (err) {
+      logger.warn(`[voice-agent-lead] capture serialization failed for callSid=${opts.callSid} (${err.message}) — proceeding unserialized`);
+      leadId = undefined;
+      created = false;
+      await resolveExistingLead(db);
+    }
   } else {
-    const leadSourceId = await resolveLeadSourceId(opts.toPhone);
-    const insert = {
-      lead_source_id: leadSourceId,
-      customer_id: customerId,
-      phone,
-      first_name: nameCase(extracted.first_name),
-      last_name: nameCase(extracted.last_name) || '',
-      email: extracted.email || null,
-      lead_type: 'inbound_call',
-      first_contact_at: new Date(),
-      first_contact_channel: 'call',
-      status: 'new',
-    };
-    if (opts.callSid) insert.twilio_call_sid = opts.callSid;
-    if (opts.callDurationSeconds != null) insert.call_duration_seconds = opts.callDurationSeconds;
-    const [newLead] = await db('leads').insert(insert).returning('*');
-    leadId = newLead.id;
-    created = true;
-    // Log IDs/masked phone only — `service` is caller-provided free text and
-    // can contain names/addresses; it belongs in the row, not plain logs.
-    logger.info(`[voice-agent-lead] Created lead ${leadId} for ${maskPhone(phone)}`);
+    await resolveExistingLead(db);
   }
 
   if (leadId) {
