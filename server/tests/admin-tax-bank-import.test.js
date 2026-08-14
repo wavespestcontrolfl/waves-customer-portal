@@ -539,6 +539,23 @@ describe('force-duplicates upload (gate on)', () => {
     expect(state.insertedBank[2].row_hash).not.toBe(ordinal1Hash);
   });
 
+  test('forcing a HIGHER-ordinal duplicate starts at the first free ordinal — no holes for a fuller export to refill', async () => {
+    const { hashRow } = jest.requireActual('../services/bank-import');
+    const hdRow = { txn_date: '2026-08-10', description: 'HD SUPPLY', amount: 204.87, direction: 'debit' };
+    const ordinal1Hash = hashRow('capone-checking', hdRow, 1);
+    // both occurrences already stored (ordinals 0-1); the operator forces
+    // only the SECOND — the copy must land at ordinal 2, not skip to 3
+    const twoIdenticalCsv = 'Date,Description,Amount\n08/10/2026,HD SUPPLY,-204.87\n08/10/2026,HD SUPPLY,-204.87';
+    state.insertReturningQueue = [
+      [], // bulk: both conflict
+      [{ id: 'bt-forced' }], // force attempt lands
+    ];
+    const res = await post('/admin/tax/bank-import/upload', { accountLabel: 'capone-checking', accountType: 'bank', csv: twoIdenticalCsv, forceDuplicates: true, forceRowHashes: [ordinal1Hash], forceToken: 'tok-hole-13' });
+    const body = await res.json();
+    expect(body.forced).toBe(1);
+    expect(state.insertedBank[2].row_hash).toBe(hashRow('capone-checking', hdRow, 2));
+  });
+
   test('force only touches the scoped hashes — a full re-post cannot duplicate the rest of the statement', async () => {
     const twoRowCsv = 'Date,Description,Amount\n08/10/2026,HD SUPPLY,-204.87\n08/11/2026,REFUND,15.00';
     state.insertReturningQueue = [

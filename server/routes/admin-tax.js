@@ -1735,10 +1735,13 @@ router.post('/bank-import/upload', async (req, res, next) => {
     //   and reports alreadyPresent instead of minting another copy.
     // - A LATER genuine confirmation carries a NEW token, so it walks to the
     //   next free ordinal — a third/fourth identical transaction stays
-    //   importable. The walk starts past every ordinal this file occupies
-    //   (tuple occurrences + row ordinal), so it can never collide with a
-    //   row the same upload imported normally, and forced copies stay IN
-    //   the ordinal space so a later fuller export dedupes against them.
+    //   importable. The walk starts at the file's occurrence count for the
+    //   tuple — past every ordinal this file occupies, so it can never
+    //   collide with a row the same upload imported normally — and lets
+    //   conflicts advance it, so the canonical sequence stays CONTIGUOUS:
+    //   adding the row's own ordinal would leave holes (forcing the second
+    //   of two stored duplicates would land at 3, not 2) that a later
+    //   fuller export refills as phantom extra copies.
     // ⛔ Force is scoped to EXPLICIT row hashes from the FIRST response's
     // duplicate set: on the confirming re-post every previously inserted row
     // conflicts too, so an unscoped force would duplicate the whole
@@ -1756,7 +1759,7 @@ router.post('/bank-import/upload', async (req, res, next) => {
           .whereRaw("suggestion->>'forcedFor' = ?", [r.row_hash])
           .first('id');
         if (replay) { forceAlreadyPresent++; continue; }
-        const startOrdinal = tupleCounts.get(r.tuple_key) + r.ordinal;
+        const startOrdinal = tupleCounts.get(r.tuple_key);
         let landed = false;
         let lostIdentityRace = false;
         for (let ord = startOrdinal; ord < startOrdinal + 25 && !landed && !lostIdentityRace; ord++) {
