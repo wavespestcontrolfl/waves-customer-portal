@@ -186,6 +186,11 @@ async function fileContactInstructionNotification(customer, instruction, opts, d
         contact_preference: instruction.contact_preference || null,
         preferred_contact_method: instruction.preferred_contact_method || null,
         do_not_contact_request: instruction.do_not_contact_request === true,
+        // The notification BODY states whether the SMS opt-out already landed
+        // — a "suppression failed" card is not delivery evidence for a later
+        // capture where it succeeded (staff would keep the wrong compliance
+        // state).
+        smsSuppressionApplied: opts.smsSuppressionApplied === true,
       }))
       .digest('hex').slice(0, 16);
     if (opts.callSid) {

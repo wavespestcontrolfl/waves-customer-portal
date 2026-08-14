@@ -140,15 +140,26 @@ async function beginRelaySessionClaim(callSid, sessionKey = null) {
  * fence fails open on unprovable, the claim WRITE stays the atomic boundary).
  */
 async function relaySessionClaimOwner(callSid) {
+  // TRI-STATE, deliberately: `{ ok: true, owner }` is a PROVEN read (owner
+  // null = no claim record — the sandbox TwiML-Bin path has no call_log row
+  // at all); `{ ok: false }` is UNPROVABLE (DB error, unparseable metadata).
+  // The fence decides differently for each — collapsing them to null let a
+  // superseded socket keep its tools through any transient read failure.
   const key = String(callSid || '').trim();
-  if (!key) return null;
+  if (!key) return { ok: true, owner: null };
   try {
     const db = require('../../models/db');
     const row = await db('call_log').where({ twilio_call_sid: key }).first('metadata');
-    const meta = row && (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata);
-    return (meta && meta[RELAY_CLAIM_OWNER_KEY]) || null;
+    if (!row) return { ok: true, owner: null };
+    let meta;
+    try {
+      meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+    } catch {
+      return { ok: false };
+    }
+    return { ok: true, owner: (meta && meta[RELAY_CLAIM_OWNER_KEY]) || null };
   } catch {
-    return null;
+    return { ok: false };
   }
 }
 

@@ -614,21 +614,28 @@ class RelayConversation {
     // socket (dead to Twilio but possibly still open here, or on another
     // instance) must not keep account context and write access past that
     // takeover: every tool call re-proves ownership against the current
-    // claim. Fail-open only on a READ ERROR (a transient DB blip must not
-    // strangle a live call — the claim itself is the boundary, this fence is
-    // its enforcement at the privileged surface).
+    // claim, with the read's tri-state honoured:
+    //   - a session that CLAIMED the call (verified — verification implies
+    //     the claim won) requires a PROVEN read whose owner is exactly its
+    //     own nonce; unprovable ⇒ refuse (fail closed — the finding's rule);
+    //   - an UNCLAIMED session (unverified; the sandbox path has no call_log
+    //     row at all) is refused only on a proven FOREIGN owner — it never
+    //     had privileged context to lose, and the sandbox line must keep
+    //     working.
     if (this.sessionKey && this.callSid) {
-      try {
-        const { relaySessionClaimOwner } = require('./relay-context');
-        const owner = await relaySessionClaimOwner(this.callSid);
-        if (owner && owner !== this.sessionKey) {
-          logger.warn(`[voice-relay] session superseded by a reconnect callSid=${this.callSid} — tool "${name}" refused, ending`);
-          this._ending = true;
-          try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing anyway */ }
-          return 'This session was superseded by a reconnect. Do NOT call any more tools and do not answer '
-            + 'account questions — say goodbye briefly.';
-        }
-      } catch { /* unprovable ⇒ proceed; the claim write itself is atomic */ }
+      const { relaySessionClaimOwner } = require('./relay-context');
+      const res = await relaySessionClaimOwner(this.callSid);
+      const claimedByUs = this._callerVerified === true;
+      const superseded = claimedByUs
+        ? !(res && res.ok === true && res.owner === this.sessionKey)
+        : !!(res && res.ok === true && res.owner && res.owner !== this.sessionKey);
+      if (superseded) {
+        logger.warn(`[voice-relay] session superseded (or ownership unprovable on a claimed call) callSid=${this.callSid} — tool "${name}" refused, ending`);
+        this._ending = true;
+        try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing anyway */ }
+        return 'This session was superseded by a reconnect. Do NOT call any more tools and do not answer '
+          + 'account questions — say goodbye briefly.';
+      }
     }
     // IN-FLIGHT LATCH (writes only). A write that blew its budget kept running
     // while the model was told "no confirmation either way" — and nothing

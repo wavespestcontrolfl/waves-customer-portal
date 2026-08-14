@@ -568,6 +568,36 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
   });
 
+  // Tri-state: a CLAIMED (verified) session fails CLOSED on an unprovable
+  // ownership read; an unclaimed (sandbox — no call_log row) session keeps
+  // working.
+  test('a VERIFIED session with an unprovable ownership read is refused (fail closed)', async () => {
+    const builder = {};
+    builder.where = jest.fn(() => builder);
+    builder.first = jest.fn(async () => { throw new Error('pool exhausted'); });
+    db.mockImplementation(() => builder);
+    const endSession = jest.fn();
+    const convo = new RelayConversation({
+      callSid: 'CA-unprovable', sessionKey: 'nonce-MINE', from: '+19415551234', send: jest.fn(), endSession,
+    });
+    convo._callerVerified = true; // verification implies the claim was won
+    const out = await convo._executeToolBounded('get_availability', {}, {});
+    expect(out).toMatch(/superseded by a reconnect/i);
+    expect(endSession).toHaveBeenCalled();
+  });
+
+  test('an UNVERIFIED session with NO call_log row (the sandbox path) keeps its tools', async () => {
+    const builder = {};
+    builder.where = jest.fn(() => builder);
+    builder.first = jest.fn(async () => null); // no row at all
+    db.mockImplementation(() => builder);
+    const convo = new RelayConversation({
+      callSid: 'CA-sandbox', sessionKey: 'nonce-SANDBOX', from: '+19415551234', send: jest.fn(), endSession: jest.fn(),
+    });
+    const out = await convo._executeToolBounded('definitely_not_a_tool', {}, {});
+    expect(out).not.toMatch(/superseded/i);
+  });
+
   test('a session that still OWNS the claim executes tools normally', async () => {
     const builder = {};
     builder.where = jest.fn(() => builder);
