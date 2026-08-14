@@ -171,6 +171,7 @@ jest.mock('../services/bank-import', () => ({
   healOrphanRefunds: jest.fn(() => Promise.resolve(0)),
   verifyPendingExpenseClaims: jest.fn(() => Promise.resolve({ cleared: 0, reverted: 0, more: false })),
   verifyPendingPayoutClaims: jest.fn(() => Promise.resolve({ cleared: 0, reverted: 0, more: false })),
+  retryPendingEchoes: jest.fn(() => Promise.resolve({ pending: 0, morePending: false, retried: 0, humanRejected: 0 })),
 }));
 
 const express = require('express');
@@ -661,9 +662,11 @@ describe('refund-candidates on demand (gate on)', () => {
     expect(healOrphanRefunds).toHaveBeenCalled();
     // crash-leftover claim verifications finish on page load too — the
     // snapshot must not count a possibly-ambiguous claim as completed
-    const { verifyPendingExpenseClaims, verifyPendingPayoutClaims } = require('../services/bank-import');
+    const { verifyPendingExpenseClaims, verifyPendingPayoutClaims, retryPendingEchoes } = require('../services/bank-import');
     expect(verifyPendingExpenseClaims).toHaveBeenCalled();
     expect(verifyPendingPayoutClaims).toHaveBeenCalled();
+    // and a just-verified payout claim gets its echo retried on page load
+    expect(retryPendingEchoes).toHaveBeenCalled();
   });
 
   test('the transactions page SELF-HEALS too — rendered rows must not carry actions that can only 409', async () => {

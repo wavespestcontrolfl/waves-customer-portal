@@ -1643,6 +1643,10 @@ async function healBankImportSnapshot() {
   // until someone verifies it
   await bankImport.verifyPendingExpenseClaims();
   await bankImport.verifyPendingPayoutClaims();
+  // and the echo retries: a payout claim whose verification a page load
+  // just finished must not sit reconcilePending until an explicit
+  // matching action (bounded 25 + rotation, same as a matching pass)
+  await bankImport.retryPendingEchoes();
 }
 
 // /bank-import/status always answers (the client uses it to decide whether
@@ -2349,6 +2353,11 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
           }
           const changed = await trx('bank_transactions')
             .where({ id: row.id, status: 'refund_applied' })
+            // bound to the SCANNED target: a concurrent orphan heal +
+            // re-apply to a different expense must not have this stale
+            // undo clear the newer association while its ledger
+            // adjustment stays applied
+            .whereRaw("coalesce(suggestion->>'refundAppliedTo', '') = ?", [String(target || '')])
             .update({
               status: 'unmatched',
               match_method: null,

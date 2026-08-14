@@ -865,6 +865,17 @@ async function retryPendingReconciliations() {
   // BEFORE the echo retries below — an unverified payout claim must be
   // verified (or rolled back) before anything confirms its reconciliation
   const payoutVerify = await verifyPendingPayoutClaims();
+  const echoes = await retryPendingEchoes();
+  const morePending = echoes.morePending || claimVerify.more || payoutVerify.more;
+  return { pending: echoes.pending, morePending, retried: echoes.retried, humanRejected: echoes.humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds, expenseLinksReverted: editedLinks, claimVerifyReverted: claimVerify.reverted, payoutVerifyReverted: payoutVerify.reverted };
+}
+
+// The bounded echo-retry batch, callable on its own: the page-load healer
+// runs it AFTER the verification sweeps so a claim whose verifyPending a
+// page load just cleared gets its reconciliation echo retried too —
+// otherwise the reconcilePending marker sat until an explicit matching
+// action (the heals deliberately leave eligible pending rows to this path).
+async function retryPendingEchoes() {
   // BOUNDED batch + sentinel: during a reconciliation outage a large
   // backfill can leave hundreds of pending echoes, and retrying them all
   // serially would starve the (separately bounded) unmatched-row scan on
@@ -927,8 +938,8 @@ async function retryPendingReconciliations() {
   // back — there is never a committed unlink awaiting reversal.)
   // unfinished work of EVERY kind feeds the caller's more-signal: retry
   // backlog, unresolved retries, and verification sweeps that hit their cap
-  const morePending = pendingFetch.length > PENDING_RETRY_LIMIT || unresolved > 0 || claimVerify.more || payoutVerify.more;
-  return { pending: pending.length, morePending, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds, expenseLinksReverted: editedLinks, claimVerifyReverted: claimVerify.reverted, payoutVerifyReverted: payoutVerify.reverted };
+  const morePending = pendingFetch.length > PENDING_RETRY_LIMIT || unresolved > 0;
+  return { pending: pending.length, morePending, retried, humanRejected };
 }
 
 // An operator EDIT to a linked expense (amount/date via the Expenses or
@@ -1570,9 +1581,10 @@ async function runDeterministicMatching({ limit } = {}) {
                 });
               } catch (rollbackErr) {
                 // the transaction rolled everything back together — the
-                // claim stands (rare; a later pass re-verifies via the
-                // pending-retry path)
+                // claim stands with its markers, which is NEW work only
+                // another pass can finish, so it must read as remaining
                 logger.warn(`[bank-import] ambiguity rollback for row ${row.id} failed — link kept: ${rollbackErr.message}`);
+                summary.moreRemaining = true;
               }
               if (rolledBack) summary.ambiguous++;
               continue; // never echo a reverted (or foreign-owned) claim
@@ -1889,6 +1901,7 @@ module.exports = {
   healOrphanRefunds,
   verifyPendingExpenseClaims,
   verifyPendingPayoutClaims,
+  retryPendingEchoes,
   methodIncompatible,
   effectivePayoutAmount,
   suggestionMerge,
