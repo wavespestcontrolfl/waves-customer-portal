@@ -889,36 +889,36 @@ async function findScheduleGaps(input) {
   let d = new Date(from + 'T12:00:00');
   const end = new Date(to + 'T12:00:00');
   while (d <= end) {
-    const dow = d.getDay();
-    if (dow !== 0) { // skip Sundays
-      const dateStr = d.toISOString().split('T')[0];
-      const dayName = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
-      const dayServices = services.filter(s => s.scheduled_date === dateStr || (s.scheduled_date && s.scheduled_date.toISOString && s.scheduled_date.toISOString().split('T')[0] === dateStr));
+    // Every day of week — Waves works weekends. Which days are actually
+    // offered to customers is governed by the owner-editable weekly days-off
+    // setting (scheduling/blackout-dates.js), not a hardcoded skip here.
+    const dateStr = d.toISOString().split('T')[0];
+    const dayName = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
+    const dayServices = services.filter(s => s.scheduled_date === dateStr || (s.scheduled_date && s.scheduled_date.toISOString && s.scheduled_date.toISOString().split('T')[0] === dateStr));
 
-      const techSlots = techs.map(t => {
-        const techServices = dayServices.filter(s => s.technician_id === t.id);
-        const zones = {};
-        techServices.forEach(s => { const z = getZone(s.city); zones[z] = (zones[z] || 0) + 1; });
-        return {
-          tech: t.name,
-          scheduled: techServices.length,
-          capacity: MAX_STOPS_PER_DAY,
-          available: Math.max(0, MAX_STOPS_PER_DAY - techServices.length),
-          zones,
-        };
-      });
+    const techSlots = techs.map(t => {
+      const techServices = dayServices.filter(s => s.technician_id === t.id);
+      const zones = {};
+      techServices.forEach(s => { const z = getZone(s.city); zones[z] = (zones[z] || 0) + 1; });
+      return {
+        tech: t.name,
+        scheduled: techServices.length,
+        capacity: MAX_STOPS_PER_DAY,
+        available: Math.max(0, MAX_STOPS_PER_DAY - techServices.length),
+        zones,
+      };
+    });
 
-      const unassignedCount = dayServices.filter(s => !s.technician_id).length;
+    const unassignedCount = dayServices.filter(s => !s.technician_id).length;
 
-      days.push({
-        date: dateStr,
-        day: dayName,
-        total_scheduled: dayServices.length,
-        total_available: techSlots.reduce((s, t) => s + t.available, 0),
-        unassigned: unassignedCount,
-        by_tech: techSlots,
-      });
-    }
+    days.push({
+      date: dateStr,
+      day: dayName,
+      total_scheduled: dayServices.length,
+      total_available: techSlots.reduce((s, t) => s + t.available, 0),
+      unassigned: unassignedCount,
+      by_tech: techSlots,
+    });
     d.setDate(d.getDate() + 1);
   }
 
@@ -1099,6 +1099,11 @@ async function findAvailableSlotsTool(input) {
     dateTo: date_to || weekOut,
     technicianId: technician_id,
     topN: top_n || 10,
+    // Waves works weekends — without this, find-time's legacy default
+    // silently dropped every Sunday from staff slot suggestions. Day-off
+    // policy lives in the weekly days-off setting, and staff surfaces are
+    // deliberately unblocked anyway (matching admin-schedule-find-time.js).
+    includeWeekends: true,
   });
 }
 
