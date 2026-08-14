@@ -172,12 +172,13 @@ describe('structural denials', () => {
     expect(result.eligibleBalanceCents).toBe(0);
   });
 
-  test('an invoice with a Stripe PaymentIntent attached is excluded as pending settlement', async () => {
-    armAllowedBaseline({ invoices: [invoiceRow({ stripe_payment_intent_id: 'pi_123' })] });
+  test('a sent invoice with a populated stripe_payment_intent_id REMAINS eligible (codex ruling: PI presence is not in-flight evidence — stale/failed/canceled PIs persist; the real marker is status processing, which the loader already excludes)', async () => {
+    armAllowedBaseline({ invoices: [invoiceRow({ stripe_payment_intent_id: 'pi_stale_123' })] });
     const result = await evalVoice();
-    expect(result.allowed).toBe(false);
-    expect(result.denialReasons).toEqual(expect.arrayContaining(['invoice_pending_settlement', 'no_eligible_balance']));
-    expect(result.eligibleInvoiceIds).toEqual([]);
+    expect(result.allowed).toBe(true);
+    expect(result.eligibleInvoiceIds).toEqual(['inv-1']);
+    expect(result.eligibleBalanceCents).toBe(12800);
+    expect(result.denialReasons).toEqual([]);
   });
 
   test('FAIL CLOSED: a DB error is a denial, never an allow', async () => {
@@ -443,6 +444,63 @@ describe('voice pilot caps (purpose late_payment)', () => {
     armAllowedBaseline({ customer: customerRow({ property_type: 'commercial' }) });
     const result = await evalVoice();
     expect(result.denialReasons).toContain('commercial_customer');
+  });
+
+  test("property_type 'business' denies too (the billing authorities' second commercial value)", async () => {
+    armAllowedBaseline({ customer: customerRow({ property_type: 'Business' }) });
+    const result = await evalVoice();
+    expect(result.denialReasons).toContain('commercial_customer');
+  });
+
+  test('NULL property_type is residential-presumed for the pilot (property_type is ~NULL across prod — strict fail-closed would deny every pilot customer)', async () => {
+    armAllowedBaseline({ customer: customerRow({ property_type: null }) });
+    const result = await evalVoice();
+    expect(result.denialReasons).not.toContain('commercial_customer');
+    expect(result.allowed).toBe(true);
+  });
+});
+
+describe('manual_call — call-shaped checks apply (codex 2026-08-14)', () => {
+  const at = (msAgo) => new Date(WED_11AM_EDT.getTime() - msAgo).toISOString();
+  const HOUR = 60 * 60 * 1000;
+  const DAY = 24 * HOUR;
+
+  async function evalManual(now = WED_11AM_EDT) {
+    return ContactPolicy.evaluate('cust-1', { channel: 'manual_call', purpose: 'late_payment', now });
+  }
+
+  test('a clean account inside the window is allowed (no automated-voice pilot caps or consent required)', async () => {
+    armAllowedBaseline();
+    const result = await evalManual();
+    expect(result.allowed).toBe(true);
+    // Automated-voice-only machinery must NOT run for a human dial sheet.
+    expect(readCachedLineType).not.toHaveBeenCalled();
+    expect(ConsentProvenance.resolve).not.toHaveBeenCalled();
+  });
+
+  test('any ledger contact within 24h denies a manual call', async () => {
+    armAllowedBaseline({ ledger: [{ channel: 'sms', occurred_at: at(2 * HOUR) }] });
+    const result = await evalManual();
+    expect(result.denialReasons).toContain('contact_within_24h');
+    expect(result.allowed).toBe(false);
+  });
+
+  test('a voice contact within 7d denies a manual call (back-to-back calls blocked)', async () => {
+    armAllowedBaseline({ ledger: [{ channel: 'voice', occurred_at: at(3 * DAY) }] });
+    const result = await evalManual();
+    expect(result.denialReasons).toContain('voice_contact_within_7d');
+  });
+
+  test('the ET call window applies to manual calls (after-hours dial sheet denied)', async () => {
+    armAllowedBaseline();
+    const result = await evalManual(WED_1800_EDT);
+    expect(result.denialReasons).toContain('outside_call_window');
+  });
+
+  test('Saturday denies a manual call', async () => {
+    armAllowedBaseline();
+    const result = await evalManual(SAT_11AM_EDT);
+    expect(result.denialReasons).toContain('outside_call_window');
   });
 });
 

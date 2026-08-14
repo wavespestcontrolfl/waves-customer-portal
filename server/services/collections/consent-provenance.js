@@ -70,10 +70,35 @@ async function latestInboundCall(customerId, variants) {
     .first('id', 'created_at');
 }
 
+// Lead rows only count as consent evidence when the CUSTOMER originated the
+// contact (codex 2026-08-14 P1): staff-created rows (admin manual entry,
+// tech field observations, tech-run lawn diagnostics) prove a staffer typed
+// a number, not that its owner ever reached out to Waves Pest Control.
+// Allowlist drawn from the live leads.first_contact_channel vocabulary —
+// admin-leads.js writes 'manual', tech-field-lead.js 'field_observation',
+// tech-lawn-diagnostic.js 'lawn_diagnostic' (all staff-side, excluded);
+// the customer-originated intakes below are the web/booking/quote forms,
+// the public photo funnels, inbound call/sms/email, and chat. Unknown or
+// novel channels are NOT evidence (fail closed at the query).
+const CUSTOMER_ORIGINATED_LEAD_CHANNELS = [
+  'web',
+  'form',
+  'booking',
+  'website_quote',
+  'lawn_diagnostic_report', // public self-serve funnel (vs tech-run 'lawn_diagnostic')
+  'pest_identifier_funnel',
+  'lawn_assessment_funnel',
+  'call',
+  'sms',
+  'chat',
+  'email',
+];
+
 async function latestLeadWithPhone(customerId, variants) {
   return db('leads')
     .where({ customer_id: customerId })
     .whereIn('phone', variants)
+    .whereIn('first_contact_channel', CUSTOMER_ORIGINATED_LEAD_CHANNELS)
     .orderBy('created_at', 'desc')
     .first('id', 'created_at', 'first_contact_at');
 }
@@ -131,4 +156,10 @@ async function freshness(customerId, phone) {
   return new Date(Math.max(...valid.map((d) => d.getTime())));
 }
 
-module.exports = { resolve, freshness, normalizeE164, phoneVariants };
+module.exports = {
+  resolve,
+  freshness,
+  normalizeE164,
+  phoneVariants,
+  CUSTOMER_ORIGINATED_LEAD_CHANNELS,
+};

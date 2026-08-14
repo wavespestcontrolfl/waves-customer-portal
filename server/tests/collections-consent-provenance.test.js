@@ -83,6 +83,37 @@ describe('resolve — strongest evidence first', () => {
     });
   });
 
+  test('the lead arm is restricted to CUSTOMER-ORIGINATED intake channels at the query (codex 2026-08-14: a staff-created lead proves a staffer typed a number, not consent)', async () => {
+    const leadsChain = chain({ first: undefined });
+    setDbTables({
+      sms_log: chain({ first: undefined }),
+      call_log: chain({ first: undefined }),
+      leads: leadsChain,
+    });
+    await ConsentProvenance.resolve('cust-1', '+19415550100');
+    expect(leadsChain.whereIn).toHaveBeenCalledWith(
+      'first_contact_channel',
+      ConsentProvenance.CUSTOMER_ORIGINATED_LEAD_CHANNELS,
+    );
+  });
+
+  test('the allowlist covers the customer-originated intakes and excludes every staff-side channel', () => {
+    const allow = ConsentProvenance.CUSTOMER_ORIGINATED_LEAD_CHANNELS;
+    // Customer-originated (web/booking/estimate forms, funnels, inbound
+    // call/sms/email, chat) — evidence.
+    for (const ch of ['web', 'form', 'booking', 'website_quote', 'call', 'sms', 'chat', 'email',
+      'pest_identifier_funnel', 'lawn_assessment_funnel', 'lawn_diagnostic_report']) {
+      expect(allow).toContain(ch);
+    }
+    // Staff-side / ambiguous writers in the live vocabulary — NOT evidence:
+    // admin-leads.js writes 'manual', tech-field-lead.js 'field_observation',
+    // tech-lawn-diagnostic.js 'lawn_diagnostic' (tech-run), 'referral' is a
+    // third party's word. Unknown/novel channels fall outside the whereIn.
+    for (const ch of ['manual', 'field_observation', 'lawn_diagnostic', 'referral']) {
+      expect(allow).not.toContain(ch);
+    }
+  });
+
   test('no inbound traffic → lead intake carrying the phone (first_contact_at preferred)', async () => {
     setDbTables({
       sms_log: chain({ first: undefined }),

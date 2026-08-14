@@ -10,7 +10,7 @@
  *
  * Denial reasons are stable identifiers (tests pin them):
  *   unknown_channel, customer_not_found, customer_archived,
- *   no_eligible_balance, invoice_pending_settlement,
+ *   no_eligible_balance,
  *   flag_<flag> (one per active collections_flags row covering the channel),
  *   contact_within_24h, voice_contact_within_7d, live_conversation_within_7d,
  *   outside_call_window,
@@ -143,30 +143,21 @@ async function evaluate(customerId, { channel, purpose, now = new Date() } = {})
     // cents-positive remainder). Its fail-closed drop policy is inherited
     // deliberately: a row it cannot prove self-pay is not collectible here
     // either.
-    const openInvoices = await openBalanceInvoices(customerId);
-    // Invoice-level exclusion the loader doesn't make: a payment already in
-    // flight. Status 'processing'/paid/void/draft never reach here (loader
-    // selects sent/viewed/overdue only) and credit-covered rows are dropped
-    // by its cents test, but a row with a Stripe PaymentIntent attached may
-    // be mid-settlement — dunning it risks a double ask. Conservative drop.
-    const eligible = [];
-    let droppedPendingSettlement = false;
-    for (const inv of openInvoices) {
-      if (inv.stripe_payment_intent_id) {
-        droppedPendingSettlement = true;
-        continue;
-      }
-      eligible.push(inv);
-    }
+    // NOTE — deliberately NO stripe_payment_intent_id exclusion here (codex
+    // 2026-08-14 ruling): a populated PI on an open invoice is NOT evidence
+    // of an in-flight payment. PIs persist after failed, canceled, and
+    // abandoned attempts, so excluding on presence would suppress those
+    // invoices forever. The actual in-flight marker is invoice status
+    // 'processing', which the loader above already excludes (it admits only
+    // sent/viewed/overdue), same as paid/void/draft; credit-covered rows
+    // fall to its cents test.
+    const eligible = await openBalanceInvoices(customerId);
     result.eligibleInvoiceIds = eligible.map((inv) => inv.id);
     result.eligibleBalanceCents = eligible.reduce(
       (sum, inv) => sum + Math.round(invoiceAmountDue(inv) * 100),
       0,
     );
-    if (!eligible.length) {
-      if (droppedPendingSettlement) deny('invoice_pending_settlement');
-      deny('no_eligible_balance');
-    }
+    if (!eligible.length) deny('no_eligible_balance');
 
     // ── Hard flags ──────────────────────────────────────────────────────
     const flags = await db('collections_flags')
@@ -189,7 +180,11 @@ async function evaluate(customerId, { channel, purpose, now = new Date() } = {})
       .select('*');
     result.recentContacts = recent;
     const within = (row, ms) => now.getTime() - new Date(row.occurred_at).getTime() < ms;
-    if (channel === 'voice') {
+    // Voice frequency spacing applies to BOTH voice and manual_call (codex
+    // 2026-08-14 P1): manual calls COUNT as voice contacts in the ledger, so
+    // a dial-sheet consumer evaluating manual_call must not be authorized
+    // into a back-to-back call the automated channel would be denied.
+    if (isVoiceLike(channel)) {
       const any24h = recent.find((r) => within(r, DAY_MS));
       if (any24h) {
         deny('contact_within_24h');
@@ -211,15 +206,21 @@ async function evaluate(customerId, { channel, purpose, now = new Date() } = {})
       }
     }
 
-    // ── Voice-only checks ───────────────────────────────────────────────
-    if (channel === 'voice') {
+    // ── Call-shaped checks (voice AND manual_call) ──────────────────────
+    if (isVoiceLike(channel)) {
       // Quiet window: 9:00–17:59 ET, Monday–Friday, via datetime-et (never
-      // raw new Date() ET math — the timestamptz trap).
+      // raw new Date() ET math — the timestamptz trap). Applies to
+      // manual_call too (codex 2026-08-14 P1): a dial sheet must not
+      // authorize an after-hours collection call just because a human
+      // places it.
       const et = etParts(now);
       const weekday = et.dayOfWeek >= 1 && et.dayOfWeek <= 5;
       const inHours = et.hour >= CALL_WINDOW_START_HOUR && et.hour < CALL_WINDOW_END_HOUR;
       if (!weekday || !inHours) deny('outside_call_window');
+    }
 
+    // ── Automated-voice-only checks ─────────────────────────────────────
+    if (channel === 'voice') {
       if (purpose === 'late_payment') {
         if (eligible.length !== 1) {
           if (eligible.length > 1) deny('pilot_requires_single_invoice');
@@ -247,8 +248,16 @@ async function evaluate(customerId, { channel, purpose, now = new Date() } = {})
         if (lineType.state !== 'hit') deny('line_type_unknown');
         else if (lineType.lineType !== 'mobile') deny('line_type_not_mobile');
 
-        // Residential only in the pilot.
-        if (String(customer.property_type || '').toLowerCase() === 'commercial') {
+        // Residential only in the pilot. 'commercial' AND 'business' — the
+        // two values every billing authority treats as commercial
+        // (invoice.js, tax-calculator.js, invoice-pdf.js,
+        // secure-appointment-plans.js all check exactly this pair).
+        // DELIBERATELY NOT fail-closed on NULL/unrecognized: property_type
+        // is ~NULL across prod (commercial-taxability lane, 2026-08-09), so
+        // a strict unknown⇒deny would zero out the pilot. NULL/unknown =
+        // residential-presumed FOR THIS PILOT ONLY — revisit once
+        // property_type is actually populated.
+        if (['commercial', 'business'].includes(String(customer.property_type || '').toLowerCase())) {
           deny('commercial_customer');
         }
       }
