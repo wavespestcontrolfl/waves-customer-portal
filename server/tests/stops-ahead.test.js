@@ -95,7 +95,7 @@ describe('computeStopsAhead', () => {
     // from the clamped count.
     const db = makeDb({ svcRow: baseSvc(), countN: 2, beforeAll: 5, othersAll: 7, doneBefore: 3 });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY }))
-      .toEqual({ stopsAhead: 2, yourStop: 6, totalStops: 8, currentStop: 3 });
+      .toEqual({ stopsAhead: 2, yourStop: 6, totalStops: 8, currentStop: 3, atStop: false });
     // Single conditional UPDATE — (today, clamped, clamped, today, id) for
     // the SET, plus (today, clamped) for the skip-unchanged-write guard.
     expect(db.updateCalls()).toHaveLength(1);
@@ -135,7 +135,7 @@ describe('computeStopsAhead', () => {
       rawFloor: null,
     });
     const res = await computeStopsAhead(db, 'svc-self', { today: TODAY });
-    expect(res).toEqual({ stopsAhead: 2, yourStop: 5, totalStops: 7, currentStop: 0 });
+    expect(res).toEqual({ stopsAhead: 2, yourStop: 5, totalStops: 7, currentStop: 0, atStop: false });
   });
 
   test('a floor from a previous date is superseded (re-date resets the clamp)', async () => {
@@ -204,7 +204,7 @@ describe('computeStopsAhead', () => {
       doneBefore: 2, workingBefore: 1,
     });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY }))
-      .toEqual({ stopsAhead: 1, yourStop: 4, totalStops: 6, currentStop: 3 });
+      .toEqual({ stopsAhead: 1, yourStop: 4, totalStops: 6, currentStop: 3, atStop: true });
   });
 
   test('any read error fails soft to null', async () => {

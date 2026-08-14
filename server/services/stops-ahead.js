@@ -175,8 +175,11 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     // is actively at/driving to one of them.
     const doneBefore = Number(agg?.done_before);
     const workingBefore = Number(agg?.working_before);
-    const currentStop = (Number.isFinite(doneBefore) ? doneBefore : 0)
-      + (Number.isFinite(workingBefore) && workingBefore > 0 ? 1 : 0);
+    // atStop distinguishes "Now at stop X" (tech actively at/driving to it)
+    // from "Finished stop X" (between stops) — labeling the last completed
+    // stop as the current one would misstate where the truck is.
+    const atStop = Number.isFinite(workingBefore) && workingBefore > 0;
+    const currentStop = (Number.isFinite(doneBefore) ? doneBefore : 0) + (atStop ? 1 : 0);
     if (!Number.isFinite(raw) || !Number.isFinite(yourStop) || !Number.isFinite(totalStops)) return null;
 
     // Clamp against the persisted floor — valid only for today's display.
@@ -224,7 +227,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
       if (res?.rows?.[0]) {
         const persisted = Number(res.rows[0].stops_ahead_min_shown);
         return Number.isFinite(persisted)
-          ? { stopsAhead: Math.min(persisted, clamped), yourStop, totalStops, currentStop }
+          ? { stopsAhead: Math.min(persisted, clamped), yourStop, totalStops, currentStop, atStop }
           : null;
       }
       // Zero rows updated = today's stored floor is already ≤ this value
@@ -235,7 +238,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
         .first('stops_ahead_min_shown', 'stops_ahead_shown_date');
       const curMin = cur?.stops_ahead_min_shown == null ? null : Number(cur.stops_ahead_min_shown);
       if (Number.isInteger(curMin) && dateOnly(cur?.stops_ahead_shown_date) === today) {
-        return { stopsAhead: Math.min(curMin, clamped), yourStop, totalStops, currentStop };
+        return { stopsAhead: Math.min(curMin, clamped), yourStop, totalStops, currentStop, atStop };
       }
     } catch (err) {
       logger.warn(`[stops-ahead] floor persist failed for ${svc.id}: ${err.message}`);

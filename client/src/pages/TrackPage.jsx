@@ -506,7 +506,11 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
             display: 'flex', justifyContent: 'space-between', marginTop: 8,
             fontSize: 14, color: TRACK_SURFACE.muted,
           }}>
-            <span>{started ? <>Now at <strong style={{ color: COLORS.glassNavy }}>stop {truckStop} of {totalStops}</strong></> : 'Route starts soon'}</span>
+            {/* "Now at" only while the tech is actively at/driving to a stop;
+                between stops the truthful label is "Finished". */}
+            <span>{started
+              ? <>{routeProgress?.atStop ? 'Now at' : 'Finished'} <strong style={{ color: COLORS.glassNavy }}>stop {truckStop} of {totalStops}</strong></>
+              : 'Route starts soon'}</span>
             <span style={{ fontWeight: 700, color: COLORS.glassNavy }}>You&apos;re stop {yourStop}</span>
           </div>
         </div>

@@ -526,9 +526,12 @@ router.get('/:token', async (req, res, next) => {
       vehicle: customerState === 'en_route' ? await buildVehicle(row) : null,
       stopsAhead: stops ? stops.stopsAhead : null,
       routeProgress: stops
-        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop }
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop, atStop: stops.atStop }
         : null,
-      vehicleApprox: stops ? await buildApproxVehicle(row) : null,
+      // Truck coords only once the route has STARTED (currentStop ≥ 1) —
+      // before the first stop the truck sits at the tech's home/base,
+      // which is not route information.
+      vehicleApprox: stops && stops.currentStop >= 1 ? await buildApproxVehicle(row) : null,
       summary: customerState === 'complete' ? await buildSummary(row) : null,
       cancellation: customerState === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }
