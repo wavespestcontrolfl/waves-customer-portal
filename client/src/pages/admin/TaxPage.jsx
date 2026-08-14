@@ -4415,46 +4415,51 @@ function BankImportTab() {
                         </option>
                       )}
                     </select>
-                  ) : r.status === "unmatched" && r.direction === "credit" && r.suggestion?.refundCandidates?.length ? (
+                  ) : r.status === "unmatched" && r.direction === "credit" && (r.suggestion?.refundCandidates?.length || r.suggestion?.payoutCandidates?.length) ? (
+                    /* BOTH action types can be parked at once (an unrelated
+                       same-amount payout must not hide a legitimate refund) —
+                       one select, values prefixed p:/r: so the button knows
+                       which route the pick belongs to */
                     <select
                       style={{ ...inputStyle, maxWidth: 240 }}
                       value={linkPick[r.id] || ""}
                       onChange={(e) => setLinkPick((p) => ({ ...p, [r.id]: e.target.value }))}
-                      title="Original purchases this refund could offset — applying reduces that expense"
+                      title="What is this deposit? Pick the Stripe payout it is, or the original purchase it refunds (applying a refund reduces that expense)"
                     >
                       <option value="">
-                        {r.suggestion.refundCandidates.length} possible original purchase{r.suggestion.refundCandidates.length > 1 ? "s" : ""}…
+                        {[
+                          r.suggestion?.payoutCandidates?.length ? `${r.suggestion.payoutCandidates.length} payout${r.suggestion.payoutCandidates.length > 1 ? "s" : ""}` : null,
+                          r.suggestion?.refundCandidates?.length ? `${r.suggestion.refundCandidates.length} original purchase${r.suggestion.refundCandidates.length > 1 ? "s" : ""}` : null,
+                        ].filter(Boolean).join(" · ")}
+                        …
                       </option>
-                      {r.suggestion.refundCandidates.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {(c.vendor_name || c.description || "expense").slice(0, 34)} · {fmtM(c.amount)} · {fmtD(c.expense_date)}
-                        </option>
-                      ))}
-                      {(r.suggestion.refundCandidatesTotal || 0) > r.suggestion.refundCandidates.length && (
-                        <option value="" disabled>
-                          +{r.suggestion.refundCandidatesTotal - r.suggestion.refundCandidates.length} more — closest amounts shown; narrow via the Expenses tab
-                        </option>
+                      {!!r.suggestion?.payoutCandidates?.length && (
+                        <optgroup label="Stripe payouts — link">
+                          {r.suggestion.payoutCandidates.map((c) => (
+                            <option key={`p:${c.id}`} value={`p:${c.id}`}>
+                              {fmtM(c.amount)} · arrived {fmtD(c.arrival_date)}
+                            </option>
+                          ))}
+                          {(r.suggestion.payoutCandidatesTotal || 0) > r.suggestion.payoutCandidates.length && (
+                            <option value="" disabled>
+                              +{r.suggestion.payoutCandidatesTotal - r.suggestion.payoutCandidates.length} more — nearest arrivals shown; identify it on the Banking page
+                            </option>
+                          )}
+                        </optgroup>
                       )}
-                    </select>
-                  ) : r.status === "unmatched" && r.direction === "credit" && r.suggestion?.payoutCandidates?.length ? (
-                    <select
-                      style={{ ...inputStyle, maxWidth: 240 }}
-                      value={linkPick[r.id] || ""}
-                      onChange={(e) => setLinkPick((p) => ({ ...p, [r.id]: e.target.value }))}
-                      title="Stripe payouts with a matching amount near this date — pick the one this deposit is"
-                    >
-                      <option value="">
-                        {r.suggestion.payoutCandidates.length} possible payout{r.suggestion.payoutCandidates.length > 1 ? "s" : ""}…
-                      </option>
-                      {r.suggestion.payoutCandidates.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {fmtM(c.amount)} · arrived {fmtD(c.arrival_date)}
-                        </option>
-                      ))}
-                      {(r.suggestion.payoutCandidatesTotal || 0) > r.suggestion.payoutCandidates.length && (
-                        <option value="" disabled>
-                          +{r.suggestion.payoutCandidatesTotal - r.suggestion.payoutCandidates.length} more — nearest arrivals shown; identify it on the Banking page
-                        </option>
+                      {!!r.suggestion?.refundCandidates?.length && (
+                        <optgroup label="Original purchases — apply refund">
+                          {r.suggestion.refundCandidates.map((c) => (
+                            <option key={`r:${c.id}`} value={`r:${c.id}`}>
+                              {(c.vendor_name || c.description || "expense").slice(0, 34)} · {fmtM(c.amount)} · {fmtD(c.expense_date)}
+                            </option>
+                          ))}
+                          {(r.suggestion.refundCandidatesTotal || 0) > r.suggestion.refundCandidates.length && (
+                            <option value="" disabled>
+                              +{r.suggestion.refundCandidatesTotal - r.suggestion.refundCandidates.length} more — closest amounts shown; narrow via the Expenses tab
+                            </option>
+                          )}
+                        </optgroup>
                       )}
                     </select>
                   ) : (
@@ -4487,15 +4492,15 @@ function BankImportTab() {
                       disabled={!!busy}
                       style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
                       onClick={() => {
-                        // dispatch on WHICH list the pick came from — a bank
-                        // credit parks refund candidates too (a purchase
-                        // refunded into checking), and only one list is ever
-                        // present (the matcher subtracts the other's keys)
-                        const isRefund = !!r.suggestion?.refundCandidates?.length;
+                        // the pick's p:/r: prefix says which route it belongs
+                        // to — both lists can be parked on one credit
+                        const pick = String(linkPick[r.id] || "");
+                        const isRefund = pick.startsWith("r:");
+                        const id = pick.slice(2);
                         const path = isRefund
                           ? `/admin/tax/bank-import/${r.id}/apply-refund`
                           : `/admin/tax/bank-import/${r.id}/link-payout`;
-                        const body = isRefund ? { expenseId: linkPick[r.id] } : { payoutId: linkPick[r.id] };
+                        const body = isRefund ? { expenseId: id } : { payoutId: id };
                         act(isRefund ? "apply-refund" : "link-payout", path, body).then((res) => {
                           if (res)
                             setLinkPick((p) => {
@@ -4506,7 +4511,7 @@ function BankImportTab() {
                         });
                       }}
                     >
-                      {r.suggestion?.refundCandidates?.length ? "Apply refund" : "Link payout"}
+                      {String(linkPick[r.id] || "").startsWith("r:") ? "Apply refund" : "Link payout"}
                     </button>
                   )}
                   {/* transfer-flagged rows keep Create too — the flag is only a

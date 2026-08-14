@@ -915,38 +915,40 @@ async function runDeterministicMatching({ limit } = {}) {
       // is always a human call. Card credits are refund territory outright;
       // bank credits reach here only AFTER payout matching comes up empty
       // (a debit-card purchase refunded into checking).
-      const parkRefundCandidates = async () => {
+      const refundCandidateList = async () => {
         const originals = await db('expenses')
           .whereBetween('expense_date', [addDays(txnDate, -REFUND_LOOKBACK_DAYS), txnDate])
           .where('amount', '>=', row.amount)
           .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
-        const refundCandidates = originals.filter(c => vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
-        if (!refundCandidates.length) return false;
+        const list = originals.filter(c => vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
         // Likeliest-first, deterministic: nearest covering amount, then the
         // most recent purchase, then id — so the real original sits inside
         // the bounded visible slice even for a high-frequency vendor. The
         // apply route validates by the same plausibility RULES, not by
         // membership in this display slice, so an off-slice original is
         // still applicable.
-        refundCandidates.sort((a, b) => (Number(a.amount) - Number(b.amount))
+        list.sort((a, b) => (Number(a.amount) - Number(b.amount))
           || String(toDateStr(b.expense_date)).localeCompare(String(toDateStr(a.expense_date)))
           || String(a.id).localeCompare(String(b.id)));
-        summary.ambiguous++;
-        // stale payout keys subtracted: whichever list is present is the
-        // row's ONE review action, and the UI dispatches on that
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-          suggestion: suggestionMerge({
-            refundCandidates: refundCandidates.slice(0, 20).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: toDateStr(c.expense_date) })),
-            refundCandidatesTotal: refundCandidates.length,
-          }, ['payoutCandidates', 'payoutCandidatesTotal']),
-          updated_at: new Date(),
-        });
-        return true;
+        return list;
       };
+      const refundPatch = (list) => ({
+        refundCandidates: list.slice(0, 20).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: toDateStr(c.expense_date) })),
+        refundCandidatesTotal: list.length,
+      });
       // Stripe pays out to the BANK account only — card credits skip payout
       // matching entirely.
       if (row.account_type !== 'bank') {
-        if (!(await parkRefundCandidates())) await markScanned(row);
+        const refunds = await refundCandidateList();
+        if (refunds.length) {
+          summary.ambiguous++;
+          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+            suggestion: suggestionMerge(refundPatch(refunds), ['payoutCandidates', 'payoutCandidatesTotal']),
+            updated_at: new Date(),
+          });
+        } else {
+          await markScanned(row);
+        }
         continue;
       }
       // The COMPLETE payout survey — reused for the post-claim ambiguity
@@ -1083,15 +1085,22 @@ async function runDeterministicMatching({ limit } = {}) {
         // date, then id) and bounded at 20 with the honest total — the
         // link-payout route validates by the matcher's plausibility RULES,
         // not slice membership, so an off-slice payout stays linkable.
-        // Stale refund keys subtracted for the same reason as the inverse.
+        // Refund candidates park ALONGSIDE when both are plausible: an
+        // unrelated same-amount payout in the window must not hide the
+        // legitimate refund action (the UI offers the union) — otherwise
+        // the operator could only reach the refund by linking and unlinking
+        // a known-wrong payout. Stale refund keys are subtracted only when
+        // no refund target survives the rescan.
         summary.ambiguous++;
+        const refunds = await refundCandidateList();
         const arrivalDistance = (c) => Math.abs(new Date(`${toDateStr(c.arrival_date)}T00:00:00Z`) - new Date(`${txnDate}T00:00:00Z`));
         const parkedPayouts = [...candidates].sort((a, b) => (arrivalDistance(a) - arrivalDistance(b)) || String(a.id).localeCompare(String(b.id)));
         await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
           suggestion: suggestionMerge({
             payoutCandidates: parkedPayouts.slice(0, 20).map(c => ({ id: c.id, amount: c.effective_amount, arrival_date: toDateStr(c.arrival_date) })),
             payoutCandidatesTotal: candidates.length,
-          }, ['refundCandidates', 'refundCandidatesTotal']),
+            ...(refunds.length ? refundPatch(refunds) : {}),
+          }, refunds.length ? [] : ['refundCandidates', 'refundCandidatesTotal']),
           updated_at: new Date(),
         });
       } else if (candidates.length === 0) {
@@ -1099,7 +1108,16 @@ async function runDeterministicMatching({ limit } = {}) {
         // refund into checking (debit-card purchase refunded). Without this
         // path the operator's only actions were Ignore or a wrong payout
         // link, leaving the original expense overstated.
-        if (!(await parkRefundCandidates())) await markScanned(row); // nothing to propose — leave the fresh pool
+        const refunds = await refundCandidateList();
+        if (refunds.length) {
+          summary.ambiguous++;
+          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+            suggestion: suggestionMerge(refundPatch(refunds), ['payoutCandidates', 'payoutCandidatesTotal']),
+            updated_at: new Date(),
+          });
+        } else {
+          await markScanned(row); // nothing to propose — leave the fresh pool
+        }
       }
       continue;
     }

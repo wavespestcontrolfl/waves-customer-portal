@@ -618,6 +618,24 @@ describe('runDeterministicMatching', () => {
     expect(String(parked.patch.suggestion.sql)).toContain("'payoutCandidates'");
   });
 
+  test('an ambiguous bank credit parks BOTH payout and refund candidates — the refund path is never hidden', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA 5211 REFUND', amount: 20, direction: 'credit', account_type: 'bank', suggestion: null }];
+    // two unrelated same-amount payouts make the payout side ambiguous…
+    state.payouts = [
+      { id: 'po-1', amount: '20.00', arrival_date: '2026-08-10', reconciled: false },
+      { id: 'po-2', amount: '20.00', arrival_date: '2026-08-11', reconciled: false },
+    ];
+    // …while the credit is really a refund of this purchase
+    state.expenses = [{ id: 'exp-1', amount: '58.12', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-01', payment_method: 'ach' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).payoutCandidates);
+    const sug = sugOf(parked);
+    expect(sug.payoutCandidates).toHaveLength(2);
+    expect(sug.refundCandidates).toHaveLength(1); // the union parks — no link-then-unlink dance
+    expect(sug.refundCandidates[0].id).toBe('exp-1');
+  });
+
   test('a bank credit with an eligible payout still prefers the payout path over refund parking', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE DEPOSIT WAWA', amount: 20, direction: 'credit', account_type: 'bank', suggestion: null }];
     state.payouts = [{ id: 'po-1', amount: '20.00', arrival_date: '2026-08-11', reconciled: false }];
