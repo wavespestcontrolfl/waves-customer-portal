@@ -540,23 +540,38 @@ const COOLDOWN_STATUSES = [
   'incomplete_address', 'vacant_or_unassessed', 'no_parcel', 'no_record',
 ];
 
+// enrichPropertyById pre-spend skip reasons that mean the row NO LONGER
+// matches fetchBackfillCandidates' predicate (deleted/deactivated, filled
+// complete by another writer, unrepairable lone coordinate, address no
+// longer geocodable) — for the sweep's offset accounting these shift the
+// result set exactly like a completed enrichment does. 'lookup_in_flight'
+// is deliberately absent: that row still matches and keeps its position.
+const LEFT_CANDIDATE_SET_SKIPS = [
+  'missing', 'complete', 'unrepairable_partial', 'incomplete_address', 'no_address',
+];
+
 /**
  * Classifies a candidate row by its address's most recent lookup attempt
  * inside the cooldown window:
  * - 'cooldown'  — the last attempt was UNPRODUCTIVE; retrying soon re-buys
  *   the same nothing.
  * - 'parked'    — a PRODUCTIVE attempt (resolved/cache_hit) already ran AND
- *   the enrich lane worked this row (facts written, or the deliberate
- *   no-fill/flag touch: updated_at > created_at + 1s slop). Re-selecting
- *   it nightly would let a batch-sized head of partially enriched rows
- *   starve the backlog; it resurfaces when the attempt ages out.
- * - null        — go: no recent attempt, or a productive attempt on an
- *   UNWORKED row (the in-flight-skip catch-up case — the enrich is a
- *   near-free cache hit, exactly what the sweep wants to consume).
+ *   the enrich lane worked this row AFTER it: the row's updated_at sits at
+ *   or past last_attempt_at (the fact-fill and the deliberate no-fill/flag
+ *   touches all stamp updated_at moments after the attempt lands in the
+ *   ledger), and past created_at + 1s slop so insertion's own stamp never
+ *   qualifies. Re-selecting a worked row nightly would let a batch-sized
+ *   head of partially enriched rows starve the backlog; it resurfaces when
+ *   the attempt ages out.
+ * - null        — go: no recent attempt, or a productive attempt the enrich
+ *   lane never consumed (the in-flight-skip catch-up case — the enrich is
+ *   a near-free cache hit, exactly what the sweep wants to consume).
  * Evidence is the ATTEMPT LEDGER, never property updated_at alone — an
  * ordinary admin edit must not park a row a week (that was the old
- * recently_touched sort sink's failure). Fail-open: a ledger error means
- * "go".
+ * recently_touched sort sink's failure), and because the edit's stamp
+ * predates any LATER lookup attempt, an edited row followed by an
+ * estimator-side lookup still reads as unworked and gets its catch-up.
+ * Fail-open: a ledger error means "go".
  */
 async function recentLookupVerdict(row) {
   try {
@@ -565,12 +580,15 @@ async function recentLookupVerdict(row) {
     const attempt = await db('property_lookups')
       .where({ address_hash: hash })
       .whereRaw(`last_attempt_at > NOW() - INTERVAL '${BACKFILL_ATTEMPT_COOLDOWN_DAYS} days'`)
-      .first('last_attempt_status');
+      .first('last_attempt_status', 'last_attempt_at');
     if (!attempt) return null;
     if (COOLDOWN_STATUSES.includes(attempt.last_attempt_status)) return 'cooldown';
     const created = row.created_at ? new Date(row.created_at).getTime() : NaN;
     const updated = row.updated_at ? new Date(row.updated_at).getTime() : NaN;
-    const worked = Number.isFinite(created) && Number.isFinite(updated) && updated > created + 1000;
+    const attemptedAt = attempt.last_attempt_at ? new Date(attempt.last_attempt_at).getTime() : NaN;
+    const worked = Number.isFinite(created) && Number.isFinite(updated) && Number.isFinite(attemptedAt)
+      && updated > created + 1000
+      && updated >= attemptedAt;
     return worked ? 'parked' : null;
   } catch (err) {
     logger.warn('[call-property-lookup] attempt-cooldown check failed', { error: errId(err) });
@@ -891,15 +909,23 @@ async function sweepUnenrichedProperties({ limit } = {}) {
     if (!page.length) break;
     seen += page.length;
     // OFFSET advances only by rows that STAY in the NULL-filtered result
-    // set (cooled/parked/failed/no-data/partially-filled). Only a row that
-    // is now COMPLETE leaves the set and shifts everything left — a partial
-    // fill (coords taken, synthesized type refused) still matches the
-    // filter. This accounting requires the candidate ORDER to be stable
-    // while the sweep runs: every sort key (upcoming visit, estimate,
-    // created_at) is untouched by the sweep's own writes — a sort key
-    // derived from updated_at would move each looked-up row to the tail
-    // mid-sweep and the advancing offset would jump over unseen rows.
-    let completedThisPage = 0;
+    // set (cooled/parked/failed/no-data/partially-filled). A row that
+    // LEAVES the set shifts everything after it left — that is a completed
+    // enrichment, but also any concurrent departure enrichPropertyById
+    // reports pre-spend: the row vanished/deactivated ('missing'), was
+    // completed by another writer ('complete'), became unrepairable
+    // ('unrepairable_partial'), or lost its geocodable address
+    // ('incomplete_address'/'no_address' — the candidate SQL requires
+    // one). Counting only enrich-completions over-advanced the offset and
+    // skipped a shifted eligible row for the night. A partial fill (coords
+    // taken, synthesized type refused) and an in-flight skip still match
+    // the filter and stay counted. This accounting also requires the
+    // candidate ORDER to be stable while the sweep runs: every sort key
+    // (upcoming visit, estimate, created_at) is untouched by the sweep's
+    // own writes — a sort key derived from updated_at would move each
+    // looked-up row to the tail mid-sweep and the advancing offset would
+    // jump over unseen rows.
+    let leftSetThisPage = 0;
     for (const row of page) {
       if (processed >= batch) break;
       const verdict = await recentLookupVerdict(row);
@@ -912,14 +938,14 @@ async function sweepUnenrichedProperties({ limit } = {}) {
         // and must not let a head of skip rows exhaust the nightly cap.
         if (!res.skipped) processed += 1;
         if (res.enriched) enriched += 1;
-        if (res.complete) completedThisPage += 1;
+        if (res.complete || LEFT_CANDIDATE_SET_SKIPS.includes(res.skipped)) leftSetThisPage += 1;
       } catch (err) {
         processed += 1;
         failed += 1;
         logger.warn('[call-property-lookup] backfill row failed', { propertyId: row.id, error: errId(err) });
       }
     }
-    offset += page.length - completedThisPage;
+    offset += page.length - leftSetThisPage;
   }
   logger.info('[call-property-lookup] backfill sweep complete', {
     candidates: seen,

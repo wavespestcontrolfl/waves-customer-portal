@@ -567,27 +567,35 @@ describe('sweepUnenrichedProperties', () => {
 
   test('park is ledger-based: worked rows skip free, admin edits and cache catch-ups still enrich', async () => {
     process.env.GATE_PROPERTY_ENRICH_BACKFILL = 'true';
-    process.env.PROPERTY_BACKFILL_BATCH = '2';
+    process.env.PROPERTY_BACKFILL_BATCH = '3';
     const mkRow = (id, createdAt, updatedAt) => ({
       id, active: true, latitude: null, longitude: null, property_type: null,
       address_line1: '123 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
       created_at: createdAt, updated_at: updatedAt,
     });
     const candidates = [
-      // Productive attempt + the enrich lane's touch (updated_at moved
-      // past created_at) → PARKED: no lookup, no batch spend.
+      // Productive attempt AND the enrich lane's touch landed AFTER it
+      // (updated_at ≥ last_attempt_at, past created_at + 1s) → PARKED:
+      // no lookup, no batch spend.
       mkRow('p-parked', '2026-08-01T00:00:00Z', '2026-08-13T00:00:00Z'),
       // updated_at recent but NO ledger attempt — an ordinary admin edit
       // (say a ZIP fill that first made the row geocodable) must NEVER
       // park a candidate; property updated_at alone is not attempt
       // evidence.
       mkRow('p-admin-edit', '2026-08-01T00:00:00Z', '2026-08-13T00:00:00Z'),
-      // Productive attempt but the row was never worked (in-flight-skip
-      // catch-up) → enriched as a near-free cache hit.
+      // Admin edit FOLLOWED BY an estimator-side lookup the enrich lane
+      // never consumed: updated_at predates last_attempt_at, so the row
+      // still reads as unworked and gets its near-free cache catch-up —
+      // a generic "updated after creation" test wrongly parked this.
+      mkRow('p-edit-then-lookup', '2026-08-01T00:00:00Z', '2026-08-10T00:00:00Z'),
+      // Productive attempt but the row was never touched at all
+      // (in-flight-skip catch-up) → enriched as a near-free cache hit.
       mkRow('p-catchup', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'),
     ];
     // property_lookups call order: p-parked verdict(1) → p-admin-edit
-    // verdict(2) + in-flight(3) → p-catchup verdict(4) + in-flight(5).
+    // verdict(2) + in-flight(3) → p-edit-then-lookup verdict(4) +
+    // in-flight(5) → p-catchup verdict(6) + in-flight(7).
+    const attempt = { last_attempt_status: 'resolved', last_attempt_at: '2026-08-12T00:00:00Z' };
     let ledgerCalls = 0;
     let rowFetches = 0;
     db.mockImplementation((table) => {
@@ -595,11 +603,11 @@ describe('sweepUnenrichedProperties', () => {
       if (String(table).startsWith('customer_properties as cp')) return builder(candidates);
       if (table === 'property_lookups') {
         ledgerCalls += 1;
-        return builder([1, 4].includes(ledgerCalls) ? { last_attempt_status: 'resolved' } : undefined);
+        return builder([1, 4, 6].includes(ledgerCalls) ? attempt : undefined);
       }
       if (table === 'customer_properties') {
         rowFetches += 1;
-        return builder(candidates[rowFetches === 1 ? 1 : 2]);
+        return builder(candidates[Math.min(rowFetches, 3)]);
       }
       return builder(1);
     });
@@ -611,9 +619,52 @@ describe('sweepUnenrichedProperties', () => {
     const res = await sweepUnenrichedProperties();
     expect(res.parked).toBe(1);
     expect(res.cooledDown).toBe(0);
-    expect(res.processed).toBe(2);
-    expect(res.enriched).toBe(2);
-    expect(performPropertyLookup).toHaveBeenCalledTimes(2);
+    expect(res.processed).toBe(3);
+    expect(res.enriched).toBe(3);
+    expect(performPropertyLookup).toHaveBeenCalledTimes(3);
+  });
+
+  test('a row that left the candidate set pre-spend shifts the offset like a completion', async () => {
+    process.env.GATE_PROPERTY_ENRICH_BACKFILL = 'true';
+    process.env.PROPERTY_BACKFILL_BATCH = '1';
+    const mkRow = (id) => ({
+      id, active: true, latitude: null, longitude: null, property_type: null,
+      address_line1: '123 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+    });
+    // Page 1's only row vanishes before its re-read (deleted/deactivated
+    // concurrently → skipped 'missing'). It LEFT the candidate set, so the
+    // next page must be fetched at the SAME offset — advancing past it
+    // would skip the row that shifted into its position (the old
+    // completions-only accounting did exactly that).
+    const pages = [[mkRow('p-gone')], [mkRow('p-real')]];
+    const cpBuilder = builder([]);
+    let pageCalls = 0;
+    let rowFetches = 0;
+    db.mockImplementation((table) => {
+      if (String(table).startsWith('scheduled_services as ss')) return builder([]);
+      if (String(table).startsWith('customer_properties as cp')) {
+        const rows = pages[Math.min(pageCalls, 1)];
+        pageCalls += 1;
+        // Reuse ONE builder so every .offset(...) call is recorded on it.
+        cpBuilder.then = (resolve) => resolve(rows);
+        return cpBuilder;
+      }
+      if (table === 'property_lookups') return builder(undefined);
+      if (table === 'customer_properties') {
+        rowFetches += 1;
+        return builder(rowFetches === 1 ? undefined : pages[1][0]);
+      }
+      return builder(1);
+    });
+    performPropertyLookup.mockResolvedValue({
+      satellite: { inServiceArea: true },
+      enriched: { lat: 27.5, lng: -82.5, propertyType: 'Single Family', _observed: { propertyType: true } },
+    });
+
+    const res = await sweepUnenrichedProperties();
+    expect(res.processed).toBe(1);
+    expect(res.enriched).toBe(1);
+    expect(cpBuilder.offset.mock.calls).toEqual([[0], [0]]);
   });
 
   test('a throwing row is counted failed and never aborts the batch', async () => {
