@@ -291,6 +291,110 @@ async function refundCandidatesForRow(row, dbOrTrx = db) {
   return list;
 }
 
+// The COMPLETE expense-candidate survey for one bank row — net and gross
+// identities, unbounded (uniqueness must be judged over the full set). Used
+// by the matcher, its in-transaction recheck and post-claim verify, the
+// crash-recovery sweep for verifyPending claims, and the on-demand
+// candidate route.
+async function surveyExpenseCandidatesForRow(row, rejected, dbOrTrx = db) {
+  const txnDate = toDateStr(row.txn_date);
+  let expenseQuery = dbOrTrx('expenses')
+    .whereBetween('expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
+    .whereRaw('abs(amount - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
+    // claims by OTHER rows only — excluding our own row's (nonexistent
+    // pre-claim) claim keeps this survey valid for the post-claim
+    // plurality verify below
+    .whereNotExists(function claimed() {
+      this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = expenses.id').whereRaw('bt.id <> ?', [row.id]);
+    })
+    // A refund-REDUCED expense is never a net candidate: its remaining
+    // net amount belongs to the original gross debit, and letting a
+    // coincidental same-net debit consume it would strand that debit
+    // unexplained. Refunded expenses match ONLY through the gross path.
+    .whereNotExists(function refunded() {
+      this.select(1).from('bank_transactions as rbt')
+        .whereRaw("rbt.status = 'refund_applied'")
+        .whereRaw("rbt.suggestion->>'refundAppliedTo' = expenses.id::text");
+    })
+    // UNBOUNDED on purpose: uniqueness must be judged over the COMPLETE
+    // candidate set — a cap could hide a second strong candidate and fake
+    // "exactly one". The ±5-day amount-filtered window keeps this small;
+    // only the operator-facing suggestion list below is bounded.
+    .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
+  if (rejected.expenseIds.length) expenseQuery = expenseQuery.whereNotIn('id', rejected.expenseIds);
+  const found = await expenseQuery;
+  // GROSS-amount candidates: an applied refund already REDUCED the ledger
+  // expense, so a later-imported full-price debit no longer matches its
+  // net amount and the row would stay unexplained (or bait a duplicate
+  // create). The refund credit's suggestion carries the association —
+  // join it back and match against amount + applied refunds. Coverage is
+  // already refund-aware: covered caps at the CURRENT amount and the
+  // refund credit nets the difference in the purchase month.
+  let grossQuery = dbOrTrx('expenses as e')
+    .join('bank_transactions as rbt', function refundLink() {
+      this.on(db.raw("rbt.status = 'refund_applied'"))
+        .andOn(db.raw("rbt.suggestion->>'refundAppliedTo' = e.id::text"));
+    })
+    .whereBetween('e.expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
+    .whereNotExists(function claimed() {
+      this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = e.id').whereRaw('bt.id <> ?', [row.id]);
+    })
+    .groupBy('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method')
+    .havingRaw("abs(e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) - ?) <= ?", [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
+    .select('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method',
+      db.raw("e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) as gross_amount"));
+  if (rejected.expenseIds.length) grossQuery = grossQuery.whereNotIn('e.id', rejected.expenseIds);
+  const netIds = new Set(found.map(c => c.id));
+  for (const g of await grossQuery) {
+    // a net match wins over its own gross reading — uniqueness is judged
+    // over expense IDENTITIES, never the same expense twice
+    if (!netIds.has(g.id)) found.push({ ...g, gross_amount: Number(g.gross_amount) });
+  }
+  return found;
+}
+
+// Crash-recovery sweep for the post-claim plurality verify: a claim commits
+// with suggestion.verifyPending, and a process exit before the verify would
+// otherwise leave a possibly-ambiguous link nothing ever revisits. Bounded
+// like the echo retries; the normal path clears the marker inline, so this
+// sweep only ever sees crash leftovers.
+async function verifyPendingExpenseClaims() {
+  const rows = await db('bank_transactions')
+    .where({ status: 'matched_expense' })
+    .whereRaw("suggestion->>'verifyPending' = 'true'")
+    .orderBy('updated_at', 'asc')
+    .orderBy('id', 'asc')
+    .limit(25)
+    .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion', 'matched_expense_id');
+  let cleared = 0;
+  let reverted = 0;
+  for (const row of rows) {
+    const rejected = rejectedTargets(row.suggestion);
+    const candidates = await surveyExpenseCandidatesForRow(row, rejected);
+    if (candidates.length === 1 && candidates[0].id === row.matched_expense_id) {
+      const done = await db('bank_transactions')
+        .where({ id: row.id, status: 'matched_expense', matched_expense_id: row.matched_expense_id })
+        .update({ suggestion: db.raw("suggestion - 'verifyPending'"), updated_at: new Date() });
+      if (done) cleared++;
+    } else {
+      const changed = await db('bank_transactions')
+        .where({ id: row.id, status: 'matched_expense', matched_expense_id: row.matched_expense_id })
+        .update({
+          status: 'unmatched',
+          matched_expense_id: null,
+          match_method: null,
+          matched_at: null,
+          suggestion: suggestionMerge({
+            autoRevert: { at: new Date().toISOString(), expenseId: row.matched_expense_id, reason: 'a concurrently added expense made the match ambiguous' },
+          }, ['verifyPending']),
+          updated_at: new Date(),
+        });
+      if (changed) reverted++;
+    }
+  }
+  return { cleared, reverted };
+}
+
 // Server-side plausibility for a refund target — the SAME rules the matcher
 // uses to park refundCandidates, so any valid original purchase is
 // applicable even when it fell outside the bounded parked slice (a fuel or
@@ -495,6 +599,7 @@ async function retryPendingReconciliations() {
   const healLinks = await healUnreconciledLinks();
   const orphanRefunds = await healOrphanRefunds();
   const editedLinks = await healEditedExpenseLinks();
+  const claimVerify = await verifyPendingExpenseClaims();
   // BOUNDED batch + sentinel: during a reconciliation outage a large
   // backfill can leave hundreds of pending echoes, and retrying them all
   // serially would starve the (separately bounded) unmatched-row scan on
@@ -553,7 +658,7 @@ async function retryPendingReconciliations() {
   // the reversal's own transaction, so a failed reversal rolls the unlink
   // back — there is never a committed unlink awaiting reversal.)
   const morePending = pendingFetch.length > PENDING_RETRY_LIMIT || unresolved > 0;
-  return { pending: pending.length, morePending, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds, expenseLinksReverted: editedLinks };
+  return { pending: pending.length, morePending, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds, expenseLinksReverted: editedLinks, claimVerifyReverted: claimVerify.reverted };
 }
 
 // An operator EDIT to a linked expense (amount/date via the Expenses or
@@ -960,7 +1065,7 @@ async function runDeterministicMatching({ limit } = {}) {
   // pending echoes beyond the retry batch are unfinished work too — the
   // caller's "more rows pending" surface must not read as done
   moreRemaining = moreRemaining || reconciliation.morePending;
-  const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted, expenseLinksReverted: reconciliation.expenseLinksReverted };
+  const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted, expenseLinksReverted: reconciliation.expenseLinksReverted, claimVerifyReverted: reconciliation.claimVerifyReverted };
 
   for (const row of unmatched) {
     const txnDate = toDateStr(row.txn_date);
@@ -1244,63 +1349,9 @@ async function runDeterministicMatching({ limit } = {}) {
     }
 
     // The COMPLETE candidate survey — net and gross identities. Reused
-    // inside the claim transaction so uniqueness is re-judged atomically
-    // with the claim (see below).
-    const surveyExpenseCandidates = async (dbOrTrx) => {
-      let expenseQuery = dbOrTrx('expenses')
-        .whereBetween('expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
-        .whereRaw('abs(amount - ?) <= ?', [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
-        // claims by OTHER rows only — excluding our own row's (nonexistent
-        // pre-claim) claim keeps this survey valid for the post-claim
-        // plurality verify below
-        .whereNotExists(function claimed() {
-          this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = expenses.id').whereRaw('bt.id <> ?', [row.id]);
-        })
-        // A refund-REDUCED expense is never a net candidate: its remaining
-        // net amount belongs to the original gross debit, and letting a
-        // coincidental same-net debit consume it would strand that debit
-        // unexplained. Refunded expenses match ONLY through the gross path.
-        .whereNotExists(function refunded() {
-          this.select(1).from('bank_transactions as rbt')
-            .whereRaw("rbt.status = 'refund_applied'")
-            .whereRaw("rbt.suggestion->>'refundAppliedTo' = expenses.id::text");
-        })
-        // UNBOUNDED on purpose: uniqueness must be judged over the COMPLETE
-        // candidate set — a cap could hide a second strong candidate and fake
-        // "exactly one". The ±5-day amount-filtered window keeps this small;
-        // only the operator-facing suggestion list below is bounded.
-        .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
-      if (rejected.expenseIds.length) expenseQuery = expenseQuery.whereNotIn('id', rejected.expenseIds);
-      const found = await expenseQuery;
-      // GROSS-amount candidates: an applied refund already REDUCED the ledger
-      // expense, so a later-imported full-price debit no longer matches its
-      // net amount and the row would stay unexplained (or bait a duplicate
-      // create). The refund credit's suggestion carries the association —
-      // join it back and match against amount + applied refunds. Coverage is
-      // already refund-aware: covered caps at the CURRENT amount and the
-      // refund credit nets the difference in the purchase month.
-      let grossQuery = dbOrTrx('expenses as e')
-        .join('bank_transactions as rbt', function refundLink() {
-          this.on(db.raw("rbt.status = 'refund_applied'"))
-            .andOn(db.raw("rbt.suggestion->>'refundAppliedTo' = e.id::text"));
-        })
-        .whereBetween('e.expense_date', [addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS), addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS)])
-        .whereNotExists(function claimed() {
-          this.select(1).from('bank_transactions as bt').whereRaw('bt.matched_expense_id = e.id').whereRaw('bt.id <> ?', [row.id]);
-        })
-        .groupBy('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method')
-        .havingRaw("abs(e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) - ?) <= ?", [row.amount, CANDIDATE_AMOUNT_TOLERANCE])
-        .select('e.id', 'e.amount', 'e.description', 'e.vendor_name', 'e.expense_date', 'e.payment_method',
-          db.raw("e.amount + sum((rbt.suggestion->>'refundAmount')::numeric) as gross_amount"));
-      if (rejected.expenseIds.length) grossQuery = grossQuery.whereNotIn('e.id', rejected.expenseIds);
-      const netIds = new Set(found.map(c => c.id));
-      for (const g of await grossQuery) {
-        // a net match wins over its own gross reading — uniqueness is judged
-        // over expense IDENTITIES, never the same expense twice
-        if (!netIds.has(g.id)) found.push({ ...g, gross_amount: Number(g.gross_amount) });
-      }
-      return found;
-    };
+    // inside the claim transaction (uniqueness re-judged atomically with
+    // the claim), the post-claim verify, and the crash-recovery sweep.
+    const surveyExpenseCandidates = (dbOrTrx = db) => surveyExpenseCandidatesForRow(row, rejected, dbOrTrx);
     const candidates = await surveyExpenseCandidates(db);
     // The amount a candidate matches AT: its gross when refunds already
     // reduced it, its current amount otherwise.
@@ -1346,7 +1397,19 @@ async function runDeterministicMatching({ limit } = {}) {
           if (!stillValid) return;
           const changed = await trx('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
-            .update({ status: 'matched_expense', matched_expense_id: strong[0].id, match_method: 'expense_amount_date_vendor', matched_at: new Date(), updated_at: new Date() });
+            .update({
+              status: 'matched_expense',
+              matched_expense_id: strong[0].id,
+              match_method: 'expense_amount_date_vendor',
+              matched_at: new Date(),
+              updated_at: new Date(),
+              // durable verification marker, persisted ATOMICALLY with the
+              // claim (the reconcilePending pattern): a crash between this
+              // commit and the post-claim verify below must leave a marker
+              // the verifyPendingExpenseClaims sweep can finish — never a
+              // possibly-ambiguous link nothing ever revisits
+              suggestion: suggestionMerge({ verifyPending: true }),
+            });
           if (changed) claimedExpense = true;
         });
         if (claimedExpense) {
@@ -1361,6 +1424,9 @@ async function runDeterministicMatching({ limit } = {}) {
           // healer draws).
           const after = await surveyExpenseCandidates(db);
           if (after.length === 1 && after[0].id === strong[0].id) {
+            await db('bank_transactions')
+              .where({ id: row.id, status: 'matched_expense', matched_expense_id: strong[0].id })
+              .update({ suggestion: db.raw("suggestion - 'verifyPending'"), updated_at: new Date() });
             summary.expensesLinked++;
           } else {
             const undone = await db('bank_transactions')
@@ -1372,7 +1438,7 @@ async function runDeterministicMatching({ limit } = {}) {
                 matched_at: null,
                 suggestion: suggestionMerge({
                   autoRevert: { at: new Date().toISOString(), expenseId: strong[0].id, reason: 'a concurrently added expense made the match ambiguous' },
-                }),
+                }, ['verifyPending']),
                 updated_at: new Date(),
               });
             // CAS no-op = someone else already changed the row (unlink or
@@ -1390,6 +1456,10 @@ async function runDeterministicMatching({ limit } = {}) {
       // otherwise take markScanned's early bump-only branch forever, and
       // stale candidate lists would never be cleaned up once the targets
       // disappeared. The two states are mutually exclusive by construction.
+      // deterministic display order (newest first, then id) — an unordered
+      // slice made the visible subset arbitrary run-to-run
+      const parkedCandidates = [...candidates].sort((a, b) => String(toDateStr(b.expense_date)).localeCompare(String(toDateStr(a.expense_date)))
+        || String(a.id).localeCompare(String(b.id)));
       await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
         suggestion: suggestionMerge({
           // amount included (the GROSS reading for refund-reduced
@@ -1397,7 +1467,7 @@ async function runDeterministicMatching({ limit } = {}) {
           // same-vendor same-day near-misses inside the one-cent tolerance
           // are otherwise indistinguishable in the picker, and manually
           // linking the wrong one consumes the wrong ledger expense
-          candidates: candidates.slice(0, 20).map(c => ({ id: c.id, amount: c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount), description: c.description, vendor_name: c.vendor_name, expense_date: toDateStr(c.expense_date) })),
+          candidates: parkedCandidates.slice(0, 20).map(c => ({ id: c.id, amount: c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount), description: c.description, vendor_name: c.vendor_name, expense_date: toDateStr(c.expense_date) })),
           candidatesTotal: candidates.length,
         }, ['noMatch']),
         updated_at: new Date(),
@@ -1478,6 +1548,8 @@ module.exports = {
   isPlausibleRefundTarget,
   appliedRefundTotal,
   refundCandidatesForRow,
+  surveyExpenseCandidatesForRow,
+  rejectedTargets,
   resetDanglingLinks,
   healEditedExpenseLinks,
   methodIncompatible,

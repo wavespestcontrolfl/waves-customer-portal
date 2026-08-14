@@ -164,6 +164,7 @@ jest.mock('../services/bank-import', () => ({
   // list construction is unit-tested in the service suite; the route test
   // asserts the endpoint's shape and guards
   refundCandidatesForRow: jest.fn(() => Promise.resolve([])),
+  surveyExpenseCandidatesForRow: jest.fn(() => Promise.resolve([])),
 }));
 
 const express = require('express');
@@ -609,6 +610,38 @@ describe('refund-candidates on demand (gate on)', () => {
   test('a debit has no refund candidates — 400', async () => {
     state.bankRow = { id: 'bt-1', direction: 'debit', status: 'unmatched' };
     expect((await get('/admin/tax/bank-import/bt-1/refund-candidates')).status).toBe(400);
+  });
+
+  test('expense-candidates serves the FULL list for a debit (gross-aware amounts) — off-slice targets stay selectable', async () => {
+    const { surveyExpenseCandidatesForRow } = require('../services/bank-import');
+    surveyExpenseCandidatesForRow.mockResolvedValueOnce([
+      { id: 'exp-1', amount: '38.12', gross_amount: 58.12, vendor_name: 'Wawa', description: 'gas', expense_date: '2026-08-08' },
+      { id: 'exp-2', amount: '58.12', vendor_name: 'Wawa', description: 'gas 2', expense_date: '2026-08-09' },
+    ]);
+    state.bankRow = { id: 'bt-1', amount: '58.12', txn_date: '2026-08-09', description: 'WAWA', direction: 'debit', account_type: 'card', status: 'unmatched', suggestion: null };
+    const res = await get('/admin/tax/bank-import/bt-1/expense-candidates');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total).toBe(2);
+    // newest-first deterministic order; gross reading surfaces for the
+    // refund-reduced candidate
+    expect(body.candidates.map((c) => c.id)).toEqual(['exp-2', 'exp-1']);
+    expect(body.candidates[1].amount).toBe(58.12);
+  });
+
+  test('a credit has no expense candidates — 400', async () => {
+    state.bankRow = { id: 'bt-1', direction: 'credit', status: 'unmatched' };
+    expect((await get('/admin/tax/bank-import/bt-1/expense-candidates')).status).toBe(400);
+  });
+
+  test('status SELF-HEALS before counting — concurrent tab loads cannot report already-reverted matches', async () => {
+    const { resetDanglingLinks, healEditedExpenseLinks } = require('../services/bank-import');
+    resetDanglingLinks.mockClear();
+    healEditedExpenseLinks.mockClear();
+    const res = await get('/admin/tax/bank-import/status');
+    expect(res.status).toBe(200);
+    expect(resetDanglingLinks).toHaveBeenCalled();
+    expect(healEditedExpenseLinks).toHaveBeenCalled();
   });
 });
 

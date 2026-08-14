@@ -1630,6 +1630,12 @@ const MAX_STATEMENT_BYTES = 2 * 1024 * 1024;
 router.get('/bank-import/status', async (req, res, next) => {
   try {
     if (!gateEnvValue('GATE_BANK_IMPORT')) return res.json({ enabled: false });
+    // status counts are the tab's headline claims — self-heal first, same
+    // as coverage (the client fires /status, /transactions and /coverage
+    // concurrently, so this endpoint cannot rely on coverage's healing
+    // having landed before its own snapshot)
+    await bankImport.resetDanglingLinks();
+    await bankImport.healEditedExpenseLinks();
     const counts = await db('bank_transactions').select('status').count('* as n').groupBy('status');
     res.json({
       enabled: true,
@@ -2452,6 +2458,25 @@ router.get('/bank-import/:id/refund-candidates', async (req, res, next) => {
     const list = await bankImport.refundCandidatesForRow(row);
     res.json({
       candidates: list.slice(0, 500).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: dateCellStr(c.expense_date) })),
+      total: list.length,
+    });
+  } catch (err) { next(err); }
+});
+
+// Full expense-candidate list for ONE debit, on demand — same shape as the
+// refund-candidate route: the parked slice shows 20, and the real target
+// can sit beyond it; link-expense validates by plausibility rules, so
+// every entry served here is actionable.
+router.get('/bank-import/:id/expense-candidates', async (req, res, next) => {
+  try {
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits have expense candidates' });
+    const rejected = bankImport.rejectedTargets(row.suggestion);
+    const list = await bankImport.surveyExpenseCandidatesForRow(row, rejected);
+    list.sort((a, b) => String(dateCellStr(b.expense_date)).localeCompare(String(dateCellStr(a.expense_date))) || String(a.id).localeCompare(String(b.id)));
+    res.json({
+      candidates: list.slice(0, 500).map(c => ({ id: c.id, amount: c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: dateCellStr(c.expense_date) })),
       total: list.length,
     });
   } catch (err) { next(err); }

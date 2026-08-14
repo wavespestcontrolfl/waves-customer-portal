@@ -144,6 +144,9 @@ function makeBuilder(table) {
       if (b.whereRaw.mock.calls.some(c => String(c[0]).includes('reconcilePending'))) {
         rows = rows.filter(r => r.suggestion && r.suggestion.reconcilePending === true);
       }
+      if (b.whereRaw.mock.calls.some(c => String(c[0]).includes('verifyPending'))) {
+        rows = rows.filter(r => r.suggestion && r.suggestion.verifyPending === true);
+      }
       // mirror the bounded pass's fresh-vs-examined split
       const isExamined = (r) => !!(r.suggestion && (r.suggestion.ignore || r.suggestion.candidates || r.suggestion.payoutCandidates || r.suggestion.refundCandidates || r.suggestion.noMatch));
       const raws = b.whereRaw.mock.calls.map(c => String(c[0]));
@@ -831,6 +834,31 @@ describe('runDeterministicMatching', () => {
     const revert = state.updates.find(u => u.patch.status === 'unmatched');
     expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_expense', matched_expense_id: 'exp-1' });
     expect(sugOf(revert).autoRevert.reason).toContain('edited');
+  });
+
+  test('a crash between claim and verify is healed — the verifyPending sweep reverts a now-plural link', async () => {
+    // the claim committed with the durable marker, then the process died
+    // before the post-claim survey; a second candidate exists now
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: '312.40', direction: 'debit', account_type: 'card', status: 'matched_expense', matched_expense_id: 'exp-1', suggestion: { verifyPending: true } }];
+    state.expenses = [
+      { id: 'exp-1', amount: '312.40', description: 'order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' },
+      { id: 'exp-2', amount: '312.40', description: 'order 2', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' },
+    ];
+    const summary = await runDeterministicMatching();
+    expect(summary.claimVerifyReverted).toBe(1);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_expense', matched_expense_id: 'exp-1' });
+    expect(sugOf(revert).autoRevert.reason).toContain('ambiguous');
+  });
+
+  test('a crashed-but-still-unique claim just clears its verifyPending marker', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: '312.40', direction: 'debit', account_type: 'card', status: 'matched_expense', matched_expense_id: 'exp-1', suggestion: { verifyPending: true } }];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.claimVerifyReverted).toBe(0);
+    expect(state.updates.find(u => u.patch.status === 'unmatched')).toBeUndefined();
+    const clear = state.updates.find(u => typeof u.patch.suggestion === 'string' && u.patch.suggestion.includes('verifyPending'));
+    expect(clear).toBeDefined();
   });
 
   test('an expense corrected back BETWEEN the heal scan and the lock keeps its link', async () => {

@@ -4048,9 +4048,10 @@ function BankImportTab() {
   // operator names exactly which skipped tuples were genuinely separate
   // purchases; forcing the whole set would re-import ordinary overlaps too.
   const [dupPicks, setDupPicks] = useState({});
-  // on-demand FULL refund-candidate lists (row id → candidates): the parked
-  // slice shows 20, and the real original can sit beyond it
+  // on-demand FULL candidate lists (row id → candidates): the parked
+  // slices show 20, and the real target can sit beyond them
   const [fullRefunds, setFullRefunds] = useState({});
+  const [fullExpenseCands, setFullExpenseCands] = useState({});
 
   // offset pagination with APPEND semantics — the server caps limit at 500,
   // so growing a single limit stalls there; offset pages don't
@@ -4445,21 +4446,33 @@ function BankImportTab() {
                     <select
                       style={{ ...bankInput, maxWidth: 240 }}
                       value={linkPick[r.id] || ""}
-                      onChange={(e) => setLinkPick((p) => ({ ...p, [r.id]: e.target.value }))}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === "__more_candidates") {
+                          // fetch the FULL plausible list — link-expense
+                          // validates by plausibility rules, so every entry
+                          // is actionable
+                          adminFetch(`/admin/tax/bank-import/${r.id}/expense-candidates`)
+                            .then((d) => setFullExpenseCands((p) => ({ ...p, [r.id]: d.candidates || [] })))
+                            .catch(() => {});
+                          return;
+                        }
+                        setLinkPick((p) => ({ ...p, [r.id]: v }));
+                      }}
                       title="Existing ledger expenses with a matching amount — link instead of creating a duplicate"
                     >
                       <option value="">
                         {r.suggestion.candidates.length} possible existing match{r.suggestion.candidates.length > 1 ? "es" : ""}…
                       </option>
-                      {r.suggestion.candidates.map((c) => (
+                      {(fullExpenseCands[r.id] || r.suggestion.candidates).map((c) => (
                         <option key={c.id} value={c.id}>
                           {(c.vendor_name || c.description || "expense").slice(0, 34)}
                           {c.amount != null ? ` · ${fmtM(c.amount)}` : ""} · {fmtD(c.expense_date)}
                         </option>
                       ))}
-                      {(r.suggestion.candidatesTotal || 0) > r.suggestion.candidates.length && (
-                        <option value="" disabled>
-                          +{r.suggestion.candidatesTotal - r.suggestion.candidates.length} more — narrow via the Expenses tab
+                      {!fullExpenseCands[r.id] && (r.suggestion.candidatesTotal || 0) > r.suggestion.candidates.length && (
+                        <option value="__more_candidates">
+                          +{r.suggestion.candidatesTotal - r.suggestion.candidates.length} more — load all…
                         </option>
                       )}
                     </select>
