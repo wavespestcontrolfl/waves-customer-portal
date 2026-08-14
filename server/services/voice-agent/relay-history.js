@@ -67,9 +67,20 @@ const LONG_TOKEN_RE = /\b[A-Za-z0-9_-]{20,}\b/g;
 function voiceSafeText(value, max = 200) {
   const { redactAccessCodes } = require('../context-aggregator');
   const { promptSafeUntrusted } = require('./relay-context');
-  const stripped = String(value == null ? '' : value)
+  let stripped = String(value == null ? '' : value)
     .replace(URL_RE, '[link]')
     .replace(LONG_TOKEN_RE, '[code]');
+  // ⭐ CARD DATA NEVER LEAVES BY VOICE. A customer who once TEXTED a card
+  // number would otherwise have it sent to the model and read back on a call
+  // — a stored PAN extended onto a new external surface. The shared scrubber
+  // runs on every SMS body; if it cannot run, the body is withheld (fail
+  // closed — the transcript-path rule).
+  try {
+    const { scrubPans } = require('../../utils/pan-scrub');
+    stripped = scrubPans(stripped);
+  } catch {
+    return '[message unavailable]';
+  }
   return promptSafeUntrusted(redactAccessCodes(stripped), max);
 }
 

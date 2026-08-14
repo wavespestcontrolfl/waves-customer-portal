@@ -969,7 +969,20 @@ async function requestBookingText(input = {}, ctx = {}) {
     const range = arrivalWindowRange(windowStart);
     if (range) spokenTime = formatSmsTimeRange(range);
   } catch { /* fall through to the no-time copy */ }
-  return `Booking REQUEST submitted for ${catalogRow.name} on ${dateStr}`
+  // ⭐ THE BOOKED NAME TAKES BOTH COMPLIANCE SCREENS TOO — the catalog LIST
+  // filters banned names, but this success path renders `catalogRow.name`
+  // independently; "Pet-Safe Pest Control" spoken as a booking confirmation
+  // is the same banned claim on the same surface. A failing name degrades to
+  // a generic label; the booking itself already committed.
+  let spokenServiceName = 'the requested service';
+  try {
+    const { findBannedCustomerCopy } = require('../service-report/activity-indicators');
+    const { reentrySafetyClaimFinding } = require('../../services/content/content-guardrails');
+    if (findBannedCustomerCopy(catalogRow.name).length === 0 && !reentrySafetyClaimFinding(catalogRow.name)) {
+      spokenServiceName = catalogRow.name;
+    }
+  } catch { /* unscreenable ⇒ the generic label stands */ }
+  return `Booking REQUEST submitted for ${spokenServiceName} on ${dateStr}`
     + (spokenTime
       ? ` with an arrival window of ${spokenTime}. `
       : '. Do NOT state an arrival time — the office will confirm the window. ')

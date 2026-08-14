@@ -518,6 +518,15 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     }
   });
 
+  // ⭐ THE BOOKED NAME TAKES BOTH COMPLIANCE SCREENS — the success path
+  // renders catalogRow.name independently of the filtered catalog list.
+  test('a banned catalog NAME degrades to a generic label in the booking confirmation', async () => {
+    catalog.resolveCallBookingCatalogService.mockReturnValue({ ...PEST_ROW, name: 'Pet-Safe Pest Control' });
+    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    expect(out).toMatch(/Booking REQUEST submitted for the requested service/);
+    expect(out).not.toMatch(/pet-safe/i);
+  });
+
   test('no bookable catalog at all → refused, nothing written', async () => {
     catalog.loadBookableCallServices.mockResolvedValue([]);
     const out = await executeTool('request_booking', GOOD_INPUT, CTX);

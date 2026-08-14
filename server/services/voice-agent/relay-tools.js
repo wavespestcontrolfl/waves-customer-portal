@@ -1222,6 +1222,13 @@ async function executeTool(name, input = {}, ctx = {}) {
       }
       if (leadResult && leadResult.failed) {
         logger.error(`[voice-relay] capture_lead write FAILED callSid=${ctx.callSid || 'n/a'} — floor left armed, no capture claimed`);
+        // A write that outlived the close drain settles HERE after the call
+        // already finalized — nothing else would ever observe the failure.
+        // The callback lets the session run its capture floor post-settlement
+        // (the per-call lock + same-call reuse make that insert race-safe).
+        if (typeof ctx.onCaptureFailed === 'function') {
+          try { ctx.onCaptureFailed(); } catch { /* best-effort */ }
+        }
         return 'The capture could NOT be saved just now — do NOT tell the caller anything was recorded. '
           + 'Keep their details in the conversation, finish helping them, and call capture_lead again '
           + 'before the call ends.';

@@ -318,6 +318,20 @@ describe('GATE ON — get_message_history read shape', () => {
     expect(out).not.toContain('4482');
   });
 
+  // ⭐ CARD DATA NEVER LEAVES BY VOICE. A customer who once TEXTED a card
+  // number must not have it read back on a call — the shared PAN scrub runs
+  // on every SMS body before it reaches the model.
+  test('a card number in a past text is scrubbed before the model ever sees it', async () => {
+    primeDb({
+      messages: [
+        { direction: 'inbound', body: 'my card is 4111 1111 1111 1111 if you need it', created_at: '2026-08-09T13:00:00Z' },
+      ],
+    });
+    const out = await executeTool('get_message_history', {}, { customerId: CUSTOMER_ID, from: FROM, callerAttested: true });
+    expect(out).not.toMatch(/4111[\s-]?1111[\s-]?1111[\s-]?1111/);
+    expect(out).toContain('[card ending 1111]');
+  });
+
   test('empty thread → says so plainly', async () => {
     primeDb({ messages: [] });
     const out = await executeTool('get_message_history', {}, { customerId: CUSTOMER_ID, from: FROM, callerAttested: true });

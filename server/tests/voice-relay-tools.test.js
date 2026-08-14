@@ -246,6 +246,20 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
     expect(markCaptured).not.toHaveBeenCalled();
   });
 
+  // ⭐ A LATE-SETTLING FAILURE IS OBSERVED: the failed result fires the
+  // session's onCaptureFailed callback, which re-runs the floor after the
+  // call has closed (nothing else ever sees a post-drain failure).
+  test('a FAILED capture fires onCaptureFailed for the post-close floor', async () => {
+    createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: null, created: false, failed: true });
+    const onCaptureFailed = jest.fn();
+    await executeTool(
+      'capture_lead',
+      { call_summary: 'caller details' },
+      { from: '+19415551234', callSid: 'CA-late-fail', markCaptured: jest.fn(), onCaptureFailed },
+    );
+    expect(onCaptureFailed).toHaveBeenCalled();
+  });
+
   test('a SUPERSEDED capture tells the model to stand down entirely', async () => {
     createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: null, created: false, superseded: true });
     const markCaptured = jest.fn();

@@ -680,6 +680,23 @@ class RelayConversation {
       // mis-ordered reconnect that lost the claim race) writes unlinked
       // capture-only state and must not be blocked by the foreign owner.
       get sessionKey() { return convo._callerVerified === true ? convo.sessionKey : null; },
+      // ⭐ A CAPTURE THAT FAILS AFTER THE CALL CLOSED STILL GETS ITS FLOOR.
+      // A capture_lead that outlived the 10s close drain suppressed the floor
+      // ("a still-writing capture IS the lead") — but if that detached write
+      // then settles as FAILED, nothing else ever observes it and the call
+      // ends with no artifact at all. This callback re-runs the floor once
+      // the failed write has fully settled (macrotask — after the in-flight
+      // latch clears), and only for an ended, uncaptured session; the
+      // per-call advisory lock and the same-call reuse rule make the late
+      // insert race-safe against any concurrent writer.
+      onCaptureFailed: () => {
+        setTimeout(() => {
+          if (convo.ended && !convo.leadCaptured && !convo._inFlightWrites.has('capture_lead')) {
+            logger.warn(`[voice-relay] late capture failure after close callSid=${convo.callSid} — running the floor post-settlement`);
+            convo._runCaptureFloor('late-capture-failure').catch(() => {});
+          }
+        }, 0);
+      },
       language: this.language,
       // Live getters like callerVerified below: a late-landing verification
       // UPGRADES the session context after this turn's ctx was built, and a
