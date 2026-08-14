@@ -933,6 +933,22 @@ describe('runDeterministicMatching', () => {
     expect(state.updates.find(u => u.patch.status === 'unmatched')).toBeUndefined();
   });
 
+  test('a mid-flight insert caught by the LOCKED recheck parks the rechecked candidates immediately', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', account_type: 'card', suggestion: null }];
+    state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' }];
+    mockDb.transaction.mockImplementationOnce(async (cb) => {
+      state.expenses.push({ id: 'exp-2', amount: '312.40', description: 'order 2', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' });
+      return cb(mockDb);
+    });
+    const summary = await runDeterministicMatching();
+    expect(summary.expensesLinked).toBe(0);
+    expect(summary.ambiguous).toBe(1);
+    // the operator gets a picker NOW — not an unmatched row a bounded pass
+    // just reported as done
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).candidates);
+    expect(sugOf(parked).candidates).toHaveLength(2);
+  });
+
   test('a phantom expense committing DURING the claim is caught by the post-claim verify', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', account_type: 'card', suggestion: null }];
     state.expenses = [{ id: 'exp-1', amount: '312.40', description: 'order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' }];

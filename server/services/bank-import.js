@@ -1674,6 +1674,7 @@ async function runDeterministicMatching({ limit } = {}) {
     const strong = candidates.filter(c => strongExpenseMatch(row, c));
     if (candidates.length === 1 && strong.length === 1) {
       let claimedExpense = false;
+      let recheckPlural = null;
       try {
         // Claim with the candidate expense LOCKED and every matching
         // predicate revalidated against its CURRENT values — the earlier
@@ -1687,10 +1688,12 @@ async function runDeterministicMatching({ limit } = {}) {
           if (!fresh) return;
           // Uniqueness re-judged ATOMICALLY with the claim: an expense
           // inserted between the unlocked survey and this lock can make the
-          // set plural, and the plurality rule says park, not link. The
-          // next pass re-parks the row with the fuller candidate list.
+          // set plural, and the plurality rule says park, not link.
           const recheck = await surveyExpenseCandidates(trx);
-          if (!(recheck.length === 1 && recheck[0].id === fresh.id)) return;
+          if (!(recheck.length === 1 && recheck[0].id === fresh.id)) {
+            recheckPlural = recheck; // parked AFTER the transaction commits
+            return;
+          }
           const freshDate = toDateStr(fresh.expense_date);
           // a gross candidate revalidates at amount + CURRENT applied
           // refunds (re-summed under the lock — an undo since the read
@@ -1703,7 +1706,13 @@ async function runDeterministicMatching({ limit } = {}) {
             && !methodIncompatible(row.account_type, fresh.payment_method)
             && freshDate >= addDays(txnDate, -EXPENSE_DATE_WINDOW_DAYS)
             && freshDate <= addDays(txnDate, EXPENSE_DATE_WINDOW_DAYS);
-          if (!stillValid) return;
+          if (!stillValid) {
+            // the chosen expense drifted mid-flight — the row needs another
+            // pass to re-park or noMatch it, and a bounded pass ending here
+            // must not report done
+            summary.moreRemaining = true;
+            return;
+          }
           const changed = await trx('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
             .update({
@@ -1721,6 +1730,16 @@ async function runDeterministicMatching({ limit } = {}) {
             });
           if (changed) claimedExpense = true;
         });
+        if (!claimedExpense && recheckPlural) {
+          // the locked recheck turned plural — park the FULL rechecked list
+          // now, so the operator gets a picker immediately instead of an
+          // unmatched row a bounded pass just reported as done
+          summary.ambiguous++;
+          await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+            suggestion: suggestionMerge(expenseCandidatePatch(recheckPlural), ['noMatch']),
+            updated_at: new Date(),
+          });
+        }
         if (claimedExpense) {
           // POST-CLAIM plurality verify: READ COMMITTED lets an expense
           // whose insert COMMITS during the claim transaction slip past the
