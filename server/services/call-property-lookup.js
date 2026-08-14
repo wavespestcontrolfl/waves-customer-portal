@@ -386,23 +386,29 @@ async function enrichPropertyById(propertyId) {
  * deploy), but a cheap pre-check here skips the setImmediate churn when
  * dark.
  */
-const IN_FLIGHT_RETRY_MS = 3 * 60 * 1000;
+// Bounded retry ladder after an in-flight skip. The second delay must
+// OUTLAST the 10-minute pending window in the in-flight check: a killed
+// process leaves a stale last_attempt_status='pending' stamp, and a single
+// 3-minute retry still lands inside the window and skips again — with the
+// independently gated backfill off, that row stayed unenriched forever.
+// 3m catches a genuinely running estimator lookup finishing (near-free
+// cache hit); 3m+8m=11m guarantees one attempt after any stamp written
+// just before our first run has aged out. Still pending after that means
+// an ACTIVE re-stamped lookup — its result warms the same cache, and the
+// nightly sweep catches leftovers.
+const IN_FLIGHT_RETRY_DELAYS_MS = [3 * 60 * 1000, 8 * 60 * 1000];
 
-function enqueueCallPropertyLookup({ propertyId, isRetry } = {}) {
+function enqueueCallPropertyLookup({ propertyId, retryAttempt = 0 } = {}) {
   if (!gateEnvValue('GATE_CALL_PROPERTY_LOOKUP')) return;
   if (!propertyId) return;
   setImmediate(() => {
     runCallPropertyLookup({ propertyId })
       .then((res) => {
-        // ONE bounded retry after an in-flight skip: by then the pending
-        // estimator lookup has finished, so the retry is a near-free cache
-        // hit that fills the row — without this, the nightly backfill (its
-        // OWN gate, possibly off) was the only catcher. unref() so a retry
-        // timer never holds a shutting-down process open.
-        if (res?.skipped === 'lookup_in_flight' && !isRetry) {
+        // unref() so a retry timer never holds a shutting-down process open.
+        if (res?.skipped === 'lookup_in_flight' && retryAttempt < IN_FLIGHT_RETRY_DELAYS_MS.length) {
           const timer = setTimeout(
-            () => enqueueCallPropertyLookup({ propertyId, isRetry: true }),
-            IN_FLIGHT_RETRY_MS,
+            () => enqueueCallPropertyLookup({ propertyId, retryAttempt: retryAttempt + 1 }),
+            IN_FLIGHT_RETRY_DELAYS_MS[retryAttempt],
           );
           if (typeof timer.unref === 'function') timer.unref();
         }
@@ -476,8 +482,13 @@ async function fetchBackfillCandidates(limit, offset = 0) {
     )
     .whereRaw("COALESCE(TRIM(cp.zip), '') <> ''")
     .select('cp.*')
+    // Terminal statuses excluded: a future cancelled/skipped visit needs no
+    // dispatch coordinates, and a batch of them would outrank properties
+    // with REAL upcoming appointments for the bounded nightly budget.
+    // (Vocabulary pinned by the scheduled_services status CHECK constraint;
+    // terminal set matches admin-dispatch's.)
     .select(db.raw(
-      'EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.property_id = cp.id AND ss.scheduled_date >= ?) as has_upcoming_visit',
+      "EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.property_id = cp.id AND ss.scheduled_date >= ? AND ss.status NOT IN ('completed', 'cancelled', 'skipped')) as has_upcoming_visit",
       [todayEt],
     ))
     .select(db.raw(

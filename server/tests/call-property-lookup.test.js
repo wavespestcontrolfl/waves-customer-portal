@@ -422,6 +422,44 @@ describe('enqueueCallPropertyLookup', () => {
     await flushImmediates();
     expect(logger.warn).toHaveBeenCalledWith('[call-property-lookup] failed', expect.objectContaining({ propertyId: 'p1' }));
   });
+
+  test('in-flight retry ladder: 3m then 8m (outlasting the 10m pending window), then stops', async () => {
+    // A killed process leaves a stale 'pending' ledger stamp; a single
+    // 3-minute retry landed inside the 10-minute pending window and skipped
+    // again — the row stayed unenriched until the (separately gated)
+    // backfill. The second rung (3m+8m=11m) guarantees one attempt after
+    // any stamp seen at the first run has aged out of the window.
+    process.env.GATE_CALL_PROPERTY_LOOKUP = 'true';
+    const timeouts = [];
+    const spy = jest.spyOn(global, 'setTimeout')
+      .mockImplementation((cb, ms) => { timeouts.push({ cb, ms }); return { unref: () => {} }; });
+    db.mockImplementation((table) => {
+      if (table === 'property_lookups') return builder({ id: 'stale-pending' });
+      if (table === 'customer_properties') {
+        return builder({
+          id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
+          address_line1: '123 Sample Cove', city: 'Bradenton', state: 'FL', zip: '34212',
+        });
+      }
+      return builder(1);
+    });
+    enqueueCallPropertyLookup({ propertyId: 'p1' });
+    await flushImmediates();
+    await flushImmediates();
+    expect(timeouts.map((t) => t.ms)).toEqual([3 * 60 * 1000]);
+    timeouts[0].cb();
+    await flushImmediates();
+    await flushImmediates();
+    expect(timeouts.map((t) => t.ms)).toEqual([3 * 60 * 1000, 8 * 60 * 1000]);
+    timeouts[1].cb();
+    await flushImmediates();
+    await flushImmediates();
+    // Still pending past the window = an ACTIVE re-stamped lookup — stop;
+    // its result warms the same cache and the nightly sweep catches the row.
+    expect(timeouts).toHaveLength(2);
+    expect(performPropertyLookup).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
 });
 
 describe('sweepUnenrichedProperties', () => {
@@ -563,6 +601,11 @@ describe('fetchBackfillCandidates', () => {
     // created property behind the legacy backlog.
     const touchedSelect = db.raw.mock.calls.find((c) => String(c[0]).includes('recently_touched'));
     expect(String(touchedSelect[0])).toContain('cp.updated_at > cp.created_at');
+    // Upcoming priority counts ACTIONABLE visits only — a batch of future
+    // cancelled/skipped rows must not outrank real dispatches for the
+    // bounded nightly budget.
+    const upcomingSelect = db.raw.mock.calls.find((c) => String(c[0]).includes('has_upcoming_visit'));
+    expect(String(upcomingSelect[0])).toContain("ss.status NOT IN ('completed', 'cancelled', 'skipped')");
     // The sink ranks FIRST, across visit classes — upcoming-first ordering
     // let a batch-sized head of partial upcoming rows starve everything.
     expect(cpBuilder.orderBy).toHaveBeenCalledWith([
