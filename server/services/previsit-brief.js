@@ -56,7 +56,7 @@ const { compilePropertyAlerts } = require('./nextstop-alerts');
 // The shared deterministic access-code redactor (context-aggregator's own
 // layer) — re-applied here to EVERY free-text slice at the LLM boundary.
 const { redactAccessCodes, customerSafeVisitNotes } = require('./context-aggregator');
-const { normalizeServiceType, detectServiceCategory } = require('../utils/service-normalizer');
+const { normalizeServiceType, stripServiceSuffixes, detectServiceCategory } = require('../utils/service-normalizer');
 const { etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
 
 // Exact stored type strings. WDO_BRIEF_TYPE mirrors
@@ -438,6 +438,18 @@ async function loadEstimateSource(dbh, sourceEstimateId) {
 // The deterministic access block — copied straight from
 // property_preferences, NEVER given to the LLM. The shared alerts compiler
 // keeps this identical to what the tech Next-Stop card shows.
+// The brief's stable service identity: the raw label with only cosmetic
+// duration/price suffixes stripped. Deliberately NOT normalizeServiceType
+// — that collapses distinct services ("Tree & Shrub Fertilization" →
+// "Lawn Fertilization"), which would both misdescribe specialty visits
+// to the LLM and blind the staleness stamp to a rewrite between them.
+// Used for the hashed llmFacts.visit.serviceType, the stored for_service
+// stamp, and briefStaleReason's comparison — one derivation, three
+// sites, so hash, stamp, and read can never desync.
+function briefServiceIdentity(rawServiceType) {
+  return stripServiceSuffixes(rawServiceType) || 'General Service';
+}
+
 function buildAccessBlock(prefs, svc, genuinelyNew, normalizedType) {
   return {
     codes: {
@@ -471,6 +483,16 @@ async function assembleGrounding(svc, dbh = db) {
   if (!customer) return { error: 'no_customer', svc };
 
   const normalizedType = normalizeServiceType(svc.service_type);
+  // The brief's grounded service identity: raw label with only
+  // duration/price suffixes stripped. normalizeServiceType COLLAPSES
+  // distinct services ("Tree & Shrub Fertilization" → "Lawn
+  // Fertilization"), which would tell the LLM the wrong visit type for
+  // specialty visits and blind the for_service staleness stamp to a
+  // rewrite between them — while a fully raw stamp would desync from the
+  // hash on a cosmetic suffix edit. This identity feeds llmFacts (so it
+  // is a hashed fact), the stored for_service stamp, and
+  // briefStaleReason's comparison — all three stay aligned.
+  const serviceIdentity = briefServiceIdentity(svc.service_type);
   // Category classifies on the RAW service_type: normalizeServiceType maps
   // "Tree & Shrub Fertilization" / "Palm Fertilization" → "Lawn
   // Fertilization", which would route tree/shrub visits into the TURF
@@ -578,7 +600,7 @@ async function assembleGrounding(svc, dbh = db) {
   // the reviewed customer-safe parse), no call transcripts.
   const llmFacts = {
     visit: {
-      serviceType: normalizedType,
+      serviceType: serviceIdentity,
       scheduledDate: calendarDay(svc.scheduled_date),
       isRecurring: !!svc.is_recurring,
       // Omitted entirely when history is unreadable — the model must not
@@ -643,6 +665,7 @@ async function assembleGrounding(svc, dbh = db) {
     svc,
     customer,
     normalizedType,
+    serviceIdentity,
     category,
     access,
     productGuidance,
@@ -1280,13 +1303,14 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
     // acceptance rewrites service_type too) — the read path compares
     // these stamps against the row and withdraws mismatched guidance
     // (briefStaleReason) instead of serving another day's or another
-    // service's products until a later sweep. NORMALIZED, exactly the
-    // hashed llmFacts.visit.serviceType: stamping the raw label would
-    // desync from the hash on a label-only rewrite (suffix strip) — the
-    // sweep's cache branch would keep answering 'unchanged' while the
-    // read withdrew the brief forever.
+    // service's products until a later sweep. The identity is the
+    // suffix-stripped raw label, exactly the hashed
+    // llmFacts.visit.serviceType (rationale at briefServiceIdentity):
+    // any other choice either collapses specialty services or desyncs
+    // from the hash, leaving the read withdrawing a brief the sweep's
+    // unchanged-hash branch will never restamp.
     for_date: calendarDay(svc.scheduled_date),
-    for_service: grounding.normalizedType,
+    for_service: grounding.serviceIdentity,
     priorities: body.priorities,
     watch_items: body.watch_items,
     last_visit: {
@@ -1394,11 +1418,13 @@ function briefStaleReason(brief, svc) {
   if (!brief || !brief.for_date || brief.for_date !== calendarDay(svc.scheduled_date)) {
     return 'date_moved';
   }
-  // NORMALIZED comparison, matching the stamp and the grounding hash: a
-  // label-only rewrite (same normalized service) must neither withdraw
-  // the brief nor demand a regeneration the 'unchanged' cache branch
-  // will never perform.
-  if (!brief.for_service || brief.for_service !== normalizeServiceType(svc.service_type)) {
+  // Same derivation as the stamp and the hashed grounding fact
+  // (briefServiceIdentity): a suffix-only label edit must neither
+  // withdraw the brief nor demand a regeneration the 'unchanged' cache
+  // branch will never perform, while a real service switch — specialty
+  // services included, which normalizeServiceType would collapse — is
+  // withdrawn.
+  if (!brief.for_service || brief.for_service !== briefServiceIdentity(svc.service_type)) {
     return 'service_changed';
   }
   return null;

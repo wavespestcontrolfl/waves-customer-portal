@@ -566,11 +566,18 @@ describe('briefClearOnReclassification (update-details service switch)', () => {
     // Direct service_type writers (estimate acceptance, call flows) never
     // pass through update-details' clearing — the read must fail closed.
     expect(briefStaleReason(stamped, { scheduled_date: '2026-08-13', service_type: 'Lawn Care Service' })).toBe('service_changed');
-    // Label-only rewrite (same NORMALIZED service): must stay servable —
-    // the stamp is normalized exactly like the hashed grounding fact, so
-    // a raw comparison would withdraw the brief forever while the
-    // sweep's unchanged-hash cache branch never restamps it.
+    // Suffix-only label edit (same service): must stay servable — the
+    // stamp shares the hashed grounding fact's derivation, so a raw
+    // comparison would withdraw the brief forever while the sweep's
+    // unchanged-hash cache branch never restamps it.
     expect(briefStaleReason(stamped, { scheduled_date: '2026-08-13', service_type: 'Pest Control Service - 30 min' })).toBeNull();
+    // Specialty rewrite that normalizeServiceType would COLLAPSE
+    // ("Tree & Shrub Fertilization" and "Lawn Fertilization" both map to
+    // "Lawn Fertilization"): the suffix-stripped identity keeps them
+    // distinct, so the switch withdraws the brief.
+    const treeStamp = { for_date: '2026-08-13', for_service: 'Tree & Shrub Fertilization' };
+    expect(briefStaleReason(treeStamp, { scheduled_date: '2026-08-13', service_type: 'Tree & Shrub Fertilization - 1 hour' })).toBeNull();
+    expect(briefStaleReason(treeStamp, { scheduled_date: '2026-08-13', service_type: 'Lawn Fertilization' })).toBe('service_changed');
     expect(briefStaleReason({ priorities: [] }, { scheduled_date: '2026-08-13', service_type: 'Pest Control Service' })).toBe('date_moved');
     expect(briefStaleReason({ for_date: '2026-08-13' }, { scheduled_date: '2026-08-13', service_type: 'Pest Control Service' })).toBe('service_changed');
     expect(briefStaleReason(null, { scheduled_date: '2026-08-13', service_type: 'Pest Control Service' })).toBe('date_moved');
