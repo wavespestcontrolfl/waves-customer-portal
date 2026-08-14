@@ -609,33 +609,14 @@ class RelayConversation {
     const isWrite = WRITE_TOOLS.has(name);
     const ms = isWrite ? WRITE_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
     const onTimeout = isWrite ? WRITE_TOOL_TIMEOUT_TEXT : TOOL_TIMEOUT_TEXT;
-    // ⭐ A SUPERSEDED SESSION LOSES ITS TOOLS. The nonce-owned CallSid claim
-    // lets a fresh-token reconnect take over the live call — and the OLD
-    // socket (dead to Twilio but possibly still open here, or on another
-    // instance) must not keep account context and write access past that
-    // takeover: every tool call re-proves ownership against the current
-    // claim, with the read's tri-state honoured:
-    //   - a session that CLAIMED the call (verified — verification implies
-    //     the claim won) requires a PROVEN read whose owner is exactly its
-    //     own nonce; unprovable ⇒ refuse (fail closed — the finding's rule);
-    //   - an UNCLAIMED session (unverified; the sandbox path has no call_log
-    //     row at all) is refused only on a proven FOREIGN owner — it never
-    //     had privileged context to lose, and the sandbox line must keep
-    //     working.
-    if (this.sessionKey && this.callSid) {
-      const { relaySessionClaimOwner } = require('./relay-context');
-      const res = await relaySessionClaimOwner(this.callSid);
-      const claimedByUs = this._callerVerified === true;
-      const superseded = claimedByUs
-        ? !(res && res.ok === true && res.owner === this.sessionKey)
-        : !!(res && res.ok === true && res.owner && res.owner !== this.sessionKey);
-      if (superseded) {
-        logger.warn(`[voice-relay] session superseded (or ownership unprovable on a claimed call) callSid=${this.callSid} — tool "${name}" refused, ending`);
-        this._ending = true;
-        try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing anyway */ }
-        return 'This session was superseded by a reconnect. Do NOT call any more tools and do not answer '
-          + 'account questions — say goodbye briefly.';
-      }
+    // ⭐ A SUPERSEDED SESSION LOSES ITS TOOLS — the same boundary check the
+    // turn entry and the close-time writes take (_sessionSuperseded).
+    if (this.sessionKey && await this._sessionSuperseded().catch(() => false)) {
+      logger.warn(`[voice-relay] session superseded (or ownership unprovable on a claimed call) callSid=${this.callSid} — tool "${name}" refused, ending`);
+      this._ending = true;
+      try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing anyway */ }
+      return 'This session was superseded by a reconnect. Do NOT call any more tools and do not answer '
+        + 'account questions — say goodbye briefly.';
     }
     // IN-FLIGHT LATCH (writes only). A write that blew its budget kept running
     // while the model was told "no confirmation either way" — and nothing
@@ -791,9 +772,37 @@ class RelayConversation {
     };
   }
 
+  /**
+   * ⭐ THE ONE-SESSION BOUNDARY, RE-PROVEN AT EVERY PRIVILEGED SURFACE. A
+   * fresh-token reconnect takes over the CallSid claim; the OLD socket must
+   * not keep answering from its frozen KNOWN CALLER block, running tools, or
+   * writing the call record at close. Tri-state: a CLAIMED session (verified
+   * — verification implies the claim won) requires a PROVEN read matching its
+   * own nonce and fails CLOSED on unprovable; an unclaimed session (the
+   * sandbox path has no call_log row) is out only on a proven foreign owner.
+   */
+  async _sessionSuperseded() {
+    if (!this.sessionKey || !this.callSid) return false;
+    const { relaySessionClaimOwner } = require('./relay-context');
+    const res = await relaySessionClaimOwner(this.callSid);
+    const claimedByUs = this._callerVerified === true;
+    return claimedByUs
+      ? !(res && res.ok === true && res.owner === this.sessionKey)
+      : !!(res && res.ok === true && res.owner && res.owner !== this.sessionKey);
+  }
+
   async _runLoop(callerText = null) {
     if (this.ended || !anthropic) {
       if (!anthropic) this.say('Sorry, I am unable to help right now. A team member will call you back.');
+      return;
+    }
+    // The boundary covers the MODEL too, not just tools: a superseded socket
+    // could otherwise keep answering account questions straight from its
+    // frozen KNOWN CALLER block without ever touching a tool.
+    if (this.sessionKey && await this._sessionSuperseded().catch(() => false)) {
+      logger.warn(`[voice-relay] turn refused — session superseded callSid=${this.callSid}`);
+      this._ending = true;
+      try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
       return;
     }
     // Identity must be settled before the first model round: the tool ctx and
@@ -1028,7 +1037,19 @@ class RelayConversation {
     // contradicting the lead it produced. Bounded so a slow lead write cannot
     // hold the finalization (a late write still lands; only the flag is
     // conservative), and never throws — the floor is best-effort by contract.
-    await this._runCaptureFloor(reason);
+    // ⭐ CLOSE-TIME WRITES BELONG TO THE SESSION THAT OWNS THE CALL. A
+    // superseded socket's end() must not run the capture floor (a duplicate
+    // lead the replacement will also mint) or the reporting reconcile
+    // (overwriting the replacement's transcript/outcome with this socket's
+    // partial view). The replacement session owns the record now.
+    const supersededAtClose = this.sessionKey
+      ? await this._sessionSuperseded().catch(() => false)
+      : false;
+    if (supersededAtClose) {
+      logger.warn(`[voice-relay] close-time writes skipped — session superseded callSid=${this.callSid} (the replacement session owns the record)`);
+    }
+
+    if (!supersededAtClose) await this._runCaptureFloor(reason);
 
     // Reconcile call reporting: this call was handled by the AI agent, not
     // voicemail. The /voice answers-first and /call-complete backstop paths
@@ -1038,7 +1059,7 @@ class RelayConversation {
     // calls don't linger as ringing/no-answer/null, then resync the unified
     // message row. Keyed by CallSid — a no-op (0 rows) for the TwiML-Bin
     // sandbox path, which has no call_log row.
-    if (this.callSid) {
+    if (this.callSid && !supersededAtClose) {
       try {
         // RACE: end() runs on EVERY WebSocket close, including a relay failure
         // (rejected upgrade / WS error / transient disconnect). On failure Twilio

@@ -598,6 +598,50 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(out).not.toMatch(/superseded/i);
   });
 
+  // ⭐ THE BOUNDARY COVERS THE MODEL AND THE CLOSE, NOT JUST TOOLS: a
+  // superseded socket must not answer from its frozen KNOWN CALLER block,
+  // and its end() must not overwrite the replacement session's record.
+  test('a superseded session refuses the TURN — the model is never consulted', async () => {
+    let IsolatedConvo;
+    const streamSpy = jest.fn(() => { throw new Error('model must not be consulted'); });
+    jest.isolateModules(() => {
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() {
+        return { messages: { stream: streamSpy } };
+      });
+      jest.doMock('../services/voice-agent/relay-tools', () => ({
+        TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: jest.fn(async () => 'ok'),
+      }));
+      IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
+    });
+    const builder = {};
+    builder.where = jest.fn(() => builder);
+    builder.first = jest.fn(async () => ({ metadata: { relay_session_claim_owner: 'nonce-NEW' } }));
+    db.mockImplementation(() => builder);
+    const endSession = jest.fn();
+    const convo = new IsolatedConvo({
+      callSid: 'CA-superseded-turn', sessionKey: 'nonce-OLD', from: '+19415551234', send: jest.fn(), endSession,
+    });
+    await convo._runLoop('what is my balance?').catch(() => {});
+    expect(streamSpy).not.toHaveBeenCalled();
+    expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
+  });
+
+  test('a superseded session skips its close-time writes — no floor lead, no reconcile', async () => {
+    const builder = {};
+    builder.where = jest.fn(() => builder);
+    builder.first = jest.fn(async () => ({ metadata: { relay_session_claim_owner: 'nonce-NEW' } }));
+    builder.update = jest.fn(() => Promise.resolve(1));
+    db.mockImplementation(() => builder);
+    const convo = new RelayConversation({
+      callSid: 'CA-superseded-close', sessionKey: 'nonce-OLD', from: '+19415551234', send: jest.fn(), endSession: jest.fn(),
+    });
+    const { createLeadFromExtraction: floorWrite } = require('../services/lead-from-extraction');
+    floorWrite.mockClear();
+    await convo.end('socket_closed');
+    expect(floorWrite).not.toHaveBeenCalled(); // capture floor skipped
+    expect(builder.update).not.toHaveBeenCalled(); // transcript/outcome reconcile skipped
+  });
+
   test('a session that still OWNS the claim executes tools normally', async () => {
     const builder = {};
     builder.where = jest.fn(() => builder);
