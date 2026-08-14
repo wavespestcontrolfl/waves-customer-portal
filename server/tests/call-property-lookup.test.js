@@ -30,7 +30,7 @@ const flushImmediates = () => new Promise((resolve) => setImmediate(resolve));
 
 // Table-aware single-row mock: customer_properties → the row; the
 // property_lookups ledger (in-flight dedupe) → empty; updates → 1 row.
-function mockRowDb(row, updateBuilder) {
+function mockRowDb(row, updateBuilder, extra = {}) {
   let cpCalls = 0;
   db.mockImplementation((table) => {
     if (table === 'property_lookups') return builder(undefined);
@@ -40,6 +40,8 @@ function mockRowDb(row, updateBuilder) {
       // fill-only UPDATE.
       return cpCalls === 1 ? builder(row) : (updateBuilder || builder(1));
     }
+    if (table === 'scheduled_services') return extra.visits || builder(1);
+    if (table === 'customers') return extra.customers || builder(undefined);
     return builder(1);
   });
 }
@@ -89,10 +91,11 @@ describe('runCallPropertyLookup', () => {
 
   test('fill-only patch: COALESCE lat/lng/type, snake_case vocabulary, no sqft ever', async () => {
     const updateBuilder = builder(1);
+    const visitsBuilder = builder(1);
     mockRowDb({
       id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
       address_line1: '123 Sample Cove', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34212',
-    }, updateBuilder);
+    }, updateBuilder, { visits: visitsBuilder });
     performPropertyLookup.mockResolvedValueOnce({
       satellite: { inServiceArea: true },
       enriched: {
@@ -103,7 +106,9 @@ describe('runCallPropertyLookup', () => {
 
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
     expect(res).toEqual({ enriched: true, filled: ['latitude', 'longitude', 'property_type'], complete: true });
-    expect(performPropertyLookup).toHaveBeenCalledWith('123 Sample Cove, Bradenton, FL, 34212');
+    expect(performPropertyLookup).toHaveBeenCalledWith('123 Sample Cove, Bradenton, FL 34212');
+    // Linked visits missing their coordinate pair get the same fill.
+    expect(visitsBuilder.update).toHaveBeenCalledWith({ lat: 27.4995, lng: -82.4108 });
 
     const patch = updateBuilder.update.mock.calls[0][0];
     // Atomic coordinate pair: each component writes only when BOTH are null.
@@ -167,6 +172,45 @@ describe('runCallPropertyLookup', () => {
     });
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
     expect(res).toEqual({ enriched: true, filled: [], complete: false });
+  });
+
+  test('numberless street → skipped before any lookup spend', async () => {
+    mockRowDb({
+      id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
+      address_line1: 'Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+    });
+    expect(await runCallPropertyLookup({ propertyId: 'p1' })).toEqual({ skipped: 'incomplete_address' });
+    expect(performPropertyLookup).not.toHaveBeenCalled();
+  });
+
+  test('primary row mirrors coords to customers but NEVER a commercial type', async () => {
+    const customersBuilder = builder({
+      id: 'c1', address_line1: '123 Sample Cove', address_line2: null, city: 'Bradenton', zip: '34212',
+      latitude: null, longitude: null, property_type: null,
+    });
+    mockRowDb({
+      id: 'p1', customer_id: 'c1', active: true, is_primary: true,
+      latitude: null, longitude: null, property_type: null,
+      address_line1: '123 Sample Cove', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34212',
+      address_key: require('../services/customer-properties').addressKey({
+        address_line1: '123 Sample Cove', city: 'Bradenton', zip: '34212',
+      }),
+    }, undefined, { customers: customersBuilder });
+    performPropertyLookup.mockResolvedValueOnce({
+      satellite: { inServiceArea: true },
+      enriched: {
+        lat: 27.5, lng: -82.4, propertyType: 'Commercial',
+        _observed: { propertyType: true }, fieldVerifyFlags: [],
+      },
+    });
+    const res = await runCallPropertyLookup({ propertyId: 'p1' });
+    expect(res.filled).toEqual(['latitude', 'longitude', 'property_type']);
+    // customers mirror got the coordinate pair…
+    const mirror = customersBuilder.update.mock.calls[0][0];
+    expect(mirror.latitude).toBeDefined();
+    // …but the commercial classification NEVER lands on customers
+    // (customers.property_type feeds service_taxability — owner ruling).
+    expect(mirror.property_type).toBeUndefined();
   });
 
   test('lone-coordinate row with a type is unrepairable → skipped, no spend', async () => {
@@ -247,7 +291,7 @@ describe('sweepUnenrichedProperties', () => {
     process.env.PROPERTY_BACKFILL_BATCH = '2';
     const mkRow = (id) => ({
       id, active: true, latitude: null, longitude: null, property_type: null,
-      address_line1: `${id} Main St`, city: 'Bradenton', state: 'FL', zip: '34205',
+      address_line1: '123 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
     });
     const candidates = [mkRow('p1'), mkRow('p2'), mkRow('p3')];
     // property_lookups sees the cooldown check per candidate AND the
@@ -287,7 +331,7 @@ describe('sweepUnenrichedProperties', () => {
     process.env.PROPERTY_BACKFILL_BATCH = '2';
     const mkRow = (id) => ({
       id, active: true, latitude: null, longitude: null, property_type: null,
-      address_line1: `${id} Main St`, city: 'Bradenton', state: 'FL', zip: '34205',
+      address_line1: '123 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
     });
     const candidates = [mkRow('p1'), mkRow('p2')];
     let rowFetch = 0;

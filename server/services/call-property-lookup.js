@@ -39,12 +39,23 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 
-/** One-line lookup address from a customer_properties row (empty → ''). */
+/**
+ * One-line lookup address from a customer_properties row (empty → '').
+ * line2 goes through normalizeUnitLine so a bare "4" becomes "Unit 4" —
+ * a raw comma-separated "100 Main St, 4, Bradenton" reads its second
+ * component as a CITY to the cache's canonical parser, splitting this
+ * lookup's cache entry from the estimator's normalized form.
+ */
 function propertyRowAddress(row) {
-  return [row.address_line1, row.address_line2, row.city, row.state || 'FL', row.zip]
-    .map((s) => String(s || '').trim())
-    .filter(Boolean)
-    .join(', ');
+  const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
+  const line2 = String(row.address_line2 || '').trim();
+  return formatAddress({
+    line1: row.address_line1,
+    line2: line2 ? normalizeUnitLine(line2) : '',
+    city: row.city,
+    state: row.state || 'FL',
+    zip: row.zip,
+  });
 }
 
 /**
@@ -92,10 +103,15 @@ async function enrichPropertyById(propertyId) {
   if (!coordsFillable && !typeFillable) {
     return { skipped: 'unrepairable_partial' };
   }
-  // Street + ZIP required BEFORE spending: the call pipeline permits a
-  // first property without city/ZIP, and "123 Main St, FL" is ambiguous
-  // enough to geocode onto another premise entirely.
-  if (!String(row.address_line1 || '').trim() || !String(row.zip || '').trim()) {
+  // Street WITH A HOUSE NUMBER + ZIP required BEFORE spending: the call
+  // pipeline permits partial addresses, and a numberless "Main St" (or a
+  // street + state with no ZIP) geocodes to a street centroid the lookup
+  // won't flag — a fill-only write of centroid coordinates would then be
+  // unrepairable by later valid lookups. Same predicate the estimator's
+  // draft gate uses (unit-scope-model.hasPrimaryStreetNumber).
+  const { hasPrimaryStreetNumber } = require('./estimator-engine/unit-scope-model');
+  if (!String(row.address_line1 || '').trim() || !String(row.zip || '').trim()
+      || !hasPrimaryStreetNumber(row.address_line1)) {
     return { skipped: 'incomplete_address' };
   }
   const address = propertyRowAddress(row);
@@ -194,6 +210,51 @@ async function enrichPropertyById(propertyId) {
     }
   }
   const filled = Object.keys(patch).filter((k) => k !== 'updated_at');
+  const wroteCoords = filled.includes('latitude') && row.latitude == null && row.longitude == null;
+  // ── Downstream mirrors (fill-only, fenced, fail-open) ──
+  // Production paths still read the LEGACY surfaces: dispatch maps/ETAs
+  // read customers.latitude/longitude, completion tax reads
+  // customers.property_type, and route tooling reads the coordinates on
+  // scheduled_services rows linked at booking time (often inserted before
+  // this fire-and-forget lookup finishes). Enriching only the property row
+  // would leave all of them stale.
+  try {
+    if (wroteCoords) {
+      // Visits linked to THIS property whose coordinate pair is absent.
+      await db('scheduled_services')
+        .where({ property_id: propertyId })
+        .whereNull('lat')
+        .whereNull('lng')
+        .update({ lat, lng });
+    }
+    if (row.is_primary) {
+      const { addressKey } = require('./customer-properties');
+      const customer = await db('customers').where({ id: row.customer_id }).first();
+      // Fence: mirror only while the customers primary-address mirror still
+      // IS this property's address.
+      if (customer && addressKey(customer) === row.address_key) {
+        const mirror = {};
+        if (wroteCoords) {
+          mirror.latitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE latitude END', [lat]);
+          mirror.longitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE longitude END', [lng]);
+        }
+        // NEVER mirror a commercial classification onto customers:
+        // customers.property_type feeds service_taxability, and activating
+        // sales tax off an AI-inferred classification is an owner ruling
+        // (pending), not an enrichment side effect. Residential types are
+        // display/routing metadata only.
+        if (filled.includes('property_type') && propertyType && propertyType !== 'commercial') {
+          mirror.property_type = db.raw('COALESCE(property_type, ?)', [propertyType]);
+        }
+        if (Object.keys(mirror).length) {
+          mirror.updated_at = db.fn.now();
+          await db('customers').where({ id: row.customer_id }).update(mirror);
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn('[call-property-lookup] mirror update failed', { propertyId, error: errId(err) });
+  }
   // Post-patch completeness (drives the sweep's offset accounting): the
   // row leaves the NULL-candidate set only when coords AND type are all
   // present now — a partial fill (coords taken, synthesized type refused)
@@ -291,7 +352,17 @@ async function fetchBackfillCandidates(limit, offset = 0) {
     .select(db.raw(
       'EXISTS (SELECT 1 FROM estimates e WHERE e.property_id = cp.id) as has_estimate',
     ))
+    // recently_touched sinks rows the sweep (or anyone) already worked this
+    // week: a PARTIAL enrichment (coords filled, type refused) stamps
+    // updated_at, stays in the NULL-candidate set, and under a stable
+    // priority order a batch-sized head of such rows would consume every
+    // nightly batch forever. Sinking them for 7 days lets the backlog
+    // progress; they resurface weekly.
+    .select(db.raw(
+      "(cp.updated_at IS NOT NULL AND cp.updated_at > NOW() - INTERVAL '7 days') as recently_touched",
+    ))
     .orderBy([
+      { column: 'recently_touched', order: 'asc' },
       { column: 'has_upcoming_visit', order: 'desc' },
       { column: 'has_estimate', order: 'desc' },
       { column: 'cp.created_at', order: 'desc' },
