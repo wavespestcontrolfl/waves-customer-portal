@@ -588,6 +588,23 @@ violations at the severity noted.
   only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
   same noindex/no-referrer/no-store headers as `/report/:token`),
   `/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound),
+  `/api/webhooks/twilio/collections-vestibule[-key|-noinput]` +
+  `/api/webhooks/twilio/collections-relay-complete` +
+  `/api/webhooks/twilio/collections-transfer-complete` (POST; machine-to-machine
+  TwiML webhooks for the OUTBOUND collections voice lane — Twilio-signature
+  validated at the mount like every Twilio inbound route, and additionally
+  fail-closed to a bare `<Hangup/>` unless `GATE_VOICE_LATE_PAYMENT` is exactly
+  'true' AND the `callLogId` query param resolves to a call_log row this lane
+  itself originated (direction 'outbound', source 'collections_voice', a linked
+  collection case) whose CallSid matches the request. The vestibule is a FIXED
+  DTMF consent stage: deterministic script, `<Gather input="dtmf">` only, no
+  ConversationRelay/recording/audio processing before press-1, metadata-only
+  logging before consent. Press-1 renders `<Connect><ConversationRelay>` to the
+  existing `/ws/voice-agent` endpoint with a per-call minted token and a
+  `session_mode=collections` Parameter — which the ws server treats as an
+  UNVERIFIED hint and re-proves against the same call_log row before any
+  account data exists in the session. Treat the gate, the call_log linkage
+  check, and the no-audio-before-consent contract as security-critical),
   `/api/bouncie` + `/api/webhooks/bouncie`, `/api/webhooks/sendgrid`,
   `/api/webhooks/resend` (Svix-signed), `/api/webhooks/lead`
   (+ `POST /api/leads`, an alias accepting the same pair with identical

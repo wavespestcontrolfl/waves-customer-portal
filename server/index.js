@@ -650,6 +650,10 @@ app.use('/api/webhooks/twilio', validateTwilioSignature, twilioVoiceWebhookRoute
 // Facebook Messenger / Instagram channel-sender inbound (POST /messenger) —
 // same mount + signature validation as the SMS/voice webhooks; no path conflict.
 app.use('/api/webhooks/twilio', validateTwilioSignature, require('./routes/twilio-messenger-webhook'));
+// Collections outbound-voice vestibule + relay action (PR B) — same mount +
+// signature validation; every route fails closed (bare hangup) unless
+// GATE_VOICE_LATE_PAYMENT is exactly 'true'.
+app.use('/api/webhooks/twilio', validateTwilioSignature, require('./routes/collections-voice-webhook'));
 app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
 app.use('/api/admin/schedule/find-time', require('./routes/admin-schedule-find-time'));
