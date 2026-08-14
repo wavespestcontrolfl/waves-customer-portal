@@ -85,6 +85,16 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain) {
       metadata: { original_message_type: 'bank_verification_incomplete' },
     });
     if (sendResult.blocked || sendResult.sent === false) return 'skip';
+    // Collections contact ledger (additive, safe ungated): the verification
+    // re-nudge still reached the customer about this invoice.
+    await require('./collections/contact-ledger').recordContact({
+      customerId: customer.id,
+      channel: 'sms',
+      purpose: 'payment_verification',
+      invoiceIds: [inv.id],
+      source: 'late_payment_checker',
+      metadata: { microdeposit: true, tier_days: tierDays },
+    });
     // Branded email sidecar — best-effort; the SMS re-nudge already succeeded, so a
     // missing email address or send failure must NOT downgrade the 'sent' outcome.
     await sendMicrodepositVerificationEmail({ invoice: inv, customer, touchKey: `${tierDays}d` })
@@ -205,6 +215,23 @@ const LatePaymentService = {
         continue;
       }
 
+      // Collections contact policy (PR A): consult-and-skip ONLY while
+      // GATE_COLLECTIONS_POLICY is exactly 'true' — gate off/unset leaves this
+      // rail byte-identical (pinned by test). evaluate() fails closed
+      // internally (an error is a denial), so a policy blip skips the send
+      // rather than bypassing the policy.
+      if (process.env.GATE_COLLECTIONS_POLICY === 'true') {
+        const ContactPolicy = require('./collections/contact-policy');
+        const verdict = await ContactPolicy.evaluate(customer.id, {
+          channel: 'sms', purpose: 'late_payment', now,
+        });
+        if (!verdict.allowed) {
+          logger.info(`[late-payment] collections policy denied reminder for customer ${customer.id}: ${verdict.denialReasons.join(', ')}`);
+          skipped++;
+          continue;
+        }
+      }
+
       const name = customer.first_name || 'there';
       const invoiceTitle = inv.title || 'your service';
       const payUrl = await shortenOrPassthrough(`${domain}/pay/${inv.token}`, {
@@ -315,6 +342,18 @@ const LatePaymentService = {
           skipped++;
           continue;
         }
+
+        // Collections contact ledger (additive/observational, safe ungated):
+        // a delivered reminder is a balance contact the policy's frequency
+        // windows must see. Never throws.
+        await require('./collections/contact-ledger').recordContact({
+          customerId: customer.id,
+          channel: smsSent ? 'sms' : 'email',
+          purpose: 'late_payment',
+          invoiceIds: [inv.id],
+          source: 'late_payment_checker',
+          metadata: { tier_days: tierDays, days_overdue: daysSince },
+        });
 
         await db('activity_log').insert({
           customer_id: customer.id,

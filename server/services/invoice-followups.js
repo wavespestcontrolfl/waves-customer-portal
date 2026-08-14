@@ -389,6 +389,23 @@ async function runPending() {
   let sent = 0, skipped = 0;
   for (const row of rows) {
     try {
+      // Collections contact policy (PR A): consult-and-skip ONLY while
+      // GATE_COLLECTIONS_POLICY is exactly 'true' — gate off/unset leaves
+      // this rail byte-identical (pinned by test). evaluate() fails closed
+      // internally (an error is a denial), so a policy blip skips the touch
+      // rather than bypassing the policy; the sequence stays due and the
+      // next tick re-decides.
+      if (process.env.GATE_COLLECTIONS_POLICY === 'true') {
+        const ContactPolicy = require('./collections/contact-policy');
+        const verdict = await ContactPolicy.evaluate(row.customer_id, {
+          channel: 'sms', purpose: 'late_payment', now,
+        });
+        if (!verdict.allowed) {
+          logger.info(`[invoice-followups] collections policy denied touch for sequence ${row.id} (customer ${row.customer_id}): ${verdict.denialReasons.join(', ')}`);
+          skipped++;
+          continue;
+        }
+      }
       if (row.next_touch_at && isStaleTouch(row.next_touch_at, now)) {
         const skip = await skipStaleTouches(row, now);
         skipped++;
@@ -889,6 +906,18 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     last_touch_at: new Date(),
     next_touch_at: nextAt,
     status: nextAt ? 'active' : 'completed',
+  });
+
+  // Collections contact ledger (additive/observational, safe ungated): a
+  // delivered touch is a balance contact the policy's frequency windows must
+  // see. Never throws.
+  await require('./collections/contact-ledger').recordContact({
+    customerId: customer.id,
+    channel: smsSent ? 'sms' : 'email',
+    purpose: 'invoice_followup',
+    invoiceIds: [row.invoice_id],
+    source: 'invoice_followups',
+    metadata: { step_id: step.id, sms_sent: smsSent, email_sent: !!emailResult.ok },
   });
 
   // Log to customer_interactions for the 360 view
