@@ -142,7 +142,6 @@ const SVC = {
   status: 'confirmed',
   is_recurring: true,
   notes: '',
-  service_preferences: null,
   source_estimate_id: null,
   pre_service_brief: null,
   pre_service_brief_type: null,
@@ -673,13 +672,15 @@ describe('serviceHistory is line-scoped from the paged walk', () => {
 });
 
 describe('service-preference opt-outs in grounding', () => {
-  test('non-secret opt-out flags reach llmFacts and an opted-out instruction falls to the template', async () => {
+  test('non-secret opt-out flags reach llmFacts from the CUSTOMER row and an opted-out instruction falls to the template', async () => {
     global.__dispatch = jest.fn(async () => ({
       ok: true,
       json: { ...CLEAN_LLM_JSON, priorities: ['Treat interior'] },
     }));
     useDb(baseResponses({
-      scheduled_services: [{ ...SVC, service_preferences: { interior_spray: false, exterior_sweep: true } }],
+      // customers.service_preferences is the source of truth (estimate
+      // acceptance writes there); scheduled_services has no such column.
+      customers: [{ id: 'cust-1', first_name: 'Test', last_name: 'Fixture', service_preferences: { interior_spray: false, exterior_sweep: true } }],
     }));
     const out = await PrevisitBrief.generateVisitBrief('svc-1');
     expect(out.generated).toBe(true);
@@ -687,6 +688,16 @@ describe('service-preference opt-outs in grounding', () => {
     const text = global.__dispatch.mock.calls[0][1].text;
     const facts = JSON.parse(text.split('Grounding facts:\n')[1].split('\n\nReturn only')[0]);
     expect(facts.servicePreferences).toEqual({ interiorSpray: false, exteriorSweep: true });
+  });
+
+  test('the deterministic EXTERIOR ONLY alert fires from the customer-row preferences', async () => {
+    const state = useDb(baseResponses({
+      customers: [{ id: 'cust-1', first_name: 'Test', last_name: 'Fixture', service_preferences: JSON.stringify({ interior_spray: false }) }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    const { brief } = storedBrief(state);
+    expect(brief.access.alerts.some((a) => a.type === 'service_pref' && /EXTERIOR ONLY/.test(a.text))).toBe(true);
   });
 });
 
@@ -730,6 +741,16 @@ describe('combined visits (completion-profile companions)', () => {
     const stored = JSON.parse(state.updates.scheduled_services.at(-1).pre_service_brief);
     expect(stored.product_guidance.companions[0].line).toBe('rodent');
     expect(stored.product_guidance.companions[0].products[0].name).toBe('ContraPest');
+  });
+
+  test('a companion-profile resolution outage aborts generation (strict — never hashes an empty companion list)', async () => {
+    mockResolveProfile.mockRejectedValue(new Error('profiles schema probe down'));
+    const state = useDb(baseResponses());
+    await expect(PrevisitBrief.generateVisitBrief('svc-1')).rejects.toThrow('profiles schema probe down');
+    expect(state.updates.scheduled_services || []).toHaveLength(0);
+    // The caller must ask for strict resolution — the resolver's default
+    // swallows the probe failure into companions: [].
+    expect(mockResolveProfile).toHaveBeenCalledWith(expect.anything(), expect.anything(), { strict: true });
   });
 
   test('a companion on the visit\'s own line adds no duplicate block', async () => {

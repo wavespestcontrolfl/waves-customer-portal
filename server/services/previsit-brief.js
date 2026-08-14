@@ -503,7 +503,11 @@ function briefServiceIdentity(rawServiceType) {
   return stripServiceSuffixes(rawServiceType) || 'General Service';
 }
 
-function buildAccessBlock(prefs, svc, genuinelyNew, normalizedType) {
+// rawServicePreferences comes from the CUSTOMER row —
+// customers.service_preferences is where estimate acceptance persists the
+// opt-outs (estimate-public.js); scheduled_services has no such column,
+// so reading it off svc silently disabled the alert forever.
+function buildAccessBlock(prefs, svc, genuinelyNew, normalizedType, rawServicePreferences = null) {
   return {
     codes: {
       neighborhoodGate: prefs?.neighborhood_gate_code || null,
@@ -523,7 +527,7 @@ function buildAccessBlock(prefs, svc, genuinelyNew, normalizedType) {
       prefs,
       notes: svc.notes,
       genuinelyNew,
-      servicePreferences: svc.service_preferences,
+      servicePreferences: rawServicePreferences,
       normalizedServiceType: normalizedType,
     }),
   };
@@ -634,10 +638,13 @@ async function assembleGrounding(svc, dbh = db) {
   // Resolution/walk failures propagate — companion guidance is hashed,
   // and an outage-shaped empty must abort rather than overwrite a
   // complete cached brief (same sentinel rule as the primary walk).
+  // strict: the resolver's DEFAULT swallows a schema-probe failure into
+  // "table unavailable" → default profile with companions: [] — exactly
+  // the outage-shaped empty this caller must never hash.
   const companionGuidance = [];
   {
     const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
-    const profile = await resolveCompletionProfileForScheduledService(svc, dbh);
+    const profile = await resolveCompletionProfileForScheduledService(svc, dbh, { strict: true });
     const seenLines = new Set([history.visitLine].filter(Boolean));
     for (const companion of profile?.companions || []) {
       const line = COMPANION_TYPE_LINES[companion.type];
@@ -663,24 +670,28 @@ async function assembleGrounding(svc, dbh = db) {
   // actually readable and empty. An outage (available:false) asserts
   // nothing — no new-customer alert, no first-visit prompt fact.
   const genuinelyNew = history.available ? !history.last : false;
-  const access = buildAccessBlock(prefs, svc, genuinelyNew, normalizedType);
 
-  // Current service opt-outs from scheduled_services.service_preferences
-  // (jsonb or string — same tolerant parse and pest scoping as the
-  // deterministic alert in nextstop-alerts). Boolean whitelist only.
+  // Current service opt-outs from the CUSTOMER row —
+  // customers.service_preferences is where estimate acceptance persists
+  // them (estimate-public.js); scheduled_services has no such column, so
+  // an svc read is always undefined and would disable both the deterministic
+  // alert and these flags. Same tolerant parse and pest scoping as the
+  // nextstop-alerts compiler; boolean whitelist only.
+  const rawServicePreferences = customer.service_preferences ?? null;
   let servicePrefFlags = null;
   if (/pest/i.test(normalizedType)) {
     let svcPrefs = null;
     try {
-      svcPrefs = typeof svc.service_preferences === 'string'
-        ? JSON.parse(svc.service_preferences || '{}')
-        : (svc.service_preferences || null);
+      svcPrefs = typeof rawServicePreferences === 'string'
+        ? JSON.parse(rawServicePreferences || '{}')
+        : (rawServicePreferences || null);
     } catch { svcPrefs = null; }
     const flags = {};
     if (typeof svcPrefs?.interior_spray === 'boolean') flags.interiorSpray = svcPrefs.interior_spray;
     if (typeof svcPrefs?.exterior_sweep === 'boolean') flags.exteriorSweep = svcPrefs.exterior_sweep;
     if (Object.keys(flags).length) servicePrefFlags = flags;
   }
+  const access = buildAccessBlock(prefs, svc, genuinelyNew, normalizedType, rawServicePreferences);
 
   const catalogVocabulary = await loadCatalogVocabulary(dbh);
 

@@ -191,14 +191,18 @@ function serializeProfile(row = null) {
   };
 }
 
-async function tableAvailable(knex) {
+async function tableAvailable(knex, { strict = false } = {}) {
   // try/catch, not just .catch(): if knex.schema itself is unavailable the
   // property access throws before a promise exists, and the rejection would
   // escape appointmentManagedProjectTypes' fail-open contract (500ing every
   // project create instead of degrading to "no types managed").
+  // strict: persisted-state callers (the pre-visit brief hashes the
+  // companion list) must SEE a transient failure — swallowed-to-false it
+  // reads as "no companions" and overwrites cached guidance.
   try {
     return await knex.schema.hasTable('service_completion_profiles');
-  } catch {
+  } catch (err) {
+    if (strict) throw err;
     return false;
   }
 }
@@ -379,17 +383,17 @@ async function lookupServiceForScheduledService(scheduledService = {}, knex = db
   return null;
 }
 
-async function profileByServiceKey(serviceKey, knex = db) {
-  if (!serviceKey || !(await tableAvailable(knex))) return null;
+async function profileByServiceKey(serviceKey, knex = db, { strict = false } = {}) {
+  if (!serviceKey || !(await tableAvailable(knex, { strict }))) return null;
   return knex('service_completion_profiles')
     .where({ service_key: serviceKey, active: true })
     .first();
 }
 
-async function resolveCompletionProfileForScheduledService(scheduledService = {}, knex = db) {
+async function resolveCompletionProfileForScheduledService(scheduledService = {}, knex = db, { strict = false } = {}) {
   const service = await lookupServiceForScheduledService(scheduledService, knex);
   const profile = service?.service_key
-    ? await profileByServiceKey(service.service_key, knex)
+    ? await profileByServiceKey(service.service_key, knex, { strict })
     : null;
   if (profile) return serializeProfile(profile);
 
