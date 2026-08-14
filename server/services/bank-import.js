@@ -720,11 +720,15 @@ async function healUnreconciledLinks() {
       'sp.amount as payout_amount', 'sp.status as payout_status', 'sp.arrival_date as arrival_date', 'sp.reconciled as payout_reconciled');
   let pendingReverts = 0;
   for (const row of pendingLinks) {
-    if (row.payout_reconciled) continue; // the echo guard revalidates reconciled+pending links
-    if (linkStillEligible(row, Number(row.payout_amount))) continue;
+    // an UNRECONCILED pending row that is still eligible by its expected
+    // amount is the echo retries' normal work — skip without a lock. A
+    // RECONCILED pending row (echo committed, crash before the flag
+    // cleared) always takes the locked path: its effective amount is the
+    // confirmed actual, which only the lock can read consistently.
+    if (!row.payout_reconciled && linkStillEligible(row, Number(row.payout_amount))) continue;
     await db.transaction(async (trx) => {
-      const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('id', 'amount', 'status', 'arrival_date', 'reconciled');
-      if (!sp || sp.reconciled) return; // reconciled since the scan — the echo guard owns it now
+      const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('id', 'amount', 'status', 'arrival_date', 'reconciled', 'reconciled_by');
+      if (!sp) return; // payout gone — FK SET NULL + the dangling heal own this
       const lockedEffective = await effectivePayoutAmount(sp, trx);
       if (linkStillEligible({ ...row, payout_status: sp.status, arrival_date: sp.arrival_date }, lockedEffective)) return;
       const changed = await trx('bank_transactions')
@@ -739,7 +743,14 @@ async function healUnreconciledLinks() {
           }, ['reconcilePending', 'verifyPending']),
           updated_at: new Date(),
         });
-      if (changed) pendingReverts++;
+      if (!changed) return;
+      pendingReverts++;
+      // a reconciliation THIS row authored is reversed with its link
+      // (human-authored ones are never touched from here)
+      if (sp.reconciled && sp.reconciled_by === `bank-import:${row.id}`) {
+        const { reconcilePayout } = require('./stripe-banking');
+        await reconcilePayout(row.matched_payout_id, Number(row.amount), `Eligibility revert for bank import row ${row.id}`, `bank-import:${row.id}`, 'rejected', { trx });
+      }
     });
   }
   return { reverted: reverted + amountReverts + pendingReverts, remarked };
@@ -937,14 +948,20 @@ async function healEditedExpenseLinks() {
 // ledger side no longer exists. Deterministic self-heal at the top of every
 // matching pass.
 async function resetDanglingLinks() {
+  // claim-generation markers are stripped WITH the heal: a claim whose
+  // ledger side was deleted mid-verification would otherwise leave
+  // verifyPending/reconcilePending behind, and the operator's NEXT manual
+  // link would inherit them — the sweeps could then revert that new link
+  // as if it were the abandoned automatic claim.
+  const dropMarkers = db.raw("coalesce(suggestion, '{}'::jsonb) - 'reconcilePending' - 'verifyPending'");
   const healedExpense = await db('bank_transactions')
     .whereIn('status', ['matched_expense', 'created_expense'])
     .whereNull('matched_expense_id')
-    .update({ status: 'unmatched', match_method: null, matched_at: null, updated_at: new Date() });
+    .update({ status: 'unmatched', match_method: null, matched_at: null, suggestion: dropMarkers, updated_at: new Date() });
   const healedPayout = await db('bank_transactions')
     .where({ status: 'matched_payout' })
     .whereNull('matched_payout_id')
-    .update({ status: 'unmatched', match_method: null, matched_at: null, updated_at: new Date() });
+    .update({ status: 'unmatched', match_method: null, matched_at: null, suggestion: dropMarkers, updated_at: new Date() });
   return healedExpense + healedPayout;
 }
 

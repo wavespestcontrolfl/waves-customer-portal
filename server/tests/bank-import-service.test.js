@@ -1300,7 +1300,9 @@ describe('runDeterministicMatching', () => {
     expect(summary.reconcileRetried).toBe(0);
     const revert = state.updates.find(u => u.patch.status === 'unmatched');
     expect(revert).toBeDefined();
-    expect(sugOf(revert).autoRevert.reason).toContain('different banked amount');
+    // the page-load heal scan now catches this BEFORE the echo retry —
+    // reconciled+pending rows are revalidated under the payout lock
+    expect(sugOf(revert).autoRevert.reason).toContain('no longer eligible');
   });
 
   test('moreRemaining stays true when the fresh pool fills the limit but examined rows still exist', async () => {
