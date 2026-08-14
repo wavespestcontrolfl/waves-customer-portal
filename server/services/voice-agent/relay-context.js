@@ -1356,7 +1356,7 @@ async function pricingText(input = {}) {
   // a building beyond the residential bounds is a custom quote — clamping it
   // into the house table produced a concrete underquote the prompt then
   // orders Sandy to state as exact.
-  if (homeSqFt > 20000 || (lotSqFt && lotSqFt > 200000)) {
+  if (homeSqFt > 20000 || (lotSqFt && lotSqFt > 200000) || (lawnSqFt && lawnSqFt > 200000)) {
     return 'A property this size is beyond standard residential pricing — it needs a custom quote. '
       + 'Do NOT state a price. Capture the lead and tell the caller a Waves team member will follow up '
       + 'with exact pricing.';

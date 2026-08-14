@@ -1148,6 +1148,14 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(generateEstimate).not.toHaveBeenCalled();
   });
 
+  test('an oversized LAWN refuses too — turf beyond the bound is never silently clamped', async () => {
+    const out = await executeTool('get_pricing', {
+      service: 'lawn_care', home_sqft: 5000, lawn_sqft: 500000,
+    }, { customerId: null });
+    expect(out).toMatch(/custom quote/i);
+    expect(generateEstimate).not.toHaveBeenCalled();
+  });
+
   // ⭐ THE RETIRED 'basic' TIER IS NEITHER ADVERTISED NOR FORWARDED. The 4x
   // lawn tier is fully retired (owner 2026-08-04); the engine silently
   // resolves it to enhanced, so offering it in the schema quoted a program
