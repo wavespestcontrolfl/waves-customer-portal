@@ -468,4 +468,9 @@ module.exports = {
   PILOT_MIN_DUNNING_TOUCHES,
   RND_STALENESS_DAYS,
   FLAG_BLOCKED_CHANNELS,
+  // The staffed-call window — exported so PR B's human-escape-hatch and
+  // vestibule share the SAME window the policy enforces (one source of truth
+  // for "are we inside calling hours").
+  CALL_WINDOW_START_HOUR,
+  CALL_WINDOW_END_HOUR,
 };
