@@ -10988,7 +10988,7 @@ function MyPlanTab({ customer, focusService }) {
 // Maps script blocked) — the existing ETA card below handles the
 // "no map" case.
 // =========================================================================
-function EnRouteLiveMap({ techPosition, customerLocation, techName }) {
+function EnRouteLiveMap({ techPosition, customerLocation, techName, truckTitle }) {
   const mapRef = useRef(null);
   const mapInstRef = useRef(null);
   const truckMarkerRef = useRef(null);
@@ -11084,7 +11084,10 @@ function EnRouteLiveMap({ techPosition, customerLocation, techName }) {
       truckMarkerRef.current = new window.google.maps.Marker({
         map: mapInstRef.current,
         position: truckPos,
-        title: `${techName || 'Tech'} is on the way`,
+        // Scheduled-state reuse passes a neutral title — the default
+        // en-route claim must not leak onto a card that says the customer
+        // will be texted once the tech IS on the way.
+        title: truckTitle || `${techName || 'Tech'} is on the way`,
         icon: {
           path: window.google.maps.SymbolPath.CIRCLE,
           scale: 11,
@@ -11261,6 +11264,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
             techPosition={techApprox}
             customerLocation={customerLocation}
             techName={techFirst}
+            truckTitle={`${techFirst}'s approximate location`}
           />
           <div style={{ fontSize: 14, color: B.textCaption, marginTop: 6 }}>
             Approximate location — updates as {techFirst} works the route.
