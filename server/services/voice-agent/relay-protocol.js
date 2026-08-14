@@ -322,6 +322,15 @@ function buildRelayTwiML({
   voice = defaultTtsVoice(), // provider-specific voice id (env VOICE_RELAY_TTS_VOICE)
   action, // optional <Connect action> URL — Twilio POSTs here when the session ends/fails
   wsSecret = process.env.VOICE_RELAY_WS_SECRET,
+  // Optional { name: value } map rendered as <Parameter> children — Twilio
+  // echoes them back verbatim in the setup frame's customParameters, which is
+  // how a purpose-built leg (the collections outbound relay) labels its
+  // session mode. ABSENT (every existing caller) renders the exact
+  // self-closing element as before — byte-identical, pinned by tests. The
+  // values are hints only: relay-server treats every setup-frame field as
+  // unverified input, so the session mode is re-proven server-side against
+  // the call_log row for the AUTHENTICATED CallSid before anything acts on it.
+  parameters = null,
 } = {}) {
   if (!wsUrl) throw new Error('buildRelayTwiML: wsUrl is required');
   // Authenticate the upgrade with a token minted for THIS CallSid — validated
@@ -347,10 +356,20 @@ function buildRelayTwiML({
   // or fails (e.g. a rejected upgrade or transient WS error) instead of
   // stranding the call — the live backstop points it at /relay-complete.
   const connectAttrs = action ? ` action="${escapeXmlAttr(action)}" method="POST"` : '';
+  const paramEntries = parameters && typeof parameters === 'object'
+    ? Object.entries(parameters).filter(([k, v]) => k && v != null)
+    : [];
+  const relayElement = paramEntries.length
+    ? `<ConversationRelay ${attrs.join(' ')}>`
+      + paramEntries
+        .map(([k, v]) => `<Parameter name="${escapeXmlAttr(k)}" value="${escapeXmlAttr(v)}" />`)
+        .join('')
+      + '</ConversationRelay>'
+    : `<ConversationRelay ${attrs.join(' ')} />`;
   return (
     '<?xml version="1.0" encoding="UTF-8"?>' +
     `<Response><Connect${connectAttrs}>` +
-    `<ConversationRelay ${attrs.join(' ')} />` +
+    relayElement +
     '</Connect></Response>'
   );
 }
