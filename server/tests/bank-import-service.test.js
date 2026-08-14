@@ -1355,6 +1355,19 @@ describe('runDeterministicMatching', () => {
     expect(summary.moreRemaining).toBe(true); // …but the examined row is not forgotten
   });
 
+  test('a fully-reviewed examined pool larger than the fill budget stops reading as pending', async () => {
+    // no fresh rows at all — only permanently parked/noMatch rows rotate;
+    // another pass would find nothing new, so "more" must not nag forever
+    state.bankRows = [
+      { id: 'bt-1', txn_date: '2026-08-01', description: 'A', amount: 1, direction: 'debit', suggestion: { noMatch: true } },
+      { id: 'bt-2', txn_date: '2026-08-02', description: 'B', amount: 2, direction: 'debit', suggestion: { noMatch: true } },
+      { id: 'bt-3', txn_date: '2026-08-03', description: 'C', amount: 3, direction: 'debit', suggestion: { noMatch: true } },
+    ];
+    state.expenses = [];
+    const summary = await runDeterministicMatching({ limit: 2 });
+    expect(summary.moreRemaining).toBe(false);
+  });
+
   test("a human DRAFT reconciliation pauses automation — no re-mark, no revert, no re-confirm", async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
     state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'paid', reconciled: false }];

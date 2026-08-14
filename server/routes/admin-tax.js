@@ -2041,8 +2041,13 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
         // (amount + applied refunds): the original full-price debit is
         // still its statement row.
         const refundTotal = await bankImport.appliedRefundTotal(expenseId, trx);
-        const plausible = bankImport.isPlausibleExpenseLink(row, expense)
-          || (refundTotal > 0 && bankImport.isPlausibleExpenseLink(row, { ...expense, amount: Number(expense.amount) + refundTotal }));
+        // gross-ONLY when refunds exist (the survey's net/gross
+        // exclusivity): a refunded expense whose net drifted to equal the
+        // debit must not link on the coincidence while its true gross
+        // stopped explaining it
+        const plausible = refundTotal > 0
+          ? bankImport.isPlausibleExpenseLink(row, { ...expense, amount: Number(expense.amount) + refundTotal })
+          : bankImport.isPlausibleExpenseLink(row, expense);
         if (!plausible) {
           const e = new Error('that expense does not plausibly match this bank row (amount/date outside the matching window)');
           e.status = 400;
@@ -2325,11 +2330,16 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       const target = row.suggestion?.refundAppliedTo;
       const restore = row.suggestion?.refundRestore;
       const refund = Number(row.amount);
+      // releaseOnly: the drift 409 below is otherwise a dead end — once
+      // the operator restores the expense BY HAND on the Expenses tab,
+      // the snapshot comparison keeps failing forever. This clears the
+      // refund association WITHOUT touching the expense.
+      const releaseOnly = !!(req.body && req.body.releaseOnly === true);
       let restoredServiceId = null;
       try {
         await db.transaction(async (trx) => {
           const expense = target ? await trx('expenses').where({ id: target }).forUpdate().first('id', 'amount', 'tax_deductible_amount', 'notes', 'scheduled_service_id') : null;
-          if (expense && restore) {
+          if (expense && restore && !releaseOnly) {
             const expected = Math.round((Number(restore.prevAmount) - refund) * 100) / 100;
             const amountUntouched = Math.round(Number(expense.amount) * 100) === Math.round(expected * 100);
             // deductible must ALSO equal what apply-refund wrote — an
@@ -2340,7 +2350,7 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
               || (expense.tax_deductible_amount != null && appliedDeductible != null
                 && Math.round(Number(expense.tax_deductible_amount) * 100) === Math.round(Number(appliedDeductible) * 100));
             if (!amountUntouched || !deductibleUntouched) {
-              const e = new Error('the expense changed since this refund was applied — undo it manually on the Expenses tab');
+              const e = new Error('the expense changed since this refund was applied — fix it manually on the Expenses tab, then use Release to clear this refund without touching the expense again');
               e.status = 409;
               throw e;
             }
@@ -2362,7 +2372,7 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
               status: 'unmatched',
               match_method: null,
               matched_at: null,
-              suggestion: bankImport.suggestionMerge({ refundUndone: { at: new Date().toISOString(), expenseId: target || null } }, ['refundAppliedTo', 'refundAmount', 'refundRestore']),
+              suggestion: bankImport.suggestionMerge({ refundUndone: { at: new Date().toISOString(), expenseId: target || null, ...(releaseOnly ? { releasedWithoutRestore: true } : {}) } }, ['refundAppliedTo', 'refundAmount', 'refundRestore']),
               updated_at: new Date(),
             });
           if (!changed) {

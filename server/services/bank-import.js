@@ -1378,6 +1378,7 @@ async function runDeterministicMatching({ limit } = {}) {
       .limit(limit + 1);
     const moreFresh = fresh.length > limit;
     unmatched = fresh.slice(0, limit);
+    const freshCount = unmatched.length;
     let moreExamined = false;
     if (!moreFresh) {
       // Even with NO leftover capacity (fresh pool exactly == limit), the
@@ -1397,7 +1398,13 @@ async function runDeterministicMatching({ limit } = {}) {
       moreExamined = examined.length > fill;
       unmatched = unmatched.concat(examined.slice(0, fill));
     }
-    moreRemaining = moreFresh || moreExamined;
+    // The examined pool is a PERMANENT rotation of reviewed rows — its
+    // size never shrinks below the fill budget, so counting its overflow
+    // as pending forever would nag the operator to re-run matching with
+    // nothing new to find. Overflow only reads as remaining while the
+    // pass also had FRESH work: new imports (and the ledger changes that
+    // accompany them) are what make a rescan of the rest worthwhile.
+    moreRemaining = moreFresh || (moreExamined && freshCount > 0);
   }
   // pending echoes beyond the retry batch are unfinished work too — the
   // caller's "more rows pending" surface must not read as done

@@ -821,6 +821,22 @@ describe('apply-refund (gate on)', () => {
     expect(sugOf(claim).refundUndone.expenseId).toBe('exp-9');
   });
 
+  test('releaseOnly clears a drift-blocked refund WITHOUT touching the expense', async () => {
+    state.bankRow = {
+      id: 'bt-1', amount: '20.00', direction: 'credit', account_type: 'card', status: 'refund_applied',
+      suggestion: { refundAppliedTo: 'exp-9', refundAmount: 20, refundRestore: { prevAmount: 58.12, prevDeductible: 29.06, appliedDeductible: 19.06 } },
+    };
+    // the expense drifted — a normal undo would 409 forever after the
+    // operator fixed it by hand on the Expenses tab
+    state.expenseRow = { id: 'exp-9', amount: '999.99', tax_deductible_amount: '1.00', notes: 'n' };
+    const res = await post('/admin/tax/bank-import/bt-1/unlink', { releaseOnly: true });
+    expect(res.status).toBe(200);
+    expect(state.expenseUpdates).toHaveLength(0); // the expense is NEVER touched
+    const claim = state.bankUpdates[0];
+    expect(claim.patch.status).toBe('unmatched');
+    expect(sugOf(claim).refundUndone.releasedWithoutRestore).toBe(true);
+  });
+
   test('undoing a job expense refund re-derives the job-cost rollups too', async () => {
     const { calculateJobCost } = require('../services/job-costing');
     calculateJobCost.mockClear();

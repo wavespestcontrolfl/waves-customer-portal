@@ -4695,6 +4695,20 @@ function BankImportTab() {
                       {r.status === "refund_applied" ? "Undo refund" : "Unlink"}
                     </button>
                   )}
+                  {r.status === "refund_applied" && (
+                    <button
+                      type="button"
+                      disabled={!!busy}
+                      style={{ ...bankInput, cursor: "pointer", color: D.muted, marginLeft: 6 }}
+                      title="Already fixed the expense by hand on the Expenses tab? Clears this refund association WITHOUT touching the expense — the escape hatch when Undo refuses because the expense changed"
+                      onClick={() => {
+                        if (window.confirm("Release this refund WITHOUT restoring the expense? Only after you already corrected the expense manually on the Expenses tab."))
+                          act("release", `/admin/tax/bank-import/${r.id}/unlink`, { releaseOnly: true });
+                      }}
+                    >
+                      Release
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}
