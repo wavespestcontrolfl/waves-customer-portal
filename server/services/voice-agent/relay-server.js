@@ -207,11 +207,12 @@ function attachVoiceRelay(httpServer) {
       // the live CallSid — while a duplicate setup frame on the SAME socket
       // (same nonce) still cannot claim twice.
       req.relaySessionKey = String(token).split('.')[2] || null;
-      // The token's expiry doubles as a MONOTONIC GENERATION: every retry
-      // mints a fresh token with a later exp, so a takeover can require the
-      // claimant to be provably NEWER — a delayed old socket can no longer
-      // steal the claim back from the replacement.
-      req.relaySessionGeneration = Number(String(token).split('.')[1]) || null;
+      // The nonce's 12-hex millisecond prefix IS the mint generation (see
+      // mintCallToken): millisecond-resolution ordering so a takeover can
+      // require the claimant to be provably newer — a delayed old socket
+      // cannot steal the claim back, and same-millisecond mints break ties
+      // deterministically on the nonce's lexicographic order.
+      req.relaySessionGeneration = parseInt(String(req.relaySessionKey || '').slice(0, 12), 16) || null;
       wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
     }).catch(() => {
       try { socket.destroy(); } catch { /* socket already gone */ }

@@ -104,13 +104,15 @@ async function beginRelaySessionClaim(callSid, sessionKey = null, sessionGenerat
     // token for the SAME CallSid, with a LATER expiry. The claim is owned by
     // the token's nonce and stamped with its generation (the expiry):
     //   - no claim yet → any session claims (first winner);
-    //   - claim held by ANOTHER nonce → takeover ONLY with an equal-or-newer
-    //     generation. Strictly older = a delayed OLD socket, refused — it can
-    //     no longer steal the claim back from the replacement. EQUAL = two
-    //     mints inside the token's one-second resolution (the same-second
-    //     retry mintCallToken's nonce exists to support): both are live
-    //     candidates and the latest claimant wins — no seesaw, because a
-    //     session claims once and the loser's supersession fence ends it;
+    //   - claim held by ANOTHER nonce → takeover only by a PROVABLY NEWER
+    //     mint under a durable TOTAL order: the generation (the nonce's
+    //     millisecond mint prefix) must be strictly greater, or equal with a
+    //     lexicographically greater nonce (same-millisecond mints are
+    //     genuinely concurrent; the tie-break is arbitrary but durable and
+    //     total, so at most ONE bounded flip and never a seesaw — a session
+    //     claims once and the loser's supersession fence ends it). A delayed
+    //     OLD socket is strictly older on both axes and can never steal the
+    //     claim back;
     //   - claim held by THIS nonce → refused — a duplicate setup frame on
     //     the same socket still cannot claim twice (the r25 race).
     // Legacy shape (no sessionKey) keeps the strict one-claim predicate.
@@ -119,8 +121,10 @@ async function beginRelaySessionClaim(callSid, sessionKey = null, sessionGenerat
       q.whereRaw(
         `((metadata->>'${RELAY_CLAIM_KEY}') IS NULL `
         + `OR ((metadata->>'${RELAY_CLAIM_OWNER_KEY}') IS DISTINCT FROM ? `
-        + `AND COALESCE((metadata->>'${RELAY_CLAIM_GEN_KEY}')::bigint, 0) <= ?))`,
-        [owner, generation],
+        + `AND (COALESCE((metadata->>'${RELAY_CLAIM_GEN_KEY}')::bigint, 0) < ? `
+        + `OR (COALESCE((metadata->>'${RELAY_CLAIM_GEN_KEY}')::bigint, 0) = ? `
+        + `AND COALESCE(metadata->>'${RELAY_CLAIM_OWNER_KEY}', '') < ?))))`,
+        [owner, generation, generation, owner],
       );
     } else {
       q.whereRaw(`(metadata->>'${RELAY_CLAIM_KEY}') IS NULL`);

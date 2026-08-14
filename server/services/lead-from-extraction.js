@@ -601,27 +601,16 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     }
   };
   const serializeCapture = opts.callSid && opts.aniPhone && typeof db.transaction === 'function';
-  if (serializeCapture) {
-    try {
-      await db.transaction(async (trx) => {
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['voice-lead-capture', String(opts.callSid)],
-        );
-        await resolveExistingLead(trx);
-      });
-    } catch (err) {
-      logger.warn(`[voice-agent-lead] capture serialization failed for callSid=${opts.callSid} (${err.message}) — proceeding unserialized`);
-      leadId = undefined;
-      created = false;
-      await resolveExistingLead(db);
-    }
-  } else {
-    await resolveExistingLead(db);
-  }
 
-  if (leadId) {
-    const current = existingLead || (await db('leads').where({ id: leadId }).first());
+  // ⭐ THE LOCK COVERS THE MUTABLE LEAD STATE, NOT JUST THE INSERT. Releasing
+  // it after the lookup/insert left the current-read → merge → update →
+  // activity section racing: two same-call sessions could both read stale
+  // extracted_data and overwrite each other's summary or contact-preference
+  // fields. The merge runs inside the same locked transaction, on the same
+  // connection.
+  const mergeAndStamp = async (q) => {
+    if (!leadId) return;
+    const current = existingLead || (await q('leads').where({ id: leadId }).first());
     const leadUpdates = {};
     if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = nameCase(extracted.first_name);
     if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = nameCase(extracted.last_name);
@@ -675,9 +664,9 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     // null out an existing lead's customer_id on a no-match/ambiguous lookup.
     if (customerId) leadUpdates.customer_id = customerId;
     leadUpdates.updated_at = new Date();
-    await db('leads').where({ id: leadId }).update(leadUpdates);
+    await q('leads').where({ id: leadId }).update(leadUpdates);
 
-    await db('lead_activities').insert({
+    await q('lead_activities').insert({
       lead_id: leadId,
       activity_type: 'ai_triage',
       description: `AI voice agent captured: ${service || 'general inquiry'}${language === 'es' ? ' (Spanish)' : ''}, quality: ${extracted.lead_quality || 'unknown'}`,
@@ -690,6 +679,30 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
         ...(contactPreference || {}),
       }),
     }).catch((e) => logger.warn(`[voice-agent-lead] activity log failed (non-blocking): ${e.message}`));
+  };
+
+  const runCapture = async (q) => {
+    await resolveExistingLead(q);
+    await mergeAndStamp(q);
+  };
+  if (serializeCapture) {
+    try {
+      await db.transaction(async (trx) => {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['voice-lead-capture', String(opts.callSid)],
+        );
+        await runCapture(trx);
+      });
+    } catch (err) {
+      logger.warn(`[voice-agent-lead] capture serialization failed for callSid=${opts.callSid} (${err.message}) — proceeding unserialized`);
+      leadId = undefined;
+      created = false;
+      existingLead = null;
+      await runCapture(db);
+    }
+  } else {
+    await runCapture(db);
   }
 
   return { leadId, customerId, created };

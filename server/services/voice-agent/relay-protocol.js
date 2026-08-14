@@ -97,7 +97,16 @@ function mintCallToken(callSid, { secret = process.env.VOICE_RELAY_WS_SECRET, no
   const sid = String(callSid || '').trim();
   if (!secret || !sid) return '';
   const expSec = Math.floor((now + ttlMs) / 1000);
-  const nonce = require('crypto').randomBytes(8).toString('hex');
+  // The nonce carries its own MINT ORDER: a 12-hex millisecond prefix plus
+  // 4 random hex. The session-claim takeover needs a durable total ordering
+  // of mints (the expiry's one-second resolution ties on same-second
+  // retries), and an opaque random nonce cannot say which token is newer —
+  // this one can, at millisecond resolution, with the random suffix as a
+  // deterministic lexicographic tie-break. Still 16 hex, still MAC-covered,
+  // still burn-table-compatible; sandbox-minted pure-random nonces order
+  // arbitrarily but the sandbox path never claims a call_log row at all.
+  const nonce = Date.now().toString(16).padStart(12, '0')
+    + require('crypto').randomBytes(2).toString('hex');
   return `${CALL_TOKEN_VERSION}.${expSec}.${nonce}.${callTokenMac(sid, expSec, nonce, secret)}`;
 }
 
