@@ -79,7 +79,12 @@ function makeBuilder(table) {
         rows = state.bankRows.filter(r => r.status === 'matched_payout'
           && r.matched_payout_id
           && !(r.suggestion && r.suggestion.reconcilePending)
-          && state.payouts.some(p => p.id === r.matched_payout_id && p.reconciled === wantReconciled));
+          && state.payouts.some(p => p.id === r.matched_payout_id && p.reconciled === wantReconciled))
+          // the scan JOINs payout columns — mirror them onto the row
+          .map(r => {
+            const p = state.payouts.find(pp => pp.id === r.matched_payout_id);
+            return { ...r, payout_amount: p && p.amount, payout_status: p && p.status, arrival_date: p && p.arrival_date };
+          });
       }
     }
     // the payout survey is amount-aware against the EFFECTIVE banked amount
@@ -1216,13 +1221,33 @@ describe('runDeterministicMatching', () => {
 
   test('a RECONCILED link whose later human reconciliation carries a different amount is reverted', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
-    state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: true }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'paid', reconciled: true }];
     state.reconRows = [{ payout_id: 'po-1', status: 'confirmed', actual_amount: '2000.00', reconciled_by: 'adam' }];
     const summary = await runDeterministicMatching();
     expect(summary.linksReverted).toBe(1);
     const revert = state.updates.find(u => u.patch.status === 'unmatched');
     expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
-    expect(sugOf(revert).autoRevert.reason).toContain('different banked amount');
+    expect(sugOf(revert).autoRevert.reason).toContain('no longer explains');
+  });
+
+  test('a RECONCILED link whose payout later FAILED (amount unchanged) is reverted — the credit is not hidden', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
+    // payout.failed webhook AFTER the echo succeeded: reconciled stays true,
+    // amount unchanged — only status flipped
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'failed', reconciled: true }];
+    state.reconRows = [{ payout_id: 'po-1', status: 'confirmed', actual_amount: '2418.66' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.linksReverted).toBe(1);
+    expect(sugOf(state.updates.find(u => u.patch.status === 'unmatched')).autoRevert.reason).toContain('status');
+  });
+
+  test('a RECONCILED link still fully eligible is left alone by the heal scan', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'paid', reconciled: true }];
+    state.reconRows = [{ payout_id: 'po-1', status: 'confirmed', actual_amount: '2418.66' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.linksReverted).toBe(0);
+    expect(state.updates.find(u => u.patch.status === 'unmatched')).toBeUndefined();
   });
 
   test('a refund_applied row whose target expense was DELETED reverts to review', async () => {

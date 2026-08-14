@@ -2376,13 +2376,16 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
         ...(row.matched_payout_id ? { payoutId: row.matched_payout_id } : {}),
       },
     }, ['reconcilePending']);
-    // CAS on the status (and, for payouts, the exact payout id) so a
-    // concurrent change 409s instead of being clobbered.
+    // CAS on the status AND the exact linked id (payout or expense) so a
+    // concurrent change 409s instead of being clobbered — without the
+    // expense id, a stale unlink read against expense A could clear a newer
+    // link to expense B while recording A in the rejection ledger (ABA).
     const doUnlink = (dbOrTrx) => dbOrTrx('bank_transactions')
       .where({
         id: row.id,
         status: row.status,
         ...(row.status === 'matched_payout' ? { matched_payout_id: row.matched_payout_id } : {}),
+        ...(row.status === 'matched_expense' ? { matched_expense_id: row.matched_expense_id } : {}),
       })
       .update({
         status: 'unmatched',
@@ -2434,6 +2437,23 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       return res.status(502).json({ error: `reconciliation reversal failed (${err.message}) — the row is still linked; retry` });
     }
     res.json({ success: true, reconciliation });
+  } catch (err) { next(err); }
+});
+
+// Full refund-candidate list for ONE credit, on demand — the parked slice
+// shows 20, and a high-frequency vendor's real original can sit beyond it.
+// Everything served here passes the same plausibility rules apply-refund
+// enforces under its lock, so every option is actionable.
+router.get('/bank-import/:id/refund-candidates', async (req, res, next) => {
+  try {
+    const row = await db('bank_transactions').where({ id: req.params.id }).first();
+    if (!row) return res.status(404).json({ error: 'row not found' });
+    if (row.direction !== 'credit') return res.status(400).json({ error: 'only credits have refund candidates' });
+    const list = await bankImport.refundCandidatesForRow(row);
+    res.json({
+      candidates: list.slice(0, 500).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: dateCellStr(c.expense_date) })),
+      total: list.length,
+    });
   } catch (err) { next(err); }
 });
 

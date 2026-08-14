@@ -273,6 +273,24 @@ async function appliedRefundTotal(expenseId, dbOrTrx = db) {
   return Number(r && r.total) || 0;
 }
 
+// The FULL plausible refund-candidate list for one credit row. The matcher
+// parks a bounded display slice of this; the on-demand route serves the
+// whole set so a high-frequency vendor's off-slice original stays
+// selectable through the UI. Likeliest-first, deterministic: nearest
+// covering amount, then the most recent purchase, then id.
+async function refundCandidatesForRow(row, dbOrTrx = db) {
+  const txnDate = toDateStr(row.txn_date);
+  const originals = await dbOrTrx('expenses')
+    .whereBetween('expense_date', [addDays(txnDate, -REFUND_LOOKBACK_DAYS), txnDate])
+    .where('amount', '>=', row.amount)
+    .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
+  const list = originals.filter(c => vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
+  list.sort((a, b) => (Number(a.amount) - Number(b.amount))
+    || String(toDateStr(b.expense_date)).localeCompare(String(toDateStr(a.expense_date)))
+    || String(a.id).localeCompare(String(b.id)));
+  return list;
+}
+
 // Server-side plausibility for a refund target — the SAME rules the matcher
 // uses to park refundCandidates, so any valid original purchase is
 // applicable even when it fell outside the bounded parked slice (a fuel or
@@ -380,7 +398,8 @@ async function healUnreconciledLinks() {
     // pending-flagged rows belong to the echo/retry path, whose guard
     // revalidation handles this same case
     .whereRaw("coalesce(bt.suggestion->>'reconcilePending','') <> 'true'")
-    .select('bt.id as id', 'bt.amount as amount', 'bt.matched_payout_id as matched_payout_id', 'sp.amount as payout_amount');
+    .select('bt.id as id', 'bt.amount as amount', 'bt.txn_date as txn_date', 'bt.matched_payout_id as matched_payout_id',
+      'sp.amount as payout_amount', 'sp.status as payout_status', 'sp.arrival_date as arrival_date');
   // ONE batched lookup for every linked payout's latest confirmed actual
   // amount. This scan covers every reconciled link ever made (~one payout a
   // business day), and the per-row effectivePayoutAmount() loop it replaces
@@ -405,16 +424,23 @@ async function healUnreconciledLinks() {
     }
   }
   let amountReverts = 0;
+  // eligibility over the FULL predicate — status must still be paid and the
+  // arrival must still explain the credit, not just the amount: a
+  // payout.failed/payout.updated webhook after a successful echo rewrites
+  // status/arrival_date while leaving reconciled=true, and an
+  // amount-unchanged failed payout would otherwise keep hiding this credit.
+  const linkStillEligible = (row2, effectiveAmount) => row2.payout_status === 'paid'
+    && isPlausiblePayoutLink({ txn_date: row2.txn_date, amount: row2.amount }, { amount: effectiveAmount, arrival_date: row2.arrival_date });
   for (const row of linkedReconciled) {
     const effective = confirmedAmounts.has(row.matched_payout_id)
       ? confirmedAmounts.get(row.matched_payout_id)
       : Number(row.payout_amount); // reconciled but no confirmed row — same fallback as effectivePayoutAmount
-    if (withinCandidateTolerance(effective, row.amount)) continue;
+    if (linkStillEligible(row, effective)) continue;
     await db.transaction(async (trx) => {
-      const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('id', 'amount', 'reconciled');
+      const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('id', 'amount', 'status', 'arrival_date', 'reconciled');
       if (!sp || !sp.reconciled) return; // state changed since the scan
       const lockedEffective = await effectivePayoutAmount(sp, trx);
-      if (withinCandidateTolerance(lockedEffective, row.amount)) return;
+      if (linkStillEligible({ ...row, payout_status: sp.status, arrival_date: sp.arrival_date }, lockedEffective)) return;
       const changed = await trx('bank_transactions')
         .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
         .update({
@@ -423,7 +449,7 @@ async function healUnreconciledLinks() {
           match_method: null,
           matched_at: null,
           suggestion: suggestionMerge({
-            autoRevert: { at: new Date().toISOString(), payoutId: row.matched_payout_id, reason: 'a later human reconciliation recorded a different banked amount' },
+            autoRevert: { at: new Date().toISOString(), payoutId: row.matched_payout_id, reason: 'the reconciled payout no longer explains this credit (status/amount/arrival changed)' },
           }, ['reconcilePending']),
           updated_at: new Date(),
         });
@@ -930,23 +956,7 @@ async function runDeterministicMatching({ limit } = {}) {
     // branches below AND by the transfer branch (a vendor refund whose
     // descriptor contains a transfer word must keep the human refund
     // action; automatic links stay suppressed for transfer-shaped rows).
-    const refundCandidateList = async () => {
-      const originals = await db('expenses')
-        .whereBetween('expense_date', [addDays(txnDate, -REFUND_LOOKBACK_DAYS), txnDate])
-        .where('amount', '>=', row.amount)
-        .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
-      const list = originals.filter(c => vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
-      // Likeliest-first, deterministic: nearest covering amount, then the
-      // most recent purchase, then id — so the real original sits inside
-      // the bounded visible slice even for a high-frequency vendor. The
-      // apply route validates by the same plausibility RULES, not by
-      // membership in this display slice, so an off-slice original is
-      // still applicable.
-      list.sort((a, b) => (Number(a.amount) - Number(b.amount))
-        || String(toDateStr(b.expense_date)).localeCompare(String(toDateStr(a.expense_date)))
-        || String(a.id).localeCompare(String(b.id)));
-      return list;
-    };
+    const refundCandidateList = () => refundCandidatesForRow(row);
     const refundPatch = (list) => ({
       refundCandidates: list.slice(0, 20).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: toDateStr(c.expense_date) })),
       refundCandidatesTotal: list.length,
@@ -1451,6 +1461,7 @@ module.exports = {
   isPlausiblePayoutLink,
   isPlausibleRefundTarget,
   appliedRefundTotal,
+  refundCandidatesForRow,
   resetDanglingLinks,
   healEditedExpenseLinks,
   methodIncompatible,

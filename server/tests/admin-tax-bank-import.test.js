@@ -161,6 +161,9 @@ jest.mock('../services/bank-import', () => ({
   // coverage endpoint INVOKES them (coverage is a money claim)
   resetDanglingLinks: jest.fn(() => Promise.resolve(0)),
   healEditedExpenseLinks: jest.fn(() => Promise.resolve(0)),
+  // list construction is unit-tested in the service suite; the route test
+  // asserts the endpoint's shape and guards
+  refundCandidatesForRow: jest.fn(() => Promise.resolve([])),
 }));
 
 const express = require('express');
@@ -585,6 +588,30 @@ describe('coverage (gate on)', () => {
   });
 });
 
+describe('refund-candidates on demand (gate on)', () => {
+  beforeEach(() => { process.env.GATE_BANK_IMPORT = 'true'; });
+
+  test('serves the FULL plausible list for a credit — off-slice originals stay selectable', async () => {
+    const { refundCandidatesForRow } = require('../services/bank-import');
+    refundCandidatesForRow.mockResolvedValueOnce([
+      { id: 'exp-1', amount: '21.00', vendor_name: 'Wawa', description: 'gas', expense_date: '2026-08-05' },
+      { id: 'exp-2', amount: '25.00', vendor_name: 'Wawa', description: 'gas', expense_date: '2026-08-02' },
+    ]);
+    state.bankRow = { id: 'bt-1', amount: '20.00', txn_date: '2026-08-09', description: 'WAWA REFUND', direction: 'credit', account_type: 'card', status: 'unmatched' };
+    const res = await get('/admin/tax/bank-import/bt-1/refund-candidates');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total).toBe(2);
+    expect(body.candidates.map((c) => c.id)).toEqual(['exp-1', 'exp-2']);
+    expect(body.candidates[0].amount).toBe(21);
+  });
+
+  test('a debit has no refund candidates — 400', async () => {
+    state.bankRow = { id: 'bt-1', direction: 'debit', status: 'unmatched' };
+    expect((await get('/admin/tax/bank-import/bt-1/refund-candidates')).status).toBe(400);
+  });
+});
+
 describe('apply-refund (gate on)', () => {
   beforeEach(() => {
     process.env.GATE_BANK_IMPORT = 'true';
@@ -888,8 +915,9 @@ describe('unlink (gate on)', () => {
     const res = await post('/admin/tax/bank-import/bt-1/unlink', {});
     expect(res.status).toBe(200);
     const upd = state.bankUpdates[0];
-    // CAS on the CURRENT status so a concurrent change 409s instead of clobbering
-    expect(upd.wheres).toContainEqual({ id: 'bt-1', status: 'matched_expense' });
+    // CAS on the CURRENT status AND the exact expense id — a stale unlink
+    // read against expense A must 409 instead of clearing a newer link to B
+    expect(upd.wheres).toContainEqual({ id: 'bt-1', status: 'matched_expense', matched_expense_id: 'exp-9' });
     expect(upd.patch).toMatchObject({ status: 'unmatched', matched_expense_id: null, matched_payout_id: null, match_method: null, matched_at: null });
     expect(sugOf(upd).lastUnlink).toMatchObject({ was: 'matched_expense', method: 'manual', expenseId: 'exp-9' });
     // merge semantics: prior suggestion keys (e.g. categoryName) survive at the DB

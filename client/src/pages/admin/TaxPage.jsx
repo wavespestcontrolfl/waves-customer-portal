@@ -4048,6 +4048,9 @@ function BankImportTab() {
   // operator names exactly which skipped tuples were genuinely separate
   // purchases; forcing the whole set would re-import ordinary overlaps too.
   const [dupPicks, setDupPicks] = useState({});
+  // on-demand FULL refund-candidate lists (row id → candidates): the parked
+  // slice shows 20, and the real original can sit beyond it
+  const [fullRefunds, setFullRefunds] = useState({});
 
   // offset pagination with APPEND semantics — the server caps limit at 500,
   // so growing a single limit stalls there; offset pages don't
@@ -4468,7 +4471,19 @@ function BankImportTab() {
                     <select
                       style={{ ...bankInput, maxWidth: 240 }}
                       value={linkPick[r.id] || ""}
-                      onChange={(e) => setLinkPick((p) => ({ ...p, [r.id]: e.target.value }))}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === "__more_refunds") {
+                          // fetch the FULL plausible list — every entry is
+                          // actionable through apply-refund's plausibility
+                          // validation, so nothing stays unreachable
+                          adminFetch(`/admin/tax/bank-import/${r.id}/refund-candidates`)
+                            .then((d) => setFullRefunds((p) => ({ ...p, [r.id]: d.candidates || [] })))
+                            .catch(() => {});
+                          return;
+                        }
+                        setLinkPick((p) => ({ ...p, [r.id]: v }));
+                      }}
                       title="What is this deposit? Pick the Stripe payout it is, or the original purchase it refunds (applying a refund reduces that expense)"
                     >
                       <option value="">
@@ -4495,14 +4510,14 @@ function BankImportTab() {
                       )}
                       {!!r.suggestion?.refundCandidates?.length && (
                         <optgroup label="Original purchases — apply refund">
-                          {r.suggestion.refundCandidates.map((c) => (
+                          {(fullRefunds[r.id] || r.suggestion.refundCandidates).map((c) => (
                             <option key={`r:${c.id}`} value={`r:${c.id}`}>
                               {(c.vendor_name || c.description || "expense").slice(0, 34)} · {fmtM(c.amount)} · {fmtD(c.expense_date)}
                             </option>
                           ))}
-                          {(r.suggestion.refundCandidatesTotal || 0) > r.suggestion.refundCandidates.length && (
-                            <option value="" disabled>
-                              +{r.suggestion.refundCandidatesTotal - r.suggestion.refundCandidates.length} more — closest amounts shown; narrow via the Expenses tab
+                          {!fullRefunds[r.id] && (r.suggestion.refundCandidatesTotal || 0) > r.suggestion.refundCandidates.length && (
+                            <option value="__more_refunds">
+                              +{r.suggestion.refundCandidatesTotal - r.suggestion.refundCandidates.length} more — load all…
                             </option>
                           )}
                         </optgroup>
