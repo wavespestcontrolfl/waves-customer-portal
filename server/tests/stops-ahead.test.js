@@ -35,8 +35,8 @@ function baseSvc(overrides = {}) {
 // the bound clamped value by default; `rawFloor` overrides it to emulate a
 // concurrent racer's smaller floor, or null for the guarded no-op write.
 function makeDb({
-  svcRow, countN = 0, beforeAll, othersAll, doneBefore = 0, workingBefore = 0,
-  rawFloor, rawError = null,
+  svcRow, countN = 0, beforeAll, othersAll, doneBefore = 0, atBefore = 0,
+  enrouteBefore = 0, rawFloor, rawError = null,
 } = {}) {
   const queries = [];
   const dbFn = jest.fn(() => {
@@ -58,7 +58,8 @@ function makeDb({
           before_all: beforeAll !== undefined ? beforeAll : countN,
           others_all: othersAll !== undefined ? othersAll : countN + 3,
           done_before: doneBefore,
-          working_before: workingBefore,
+          at_before: atBefore,
+          enroute_before: enrouteBefore,
         }],
       });
     }
@@ -95,7 +96,7 @@ describe('computeStopsAhead', () => {
     // from the clamped count.
     const db = makeDb({ svcRow: baseSvc(), countN: 2, beforeAll: 5, othersAll: 7, doneBefore: 3 });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY }))
-      .toEqual({ stopsAhead: 2, yourStop: 6, totalStops: 8, currentStop: 3, atStop: false });
+      .toEqual({ stopsAhead: 2, yourStop: 6, totalStops: 8, currentStop: 3, atStop: false, headingToStop: false });
     // Single conditional UPDATE — (today, clamped, clamped, today, id) for
     // the SET, plus (today, clamped) for the skip-unchanged-write guard.
     expect(db.updateCalls()).toHaveLength(1);
@@ -109,12 +110,14 @@ describe('computeStopsAhead', () => {
       ...NOT_A_ROUTE_STOP_STATUSES,    // before_all
       ...NOT_A_ROUTE_STOP_STATUSES,    // others_all
       ...NOT_A_ROUTE_STOP_STATUSES,    // done_before track-complete guard
-      ...NOT_A_STOP_STATUSES,          // working_before terminal precedence
+      ...NOT_A_STOP_STATUSES,          // at_before terminal precedence
+      ...NOT_A_STOP_STATUSES,          // enroute_before terminal precedence
     ]);
     // Terminal-status precedence: a completed/cancelled row with a stale
     // active track_state must not fabricate a working stop, and a
     // cancelled row with track_state='complete' must not count as done.
-    expect(countSql).toMatch(/working_before/);
+    expect(countSql).toMatch(/at_before/);
+    expect(countSql).toMatch(/enroute_before/);
     expect(countSql).toContain("OR (s.track_state = 'complete' AND s.status NOT IN");
     expect(NOT_A_STOP_STATUSES).toEqual(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled']);
     expect(NOT_A_ROUTE_STOP_STATUSES).toEqual(['cancelled', 'skipped', 'no_show', 'rescheduled']);
@@ -145,7 +148,7 @@ describe('computeStopsAhead', () => {
       rawFloor: null,
     });
     const res = await computeStopsAhead(db, 'svc-self', { today: TODAY });
-    expect(res).toEqual({ stopsAhead: 2, yourStop: 5, totalStops: 7, currentStop: 0, atStop: false });
+    expect(res).toEqual({ stopsAhead: 2, yourStop: 5, totalStops: 7, currentStop: 0, atStop: false, headingToStop: false });
   });
 
   test('a floor from a previous date is superseded (re-date resets the clamp)', async () => {
@@ -206,15 +209,23 @@ describe('computeStopsAhead', () => {
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
   });
 
-  test('currentStop counts the actively-worked stop (+1 while en route/on site)', async () => {
-    // 2 done + tech currently at stop 3 → currentStop 3; 1 live stop ahead
-    // (the one being worked) + you = stop 5... measured, not derived.
+  test('currentStop counts the actively-worked stop; atStop only when ON it', async () => {
+    // 2 done + tech physically at stop 3 → currentStop 3, atStop true.
     const db = makeDb({
       svcRow: baseSvc(), countN: 1, beforeAll: 3, othersAll: 5,
-      doneBefore: 2, workingBefore: 1,
+      doneBefore: 2, atBefore: 1,
     });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY }))
-      .toEqual({ stopsAhead: 1, yourStop: 4, totalStops: 6, currentStop: 3, atStop: true });
+      .toEqual({ stopsAhead: 1, yourStop: 4, totalStops: 6, currentStop: 3, atStop: true, headingToStop: false });
+  });
+
+  test('merely en-route reads as headingToStop, never atStop', async () => {
+    const db = makeDb({
+      svcRow: baseSvc(), countN: 1, beforeAll: 3, othersAll: 5,
+      doneBefore: 2, enrouteBefore: 1,
+    });
+    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY }))
+      .toEqual({ stopsAhead: 1, yourStop: 4, totalStops: 6, currentStop: 3, atStop: false, headingToStop: true });
   });
 
   test('any read error fails soft to null', async () => {

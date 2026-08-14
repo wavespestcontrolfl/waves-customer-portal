@@ -11164,7 +11164,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
   // stopsAhead (it isn't serviced yet) and currentStop — so the expected
   // gap between yourStop and truckStop is stopsAhead exactly; between
   // stops it's stopsAhead + 1.
-  const expectedGap = routeProgress?.atStop ? 0 : 1;
+  const expectedGap = (routeProgress?.atStop || routeProgress?.headingToStop) ? 0 : 1;
   const stripConsistent = yourStop != null && totalStops != null
     && Number.isFinite(truckStop)
     && (yourStop - truckStop - expectedGap) === stopsAhead;
@@ -11244,10 +11244,11 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
             display: 'flex', justifyContent: 'space-between', marginTop: 8,
             fontSize: 14, color: B.textCaption,
           }}>
-            {/* "Now at" only while the tech is actively at/driving to a stop;
-                between stops the truthful label is "Finished". */}
+            {/* Three truthful labels: "Now at" only while physically AT a
+                stop, "Heading to" while merely driving to it, "Finished"
+                between stops. */}
             <span>{started
-              ? <>{routeProgress?.atStop ? 'Now at' : 'Finished'} <strong style={{ color: B.glassNavy }}>stop {truckStop} of {totalStops}</strong></>
+              ? <>{routeProgress?.atStop ? 'Now at' : routeProgress?.headingToStop ? 'Heading to' : 'Finished'} <strong style={{ color: B.glassNavy }}>stop {truckStop} of {totalStops}</strong></>
               : 'Route starts soon'}</span>
             <span style={{ fontWeight: 700, color: B.glassNavy }}>You&apos;re stop {yourStop}</span>
           </div>

@@ -374,7 +374,7 @@ router.get('/active', async (req, res, next) => {
       const stops = await computeStopsAhead(db, canonical.id);
       formatted.stopsAhead = stops ? stops.stopsAhead : null;
       formatted.routeProgress = stops
-        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop, atStop: stops.atStop }
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop, atStop: stops.atStop, headingToStop: stops.headingToStop }
         : null;
       if (stops) {
         // Map pin: the visit's STAMPED property first (rental / secondary
@@ -445,7 +445,7 @@ router.get('/today', async (req, res, next) => {
       const stops = await computeStopsAhead(db, canonical.id);
       formatted.stopsAhead = stops ? stops.stopsAhead : null;
       formatted.routeProgress = stops
-        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop, atStop: stops.atStop }
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop, atStop: stops.atStop, headingToStop: stops.headingToStop }
         : null;
       if (stops) {
         // Map pin: the visit's STAMPED property first (rental / secondary

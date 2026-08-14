@@ -526,7 +526,7 @@ router.get('/:token', async (req, res, next) => {
       vehicle: customerState === 'en_route' ? await buildVehicle(row) : null,
       stopsAhead: stops ? stops.stopsAhead : null,
       routeProgress: stops
-        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop, atStop: stops.atStop }
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop, atStop: stops.atStop, headingToStop: stops.headingToStop }
         : null,
       // Truck coords only once the route has STARTED (currentStop ≥ 1) —
       // before the first stop the truck sits at the tech's home/base,
