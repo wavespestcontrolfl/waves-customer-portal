@@ -129,7 +129,15 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     // it. The cost of the current key is only the same-customer,
     // same-window, different-property collapse, unreachable for a
     // single-tech route.
-    // Three figures from the same rows in one pass:
+    // The aggregates classify each preceding stop at the GROUP level (one
+    // flag set per sibling group), never by summing per-row buckets: a
+    // multi-line appointment can hold a completed row NEXT TO an
+    // en_route/on_site row mid-visit (tech-track transitions rows by id),
+    // and row-level counting would put that one physical stop in BOTH
+    // done_before and the active bucket — advancing currentStop twice.
+    // A group with any active row IS the active stop (not also a finished
+    // one); has_done only counts once no sibling is still being worked.
+    // Figures produced:
     //   ahead      — live (not-yet-serviced) stops sorting before the target;
     //                this is the number the cap and clamp govern.
     //   before_all — ROUTE stops (completed included) before the target →
@@ -138,8 +146,9 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     //                totalStops = others_all + 1.
     const liveExcl = NOT_A_STOP_STATUSES.map(() => '?').join(', ');
     const routeExcl = NOT_A_ROUTE_STOP_STATUSES.map(() => '?').join(', ');
-    const STOP_KEY = "(s.customer_id, COALESCE(s.window_start, '23:59'::time))";
-    const PRECEDES = `(COALESCE(s.route_order, 999), COALESCE(s.window_start, '23:59'::time), s.created_at, s.id)
+    // Each foreign group anchors at ITS earliest route-eligible tuple
+    // (rn = 1), symmetric with the target's own sibling-group anchor.
+    const G_PRECEDES = `(g.a_route_order, g.slot, g.a_created_at, g.a_id::uuid)
               < (COALESCE(t.route_order, 999), COALESCE(t.window_start, '23:59'::time), t.created_at, t.id)`;
     // The comparison anchors at the SIBLING GROUP's earliest route tuple,
     // not the requested row's own: the route optimizer assigns route_order
@@ -180,63 +189,64 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
               ORDER BY COALESCE(s.route_order, 999), COALESCE(s.window_start, '23:59'::time), s.created_at, s.id
               LIMIT 1
            ) g ON TRUE
+       ),
+       day_rows AS (
+         SELECT s.customer_id,
+                COALESCE(s.window_start, '23:59'::time) AS slot,
+                s.route_order, s.created_at, s.id, s.status, s.track_state
+           FROM scheduled_services s, target t
+          WHERE s.technician_id = t.technician_id
+            AND s.scheduled_date = t.scheduled_date
+            AND NOT (s.customer_id = t.customer_id
+                     AND s.window_start IS NOT DISTINCT FROM t.window_start)
+            AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())
+            AND s.status NOT IN (${routeExcl})
+            AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
+       ),
+       ranked AS (
+         SELECT dr.*,
+                (dr.status NOT IN (${liveExcl})
+                 AND (dr.track_state IS NULL OR dr.track_state NOT IN ('complete', 'cancelled'))) AS is_live,
+                ROW_NUMBER() OVER (
+                  PARTITION BY dr.customer_id, dr.slot
+                  ORDER BY COALESCE(dr.route_order, 999), dr.slot, dr.created_at, dr.id
+                ) AS rn
+           FROM day_rows dr
+       ),
+       grp AS (
+         SELECT r.customer_id, r.slot,
+                BOOL_OR(r.is_live) AS has_live,
+                BOOL_OR(r.status = 'completed' OR r.track_state = 'complete') AS has_done,
+                BOOL_OR(r.is_live AND (r.status = 'on_site' OR r.track_state = 'on_property')) AS has_at,
+                BOOL_OR(r.is_live AND (r.status = 'en_route' OR r.track_state = 'en_route')) AS has_enroute,
+                MAX(COALESCE(r.route_order, 999)) FILTER (WHERE r.rn = 1) AS a_route_order,
+                MAX(r.created_at) FILTER (WHERE r.rn = 1) AS a_created_at,
+                MAX(r.id::text) FILTER (WHERE r.rn = 1) AS a_id
+           FROM ranked r
+          GROUP BY r.customer_id, r.slot
        )
        SELECT
-         COUNT(DISTINCT ${STOP_KEY}) FILTER (
-           WHERE ${PRECEDES}
-             AND s.status NOT IN (${liveExcl})
-             AND (s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))
-         )::int AS ahead,
-         COUNT(DISTINCT ${STOP_KEY}) FILTER (
-           WHERE ${PRECEDES}
-             AND s.status NOT IN (${routeExcl})
-             AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
-         )::int AS before_all,
-         COUNT(DISTINCT ${STOP_KEY}) FILTER (
-           WHERE s.status NOT IN (${routeExcl})
-             AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
-         )::int AS others_all,
-         COUNT(DISTINCT ${STOP_KEY}) FILTER (
-           WHERE ${PRECEDES}
-             AND (s.status = 'completed'
-                  OR (s.track_state = 'complete' AND s.status NOT IN (${routeExcl})))
-         )::int AS done_before,
-         COUNT(DISTINCT ${STOP_KEY}) FILTER (
-           WHERE ${PRECEDES}
-             AND (s.status = 'on_site' OR s.track_state = 'on_property')
-             AND s.status NOT IN (${liveExcl})
-             AND (s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))
-         )::int AS at_before,
-         COUNT(DISTINCT ${STOP_KEY}) FILTER (
-           WHERE ${PRECEDES}
-             AND (s.status = 'en_route' OR s.track_state = 'en_route')
-             AND s.status NOT IN (${liveExcl})
-             AND (s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))
-         )::int AS enroute_before,
+         COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_live)::int AS ahead,
+         COUNT(*) FILTER (WHERE ${G_PRECEDES})::int AS before_all,
+         COUNT(*)::int AS others_all,
+         COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_done
+                            AND NOT g.has_at AND NOT g.has_enroute)::int AS done_before,
+         COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_at)::int AS at_before,
+         COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_enroute AND NOT g.has_at)::int AS enroute_before,
          MIN(t.group_floor)::int AS group_floor
-         FROM scheduled_services s, target t
-        WHERE s.technician_id = t.technician_id
-          AND s.scheduled_date = t.scheduled_date
-          AND NOT (s.customer_id = t.customer_id
-                   AND s.window_start IS NOT DISTINCT FROM t.window_start)
-          AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())`,
+         FROM grp g, target t`,
       // Binding order mirrors the SQL order: the group_floor subquery's
-      // display date, the sibling-anchor lateral (route-excluded), then
-      // the FILTERs — ahead (live-excluded),
-      // before_all / others_all / done_before (route-excluded), and
-      // at_before / enroute_before (live-excluded again — terminal-status
-      // precedence: a completed/cancelled row with a stale active
-      // track_state must not fabricate an active stop, matching the
-      // tracking routes).
+      // display date, the sibling-anchor lateral (route-excluded), the
+      // day_rows route filter (route-excluded — cancelled/skipped/no_show/
+      // rescheduled rows are not route rows at all), then ranked's is_live
+      // flag (live-excluded, with tracker-terminal precedence NULL-safe: a
+      // completed/cancelled row with a stale active track_state must not
+      // read as live, matching the tracking routes).
       [
         svc.id,
         today,
         ...NOT_A_ROUTE_STOP_STATUSES,
-        ...NOT_A_STOP_STATUSES,
         ...NOT_A_ROUTE_STOP_STATUSES,
-        ...NOT_A_ROUTE_STOP_STATUSES,
-        ...NOT_A_ROUTE_STOP_STATUSES,
-        ...NOT_A_STOP_STATUSES,
         ...NOT_A_STOP_STATUSES,
       ]
     );
@@ -254,7 +264,9 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     // Three truthful truck phases (a merely-en-route stop must not read as
     // "Now at"): atStop = physically AT a stop (on-site/on-property);
     // headingToStop = driving to one (en-route); neither = between stops.
-    // A stop that is somehow both reads as AT (on-property wins).
+    // A stop that is somehow both reads as AT (on-property wins). The SQL
+    // classifies per GROUP, so a mixed stop (one line completed, one line
+    // active) is the active stop exactly once — never done AND active.
     const atStop = Number.isFinite(atBefore) && atBefore > 0;
     const headingToStop = !atStop && Number.isFinite(enrouteBefore) && enrouteBefore > 0;
     const currentStop = (Number.isFinite(doneBefore) ? doneBefore : 0)

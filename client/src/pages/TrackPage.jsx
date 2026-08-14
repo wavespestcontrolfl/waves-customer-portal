@@ -432,6 +432,10 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
   // gap between yourStop and truckStop is stopsAhead exactly; between
   // stops it's stopsAhead + 1.
   const expectedGap = (routeProgress?.atStop || routeProgress?.headingToStop) ? 0 : 1;
+  // One truthful phrase for BOTH the visible caption and the truck dot's
+  // accessible label — a screen reader must never hear "Now at" while the
+  // caption says "Heading to"/"Finished".
+  const truckPhrase = routeProgress?.atStop ? 'Now at' : routeProgress?.headingToStop ? 'Heading to' : 'Finished';
   const stripConsistent = yourStop != null && totalStops != null
     && Number.isFinite(truckStop)
     && (yourStop - truckStop - expectedGap) === stopsAhead;
@@ -490,7 +494,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
                 {seg(COLORS.wavesBlue)}
               </>
             )}
-            {dot(COLORS.glassNavy, COLORS.white, 'truck', 28, started ? `Now at stop ${truckStop}` : 'Route starting soon')}
+            {dot(COLORS.glassNavy, COLORS.white, 'truck', 28, started ? `${truckPhrase} stop ${truckStop}` : 'Route starting soon')}
             {betweenStops.map((s) => (
               <Fragment key={s}>
                 {seg(COLORS.grayLight)}
@@ -515,7 +519,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
                 stop, "Heading to" while merely driving to it, "Finished"
                 between stops. */}
             <span>{started
-              ? <>{routeProgress?.atStop ? 'Now at' : routeProgress?.headingToStop ? 'Heading to' : 'Finished'} <strong style={{ color: COLORS.glassNavy }}>stop {truckStop} of {totalStops}</strong></>
+              ? <>{truckPhrase} <strong style={{ color: COLORS.glassNavy }}>stop {truckStop} of {totalStops}</strong></>
               : 'Route starts soon'}</span>
             <span style={{ fontWeight: 700, color: COLORS.glassNavy }}>You&apos;re stop {yourStop}</span>
           </div>

@@ -112,43 +112,43 @@ describe('computeStopsAhead', () => {
     expect(updateSql).toContain('u.window_start IS NOT DISTINCT FROM g.window_start');
     expect(updateSql).toContain('RETURNING f.v AS stops_ahead_min_shown');
     // Single-snapshot CTE aggregate: bound to (target id, group-floor
-    // date, sibling-anchor route-excluded statuses, then the FILTERs).
+    // date, sibling-anchor route-excluded, day_rows route-excluded, is_live
+    // live-excluded).
     const [countSql, countBindings] = db.countCall();
     expect(countBindings).toEqual([
       'svc-self',
       TODAY,                           // group_floor display date
       ...NOT_A_ROUTE_STOP_STATUSES,    // sibling-anchor lateral
-      ...NOT_A_STOP_STATUSES,          // ahead (live-excluded)
-      ...NOT_A_ROUTE_STOP_STATUSES,    // before_all
-      ...NOT_A_ROUTE_STOP_STATUSES,    // others_all
-      ...NOT_A_ROUTE_STOP_STATUSES,    // done_before track-complete guard
-      ...NOT_A_STOP_STATUSES,          // at_before terminal precedence
-      ...NOT_A_STOP_STATUSES,          // enroute_before terminal precedence
+      ...NOT_A_ROUTE_STOP_STATUSES,    // day_rows route filter
+      ...NOT_A_STOP_STATUSES,          // ranked is_live (terminal precedence)
     ]);
-    // Terminal-status precedence: a completed/cancelled row with a stale
-    // active track_state must not fabricate a working stop, and a
-    // cancelled row with track_state='complete' must not count as done.
     expect(countSql).toMatch(/at_before/);
     expect(countSql).toMatch(/enroute_before/);
-    expect(countSql).toContain("OR (s.track_state = 'complete' AND s.status NOT IN");
     expect(NOT_A_STOP_STATUSES).toEqual(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled']);
     expect(NOT_A_ROUTE_STOP_STATUSES).toEqual(['cancelled', 'skipped', 'no_show', 'rescheduled']);
     // The comparison anchors at the sibling GROUP's earliest route tuple
     // (route_order is assigned per row, so per-row anchoring would give
     // sibling links different counts); the target row itself can always
-    // anchor even when its siblings are all route-excluded.
+    // anchor even when its siblings are all route-excluded. Foreign groups
+    // anchor symmetrically at their rn=1 tuple.
     expect(countSql).toContain('JOIN LATERAL');
     expect(countSql).toContain('s.id = tr.id');
-    // A stop = the repo's sibling identity (customer_id, slot); only the
-    // target's OWN sibling group is excluded.
-    expect(countSql).toContain("COUNT(DISTINCT (s.customer_id, COALESCE(s.window_start, '23:59'::time)))");
+    expect(countSql).toContain('FILTER (WHERE r.rn = 1)');
+    // A stop = the repo's sibling identity (customer_id, slot), classified
+    // at the GROUP level; only the target's OWN sibling group is excluded.
+    expect(countSql).toContain('PARTITION BY dr.customer_id, dr.slot');
+    expect(countSql).toContain('GROUP BY r.customer_id, r.slot');
     expect(countSql).toContain('NOT (s.customer_id = t.customer_id');
     expect(countSql).toContain('s.window_start IS NOT DISTINCT FROM t.window_start');
+    // A mixed stop (one line done, one line active) must classify ONCE:
+    // active wins over done, on-property wins over en-route.
+    expect(countSql).toContain('AND NOT g.has_at AND NOT g.has_enroute');
+    expect(countSql).toContain('g.has_enroute AND NOT g.has_at');
     // Dead estimate-slot holds must not count (live-hold predicate).
     expect(countSql).toContain('(s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())');
-    // Tracker-terminal rows drop out of the LIVE count by track_state too,
+    // Tracker-terminal rows drop out of the LIVE flag by track_state too,
     // NULL-safely (track_state can diverge from status).
-    expect(countSql).toContain("(s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))");
+    expect(countSql).toContain("(dr.track_state IS NULL OR dr.track_state NOT IN ('complete', 'cancelled'))");
   });
 
   test(`raw count above the cap (${STOPS_AHEAD_DISPLAY_CAP}) → null and nothing persists`, async () => {
