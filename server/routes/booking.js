@@ -779,6 +779,19 @@ function resolveBookingDuration(requested, config = {}, serviceKey = '') {
   return config.slot_duration_minutes || 60;
 }
 
+// Internal callback visits (callbackVisit — reservice-public only) carry a
+// SERVER-resolved duration from the re-service catalog row, never client
+// input, so they get a lower floor than the public funnel: re-services are
+// true 15–30 min visits, and honoring that is what lets the availability
+// builder fit them into route gaps a 45-min floor would reject. The band
+// still bounds a bad catalog edit; out-of-band falls back like the funnel.
+const MIN_CALLBACK_DURATION_MINUTES = 15;
+function resolveCallbackDuration(requested, config = {}) {
+  const n = parseInt(requested, 10);
+  if (Number.isInteger(n) && n >= MIN_CALLBACK_DURATION_MINUTES && n <= MAX_BOOKING_DURATION_MINUTES) return n;
+  return config.slot_duration_minutes || 60;
+}
+
 // Commit-time mirror of the builder's addCandidate constraints (grid
 // alignment, day window, lunch block). Returns null when the slot is one the
 // builder could have offered, else a customer-facing rejection message.
@@ -1684,7 +1697,7 @@ async function createSelfBooking(payload = {}) {
         || normalizeBookingServiceKey(service_type)
         || normalizeBookingServiceKey(quoted_service_label));
     const duration = callbackVisit
-      ? resolveBookingDuration(callbackVisit.durationMinutes, config, '')
+      ? resolveCallbackDuration(callbackVisit.durationMinutes, config)
       : resolveBookingDuration(duration_minutes, config, serviceKey);
 
     // End time is ALWAYS start + server-resolved duration. A provided
@@ -3362,6 +3375,7 @@ module.exports._internals = {
   // and the /status/:code enumeration limiter (exported for tests).
   bookingSlotWindow,
   resolveBookingDuration,
+  resolveCallbackDuration,
   normalizeBookingServiceKey,
   bookingOfferLocationKey,
   BOOKING_FUNNEL_SERVICE_DURATIONS,

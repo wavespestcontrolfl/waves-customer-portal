@@ -5147,6 +5147,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
     if (estimatedDuration !== undefined && estimatedDuration !== '') updates.estimated_duration_minutes = parseInt(estimatedDuration);
     if (scheduledDate !== undefined && scheduledDate !== '') updates.scheduled_date = scheduledDate;
+    // Notify + past date is always a mistake (a week-off click in the
+    // calendar): the reschedule text would announce the impossible date
+    // verbatim (2026-08-13: a customer was texted "now set for Friday,
+    // August 7" six days after Aug 7). Silent edits into the past stay
+    // allowed — record corrections/backfills are legitimate; TEXTING a
+    // customer a past date never is. Same-day moves stay allowed.
+    if (notifyCustomer === true && updates.scheduled_date !== undefined) {
+      const movedTo = String(updates.scheduled_date).split('T')[0];
+      if (/^\d{4}-\d{2}-\d{2}$/.test(movedTo) && movedTo < etDateString()) {
+        throw httpError(400, `That date (${movedTo}) has already passed — pick a current or future date, or turn off the booking notification for a record correction.`);
+      }
+    }
     if (windowStart !== undefined) updates.window_start = windowStart || null;
     if (windowEnd !== undefined) updates.window_end = windowEnd || null;
     if (notes !== undefined) updates.notes = notes;

@@ -12447,9 +12447,29 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 });
 
 // POST /api/admin/dispatch/:serviceId/reschedule
+// A reschedule to a date already in the past is always a mistake (a
+// week-off click in the calendar UI) — and the customer notice would
+// announce that impossible date verbatim (2026-08-13: a customer was
+// texted "now set for Friday, August 7" six days after Aug 7). Fail
+// closed; same-day moves stay allowed. Returns a customer-safe error
+// string, or null when the date is valid.
+function pastRescheduleDateError(newDate) {
+  const newDateStr = String(newDate || '').split('T')[0];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(newDateStr)) return 'Invalid newDate';
+  if (newDateStr < etDateString()) {
+    return `That date (${newDateStr}) has already passed — pick a current or future date.`;
+  }
+  return null;
+}
+
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newDate, newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+
+    const pastDateError = pastRescheduleDateError(newDate);
+    if (pastDateError) {
+      return res.status(400).json({ error: pastDateError });
+    }
 
     // Series scope shifts every future occurrence — skip the customer-confirm
     // SMS path (which only handles a single appt) and commit directly.
@@ -13872,6 +13892,7 @@ module.exports = router;
 module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
+  pastRescheduleDateError,
   ensureSmsContainsReportLink,
   reportReconcileBlockPayload,
   lawnAssessmentCompletionBlockPayload,

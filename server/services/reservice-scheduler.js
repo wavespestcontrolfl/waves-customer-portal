@@ -25,9 +25,12 @@ const { RE_SERVICE_SERVICE_KEYS, isReService } = require('./re-service');
 // (services.service_key) at commit time — id/name/duration are read live from
 // the catalog so an admin rename or duration change flows through without a
 // deploy. fallbackDuration only covers a missing/duration-less catalog row.
+// Re-service callbacks are short visits (owner: 15–30 min on site) — the
+// catalog rows carry 30; customers still see the standard 2-hour arrival
+// window (arrivalWindowRange), which derives from the start time only.
 const RESERVICE_LANES = {
-  pest: { serviceKey: 'pest_re_service', label: 'Pest Control Re-Service', fallbackDuration: 45 },
-  lawn: { serviceKey: 'lawn_re_service', label: 'Lawn Care Re-Service', fallbackDuration: 60 },
+  pest: { serviceKey: 'pest_re_service', label: 'Pest Control Re-Service', fallbackDuration: 30 },
+  lawn: { serviceKey: 'lawn_re_service', label: 'Lawn Care Re-Service', fallbackDuration: 30 },
 };
 
 function reserviceSelfServeEnabled() {

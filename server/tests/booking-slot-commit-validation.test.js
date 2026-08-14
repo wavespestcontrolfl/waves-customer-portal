@@ -29,6 +29,7 @@ const {
   bookingStatusLimiter,
   createSelfBooking,
   MAX_BOOKING_HORIZON_DAYS,
+  resolveCallbackDuration,
 } = _internals;
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -168,6 +169,23 @@ describe('resolveBookingDuration — server-derived, never trusted raw', () => {
     expect(resolveBookingDuration(75, {})).toBe(75);
     expect(resolveBookingDuration(90, {})).toBe(90);
     expect(resolveBookingDuration('60', {})).toBe(60);
+  });
+
+  test('resolveCallbackDuration honors the shorter re-service band (15–90) — 30-min true visits fit route gaps', () => {
+    // callbackVisit durations are server-resolved from the re-service catalog
+    // row (reservice-public), never client input — the 45-min funnel floor
+    // does not apply. 30 is the shipped catalog value for both lanes.
+    expect(resolveCallbackDuration(30, {})).toBe(30);
+    expect(resolveCallbackDuration(15, {})).toBe(15);
+    expect(resolveCallbackDuration(45, {})).toBe(45);
+    expect(resolveCallbackDuration(90, {})).toBe(90);
+    expect(resolveCallbackDuration('30', {})).toBe(30);
+    expect(resolveCallbackDuration(30.9, {})).toBe(30); // parseInt truncation, same as the funnel resolver
+    // Out-of-band (a bad catalog edit) still falls back to the configured slot.
+    for (const bad of [14, 1, 0, -30, 91, 600, 'abc', null, undefined, NaN, 14.5]) {
+      expect(resolveCallbackDuration(bad, {})).toBe(60);
+      expect(resolveCallbackDuration(bad, { slot_duration_minutes: 45 })).toBe(45);
+    }
   });
 
   test('forged tiny/huge/garbage durations fall back to the configured slot duration', () => {
@@ -523,7 +541,7 @@ describe('signed slot offers on the /book surface (source guards)', () => {
     // the callbackVisit-aware ternary whose non-callback arm is the same
     // call. The old raw parseInt(duration_minutes) form is gone.
     expect((src.match(/const duration = resolveBookingDuration\(duration_minutes, config, serviceKey\);/g) || []).length).toBe(2);
-    expect(src).toMatch(/const duration = callbackVisit\s*\n\s*\? resolveBookingDuration\(callbackVisit\.durationMinutes, config, ''\)\s*\n\s*: resolveBookingDuration\(duration_minutes, config, serviceKey\);/);
+    expect(src).toMatch(/const duration = callbackVisit\s*\n\s*\? resolveCallbackDuration\(callbackVisit\.durationMinutes, config\)\s*\n\s*: resolveBookingDuration\(duration_minutes, config, serviceKey\);/);
     expect(src).not.toMatch(/\? parseInt\(duration_minutes\)/);
     // both public offer routes normalize the service key the same way
     expect((src.match(/const serviceKey = normalizeBookingServiceKey\(service_type\);/g) || []).length).toBe(2);
