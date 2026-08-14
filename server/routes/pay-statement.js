@@ -137,6 +137,7 @@ router.post('/:token/setup', async (req, res, next) => {
       error: err.message,
       inProgress: !!err.inProgress,
       microdepositPending: !!err.microdepositPending,
+      microdeposit: err.microdeposit || null,
     });
     if (err.statusCode === 400) return res.status(400).json({ error: err.message });
     logger.error(`[pay-statement] setup error: ${err.message}`);

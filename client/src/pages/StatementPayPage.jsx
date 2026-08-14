@@ -30,8 +30,21 @@ import PublicLoadError from '../components/PublicLoadError';
 import BrandFooter from "../components/BrandFooter";
 import DocumentActionBar from "../components/DocumentActionBar";
 import { getStripe } from "../lib/stripeLoader";
+import { microdepositDetailFromNextAction, microdepositGuidance } from "../lib/microdeposit";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
+
+// Paragraph 1 of the micro-deposit-pending notice, whichever way we learned
+// about it (setup 409 on a revisit, or a fresh confirmPayment result). The
+// render branch adds paragraph 2 (Stripe's email + questions) so the copy
+// matches the invoice pay page's two-paragraph layout.
+function statementMicrodepositNotice(detail) {
+  const g = microdepositGuidance(detail);
+  return (
+    `You started a bank (ACH) payment for this statement. Nothing has been charged yet — ` +
+    `${g.windowLabel} ${g.depositSentence}`
+  );
+}
 
 const fmtCurrency = (n) =>
   `$${Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -49,7 +62,7 @@ function SummaryRow({ label, value, strong }) {
 }
 
 // ── Stripe Elements + surcharge flow ──────────────────────────────
-function StatementPaymentForm({ token, publishableKey, clientSecret, paymentIntentId, baseAmount, surchargeRateBps, billingName, billingEmail, onSuccess, onFinalizeFailed }) {
+function StatementPaymentForm({ token, publishableKey, clientSecret, paymentIntentId, baseAmount, surchargeRateBps, billingName, billingEmail, onSuccess, onBankVerificationPending, onFinalizeFailed }) {
   const mountRef = useRef(null);
   const elementsRef = useRef(null);
   const stripeRef = useRef(null);
@@ -184,7 +197,18 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
         });
         if (error) { setElementError(error.message); setProcessingSync(false); return; }
         if (pi && (pi.status === "succeeded" || pi.status === "processing")) onSuccess?.(pi);
-        else if (pi?.status === "requires_action") { setElementError("Additional verification required."); setProcessingSync(false); }
+        else if (pi?.status === "requires_action") {
+          // Manual account entry falls back to micro-deposit verification —
+          // requires_action with verify_with_microdeposits is neither an error
+          // nor a success. Hand the page the same "verify your bank" state a
+          // revisit gets from the setup 409 (mirrors PayPageV2).
+          if (pi.next_action?.type === "verify_with_microdeposits") {
+            onBankVerificationPending?.(pi.next_action.verify_with_microdeposits || {});
+            return;
+          }
+          setElementError("Additional verification required.");
+          setProcessingSync(false);
+        }
         else onSuccess?.(pi);
       } catch (err) {
         setElementError(err.message || "Payment failed.");
@@ -326,6 +350,10 @@ export default function StatementPayPage() {
   // verification the payer hasn't finished) — shown as calm guidance, NOT the
   // red setup-error path which tells them to refresh/call.
   const [setupNotice, setSetupNotice] = useState(null);
+  // Micro-deposit verification detail ({ microdepositType, hostedVerificationUrl,
+  // arrivalDate }) from the server 409 or a fresh confirmPayment next_action —
+  // drives the "Verify my bank account" button under the setup notice.
+  const [microdepositDetail, setMicrodepositDetail] = useState(null);
   const [paid, setPaid] = useState(false);
   const [payNotice, setPayNotice] = useState(null); // recovery message across a PI reset
   // Stripe redirect return (3DS / ACH bank-redirect). Stripe appends
@@ -437,11 +465,8 @@ export default function StatementPayPage() {
           }
           // Benign in-flight states are NOT failures — show calm guidance.
           if (d?.microdepositPending) {
-            setSetupNotice(
-              "You started a bank (ACH) payment. In 1–2 business days your bank will show two " +
-              "small deposits from Stripe — enter those amounts using the link in the email " +
-              "Stripe sent you to confirm and finish paying this statement."
-            );
+            setMicrodepositDetail(d.microdeposit || {});
+            setSetupNotice(statementMicrodepositNotice(d.microdeposit));
             return;
           }
           if (d?.inProgress) {
@@ -598,9 +623,33 @@ export default function StatementPayPage() {
         <p style={{ fontSize: FS.body, color: DOC.danger, marginBottom: SP.sm, lineHeight: LH.body }}>{payNotice}</p>
       )}
       {setupNotice ? (
-        <p style={{ fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
-          {setupNotice} Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
-        </p>
+        <>
+          {microdepositDetail ? (
+            <>
+              <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
+                {setupNotice}
+              </p>
+              <p style={{ margin: 0, marginTop: SP.sm, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
+                Stripe also emailed you a verification link. Until then there&rsquo;s nothing to
+                re-enter here. Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
+              </p>
+            </>
+          ) : (
+            <p style={{ fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
+              {setupNotice} Questions? Give us a call — <HelpPhoneLink tone="dark" inline />.
+            </p>
+          )}
+          {microdepositDetail && microdepositGuidance(microdepositDetail).verifyUrl ? (
+            <BrandButton
+              variant="primary"
+              fullWidth
+              style={{ marginTop: SP.xl }}
+              onClick={() => window.open(microdepositGuidance(microdepositDetail).verifyUrl, "_blank", "noopener")}
+            >
+              Verify my bank account
+            </BrandButton>
+          ) : null}
+        </>
       ) : setupError ? (
         <p style={{ fontSize: FS.bodyLg, color: DOC.danger, lineHeight: LH.body }}>
           {setupError} Please refresh, or call us — <HelpPhoneLink tone="dark" inline />.
@@ -618,6 +667,11 @@ export default function StatementPayPage() {
           billingName={billTo?.company || null}
           billingEmail={billTo?.ap_email || null}
           onSuccess={() => setPaid(true)}
+          onBankVerificationPending={(vwm) => {
+            const detail = microdepositDetailFromNextAction(vwm);
+            setMicrodepositDetail(detail);
+            setSetupNotice(statementMicrodepositNotice(detail));
+          }}
           onFinalizeFailed={resetPaymentIntent}
         />
       )}

@@ -567,6 +567,7 @@ router.post('/:token/setup', async (req, res, next) => {
         error: err.message,
         inProgress: !!err.inProgress,
         microdepositPending: !!err.microdepositPending,
+        microdeposit: err.microdeposit || null,
         savedCardPending: !!err.savedCardPending,
         reconciliationRequired: !!err.reconciliationRequired,
         staleInvoice: !!err.staleInvoice,
