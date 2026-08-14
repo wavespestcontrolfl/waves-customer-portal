@@ -840,6 +840,14 @@ describe('apply-refund (gate on)', () => {
     expect(sugOf(claim).releasedRefundOf).toBe('exp-9'); // durable double-apply guard
   });
 
+  test('a RELEASED refund cannot be unignored — the terminal state is genuinely terminal', async () => {
+    state.bankRow = { id: 'bt-1', status: 'ignored', suggestion: { releasedRefundOf: 'exp-9', refundUndone: { releasedWithoutRestore: true } } };
+    const res = await post('/admin/tax/bank-import/bt-1/unignore', {});
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain('cannot re-enter');
+    expect(state.bankUpdates).toHaveLength(0);
+  });
+
   test('apply-refund refuses a target this credit was RELEASED against — no double reduction', async () => {
     state.bankRow = { id: 'bt-1', amount: '20.00', txn_date: '2026-08-09', description: 'WAWA 5211 REFUND', direction: 'credit', account_type: 'card', status: 'unmatched', suggestion: { releasedRefundOf: 'exp-9' } };
     const res = await post('/admin/tax/bank-import/bt-1/apply-refund', { expenseId: 'exp-9' });

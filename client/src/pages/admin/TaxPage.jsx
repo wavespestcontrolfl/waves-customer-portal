@@ -4669,7 +4669,10 @@ function BankImportTab() {
                       Ignore
                     </button>
                   )}
-                  {r.status === "ignored" && (
+                  {/* released refunds are terminal — no reopen path (the
+                      expense keeps its reduction; reopening could reduce a
+                      second expense with the same credit) */}
+                  {r.status === "ignored" && !r.suggestion?.releasedRefundOf && (
                     <button
                       type="button"
                       disabled={!!busy}

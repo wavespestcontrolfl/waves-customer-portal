@@ -1876,17 +1876,24 @@ async function ledgerCoverage(year) {
   // in July instead of skewing two months. A refund against a MANUAL
   // expense (no claiming debit) doesn't net at all — otherwise total would
   // shrink without touching covered and coverage could exceed 100%.
+  // RELEASED refunds (terminal 'ignored' rows carrying releasedRefundOf)
+  // still represent an accounted adjustment — the expense keeps its
+  // reduction — so their netting must survive, or a fully explained $100
+  // debit with a retained $20 refund would read as $20 unexplained.
+  const RELEASED_SQL = "bt.status = 'ignored' and bt.suggestion->>'releasedRefundOf' is not null";
   const rows = await db('bank_transactions as bt')
     .leftJoin('expenses as e', 'e.id', 'bt.matched_expense_id')
     .leftJoin('bank_transactions as bt2', function refundTargetDebit() {
-      this.on(db.raw("bt.status = 'refund_applied'"))
+      this.on(db.raw(`(bt.status = 'refund_applied' or (${RELEASED_SQL}))`))
         .andOn(db.raw('bt2.matched_expense_id is not null'))
-        .andOn(db.raw("bt2.matched_expense_id::text = bt.suggestion->>'refundAppliedTo'"));
+        .andOn(db.raw("bt2.matched_expense_id::text = coalesce(bt.suggestion->>'refundAppliedTo', bt.suggestion->>'releasedRefundOf')"));
     })
-    .whereNot('bt.status', 'ignored')
+    .where(function notPlainIgnored() {
+      this.whereNot('bt.status', 'ignored').orWhereRaw(RELEASED_SQL);
+    })
     .whereRaw('extract(year from coalesce(bt2.txn_date, bt.txn_date)) = ?', [Number(year)])
     .where(function scope() {
-      this.where('bt.direction', 'debit').orWhere('bt.status', 'refund_applied');
+      this.where('bt.direction', 'debit').orWhere('bt.status', 'refund_applied').orWhereRaw(RELEASED_SQL);
     })
     .select(
       db.raw("to_char(coalesce(bt2.txn_date, bt.txn_date), 'YYYY-MM') as month"),

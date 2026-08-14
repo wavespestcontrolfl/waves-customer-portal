@@ -2297,8 +2297,19 @@ router.post('/bank-import/:id/ignore', async (req, res, next) => {
 
 router.post('/bank-import/:id/unignore', async (req, res, next) => {
   try {
+    // released refunds are TERMINAL: the expense keeps its reduction, so
+    // reopening the credit would let it apply against ANOTHER same-vendor
+    // expense and reduce the ledger twice for one statement credit
+    const row = await db('bank_transactions').where({ id: req.params.id }).first('id', 'status', 'suggestion');
+    if (!row || row.status !== 'ignored') return res.status(409).json({ error: 'row is not ignored' });
+    if (row.suggestion?.releasedRefundOf) {
+      return res.status(409).json({ error: 'this credit was released after a manual refund reconciliation — it stays accounted for and cannot re-enter review' });
+    }
     const changed = await db('bank_transactions')
       .where({ id: req.params.id, status: 'ignored' })
+      // the CAS re-checks the released marker — a concurrent Release must
+      // not be reopened by a stale unignore
+      .whereRaw("suggestion->>'releasedRefundOf' is null")
       .update({ status: 'unmatched', updated_at: new Date() });
     if (!changed) return res.status(409).json({ error: 'row is not ignored' });
     res.json({ success: true });
