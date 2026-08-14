@@ -277,6 +277,16 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     err.statusCode = 400;
     throw err;
   }
+  // One-tap purchase drafts are INTERNAL flow state, never a document to
+  // publish (Codex #3395 r12 P2): sending one flips it to 'sent' — a state
+  // the open purchase's confirm rejects and neither cleanup sweep reclaims
+  // (their predicates are draft/expired) — and starts the normal estimate
+  // comms for something the customer buys in-app.
+  if (estimate.source === 'one_tap_purchase') {
+    const err = new Error('This is an internal one-tap purchase draft — it is bought in the portal, never sent.');
+    err.statusCode = 400;
+    throw err;
+  }
   // A persisted bermuda-suppression estimate is only sendable while the gate
   // is LIVE: the send path serves stored rows without re-entering
   // priceLawnCare, so a save-then-gate-off sequence would otherwise publish

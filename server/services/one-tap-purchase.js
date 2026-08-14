@@ -916,7 +916,10 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       // lock holds the method in place until the conversion commits.
       let lockedCard = null;
       try {
-        const freshCard = await findConsentedChargeableCard(customerId);
+        // On the trx handle (r12 P1): the default pool handle nested inside
+        // this open transaction is a second pool checkout — a wave of
+        // concurrent confirms could occupy every connection and stall.
+        const freshCard = await findConsentedChargeableCard(customerId, { dbh: trx });
         if (freshCard) {
           lockedCard = await trx('payment_methods')
             .where({ id: freshCard.id, customer_id: customerId })

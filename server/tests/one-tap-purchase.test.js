@@ -745,6 +745,14 @@ describe('confirm', () => {
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 
+  test('the in-transaction card lookup runs on the TRX handle, never a second pool checkout (GH r12 P1)', async () => {
+    await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    // Call 1 = advisory pre-check (pool handle); call 2 = in-trx authority.
+    const inTrxCall = findConsentedChargeableCard.mock.calls[1];
+    expect(inTrxCall[1]?.dbh).toBeTruthy();
+    expect(inTrxCall[1].dbh.isTransaction).toBe(true);
+  });
+
   // ── Opt-out preservation (GH r10 P1): enrollment carries the
   // confirmation moment so a disable committed after it wins.
   test('post-commit enrollment passes the confirmation moment as authorizedAt', async () => {

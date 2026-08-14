@@ -98,16 +98,20 @@ async function hasConsentFor(customerId, stripePaymentMethodId) {
  */
 const NON_ENROLLMENT_CONSENT_SOURCES = new Set(['estimate_card_hold']);
 
-async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId) {
+async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId, { dbh = db } = {}) {
   if (!customerId || !stripePaymentMethodId) return false;
-  const rows = await db('payment_method_consents')
+  const rows = await dbh('payment_method_consents')
     .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId })
     .select('consent_text_version', 'source');
   return rows.some((r) => consentVersionQualifiesForEnrollment(r.consent_text_version)
     && !NON_ENROLLMENT_CONSENT_SOURCES.has(r.source));
 }
 
-async function findConsentedChargeableCard(customerId) {
+// dbh: callers holding an OPEN transaction must pass it (Codex #3395 r12
+// P1) — the default pool handle nested inside a caller's transaction is a
+// second pool checkout per request, and a wave of such transactions can
+// occupy every connection and deadlock the pool until timeouts.
+async function findConsentedChargeableCard(customerId, { dbh = db } = {}) {
   if (!customerId) return null;
   // A prior Auto Pay OPT-OUT is sacred (Codex #2681 r6 P1): disabling
   // keeps the saved card rows, and an old consent row must not silently
@@ -115,13 +119,13 @@ async function findConsentedChargeableCard(customerId) {
   // the LATEST enable/disable toggle in autopay_log — never-enrolled
   // customers have no toggle history and still auto-satisfy. Lookup
   // errors bubble: every caller fails toward asking for the card.
-  const lastToggle = await db('autopay_log')
+  const lastToggle = await dbh('autopay_log')
     .where({ customer_id: customerId })
     .whereIn('event_type', ['autopay_enabled', 'autopay_disabled'])
     .orderBy('created_at', 'desc')
     .first('event_type');
   if (lastToggle?.event_type === 'autopay_disabled') return null;
-  const rows = await db('payment_methods')
+  const rows = await dbh('payment_methods')
     .where({ customer_id: customerId, processor: 'stripe', method_type: 'card' })
     .whereNotNull('stripe_payment_method_id')
     .orderBy([{ column: 'is_default', order: 'desc' }, { column: 'created_at', order: 'desc' }]);
@@ -131,7 +135,7 @@ async function findConsentedChargeableCard(customerId) {
     // promoting one points collection at a dead card. Junk expiry data
     // reads as expired — same fail-closed rule as the portal enable gate.
     if (isExpiredCardMethod(pm)) continue;
-    if (await hasEnrollmentScopedConsent(customerId, pm.stripe_payment_method_id)) return pm;
+    if (await hasEnrollmentScopedConsent(customerId, pm.stripe_payment_method_id, { dbh })) return pm;
   }
   return null;
 }
