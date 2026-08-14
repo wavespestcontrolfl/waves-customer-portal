@@ -872,6 +872,10 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                   entry_point: 'invoice_followup_deferred',
                   invoice_id: row.invoice_id,
                   customer_id: customer.id,
+                  // Minted ONCE at enqueue: the replay's delivery-time
+                  // ledger reservation is keyed to it, so executor retries
+                  // of this same queued row can never double-count.
+                  ledger_reservation_key: require('crypto').randomUUID(),
                   followup_sequence_id: row.id,
                   original_block_code: sendResult.code,
                   replay_purpose: 'payment_link',

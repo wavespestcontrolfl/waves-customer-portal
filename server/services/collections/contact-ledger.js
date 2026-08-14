@@ -32,10 +32,11 @@ async function recordContact({
   source,
   metadata = null,
   occurredAt = new Date(),
+  idempotencyKey = null,
 }) {
   // Deliberately NOT wrapped: an insert failure must propagate so the caller
   // skips the delivery it was about to make.
-  const inserted = await db('collections_contact_ledger')
+  let query = db('collections_contact_ledger')
     .insert({
       customer_id: customerId,
       channel,
@@ -44,11 +45,45 @@ async function recordContact({
       occurred_at: occurredAt,
       source,
       metadata: metadata ? JSON.stringify(metadata) : null,
-    })
-    .returning('id');
+      ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
+    });
+  // A keyed record is a RESERVATION a retryable caller can safely re-run:
+  // the second attempt hits the unique key, inserts nothing, and reuses the
+  // standing row — never a duplicate frequency-window touch.
+  if (idempotencyKey) query = query.onConflict('idempotency_key').ignore();
+  const inserted = await query.returning('id');
   const first = Array.isArray(inserted) ? inserted[0] : inserted;
   const id = first && typeof first === 'object' ? first.id : first;
-  return { id, metadata: metadata || {} };
+  if (id) return { id, metadata: metadata || {} };
+  if (!idempotencyKey) throw new Error('collections ledger insert returned no id');
+  const existing = await db('collections_contact_ledger')
+    .where({ idempotency_key: idempotencyKey })
+    .first('id', 'metadata');
+  if (!existing) throw new Error('collections ledger reservation neither inserted nor found');
+  const existingMeta = typeof existing.metadata === 'string'
+    ? JSON.parse(existing.metadata)
+    : (existing.metadata || {});
+  return { id: existing.id, metadata: existingMeta, reused: true };
+}
+
+/**
+ * Stamp a keyed reservation as actually delivered. Best-effort and never
+ * throws — an unstamped reserved row only ever over-suppresses, which is
+ * the safe direction (same doctrine as markSendFailed).
+ */
+async function markDelivered(idempotencyKey) {
+  if (!idempotencyKey) return false;
+  try {
+    await db('collections_contact_ledger')
+      .where({ idempotency_key: idempotencyKey })
+      .update({
+        metadata: db.raw(`COALESCE(metadata, '{}'::jsonb) || '{"delivered": true}'::jsonb`),
+      });
+    return true;
+  } catch (err) {
+    logger.warn(`[collections-ledger] delivered stamp failed for key ${idempotencyKey}: ${err.message}`);
+    return false;
+  }
 }
 
 /**
@@ -71,4 +106,4 @@ async function markSendFailed(entry, extra = {}) {
   }
 }
 
-module.exports = { recordContact, markSendFailed };
+module.exports = { recordContact, markSendFailed, markDelivered };

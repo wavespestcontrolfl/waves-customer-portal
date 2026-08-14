@@ -22,6 +22,7 @@ jest.mock('../services/collections/rail-guard', () => ({
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
   markSendFailed: jest.fn(async () => true),
+  markDelivered: jest.fn(async () => true),
 }));
 jest.mock('../services/dispatch-completion-deferred', () => ({
   finalizeDeferredCompletionSend: jest.fn(async () => ({ ok: true })),
@@ -899,35 +900,60 @@ describe('deferred-replay registry', () => {
   });
 });
 
-// Collections policy on the invoice-followup replay (codex 2026-08-14 P1):
-// the quiet-hours-held SMS must re-prove the policy at ACTUAL delivery time,
-// and the delivered replay gets a FRESH ledger row (the enqueue-time row
-// carries the blocked timestamp, which would start the 24h window early).
+// Collections policy + ledger reservation on the invoice-followup replay
+// (codex 2026-08-14 P1 ×2): the quiet-hours-held SMS re-proves the policy at
+// ACTUAL delivery time, and the delivery-time ledger row is RESERVED before
+// dispatch (idempotency-keyed — retries reuse it), then stamped delivered.
 describe('invoice_followup_deferred × collections policy', () => {
   const { collectionsChannelPermitted } = require('../services/collections/rail-guard');
   const ContactLedger = require('../services/collections/contact-ledger');
   const COLLECTIBLE = { id: 'inv-1', status: 'sent', payer_id: null, total: 100, credit_applied: 0 };
+  const KEYED = {
+    invoice_id: 'inv-1', customer_id: 'cust-1',
+    ledger_reservation_key: 'rk-1', followup_sequence_id: 'seq-1',
+  };
 
+  beforeEach(() => { jest.clearAllMocks(); });
   afterEach(() => { delete process.env.GATE_COLLECTIONS_POLICY; });
 
-  test('gate off: no policy consult, no customer resolution — replay behavior byte-identical', async () => {
+  // KEYED metas carry followup_sequence_id, so collectibility does a SECOND
+  // read (invoice_followup_sequences) — queue both chains.
+  function armKeyedReads() {
+    db.mockReturnValueOnce(firstChain(COLLECTIBLE));
+    db.mockReturnValueOnce(firstChain({ status: 'active' }));
+  }
+
+  test('gate off + legacy keyless row: no consult, no resolution, no reservation — byte-identical', async () => {
     db.mockReturnValueOnce(firstChain(COLLECTIBLE));
     const result = await recheckDeferredReplay('invoice_followup_deferred', { invoice_id: 'inv-1' });
     expect(result.eligible).toBe(true);
     expect(collectionsChannelPermitted).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
   });
 
-  test('gate on + policy denial suppresses the replay of a still-collectible invoice', async () => {
+  test('keyed row RESERVES its delivery-time ledger row before dispatch, gate-independent (always-on ledger)', async () => {
+    armKeyedReads();
+    const result = await recheckDeferredReplay('invoice_followup_deferred', KEYED);
+    expect(result.eligible).toBe(true);
+    expect(collectionsChannelPermitted).not.toHaveBeenCalled(); // gate off
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1', channel: 'sms', purpose: 'late_payment',
+      invoiceIds: ['inv-1'], source: 'invoice_followup_replay',
+      idempotencyKey: 'followup-replay:rk-1',
+      metadata: expect.objectContaining({ replay: true, followup_sequence_id: 'seq-1' }),
+    }));
+  });
+
+  test('gate on + policy denial suppresses the replay of a still-collectible invoice, nothing reserved', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     collectionsChannelPermitted.mockResolvedValueOnce(false);
-    db.mockReturnValueOnce(firstChain(COLLECTIBLE));
-    const result = await recheckDeferredReplay('invoice_followup_deferred', {
-      invoice_id: 'inv-1', customer_id: 'cust-1',
-    });
+    armKeyedReads();
+    const result = await recheckDeferredReplay('invoice_followup_deferred', KEYED);
     expect(result).toEqual({ eligible: false, reason: 'collections-policy-denied' });
     expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1', invoiceId: 'inv-1', channel: 'sms', purpose: 'late_payment',
     }));
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
   });
 
   test('gate on + legacy row without customer_id resolves the customer from the invoice', async () => {
@@ -940,6 +966,13 @@ describe('invoice_followup_deferred × collections policy', () => {
     expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-9' }));
   });
 
+  test('a reservation failure HOLDS the replay — no unledgered contact, ever', async () => {
+    armKeyedReads();
+    ContactLedger.recordContact.mockRejectedValueOnce(new Error('ledger down'));
+    const result = await recheckDeferredReplay('invoice_followup_deferred', KEYED);
+    expect(result).toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
+  });
+
   test('gate on + customer resolution failure holds the row (fail closed, never send unverified)', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     db.mockReturnValueOnce(firstChain(COLLECTIBLE));
@@ -948,14 +981,18 @@ describe('invoice_followup_deferred × collections policy', () => {
     expect(result).toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
   });
 
-  test('finalize records the FRESH delivery-time ledger row and the entry point is durable', async () => {
+  test('finalize stamps the keyed reservation delivered; legacy keyless rows record at delivery; entry is durable', async () => {
+    await finalizeDeferredReplay('invoice_followup_deferred', KEYED);
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith('followup-replay:rk-1');
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+
+    jest.clearAllMocks();
     await finalizeDeferredReplay('invoice_followup_deferred', {
-      invoice_id: 'inv-1', customer_id: 'cust-1', followup_sequence_id: 'seq-1', original_block_code: 'QUIET_HOURS_HOLD',
+      invoice_id: 'inv-1', customer_id: 'cust-1', followup_sequence_id: 'seq-1',
     });
     expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({
-      customerId: 'cust-1', channel: 'sms', purpose: 'late_payment',
-      invoiceIds: ['inv-1'], source: 'invoice_followup_replay',
-      metadata: expect.objectContaining({ replay: true, followup_sequence_id: 'seq-1' }),
+      customerId: 'cust-1', source: 'invoice_followup_replay',
+      metadata: expect.objectContaining({ replay: true }),
     }));
     expect(requiresDurableFinalize('invoice_followup_deferred')).toBe(true);
   });
