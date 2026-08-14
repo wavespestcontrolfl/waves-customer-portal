@@ -8150,8 +8150,15 @@ const CallRecordingProcessor = {
         // would miss the dedup and duplicate. A partial second address still gets
         // the review flag above. The first/primary address is recorded regardless.
         const hasFullAddress = !!String(extracted.city || '').trim() && !!String(extracted.zip || '').trim();
+        // Newly created rows queue a fire-and-forget property lookup below —
+        // deduped/pre-existing rows don't (a paid lookup per repeat caller
+        // would burn spend on addresses we already enriched). Includes a
+        // primary that ensurePrimaryProperty just created from the
+        // customers mirror — that row is brand-new too.
+        const createdPropertyIds = [];
+        if (ensured.created && ensured.propertyId) createdPropertyIds.push(ensured.propertyId);
         if (isFirstAddress || (bridgeNeedsConfirmation.includes('second_service_address') && hasFullAddress)) {
-          await customerProperties.recordCallProperty({
+          const recorded = await customerProperties.recordCallProperty({
             customerId,
             address_line1: extracted.address_line1,
             address_line2: callUnit,
@@ -8161,6 +8168,7 @@ const CallRecordingProcessor = {
             occupancyType: isRental ? 'rental_investment' : 'unknown',
             source: 'call_pipeline',
           });
+          if (recorded.created && recorded.propertyId) createdPropertyIds.push(recorded.propertyId);
         }
         // Every ADDITIONAL property discussed on the call (a landlord's second
         // rental, another unit, a second house) is recorded as a secondary
@@ -8174,7 +8182,7 @@ const CallRecordingProcessor = {
           const extraCity = String(extra.city || '').trim();
           const extraZip = String(extra.zip || '').trim();
           if (!extraCity || !extraZip) continue;
-          await customerProperties.recordCallProperty({
+          const recordedExtra = await customerProperties.recordCallProperty({
             customerId,
             address_line1: extra.address_line1,
             address_line2: extra.address_line2 || null,
@@ -8189,6 +8197,14 @@ const CallRecordingProcessor = {
             occupancyType: extra.is_rental ? 'rental_investment' : 'unknown',
             source: 'call_pipeline',
           });
+          if (recordedExtra.created && recordedExtra.propertyId) createdPropertyIds.push(recordedExtra.propertyId);
+        }
+        // Auto property-lookup for each row this call CREATED (fire-and-
+        // forget; inert unless GATE_CALL_PROPERTY_LOOKUP — it fills
+        // lat/lng/type and warms the lookup cache, so the estimate that
+        // usually follows a booking call starts from enriched data).
+        for (const newPropertyId of createdPropertyIds) {
+          require('./call-property-lookup').enqueueCallPropertyLookup({ propertyId: newPropertyId });
         }
       } catch (e) {
         // Log the error CODE/NAME only — a DB error message can echo the failing
