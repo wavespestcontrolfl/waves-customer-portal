@@ -163,11 +163,17 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     // is the merge set; customer_id stays the conflict key and is
     // never mutated.
     const insertRow = { customer_id: customerId, ...fields };
-    const [saved] = await db('customer_turf_profiles')
+    // Customer-lock fence (#3391 GitHub round): FOR UPDATE on the turf row
+    // cannot serialize the NO-ROW case, so this upsert could insert the
+    // customer's first profile between the click-to-estimate mint's null
+    // read and its estimate insert. Shared fence — every price-bearing
+    // turf writer takes it (contract-pinned).
+    const { withTurfProfileFence } = require('../services/customer-pricing-ai');
+    const [saved] = await withTurfProfileFence(db, customerId, (trx) => trx('customer_turf_profiles')
       .insert(insertRow)
       .onConflict('customer_id')
       .merge({ ...fields, updated_at: new Date() })
-      .returning('*');
+      .returning('*'));
 
     logger.info?.(`[turf-profile] saved customer=${customerId} by tech=${req.technicianId}`);
     res.json({ profile: saved });

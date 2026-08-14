@@ -1379,12 +1379,41 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     last_send_error: null,
     updated_at: db.fn.now(),
   };
+  // firstDeliveredAt: the FIRST real handoff, durable across resends and
+  // suppressed later attempts (GitHub #3391 round). Each send replaces the
+  // deliveryState key wholesale, so without carrying it forward a later
+  // suppressed-SMS attempt would erase the real-delivery witness, and
+  // sent_at (overwritten per resend) would inflate first-handoff latency.
+  // Stamped only when stampChannels is non-empty — the same real-vs-
+  // suppression-sentinel line drawn above — and consumed by the
+  // click-mint delivery predicates (source-performance + watchers).
+  const priorDeliveryState = (() => {
+    try {
+      const data = typeof estimate.estimate_data === 'string'
+        ? JSON.parse(estimate.estimate_data)
+        : estimate.estimate_data;
+      return data?.deliveryState || null;
+    } catch { return null; }
+  })();
+  const firstDeliveredAt = priorDeliveryState?.firstDeliveredAt
+    || (stampChannels.length ? now().toISOString() : null);
+  // lastDeliveredAt advances on every REAL handoff and is carried forward
+  // (never dropped) by suppressed later attempts — the watcher predicates
+  // compare it against their call/task boundary, because pairing mutable
+  // sent_at with the mere existence of firstDeliveredAt let a pre-promise
+  // delivery plus a later suppressed attempt falsely keep the promise
+  // (uncapped audit on 573ee332e).
+  const lastDeliveredAt = stampChannels.length
+    ? now().toISOString()
+    : (priorDeliveryState?.lastDeliveredAt || null);
   const deliveryStatePatch = {
     deliveryState: {
       attemptedAt: now().toISOString(),
       sentChannels,
       failedChannels,
       channels,
+      ...(firstDeliveredAt ? { firstDeliveredAt } : {}),
+      ...(lastDeliveredAt ? { lastDeliveredAt } : {}),
     },
   };
   // Delivery outcomes must survive even if snapshot construction fails;
@@ -1447,6 +1476,28 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       await recordSentLearningEvent({ estimateId: estimate.id, sentRow: estimate });
     } catch (e) {
       logger.warn(`[admin-estimates] learning event failed for estimate ${estimate.id}: ${e.message}`);
+    }
+    // The delivery WITNESS must survive losing the claim (GitHub #3391
+    // round P1): when a customer accepts mid-flight, the guarded update
+    // above misses and deliveryState would never persist — the click-mint
+    // delivery predicates (source-performance + both watchers) would then
+    // classify a genuinely delivered estimate as unsent forever. Merge
+    // ONLY the deliveryState key into the accepted/declined row — never
+    // status, sent_at, or expiry, which are exactly what must not be
+    // regressed here. Real deliveries only; a suppressed attempt leaves
+    // the terminal row untouched. Fail-soft like every branch below.
+    if (stampChannels.length) {
+      try {
+        await db('estimates').where({ id: estimate.id }).update({
+          estimate_data: db.raw(
+            "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify(deliveryStatePatch)],
+          ),
+          updated_at: db.fn.now(),
+        });
+      } catch (e) {
+        logger.warn(`[admin-estimates] superseded-send deliveryState merge failed for estimate ${estimate.id}: ${e.message}`);
+      }
     }
     // The channels DID reach the customer even though the row moved on —
     // other same-contact open leads were still answered by this send. Loose
@@ -3185,3 +3236,8 @@ router._internals = {
 };
 
 module.exports = router;
+// Publish-without-delivery consumers (report click-to-estimate mint) freeze
+// the SAME send snapshot the send/sibling-publication paths do — one bundle
+// builder, so a minted estimate's locked price replays exactly like a sent
+// one. Lazy-required by services to avoid load-order cycles.
+module.exports.buildEstimateSendSnapshot = buildEstimateSendSnapshot;

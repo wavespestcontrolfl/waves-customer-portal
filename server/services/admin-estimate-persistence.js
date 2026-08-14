@@ -1159,7 +1159,13 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const pestPricingVersion = (Array.isArray(v1?.lineItems)
       ? v1.lineItems.find((li) => li?.service === 'pest_control')?.pricingVersion
       : null) || null;
-    return { recomputed: true, source, serverResult, serverTotals, pestPricingVersion };
+    // rawEngineResult: the unmapped generateEstimate output. The click-to-
+    // estimate mint reads its per-line discounted annual/visit cadence for
+    // the cent-exact cross-check against the card's shown price — the same
+    // raw shape the card's own quote derivation consumed, so the check can
+    // never diverge on mapping differences. Additive; existing callers read
+    // only serverResult/serverTotals.
+    return { recomputed: true, source, serverResult, serverTotals, pestPricingVersion, rawEngineResult: v1 };
   } catch (error) {
     // failClosed policy rejections (gated/invalid add-on inside the replayed
     // inputs) propagate — wrapping them as ENGINE_ERROR would hand them to
@@ -2110,6 +2116,59 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // a later stamp-clear skip invalidation and leave the former lead's draft
 // sendable to the wrong recipient.
 const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id'];
+// Click-to-estimate mints (#3391 audit P0): both markers are
+// lifecycle-critical and PRIOR-WINS across a revise — the zero-comms
+// opt-out is the lane's owner-approved contract (a revise must never
+// re-enable automated outreach), and reportCtaMint is the durable lineage
+// the mint resolves reuse/supersession through (dropping it permits a
+// second live estimate at a second honorable price). The offer FINGERPRINT
+// inside the lineage does NOT survive: staff just changed the terms, so a
+// later identical card tap must supersede this row, never reuse it as the
+// card's unchanged offer.
+function preserveClickMintMarkersAcrossRevise(nextData, priorData) {
+  if (!nextData || typeof nextData !== 'object' || !priorData || typeof priorData !== 'object') return false;
+  let changed = false;
+  if (priorData.noEngagementAutomation === true && nextData.noEngagementAutomation !== true) {
+    nextData.noEngagementAutomation = true;
+    changed = true;
+  }
+  const mark = priorData.reportCtaMint;
+  if (mark && typeof mark === 'object') {
+    const { fingerprint: _droppedFingerprint, ...lineage } = mark;
+    nextData.reportCtaMint = {
+      ...lineage,
+      ...(mark.fingerprint ? { fingerprintInvalidatedAt: new Date().toISOString() } : {}),
+    };
+    changed = true;
+  }
+  // The delivery witness survives a revise, prior-wins (uncapped audit on
+  // 573ee332e P1): a revise replaces estimate_data wholesale, and dropping
+  // deliveryState turned a genuinely DELIVERED click-mint back into
+  // "unsent" for source-performance and both watcher predicates. A revise
+  // never authors delivery state, so the prior row's is authoritative.
+  // Scoped to click-mint rows (this function's contract) — other sources'
+  // revise behavior is unchanged. MONOTONIC, not undefined-only (uncapped
+  // audit on bf357980f): this helper runs once pre-lock and again against
+  // the LOCKED re-read — if a real resend finished in between, the first
+  // pass already planted the older deliveryState in the pending payload,
+  // and an undefined-only guard would let the revision overwrite the
+  // locked row's newer witness. Whichever side carries the newer delivery
+  // evidence wins.
+  if (mark && typeof mark === 'object'
+    && priorData.deliveryState && typeof priorData.deliveryState === 'object') {
+    const witnessTs = (ds) => {
+      const value = ds?.lastDeliveredAt || ds?.firstDeliveredAt || null;
+      const ts = value ? new Date(value).getTime() : NaN;
+      return Number.isFinite(ts) ? ts : -Infinity;
+    };
+    const nextDs = nextData.deliveryState;
+    if (nextDs === undefined || witnessTs(priorData.deliveryState) > witnessTs(nextDs)) {
+      nextData.deliveryState = priorData.deliveryState;
+      changed = true;
+    }
+  }
+  return changed;
+}
 // Nested estimatorEngine keys preserved across a revise — the call
 // provenance every linkage consumer resolves through, plus the
 // invalidation markers a revise must never clear.
@@ -2250,6 +2309,7 @@ async function reviseAdminEstimate({
           preserved = true;
         }
       }
+      if (preserveClickMintMarkersAcrossRevise(nextData, existingData)) preserved = true;
       // Durable CALL PROVENANCE survives a revise even though the rest of
       // the estimator metadata is deliberately replaced (codex P1, PR
       // #3304 GH r8): the V2 client sends a fresh blob carrying only
@@ -2449,6 +2509,7 @@ async function reviseAdminEstimate({
           for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
             if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
           }
+          preserveClickMintMarkersAcrossRevise(pendingData, lockedData);
           for (const key of REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS) {
             const lockedValue = lockedData?.estimatorEngine?.[key];
             if (lockedValue === undefined) continue;
@@ -2532,4 +2593,8 @@ module.exports = {
   resolveServerAuthoritativePricing,
   compareClientToServer,
   sanitizeClientIdentityFields,
+  // Exported for the monotonic delivery-witness contract test (#3391): the
+  // helper runs once pre-lock and again against the locked re-read, and
+  // the newer witness must always win.
+  preserveClickMintMarkersAcrossRevise,
 };

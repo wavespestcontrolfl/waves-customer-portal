@@ -41,6 +41,25 @@ const request = (over = {}) => ({
 });
 
 describe('composeUnworkedCommsDigest', () => {
+  test('a zero-delivery click-to-estimate mint never fulfills a send_estimate task (source contract, #3391)', () => {
+    // Those mints stamp sent_at without delivering anything — they must not
+    // clear a send obligation owed from a call.
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '../services/unworked-comms-watcher.js'), 'utf8',
+    );
+    const block = src.split('fe.customer_id = t.customer_id')[1].slice(0, 900);
+    expect(block).toMatch(/COALESCE\(fe\.source, ''\) <> 'service_report_cta'/);
+    // …but a mint an operator LATER actually delivered fulfills the task
+    // (GitHub #3391 round P2). The witness is deliveryState.firstDeliveredAt
+    // — stamped only for REAL deliveries, durable across resends, merged
+    // even when a concurrent accept wins the send claim.
+    // lastDeliveredAt compared against the task boundary itself (audit on
+    // 573ee332e) — never mere existence paired with mutable sent_at.
+    expect(block).toMatch(/\(fe\.estimate_data #>> '\{deliveryState,lastDeliveredAt\}'\)::timestamptz > t\.created_at/);
+    expect(block).not.toMatch(/sentChannels/);
+    expect(block).not.toMatch(/channels,email,ok/);
+  });
+
   test('fully-worked day composes nothing', () => {
     expect(composeUnworkedCommsDigest({ callbacks: [], followUps: [], unanswered: [] })).toBeNull();
     expect(composeUnworkedCommsDigest({})).toBeNull();

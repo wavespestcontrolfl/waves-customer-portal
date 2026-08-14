@@ -24,6 +24,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/estimate-follow-up', () => ({
   _private: { repairFollowupCounters: jest.fn(async () => null) },
 }));
+// The zero-comms describe drives a NON-silent call and asserts nothing
+// customer-facing fires — mock the senders so a guard regression fails
+// here instead of reaching real template plumbing.
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(async () => ({ sent: true })),
+}));
 
 const db = require('../models/db');
 const { repairFollowupCounters } = require('../services/estimate-follow-up')._private;
@@ -143,6 +149,46 @@ describe('extendEstimate post-write: engine expiring re-arm (codex 2736 r9)', ()
       { table: 'estimate_followup_jobs', whereIn: ['rule_key', ['expiring_engaged', 'expiring_never_viewed']] },
       { table: 'estimate_followup_sends', whereIn: ['rule_key', ['expiring_engaged', 'expiring_never_viewed']] },
     ]);
+  });
+});
+
+describe('extendEstimate zero-comms opt-out (#3391 round 9 in-hook audit)', () => {
+  it('forces SILENT when estimate_data.noEngagementAutomation is true — a non-silent caller still sends nothing', async () => {
+    // The public extension-request flow calls extendEstimate non-silently;
+    // a click-mint's token holder extending after expiry must not trigger
+    // the automatic SMS/email the lane promises never fire.
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    sendCustomerMessage.mockClear();
+    const res = await extendEstimate({
+      estimate: {
+        id: 'est-optout-1', status: 'viewed', archived_at: null,
+        expires_at: PAST, viewed_at: PAST, customer_phone: '+15550100999',
+        estimate_data: JSON.stringify({ noEngagementAutomation: true }),
+      },
+      days: 7,
+      entryPoint: 'public_estimate_extension_request',
+      workflow: 'public_estimate_extension_request',
+    });
+    expect(res.newExpiry).toBeInstanceOf(Date);
+    expect(res.smsResult).toEqual({ sent: false, reason: 'silent' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('object-form estimate_data (jsonb hydration) forces silent identically', async () => {
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    sendCustomerMessage.mockClear();
+    const res = await extendEstimate({
+      estimate: {
+        id: 'est-optout-2', status: 'viewed', archived_at: null,
+        expires_at: PAST, viewed_at: PAST, customer_phone: '+15550100999',
+        estimate_data: { noEngagementAutomation: true },
+      },
+      days: 7,
+      entryPoint: 'test',
+      workflow: 'test',
+    });
+    expect(res.smsResult).toEqual({ sent: false, reason: 'silent' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 });
 

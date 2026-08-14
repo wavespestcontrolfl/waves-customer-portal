@@ -138,6 +138,92 @@ beforeEach(() => {
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'sg-1' } });
 });
 
+describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () => {
+  // deliveryState.firstDeliveredAt is the click-mint delivery truth the
+  // source-performance report and both watchers key on: stamped only for
+  // REAL deliveries, carried across resends, and persisted even when a
+  // concurrent accept wins the send claim.
+  const deliveryPatches = () => db.raw.mock.calls
+    .filter(([sql, bindings]) => /jsonb/.test(String(sql)) && Array.isArray(bindings))
+    .map(([, bindings]) => { try { return JSON.parse(bindings[0]); } catch { return null; } })
+    .filter((patch) => patch && patch.deliveryState);
+
+  test('a real delivery stamps firstDeliveredAt', async () => {
+    const result = await router.sendEstimateNow(estimateRow(), 'email');
+    expect(result.sent).toBe(true);
+    const patches = deliveryPatches();
+    expect(patches.length).toBeGreaterThan(0);
+    expect(patches[0].deliveryState.firstDeliveredAt).toBeTruthy();
+  });
+
+  test('a resend carries the ORIGINAL firstDeliveredAt forward — sent_at inflation never reaches the witness', async () => {
+    const first = '2026-07-02T09:00:00.000Z';
+    const row = estimateRow({
+      estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: first } }),
+    });
+    db.mockImplementation(() => makeBuilder(row));
+    await router.sendEstimateNow(row, 'email');
+    const patches = deliveryPatches();
+    expect(patches.length).toBeGreaterThan(0);
+    expect(patches[0].deliveryState.firstDeliveredAt).toBe(first);
+  });
+
+  test('a real delivery advances lastDeliveredAt; a suppressed-SMS-only attempt carries BOTH witnesses forward unchanged (audit on 573ee332e)', async () => {
+    // The watchers compare lastDeliveredAt against their call/task
+    // boundary — a suppressed attempt advances sent_at but must never
+    // advance the witness, or a pre-promise delivery plus a suppressed
+    // later attempt would falsely keep the promise.
+    const first = '2026-07-02T09:00:00.000Z';
+    const last = '2026-07-03T09:00:00.000Z';
+    const row = estimateRow({
+      customer_email: null, // sms-only attempt
+      estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: first, lastDeliveredAt: last } }),
+    });
+    db.mockImplementation(() => makeBuilder(row));
+    // {sent:true} with no providerMessageId = a suppression path, not a
+    // real provider send (isRealProviderSend contract).
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    await router.sendEstimateNow(row, 'sms');
+    const patches = deliveryPatches();
+    expect(patches.length).toBeGreaterThan(0);
+    expect(patches[0].deliveryState.firstDeliveredAt).toBe(first);
+    expect(patches[0].deliveryState.lastDeliveredAt).toBe(last);
+  });
+
+  test('a REAL provider send advances lastDeliveredAt past the prior stamp', async () => {
+    const last = '2026-07-03T09:00:00.000Z';
+    const row = estimateRow({
+      estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: last, lastDeliveredAt: last } }),
+    });
+    db.mockImplementation(() => makeBuilder(row));
+    await router.sendEstimateNow(row, 'email');
+    const patches = deliveryPatches();
+    expect(patches[0].deliveryState.firstDeliveredAt).toBe(last);
+    expect(patches[0].deliveryState.lastDeliveredAt).not.toBe(last);
+    expect(new Date(patches[0].deliveryState.lastDeliveredAt).getTime()).toBeGreaterThan(new Date(last).getTime());
+  });
+
+  test('losing the sending claim to a concurrent accept still persists the delivery witness (estimate_data-only merge)', async () => {
+    const updatePayloads = [];
+    db.mockImplementation(() => {
+      const b = makeBuilder(estimateRow());
+      // Every guarded update misses (the accept won the claim); the
+      // witness merge is an unguarded estimate_data-only update.
+      b.update = jest.fn(async (payload) => { updatePayloads.push(payload); return 0; });
+      return b;
+    });
+    const result = await router.sendEstimateNow(estimateRow(), 'email');
+    expect(result.sent).toBe(true);
+    expect(result.superseded).toBe(true);
+    // A merge that touches ONLY estimate_data (+updated_at) — never
+    // status/sent_at/expiry, which belong to the accepted state.
+    const witnessMerge = updatePayloads.find((p) => p && p.estimate_data && !p.status && !p.sent_at);
+    expect(witnessMerge).toBeTruthy();
+    const patches = deliveryPatches();
+    expect(patches.some((p) => p.deliveryState.firstDeliveredAt)).toBe(true);
+  });
+});
+
 describe('sendEstimateNow — per-channel tracked links (round 7)', () => {
   test("sendMethod='both': two mints, sms leg texts the sms-tagged URL, email carries the email-tagged URL", async () => {
     const result = await router.sendEstimateNow(estimateRow(), 'both');

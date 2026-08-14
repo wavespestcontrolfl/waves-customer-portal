@@ -287,6 +287,13 @@ function optionIsPriceable(option) {
   // carry (r7 ruling), so a termite-basic dueAtStart would price-lock an
   // undisclosed charge — demote to the quote CTA instead.
   if (Number(option.dueAtStart) > 0 || Number(option.oneTime) > 0) return false;
+  // Deliberately NOT demoted here: the pest line's standing initialFee
+  // (option.setupFee). Priced pest cards are live, owner-verified behavior,
+  // and the fee is the standard membership fee every estimate page itemizes
+  // BEFORE acceptance — the owner's copy ruling names the estimate page as
+  // the disclosure surface. The click-to-estimate mint's belt check permits
+  // exactly that line-declared fee and refuses any OTHER one-time charge
+  // (GitHub #3391 P1).
   return Number(option.perVisit) > 0;
 }
 
@@ -477,7 +484,15 @@ async function cacheOnlyPropertyLookup(address) {
 // `service` is the reports-public joined row (service_records + customers
 // COALESCE address). Best-effort by contract: every failure path returns
 // null — the report itself must never notice this feature exists.
-async function buildReportCrossSell(service, database, { propertyLookup = cacheOnlyPropertyLookup } = {}) {
+async function buildReportCrossSell(service, database, {
+  propertyLookup = cacheOnlyPropertyLookup,
+  // Opt-in ONLY (click-to-estimate mint path): ride the picked option's raw
+  // engine context out on a server-internal `engineContext` key. The READ
+  // path never passes this, so the public report payload — which spreads
+  // this return wholesale — can never carry engine inputs, and the
+  // fingerprint is computed over the public payload alone either way.
+  includeEngineContext = false,
+} = {}) {
   try {
     const customerId = service?.customer_id;
     if (!customerId || !database) return null;
@@ -831,6 +846,7 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
       db: database,
       propertyLookup: trackedPropertyLookup,
       propertySeed,
+      includeEngineContext,
     });
 
     // No lookup result — a miss, a rejected lookup, or the lookup switched
@@ -923,7 +939,33 @@ async function buildReportCrossSell(service, database, { propertyLookup = cacheO
     // stable option id + price can no longer persist a snapshot the
     // customer never saw. Recomputed identically on the click path; any
     // drift 409s and the card prompts a refresh.
-    return { ...payload, fingerprint: offerFingerprint(payload) };
+    // engineContext rides OUTSIDE the fingerprinted payload — it is
+    // server-internal mint material, never customer-visible, and including
+    // it would change the fingerprint between the read path (no context)
+    // and the click path (context requested), 409ing every valid tap.
+    const fingerprinted = { ...payload, fingerprint: offerFingerprint(payload) };
+    if (includeEngineContext && priced && option?.engineContext) {
+      // The customer row rides along so the mint persists identity/address
+      // from the SAME row every pricing frame above was anchored to (the
+      // mint re-reads under its lock and treats premises drift as a 409).
+      // primaryStreet is the SAME normalized scope key every frame above
+      // anchored to — the mint's membership snapshot must be bounded by it
+      // or account-wide rows inflate the accepted tier (GitHub #3391 P1).
+      // Which proof admitted this report (GitHub #3391 round): a report the
+      // fallback single-premises proof admitted is only priceable while the
+      // account STAYS single-premises — the mint re-runs that proof under
+      // its lock, because a staff has_multi_home flip or a new
+      // customer_properties row between composition and tap silently makes
+      // this an exact price for possibly the wrong premises. Linkage-proven
+      // reports carry their own address evidence and need no re-proof.
+      fingerprinted.engineContext = {
+        ...option.engineContext,
+        customer,
+        primaryStreet,
+        premisesProof: premisesProven ? 'report_linkage' : 'single_premises',
+      };
+    }
+    return fingerprinted;
   } catch (err) {
     // err.code only (codex #3381-lane pre-push r4): the composer's errors
     // can be PG errors quoting bound values (addresses, payload fields) —
@@ -1082,6 +1124,9 @@ async function buildPortalOffer(customerId, database, { propertyLookup = cacheOn
 module.exports = {
   buildReportCrossSell,
   buildPortalOffer,
+  // The mint re-runs this proof under its transaction lock for reports the
+  // fallback branch admitted (GitHub #3391 round — see premisesProof stamp).
+  customerHasOnlyPrimaryPremises,
   // Test hooks: target matrix + priceability are the card's two decisions.
   _private: {
     pickOfferTarget, startFamilyForIdentity, pickOption, optionIsPriceable, offerFingerprint, OFFER_LADDER,

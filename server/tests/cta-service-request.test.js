@@ -77,10 +77,57 @@ describe('writeOrRefreshCtaRequest', () => {
     });
     const onWrite = jest.fn();
     const outcome = await writeOrRefreshCtaRequest(db, { ...ARGS, onWrite });
-    expect(outcome).toEqual({ deduped: true });
+    expect(outcome.deduped).toBe(true);
+    // The existing row rides the dedupe outcome (click-to-estimate lane):
+    // the mint hook resolves its previously minted estimate from it.
+    expect(outcome.request?.id).toBe('req-1');
     expect(ops.updates).toHaveLength(0);
     expect(ops.inserts).toHaveLength(0);
     expect(onWrite).not.toHaveBeenCalled();
+  });
+
+  test('a stored mintedEstimate linkage does NOT break the dedupe match', async () => {
+    // The mint hook stamps pricing_revision.mintedEstimate AFTER the
+    // snapshot is stored; the freshly recomputed snapshot never carries it.
+    // If the compare saw it, every repeat tap on a minted offer would churn
+    // the row and supersede a perfectly valid estimate.
+    const { db, ops } = fakeDb({
+      existing: {
+        id: 'req-1',
+        source: 'portal_home',
+        subject: ARGS.subject,
+        pricing_revision: JSON.stringify({
+          ...ARGS.revisionSnapshot,
+          mintedEstimate: { id: 'est-1', token: 'tok', mintedAt: '2026-08-13T00:00:00Z' },
+        }),
+      },
+    });
+    const outcome = await writeOrRefreshCtaRequest(db, ARGS);
+    expect(outcome.deduped).toBe(true);
+    expect(ops.updates).toHaveLength(0);
+    expect(ops.inserts).toHaveLength(0);
+  });
+
+  test('a refresh from a surface with NO mint hook preserves the minted-estimate linkage (#3391 audit P1)', async () => {
+    // Portal-home tap after a report mint: the fresh snapshot carries no
+    // mintedEstimate, but wholesale-replacing pricing_revision would erase
+    // the pointer — a later report tap would mint a SECOND estimate with no
+    // way to archive the first (two live honorable prices).
+    const minted = { id: 'est-1', token: 'tok-1', mintedAt: '2026-08-13T00:00:00Z' };
+    const { db, ops } = fakeDb({
+      existing: {
+        id: 'req-1',
+        source: 'service_report',
+        subject: 'old subject',
+        pricing_revision: JSON.stringify({ source: 'service_report', crossSell: {}, mintedEstimate: minted }),
+      },
+    });
+    const outcome = await writeOrRefreshCtaRequest(db, ARGS);
+    expect(outcome.refreshed).toBe(true);
+    const stored = JSON.parse(ops.updates[0].patch.pricing_revision);
+    expect(stored.mintedEstimate).toEqual(minted);
+    // The offer snapshot itself is still the fresh one.
+    expect(stored.offer).toEqual(ARGS.revisionSnapshot.offer);
   });
 
   test('onWrite runs inside the transaction on a real write', async () => {
@@ -88,5 +135,65 @@ describe('writeOrRefreshCtaRequest', () => {
     const onWrite = jest.fn();
     await writeOrRefreshCtaRequest(db, { ...ARGS, onWrite });
     expect(onWrite).toHaveBeenCalledTimes(1);
+  });
+
+  describe('withRow hook (click-to-estimate seam)', () => {
+    test('fires on an insert with the written row and no prior revision', async () => {
+      const { db } = fakeDb();
+      const withRow = jest.fn();
+      await writeOrRefreshCtaRequest(db, { ...ARGS, withRow });
+      expect(withRow).toHaveBeenCalledTimes(1);
+      const [, ctx] = withRow.mock.calls[0];
+      expect(ctx.deduped).toBe(false);
+      expect(ctx.refreshed).toBe(false);
+      expect(ctx.priorPricingRevision).toBeNull();
+      expect(ctx.row).toBeTruthy();
+    });
+
+    test('fires on a refresh with the PRE-call pricing_revision (the row write already replaced the stored snapshot)', async () => {
+      const priorRevision = {
+        source: 'service_report',
+        crossSell: {},
+        mintedEstimate: { id: 'est-old', token: 'tok-old' },
+      };
+      const { db } = fakeDb({
+        existing: {
+          id: 'req-1',
+          source: 'service_report',
+          subject: 'old subject',
+          pricing_revision: JSON.stringify(priorRevision),
+        },
+      });
+      const withRow = jest.fn();
+      const outcome = await writeOrRefreshCtaRequest(db, { ...ARGS, withRow });
+      expect(outcome.refreshed).toBe(true);
+      const [, ctx] = withRow.mock.calls[0];
+      expect(ctx.refreshed).toBe(true);
+      expect(ctx.priorPricingRevision).toEqual(priorRevision);
+    });
+
+    test('fires on the dedupe no-op too — a repeat tap must reach the mint', async () => {
+      const { db } = fakeDb({
+        existing: {
+          id: 'req-1',
+          source: 'portal_home',
+          subject: ARGS.subject,
+          pricing_revision: JSON.stringify(ARGS.revisionSnapshot),
+        },
+      });
+      const withRow = jest.fn();
+      const onWrite = jest.fn();
+      const outcome = await writeOrRefreshCtaRequest(db, { ...ARGS, withRow, onWrite });
+      expect(outcome.deduped).toBe(true);
+      expect(withRow).toHaveBeenCalledTimes(1);
+      expect(withRow.mock.calls[0][1].deduped).toBe(true);
+      expect(onWrite).not.toHaveBeenCalled();
+    });
+
+    test('a withRow throw propagates so the transaction rolls back the row write with it', async () => {
+      const { db } = fakeDb();
+      const withRow = jest.fn().mockRejectedValue(new Error('mint failed'));
+      await expect(writeOrRefreshCtaRequest(db, { ...ARGS, withRow })).rejects.toThrow('mint failed');
+    });
   });
 });

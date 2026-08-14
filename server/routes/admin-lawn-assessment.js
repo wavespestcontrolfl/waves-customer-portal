@@ -655,13 +655,17 @@ router.post('/assess', async (req, res, next) => {
     // edit or estimate). Fail-soft — never break the assessment.
     if (mergedComposite.grass_type) {
       try {
-        await db('customer_turf_profiles')
+        // Customer-lock fence (#3391): a first-profile insert must not race
+        // the click-to-estimate mint's turf revalidation — every
+        // price-bearing turf writer takes the shared fence.
+        const { withTurfProfileFence } = require('../services/customer-pricing-ai');
+        await withTurfProfileFence(db, customerId, (trx) => trx('customer_turf_profiles')
           .insert({ customer_id: customerId, grass_type: mergedComposite.grass_type })
           .onConflict('customer_id')
           .merge({
-            grass_type: db.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [mergedComposite.grass_type]),
+            grass_type: trx.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [mergedComposite.grass_type]),
             updated_at: new Date(),
-          });
+          }));
       } catch (grassErr) {
         logger.warn?.(`[lawn-assessment] grass-type auto-capture skipped for ${customerId}: ${grassErr.message}`);
       }

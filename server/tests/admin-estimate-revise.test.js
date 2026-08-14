@@ -361,6 +361,93 @@ describe('reviseAdminEstimate', () => {
     expect(updates).toHaveLength(0);
   });
 
+  test('a click-mint revise keeps the zero-comms marker and lineage but INVALIDATES the offer fingerprint (#3391 audit P0)', async () => {
+    const clickMint = {
+      ...sentEstimate,
+      estimate_data: JSON.stringify({
+        ...JSON.parse(sentEstimate.estimate_data),
+        noEngagementAutomation: true,
+        reportCtaMint: {
+          serviceKey: 'pest_control',
+          serviceRecordId: 'sr-1',
+          requestId: 'req-1',
+          fingerprint: 'fp-card-1',
+          mintedAt: '2026-08-13T00:00:00.000Z',
+        },
+      }),
+    };
+    const { database, updates } = makeReviseDatabase({ estimate: clickMint });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: reviseBody,
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    const data = JSON.parse(updates[0].estimate_data);
+    // The zero-comms contract survives — a revise must never re-enable
+    // automated outreach on the lane that promises none.
+    expect(data.noEngagementAutomation).toBe(true);
+    // Lineage survives (reuse/supersession resolves through it) …
+    expect(data.reportCtaMint.serviceKey).toBe('pest_control');
+    expect(data.reportCtaMint.mintedAt).toBe('2026-08-13T00:00:00.000Z');
+    // … but the fingerprint does NOT: staff changed the terms, so a later
+    // identical card tap must supersede this row, never reuse it.
+    expect(data.reportCtaMint.fingerprint).toBeUndefined();
+    expect(data.reportCtaMint.fingerprintInvalidatedAt).toBeTruthy();
+  });
+
+  test('a click-mint revise preserves the delivery witness — a DELIVERED mint must not become "unsent" (audit on 573ee332e P1)', async () => {
+    // The witness (firstDeliveredAt / lastDeliveredAt) is what the
+    // source-performance report and both watcher predicates key on; a
+    // revise replaces estimate_data wholesale and never authors delivery
+    // state, so the prior row's is authoritative (prior-wins).
+    const deliveredMint = {
+      ...sentEstimate,
+      estimate_data: JSON.stringify({
+        ...JSON.parse(sentEstimate.estimate_data),
+        noEngagementAutomation: true,
+        reportCtaMint: { serviceKey: 'pest_control', fingerprint: 'fp-card-1' },
+        deliveryState: {
+          firstDeliveredAt: '2026-08-13T01:00:00.000Z',
+          lastDeliveredAt: '2026-08-13T02:00:00.000Z',
+          sentChannels: ['email'],
+          channels: { email: { ok: true, provider: 'email' } },
+        },
+      }),
+    };
+    const { database, updates } = makeReviseDatabase({ estimate: deliveredMint });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: reviseBody,
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    const data = JSON.parse(updates[0].estimate_data);
+    expect(data.deliveryState.firstDeliveredAt).toBe('2026-08-13T01:00:00.000Z');
+    expect(data.deliveryState.lastDeliveredAt).toBe('2026-08-13T02:00:00.000Z');
+  });
+
+  test('the witness merge is MONOTONIC — the locked row\'s newer delivery state beats a stale pre-lock copy (audit on bf357980f P1)', async () => {
+    // preserveClickMintMarkersAcrossRevise runs once pre-lock and again
+    // against the locked re-read; a resend finishing in between means the
+    // pending payload already carries the OLDER witness, and undefined-only
+    // preservation would let the revision overwrite the new one.
+    const { preserveClickMintMarkersAcrossRevise } = require('../services/admin-estimate-persistence');
+    const mark = { serviceKey: 'pest_control' };
+    const stale = { firstDeliveredAt: '2026-08-13T01:00:00.000Z', lastDeliveredAt: '2026-08-13T02:00:00.000Z' };
+    const fresh = { firstDeliveredAt: '2026-08-13T01:00:00.000Z', lastDeliveredAt: '2026-08-13T06:00:00.000Z' };
+    // Locked row (prior) newer → wins over the stale pre-lock copy.
+    const next1 = { reportCtaMint: mark, deliveryState: { ...stale } };
+    preserveClickMintMarkersAcrossRevise(next1, { reportCtaMint: mark, deliveryState: fresh });
+    expect(next1.deliveryState.lastDeliveredAt).toBe('2026-08-13T06:00:00.000Z');
+    // Pending payload already newer (prior stale) → kept, never regressed.
+    const next2 = { reportCtaMint: mark, deliveryState: { ...fresh } };
+    preserveClickMintMarkersAcrossRevise(next2, { reportCtaMint: mark, deliveryState: stale });
+    expect(next2.deliveryState.lastDeliveredAt).toBe('2026-08-13T06:00:00.000Z');
+  });
+
   test('carries the lead_id mirror and schedule-stitch pointer across the rewrite', async () => {
     const withLinkage = {
       ...sentEstimate,

@@ -34,6 +34,24 @@ function canFallbackFromAutomationEmailError(err) {
   return /relation .*email_template_automation|automation .*not found|does not define an idempotency key|active template not found|template version not found|template not found/i.test(err?.message || '');
 }
 
+// estimate_data.noEngagementAutomation — the durable zero-comms opt-out
+// stamped by publish-without-delivery mints (report click-to-estimate).
+// Same key the engagement engine and legacy follow-up cron enforce;
+// duplicated locally like theirs (shared-import would couple this sender's
+// load order to those modules) and pinned in lockstep by
+// estimate-followup-engagement-optout.test.js. A renewal here would both
+// EXTEND the estimate and EMAIL the customer — the lane promises neither.
+function estimateOptedOutOfAutoRenew(est) {
+  try {
+    const data = typeof est.estimate_data === 'string'
+      ? JSON.parse(est.estimate_data)
+      : est.estimate_data;
+    return data?.noEngagementAutomation === true;
+  } catch {
+    return false;
+  }
+}
+
 const EstimateAutoRenew = {
   async checkAll() {
     let renewed = 0;
@@ -50,6 +68,7 @@ const EstimateAutoRenew = {
 
       for (const est of stale) {
         try {
+          if (estimateOptedOutOfAutoRenew(est)) continue;
           const newExpiry = new Date(Date.now() + RENEWAL_DAYS * 86400000);
           await db('estimates').where({ id: est.id }).update({
             expires_at: newExpiry,

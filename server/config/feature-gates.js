@@ -39,6 +39,7 @@
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
+ *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -158,6 +159,16 @@ const gates = {
   // unless GATE_REPORT_CROSS_SELL is also on. Gate off: completions behave
   // exactly as today and the card keeps falling back to the quote CTA.
   reportCrossSellPrewarm: process.env.GATE_REPORT_CROSS_SELL_PREWARM === 'true',
+
+  // A PRICED cross-sell tap mints a customer-viewable estimate at the exact
+  // shown price and the response redirects into the estimate page (slot pick
+  // + per-application / pay-in-full acceptance). Customer-facing money
+  // surface — fail-closed ==='true' in EVERY environment, and inert unless
+  // GATE_REPORT_CROSS_SELL is also on (the tap only exists on a live card).
+  // Gate off: taps keep today's request-row + office-bell flow byte-for-byte
+  // and the response carries no estimate URL. Quote-mode (CTA) taps keep the
+  // request flow at ANY setting.
+  reportClickToEstimate: process.env.GATE_REPORT_CLICK_TO_ESTIMATE === 'true',
 
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is

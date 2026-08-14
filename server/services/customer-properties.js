@@ -182,9 +182,22 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
   if (!customerId || !street) return { created: false, propertyId: null };
 
   const candidate = { address_line1: street, address_line2, city, zip };
+  // Customer-lock fence (#3391 GitHub round): the click-to-estimate mint's
+  // single-premises proof reads customer_properties under the CTA writer's
+  // customer row lock — an unfenced insert here could land between that
+  // proof and the estimate insert, publishing primary-property terms for a
+  // report the new evidence says belongs elsewhere. Everything below runs
+  // in ONE transaction that takes the same customer lock first
+  // (customers → child table, the repo's order), so this write lands
+  // wholly before or wholly after any in-flight mint. The 23505 retry
+  // branches run in SAVEPOINTS (nested trx) — a failed insert inside a
+  // plain transaction would poison it (try/catch in a TXN is not
+  // fail-open).
+  return db.transaction(async (trx) => {
+  await trx('customers').where({ id: customerId }).forUpdate().first('id');
   // Fast-path dedup on the full address; the partial-unique index (migration) is
   // the atomic backstop against a concurrent double-insert.
-  const existing = await db('customer_properties').where({ customer_id: customerId });
+  const existing = await trx('customer_properties').where({ customer_id: customerId });
   if (!isNewAddress(existing, candidate)) return { created: false, propertyId: null };
 
   const key = addressKey(candidate);
@@ -206,12 +219,14 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
   // (two concurrent first-address writes), the loser retries as a NON-primary so
   // a genuinely distinct address isn't dropped; an address-uniqueness violation
   // means the same address already exists → already-present.
-  const insertRow = async (isPrimary) => {
-    const [r] = await db('customer_properties')
+  const insertRow = async (isPrimary) => trx.transaction(async (sp) => {
+    // Nested trx = SAVEPOINT: the 23505 retry below must not poison the
+    // outer customer-lock transaction.
+    const [r] = await sp('customer_properties')
       .insert({ ...baseRow, is_primary: isPrimary, label: baseRow.label || (isPrimary ? 'Primary' : null) })
       .returning('id');
     return r && (r.id || r);
-  };
+  });
 
   let isPrimary = !existing.some((p) => p.is_primary);
   let propertyId;
@@ -237,8 +252,10 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
 
   if (isPrimary) {
     // Mirror the new primary into customers.address_* — only when empty so we
-    // never clobber an existing mirror.
-    await db('customers')
+    // never clobber an existing mirror. In-transaction (the row is already
+    // locked above); a failure here must not roll back the recorded
+    // property, so it runs in its own SAVEPOINT and stays fail-soft.
+    await trx.transaction(async (sp) => sp('customers')
       .where({ id: customerId })
       .andWhere((q) => q.whereNull('address_line1').orWhere('address_line1', ''))
       .update({
@@ -248,12 +265,13 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
         state: state || 'FL',
         zip: zip || null,
         updated_at: new Date(),
-      })
+      }))
       .catch((e) => logger.warn(`[customer-properties] primary mirror sync failed for ${customerId}: ${e.code || e.name || 'db_error'}`));
   }
 
   logger.info(`[customer-properties] recorded ${source} ${isPrimary ? 'primary' : 'secondary'} property ${propertyId} for customer ${customerId} (occupancy=${normalizeOccupancy(occupancyType)})`);
   return { created: true, propertyId };
+  });
 }
 
 /**

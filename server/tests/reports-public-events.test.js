@@ -9,6 +9,7 @@ jest.mock('../models/db', () => {
 // the cross-sell click tests turn it on for themselves.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../services/service-report/cross-sell', () => ({ buildReportCrossSell: jest.fn() }));
+jest.mock('../services/service-report/click-estimate-mint', () => ({ mintReportClickEstimate: jest.fn() }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn().mockResolvedValue(null) }));
 jest.mock('../config', () => ({
   s3: { bucket: 'test-bucket', region: 'us-east-1' },
@@ -288,6 +289,227 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
     expect(triggerNotification).toHaveBeenCalledWith('bundle_quote_requested', expect.objectContaining({
       refreshed: false,
     }));
+  });
+});
+
+describe('click-to-estimate mint (GATE_REPORT_CLICK_TO_ESTIMATE)', () => {
+  const { isEnabled } = require('../config/feature-gates');
+  const { buildReportCrossSell } = require('../services/service-report/cross-sell');
+  const { mintReportClickEstimate } = require('../services/service-report/click-estimate-mint');
+
+  const ENGINE_CONTEXT = {
+    propertyInput: { homeSqFt: 2100 },
+    targetOnlyServices: { lawn: { track: 'B' } },
+    currentServiceKeys: ['pest'],
+    customer: { id: 'cust-1', first_name: 'Testa', address_line1: '12 Invented Way' },
+  };
+  const PRICED_OFFER = {
+    serviceKey: 'lawn_care',
+    label: 'Lawn Care',
+    mode: 'priced',
+    relationship: 'add',
+    fingerprint: 'FINGERPRINT-1',
+    option: { id: 'lawn-enhanced', label: 'Lawn care — 9x applications/yr', perVisit: 57.6 },
+    engineContext: ENGINE_CONTEXT,
+  };
+  const clickBody = {
+    eventName: 'cross_sell_requested',
+    metadata: {
+      serviceKey: 'lawn_care', offerMode: 'priced', perApplication: 57.6,
+      optionId: 'lawn-enhanced', fingerprint: 'FINGERPRINT-1',
+    },
+  };
+
+  function clickDb({ openRequest = null } = {}) {
+    const updates = [];
+    const inserts = [];
+    const q = (table) => {
+      const chain = {
+        leftJoin: () => chain,
+        where: () => chain,
+        whereIn: () => chain,
+        orderBy: () => chain,
+        whereNotIn: () => chain,
+        forUpdate: () => chain,
+        select: () => chain,
+        returning: async () => [{ id: 'req-new' }],
+        update: async (patch) => { updates.push({ table, patch }); return 1; },
+        insert: (row) => {
+          inserts.push({ table, row });
+          return { returning: async () => [{ id: 'req-new', ...row }] };
+        },
+        first: async () => {
+          if (table === 'service_records') {
+            return { id: 'sr-1', customer_id: 'cust-1', report_template_version: 'service_report_v1' };
+          }
+          if (table === 'service_records as sr') {
+            return { id: 'sr-1', customer_id: 'cust-1', first_name: 'Pat', last_name: 'Q' };
+          }
+          if (table === 'service_requests') return openRequest;
+          if (table === 'customers') return { id: 'cust-1' };
+          return null;
+        },
+      };
+      return chain;
+    };
+    return { q, updates, inserts };
+  }
+
+  async function click(token, body = clickBody) {
+    return withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${token}/events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: await res.json().catch(() => null) };
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isEnabled.mockReturnValue(true);
+    buildReportCrossSell.mockResolvedValue(PRICED_OFFER);
+    mintReportClickEstimate.mockResolvedValue({
+      estimateId: 'est-1', token: 'tok-1',
+      url: 'https://portal.wavespestcontrol.com/estimate/tok-1', reused: false,
+    });
+  });
+  afterEach(() => { isEnabled.mockReturnValue(false); });
+
+  test('gate ON + priced tap: mints inside the transaction and the response carries estimateUrl', async () => {
+    const { q, inserts } = clickDb();
+    db.mockImplementation(q);
+    const res = await click('dddddddddddddddd0123456789abcdef');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, estimateUrl: 'https://portal.wavespestcontrol.com/estimate/tok-1' });
+    expect(mintReportClickEstimate).toHaveBeenCalledTimes(1);
+    const [, mintArgs] = mintReportClickEstimate.mock.calls[0];
+    expect(mintArgs.customer).toBe(ENGINE_CONTEXT.customer);
+    expect(mintArgs.crossSell).toBe(PRICED_OFFER);
+    // The stored request snapshot must NOT embed the server-internal engine
+    // context: the customer row's incidental fields move between taps, so
+    // embedding it would turn every identical tap into a "material refresh"
+    // (bell churn + a superseded estimate per tap), and its presence would
+    // flip on gate state.
+    const requestInsert = inserts.find((i) => i.table === 'service_requests');
+    const stored = JSON.parse(requestInsert.row.pricing_revision);
+    expect(stored.crossSell.engineContext).toBeUndefined();
+    expect(mintArgs.revisionSnapshot.crossSell.engineContext).toBeUndefined();
+  });
+
+  test('click-to-estimate gate OFF (card gate still on): no mint, no estimateUrl, request flow unchanged', async () => {
+    isEnabled.mockImplementation((gate) => gate === 'reportCrossSell');
+    // Gate off ⇒ the route asks the composer for NO engine context and the
+    // payload has none — mirror that in the mock.
+    const { engineContext, ...bare } = PRICED_OFFER;
+    buildReportCrossSell.mockResolvedValue(bare);
+    const { q, inserts } = clickDb();
+    db.mockImplementation(q);
+    const res = await click('eeeeeeeeeeeeeeee0123456789abcdef');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(mintReportClickEstimate).not.toHaveBeenCalled();
+    expect(buildReportCrossSell).toHaveBeenCalledWith(expect.anything(), expect.anything(),
+      { includeEngineContext: false });
+    expect(inserts.filter((i) => i.table === 'service_requests')).toHaveLength(1);
+  });
+
+  test('a quote-mode tap never mints even with the gate on', async () => {
+    buildReportCrossSell.mockResolvedValue({
+      serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'quote_cta',
+      relationship: 'add', fingerprint: 'FP-QUOTE', option: null,
+    });
+    const { q } = clickDb();
+    db.mockImplementation(q);
+    // NOT the 'ffff…' token — the whitespace-limiter test above exhausts
+    // that token's 5/min budget and the limiter is module-global state.
+    const res = await click('efefefefefefefef0123456789abcdef', {
+      eventName: 'cross_sell_requested',
+      metadata: {
+        serviceKey: 'lawn_care', offerMode: 'quote_cta', perApplication: null,
+        optionId: null, fingerprint: 'FP-QUOTE',
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(mintReportClickEstimate).not.toHaveBeenCalled();
+  });
+
+  test('an ACCEPTED-reuse mint skips the bundle-inquiry bell — the work is booked (GitHub round P1)', async () => {
+    // Acceptance resolved the original request, so the writer inserts a
+    // fresh row (deduped=false) — but the mint matched the ACCEPTED
+    // fingerprint and resolved that fresh row too. Staff must not be paged
+    // to follow up on booked work.
+    const { triggerNotification } = require('../services/notification-triggers');
+    mintReportClickEstimate.mockResolvedValue({
+      estimateId: 'est-1', token: 'tok-1', url: '/estimate/tok-1',
+      reused: true, acceptedReuse: true,
+    });
+    const { q, inserts } = clickDb({ openRequest: null });
+    db.mockImplementation(q);
+    const res = await click('adadadadadadadad0123456789abcdef');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, estimateUrl: '/estimate/tok-1' });
+    expect(inserts.filter((i) => i.table === 'service_requests')).toHaveLength(1);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('an UNACCEPTED reuse on a fresh row still rings the bell — an open request needs eyes', async () => {
+    const { triggerNotification } = require('../services/notification-triggers');
+    mintReportClickEstimate.mockResolvedValue({
+      estimateId: 'est-1', token: 'tok-1', url: '/estimate/tok-1', reused: true,
+    });
+    const { q } = clickDb({ openRequest: null });
+    db.mockImplementation(q);
+    const res = await click('aeaeaeaeaeaeaeae0123456789abcdef');
+    expect(res.status).toBe(200);
+    expect(triggerNotification).toHaveBeenCalledWith('bundle_quote_requested', expect.anything());
+  });
+
+  test('mint price drift rolls everything back and 409s like any other offer drift', async () => {
+    mintReportClickEstimate.mockRejectedValue(
+      Object.assign(new Error('per-application drift'), { clickEstimateDrift: true }),
+    );
+    const { q } = clickDb();
+    db.mockImplementation(q);
+    const res = await click('abababababababab0123456789abcdef');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/no longer available/);
+  });
+
+  test('acceptance terminalizes the linked CTA request, scoped to click-mints only (source contract)', () => {
+    // The accept transaction lives in estimate-public.js behind the full
+    // acceptance harness — this pins the load-bearing structure the same
+    // way the composeOffers contract tests do: scoped to the mint source,
+    // matched on the pricing_revision linkage, resolved not deleted.
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    expect(src).toMatch(/estimate\.source === 'service_report_cta' && estimate\.customer_id/);
+    expect(src).toMatch(/pricing_revision->'mintedEstimate'->>'id' = \?/);
+    const block = src.split("estimate.source === 'service_report_cta'")[1].slice(0, 700);
+    expect(block).toMatch(/whereNotIn\('status', OPEN_REQUEST_TERMINAL_STATUSES\)/);
+    expect(block).toMatch(/status: 'resolved'/);
+  });
+
+  test('DECLINE terminalizes the linked CTA request too — a rejected offer must not page staff forever (GitHub round P1, source contract)', () => {
+    // Mirrors the acceptance pin: same source scoping, same linkage match,
+    // resolved in the SAME decline transaction.
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    const declineIdx = src.indexOf("status: 'declined', declined_at");
+    expect(declineIdx).toBeGreaterThan(0);
+    const block = src.slice(declineIdx, declineIdx + 1400);
+    expect(block).toMatch(/declinedCount && estimate\.source === 'service_report_cta'/);
+    expect(block).toMatch(/whereNotIn\('status', OPEN_REQUEST_TERMINAL_STATUSES\)/);
+    expect(block).toMatch(/pricing_revision->'mintedEstimate'->>'id' = \?/);
+    expect(block).toMatch(/status: 'resolved'/);
+  });
+
+  test('a non-drift mint failure is a retryable 503 — the card may only confirm durable state', async () => {
+    mintReportClickEstimate.mockRejectedValue(new Error('snapshot did not freeze'));
+    const { q } = clickDb();
+    db.mockImplementation(q);
+    const res = await click('cdcdcdcdcdcdcdcd0123456789abcdef');
+    expect(res.status).toBe(503);
   });
 });
 
