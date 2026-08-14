@@ -63,14 +63,16 @@ function adminFetch(path, options = {}) {
   });
 }
 
-function Badge({ children, color, small }) {
+function Badge({ children, color, small, fontSize }) {
   return (
     <span
       style={{
         display: "inline-block",
         padding: small ? "1px 6px" : "2px 10px",
         borderRadius: 9999,
-        fontSize: small ? 10 : 11,
+        // fontSize override: newer surfaces hold the repo's 14px floor
+        // without disturbing the legacy tabs' compact badges
+        fontSize: fontSize || (small ? 10 : 11),
         fontWeight: 600,
         background: `${color || D.muted}22`,
         color: color || D.muted,
@@ -4020,6 +4022,9 @@ const BANK_STATUS_LABELS = {
 };
 
 function BankImportTab() {
+  // 14px floor on this financial-review surface (repo minimum readable
+  // size) — the shared inputStyle stays 12px for the legacy tabs
+  const bankInput = { ...inputStyle, fontSize: 14 };
   const [counts, setCounts] = useState({});
   const [rows, setRows] = useState([]);
   const [coverage, setCoverage] = useState([]);
@@ -4199,14 +4204,14 @@ function BankImportTab() {
         }}
       >
         <input
-          style={{ ...inputStyle, width: 180 }}
+          style={{ ...bankInput, width: 180 }}
           value={accountLabel}
           onChange={(e) => setAccountLabel(e.target.value)}
           placeholder="Account label (e.g. capone-card-1234)"
           title="Stamped on every imported row so checking and each card stay separate"
         />
         <select
-          style={inputStyle}
+          style={bankInput}
           value={accountType}
           onChange={(e) => setAccountType(e.target.value)}
           title="Card statements book created expenses as 'card'; bank statements as 'ach'"
@@ -4216,7 +4221,7 @@ function BankImportTab() {
         </select>
         <label
           style={{
-            ...inputStyle,
+            ...bankInput,
             cursor: "pointer",
             background: D.heading,
             color: D.white,
@@ -4229,7 +4234,7 @@ function BankImportTab() {
         </label>
         <button
           type="button"
-          style={{ ...inputStyle, cursor: "pointer", fontWeight: 600 }}
+          style={{ ...bankInput, cursor: "pointer", fontWeight: 600 }}
           disabled={!!busy}
           onClick={() =>
             act("match", "/admin/tax/bank-import/match").then((r) => {
@@ -4244,7 +4249,7 @@ function BankImportTab() {
         </button>
         <button
           type="button"
-          style={{ ...inputStyle, cursor: "pointer", fontWeight: 600 }}
+          style={{ ...bankInput, cursor: "pointer", fontWeight: 600 }}
           disabled={!!busy}
           onClick={() => {
             // scoped to the rows on screen — a global oldest-first pass can
@@ -4267,7 +4272,7 @@ function BankImportTab() {
         >
           {busy === "suggest" ? "Suggesting…" : "Suggest categories (AI)"}
         </button>
-        <select style={inputStyle} value={filter} onChange={(e) => setFilter(e.target.value)}>
+        <select style={bankInput} value={filter} onChange={(e) => setFilter(e.target.value)}>
           <option value="">All statuses</option>
           <option value="unmatched">Needs review</option>
           <option value="matched_expense">Matched to expense</option>
@@ -4276,7 +4281,7 @@ function BankImportTab() {
           <option value="ignored">Ignored</option>
         </select>
         <select
-          style={inputStyle}
+          style={bankInput}
           value={covYear}
           onChange={(e) => setCovYear(e.target.value)}
           title="Coverage year — switch when backfilling a prior tax year"
@@ -4300,7 +4305,7 @@ function BankImportTab() {
             color: notice.error ? D.red : D.text,
             borderRadius: 8,
             padding: "8px 14px",
-            fontSize: 12,
+            fontSize: 14,
             marginBottom: 16,
           }}
         >
@@ -4311,7 +4316,7 @@ function BankImportTab() {
             <button
               type="button"
               disabled={!!busy}
-              style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginLeft: 10 }}
+              style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginLeft: 10 }}
               onClick={forceImportDuplicates}
               title="Only when the skipped rows were genuinely separate identical purchases, not a re-upload"
             >
@@ -4335,7 +4340,7 @@ function BankImportTab() {
         >
           {coverage.map((m, i) => (
             <div key={m.month} style={{ marginBottom: i < coverage.length - 1 ? 10 : 0 }}>
-              <div style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}>
+              <div style={{ fontSize: 14, color: D.muted, marginBottom: 6 }}>
                 {m.month} ledger coverage —{" "}
                 <span style={{ color: D.heading, fontWeight: 700 }}>
                   {m.pct == null ? "—" : `${m.pct}%`}
@@ -4357,11 +4362,11 @@ function BankImportTab() {
       )}
 
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
           <thead>
             <tr style={{ color: D.muted, textAlign: "left" }}>
               {["Date", "Account", "Description", "Amount", "Status", "Suggestion", ""].map((h) => (
-                <th key={h} style={{ padding: "10px 12px", borderBottom: `1px solid ${D.border}`, fontWeight: 600, textTransform: "uppercase", fontSize: 10, letterSpacing: 0.5 }}>
+                <th key={h} style={{ padding: "10px 12px", borderBottom: `1px solid ${D.border}`, fontWeight: 600, textTransform: "uppercase", fontSize: 14, letterSpacing: 0.5 }}>
                   {h}
                 </th>
               ))}
@@ -4387,7 +4392,7 @@ function BankImportTab() {
                   {fmtM(r.amount)}
                 </td>
                 <td style={{ padding: "8px 12px" }}>
-                  <Badge small color={BANK_STATUS_COLORS[r.status]}>
+                  <Badge small fontSize={14} color={BANK_STATUS_COLORS[r.status]}>
                     {BANK_STATUS_LABELS[r.status] || r.status}
                   </Badge>
                 </td>
@@ -4396,7 +4401,7 @@ function BankImportTab() {
                     "internal transfer?"
                   ) : r.status === "unmatched" && r.suggestion?.candidates?.length ? (
                     <select
-                      style={{ ...inputStyle, maxWidth: 240 }}
+                      style={{ ...bankInput, maxWidth: 240 }}
                       value={linkPick[r.id] || ""}
                       onChange={(e) => setLinkPick((p) => ({ ...p, [r.id]: e.target.value }))}
                       title="Existing ledger expenses with a matching amount — link instead of creating a duplicate"
@@ -4421,7 +4426,7 @@ function BankImportTab() {
                        one select, values prefixed p:/r: so the button knows
                        which route the pick belongs to */
                     <select
-                      style={{ ...inputStyle, maxWidth: 240 }}
+                      style={{ ...bankInput, maxWidth: 240 }}
                       value={linkPick[r.id] || ""}
                       onChange={(e) => setLinkPick((p) => ({ ...p, [r.id]: e.target.value }))}
                       title="What is this deposit? Pick the Stripe payout it is, or the original purchase it refunds (applying a refund reduces that expense)"
@@ -4471,7 +4476,7 @@ function BankImportTab() {
                     <button
                       type="button"
                       disabled={!!busy}
-                      style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
+                      style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
                       onClick={() =>
                         act("link", `/admin/tax/bank-import/${r.id}/link-expense`, { expenseId: linkPick[r.id] }).then((res) => {
                           if (res)
@@ -4490,7 +4495,7 @@ function BankImportTab() {
                     <button
                       type="button"
                       disabled={!!busy}
-                      style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
+                      style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginRight: 6, background: D.heading, color: D.white, border: "none" }}
                       onClick={() => {
                         // the pick's p:/r: prefix says which route it belongs
                         // to — both lists can be parked on one credit
@@ -4522,7 +4527,7 @@ function BankImportTab() {
                   {r.status === "unmatched" && r.direction === "debit" && !linkPick[r.id] && (
                     <>
                       <select
-                        style={{ ...inputStyle, maxWidth: 170, marginRight: 6 }}
+                        style={{ ...bankInput, maxWidth: 170, marginRight: 6 }}
                         value={catPick[r.id] || ""}
                         onChange={(e) => setCatPick((p) => ({ ...p, [r.id]: e.target.value }))}
                         title="Category — the AI suggestion is only a default; pick to override"
@@ -4539,7 +4544,7 @@ function BankImportTab() {
                       <button
                         type="button"
                         disabled={!!busy}
-                        style={{ ...inputStyle, cursor: "pointer", fontWeight: 600, marginRight: 6 }}
+                        style={{ ...bankInput, cursor: "pointer", fontWeight: 600, marginRight: 6 }}
                         onClick={() =>
                           // an operator-picked category overrides the AI
                           // suggestion (and skips the AI-verify note)
@@ -4561,7 +4566,7 @@ function BankImportTab() {
                     <button
                       type="button"
                       disabled={!!busy}
-                      style={{ ...inputStyle, cursor: "pointer", color: D.muted }}
+                      style={{ ...bankInput, cursor: "pointer", color: D.muted }}
                       onClick={() => act("ignore", `/admin/tax/bank-import/${r.id}/ignore`)}
                     >
                       Ignore
@@ -4571,7 +4576,7 @@ function BankImportTab() {
                     <button
                       type="button"
                       disabled={!!busy}
-                      style={{ ...inputStyle, cursor: "pointer", color: D.muted }}
+                      style={{ ...bankInput, cursor: "pointer", color: D.muted }}
                       onClick={() => act("unignore", `/admin/tax/bank-import/${r.id}/unignore`)}
                     >
                       Undo
@@ -4581,7 +4586,7 @@ function BankImportTab() {
                     <button
                       type="button"
                       disabled={!!busy}
-                      style={{ ...inputStyle, cursor: "pointer", color: D.muted }}
+                      style={{ ...bankInput, cursor: "pointer", color: D.muted }}
                       title={r.status === "refund_applied"
                         ? "Undo this refund — restores the adjusted expense and returns the credit to review"
                         : "Wrong match? Returns the row to Needs Review; the linked expense/payout itself is untouched"}
@@ -4602,7 +4607,7 @@ function BankImportTab() {
           <div style={{ padding: 12, textAlign: "center" }}>
             <button
               type="button"
-              style={{ ...inputStyle, cursor: "pointer", fontWeight: 600 }}
+              style={{ ...bankInput, cursor: "pointer", fontWeight: 600 }}
               onClick={() => loadRows(rows.length)}
             >
               Load 200 more

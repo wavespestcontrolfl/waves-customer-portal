@@ -466,11 +466,22 @@ async function retryPendingReconciliations() {
   const healLinks = await healUnreconciledLinks();
   const orphanRefunds = await healOrphanRefunds();
   const editedLinks = await healEditedExpenseLinks();
-  const pending = await db('bank_transactions')
+  // BOUNDED batch + sentinel: during a reconciliation outage a large
+  // backfill can leave hundreds of pending echoes, and retrying them all
+  // serially would starve the (separately bounded) unmatched-row scan on
+  // every request. Oldest-updated first; a failed retry bumps updated_at so
+  // one broken payout rotates to the back instead of hogging every batch.
+  const PENDING_RETRY_LIMIT = 25;
+  const pendingFetch = await db('bank_transactions')
     .where({ status: 'matched_payout' })
     .whereNotNull('matched_payout_id')
     .whereRaw("suggestion->>'reconcilePending' = 'true'")
+    .orderBy('updated_at', 'asc')
+    .orderBy('id', 'asc') // deterministic tie-breaker
+    .limit(PENDING_RETRY_LIMIT + 1)
     .select('id', 'amount', 'matched_payout_id', 'suggestion');
+  const morePending = pendingFetch.length > PENDING_RETRY_LIMIT;
+  const pending = pendingFetch.slice(0, PENDING_RETRY_LIMIT);
   let retried = 0;
   let humanRejected = 0;
   for (const row of pending) {
@@ -487,6 +498,11 @@ async function retryPendingReconciliations() {
         else if (result.reason === 'human_rejected') humanRejected++;
       } catch (err) {
         logger.warn(`[bank-import] reconciliation retry for payout ${payout.id} failed again: ${err.message}`);
+        // rotation: the failed row goes to the back of the bounded batch
+        // order so it can't monopolize every subsequent pass
+        await db('bank_transactions')
+          .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+          .update({ updated_at: new Date() });
       }
     } else {
       // payout deleted — nothing to echo; clear the flag, scoped to the
@@ -500,7 +516,7 @@ async function retryPendingReconciliations() {
   // (Reversals need no sweep: the unlink route runs its unlink CAS inside
   // the reversal's own transaction, so a failed reversal rolls the unlink
   // back — there is never a committed unlink awaiting reversal.)
-  return { pending: pending.length, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds, expenseLinksReverted: editedLinks };
+  return { pending: pending.length, morePending, retried, humanRejected, linksReverted: healLinks.reverted, linksRemarked: healLinks.remarked, orphanRefundsReverted: orphanRefunds, expenseLinksReverted: editedLinks };
 }
 
 // An operator EDIT to a linked expense (amount/date via the Expenses or
@@ -780,9 +796,11 @@ function rejectedTargets(suggestion) {
 // The one description shape that identifies Stripe money — shared by the
 // payout-evidence check and the transfer-heuristic exemption in the
 // matching loop, so the two can never disagree about what "looks like
-// Stripe" means.
+// Stripe" means. A COMPLETE token only: a substring test made a merchant
+// like PINSTRIPES count as payout provenance, which could auto-confirm an
+// unrelated same-amount credit against a real payout.
 function stripeShapedDescription(description) {
-  return /stripe/i.test(String(description || ''));
+  return /\bstripe\b/i.test(String(description || ''));
 }
 
 function payoutProvenance(row, payout) {
@@ -886,6 +904,9 @@ async function runDeterministicMatching({ limit } = {}) {
     }
     moreRemaining = moreFresh || moreExamined;
   }
+  // pending echoes beyond the retry batch are unfinished work too — the
+  // caller's "more rows pending" surface must not read as done
+  moreRemaining = moreRemaining || reconciliation.morePending;
   const summary = { scanned: unmatched.length, moreRemaining, payoutsLinked: 0, expensesLinked: 0, transferFlagged: 0, ambiguous: 0, healed, reconcileRetried: reconciliation.retried, reconcilePending: reconciliation.pending, linksReverted: reconciliation.linksReverted, linksRemarked: reconciliation.linksRemarked, orphanRefundsReverted: reconciliation.orphanRefundsReverted, expenseLinksReverted: reconciliation.expenseLinksReverted };
 
   for (const row of unmatched) {
@@ -954,7 +975,7 @@ async function runDeterministicMatching({ limit } = {}) {
         if (refunds.length) {
           summary.ambiguous++;
           await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-            suggestion: suggestionMerge(refundPatch(refunds), ['payoutCandidates', 'payoutCandidatesTotal']),
+            suggestion: suggestionMerge(refundPatch(refunds), ['payoutCandidates', 'payoutCandidatesTotal', 'noMatch']),
             updated_at: new Date(),
           });
         } else {
@@ -1111,7 +1132,7 @@ async function runDeterministicMatching({ limit } = {}) {
             payoutCandidates: parkedPayouts.slice(0, 20).map(c => ({ id: c.id, amount: c.effective_amount, arrival_date: toDateStr(c.arrival_date) })),
             payoutCandidatesTotal: candidates.length,
             ...(refunds.length ? refundPatch(refunds) : {}),
-          }, refunds.length ? [] : ['refundCandidates', 'refundCandidatesTotal']),
+          }, refunds.length ? ['noMatch'] : ['refundCandidates', 'refundCandidatesTotal', 'noMatch']),
           updated_at: new Date(),
         });
       } else if (candidates.length === 0) {
@@ -1123,7 +1144,7 @@ async function runDeterministicMatching({ limit } = {}) {
         if (refunds.length) {
           summary.ambiguous++;
           await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
-            suggestion: suggestionMerge(refundPatch(refunds), ['payoutCandidates', 'payoutCandidatesTotal']),
+            suggestion: suggestionMerge(refundPatch(refunds), ['payoutCandidates', 'payoutCandidatesTotal', 'noMatch']),
             updated_at: new Date(),
           });
         } else {
@@ -1275,11 +1296,16 @@ async function runDeterministicMatching({ limit } = {}) {
       }
     } else if (candidates.length > 0) {
       summary.ambiguous++;
+      // noMatch subtracted whenever candidates park (here and in the credit
+      // branches): a row that was noMatch and later gained candidates would
+      // otherwise take markScanned's early bump-only branch forever, and
+      // stale candidate lists would never be cleaned up once the targets
+      // disappeared. The two states are mutually exclusive by construction.
       await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
         suggestion: suggestionMerge({
           candidates: candidates.slice(0, 20).map(c => ({ id: c.id, description: c.description, vendor_name: c.vendor_name, expense_date: toDateStr(c.expense_date) })),
           candidatesTotal: candidates.length,
-        }),
+        }, ['noMatch']),
         updated_at: new Date(),
       });
     } else {

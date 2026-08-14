@@ -684,6 +684,38 @@ describe('runDeterministicMatching', () => {
     expect(second.expensesLinked).toBe(1);
   });
 
+  test('a merchant merely CONTAINING "stripe" (PINSTRIPES) is not payout provenance — parks instead of linking', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'PINSTRIPES BRADENTON', amount: 500, direction: 'credit', account_type: 'bank', account_label: 'capone-checking', suggestion: null }];
+    state.payouts = [{ id: 'po-1', amount: '500.00', arrival_date: '2026-08-11', reconciled: false, bank_last_four: '9876' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0); // a coincidental same-amount credit must not consume the payout
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).payoutCandidates);
+    expect(parked).toBeDefined();
+  });
+
+  test('parking candidates CLEARS a prior noMatch — stale lists cannot hide behind the early bump branch', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: 312.4, direction: 'debit', account_type: 'card', suggestion: { noMatch: true } }];
+    state.expenses = [
+      { id: 'exp-1', amount: '312.40', description: 'order', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' },
+      { id: 'exp-2', amount: '312.40', description: 'order 2', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' },
+    ];
+    await runDeterministicMatching();
+    const parked = state.updates.find(u => sugOf(u) && sugOf(u).candidates);
+    expect(parked).toBeDefined();
+    expect(String(parked.patch.suggestion.sql)).toContain("'noMatch'"); // subtracted in the same write
+  });
+
+  test('pending reconciliation retries are BOUNDED per pass with an honest morePending signal', async () => {
+    state.bankRows = Array.from({ length: 27 }, (_, i) => ({
+      id: `bt-${String(i).padStart(2, '0')}`, txn_date: '2026-08-11', amount: '100.00', direction: 'credit', account_type: 'bank',
+      status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true },
+    }));
+    state.payouts = [{ id: 'po-1', amount: '100.00', arrival_date: '2026-08-11', status: 'paid', reconciled: false }];
+    const summary = await runDeterministicMatching();
+    expect(summary.reconcilePending).toBe(25); // the batch, not the backlog
+    expect(summary.moreRemaining).toBe(true); // the backlog is not silently "done"
+  });
+
   test('a Stripe-shaped BANK credit is payout territory even when the description says TRANSFER', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE TRANSFER ST-77', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
     state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', reconciled: false }];
