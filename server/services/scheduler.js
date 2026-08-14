@@ -792,7 +792,7 @@ function initScheduledJobs() {
       const res = await runExclusive('property-enrich-backfill', () =>
         require('./call-property-lookup').sweepUnenrichedProperties());
       if (res && !res.skipped) {
-        logger.info(`Property-enrich backfill: ${res.enriched}/${res.processed} enriched (${res.cooledDown} cooled, ${res.failed} failed)`);
+        logger.info(`Property-enrich backfill: ${res.enriched}/${res.processed} enriched (${res.cooledDown} cooled, ${res.parked} parked, ${res.failed} failed)`);
       }
     } catch (err) {
       logger.error(`Property-enrich backfill failed: ${err.message}`);

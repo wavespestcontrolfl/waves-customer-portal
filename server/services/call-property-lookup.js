@@ -168,7 +168,9 @@ async function enrichPropertyById(propertyId) {
     // Touch updated_at: the lookup's own attempt stamp is resolved/
     // cache_hit (deliberately outside the cooldown), so without this the
     // flagged row would head the nightly candidate order forever. The
-    // recently_touched sink parks it for a week instead. Fenced to the
+    // touch is the "worked" half of the sweep's parked verdict
+    // (recentLookupVerdict: productive attempt + touched row = skip free
+    // for a week). Fenced to the
     // ADDRESS THAT WAS LOOKED UP: an address edit (or deactivation) mid-
     // lookup means the CORRECTED address was never looked up — parking it
     // a week on the old address's verdict would deprioritize a legitimate
@@ -251,7 +253,8 @@ async function enrichPropertyById(propertyId) {
     // unobserved/disputed type) stamps resolved/cache_hit — deliberately
     // outside the attempt cooldown — and leaves the row untouched, so it
     // would head the nightly candidate order and consume a batch slot
-    // every night. The recently_touched sink parks it for a week instead.
+    // every night. The touch makes the sweep's parked verdict skip it
+    // free for a week instead (recentLookupVerdict).
     // Same address fence as the flagged path: a row edited or deactivated
     // during the lookup is a fresh candidate, not one to park.
     try {
@@ -510,25 +513,15 @@ async function fetchBackfillCandidates(limit, offset = 0) {
     .select(db.raw(
       'EXISTS (SELECT 1 FROM estimates e WHERE e.property_id = cp.id) as has_estimate',
     ))
-    // recently_touched sinks rows the sweep (or anyone) already worked this
-    // week: a PARTIAL enrichment (coords filled, type refused) stamps
-    // updated_at, stays in the NULL-candidate set, and under a stable
-    // priority order a batch-sized head of such rows would consume every
-    // nightly batch forever. Sinking them for 7 days lets the backlog
-    // progress; they resurface weekly. "Touched" means MODIFIED AFTER
-    // INSERTION (updated_at > created_at, 1s slop for separately-computed
-    // insert timestamps) — insertion itself stamps updated_at, and a
-    // definition on the bare timestamp sank every newly created property,
-    // including one with a visit booked tomorrow, behind the untouched
-    // legacy backlog. The sink ranks FIRST, across visit classes: were
-    // has_upcoming_visit first instead, a batch-sized head of partially
-    // enriched upcoming rows would be re-selected every night, starving
-    // both older upcoming rows and the whole non-upcoming backlog.
-    .select(db.raw(
-      "(cp.updated_at IS NOT NULL AND cp.updated_at > cp.created_at + INTERVAL '1 second' AND cp.updated_at > NOW() - INTERVAL '7 days') as recently_touched",
-    ))
+    // NO recently-touched sort key here: an ORDER BY on cp.updated_at
+    // parked rows on the wrong evidence — an ordinary admin edit (say a
+    // ZIP fill that first makes the row geocodable) sank a property with
+    // an imminent visit behind the whole backlog for a week. Rows the
+    // sweep already worked resurface at the head instead and are skipped
+    // FREE by the ledger-based verdict in the sweep loop (see
+    // recentLookupVerdict) — the ordering below stays STABLE while the
+    // sweep runs, which is what keeps the offset accounting sound.
     .orderBy([
-      { column: 'recently_touched', order: 'asc' },
       { column: 'has_upcoming_visit', order: 'desc' },
       { column: 'has_estimate', order: 'desc' },
       { column: 'cp.created_at', order: 'desc' },
@@ -548,23 +541,40 @@ const COOLDOWN_STATUSES = [
 ];
 
 /**
- * True when this address's last lookup attempt was an UNPRODUCTIVE one
- * inside the cooldown window. Fail-open: an attempt-table error just means
- * "no cooldown".
+ * Classifies a candidate row by its address's most recent lookup attempt
+ * inside the cooldown window:
+ * - 'cooldown'  — the last attempt was UNPRODUCTIVE; retrying soon re-buys
+ *   the same nothing.
+ * - 'parked'    — a PRODUCTIVE attempt (resolved/cache_hit) already ran AND
+ *   the enrich lane worked this row (facts written, or the deliberate
+ *   no-fill/flag touch: updated_at > created_at + 1s slop). Re-selecting
+ *   it nightly would let a batch-sized head of partially enriched rows
+ *   starve the backlog; it resurfaces when the attempt ages out.
+ * - null        — go: no recent attempt, or a productive attempt on an
+ *   UNWORKED row (the in-flight-skip catch-up case — the enrich is a
+ *   near-free cache hit, exactly what the sweep wants to consume).
+ * Evidence is the ATTEMPT LEDGER, never property updated_at alone — an
+ * ordinary admin edit must not park a row a week (that was the old
+ * recently_touched sort sink's failure). Fail-open: a ledger error means
+ * "go".
  */
-async function attemptedRecently(address) {
+async function recentLookupVerdict(row) {
   try {
     const { addressKey: cacheKey } = require('./property-lookup/lookup-cache');
-    const { hash } = cacheKey(address);
-    const row = await db('property_lookups')
+    const { hash } = cacheKey(propertyRowAddress(row));
+    const attempt = await db('property_lookups')
       .where({ address_hash: hash })
-      .whereIn('last_attempt_status', COOLDOWN_STATUSES)
       .whereRaw(`last_attempt_at > NOW() - INTERVAL '${BACKFILL_ATTEMPT_COOLDOWN_DAYS} days'`)
-      .first();
-    return Boolean(row);
+      .first('last_attempt_status');
+    if (!attempt) return null;
+    if (COOLDOWN_STATUSES.includes(attempt.last_attempt_status)) return 'cooldown';
+    const created = row.created_at ? new Date(row.created_at).getTime() : NaN;
+    const updated = row.updated_at ? new Date(row.updated_at).getTime() : NaN;
+    const worked = Number.isFinite(created) && Number.isFinite(updated) && updated > created + 1000;
+    return worked ? 'parked' : null;
   } catch (err) {
     logger.warn('[call-property-lookup] attempt-cooldown check failed', { error: errId(err) });
-    return false;
+    return null;
   }
 }
 
@@ -605,25 +615,34 @@ const RECONCILE_VISIT_MAX_PAGES = 20;
 // by creation time, new rows always sort past any persisted position.
 // A completed scan clears the cursor (wrap to the top). Best-effort +
 // fail-open: a KV error or malformed value just means one night rescans
-// from the top. Serialized as '<ISO timestamp>|<id>'; JS Date truncates
-// timestamptz to milliseconds, which can only RE-INCLUDE boundary rows on
-// resume (a safe rescan), never skip them.
+// from the top. Serialized as '<timestamp text>|<id>' where the timestamp
+// is Postgres's OWN text rendering of created_at (`::text`), bound back
+// with `?::timestamptz` — it round-trips MICROSECOND precision exactly.
+// A JS Date/toISOString round trip truncates to milliseconds, and when a
+// full page shares one sub-millisecond created_at (bulk imports do this)
+// the truncated cursor sorts BEFORE every row on the page, so the tuple
+// predicate re-selects the same head forever and the scan never advances.
 const RECONCILE_VISIT_CURSOR_KEY = 'call_property_lookup.reconcile_visit_cursor';
 const RECONCILE_CUSTOMER_CURSOR_KEY = 'call_property_lookup.reconcile_customer_cursor';
 
+// Loose shape check only — the value is always PG's own ::text output (or
+// a legacy ISO string, which PG also parses); a stricter parse here would
+// just re-implement the database's timestamp grammar badly.
+const RECONCILE_CURSOR_TS_RE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/;
+
 function encodeReconcileCursor(createdAt, id) {
-  const ts = new Date(createdAt);
-  if (!id || Number.isNaN(ts.getTime())) return null;
-  return `${ts.toISOString()}|${id}`;
+  const ts = String(createdAt == null ? '' : createdAt).trim();
+  if (!id || ts.includes('|') || !RECONCILE_CURSOR_TS_RE.test(ts)) return null;
+  return `${ts}|${id}`;
 }
 
 function parseReconcileCursor(value) {
   const s = String(value || '');
   const i = s.indexOf('|');
   if (i <= 0) return null;
-  const ts = new Date(s.slice(0, i));
+  const ts = s.slice(0, i);
   const id = s.slice(i + 1);
-  if (!id || Number.isNaN(ts.getTime())) return null;
+  if (!id || !RECONCILE_CURSOR_TS_RE.test(ts)) return null;
   return { ts, id };
 }
 
@@ -681,7 +700,10 @@ async function reconcileVisitCoordinates() {
         .whereRaw("COALESCE(TRIM(ss.service_address_line1), '') <> ''")
         .whereRaw("LEFT(TRIM(COALESCE(ss.service_address_zip, '')), 5) = LEFT(TRIM(COALESCE(cp.zip, '')), 5)")
         .select(
-          'ss.id as visit_id', 'ss.created_at as visit_created_at',
+          'ss.id as visit_id',
+          // ::text — the cursor must survive the round trip at the
+          // database's own precision (see cursor comment above).
+          db.raw('ss.created_at::text as visit_created_key'),
           'ss.service_address_line1', 'ss.service_address_line2',
           'ss.service_address_city', 'ss.service_address_zip',
           'cp.latitude', 'cp.longitude',
@@ -689,7 +711,7 @@ async function reconcileVisitCoordinates() {
         )
         .orderBy([{ column: 'ss.created_at', order: 'asc' }, { column: 'ss.id', order: 'asc' }])
         .limit(RECONCILE_VISIT_PAGE);
-      if (cursor) q.whereRaw('(ss.created_at, ss.id) > (?, ?)', [cursor.ts, cursor.id]);
+      if (cursor) q.whereRaw('(ss.created_at, ss.id) > (?::timestamptz, ?)', [cursor.ts, cursor.id]);
       const rows = (await q) || [];
       if (!rows.length) {
         // A resumed cursor past the current tail wraps to the top ONCE so
@@ -704,7 +726,7 @@ async function reconcileVisitCoordinates() {
         break;
       }
       const tail = rows[rows.length - 1];
-      cursor = { ts: tail.visit_created_at, id: tail.visit_id };
+      cursor = { ts: tail.visit_created_key, id: tail.visit_id };
       for (const r of rows) {
         const propKey = addressKey(r);
         const visitKey = addressKey({
@@ -773,14 +795,15 @@ async function reconcileCustomerMirrors() {
           OR (NULLIF(TRIM(c.property_type), '') IS NULL AND NULLIF(TRIM(cp.property_type), '') IS NOT NULL AND cp.property_type <> 'commercial')
         )`)
         .select(
-          'c.id as customer_id', 'c.created_at as customer_created_at',
+          'c.id as customer_id',
+          db.raw('c.created_at::text as customer_created_key'),
           'c.address_line1 as c_line1', 'c.address_line2 as c_line2', 'c.city as c_city', 'c.zip as c_zip',
           'cp.latitude', 'cp.longitude', 'cp.property_type as cp_type',
           'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
         )
         .orderBy([{ column: 'c.created_at', order: 'asc' }, { column: 'c.id', order: 'asc' }])
         .limit(RECONCILE_VISIT_PAGE);
-      if (cursor) q.whereRaw('(c.created_at, c.id) > (?, ?)', [cursor.ts, cursor.id]);
+      if (cursor) q.whereRaw('(c.created_at, c.id) > (?::timestamptz, ?)', [cursor.ts, cursor.id]);
       const rows = (await q) || [];
       if (!rows.length) {
         if (resumed) {
@@ -793,7 +816,7 @@ async function reconcileCustomerMirrors() {
         break;
       }
       const tail = rows[rows.length - 1];
-      cursor = { ts: tail.customer_created_at, id: tail.customer_id };
+      cursor = { ts: tail.customer_created_key, id: tail.customer_id };
       for (const r of rows) {
         const propKey = addressKey(r);
         const custKey = addressKey({
@@ -856,23 +879,32 @@ async function sweepUnenrichedProperties({ limit } = {}) {
   let enriched = 0;
   let failed = 0;
   let cooled = 0;
+  let parked = 0;
   let offset = 0;
   let seen = 0;
   // Page through candidates until the batch is filled or the backlog is
-  // exhausted — cooled-down rows advance the page instead of consuming the
-  // batch, so a head of unresolvable rows can't starve older candidates.
+  // exhausted — cooled/parked rows advance the page instead of consuming
+  // the batch, so a head of unresolvable or already-worked rows can't
+  // starve older candidates.
   while (processed < batch) {
     const page = await fetchBackfillCandidates(batch, offset);
     if (!page.length) break;
     seen += page.length;
     // OFFSET advances only by rows that STAY in the NULL-filtered result
-    // set (cooled/failed/no-data/partially-filled). Only a row that is now
-    // COMPLETE leaves the set and shifts everything left — a partial fill
-    // (coords taken, synthesized type refused) still matches the filter.
+    // set (cooled/parked/failed/no-data/partially-filled). Only a row that
+    // is now COMPLETE leaves the set and shifts everything left — a partial
+    // fill (coords taken, synthesized type refused) still matches the
+    // filter. This accounting requires the candidate ORDER to be stable
+    // while the sweep runs: every sort key (upcoming visit, estimate,
+    // created_at) is untouched by the sweep's own writes — a sort key
+    // derived from updated_at would move each looked-up row to the tail
+    // mid-sweep and the advancing offset would jump over unseen rows.
     let completedThisPage = 0;
     for (const row of page) {
       if (processed >= batch) break;
-      if (await attemptedRecently(propertyRowAddress(row))) { cooled += 1; continue; }
+      const verdict = await recentLookupVerdict(row);
+      if (verdict === 'cooldown') { cooled += 1; continue; }
+      if (verdict === 'parked') { parked += 1; continue; }
       try {
         const res = await enrichPropertyById(row.id);
         // Only rows that reached a REAL lookup consume the batch budget —
@@ -895,6 +927,7 @@ async function sweepUnenrichedProperties({ limit } = {}) {
     enriched,
     failed,
     cooledDown: cooled,
+    parked,
     visitCoordsReconciled,
     customerMirrorsReconciled,
     elapsedMs: Date.now() - t0,
@@ -905,6 +938,7 @@ async function sweepUnenrichedProperties({ limit } = {}) {
     enriched,
     failed,
     cooledDown: cooled,
+    parked,
     visitCoordsReconciled,
     customerMirrorsReconciled,
   };
@@ -915,7 +949,7 @@ module.exports = {
   enqueueCallPropertyLookup,
   sweepUnenrichedProperties,
   _private: {
-    snakePropertyType, propertyRowAddress, fetchBackfillCandidates, attemptedRecently, backfillBatchSize,
+    snakePropertyType, propertyRowAddress, fetchBackfillCandidates, recentLookupVerdict, backfillBatchSize,
     reconcileVisitCoordinates, reconcileCustomerMirrors, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
   },
 };

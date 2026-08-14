@@ -544,7 +544,7 @@ describe('sweepUnenrichedProperties', () => {
       if (String(table).startsWith('customer_properties as cp')) return builder(candidates);
       if (table === 'property_lookups') {
         ledgerCalls += 1;
-        return builder(ledgerCalls === 3 ? { last_attempt_at: 'recent' } : undefined);
+        return builder(ledgerCalls === 3 ? { last_attempt_status: 'no_record' } : undefined);
       }
       if (table === 'customer_properties') {
         rowFetches += 1;
@@ -562,6 +562,57 @@ describe('sweepUnenrichedProperties', () => {
     expect(res.processed).toBe(2);
     expect(res.enriched).toBe(2);
     expect(res.cooledDown).toBe(1);
+    expect(performPropertyLookup).toHaveBeenCalledTimes(2);
+  });
+
+  test('park is ledger-based: worked rows skip free, admin edits and cache catch-ups still enrich', async () => {
+    process.env.GATE_PROPERTY_ENRICH_BACKFILL = 'true';
+    process.env.PROPERTY_BACKFILL_BATCH = '2';
+    const mkRow = (id, createdAt, updatedAt) => ({
+      id, active: true, latitude: null, longitude: null, property_type: null,
+      address_line1: '123 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+      created_at: createdAt, updated_at: updatedAt,
+    });
+    const candidates = [
+      // Productive attempt + the enrich lane's touch (updated_at moved
+      // past created_at) → PARKED: no lookup, no batch spend.
+      mkRow('p-parked', '2026-08-01T00:00:00Z', '2026-08-13T00:00:00Z'),
+      // updated_at recent but NO ledger attempt — an ordinary admin edit
+      // (say a ZIP fill that first made the row geocodable) must NEVER
+      // park a candidate; property updated_at alone is not attempt
+      // evidence.
+      mkRow('p-admin-edit', '2026-08-01T00:00:00Z', '2026-08-13T00:00:00Z'),
+      // Productive attempt but the row was never worked (in-flight-skip
+      // catch-up) → enriched as a near-free cache hit.
+      mkRow('p-catchup', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'),
+    ];
+    // property_lookups call order: p-parked verdict(1) → p-admin-edit
+    // verdict(2) + in-flight(3) → p-catchup verdict(4) + in-flight(5).
+    let ledgerCalls = 0;
+    let rowFetches = 0;
+    db.mockImplementation((table) => {
+      if (String(table).startsWith('scheduled_services as ss')) return builder([]);
+      if (String(table).startsWith('customer_properties as cp')) return builder(candidates);
+      if (table === 'property_lookups') {
+        ledgerCalls += 1;
+        return builder([1, 4].includes(ledgerCalls) ? { last_attempt_status: 'resolved' } : undefined);
+      }
+      if (table === 'customer_properties') {
+        rowFetches += 1;
+        return builder(candidates[rowFetches === 1 ? 1 : 2]);
+      }
+      return builder(1);
+    });
+    performPropertyLookup.mockResolvedValue({
+      satellite: { inServiceArea: true },
+      enriched: { lat: 27.5, lng: -82.5, propertyType: 'Single Family', _observed: { propertyType: true } },
+    });
+
+    const res = await sweepUnenrichedProperties();
+    expect(res.parked).toBe(1);
+    expect(res.cooledDown).toBe(0);
+    expect(res.processed).toBe(2);
+    expect(res.enriched).toBe(2);
     expect(performPropertyLookup).toHaveBeenCalledTimes(2);
   });
 
@@ -618,7 +669,7 @@ describe('fetchBackfillCandidates', () => {
     }
   });
 
-  test('patterns are BOUND (knex.raw eats bare ?); sink is attempt-based and ranks first', async () => {
+  test('patterns are BOUND (knex.raw eats bare ?); ordering is stable with no updated_at sort key', async () => {
     const cpBuilder = builder([]);
     db.mockImplementation(() => cpBuilder);
     await _private.fetchBackfillCandidates(5, 0);
@@ -630,20 +681,20 @@ describe('fetchBackfillCandidates', () => {
     // Blank types count as missing in the candidate predicate.
     const nullSetCall = cpBuilder.whereRaw.mock.calls.find((c) => String(c[0]).includes('cp.latitude IS NULL'));
     expect(String(nullSetCall[0])).toContain("NULLIF(TRIM(cp.property_type), '') IS NULL");
-    // recently_touched means MODIFIED AFTER INSERTION — insertion itself
-    // stamps updated_at, and a bare-timestamp definition sank every newly
-    // created property behind the legacy backlog.
-    const touchedSelect = db.raw.mock.calls.find((c) => String(c[0]).includes('recently_touched'));
-    expect(String(touchedSelect[0])).toContain('cp.updated_at > cp.created_at');
     // Upcoming priority counts ACTIONABLE visits only — a batch of future
     // cancelled/skipped rows must not outrank real dispatches for the
     // bounded nightly budget.
     const upcomingSelect = db.raw.mock.calls.find((c) => String(c[0]).includes('has_upcoming_visit'));
     expect(String(upcomingSelect[0])).toContain("ss.status NOT IN ('completed', 'cancelled', 'skipped')");
-    // The sink ranks FIRST, across visit classes — upcoming-first ordering
-    // let a batch-sized head of partial upcoming rows starve everything.
+    // The ordering must be STABLE while the sweep runs (the offset
+    // accounting depends on it) and must NOT contain an updated_at-derived
+    // sort key — that sink parked rows on the wrong evidence (an ordinary
+    // admin edit sank a geocodable row with an imminent visit for a week)
+    // and moved each looked-up row to the tail mid-sweep, so the advancing
+    // offset jumped over unseen candidates. Already-worked rows are parked
+    // in the sweep loop off the ATTEMPT LEDGER instead.
+    expect(db.raw.mock.calls.some((c) => String(c[0]).includes('recently_touched'))).toBe(false);
     expect(cpBuilder.orderBy).toHaveBeenCalledWith([
-      { column: 'recently_touched', order: 'asc' },
       { column: 'has_upcoming_visit', order: 'desc' },
       { column: 'has_estimate', order: 'desc' },
       { column: 'cp.created_at', order: 'desc' },
@@ -710,10 +761,14 @@ describe('reconcileVisitCoordinates', () => {
       return builder(1);
     });
     await _private.reconcileVisitCoordinates();
-    // Resumed from the stored chronological cursor…
+    // Resumed from the stored chronological cursor — the timestamp is
+    // bound as the STORED TEXT with an explicit ::timestamptz cast, never
+    // routed through a JS Date (which truncates PG's microsecond
+    // precision; a truncated cursor sorted before a whole same-timestamp
+    // page and the scan re-selected that head forever).
     expect(joinedResumed.whereRaw).toHaveBeenCalledWith(
-      '(ss.created_at, ss.id) > (?, ?)',
-      [new Date('2026-08-14T00:00:00.000Z'), 'v-500'],
+      '(ss.created_at, ss.id) > (?::timestamptz, ?)',
+      ['2026-08-14T00:00:00.000Z', 'v-500'],
     );
     // …an empty page past the cursor wraps to the top ONCE (no keyset)…
     const fromTopKeyset = joinedFromTop.whereRaw.mock.calls
@@ -726,12 +781,15 @@ describe('reconcileVisitCoordinates', () => {
     expect(settingsWrite.merge).toHaveBeenCalledWith(expect.objectContaining({ value: null }));
   });
 
-  test('page-capped scan persists a chronological cursor built from the tail row', async () => {
+  test('page-capped scan persists the tail cursor at full database precision', async () => {
     // 20 full pages (the nightly cap) → the run is page-capped, so the
-    // NEXT night must resume from tonight's tail, serialized ts|id.
+    // NEXT night must resume from tonight's tail, serialized ts|id. The
+    // timestamp is PG's ::text rendering, persisted VERBATIM — microseconds
+    // included — so a bulk-imported page sharing one sub-millisecond
+    // created_at can never pin the cursor before its own rows.
     const fullPage = Array.from({ length: 200 }, (_, i) => ({
       visit_id: `v-${i}`,
-      visit_created_at: '2026-08-10T12:00:00.000Z',
+      visit_created_key: '2026-08-10 12:00:00.123456+00',
       service_address_line1: '9 Elsewhere Rd',
       service_address_city: 'Bradenton',
       service_address_zip: '34212',
@@ -751,7 +809,7 @@ describe('reconcileVisitCoordinates', () => {
     await _private.reconcileVisitCoordinates();
     expect(settingsWrite.insert).toHaveBeenCalledWith(expect.objectContaining({
       key: 'call_property_lookup.reconcile_visit_cursor',
-      value: '2026-08-10T12:00:00.000Z|v-199',
+      value: '2026-08-10 12:00:00.123456+00|v-199',
     }));
   });
 });
