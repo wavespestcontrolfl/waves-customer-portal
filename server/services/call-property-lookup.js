@@ -96,8 +96,12 @@ async function enrichPropertyById(propertyId) {
   // spend (and a nightly batch slot) forever. Those rows are a human-repair
   // case, surfaced by their lone coordinate in the admin property panel.
   const coordsFillable = row.latitude == null && row.longitude == null;
-  const typeFillable = !row.property_type;
-  if (row.latitude != null && row.longitude != null && row.property_type) {
+  // Blank/whitespace types are MISSING (admin edits store '' verbatim) —
+  // mirrors the SQL NULLIF in the fill patch and the sweep's candidate
+  // filter, so the three layers can't disagree about repairability.
+  const rowType = String(row.property_type || '').trim();
+  const typeFillable = !rowType;
+  if (row.latitude != null && row.longitude != null && rowType) {
     return { skipped: 'complete' };
   }
   if (!coordsFillable && !typeFillable) {
@@ -198,7 +202,10 @@ async function enrichPropertyById(propertyId) {
     ? snakePropertyType(enriched.propertyType)
     : null;
   if (propertyType) {
-    patch.property_type = db.raw('COALESCE(property_type, ?)', [propertyType]);
+    // NULLIF: admin edits can store property_type = '' verbatim (and
+    // ensurePrimaryProperty copies it with ??) — a blank is MISSING, not a
+    // value to preserve, or the row would be permanently unenrichable.
+    patch.property_type = db.raw("COALESCE(NULLIF(TRIM(property_type), ''), ?)", [propertyType]);
   }
   let after = null;
   if (Object.keys(patch).length) {
@@ -228,8 +235,9 @@ async function enrichPropertyById(propertyId) {
   // value); a concurrent writer's value surviving the CASE/COALESCE is not
   // a fill by this run.
   const filled = [];
+  const afterType = String(after.property_type || '').trim();
   if (row.latitude == null && after.latitude != null) filled.push('latitude', 'longitude');
-  if (!row.property_type && after.property_type) filled.push('property_type');
+  if (!rowType && afterType) filled.push('property_type');
   // ── Downstream mirrors (fill-only, fenced, fail-open) ──
   // Production paths still read the LEGACY surfaces: dispatch maps/ETAs
   // read customers.latitude/longitude, completion tax reads
@@ -241,6 +249,7 @@ async function enrichPropertyById(propertyId) {
   try {
     const mirrorLat = after.latitude == null ? null : Number(after.latitude);
     const mirrorLng = after.longitude == null ? null : Number(after.longitude);
+    const { addressKey } = require('./customer-properties');
     if (mirrorLat != null && mirrorLng != null) {
       // Visits linked to THIS property whose coordinate pair is absent —
       // fenced to the ADDRESS THAT WAS LOOKED UP: the visit's
@@ -248,26 +257,42 @@ async function enrichPropertyById(propertyId) {
       // syncPrimaryAddress keeps the property ID across an address edit.
       // Matching by property_id alone let a later lookup for the EDITED
       // address attach its coordinates to a visit stamped with the old
-      // one, dispatching to the wrong parcel. Unstamped legacy rows are
-      // excluded on purpose: they render the customers mirror address,
-      // which has its own fenced fill below. (row.address_* is safe here —
-      // the address_key fence above already proved it unchanged.)
-      await db('scheduled_services')
-        .where({ property_id: propertyId })
-        .whereNull('lat')
-        .whereNull('lng')
-        .whereRaw(
-          "LOWER(TRIM(COALESCE(service_address_line1, ''))) = ? AND LOWER(TRIM(COALESCE(service_address_line2, ''))) = ? AND LEFT(TRIM(COALESCE(service_address_zip, '')), 5) = ?",
-          [
-            String(row.address_line1 || '').trim().toLowerCase(),
-            String(row.address_line2 || '').trim().toLowerCase(),
-            String(row.zip || '').trim().slice(0, 5),
-          ],
-        )
-        .update({ lat: mirrorLat, lng: mirrorLng });
+      // one, dispatching to the wrong parcel. The fence compares CANONICAL
+      // addressKey values — the SAME comparison that established the
+      // visit↔property linkage — because a legitimately linked stamp may
+      // differ textually from the property row ("Street" vs "St", "Apt 4"
+      // vs "Unit 4"); a raw string compare orphaned those visits. Done in
+      // JS (addressKey is not expressible in SQL); the UPDATE re-asserts
+      // the null coordinate pair so this stays fill-only under races.
+      // Unstamped legacy rows key to '' and never match — they render the
+      // customers mirror address, which has its own fenced fill below.
+      // (row.address_* is safe here — the address_key fence above already
+      // proved it unchanged.)
+      const propKey = addressKey(row);
+      if (propKey) {
+        const visits = await db('scheduled_services')
+          .where({ property_id: propertyId })
+          .whereNull('lat')
+          .whereNull('lng')
+          .select('id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
+        const matchedIds = (visits || [])
+          .filter((v) => addressKey({
+            address_line1: v.service_address_line1,
+            address_line2: v.service_address_line2,
+            city: v.service_address_city,
+            zip: v.service_address_zip,
+          }) === propKey)
+          .map((v) => v.id);
+        if (matchedIds.length) {
+          await db('scheduled_services')
+            .whereIn('id', matchedIds)
+            .whereNull('lat')
+            .whereNull('lng')
+            .update({ lat: mirrorLat, lng: mirrorLng });
+        }
+      }
     }
     if (row.is_primary) {
-      const { addressKey } = require('./customer-properties');
       const customer = await db('customers').where({ id: row.customer_id }).first();
       // Fence: mirror only while the customers primary-address mirror still
       // IS this property's address — and the SAME captured address columns
@@ -285,8 +310,8 @@ async function enrichPropertyById(propertyId) {
         // sales tax off an AI-inferred classification is an owner ruling
         // (pending), not an enrichment side effect. Residential types are
         // display/routing metadata only.
-        if (after.property_type && after.property_type !== 'commercial') {
-          mirror.property_type = db.raw('COALESCE(property_type, ?)', [after.property_type]);
+        if (afterType && afterType !== 'commercial') {
+          mirror.property_type = db.raw("COALESCE(NULLIF(TRIM(property_type), ''), ?)", [afterType]);
         }
         if (Object.keys(mirror).length) {
           mirror.updated_at = db.fn.now();
@@ -305,7 +330,7 @@ async function enrichPropertyById(propertyId) {
   // Post-patch completeness from the AUTHORITATIVE post-update row (drives
   // the sweep's offset accounting): the row leaves the NULL-candidate set
   // only when coords AND type are all present now.
-  const complete = after.latitude != null && after.longitude != null && Boolean(after.property_type);
+  const complete = after.latitude != null && after.longitude != null && Boolean(afterType);
   logger.info('[call-property-lookup] enriched', {
     propertyId,
     filled,
@@ -393,7 +418,8 @@ async function fetchBackfillCandidates(limit, offset = 0) {
     // Only rows THIS writer can repair: the coordinate pair fills
     // atomically (both null), so a lone-coordinate row with a type is not
     // a candidate — it would consume a batch slot every night unrepaired.
-    .whereRaw('((cp.latitude IS NULL AND cp.longitude IS NULL) OR cp.property_type IS NULL)')
+    // Blank types count as missing (NULLIF) — admin edits store '' verbatim.
+    .whereRaw("((cp.latitude IS NULL AND cp.longitude IS NULL) OR NULLIF(TRIM(cp.property_type), '') IS NULL)")
     .whereRaw("COALESCE(TRIM(cp.address_line1), '') <> ''")
     // Mirrors the enrich guard's house-number prerequisite (estimator
     // hasPrimaryStreetNumber INCLUDING its leading-unit rule): a primary
@@ -421,20 +447,21 @@ async function fetchBackfillCandidates(limit, offset = 0) {
     // updated_at, stays in the NULL-candidate set, and under a stable
     // priority order a batch-sized head of such rows would consume every
     // nightly batch forever. Sinking them for 7 days lets the backlog
-    // progress; they resurface weekly.
+    // progress; they resurface weekly. "Touched" means MODIFIED AFTER
+    // INSERTION (updated_at > created_at, 1s slop for separately-computed
+    // insert timestamps) — insertion itself stamps updated_at, and a
+    // definition on the bare timestamp sank every newly created property,
+    // including one with a visit booked tomorrow, behind the untouched
+    // legacy backlog. The sink ranks FIRST, across visit classes: were
+    // has_upcoming_visit first instead, a batch-sized head of partially
+    // enriched upcoming rows would be re-selected every night, starving
+    // both older upcoming rows and the whole non-upcoming backlog.
     .select(db.raw(
-      "(cp.updated_at IS NOT NULL AND cp.updated_at > NOW() - INTERVAL '7 days') as recently_touched",
+      "(cp.updated_at IS NOT NULL AND cp.updated_at > cp.created_at + INTERVAL '1 second' AND cp.updated_at > NOW() - INTERVAL '7 days') as recently_touched",
     ))
-    // has_upcoming_visit OUTRANKS the weekly sink: insertion itself stamps
-    // updated_at, so a sink-first order put every NEWLY CREATED property —
-    // including one visiting tomorrow — behind the entire untouched legacy
-    // backlog whenever only the backfill gate is on (weeks at the default
-    // batch). Within each visit class the sink still holds; the partial
-    // rows it resurfaces early are near-free cache hits, and the
-    // upcoming-visit set is small by nature.
     .orderBy([
-      { column: 'has_upcoming_visit', order: 'desc' },
       { column: 'recently_touched', order: 'asc' },
+      { column: 'has_upcoming_visit', order: 'desc' },
       { column: 'has_estimate', order: 'desc' },
       { column: 'cp.created_at', order: 'desc' },
     ])

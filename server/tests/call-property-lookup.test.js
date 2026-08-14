@@ -32,6 +32,7 @@ const flushImmediates = () => new Promise((resolve) => setImmediate(resolve));
 // property_lookups ledger (in-flight dedupe) → empty; updates → 1 row.
 function mockRowDb(row, updateBuilder, extra = {}) {
   let cpCalls = 0;
+  let ssCalls = 0;
   db.mockImplementation((table) => {
     if (table === 'property_lookups') return builder(undefined);
     if (table === 'customer_properties') {
@@ -40,7 +41,12 @@ function mockRowDb(row, updateBuilder, extra = {}) {
       // fill-only UPDATE.
       return cpCalls === 1 ? builder(row) : (updateBuilder || builder(1));
     }
-    if (table === 'scheduled_services') return extra.visits || builder(1);
+    if (table === 'scheduled_services') {
+      // The visit mirror now SELECTS candidates (canonical-key fence in
+      // JS) then UPDATEs by id — visitsSeq supplies one builder per call.
+      if (extra.visitsSeq) return extra.visitsSeq[Math.min(ssCalls++, extra.visitsSeq.length - 1)];
+      return builder([]);
+    }
     if (table === 'customers') return extra.customers || builder(undefined);
     return builder(1);
   });
@@ -92,11 +98,16 @@ describe('runCallPropertyLookup', () => {
   test('fill-only patch: COALESCE lat/lng/type, snake_case vocabulary, no sqft ever', async () => {
     // update(...) uses RETURNING — resolves to the post-update rows.
     const updateBuilder = builder([{ latitude: 27.4995, longitude: -82.4108, property_type: 'single_family' }]);
+    const visitSelect = builder([{
+      id: 'v1',
+      service_address_line1: '123 Sample Cove', service_address_line2: null,
+      service_address_city: 'Bradenton', service_address_zip: '34212',
+    }]);
     const visitsBuilder = builder(1);
     mockRowDb({
       id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
       address_line1: '123 Sample Cove', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34212',
-    }, updateBuilder, { visits: visitsBuilder });
+    }, updateBuilder, { visitsSeq: [visitSelect, visitsBuilder] });
     performPropertyLookup.mockResolvedValueOnce({
       satellite: { inServiceArea: true },
       enriched: {
@@ -115,18 +126,40 @@ describe('runCallPropertyLookup', () => {
     // Atomic coordinate pair: each component writes only when BOTH are null.
     expect(patch.latitude).toMatchObject({ __raw: 'CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE latitude END', bindings: [27.4995] });
     expect(patch.longitude).toMatchObject({ __raw: 'CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE longitude END', bindings: [-82.4108] });
-    expect(patch.property_type).toMatchObject({ __raw: 'COALESCE(property_type, ?)', bindings: ['single_family'] });
+    expect(patch.property_type).toMatchObject({ __raw: "COALESCE(NULLIF(TRIM(property_type), ''), ?)", bindings: ['single_family'] });
     // sqft semantics belong to the lawn lane — never written here.
     expect(Object.keys(patch)).toEqual(['latitude', 'longitude', 'property_type', 'updated_at']);
   });
 
-  test('visit coordinate fill only reaches visits stamped with the looked-up address', async () => {
+  test('visit fill fences by CANONICAL addressKey: designator variants match, other addresses do not', async () => {
     const updateBuilder = builder([{ latitude: 27.4995, longitude: -82.4108, property_type: 'single_family' }]);
-    const visitsBuilder = builder(1);
+    const visitSelect = builder([
+      {
+        // Linked via the canonical key ("Apt 4" vs the property's "Unit 4",
+        // case differs) — a raw string compare orphaned exactly this visit.
+        id: 'v-linked',
+        service_address_line1: '123 SAMPLE COVE', service_address_line2: 'Apt 4',
+        service_address_city: 'Bradenton', service_address_zip: '34212',
+      },
+      {
+        // Stamped with a DIFFERENT address (the pre-edit booking) — the
+        // post-edit backfill must never attach coordinates here.
+        id: 'v-old-address',
+        service_address_line1: '9 Elsewhere Rd', service_address_line2: null,
+        service_address_city: 'Bradenton', service_address_zip: '34212',
+      },
+      {
+        // Unstamped legacy row — keys to '' and never matches.
+        id: 'v-unstamped',
+        service_address_line1: null, service_address_line2: null,
+        service_address_city: null, service_address_zip: null,
+      },
+    ]);
+    const visitUpdate = builder(1);
     mockRowDb({
       id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
-      address_line1: ' 123 Sample Cove ', address_line2: 'Unit 4', city: 'Bradenton', state: 'FL', zip: '34212-1234',
-    }, updateBuilder, { visits: visitsBuilder });
+      address_line1: '123 Sample Cove', address_line2: 'Unit 4', city: 'Bradenton', state: 'FL', zip: '34212',
+    }, updateBuilder, { visitsSeq: [visitSelect, visitUpdate] });
     performPropertyLookup.mockResolvedValueOnce({
       satellite: { inServiceArea: true },
       enriched: {
@@ -135,15 +168,8 @@ describe('runCallPropertyLookup', () => {
       },
     });
     await runCallPropertyLookup({ propertyId: 'p1' });
-    // Fence: stamped service_address must still match the looked-up
-    // address (normalized), so a post-edit backfill can't attach the new
-    // address's coordinates to a visit booked for the old one.
-    const [sql, bindings] = visitsBuilder.whereRaw.mock.calls[0];
-    expect(sql).toContain('service_address_line1');
-    expect(sql).toContain('service_address_line2');
-    expect(sql).toContain('service_address_zip');
-    expect(bindings).toEqual(['123 sample cove', 'unit 4', '34212']);
-    expect(visitsBuilder.update).toHaveBeenCalledWith({ lat: 27.4995, lng: -82.4108 });
+    expect(visitUpdate.whereIn).toHaveBeenCalledWith('id', ['v-linked']);
+    expect(visitUpdate.update).toHaveBeenCalledWith({ lat: 27.4995, lng: -82.4108 });
   });
 
   test('null coordinates are never persisted as 0,0; synthesized type never persists', async () => {
@@ -238,6 +264,30 @@ describe('runCallPropertyLookup', () => {
     // …but the commercial classification NEVER lands on customers
     // (customers.property_type feeds service_taxability — owner ruling).
     expect(mirror.property_type).toBeUndefined();
+  });
+
+  test("blank property_type is MISSING: the row enriches and the fill won't preserve ''", async () => {
+    // Admin edits store '' verbatim; a truthy/IS NULL reading of that blank
+    // made such rows permanently unenrichable (skipped as complete once
+    // coordinates existed, and COALESCE preserved the '').
+    const updateBuilder = builder([{ latitude: 27.4, longitude: -82.5, property_type: 'single_family' }]);
+    mockRowDb({
+      id: 'p1', active: true, latitude: 27.4, longitude: -82.5, property_type: '',
+      address_line1: '123 Sample Cove', city: 'Bradenton', state: 'FL', zip: '34212',
+    }, updateBuilder);
+    performPropertyLookup.mockResolvedValueOnce({
+      satellite: { inServiceArea: true },
+      enriched: {
+        lat: 27.4, lng: -82.5, propertyType: 'Single Family',
+        _observed: { propertyType: true }, fieldVerifyFlags: [],
+      },
+    });
+    const res = await runCallPropertyLookup({ propertyId: 'p1' });
+    expect(res).toEqual({ enriched: true, filled: ['property_type'], complete: true });
+    const patch = updateBuilder.update.mock.calls[0][0];
+    expect(patch.property_type).toMatchObject({
+      __raw: "COALESCE(NULLIF(TRIM(property_type), ''), ?)", bindings: ['single_family'],
+    });
   });
 
   test('lone-coordinate row with a type is unrepairable → skipped, no spend', async () => {
@@ -405,7 +455,7 @@ describe('fetchBackfillCandidates', () => {
     }
   });
 
-  test('patterns are BOUND (knex.raw eats bare ?) and upcoming visits outrank the weekly sink', async () => {
+  test('patterns are BOUND (knex.raw eats bare ?); sink is attempt-based and ranks first', async () => {
     const cpBuilder = builder([]);
     db.mockImplementation(() => cpBuilder);
     await _private.fetchBackfillCandidates(5, 0);
@@ -414,9 +464,19 @@ describe('fetchBackfillCandidates', () => {
     expect(rawCall[1]).toEqual([
       _private.SQL_PRIMARY_NUMBER_RE, _private.SQL_LEADING_UNIT_RE, _private.SQL_PRIMARY_NUMBER_RE,
     ]);
+    // Blank types count as missing in the candidate predicate.
+    const nullSetCall = cpBuilder.whereRaw.mock.calls.find((c) => String(c[0]).includes('cp.latitude IS NULL'));
+    expect(String(nullSetCall[0])).toContain("NULLIF(TRIM(cp.property_type), '') IS NULL");
+    // recently_touched means MODIFIED AFTER INSERTION — insertion itself
+    // stamps updated_at, and a bare-timestamp definition sank every newly
+    // created property behind the legacy backlog.
+    const touchedSelect = db.raw.mock.calls.find((c) => String(c[0]).includes('recently_touched'));
+    expect(String(touchedSelect[0])).toContain('cp.updated_at > cp.created_at');
+    // The sink ranks FIRST, across visit classes — upcoming-first ordering
+    // let a batch-sized head of partial upcoming rows starve everything.
     expect(cpBuilder.orderBy).toHaveBeenCalledWith([
-      { column: 'has_upcoming_visit', order: 'desc' },
       { column: 'recently_touched', order: 'asc' },
+      { column: 'has_upcoming_visit', order: 'desc' },
       { column: 'has_estimate', order: 'desc' },
       { column: 'cp.created_at', order: 'desc' },
     ]);
