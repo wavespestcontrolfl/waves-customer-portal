@@ -104,8 +104,18 @@ describe('computeStopsAhead', () => {
     // statuses, route-excluded statuses ×2).
     const [countSql, countBindings] = db.countCall();
     expect(countBindings).toEqual([
-      'svc-self', ...NOT_A_STOP_STATUSES, ...NOT_A_ROUTE_STOP_STATUSES, ...NOT_A_ROUTE_STOP_STATUSES,
+      'svc-self',
+      ...NOT_A_STOP_STATUSES,          // ahead (live-excluded)
+      ...NOT_A_ROUTE_STOP_STATUSES,    // before_all
+      ...NOT_A_ROUTE_STOP_STATUSES,    // others_all
+      ...NOT_A_ROUTE_STOP_STATUSES,    // done_before track-complete guard
+      ...NOT_A_STOP_STATUSES,          // working_before terminal precedence
     ]);
+    // Terminal-status precedence: a completed/cancelled row with a stale
+    // active track_state must not fabricate a working stop, and a
+    // cancelled row with track_state='complete' must not count as done.
+    expect(countSql).toMatch(/working_before/);
+    expect(countSql).toContain("OR (s.track_state = 'complete' AND s.status NOT IN");
     expect(NOT_A_STOP_STATUSES).toEqual(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled']);
     expect(NOT_A_ROUTE_STOP_STATUSES).toEqual(['cancelled', 'skipped', 'no_show', 'rescheduled']);
     // A stop = the repo's sibling identity (customer_id, slot); only the

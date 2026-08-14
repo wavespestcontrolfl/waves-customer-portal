@@ -427,9 +427,14 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
   // at a smaller value, and a strip built from disagreeing figures would
   // fabricate "Now at stop X". The hero numeral still shows on its own.
   const truckStop = routeProgress?.currentStop;
+  // While the tech is actively AT a stop, that stop is counted in BOTH
+  // stopsAhead (it isn't serviced yet) and currentStop — so the expected
+  // gap between yourStop and truckStop is stopsAhead exactly; between
+  // stops it's stopsAhead + 1.
+  const expectedGap = routeProgress?.atStop ? 0 : 1;
   const stripConsistent = yourStop != null && totalStops != null
     && Number.isFinite(truckStop)
-    && (yourStop - truckStop - 1) === stopsAhead;
+    && (yourStop - truckStop - expectedGap) === stopsAhead;
   const started = stripConsistent && truckStop >= 1;
 
   const dot = (bg, fg, iconName, size, label) => (

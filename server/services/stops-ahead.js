@@ -150,12 +150,15 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
          )::int AS others_all,
          COUNT(DISTINCT ${STOP_KEY}) FILTER (
            WHERE ${PRECEDES}
-             AND (s.status = 'completed' OR s.track_state = 'complete')
+             AND (s.status = 'completed'
+                  OR (s.track_state = 'complete' AND s.status NOT IN (${routeExcl})))
          )::int AS done_before,
          COUNT(DISTINCT ${STOP_KEY}) FILTER (
            WHERE ${PRECEDES}
              AND (s.status IN ('en_route', 'on_site')
                   OR s.track_state IN ('en_route', 'on_property'))
+             AND s.status NOT IN (${liveExcl})
+             AND (s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))
          )::int AS working_before
          FROM scheduled_services s, target t
         WHERE s.technician_id = t.technician_id
@@ -163,7 +166,19 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
           AND NOT (s.customer_id = t.customer_id
                    AND s.window_start IS NOT DISTINCT FROM t.window_start)
           AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())`,
-      [svc.id, ...NOT_A_STOP_STATUSES, ...NOT_A_ROUTE_STOP_STATUSES, ...NOT_A_ROUTE_STOP_STATUSES]
+      // Binding order mirrors the FILTER order: ahead (live-excluded),
+      // before_all / others_all / done_before (route-excluded), and
+      // working_before (live-excluded again — terminal-status precedence:
+      // a completed/cancelled row with a stale active track_state must not
+      // fabricate a working stop, matching the tracking routes).
+      [
+        svc.id,
+        ...NOT_A_STOP_STATUSES,
+        ...NOT_A_ROUTE_STOP_STATUSES,
+        ...NOT_A_ROUTE_STOP_STATUSES,
+        ...NOT_A_ROUTE_STOP_STATUSES,
+        ...NOT_A_STOP_STATUSES,
+      ]
     );
     const agg = countRes?.rows?.[0];
     const raw = Number(agg?.ahead);
