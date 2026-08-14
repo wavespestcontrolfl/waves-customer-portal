@@ -105,7 +105,19 @@ function mintCallToken(callSid, { secret = process.env.VOICE_RELAY_WS_SECRET, no
   // deterministic lexicographic tie-break. Still 16 hex, still MAC-covered,
   // still burn-table-compatible; sandbox-minted pure-random nonces order
   // arbitrarily but the sandbox path never claims a call_log row at all.
-  const nonce = Date.now().toString(16).padStart(12, '0')
+  // `now` (the injectable mint clock), never a second Date.now() — the exp
+  // and the generation must agree on when this token was minted.
+  //
+  // KNOWN TRADE, deliberately accepted: this is wall-clock ordering with a
+  // random lexicographic tie-break, not a cross-pod monotonic sequence (that
+  // would need a DB-assigned generation and an async mint on the live /voice
+  // path). Pod clock skew or an unlucky same-millisecond tie can order a
+  // legitimate reconnect BELOW the stale claim — the cost is bounded and
+  // non-fatal: the refused claim degrades that session to UNVERIFIED
+  // capture-only service (the same posture as any claim refusal), it never
+  // drops the call. A delayed old socket still cannot reclaim once any newer
+  // mint holds the claim.
+  const nonce = now.toString(16).padStart(12, '0')
     + require('crypto').randomBytes(2).toString('hex');
   return `${CALL_TOKEN_VERSION}.${expSec}.${nonce}.${callTokenMac(sid, expSec, nonce, secret)}`;
 }

@@ -195,7 +195,10 @@ async function claimOwnedElsewhere(q, callSid, sessionKey) {
   const key = String(callSid || '').trim();
   if (!key || !sessionKey) return false;
   try {
-    const row = await q('call_log').where({ twilio_call_sid: key }).first('metadata');
+    // FOR UPDATE: the row lock is what makes the check atomic with the write —
+    // a takeover's claim UPDATE now WAITS for this transaction to commit and
+    // re-evaluates, instead of landing between this read and our commit.
+    const row = await q('call_log').where({ twilio_call_sid: key }).forUpdate().first('metadata');
     if (!row) return false;
     let meta;
     try {

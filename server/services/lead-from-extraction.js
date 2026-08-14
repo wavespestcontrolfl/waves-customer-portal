@@ -710,6 +710,17 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
         return { leadId: null, customerId, created: false, superseded: true };
       }
     } catch (err) {
+      // ⭐ A KEYED SESSION FAILS CLOSED. Retrying unserialized would run the
+      // lead writes with NO claim check and no per-call lock — exactly the
+      // superseded-write hole the lock exists to close, opened by any
+      // transient DB error. A keyed capture that cannot be serialized is a
+      // FAILED capture (the model reports it; the hangup floor and the sweep
+      // rails still stand). Legacy sessions (no sessionKey — nothing to prove
+      // ownership against) keep the unserialized fallback.
+      if (opts.sessionKey) {
+        logger.error(`[voice-agent-lead] capture serialization failed on a KEYED session callSid=${opts.callSid} — failing closed, no unserialized write: ${err.message}`);
+        return { leadId: null, customerId, created: false };
+      }
       logger.warn(`[voice-agent-lead] capture serialization failed for callSid=${opts.callSid} (${err.message}) — proceeding unserialized`);
       leadId = undefined;
       created = false;
