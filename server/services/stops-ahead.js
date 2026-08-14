@@ -96,14 +96,14 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     //    so tracker-terminal rows drop out by track_state too — NULL-safe,
     //    since NOT IN alone silently drops NULL-track_state rows.
     // Ordering matches the dispatch day-plan (route_order, window, created)
-    // with id as deterministic tiebreak. The count is DISTINCT customers,
-    // not rows: sibling rows for the same customer/appointment slot exist
-    // (appointment-reminders merges them) and must read as ONE stop — and
-    // every row belonging to the target's own customer is excluded, so a
-    // sibling of the target can never count as ahead of itself. A customer
-    // with two properties served the same day reads as one stop — a small
-    // deliberate undercount, which the clamp tolerates (overcounts are what
-    // it cannot take back).
+    // with id as deterministic tiebreak. A "stop" is the repo's sibling
+    // identity — (customer_id, appointment slot), the same key
+    // appointment-reminders merges on: sibling rows for one slot read as
+    // ONE stop via COUNT(DISTINCT (customer, slot)), while a customer's
+    // separate same-day appointment (other slot / other property) stays a
+    // real stop. Only the target's OWN sibling group is excluded, so a
+    // sibling of the target never counts as ahead of itself but the
+    // customer's genuinely-earlier other appointment still does.
     const statusPlaceholders = NOT_A_STOP_STATUSES.map(() => '?').join(', ');
     const countRes = await db.raw(
       `WITH target AS (
@@ -111,11 +111,12 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
            FROM scheduled_services
           WHERE id = ?::uuid
        )
-       SELECT COUNT(DISTINCT s.customer_id)::int AS n
+       SELECT COUNT(DISTINCT (s.customer_id, COALESCE(s.window_start, '23:59'::time)))::int AS n
          FROM scheduled_services s, target t
         WHERE s.technician_id = t.technician_id
           AND s.scheduled_date = t.scheduled_date
-          AND s.customer_id <> t.customer_id
+          AND NOT (s.customer_id = t.customer_id
+                   AND s.window_start IS NOT DISTINCT FROM t.window_start)
           AND s.status NOT IN (${statusPlaceholders})
           AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())
           AND (s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))
