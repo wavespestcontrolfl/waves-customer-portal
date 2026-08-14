@@ -4401,7 +4401,11 @@ function BankImportTab() {
                   </Badge>
                 </td>
                 <td style={{ padding: "8px 12px", color: D.muted, maxWidth: 260, overflow: "hidden", whiteSpace: "nowrap" }}>
-                  {r.suggestion?.ignore ? (
+                  {/* a transfer-flagged CREDIT with candidates falls through
+                      to the select — a vendor refund whose descriptor says
+                      "transfer" still needs its Apply refund action (the
+                      hint folds into the select placeholder) */}
+                  {r.suggestion?.ignore && !(r.direction === "credit" && (r.suggestion?.refundCandidates?.length || r.suggestion?.payoutCandidates?.length)) ? (
                     "internal transfer?"
                   ) : r.status === "unmatched" && r.suggestion?.candidates?.length ? (
                     <select
@@ -4437,6 +4441,7 @@ function BankImportTab() {
                     >
                       <option value="">
                         {[
+                          r.suggestion?.ignore ? "internal transfer?" : null,
                           r.suggestion?.payoutCandidates?.length ? `${r.suggestion.payoutCandidates.length} payout${r.suggestion.payoutCandidates.length > 1 ? "s" : ""}` : null,
                           r.suggestion?.refundCandidates?.length ? `${r.suggestion.refundCandidates.length} original purchase${r.suggestion.refundCandidates.length > 1 ? "s" : ""}` : null,
                         ].filter(Boolean).join(" · ")}

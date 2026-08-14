@@ -923,6 +923,31 @@ async function runDeterministicMatching({ limit } = {}) {
     // re-proposes ANY previously rejected target — including earlier
     // rejections, not just the latest. (Manual re-link stays possible.)
     const rejected = rejectedTargets(row.suggestion);
+    // Refund-candidate discovery for CREDITS — used by the refund/payout
+    // branches below AND by the transfer branch (a vendor refund whose
+    // descriptor contains a transfer word must keep the human refund
+    // action; automatic links stay suppressed for transfer-shaped rows).
+    const refundCandidateList = async () => {
+      const originals = await db('expenses')
+        .whereBetween('expense_date', [addDays(txnDate, -REFUND_LOOKBACK_DAYS), txnDate])
+        .where('amount', '>=', row.amount)
+        .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
+      const list = originals.filter(c => vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
+      // Likeliest-first, deterministic: nearest covering amount, then the
+      // most recent purchase, then id — so the real original sits inside
+      // the bounded visible slice even for a high-frequency vendor. The
+      // apply route validates by the same plausibility RULES, not by
+      // membership in this display slice, so an off-slice original is
+      // still applicable.
+      list.sort((a, b) => (Number(a.amount) - Number(b.amount))
+        || String(toDateStr(b.expense_date)).localeCompare(String(toDateStr(a.expense_date)))
+        || String(a.id).localeCompare(String(b.id)));
+      return list;
+    };
+    const refundPatch = (list) => ({
+      refundCandidates: list.slice(0, 20).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: toDateStr(c.expense_date) })),
+      refundCandidatesTotal: list.length,
+    });
     // A bank-account credit with a Stripe-shaped description is PAYOUT
     // territory even when it also carries a transfer word (Capital One
     // renders payouts as e.g. "STRIPE TRANSFER ST-…") — payoutProvenance
@@ -934,11 +959,29 @@ async function runDeterministicMatching({ limit } = {}) {
     const stripeBankCredit = row.direction === 'credit' && row.account_type === 'bank' && stripeShapedDescription(row.description);
     const transfer = stripeBankCredit ? null : transferSuggestion(row.description);
     if (transfer) {
+      // For CREDITS the refund candidates ride along with the flag: the
+      // flag is only ever a SUGGESTION, and without candidates a vendor
+      // refund whose descriptor says "transfer" would leave the operator
+      // with Ignore as the only action.
+      const refunds = row.direction === 'credit' ? await refundCandidateList() : [];
       if (!row.suggestion || !row.suggestion.ignore) {
         // merged, not replaced — suggestion also carries durable identity
         // records (forceToken/forcedFor, lastUnlink) that must survive
-        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({ suggestion: suggestionMerge(transfer), updated_at: new Date() });
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+          suggestion: suggestionMerge({ ...transfer, ...(refunds.length ? refundPatch(refunds) : {}) }, refunds.length ? ['noMatch'] : []),
+          updated_at: new Date(),
+        });
         summary.transferFlagged++;
+      } else if (row.direction === 'credit') {
+        // already flagged — REFRESH the refund list on every rescan
+        // (targets appear and disappear; a stale list can only 404/409)
+        // and rotate via updated_at like every other examined row
+        await db('bank_transactions').where({ id: row.id, status: 'unmatched' }).update({
+          suggestion: suggestionMerge(
+            refunds.length ? refundPatch(refunds) : {},
+            refunds.length ? ['noMatch'] : ['refundCandidates', 'refundCandidatesTotal']),
+          updated_at: new Date(),
+        });
       } else if (bounded) {
         // rotation bump — an already-flagged row rescanned by a bounded
         // pass goes to the back of the examined queue (see markScanned)
@@ -955,29 +998,9 @@ async function runDeterministicMatching({ limit } = {}) {
       // is always a human call. Card credits are refund territory outright;
       // bank credits reach here only AFTER payout matching comes up empty
       // (a debit-card purchase refunded into checking).
-      const refundCandidateList = async () => {
-        const originals = await db('expenses')
-          .whereBetween('expense_date', [addDays(txnDate, -REFUND_LOOKBACK_DAYS), txnDate])
-          .where('amount', '>=', row.amount)
-          .select('id', 'amount', 'description', 'vendor_name', 'expense_date', 'payment_method');
-        const list = originals.filter(c => vendorEvidence(row.description, c) && !methodIncompatible(row.account_type, c.payment_method));
-        // Likeliest-first, deterministic: nearest covering amount, then the
-        // most recent purchase, then id — so the real original sits inside
-        // the bounded visible slice even for a high-frequency vendor. The
-        // apply route validates by the same plausibility RULES, not by
-        // membership in this display slice, so an off-slice original is
-        // still applicable.
-        list.sort((a, b) => (Number(a.amount) - Number(b.amount))
-          || String(toDateStr(b.expense_date)).localeCompare(String(toDateStr(a.expense_date)))
-          || String(a.id).localeCompare(String(b.id)));
-        return list;
-      };
-      const refundPatch = (list) => ({
-        refundCandidates: list.slice(0, 20).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: toDateStr(c.expense_date) })),
-        refundCandidatesTotal: list.length,
-      });
       // Stripe pays out to the BANK account only — card credits skip payout
-      // matching entirely.
+      // matching entirely. (refundCandidateList/refundPatch are hoisted
+      // above the transfer branch — it parks refund candidates too.)
       if (row.account_type !== 'bank') {
         const refunds = await refundCandidateList();
         if (refunds.length) {

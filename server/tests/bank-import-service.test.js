@@ -684,6 +684,18 @@ describe('runDeterministicMatching', () => {
     expect(second.expensesLinked).toBe(1);
   });
 
+  test('a transfer-flagged CREDIT still parks refund candidates — Ignore is never the only action', async () => {
+    // vendor refund whose descriptor contains a transfer word
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'WAWA REFUND TRANSFER', amount: 20, direction: 'credit', account_type: 'card', suggestion: null }];
+    state.expenses = [{ id: 'exp-1', amount: '58.12', description: 'gas', vendor_name: 'Wawa', expense_date: '2026-08-01', payment_method: 'card' }];
+    const summary = await runDeterministicMatching();
+    expect(summary.transferFlagged).toBe(1);
+    const flagged = state.updates.find(u => sugOf(u) && sugOf(u).ignore);
+    expect(sugOf(flagged).refundCandidates).toHaveLength(1); // flag AND the refund action, one write
+    expect(sugOf(flagged).refundCandidates[0].id).toBe('exp-1');
+    expect(state.updates.find(u => u.patch.status)).toBeUndefined(); // still never auto-matches
+  });
+
   test('a merchant merely CONTAINING "stripe" (PINSTRIPES) is not payout provenance — parks instead of linking', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'PINSTRIPES BRADENTON', amount: 500, direction: 'credit', account_type: 'bank', account_label: 'capone-checking', suggestion: null }];
     state.payouts = [{ id: 'po-1', amount: '500.00', arrival_date: '2026-08-11', reconciled: false, bank_last_four: '9876' }];
