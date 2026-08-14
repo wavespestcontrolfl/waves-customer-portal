@@ -73,6 +73,15 @@ function parseJsonObject(value) {
   }
 }
 
+// Google's review feed returns very fresh reviews inconsistently: a review a
+// few hours old can be present in one pull and absent from the next while
+// Google's replication/spam screening settles, then reappear (2026-08-13: a
+// 2.5h-old review vanished from the 20:00Z pull, rang the removal alert, and
+// was back by 00:00Z). The missing-review reconcile therefore ignores rows
+// whose review is younger than this window — a genuinely removed new review
+// still stamps (and alerts) on the first reconcile after the window ends.
+const MISSING_REVIEW_GRACE_MS = 48 * 60 * 60 * 1000;
+
 // Google's My Business v4 endpoints normally return JSON, but when the OAuth
 // client lives in a project where the API isn't enabled — or hits a redirect
 // chain — they sometimes return 2xx with an HTML body. Parsing that as JSON
@@ -548,7 +557,7 @@ class GoogleBusinessService {
     return candidates.find(row => sameReviewerAndTime(row, normalized.reviewer_name, normalized.review_created_at)) || null;
   }
 
-  async _upsertGbpReview(normalized, syncStart = null, pendingUnlinkedNotifications = null) {
+  async _upsertGbpReview(normalized, syncStart = null, pendingUnlinkedNotifications = null, pendingRestoredNotifications = null) {
     const existing = await this._findExistingReview(normalized);
     const customerId = await this._findCustomerIdByReviewerName(normalized.reviewer_name);
     const replyFields = isDraftReply(existing?.review_reply)
@@ -635,7 +644,20 @@ class GoogleBusinessService {
         .where({ id: result.id })
         .whereNotNull('missing_since');
       if (syncStart) clear.where('missing_since', '<', new Date(syncStart).toISOString());
-      await clear.update({ missing_since: null });
+      const cleared = await clear.update({ missing_since: null }, ['id']);
+      // A stamped→clear transition means a review the removal alert reported
+      // gone is back on Google — tell the admin, or the "removed" bell is the
+      // last word they ever hear about it. Collected per run and flushed as
+      // one bell per location (a profile-wide reinstatement would otherwise
+      // ring dozens of bells).
+      if ((cleared || []).length > 0 && Array.isArray(pendingRestoredNotifications)) {
+        pendingRestoredNotifications.push({
+          review_id: result.id,
+          location_id: normalized.location_id,
+          reviewer_name: normalized.reviewer_name,
+          star_rating: normalized.star_rating,
+        });
+      }
     }
     if (row.customer_id) {
       // A matched review means the customer left one — stop asking them.
@@ -699,7 +721,7 @@ class GoogleBusinessService {
     return { rating: googleRating, totalReviews: googleTotalReviews };
   }
 
-  async _syncPlacesReviewSampleForLocation(loc, googleKey, pendingUnlinkedNotifications = null) {
+  async _syncPlacesReviewSampleForLocation(loc, googleKey, pendingUnlinkedNotifications = null, pendingRestoredNotifications = null) {
     if (!loc.googlePlaceId || !googleKey) return { synced: 0, new: 0 };
     // Ordering token for the reinstatement clear below — a removal stamp
     // written after this fetch began is newer information than this sample.
@@ -814,11 +836,21 @@ class GoogleBusinessService {
         // so an authoritative stamp committed after this sample's fetch
         // began survives a concurrent degraded runner.
         if (identityCorroborated) {
-          await db('google_reviews')
+          const cleared = await db('google_reviews')
             .where({ id: existing.id })
             .whereNotNull('missing_since')
             .where('missing_since', '<', sampleSyncStart.toISOString())
-            .update({ missing_since: null });
+            .update({ missing_since: null }, ['id']);
+          // Stamped→clear transition — surface the reinstatement, mirroring
+          // the GBP-path collection in _upsertGbpReview.
+          if ((cleared || []).length > 0 && Array.isArray(pendingRestoredNotifications)) {
+            pendingRestoredNotifications.push({
+              review_id: existing.id,
+              location_id: loc.id,
+              reviewer_name: existing.reviewer_name,
+              star_rating: existing.star_rating,
+            });
+          }
         }
       } else {
         await db('google_reviews').insert({
@@ -899,6 +931,11 @@ class GoogleBusinessService {
     // after every location's reviews are inserted/linked — the likely-reviewer
     // exclusion must see the full batch (codex #3264 r2).
     const pendingUnlinked = [];
+    // Reinstated-review notifications (stamped missing_since → cleared),
+    // collected across the run and fired as one bell per location — the
+    // removal alert's correction; without it "removed" is the last word the
+    // admin ever hears about a review that came back.
+    const pendingRestored = [];
 
     for (const loc of WAVES_LOCATIONS) {
       try {
@@ -932,7 +969,7 @@ class GoogleBusinessService {
             pulledCounts[loc.id] = reviews.length;
             for (const review of reviews) {
               const normalized = this._normalizeGbpReview(review, loc);
-              const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked);
+              const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked, pendingRestored);
               if (result.inserted) totalNew++;
               totalSynced++;
             }
@@ -969,7 +1006,7 @@ class GoogleBusinessService {
             await this._notifyDegradedSync(loc, gbpFailure || 'no_client');
           }
           if (GOOGLE_KEY) {
-            const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked);
+            const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked, pendingRestored);
             pulledCounts[loc.id] = sample.synced;
             totalSynced += sample.synced;
             totalNew += sample.new;
@@ -998,6 +1035,8 @@ class GoogleBusinessService {
     for (const row of pendingUnlinked) {
       await this._notifyUnlinkedReview(row);
     }
+
+    await this._notifyRestoredReviews(pendingRestored);
 
     await this._resolveGbpResourceNames();
     try {
@@ -1205,6 +1244,12 @@ class GoogleBusinessService {
         .whereNotNull('gbp_review_name')
         .whereNull('missing_since')
         .where('synced_at', '<', syncStart)
+        // Fresh-review grace window: brand-new reviews flicker in and out of
+        // the feed while Google settles (see MISSING_REVIEW_GRACE_MS) — one
+        // absent pull is not removal evidence for them. review_created_at is
+        // immutable, so the candidate select is the only place this needs to
+        // hold; a NULL creation time stays stampable (fail toward alerting).
+        .whereRaw('(review_created_at IS NULL OR review_created_at < ?)', [new Date(new Date(syncStart).getTime() - MISSING_REVIEW_GRACE_MS).toISOString()])
         // A testimonial publisher stamps a short-lived publish claim (under
         // this location's advisory lock) before its slow external posting —
         // skip claimed rows so a removal stamp cannot land mid-publication;
@@ -1282,6 +1327,47 @@ class GoogleBusinessService {
       // exact failure mode this watchdog exists to alert on.
       logger.warn(`[gbp] Missing-review reconcile failed for ${loc.name}: ${err.message}`);
       return { ok: false, error: err.message };
+    }
+  }
+
+  /**
+   * Correction bell for the removal alert: reviews whose missing_since stamp
+   * cleared this run are back on Google, and the admin who saw "removed"
+   * needs to hear it (2026-08-13: a transient false removal alert sent the
+   * owner toward filing a GBP support case for a review that was already
+   * back). One bell per location per run. Best-effort by design — the stamp
+   * is already cleared, so unlike the removal alert's claim/rollback
+   * coupling, a lost good-news bell costs nothing durable and must never
+   * fail the sync.
+   */
+  async _notifyRestoredReviews(restored) {
+    if (!Array.isArray(restored) || restored.length === 0) return;
+    const byLocation = new Map();
+    for (const row of restored) {
+      if (!byLocation.has(row.location_id)) byLocation.set(row.location_id, []);
+      byLocation.get(row.location_id).push(row);
+    }
+    for (const [locationId, rows] of byLocation) {
+      try {
+        const locName = WAVES_LOCATIONS.find(l => l.id === locationId)?.name || locationId;
+        const names = rows.slice(0, 15)
+          .map(r => `${r.reviewer_name || 'Anonymous'} (${Number(r.star_rating) || 0}-star)`)
+          .join(', ');
+        const suffix = rows.length > 15 ? ` and ${rows.length - 15} more` : '';
+        await NotificationService.notifyAdmin(
+          'review',
+          `${rows.length} Google review${rows.length === 1 ? '' : 's'} restored at ${locName}`,
+          `Back on Google for ${locName}: ${names}${suffix}. These were previously reported removed — no missing-reviews case is needed for them.`,
+          {
+            bell: true,
+            link: '/admin/reviews',
+            metadata: { locationId, reason: 'reviews_restored', count: rows.length, reviewIds: rows.map(r => r.review_id) },
+          },
+        );
+        logger.info(`[gbp] ${rows.length} previously-missing review(s) at ${locName} reappeared — stamp cleared, admin notified`);
+      } catch (err) {
+        logger.warn(`[gbp] Restored-review notification failed for ${locationId}: ${err.message}`);
+      }
     }
   }
 
