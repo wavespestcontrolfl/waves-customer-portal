@@ -309,13 +309,40 @@ async function loadCurrentServiceKeys(db, customer) {
   }
 }
 
-async function loadTurfProfile(db, customerId) {
-  const rows = await safeSelect(db, 'customer_turf_profiles', q => q
-    .where({ customer_id: customerId })
-    .where(function activeScope() {
-      this.where({ active: true }).orWhereNull('active');
-    })
-    .first());
+// EVERY price-bearing customer_turf_profiles writer goes through this fence
+// (#3391 GitHub round): FOR UPDATE on the turf row cannot serialize the
+// NO-ROW case, so a first-profile insert could land between the
+// click-to-estimate mint's null read and its estimate insert — publishing a
+// price that ignores the just-entered square footage or track. Taking the
+// customers row lock (customers → child table, the repo's order) makes the
+// write land wholly before or wholly after any in-flight mint, which holds
+// that same lock through the CTA writer. Works on a plain db handle (real
+// transaction) or an existing trx (savepoint; re-locking a row the outer
+// transaction already holds is a no-op).
+async function withTurfProfileFence(dbOrTrx, customerId, write) {
+  return dbOrTrx.transaction(async (trx) => {
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    return write(trx);
+  });
+}
+
+async function loadTurfProfile(db, customerId, { forUpdate = false } = {}) {
+  // forUpdate (GitHub #3391 round): the click-to-estimate mint re-reads the
+  // turf row under its transaction to compare against the composition's
+  // pricing-source stamp, but the admin turf-profile PUT updates the row
+  // without the customer lock — an unlocked read here could pass the
+  // comparison against values that are already being replaced, publishing a
+  // stale lawn price. Locking the active row serializes the mint against
+  // that writer (the PUT touches only this table, so no lock cycle).
+  const rows = await safeSelect(db, 'customer_turf_profiles', q => {
+    let query = q
+      .where({ customer_id: customerId })
+      .where(function activeScope() {
+        this.where({ active: true }).orWhereNull('active');
+      });
+    if (forUpdate) query = query.forUpdate();
+    return query.first();
+  });
   return rows || null;
 }
 
@@ -1025,6 +1052,11 @@ function buildQuoteOption({
     annual: amount.annual || null,
     oneTime: amount.oneTime || null,
     dueAtStart: amount.dueAtStart || null,
+    // Line-level standing setup fee (pest initialFee), SEPARATE from
+    // installation-driven dueAtStart — surfaced so mint-side belts can
+    // distinguish the disclosed membership fee from an undisclosed charge
+    // (GitHub #3391 P1).
+    setupFee: positiveNumber(line?.initialFee) || null,
     perVisit: amount.perVisit || null,
     estimatedPlanMonthly: showEstimatedPlanMonthly ? planMonthly || null : null,
     estimatedAdditionalMonthly: amount.monthly ? incrementalMonthly : null,
@@ -1064,7 +1096,15 @@ function ownedAndNotRepeatable(serviceKey, currentSet) {
   return currentSet.has(serviceKey) && !REPEATABLE_ONE_TIME_KEYS.includes(serviceKey);
 }
 
-async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, propertyLookup, propertySeed = null }) {
+async function buildCustomerPricingResponse({
+  customer, prompt, targetTier, db, propertyLookup, propertySeed = null,
+  // Opt-in ONLY (report click-to-estimate lane): attach the exact engine
+  // context each priced option was computed from, so a mint can persist the
+  // same combined-tier baseline instead of re-deriving property facts. The
+  // context carries raw engine inputs, so no default caller — and no public
+  // payload — may ever receive it.
+  includeEngineContext = false,
+}) {
   const text = String(prompt || '').trim();
   const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer);
   // Two sets on purpose (codex #3253 r2): currentServiceKeys (WaveGuard
@@ -1224,6 +1264,33 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
       // future path ever routes an owned service here, no price for it can
       // still reach the customer.
       if (ownedAndNotRepeatable(option.serviceKey, ownedSet)) continue;
+      if (includeEngineContext) {
+        // The exact inputs this option's price came from. targetOnlyServices
+        // is the option WITHOUT the modeled current services: an estimate
+        // minted from it prices just the new service, with the combined
+        // WaveGuard tier restored through priorQualifyingServices — the
+        // engine unions those into tierServiceKeys, so the target line's
+        // tier discount matches this combined run (the mint cross-checks
+        // that equality to the cent before anything persists).
+        quoted.engineContext = {
+          propertyInput: propertyContext.propertyInput,
+          targetOnlyServices: optionServices(option, context),
+          currentServiceKeys: [...currentServiceKeys],
+          // The RAW staff-writable price-bearing sources this pricing read
+          // (GitHub #3391 round: address/property_type equality alone
+          // misses these) — the mint re-reads both rows under its lock and
+          // treats any change as offer drift.
+          pricingSourceStamp: {
+            lot_sqft: customer.lot_sqft ?? null,
+            property_sqft: customer.property_sqft ?? null,
+            bed_sqft: customer.bed_sqft ?? null,
+            palm_count: customer.palm_count ?? null,
+            lawn_type: customer.lawn_type ?? null,
+            turf_lawn_sqft: turfProfile?.lawn_sqft ?? null,
+            turf_track_key: turfProfile?.track_key ?? turfProfile?.grass_type ?? null,
+          },
+        };
+      }
       if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) options.push(quoted);
     }
   }
@@ -1295,6 +1362,18 @@ module.exports = {
   loadTurfProfile,
   findLineItem,
   quoteAmountFromLine,
+  // Shared per-visit derivation (report click-to-estimate lane): the mint's
+  // cent-exact cross-check must read a per-application price off an engine
+  // result EXACTLY the way the card's quote did — one function, no second
+  // derivation to drift.
+  quotedPerVisitForServiceKey: (estimate, serviceKey) =>
+    quoteAmountFromLine(findLineItem(estimate, serviceKey)).perVisit || null,
+  // Ownership/qualifying loader (report click-to-estimate lane): the mint's
+  // in-transaction ownership revalidation must resolve the customer's
+  // current services EXACTLY the way the card's composition did — one
+  // loader, one street-scope resolution, no second derivation to drift.
+  loadCurrentServiceKeys,
+  withTurfProfileFence,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.
   _private: { resolvePropertyContext, missingPropertyFor },

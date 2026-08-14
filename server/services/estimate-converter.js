@@ -3767,13 +3767,18 @@ const EstimateConverter = {
     try {
       const grass = grassTypeToPersist(recurringServices, estimateData);
       if (grass) {
-        await database('customer_turf_profiles')
+        // Customer-lock fence (#3391): a first-profile insert must not race
+        // the click-to-estimate mint's turf revalidation. `database` may
+        // already be the acceptance transaction — the fence then runs as a
+        // savepoint and the re-lock is a no-op.
+        const { withTurfProfileFence } = require('./customer-pricing-ai');
+        await withTurfProfileFence(database, customerId, (trx) => trx('customer_turf_profiles')
           .insert({ customer_id: customerId, grass_type: grass })
           .onConflict('customer_id')
           .merge({
-            grass_type: database.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [grass]),
+            grass_type: trx.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [grass]),
             updated_at: new Date(),
-          });
+          }));
       }
     } catch (grassErr) {
       logger.warn?.(`[estimate-converter] grass-type persist skipped for customer ${customerId}: ${grassErr.message}`);

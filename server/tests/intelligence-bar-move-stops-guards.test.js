@@ -75,6 +75,15 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
+  // The mover's per-stop CAS now runs inside a short trx that holds the
+  // tech-day advisory fence (tech-day-lock.js). Delegate trx → db so each
+  // test's db.mockImplementation keeps serving the same query sequence; the
+  // fence probes ride trx.raw.
+  db.transaction = jest.fn(async (cb) => {
+    const trx = (table) => db(table);
+    trx.raw = (...args) => db.raw(...args);
+    return cb(trx);
+  });
   // Default to the real ET comparison so future-date tests resolve to false;
   // the same-day test overrides this with a deterministic keyed impl.
   datetimeEt.sameDayWindowElapsed.mockImplementation(actualElapsed);

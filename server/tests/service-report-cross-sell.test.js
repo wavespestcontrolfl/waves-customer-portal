@@ -230,6 +230,47 @@ describe('buildReportCrossSell', () => {
     expect(result.currentServices).toBeUndefined();
   });
 
+  describe('engineContext is opt-in mint material, never public payload (click-to-estimate lane)', () => {
+    const args = () => ({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+    });
+
+    test('the default (read-path) call NEVER carries engineContext', async () => {
+      const result = await buildReportCrossSell(SERVICE(), dbFor(args()), { propertyLookup: missLookup });
+      expect(result.mode).toBe('priced');
+      expect(result.engineContext).toBeUndefined();
+    });
+
+    test('opting in attaches the exact engine context of the picked option, and the fingerprint is unchanged', async () => {
+      const bare = await buildReportCrossSell(SERVICE(), dbFor(args()), { propertyLookup: missLookup });
+      const withContext = await buildReportCrossSell(SERVICE(), dbFor(args()), {
+        propertyLookup: missLookup, includeEngineContext: true,
+      });
+      expect(withContext.engineContext).toBeTruthy();
+      expect(withContext.engineContext.propertyInput).toBeTruthy();
+      expect(withContext.engineContext.targetOnlyServices).toBeTruthy();
+      expect(Array.isArray(withContext.engineContext.currentServiceKeys)).toBe(true);
+      expect(withContext.engineContext.customer?.id).toBe('cust-1');
+      // Which proof admitted the report rides to the mint (GitHub #3391
+      // round P1): a single-premises-admitted report must re-prove under
+      // the mint lock, a linkage-proven one must not.
+      expect(['report_linkage', 'single_premises']).toContain(withContext.engineContext.premisesProof);
+      // The context must not perturb the drift check: read path and click
+      // path fingerprint the SAME public payload, or every valid tap 409s.
+      expect(withContext.fingerprint).toBe(bare.fingerprint);
+    });
+
+    test('a quote-mode offer carries no engine context even when asked — there is nothing to mint', async () => {
+      hasVerifiedOverrides.mockResolvedValueOnce(true);
+      const demoted = await buildReportCrossSell(SERVICE(), dbFor(args()), {
+        propertyLookup: missLookup, includeEngineContext: true,
+      });
+      expect(demoted.mode).toBe('quote_cta');
+      expect(demoted.engineContext).toBeUndefined();
+    });
+  });
+
   describe('a verified correction on file never prices through the seed (PR r12 P1)', () => {
     // On a cache miss the price falls back to the accepted-estimate seed,
     // but a technician's correction supersedes that estimate too (the seed

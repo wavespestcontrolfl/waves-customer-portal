@@ -556,20 +556,25 @@ function positiveNumber(value) {
 // received"). Staff QA views post nothing and report success so the flow is
 // previewable without polluting analytics.
 async function submitReportEvent(token, eventName, metadata = {}) {
-  // Returns { ok, status } — status 0 for network failure. The cross-sell
-  // card needs the 409 (stale offer) distinguished from a transient error:
-  // retrying the same stale payload can never succeed (codex #3367 PR r5).
-  if (!token || !eventName) return { ok: false, status: 0 };
-  if (staffViewTokens.has(token)) return { ok: true, status: 200 };
+  // Returns { ok, status, body } — status 0 for network failure. The
+  // cross-sell card needs the 409 (stale offer) distinguished from a
+  // transient error: retrying the same stale payload can never succeed
+  // (codex #3367 PR r5). body is the parsed JSON response (null when
+  // unparsable): a priced tap's confirmation can carry estimateUrl, the
+  // redirect into the freshly minted estimate. Staff QA short-circuits
+  // report a bodyless success so a staff tap can never redirect.
+  if (!token || !eventName) return { ok: false, status: 0, body: null };
+  if (staffViewTokens.has(token)) return { ok: true, status: 200, body: null };
   try {
     const response = await fetch(`${API_BASE}/reports/${token}/events`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ eventName, channel: 'public_report', metadata }),
     });
-    return { ok: response.ok, status: response.status };
+    const body = await response.json().catch(() => null);
+    return { ok: response.ok, status: response.status, body };
   } catch {
-    return { ok: false, status: 0 };
+    return { ok: false, status: 0, body: null };
   }
 }
 
@@ -2970,6 +2975,25 @@ function CrossSellCard({ data, token, mode }) {
     // retrying the same stale payload can never succeed, so prompt a
     // refresh instead of a dead retry loop (codex #3367 PR r5).
     setRequestState(result.ok ? 'sent' : result.status === 409 ? 'stale' : 'failed');
+    // Click-to-estimate (GATE_REPORT_CLICK_TO_ESTIMATE): a priced tap's
+    // response can carry the freshly minted estimate's URL — go straight
+    // into the estimate page (slot pick + acceptance). The 'sent'
+    // confirmation above stays rendered behind the navigation, so a blocked
+    // redirect still shows the recorded-request copy, never a dead card.
+    // SAME-ORIGIN only, against the browser's actual origin (belt-and-
+    // braces on a server-composed value): the report and estimate pages are
+    // one SPA, so a legitimate link always shares this page's origin — in
+    // prod and in preview/dev environments alike — and anything
+    // cross-origin or unparsable never navigates.
+    const estimateUrl = result.ok ? result.body?.estimateUrl : null;
+    if (typeof estimateUrl === 'string' && estimateUrl) {
+      try {
+        const parsed = new URL(estimateUrl, window.location.origin);
+        if (parsed.origin === window.location.origin) {
+          window.location.assign(parsed.href);
+        }
+      } catch { /* unparsable URL: keep the confirmation, never navigate */ }
+    }
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">

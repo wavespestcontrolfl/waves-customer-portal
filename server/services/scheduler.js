@@ -9,7 +9,7 @@ const logger = require('./logger');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive } = require('../utils/cron-lock');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
@@ -755,6 +755,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:40AM — Vision delta scoring sweep (before/after photo pairs on
+  // treatment_outcomes → VISION-tier visual-change verdict). Bounded (25/run),
+  // idempotent (vision_scored_at is terminal), and entirely inert unless
+  // GATE_VISION_DELTA is set (canonical gateEnvValue parse; registered as
+  // visionDelta in config/feature-gates.js) — the gate check lives inside the service
+  // (single source of truth), so this leg is a no-op beyond the gated early
+  // return. runExclusive: read-then-act — a deploy overlap must not
+  // double-score (and double-bill) the same photo pairs.
+  // =========================================================================
+  cron.schedule('40 3 * * *', async () => {
+    try {
+      const res = await runExclusive('vision-delta-sweep', () =>
+        require('./vision-delta').sweepUnscoredOutcomes());
+      if (res && !res.skipped) {
+        logger.info(`Vision delta sweep: ${res.scored}/${res.candidates} scored`);
+      }
+    } catch (err) {
+      logger.error(`Vision delta sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
   // renames from the unit-review queue only: "Gallons" -> gal at factor 1;
   // missing-unit and ambiguous-oz rows stay parked for review). Gate is
@@ -902,9 +924,87 @@ function initScheduledJobs() {
         const { runAutoDispatch } = require('./auto-dispatch');
         const result = await runAutoDispatch({ triggeredBy: 'cron' });
         logger.info(`[auto-dispatch] cron run ${result.runId} ${result.status}: evaluated=${result.evaluated} recommended=${result.recommended} changed=${result.changed} skipped=${result.skipped} failed=${result.failed}`);
+        // completed_with_errors (guard-read outage or failed applies) and
+        // failed must FAIL job health — the run row already records the
+        // detail; a degraded night must not read as a green
+        // auto-dispatch-recurring (same guard as the 4:20 reorder cron).
+        if (result.status !== 'completed') {
+          throw new Error(`auto-dispatch run ${result.runId} unhealthy: status=${result.status} failed=${result.failed}`);
+        }
       });
     } catch (err) {
       logger.error(`Auto-Dispatch run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 4:20AM — ROUTE-TIERS nightly intra-day reorder (tier 3: 72h–7d
+  // band). Rewrites route_order per tech-day via the shared optimizer when
+  // savings clear the floor; NEVER moves a visit's date/window/tech, skips any
+  // day containing a frozen visit (<72h or 72h reminder sent), never touches
+  // >25-stop tech-days (Google cap — logged, not truncated). Double-gated
+  // (cronJobs AND routeReorder); the tier day-moves themselves ride the 4:10
+  // auto-dispatch run above (its eligibility is tier-aware when
+  // GATE_ROUTE_TIERS is on). Zero customer comms by construction.
+  // =========================================================================
+  cron.schedule('20 4 * * *', async () => {
+    // Call-time read (NOT the baked isEnabled snapshot) so a Railway var flip
+    // takes effect on the next tick without a redeploy — matching the
+    // documented gate contract and the service's own internal check.
+    if (!gateEnvValue('GATE_ROUTE_REORDER')) return;
+    logger.info('Running: Route-Tiers nightly reorder');
+    try {
+      // runExclusive x2: 'route-tiers-nightly' guards against deploy-overlap
+      // double-runs of THIS job; nesting inside 'auto-dispatch-recurring'
+      // serializes the two autonomous schedule WRITERS — auto-dispatch's
+      // apply pass can land moves onto reorder-band days (destination floor
+      // is 5 days out, band is 1–6), and SERIALIZABLE isolation alone cannot
+      // fence a concurrent writer running at weaker isolation. If the 4:10
+      // run is still holding the lock, tonight's reorder tick is skipped
+      // (advisory lock is non-blocking) and picked up tomorrow.
+      await runExclusive('route-tiers-nightly', async () => {
+        const { runRouteReorderIfEnabled, recordSkippedTick } = require('./route-reorder');
+        // recordHealth:false — this invocation only BORROWS the writer lock;
+        // recording it would stamp a fresh 4:20 success under the 4:10 job's
+        // name, clearing real failures and falsifying last_success_at.
+        const inner = await runExclusive('auto-dispatch-recurring', async () => runRouteReorderIfEnabled(), { recordHealth: false });
+        // STRICT boolean — a completed run returns skipped as a NUMERIC
+        // count of skipped tech-days (frozen days are routine), and a
+        // truthy check would ledger a false skipped tick + fail job health
+        // on any normal night with one skip. Only runExclusive's
+        // lock-contention shape ({ skipped: true, reason }) means the tick
+        // itself never ran (uncapped audit r27 P1).
+        if (inner && inner.skipped === true) {
+          // The 4:10 job still held the writer lock — the tick did NOT run.
+          // Ledger it as skipped so job health / the dispatch card never show
+          // a lock-starved night as a successful run with no output.
+          logger.warn(`[route-reorder] tick skipped (${inner.reason}) — auto-dispatch still holds the writer lock`);
+          const tickId = await recordSkippedTick(inner.reason);
+          // recordSkippedTick swallows insert errors and returns null — a
+          // lost skip ledger must fail job health like any lost ledger, or
+          // the night is invisible everywhere.
+          if (tickId == null) {
+            throw new Error(`route-reorder skipped tick (${inner.reason}) could not be ledgered`);
+          }
+          // Ledgered — but the night still had NO reorder pass. Returning
+          // normally would let the outer runExclusive stamp
+          // 'route-tiers-nightly' as a fresh SUCCESS, hiding the missed run
+          // from job health (uncapped audit r20 P1). Fail loud like every
+          // other not-fully-successful night; the ledger row keeps the
+          // dispatch card accurate either way.
+          throw new Error(`route-reorder tick skipped (${inner.reason}) — no reorder ran (ledger ${tickId})`);
+        }
+        const result = inner || {};
+        logger.info(`[route-reorder] cron run ${result.status}: applied=${result.applied ?? 0} skipped=${result.skipped ?? 0} failed=${result.failed ?? 0} ledger=${result.ledgerId ?? 'none'}`);
+        // Anything short of a fully-successful, ledgered run must FAIL job
+        // health — a guard outage (completed_with_errors) or a lost ledger
+        // otherwise reads as a healthy night with no visible output.
+        if (result.status !== 'gate_off' && (result.status !== 'completed' || result.ledgerId == null)) {
+          throw new Error(`route-reorder run unhealthy: status=${result.status ?? 'unknown'} ledger=${result.ledgerId ?? 'none'}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Route-Tiers reorder run failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -5094,9 +5194,22 @@ function initScheduledJobs() {
     let refreshFailed = false;
     try {
       const wiki = require('./agronomic-wiki');
-      const result = await wiki.weeklyRefreshIfDue();
-      if (result?.error) refreshFailed = true;
-      else if (!result.skipped) {
+      // runExclusive: the 6-day update-log guard inside weeklyRefreshIfDue is
+      // check-then-act, not atomic — during a rolling deploy two instances can
+      // both pass it and double-run the refresh. Same hazard the digest leg
+      // already locks against; a lease_held skip means another instance owns
+      // this tick's whole chain, so bail out of legs 2-3 too.
+      // weeklyRefreshIfDue swallows failures into { error } — rethrow inside
+      // the lock so job_health records the failure instead of a false success.
+      const result = await runExclusive('wiki-weekly-refresh', async () => {
+        const r = await wiki.weeklyRefreshIfDue();
+        if (r?.error) {
+          throw Object.assign(new Error(`wiki refresh failed: ${r.error}`), { result: r });
+        }
+        return r;
+      });
+      if (result?.reason === 'lease_held' || result?.reason === 'no_connection') return;
+      if (!result.skipped) {
         logger.info(`Agronomic wiki refresh done: ${result.refreshed} pages refreshed`);
       }
     } catch (err) {
@@ -5121,7 +5234,16 @@ function initScheduledJobs() {
     }
     try {
       const KnowledgeBridge = require('./knowledge-bridge');
-      const result = await KnowledgeBridge.syncToClaudeopediaIfDue();
+      // A sync that finished with per-entry errors must not record a healthy
+      // job_health row — rethrow inside the lock (partial progress is already
+      // persisted; the weekly marker semantics are unchanged by the throw).
+      const result = await runExclusive('wiki-kb-sync', async () => {
+        const r = await KnowledgeBridge.syncToClaudeopediaIfDue();
+        if (r?.errors > 0) {
+          throw Object.assign(new Error(`wiki→KB sync completed with ${r.errors} error(s): ${r.created} created, ${r.updated} updated`), { result: r });
+        }
+        return r;
+      });
       if (!result.skipped) {
         logger.info(`Wiki→KB trusted sync done: ${result.created} created, ${result.updated} updated, ${result.errors} errors`);
       }
@@ -5144,6 +5266,39 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Wiki yellow digest failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // HOURLY :40 — Treatment-outcome weather enrichment retry sweep. The
+  // confirm-time enrichment (linkTreatmentOutcome → backfillOutcomeWeather)
+  // is fire-and-forget and each service record links exactly once, so a
+  // transient FAWN/update failure on the first attempt would otherwise leave
+  // the outcome's weather columns null forever. The sweep re-runs the
+  // backfill for same-day all-null rows; its same-day/≤6h freshness gates
+  // fail closed, so late rows age out rather than getting wrong-day
+  // conditions stamped. Hourly because the window is the treatment day
+  // itself — a daily fire would miss most of it.
+  // =========================================================================
+  cron.schedule('40 * * * *', async () => {
+    try {
+      const wiki = require('./agronomic-wiki');
+      // runExclusive: overlapping deploy instances must not double-fetch
+      // FAWN; a sweep that itself errored must reach job_health, not log a
+      // healthy run — rethrow inside the lock (same idiom as the wiki legs).
+      const result = await runExclusive('wiki-weather-backfill-sweep', async () => {
+        const r = await wiki.sweepMissingOutcomeWeather();
+        if (r?.error) {
+          throw Object.assign(new Error(`weather backfill sweep failed: ${r.error}`), { result: r });
+        }
+        return r;
+      });
+      if (result?.reason === 'lease_held' || result?.reason === 'no_connection') return;
+      if (result?.enriched > 0) {
+        logger.info(`Treatment-outcome weather sweep: ${result.enriched}/${result.checked} enriched`);
+      }
+    } catch (err) {
+      logger.error(`Treatment-outcome weather sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

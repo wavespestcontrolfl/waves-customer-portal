@@ -247,22 +247,22 @@ async function resolveAssessmentServiceRecordId(assessment) {
 async function attachOutcomePhotoRefs(outcome, assessmentId) {
   if (!outcome) return;
   try {
+    // setOutcomeBestPhotoKey: a re-elected best photo on an already-scored
+    // outcome atomically clears the vision-delta fields so the stored verdict
+    // can never describe a photo pair the row no longer points at.
+    const VisionDelta = require('../services/vision-delta');
     const bestPhoto = await db('lawn_assessment_photos')
       .where({ assessment_id: assessmentId, is_best_photo: true })
       .first();
     if (bestPhoto) {
-      await db('treatment_outcomes')
-        .where({ id: outcome.id })
-        .update({ post_best_photo_key: bestPhoto.s3_key });
+      await VisionDelta.setOutcomeBestPhotoKey(outcome.id, 'post_best_photo_key', bestPhoto.s3_key);
     }
     if (outcome.pre_assessment_id) {
       const preBestPhoto = await db('lawn_assessment_photos')
         .where({ assessment_id: outcome.pre_assessment_id, is_best_photo: true })
         .first();
       if (preBestPhoto) {
-        await db('treatment_outcomes')
-          .where({ id: outcome.id })
-          .update({ pre_best_photo_key: preBestPhoto.s3_key });
+        await VisionDelta.setOutcomeBestPhotoKey(outcome.id, 'pre_best_photo_key', preBestPhoto.s3_key);
       }
     }
   } catch (photoRefErr) {
@@ -655,13 +655,17 @@ router.post('/assess', async (req, res, next) => {
     // edit or estimate). Fail-soft — never break the assessment.
     if (mergedComposite.grass_type) {
       try {
-        await db('customer_turf_profiles')
+        // Customer-lock fence (#3391): a first-profile insert must not race
+        // the click-to-estimate mint's turf revalidation — every
+        // price-bearing turf writer takes the shared fence.
+        const { withTurfProfileFence } = require('../services/customer-pricing-ai');
+        await withTurfProfileFence(db, customerId, (trx) => trx('customer_turf_profiles')
           .insert({ customer_id: customerId, grass_type: mergedComposite.grass_type })
           .onConflict('customer_id')
           .merge({
-            grass_type: db.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [mergedComposite.grass_type]),
+            grass_type: trx.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [mergedComposite.grass_type]),
             updated_at: new Date(),
-          });
+          }));
       } catch (grassErr) {
         logger.warn?.(`[lawn-assessment] grass-type auto-capture skipped for ${customerId}: ${grassErr.message}`);
       }

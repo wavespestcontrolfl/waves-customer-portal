@@ -304,6 +304,17 @@ describe('onEstimateViewed (view-event rules)', () => {
     await Engine.onEstimateViewed(baseEstimate({ customer_email: null }));
     expect(db).not.toHaveBeenCalled();
   });
+
+  test('an engagement-opted-out estimate never evaluates (#3391: zero-comms publish-without-delivery mints)', async () => {
+    await Engine.onEstimateViewed(baseEstimate({
+      estimate_data: JSON.stringify({ noEngagementAutomation: true }),
+    }));
+    // Object-form estimate_data (jsonb hydration) opts out identically.
+    await Engine.onEstimateViewed(baseEstimate({
+      estimate_data: { noEngagementAutomation: true },
+    }));
+    expect(db).not.toHaveBeenCalled();
+  });
 });
 
 describe('processDueJobs', () => {
@@ -360,6 +371,20 @@ describe('processDueJobs', () => {
     const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'done' }));
     expect(followupShared.bumpFollowupCounters).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
+  });
+
+  test('an engagement-opted-out estimate skips at the SEND choke point — covers jobs enqueued before the marker', async () => {
+    enqueueProcessorHappyPath({
+      est: baseEstimate({ estimate_data: JSON.stringify({ noEngagementAutomation: true }) }),
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result).toEqual({ sent: 0, shadow: 0 });
+    expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+    expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'engagement-opted-out' }));
   });
 
   test('gate off = shadow: job consumed, would-send logged, nothing claimed', async () => {

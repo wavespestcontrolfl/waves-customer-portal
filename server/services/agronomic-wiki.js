@@ -371,6 +371,132 @@ async function logUpdate(action, entrySlug, description, opts = {}) {
   }
 }
 
+// Treatment-day weather onto an outcome row (single reading, not a window
+// average — the column names predate this writer; rainfall is the station's
+// 7-day accumulation). Prefer the post-assessment's persisted FAWN snapshot
+// (no network); fall back to a current fetch, which approximates application
+// conditions since the link runs on treatment day. Enrichment only — never
+// blocks or fails the link; a transient failure logs and leaves the weather
+// columns null for the early-return retry path to pick up (codex P2 r4).
+async function backfillOutcomeWeather(outcome, post, treatmentDate, applicationMoment) {
+  try {
+    const { etCalendarDayOf, etDateString, parseETDateTime } = require('../utils/datetime-et');
+    // The post-assessment's snapshot only represents application-day
+    // conditions when the assessment happened ON the treatment day —
+    // the legacy pairing accepts assessments up to 60 days later. And
+    // even a same-day assessment can carry a STALE snapshot:
+    // attachWeather persists fawn-weather's cached _lastSnapshot on
+    // fetch failure, with no age limit. So the snapshot's own recorded
+    // moment (observation_time when present, else fetch timestamp)
+    // must ALSO land on the treatment day; missing or unparseable
+    // snapshot metadata fails closed.
+    // Shared freshness bound (±6h around the APPLICATION moment, not
+    // processing time): both the persisted snapshot and the getCurrent()
+    // fallback can carry fawn-weather's age-unlimited cached _lastSnapshot,
+    // and even a same-ET-day snapshot from just after midnight can be 20+
+    // hours from the application. Anchoring to Date.now() had it both ways
+    // wrong: the hourly sweep could stamp an 11 PM observation onto a
+    // morning application (same-day check passes, observation is "fresh"
+    // relative to the sweep tick), and a link processed 6+ hours after
+    // completion rejected a snapshot recorded AT application time. The
+    // anchor is service_records.created_at — the record is created when
+    // the visit is completed in the field. No parseable anchor fails
+    // closed (the row ages out rather than guessing at conditions); the
+    // absolute window also bounds clock-skewed future observation_times.
+    const FRESH_MS = 6 * 60 * 60 * 1000;
+    const parseMoment = (value) => {
+      if (value == null) return null;
+      // parseETDateTime's naive-as-ET handling only recognizes the T form;
+      // a space-separated naive timestamp (station payloads pass through
+      // unnormalized) would fall to new Date() and parse as UTC/local —
+      // a 4–5h shift that corrupts both the day gate and the ±6h window.
+      const normalized = String(value).trim()
+        .replace(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}(?::\d{2})?)$/, '$1T$2');
+      const parsed = parseETDateTime(normalized);
+      const ms = parsed?.getTime?.();
+      return Number.isFinite(ms) ? parsed : null;
+    };
+    const anchorMs = (() => {
+      if (applicationMoment instanceof Date && Number.isFinite(applicationMoment.getTime())) {
+        return applicationMoment.getTime();
+      }
+      const parsed = parseMoment(applicationMoment);
+      return parsed ? parsed.getTime() : null;
+    })();
+    if (anchorMs === null) return false;
+    const withinFreshWindow = (parsed) => Math.abs(parsed.getTime() - anchorMs) < FRESH_MS;
+    const postIsTreatmentDay = etCalendarDayOf(post.service_date) === etCalendarDayOf(treatmentDate);
+    let snapshotUsable = false;
+    if (postIsTreatmentDay && post.fawn_snapshot) {
+      try {
+        const snap = typeof post.fawn_snapshot === 'string' ? JSON.parse(post.fawn_snapshot) : post.fawn_snapshot;
+        const parsed = parseMoment(snap?.observation_time ?? snap?.timestamp);
+        snapshotUsable = parsed !== null
+          && etDateString(parsed) === etCalendarDayOf(treatmentDate)
+          && withinFreshWindow(parsed);
+      } catch { /* unparseable snapshot fails closed */ }
+    }
+    let weather = snapshotUsable
+      && (post.fawn_temp_f != null || post.fawn_humidity_pct != null || post.fawn_rainfall_7d != null)
+      ? { temp_f: post.fawn_temp_f, humidity_pct: post.fawn_humidity_pct, rainfall_in: post.fawn_rainfall_7d }
+      : null;
+    // Current-conditions fallback ONLY when the treatment is actually
+    // today (ET): a late confirm or resumed completion can link a
+    // historical treatment, and stamping today's weather onto it would
+    // permanently misattribute the application conditions.
+    // etCalendarDayOf, not etDateString: service_date is a pg DATE
+    // materialized at UTC midnight — the ET wall clock would shift it
+    // to the previous day and the same-day check would never pass.
+    // Runs for a PARTIAL snapshot too — a fresh snapshot carrying only
+    // one sensor would otherwise satisfy the truthy check, skip this
+    // merge, and COALESCE the same nulls every hour until ET midnight
+    // closes the window and the gaps go permanent.
+    const weatherIncomplete = !weather
+      || weather.temp_f == null || weather.humidity_pct == null || weather.rainfall_in == null;
+    if (weatherIncomplete && etCalendarDayOf(treatmentDate) === etDateString()) {
+      const fawn = await require('./fawn-weather').getCurrent();
+      // Same ≤6h bound as the persisted-snapshot path above. The
+      // STATION's observation_time is authoritative when present
+      // (naive strings are ET wall-clock — parseETDateTime handles
+      // that); fetch-time `timestamp` is only a cache-age fallback.
+      // Present-but-unparseable observation_time fails closed.
+      const freshMoment = (value) => {
+        if (value == null) return null;
+        const parsed = parseMoment(value);
+        return parsed !== null ? withinFreshWindow(parsed) : false;
+      };
+      const obsFresh = freshMoment(fawn?.observation_time);
+      const fresh = obsFresh !== null ? obsFresh : freshMoment(fawn?.timestamp) === true;
+      if (fawn && fawn.station !== 'unavailable' && fresh) {
+        // Merge into the snapshot's gaps only — the persisted snapshot
+        // stays authoritative for fields it actually carried.
+        weather = {
+          temp_f: weather?.temp_f ?? fawn.temp_f,
+          humidity_pct: weather?.humidity_pct ?? fawn.humidity_pct,
+          rainfall_in: weather?.rainfall_in ?? fawn.rainfall_in,
+        };
+      }
+    }
+    if (weather) {
+      // COALESCE: a partial snapshot must never null out a field a prior
+      // enrichment already populated — only fill what is missing.
+      await db('treatment_outcomes').where({ id: outcome.id }).update({
+        avg_temperature: db.raw('COALESCE(avg_temperature, ?)', [weather.temp_f ?? null]),
+        avg_humidity: db.raw('COALESCE(avg_humidity, ?)', [weather.humidity_pct ?? null]),
+        total_rainfall: db.raw('COALESCE(total_rainfall, ?)', [weather.rainfall_in ?? null]),
+      });
+      return true;
+    }
+    return false;
+  } catch (err) {
+    // 'error' is distinguishable from an ordinary no-fresh-data false —
+    // the sweep aggregates these so a FAWN/update outage reaches
+    // job_health instead of recording a healthy run.
+    logger.warn(`[agronomic-wiki] outcome ${outcome.id} weather backfill failed: ${err.message}`);
+    return 'error';
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 // CORE METHODS
 // ══════════════════════════════════════════════════════════════
@@ -393,6 +519,31 @@ const AgronomicWiki = {
         .first();
       if (existing) {
         logger.info(`[agronomic-wiki] treatment_outcome already exists for service_record ${serviceRecordId}`);
+        // Weather enrichment is fire-and-forget below, so a transient FAWN
+        // fetch or update failure would otherwise be abandoned permanently —
+        // nothing else writes these columns. Retry when the existing row
+        // still has no weather at all (codex P2 r4); the helper's same-day
+        // freshness gates still decide whether any value is usable, so a
+        // late retry fails closed rather than stamping wrong-day conditions.
+        if (existing.avg_temperature == null && existing.avg_humidity == null && existing.total_rainfall == null) {
+          setImmediate(async () => {
+            try {
+              const existingPost = existing.post_assessment_id
+                ? await db('lawn_assessments').where({ id: existing.post_assessment_id }).first()
+                : null;
+              // Anchor = the service record's completion moment; a missing
+              // record fails the backfill closed via the null anchor.
+              const existingSr = existingPost
+                ? await db('service_records').where({ id: serviceRecordId }).first()
+                : null;
+              if (existingPost) {
+                await backfillOutcomeWeather(existing, existingPost, existing.treatment_date, existingSr?.created_at);
+              }
+            } catch (err) {
+              logger.warn(`[agronomic-wiki] outcome ${existing.id} weather retry failed: ${err.message}`);
+            }
+          });
+        }
         return existing;
       }
 
@@ -541,8 +692,14 @@ const AgronomicWiki = {
         triggerId: serviceRecordId,
       });
 
-      // 8. Queue wiki page updates (fire-and-forget so we don't block the confirm)
+      // 8. Queue weather backfill + wiki page updates (fire-and-forget so we
+      // don't block the confirm — FAWN's external fetch has a 3.5s timeout
+      // and must never sit on the confirmation request path)
       setImmediate(async () => {
+        // Weather enrichment (see backfillOutcomeWeather) — never blocks the
+        // link; a transient failure leaves the columns null and the
+        // early-return path above retries on the next link attempt.
+        await backfillOutcomeWeather(outcome, post, treatmentDate, sr.created_at);
         try {
           // Update product pages
           for (const p of productsApplied) {
@@ -569,9 +726,73 @@ const AgronomicWiki = {
   },
 
   // ────────────────────────────────────────────────────────────
+  // sweepMissingOutcomeWeather — hourly retry for weather enrichment.
+  // The confirm-time enrichment is fire-and-forget and its only callers
+  // (assessment confirm, Complete Service) link each service record ONCE —
+  // a transient FAWN or update failure on that first attempt has no later
+  // trigger, so nothing would ever write avg_temperature/avg_humidity/
+  // total_rainfall (codex P2 r5). Sweep recent outcomes still missing ALL
+  // weather fields and re-run the backfill; its same-day/≤6h freshness
+  // gates fail closed, so rows past the window simply age out instead of
+  // getting wrong-day conditions stamped.
+  // ────────────────────────────────────────────────────────────
+  // limit is a runaway ceiling far above a real day's visit volume, not a
+  // page: the eligible window is a single ET day, so the whole set fits in
+  // one pass and permanently-unenrichable rows (deleted assessment,
+  // unusable snapshot) can never crowd retryable ones out of the batch.
+  async sweepMissingOutcomeWeather({ limit = 200 } = {}) {
+    const stats = { checked: 0, enriched: 0 };
+    try {
+      // Enrichment can only succeed on the treatment's own ET day — bound
+      // the scan to yesterday's ET calendar date. treatment_date is a pg
+      // DATE, so compare against an ET date string, not an instant: a UTC
+      // instant cutoff lands after ET midnight in the evening and would
+      // skip every current-day outcome after 8 PM ET. Over-selecting is
+      // safe because the backfill's gates fail closed.
+      const { etDateString: etDay, addETDays: addDays } = require('../utils/datetime-et');
+      // ANY missing field qualifies — an all-null predicate would never
+      // revisit a partially-enriched row, leaving a transiently missing
+      // humidity/rainfall reading absent forever. COALESCE in the
+      // backfill keeps already-populated values.
+      const rows = await db('treatment_outcomes')
+        .where(function anyWeatherMissing() {
+          this.whereNull('avg_temperature')
+            .orWhereNull('avg_humidity')
+            .orWhereNull('total_rainfall');
+        })
+        .whereNotNull('post_assessment_id')
+        .where('treatment_date', '>=', etDay(addDays(new Date(), -1)))
+        .orderBy('treatment_date', 'desc')
+        .limit(limit);
+      let rowErrors = 0;
+      for (const row of rows) {
+        stats.checked++;
+        const post = await db('lawn_assessments').where({ id: row.post_assessment_id }).first();
+        if (!post) continue;
+        // Anchor freshness to the visit's completion moment — without it
+        // the late-evening sweep tick would stamp current conditions onto
+        // a morning application (the same-day gate alone can't tell).
+        const sr = row.service_record_id
+          ? await db('service_records').where({ id: row.service_record_id }).first()
+          : null;
+        const outcome = await backfillOutcomeWeather(row, post, row.treatment_date, sr?.created_at);
+        if (outcome === true) stats.enriched++;
+        else if (outcome === 'error') rowErrors++;
+      }
+      // Per-row failures must reach job_health (the scheduler leg throws
+      // on stats.error) — ordinary freshness misses stay non-errors.
+      if (rowErrors) return { ...stats, error: `${rowErrors} row(s) failed enrichment` };
+      return stats;
+    } catch (err) {
+      logger.error(`[agronomic-wiki] weather backfill sweep failed: ${err.message}`);
+      return { ...stats, error: err.message };
+    }
+  },
+
+  // ────────────────────────────────────────────────────────────
   // updateProductPage — aggregate outcomes for a product, generate wiki page
   // ────────────────────────────────────────────────────────────
-  async updateProductPage(productName) {
+  async updateProductPage(productName, { rethrow = false, withState = false } = {}) {
     try {
       // One page per catalog product: resolve the applied-product string to
       // its canonical catalog name and aggregate outcomes across every known
@@ -589,7 +810,7 @@ const AgronomicWiki = {
 
       if (!outcomes.length) {
         logger.info(`[agronomic-wiki] No outcomes found for product ${productName}`);
-        return null;
+        return withState ? { entry: null, writeState: 'no_data' } : null;
       }
 
       // Aggregate stats
@@ -599,6 +820,7 @@ const AgronomicWiki = {
         stats,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
+        visionScoreToken: countVisionScored(outcomes),
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
@@ -652,9 +874,11 @@ const AgronomicWiki = {
         await syncKbCopyTrust(entry.id, TRUSTED_STATUSES.includes(entry.review_status));
       }
 
+      if (withState) return { entry, writeState: result?.writeState || 'failed' };
       return entry;
     } catch (err) {
       logger.error(`[agronomic-wiki] updateProductPage failed for ${productName}: ${err.message}`);
+      if (rethrow) throw err;
       return null;
     }
   },
@@ -662,7 +886,7 @@ const AgronomicWiki = {
   // ────────────────────────────────────────────────────────────
   // updateConditionPage — aggregate outcomes for a pest/disease/weed condition
   // ────────────────────────────────────────────────────────────
-  async updateConditionPage(conditionName) {
+  async updateConditionPage(conditionName, { rethrow = false, withState = false } = {}) {
     try {
       const slug = `condition/${slugify(conditionName)}`;
 
@@ -689,6 +913,7 @@ const AgronomicWiki = {
         assessmentCount: assessments.length,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
+        visionScoreToken: countVisionScored(outcomes),
         // Assessment-only condition pages (no outcomes yet) fingerprint on
         // the matching assessment ids — an empty id set would make the skip
         // guard blind to a changed assessment set with an equal count.
@@ -696,9 +921,11 @@ const AgronomicWiki = {
       };
 
       const result = await AgronomicWiki.generatePage(slug, 'condition', data, `Condition: ${conditionName}`);
+      if (withState) return { entry: result?.entry || null, writeState: result?.writeState || 'failed' };
       return result?.entry || null;
     } catch (err) {
       logger.error(`[agronomic-wiki] updateConditionPage failed for ${conditionName}: ${err.message}`);
+      if (rethrow) throw err;
       return null;
     }
   },
@@ -706,7 +933,7 @@ const AgronomicWiki = {
   // ────────────────────────────────────────────────────────────
   // updateTrackPage — aggregate performance across all customers on a track
   // ────────────────────────────────────────────────────────────
-  async updateTrackPage(trackId) {
+  async updateTrackPage(trackId, { rethrow = false, withState = false } = {}) {
     try {
       const slug = `track/${slugify(trackId)}`;
 
@@ -717,7 +944,7 @@ const AgronomicWiki = {
 
       if (!outcomes.length) {
         logger.info(`[agronomic-wiki] No outcomes found for track ${trackId}`);
-        return null;
+        return withState ? { entry: null, writeState: 'no_data' } : null;
       }
 
       const stats = aggregateOutcomes(outcomes);
@@ -728,13 +955,16 @@ const AgronomicWiki = {
         customerCount,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
+        visionScoreToken: countVisionScored(outcomes),
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
       const result = await AgronomicWiki.generatePage(slug, 'track', data, `Track ${trackId} Performance`);
+      if (withState) return { entry: result?.entry || null, writeState: result?.writeState || 'failed' };
       return result?.entry || null;
     } catch (err) {
       logger.error(`[agronomic-wiki] updateTrackPage failed for ${trackId}: ${err.message}`);
+      if (rethrow) throw err;
       return null;
     }
   },
@@ -742,7 +972,7 @@ const AgronomicWiki = {
   // ────────────────────────────────────────────────────────────
   // updateSeasonalPage — aggregate what happened this month
   // ────────────────────────────────────────────────────────────
-  async updateSeasonalPage(month) {
+  async updateSeasonalPage(month, { rethrow = false, withState = false } = {}) {
     try {
       const monthNames = [
         'January', 'February', 'March', 'April', 'May', 'June',
@@ -761,20 +991,49 @@ const AgronomicWiki = {
       // is definitionally filler (the query spans all years) — prune it so it
       // can't clog the stale-refresh budget or surface in agent reads.
       if (!outcomes.length) {
+        let pruned = 0;
         try {
-          const pruned = await db('knowledge_entries')
+          const staleEntry = await db('knowledge_entries')
             .where({ slug, category: 'seasonal' })
-            .del();
-          if (pruned) {
-            await logUpdate('prune', slug, `Pruned zero-outcome seasonal page for ${monthName}`, {
-              triggerType: 'wiki_generation',
-            });
+            .first('id');
+          if (staleEntry) {
+            // Remove the wiki-sync mirror BEFORE pruning its source —
+            // knowledge_base has no cascading FK and sync reconciliation
+            // only flags mirrors of still-present untrusted entries, so an
+            // orphaned zero-data mirror would stay agent-readable forever
+            // (same discipline as mergeVariantProductPages).
+            try {
+              await db('knowledge_base')
+                .where({ wiki_entry_id: staleEntry.id, source: 'wiki-sync' })
+                .del();
+            } catch (mirrorErr) {
+              // Tolerate ONLY the legacy-schema shapes (42703 undefined
+              // column / 42P01 undefined table). Anything else rethrows
+              // into the prune-failure path below — swallowing a
+              // transient error here and then deleting the source would
+              // leave an active orphaned mirror permanently readable.
+              if (mirrorErr?.code !== '42703' && mirrorErr?.code !== '42P01') throw mirrorErr;
+            }
+            pruned = await db('knowledge_entries').where({ id: staleEntry.id }).del();
           }
         } catch (err) {
+          // A failed prune leaves the stale filler page agent-readable —
+          // reporting 'no_data' here would let weeklyRefresh write its
+          // six-day success marker over it, deferring the retry a whole
+          // week (codex P2 r5). Fail the leg instead: rethrow under
+          // REFRESH_OPTS, writeState 'failed' otherwise — either way the
+          // weekly marker is withheld and tomorrow's run retries.
           logger.error(`[agronomic-wiki] Failed to prune empty seasonal page ${slug}: ${err.message}`);
+          if (rethrow) throw err;
+          return withState ? { entry: null, writeState: 'failed' } : null;
+        }
+        if (pruned) {
+          await logUpdate('prune', slug, `Pruned zero-outcome seasonal page for ${monthName}`, {
+            triggerType: 'wiki_generation',
+          });
         }
         logger.info(`[agronomic-wiki] No outcomes found for month ${month} — skipping seasonal page`);
-        return null;
+        return withState ? { entry: null, writeState: 'no_data' } : null;
       }
 
       const stats = aggregateOutcomes(outcomes);
@@ -784,13 +1043,16 @@ const AgronomicWiki = {
         stats,
         outcomes: outcomes.slice(0, 50),
         totalOutcomeCount: outcomes.length,
+        visionScoreToken: countVisionScored(outcomes),
         allOutcomeIds: outcomes.map((o) => o.id),
       };
 
       const result = await AgronomicWiki.generatePage(slug, 'seasonal', data, `${monthName} — Seasonal Intelligence`);
+      if (withState) return { entry: result?.entry || null, writeState: result?.writeState || 'failed' };
       return result?.entry || null;
     } catch (err) {
       logger.error(`[agronomic-wiki] updateSeasonalPage failed for month ${month}: ${err.message}`);
+      if (rethrow) throw err;
       return null;
     }
   },
@@ -820,6 +1082,21 @@ const AgronomicWiki = {
       // past the cap while count stays equal (delete+backfill, alias remap).
       const sourceIds = data.allOutcomeIds || (data.outcomes || []).map((o) => o.id);
 
+      // Vision scores (photo_verified_visual_change) land AFTER outcomes
+      // exist, so count + id-set alone would freeze existing pages before
+      // their outcomes get scored — the weekly refresh would keep advancing
+      // last_data_update while skipping. Fold the scored-outcome count into
+      // the fingerprint as a synthetic token (the column already carries
+      // assessment ids for condition pages — it is a change-detection
+      // fingerprint, not strict provenance). Zero scored outcomes = no token,
+      // so pre-vision rows stay byte-identical and don't mass-regenerate.
+      const visionScoreToken = typeof data.visionScoreToken === 'string' && data.visionScoreToken
+        ? data.visionScoreToken
+        : null;
+      const fingerprintIds = visionScoreToken
+        ? [...sourceIds, visionScoreToken]
+        : sourceIds;
+
       // Skip regeneration when the underlying data hasn't changed — the AI
       // pass would just rewrite the same page. Placeholder stubs are always
       // retried. last_data_update advances so the page doesn't get re-marked
@@ -831,7 +1108,7 @@ const AgronomicWiki = {
         existing &&
         !existing.content.includes('*Pending AI generation') &&
         existing.data_point_count === dataPointCount &&
-        sameSourceIds(existing.source_treatment_ids, sourceIds)
+        sameSourceIds(existing.source_treatment_ids, fingerprintIds)
       ) {
         // Data unchanged, but the review state may not be: a contradiction
         // that appeared since the last write must re-gate the page here too.
@@ -894,6 +1171,9 @@ ${JSON.stringify((data.outcomes || []).map((o) => ({
   days: o.days_between_assessments,
   grass: o.grass_type,
   products: o.products_applied,
+  // Photo-verified visual change: -100..100 delta scored by vision model from
+  // the tech's before/after photos; null = not photo-verified.
+  photo_verified_visual_change: o.vision_delta_score ?? null,
 })), null, 2)}
 
 Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve existing content that is still supported. Update statistics. Flag any contradictions.' : 'Generate a new wiki page from this data.'} Return the complete markdown page content.`;
@@ -976,7 +1256,7 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         confidence,
         last_data_update: new Date(),
         stale_flag: false,
-        source_treatment_ids: JSON.stringify(sourceIds),
+        source_treatment_ids: JSON.stringify(fingerprintIds),
         review_tier: tier,
         review_status: reviewStatus,
         risk_flags: JSON.stringify(flags),
@@ -1122,12 +1402,172 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
   },
 
   // ────────────────────────────────────────────────────────────
+  // markOutcomePagesStale — flag the wiki pages fed by an outcome as
+  // regenerate-eligible WITHOUT firing generation. Resolves the same page
+  // set linkTreatmentOutcome's fan-out updates: product pages via
+  // products_applied (canonical-resolved), the grass-track page, and the
+  // treatment month's seasonal page. weeklyRefresh selects purely on
+  // stale_flag=true (its 60-day rule only ADDS flags), so a flagged page is
+  // picked up on the next weekly run regardless of age. Used by the
+  // vision-delta scorer so a newly photo-verified outcome doesn't wait out
+  // the 60-day staleness window. Never throws unless opts.rethrow — the
+  // scorer's calls stay best-effort (its own weekly reconcile is the retry),
+  // but that reconcile itself must NOT be best-effort: a swallowed failure
+  // there lets the weekly_cron success marker stamp, and the 8-day scan
+  // window minus the 6-day guard leaves only ~2 days of margin — rows scored
+  // early in the window age out permanently instead of retrying tomorrow.
+  // ────────────────────────────────────────────────────────────
+  async markOutcomePagesStale(outcome, opts = {}) {
+    try {
+      if (!outcome) return 0;
+      const slugs = new Set();
+
+      let products = outcome.products_applied;
+      if (typeof products === 'string') {
+        try { products = JSON.parse(products); } catch { products = []; }
+      }
+      for (const p of Array.isArray(products) ? products : []) {
+        if (p?.name) {
+          const { canonicalName } = await resolveCanonicalProduct(p.name);
+          slugs.add(`product/${slugify(canonicalName)}`);
+        }
+      }
+
+      if (outcome.grass_track) slugs.add(`track/${slugify(String(outcome.grass_track))}`);
+
+      if (outcome.treatment_date) {
+        // treatment_date is a date-only business field; updateSeasonalPage
+        // selects by EXTRACT(MONTH ...) — the calendar month of the stored
+        // date. Read the month from the literal date, never through
+        // new Date('YYYY-MM-DD').getMonth() (UTC-midnight parse shifts
+        // 'YYYY-MM-01' into the PREVIOUS month in any western-hemisphere
+        // local timezone). pg Date objects parse at local midnight, so
+        // getMonth() on a real Date matches the stored date.
+        const raw = outcome.treatment_date;
+        const literal = /^(\d{4})-(\d{2})-(\d{2})/.exec(typeof raw === 'string' ? raw : '');
+        const month = literal
+          ? Number(literal[2])
+          : (raw instanceof Date && !Number.isNaN(raw.getTime()) ? raw.getMonth() + 1 : null);
+        const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
+          'july', 'august', 'september', 'october', 'november', 'december'];
+        if (monthNames[month - 1]) slugs.add(`seasonal/${monthNames[month - 1]}`);
+      }
+
+      // Condition pages aggregate outcomes by CUSTOMER set
+      // (updateConditionPage: assessments whose observations mention the
+      // condition → those customers' outcomes) — so any condition page whose
+      // name appears in this customer's assessment observations consumes
+      // this outcome and must re-gen too. Same substring semantics as the
+      // ilike %name% query, inverted in JS over the (small) page set.
+      if (outcome.customer_id) {
+        const conditionPages = await db('knowledge_entries')
+          .where({ category: 'condition' })
+          .select('slug', 'title');
+        if (conditionPages.length) {
+          const observationRows = await db('lawn_assessments')
+            .where({ customer_id: outcome.customer_id })
+            .whereNotNull('observations')
+            .select('observations');
+          const haystack = observationRows.map((r) => String(r.observations).toLowerCase());
+          for (const page of conditionPages) {
+            const name = String(page.title || '').replace(/^Condition:\s*/i, '').toLowerCase();
+            if (name && haystack.some((obs) => obs.includes(name))) slugs.add(page.slug);
+          }
+        }
+      }
+
+      if (!slugs.size) return 0;
+      const flagged = await db('knowledge_entries')
+        .whereIn('slug', [...slugs])
+        .where({ stale_flag: false })
+        .update({ stale_flag: true, updated_at: new Date() });
+      if (flagged) {
+        logger.info(`[agronomic-wiki] Marked ${flagged} page(s) stale for outcome ${outcome.id}`);
+      }
+      return flagged;
+    } catch (err) {
+      logger.error(`[agronomic-wiki] markOutcomePagesStale failed for outcome ${outcome?.id}: ${err.message}`);
+      if (opts.rethrow) throw err;
+      return 0;
+    }
+  },
+
+  // ────────────────────────────────────────────────────────────
   // weeklyRefresh — cron job: update stale pages, generate seasonal page
   // ────────────────────────────────────────────────────────────
   async weeklyRefresh() {
     logger.info('[agronomic-wiki] Starting weekly refresh');
 
     try {
+      // 0. Vision-score invalidation reconcile: scoreOutcome's stale-flagging
+      // is best-effort (a transient failure there is swallowed and the sweep
+      // never re-selects a scored row), so re-run the idempotent flagging for
+      // recently scored outcomes here. 8-day window = one weekly cycle plus
+      // margin; already-regenerated pages skip cheaply via the fingerprint
+      // token and the skip branch clears the flag again.
+      // Failures here must withhold the weekly success marker like any
+      // stale-loop failure: markOutcomePagesStale returns 0 on error and
+      // this block used to swallow scan errors too, so a failed reconcile
+      // recorded a healthy run and suppressed the retry for six days —
+      // past the scan window's ~2-day margin, permanently dropping rows
+      // scored early in the window (codex P2). Count per-outcome and
+      // whole-scan failures; a non-zero count joins the failed>0 path
+      // below (no marker, { error } to job_health, retry tomorrow).
+      let reconcileFailed = 0;
+      try {
+        // Select on the terminal stamp (vision_scored_at), NOT a non-null
+        // score: a cleared-then-replaced pair whose replacement scores null
+        // or fails terminally still stamps scored_at, and its pages may
+        // narrate the REMOVED score — this weekly pass is the durable retry
+        // behind the best-effort flagging at clear/score time. Over-flagging
+        // is cheap: an unchanged fingerprint takes the skip branch and
+        // clears the flag again.
+        //
+        // Keyset-paginate the whole 8-day window oldest-first on the
+        // composite (vision_scored_at, id) — a timestamp-only cursor would
+        // drop rows sharing the boundary timestamp, and a burst larger than
+        // one page must never silently age out before the next weekly run.
+        // The gated sweep stamps ≤25/day, so 20×100 is far past any
+        // legitimate volume.
+        const windowStart = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+        let cursorTs = windowStart;
+        let cursorId = null;
+        for (let page = 0; page < 20; page++) {
+          let query = db('treatment_outcomes').whereNotNull('vision_scored_at');
+          if (cursorId === null) {
+            query = query.where('vision_scored_at', '>', cursorTs);
+          } else {
+            const ts = cursorTs;
+            const id = cursorId;
+            query = query.where(function () {
+              this.where('vision_scored_at', '>', ts)
+                .orWhere(function () {
+                  this.where('vision_scored_at', ts).andWhere('id', '>', id);
+                });
+            });
+          }
+          const batch = await query
+            .orderBy('vision_scored_at', 'asc')
+            .orderBy('id', 'asc')
+            .limit(100);
+          for (const outcome of batch) {
+            try {
+              await AgronomicWiki.markOutcomePagesStale(outcome, { rethrow: true });
+            } catch {
+              // Already logged inside; keep flagging the rest of the batch.
+              reconcileFailed++;
+            }
+          }
+          if (batch.length < 100) break;
+          const last = batch[batch.length - 1];
+          cursorTs = last.vision_scored_at;
+          cursorId = last.id;
+        }
+      } catch (err) {
+        reconcileFailed++;
+        logger.error(`[agronomic-wiki] Vision-score stale reconcile failed: ${err.message}`);
+      }
+
       // 1. Mark stale pages (last_data_update > 60 days ago)
       const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
       await db('knowledge_entries')
@@ -1144,38 +1584,77 @@ Task: ${existing ? 'Update this wiki page incorporating the new data. Preserve e
         .orderBy('last_data_update', 'asc')
         .limit(10);
 
+      // Failure accounting by writeState, not by return truthiness:
+      // generatePage converts its own failures into { writeState: 'failed' }
+      // (LLM error, gate-write error) or 'stub' (empty generation), which
+      // the plain updater return would count as refreshed. Classification:
+      //   generated/skipped → refreshed; no_data → orphan page with no
+      //   source outcomes (left stale, never blocks the chain);
+      //   failed/stub/thrown → failed, which withholds the weekly success
+      //   marker (daily retry; refreshed pages skip via the fingerprint
+      //   guard) and surfaces to job_health via the returned { error }.
       let refreshed = 0;
+      let failed = 0;
+      let noData = 0;
+      const classify = (res) => {
+        if (['generated', 'skipped'].includes(res?.writeState)) refreshed++;
+        else if (res?.writeState === 'no_data') noData++;
+        else failed++;
+      };
+      const REFRESH_OPTS = { rethrow: true, withState: true };
       for (const page of stalePages) {
         try {
           if (page.category === 'product') {
             const productName = page.title.replace(/^Product:\s*/i, '');
-            await AgronomicWiki.updateProductPage(productName);
-            refreshed++;
+            classify(await AgronomicWiki.updateProductPage(productName, REFRESH_OPTS));
           } else if (page.category === 'track') {
             const trackId = page.slug.replace('track/', '');
-            await AgronomicWiki.updateTrackPage(trackId);
-            refreshed++;
+            classify(await AgronomicWiki.updateTrackPage(trackId, REFRESH_OPTS));
           } else if (page.category === 'seasonal') {
             const monthSlug = page.slug.replace('seasonal/', '');
             const monthNames = ['january','february','march','april','may','june','july','august','september','october','november','december'];
             const monthIdx = monthNames.indexOf(monthSlug);
             if (monthIdx >= 0) {
-              await AgronomicWiki.updateSeasonalPage(monthIdx + 1);
-              refreshed++;
+              classify(await AgronomicWiki.updateSeasonalPage(monthIdx + 1, REFRESH_OPTS));
             }
           } else if (page.category === 'condition') {
             const conditionName = page.title.replace(/^Condition:\s*/i, '');
-            await AgronomicWiki.updateConditionPage(conditionName);
-            refreshed++;
+            classify(await AgronomicWiki.updateConditionPage(conditionName, REFRESH_OPTS));
           }
         } catch (err) {
+          failed++;
           logger.error(`[agronomic-wiki] Failed to refresh page ${page.slug}: ${err.message}`);
         }
       }
+      if (noData > 0) {
+        logger.warn(`[agronomic-wiki] Weekly refresh: ${noData} stale page(s) have no source data (orphans) — left stale, not counted as failures`);
+      }
 
-      // 3. Generate seasonal page for current month
+      // 3. Generate seasonal page for current month — a failed/stub
+      // generation here withholds the marker like any stale-loop failure
+      // (no_data is normal early in a month with no outcomes yet).
       const currentMonth = new Date().getMonth() + 1;
-      await AgronomicWiki.updateSeasonalPage(currentMonth);
+      try {
+        const seasonalRes = await AgronomicWiki.updateSeasonalPage(currentMonth, REFRESH_OPTS);
+        if (!['generated', 'skipped', 'no_data'].includes(seasonalRes?.writeState)) failed++;
+      } catch (err) {
+        failed++;
+        logger.error(`[agronomic-wiki] Current-month seasonal refresh failed: ${err.message}`);
+      }
+
+      if (failed > 0 || reconcileFailed > 0) {
+        // Partial failure: no weekly_cron success marker — weeklyRefreshIfDue
+        // retries tomorrow, and the scheduler wrapper surfaces the error to
+        // job_health via the returned { error }.
+        const parts = [];
+        if (failed > 0) parts.push(`${failed} page refresh(es) failed`);
+        if (reconcileFailed > 0) parts.push(`${reconcileFailed} vision-score reconcile failure(s)`);
+        const error = parts.join('; ');
+        await logUpdate('error', null, `Weekly refresh: ${error} (${refreshed} refreshed)`, {
+          triggerType: 'weekly_cron_error',
+        });
+        return { refreshed, failed, reconcileFailed, staleFound: stalePages.length, error };
+      }
 
       await logUpdate('lint', null, `Weekly refresh: ${refreshed} stale pages refreshed, seasonal page updated for month ${currentMonth}`, {
         triggerType: 'weekly_cron',
@@ -1465,6 +1944,24 @@ async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug)
   }
 }
 
+// Count outcomes carrying a photo-verified visual-change score, over the FULL
+// (unsliced) outcome set — feeds generatePage's skip fingerprint so a newly
+// scored outcome makes the page regenerate-eligible. Null scores
+// (non-comparable / low-confidence pairs) don't change the prompt input, so
+// they don't count.
+function countVisionScored(outcomes) {
+  const scored = (outcomes || []).filter((o) => o.vision_delta_score !== null && o.vision_delta_score !== undefined);
+  if (!scored.length) return null;
+  // Newest scored_at rides the token: a re-scored pair (photo key changed,
+  // count unchanged) must still change the fingerprint or the page would
+  // skip regeneration and keep narrating the old verdict.
+  const maxMs = Math.max(0, ...scored.map((o) => {
+    const ms = o.vision_scored_at ? new Date(o.vision_scored_at).getTime() : 0;
+    return Number.isFinite(ms) ? ms : 0;
+  }));
+  return `vision-scored:${scored.length}:${maxMs}`;
+}
+
 function aggregateOutcomes(outcomes) {
   if (!outcomes.length) return { count: 0 };
 
@@ -1503,6 +2000,19 @@ function aggregateOutcomes(outcomes) {
     seasonDistribution: seasons,
     grassTypeDistribution: grassTypes,
     trackDistribution: tracks,
+    // Photo-verified visual change, aggregated over the FULL outcome set: the
+    // prompt's per-outcome sample is capped at 50 newest, but the sweep
+    // scores oldest-first — a scored outcome outside the sample changes the
+    // skip fingerprint, so its score must reach the prompt through stats or
+    // the regeneration writes a page that never saw it and then skips forever.
+    photoVerified: (() => {
+      const scored = outcomes.filter((o) => o.vision_delta_score != null);
+      if (!scored.length) return { count: 0 };
+      return {
+        count: scored.length,
+        avgVisualChange: avg(scored.map((o) => o.vision_delta_score)),
+      };
+    })(),
   };
 }
 
@@ -1510,6 +2020,10 @@ module.exports = AgronomicWiki;
 
 module.exports.TRUSTED_STATUSES = TRUSTED_STATUSES;
 module.exports.recomputeEntryReviewGate = recomputeEntryReviewGate;
+// Real production export — assessment-analytics' attribution fallback
+// imports it (a __private-only export made that destructuring undefined
+// and the first fallback call aborted the whole detection pass).
+module.exports.escapeLike = escapeLike;
 
 // Exposed for unit tests only.
 module.exports.__private = {
@@ -1519,6 +2033,9 @@ module.exports.__private = {
   resolveCanonicalProduct,
   classifyReviewTier,
   sameFlagSets,
+  backfillOutcomeWeather,
+  countVisionScored,
+  aggregateOutcomes,
   PRE_ASSESSMENT_MAX_AGE_DAYS,
   POST_ASSESSMENT_MAX_DAYS,
 };

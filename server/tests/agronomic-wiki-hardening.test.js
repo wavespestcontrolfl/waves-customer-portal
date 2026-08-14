@@ -10,6 +10,7 @@
 
 jest.mock('../models/db', () => {
   const fn = (table) => global.__wikiDbMock(table);
+  fn.raw = (...args) => global.__wikiDbMock.raw(...args);
   return fn;
 });
 jest.mock('../services/logger', () => ({
@@ -61,7 +62,7 @@ function makeDb(responses = {}) {
       return [];
     };
     const b = {};
-    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereIn', 'orderBy', 'orderByRaw', 'limit', 'offset', 'select', 'groupBy']) {
+    for (const m of ['where', 'andWhere', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereIn', 'whereNull', 'orWhereNull', 'whereNotNull', 'orderBy', 'orderByRaw', 'limit', 'offset', 'select', 'groupBy']) {
       b[m] = (...args) => {
         rec.ops.push([m, args]);
         if (typeof args[0] === 'function') args[0].call(b);
@@ -110,6 +111,9 @@ function makeDb(responses = {}) {
     return b;
   };
   dbFn.state = state;
+  // COALESCE-style patches pass through as opaque tokens — the harness
+  // records the patch object, it never executes SQL.
+  dbFn.raw = (sql, bindings) => ({ sql, bindings });
   return dbFn;
 }
 
@@ -256,6 +260,185 @@ describe('generatePage', () => {
     expect(global.__anthropicCreate).toHaveBeenCalled();
   });
 
+  test('a newly vision-scored outcome invalidates the skip fingerprint and lands in the stored one', async () => {
+    const existing = {
+      id: 'ke-1',
+      slug: 'product/talstar-p',
+      content: '# Talstar P\n\nExisting analysis.',
+      data_point_count: 2,
+      source_treatment_ids: ['o1', 'o2'], // written before any vision scoring
+      stale_flag: false,
+    };
+    const state = useDb({ knowledge_entries: [existing] });
+
+    // Same outcomes, same count/ids — but one outcome now carries a score
+    await wiki.generatePage('product/talstar-p', 'product', {
+      outcomes: [{ id: 'o1', vision_delta_score: 35 }, { id: 'o2' }],
+      visionScoreToken: 'vision-scored:1:1755050000000',
+    }, 'Product: Talstar P');
+
+    expect(global.__anthropicCreate).toHaveBeenCalled();
+    const written = (state.updates.knowledge_entries || []).find((u) => 'source_treatment_ids' in u);
+    expect(JSON.parse(written.source_treatment_ids)).toEqual(['o1', 'o2', 'vision-scored:1:1755050000000']);
+  });
+
+  test('vision token: unchanged token skips; a new score OR a rescore regenerates', async () => {
+    const existing = {
+      id: 'ke-1',
+      slug: 'product/talstar-p',
+      content: '# Talstar P\n\nExisting analysis.',
+      data_point_count: 2,
+      source_treatment_ids: ['o1', 'o2', 'vision-scored:1:1755050000000'],
+      stale_flag: false,
+    };
+    useDb({ knowledge_entries: [existing] });
+
+    const skipped = await wiki.generatePage('product/talstar-p', 'product', {
+      outcomes: [{ id: 'o1', vision_delta_score: 35 }, { id: 'o2' }],
+      visionScoreToken: 'vision-scored:1:1755050000000',
+    }, 'Product: Talstar P');
+    expect(skipped.writeState).toBe('skipped');
+    expect(global.__anthropicCreate).not.toHaveBeenCalled();
+
+    // second score → count changes
+    useDb({ knowledge_entries: [existing] });
+    const regenerated = await wiki.generatePage('product/talstar-p', 'product', {
+      outcomes: [{ id: 'o1', vision_delta_score: 35 }, { id: 'o2', vision_delta_score: -10 }],
+      visionScoreToken: 'vision-scored:2:1755060000000',
+    }, 'Product: Talstar P');
+    expect(regenerated.writeState).toBe('generated');
+    expect(global.__anthropicCreate).toHaveBeenCalled();
+
+    // RESCORE of the same pair (photo key re-election) → count unchanged but
+    // the newest scored_at moves, so the token changes and the page regenerates
+    useDb({ knowledge_entries: [existing] });
+    const rescored = await wiki.generatePage('product/talstar-p', 'product', {
+      outcomes: [{ id: 'o1', vision_delta_score: 12 }, { id: 'o2' }],
+      visionScoreToken: 'vision-scored:1:1755099999000',
+    }, 'Product: Talstar P');
+    expect(rescored.writeState).toBe('generated');
+  });
+
+  test('countVisionScored builds the count:maxScoredAt token from the full outcome set', () => {
+    const token = wiki.__private.countVisionScored([
+      { id: 'o1', vision_delta_score: 35, vision_scored_at: new Date(1755050000000) },
+      { id: 'o2', vision_delta_score: -5, vision_scored_at: new Date(1755060000000) },
+      { id: 'o3' },
+    ]);
+    expect(token).toBe('vision-scored:2:1755060000000');
+    expect(wiki.__private.countVisionScored([{ id: 'o1' }])).toBeNull();
+  });
+
+  test('markOutcomePagesStale flags the fan-out page set without firing generation', async () => {
+    const state = useDb({ knowledge_entries: [], products_catalog: [], product_aliases: [] });
+
+    const flagged = await wiki.markOutcomePagesStale({
+      id: 'out-1',
+      products_applied: JSON.stringify([{ name: 'Talstar P' }]),
+      grass_track: 'A',
+      treatment_date: '2026-08-05T12:00:00Z',
+    });
+
+    expect(flagged).toBe(1);
+    expect(global.__anthropicCreate).not.toHaveBeenCalled(); // flag only, never generate
+    expect(state.updates.knowledge_entries).toEqual([
+      expect.objectContaining({ stale_flag: true }),
+    ]);
+    const rec = state.calls.knowledge_entries[0];
+    const whereIn = rec.ops.find(([m]) => m === 'whereIn');
+    expect(whereIn[1][0]).toBe('slug');
+    expect([...whereIn[1][1]].sort()).toEqual(['product/talstar-p', 'seasonal/august', 'track/a']);
+    // only pages not already stale get touched
+    expect(rec.ops).toContainEqual(['where', [{ stale_flag: false }]]);
+  });
+
+  test('markOutcomePagesStale reads the month from the date literal, not local-TZ Date parse', async () => {
+    // '2026-08-01' via new Date().getMonth() is JULY in any western-hemisphere
+    // local timezone (UTC-midnight parse) — the literal month must win so the
+    // flagged page matches updateSeasonalPage's EXTRACT(MONTH ...) selection.
+    const state = useDb({ knowledge_entries: [], products_catalog: [], product_aliases: [] });
+    await wiki.markOutcomePagesStale({
+      id: 'out-2',
+      products_applied: '[]',
+      grass_track: null,
+      treatment_date: '2026-08-01',
+    });
+    const rec = state.calls.knowledge_entries[0];
+    const whereIn = rec.ops.find(([m]) => m === 'whereIn');
+    expect(whereIn[1][1]).toEqual(['seasonal/august']);
+  });
+
+  test('aggregateOutcomes carries photo-verified stats over the FULL set (beyond the 50-row prompt sample)', () => {
+    const outcomes = [
+      { vision_delta_score: 40 },
+      { vision_delta_score: -10 },
+      { vision_delta_score: null },
+      {},
+    ];
+    expect(wiki.__private.aggregateOutcomes(outcomes).photoVerified).toEqual({
+      count: 2,
+      avgVisualChange: 15,
+    });
+    expect(wiki.__private.aggregateOutcomes([{}]).photoVerified).toEqual({ count: 0 });
+  });
+
+  test('markOutcomePagesStale includes condition pages matched via the customer assessment observations', async () => {
+    const state = useDb({
+      knowledge_entries: (rec) => {
+        const isConditionSelect = rec.ops.some(([m, args]) => m === 'where' && args[0]?.category === 'condition');
+        return isConditionSelect
+          ? [{ slug: 'condition/chinch-bugs', title: 'Condition: Chinch Bugs' },
+             { slug: 'condition/brown-patch', title: 'Condition: Brown Patch' }]
+          : [];
+      },
+      products_catalog: [],
+      product_aliases: [],
+      lawn_assessments: [{ observations: 'Heavy chinch bugs along the driveway strip' }],
+    });
+
+    const flagged = await wiki.markOutcomePagesStale({
+      id: 'out-3',
+      customer_id: 'cust-1',
+      products_applied: JSON.stringify([{ name: 'Talstar P' }]),
+      grass_track: 'A',
+      treatment_date: '2026-08-05T12:00:00Z',
+    });
+
+    expect(flagged).toBe(1);
+    // The updating call is the one carrying whereIn — condition page whose
+    // name appears in this customer's observations is included; the
+    // non-matching condition page is not.
+    const updateRec = state.calls.knowledge_entries.find((r) => r.ops.some(([m]) => m === 'whereIn'));
+    const whereIn = updateRec.ops.find(([m]) => m === 'whereIn');
+    expect([...whereIn[1][1]].sort()).toEqual([
+      'condition/chinch-bugs', 'product/talstar-p', 'seasonal/august', 'track/a',
+    ]);
+  });
+
+  test('markOutcomePagesStale tolerates junk input and never throws', async () => {
+    const state = useDb({ knowledge_entries: [] });
+    const flagged = await wiki.markOutcomePagesStale({
+      id: 'out-2',
+      products_applied: 'not-json',
+      grass_track: null,
+      treatment_date: null,
+    });
+    expect(flagged).toBe(0);
+    expect(state.updates.knowledge_entries).toBeUndefined();
+    await expect(wiki.markOutcomePagesStale(null)).resolves.toBe(0);
+  });
+
+  test('markOutcomePagesStale rethrows on failure when opts.rethrow is set (weekly reconcile path)', async () => {
+    useDb({ knowledge_entries: () => { throw new Error('db down'); } });
+    // customer_id forces the condition-page SELECT, where the mock throws
+    // (the harness's update() cannot fail — selects are the failure surface).
+    const outcome = { id: 'out-3', products_applied: [], grass_track: 'a', treatment_date: null, customer_id: 'c-1' };
+    // Default contract stays best-effort for the vision-delta scorer…
+    await expect(wiki.markOutcomePagesStale(outcome)).resolves.toBe(0);
+    // …but the weekly reconcile opts in so its failures reach job_health.
+    await expect(wiki.markOutcomePagesStale(outcome, { rethrow: true })).rejects.toThrow('db down');
+  });
+
   test('placeholder stubs are always retried, never treated as unchanged', async () => {
     const existing = {
       id: 'ke-1',
@@ -277,7 +460,7 @@ describe('generatePage', () => {
 
 describe('updateSeasonalPage', () => {
   test('returns null without generating when the month has no outcomes, pruning any filler page', async () => {
-    const state = useDb({ treatment_outcomes: [], knowledge_entries: [] });
+    const state = useDb({ treatment_outcomes: [], knowledge_entries: [{ id: 'ke-seasonal' }] });
 
     const result = await wiki.updateSeasonalPage(2);
 
@@ -285,10 +468,21 @@ describe('updateSeasonalPage', () => {
     expect(global.__anthropicCreate).not.toHaveBeenCalled();
     expect(state.inserts.knowledge_entries).toBeUndefined();
     // an existing zero-outcome page is deleted so it can't clog the
-    // stale-refresh budget (del returns 1 in the mock → prune logged)
+    // stale-refresh budget (del returns 1 in the mock → prune logged) —
+    // and its wiki-sync KB mirror is removed FIRST (no cascading FK, so
+    // an orphaned mirror would stay agent-readable forever).
     expect(state.deletes.knowledge_entries).toBe(1);
+    expect(state.deletes.knowledge_base).toBe(1);
     const pruneLog = (state.inserts.knowledge_update_log || []).find((r) => r.action === 'prune');
     expect(pruneLog).toBeTruthy();
+  });
+
+  test('no filler page on a zero-outcome month prunes nothing', async () => {
+    const state = useDb({ treatment_outcomes: [], knowledge_entries: [] });
+    const result = await wiki.updateSeasonalPage(2);
+    expect(result).toBeNull();
+    expect(state.deletes.knowledge_entries).toBeUndefined();
+    expect(state.inserts.knowledge_update_log).toBeUndefined();
   });
 });
 
@@ -536,6 +730,94 @@ describe('weeklyRefreshIfDue', () => {
     expect(errorLog).toBeTruthy();
   });
 
+  test('vision-score reconcile keyset-paginates the whole window instead of a blind cap', async () => {
+    const t0 = 1755000000000;
+    const fullPage = Array.from({ length: 100 }, (_, i) => ({
+      id: `o${i}`, vision_delta_score: 5, vision_scored_at: new Date(t0 + i * 1000),
+    }));
+    const lastPage = [{ id: 'o-final', vision_delta_score: 7, vision_scored_at: new Date(t0 + 999000) }];
+    let reconcileCalls = 0;
+    const state = useDb({
+      knowledge_entries: [],
+      knowledge_update_log: [],
+      treatment_outcomes: (rec) => {
+        if (rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_scored_at')) {
+          reconcileCalls += 1;
+          return reconcileCalls === 1 ? fullPage : lastPage;
+        }
+        return [];
+      },
+    });
+    const spy = jest.spyOn(wiki, 'markOutcomePagesStale').mockResolvedValue(1);
+
+    await wiki.weeklyRefresh();
+
+    // Full first page → cursor advances past its newest row → second fetch;
+    // every row across both pages gets reconciled.
+    expect(reconcileCalls).toBe(2);
+    expect(spy).toHaveBeenCalledTimes(101);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'o-final' }), { rethrow: true });
+    // Page 2 uses the composite (vision_scored_at, id) cursor so rows tied on
+    // the boundary timestamp are never skipped.
+    const page2 = state.calls.treatment_outcomes.filter((rec) =>
+      rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_scored_at'))[1];
+    expect(page2.ops).toContainEqual(['andWhere', ['id', '>', 'o99']]);
+    spy.mockRestore();
+  });
+
+  test('a vision-score reconcile failure withholds the weekly success marker instead of recording a healthy run', async () => {
+    const state = useDb({
+      knowledge_entries: [],
+      knowledge_update_log: [],
+      treatment_outcomes: (rec) => {
+        if (rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_scored_at')) {
+          return [
+            { id: 'o1', vision_scored_at: new Date() },
+            { id: 'o2', vision_scored_at: new Date() },
+          ];
+        }
+        return [];
+      },
+    });
+    const spy = jest.spyOn(wiki, 'markOutcomePagesStale')
+      .mockRejectedValueOnce(new Error('flagging exploded'))
+      .mockResolvedValue(1);
+
+    const result = await wiki.weeklyRefresh();
+
+    // One outcome failed, the other was still flagged (no batch abort) —
+    // but the run must return { error } so weeklyRefreshIfDue withholds the
+    // weekly_cron marker (daily retry keeps the 8-day scan window covering
+    // the failed rows) and the scheduler wrapper rethrows into job_health.
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(result.error).toMatch(/vision-score reconcile/);
+    expect(result.reconcileFailed).toBe(1);
+    const errorLog = (state.inserts.knowledge_update_log || []).find((r) => r.trigger_type === 'weekly_cron_error');
+    expect(errorLog).toBeTruthy();
+    const successLog = (state.inserts.knowledge_update_log || []).find((r) => r.trigger_type === 'weekly_cron');
+    expect(successLog).toBeFalsy();
+    spy.mockRestore();
+  });
+
+  test('a whole-scan reconcile failure also returns { error } rather than a silent success', async () => {
+    const state = useDb({
+      knowledge_entries: [],
+      knowledge_update_log: [],
+      treatment_outcomes: (rec) => {
+        if (rec.ops.some(([m, a]) => m === 'whereNotNull' && a[0] === 'vision_scored_at')) {
+          throw new Error('scan query died');
+        }
+        return [];
+      },
+    });
+
+    const result = await wiki.weeklyRefresh();
+
+    expect(result.error).toMatch(/vision-score reconcile/);
+    const successLog = (state.inserts.knowledge_update_log || []).find((r) => r.trigger_type === 'weekly_cron');
+    expect(successLog).toBeFalsy();
+  });
+
   test('stale refresh only selects categories that have a refresh path', async () => {
     const state = useDb({
       knowledge_entries: [],
@@ -592,5 +874,174 @@ describe('linkTreatmentOutcome pairing windows', () => {
     expect(preLower[1][2].getTime()).toBe(new Date(TREATMENT_DATE).getTime() - 180 * 86400000);
 
     spies.forEach((s) => s.mockRestore());
+  });
+});
+
+// ── linkTreatmentOutcome weather-enrichment retry ──────────────────────────
+
+describe('linkTreatmentOutcome weather-enrichment retry', () => {
+  test('an existing outcome with no weather retries enrichment on the early-return path', async () => {
+    const state = useDb({
+      treatment_outcomes: [{
+        id: 'to-1', service_record_id: 'sr-1', post_assessment_id: 'post-1',
+        treatment_date: '2026-07-01',
+        avg_temperature: null, avg_humidity: null, total_rainfall: null,
+      }],
+      // Historical treatment + no usable snapshot: the retry must ATTEMPT
+      // (load the post assessment) but fail closed on the freshness gates —
+      // no current-conditions fetch, no wrong-day weather write.
+      lawn_assessments: [{ id: 'post-1', service_date: '2026-07-01', fawn_snapshot: null }],
+    });
+
+    const outcome = await wiki.linkTreatmentOutcome('sr-1');
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(outcome).toEqual(expect.objectContaining({ id: 'to-1' }));
+    // Retry wiring fired: the post assessment was loaded for enrichment
+    expect(state.calls.lawn_assessments).toHaveLength(1);
+    // …but the same-day/freshness gates failed closed: nothing written
+    expect(state.updates.treatment_outcomes).toBeUndefined();
+  });
+
+  test('an existing outcome that already has weather is returned without a retry', async () => {
+    const state = useDb({
+      treatment_outcomes: [{
+        id: 'to-1', service_record_id: 'sr-1', post_assessment_id: 'post-1',
+        treatment_date: '2026-07-01',
+        avg_temperature: 88.2, avg_humidity: 71, total_rainfall: 0.4,
+      }],
+      lawn_assessments: [{ id: 'post-1', service_date: '2026-07-01' }],
+    });
+
+    const outcome = await wiki.linkTreatmentOutcome('sr-1');
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(outcome).toEqual(expect.objectContaining({ id: 'to-1' }));
+    expect(state.calls.lawn_assessments).toBeUndefined();
+    expect(state.updates.treatment_outcomes).toBeUndefined();
+  });
+});
+
+// ── backfillOutcomeWeather anchor semantics ────────────────────────────────
+
+describe('backfillOutcomeWeather application-moment anchor', () => {
+  const { backfillOutcomeWeather } = wiki.__private;
+  const outcome = { id: 'to-1' };
+  const snapshotPost = (observationTime) => ({
+    id: 'post-1', service_date: '2026-07-01',
+    fawn_snapshot: JSON.stringify({ observation_time: observationTime }),
+    fawn_temp_f: 88.2, fawn_humidity_pct: 71, fawn_rainfall_7d: 0.4,
+  });
+
+  test('accepts an application-time snapshot even when processing happens much later', async () => {
+    // Snapshot recorded 15 minutes after the 9 AM application; the test
+    // itself runs long after 2026-07-01 — the old Date.now() freshness
+    // check would reject this valid snapshot outright.
+    const state = useDb({ treatment_outcomes: [] });
+    const wrote = await backfillOutcomeWeather(
+      outcome, snapshotPost('2026-07-01 09:15'), '2026-07-01', '2026-07-01 09:00',
+    );
+    expect(wrote).toBe(true);
+    expect(state.updates.treatment_outcomes).toHaveLength(1);
+  });
+
+  test('rejects a same-day observation hours away from the application moment', async () => {
+    // 11 PM station reading vs a 9 AM application: the same-day gates all
+    // pass, but the observation says nothing about application conditions —
+    // this is the late-evening sweep-tick misattribution the anchor closes.
+    const state = useDb({ treatment_outcomes: [] });
+    const wrote = await backfillOutcomeWeather(
+      outcome, snapshotPost('2026-07-01 23:00'), '2026-07-01', '2026-07-01 09:00',
+    );
+    expect(wrote).toBe(false);
+    expect(state.updates.treatment_outcomes).toBeUndefined();
+  });
+
+  test('space-separated naive station timestamps parse as ET wall-clock, not UTC', async () => {
+    // 03:30 ET is 5.5h before the 09:00 ET application → inside the ±6h
+    // window and on the treatment day → accepted. If the space-separated
+    // form fell through to new Date() on a UTC host, 03:30 would read as
+    // 2026-06-30 23:30 ET — wrong day AND outside the window — and this
+    // write would not happen.
+    const state = useDb({ treatment_outcomes: [] });
+    const wrote = await backfillOutcomeWeather(
+      outcome, snapshotPost('2026-07-01 03:30'), '2026-07-01', '2026-07-01T09:00',
+    );
+    expect(wrote).toBe(true);
+    expect(state.updates.treatment_outcomes).toHaveLength(1);
+  });
+
+  test('fails closed when no application moment is available', async () => {
+    const state = useDb({ treatment_outcomes: [] });
+    const wrote = await backfillOutcomeWeather(
+      outcome, snapshotPost('2026-07-01 09:15'), '2026-07-01', null,
+    );
+    expect(wrote).toBe(false);
+    expect(state.updates.treatment_outcomes).toBeUndefined();
+  });
+});
+
+// ── sweepMissingOutcomeWeather ─────────────────────────────────────────────
+
+describe('sweepMissingOutcomeWeather', () => {
+  test('re-attempts enrichment for all-null rows but fails closed outside the freshness window', async () => {
+    const state = useDb({
+      // Historical treatment day: the sweep must ATTEMPT (load the post
+      // assessment, run the backfill) but the same-day/freshness gates fail
+      // closed — no current-conditions fetch, no wrong-day write.
+      treatment_outcomes: (rec) => (rec.ops.some(([m]) => m === 'whereNull')
+        ? [{ id: 'to-1', post_assessment_id: 'post-1', treatment_date: '2026-07-01' }]
+        : []),
+      lawn_assessments: [{ id: 'post-1', service_date: '2026-07-01', fawn_snapshot: null }],
+    });
+
+    const result = await wiki.sweepMissingOutcomeWeather();
+
+    expect(result).toEqual({ checked: 1, enriched: 0 });
+    expect(state.calls.lawn_assessments).toHaveLength(1);
+    expect(state.updates.treatment_outcomes).toBeUndefined();
+  });
+
+  test('a failed sweep query surfaces as an error result, not a healthy run', async () => {
+    useDb({
+      treatment_outcomes: () => { throw new Error('scan failed'); },
+    });
+
+    const result = await wiki.sweepMissingOutcomeWeather();
+
+    expect(result.error).toBe('scan failed');
+    expect(result.checked).toBe(0);
+  });
+});
+
+// ── updateSeasonalPage prune failure ───────────────────────────────────────
+
+describe('updateSeasonalPage prune failure', () => {
+  test('a failed zero-outcome prune reports writeState failed, never no_data', async () => {
+    const state = useDb({
+      treatment_outcomes: [],
+      knowledge_entries: [{ id: 'ke-seasonal' }],
+      knowledge_update_log: [],
+    });
+    const origMock = global.__wikiDbMock;
+    global.__wikiDbMock = (table) => {
+      const b = origMock(table);
+      if (table === 'knowledge_entries') {
+        b.del = async () => { throw new Error('delete failed'); };
+      }
+      return b;
+    };
+
+    // withState path: 'failed', so weeklyRefresh withholds the six-day
+    // success marker while the stale filler page is still agent-readable.
+    const res = await wiki.updateSeasonalPage(2, { withState: true });
+    expect(res).toEqual({ entry: null, writeState: 'failed' });
+
+    // rethrow path (weeklyRefresh REFRESH_OPTS): the error propagates.
+    await expect(wiki.updateSeasonalPage(2, { rethrow: true, withState: true }))
+      .rejects.toThrow('delete failed');
+    expect(state.inserts.knowledge_update_log).toBeUndefined();
   });
 });

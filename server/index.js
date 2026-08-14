@@ -1154,9 +1154,44 @@ httpServer.listen(PORT, () => {
         cron.schedule('0 4 * * 0', async () => {
           try {
             await runExclusive('assessment-analytics-weekly', async () => {
+              // Populate the KB↔wiki bridge BEFORE the analytics run: the
+              // contradiction detector walks knowledge_bridge pairs, and
+              // nothing else creates them automatically — without this the
+              // detector processes an empty set forever. Deterministic name
+              // matching, idempotent (createLink upserts with onConflict
+              // ignore), no LLM calls. A failure never blocks analytics.
+              let autoLinkError = null;
+              try {
+                const KnowledgeBridge = require('./services/knowledge-bridge');
+                const linkStats = await KnowledgeBridge.autoLink();
+                logger.info(`[cron] Knowledge bridge auto-link: ${JSON.stringify(linkStats)}`);
+                if (linkStats?.errors > 0) autoLinkError = `auto-link completed with ${linkStats.errors} error(s)`;
+              } catch (err) {
+                autoLinkError = err.message;
+                logger.error(`[cron] Knowledge bridge auto-link failed: ${err.message}`);
+              }
               const analytics = require('./services/assessment-analytics');
               const results = await analytics.runAll();
               logger.info(`[cron] Weekly assessment analytics complete: ${JSON.stringify(results)}`);
+              // Analytics ran either way, but a failed bridge population must
+              // not record a healthy job_health row — contradiction
+              // attribution is degraded until autoLink succeeds. Throw AFTER
+              // runAll so the failure is recorded without blocking analytics.
+              if (autoLinkError) {
+                throw new Error(`knowledge bridge auto-link failed: ${autoLinkError}`);
+              }
+              // Each analytics leg catches internally and returns { error }
+              // rather than throwing — including detectContradictions'
+              // corrective un-gate, whose failure can leave a page blocked
+              // with no open-row path back. Surface any failed leg so the
+              // run is recorded unhealthy instead of nesting the error
+              // inside a "successful" result.
+              const failedLegs = Object.entries(results || {})
+                .filter(([, r]) => r && r.error)
+                .map(([leg, r]) => `${leg}: ${r.error}`);
+              if (failedLegs.length) {
+                throw new Error(`assessment analytics leg(s) failed: ${failedLegs.join('; ')}`);
+              }
             });
           } catch (err) {
             logger.error(`[cron] Weekly assessment analytics failed: ${err.message}`);

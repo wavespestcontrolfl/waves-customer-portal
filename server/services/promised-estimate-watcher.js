@@ -87,6 +87,26 @@ async function loadUnkeptPromises() {
         SELECT 1
         FROM estimates e
         WHERE e.sent_at IS NOT NULL
+          -- Report click-to-estimate mints stamp sent_at for the
+          -- publish-without-delivery shape but were never DELIVERED —
+          -- a report tap after a promised-quote call must not erase the
+          -- obligation (in-hook audit r7b P1 on #3391). A mint an operator
+          -- LATER actually sent is a real handoff, though (GitHub round
+          -- P2): the witness is deliveryState.lastDeliveredAt — advanced
+          -- by sendEstimateNow ONLY on real handoffs (stampChannels' own
+          -- suppression-sentinel line), carried forward by suppressed
+          -- later attempts, merged even when a concurrent accept wins the
+          -- send claim. Compared against the SAME post-call boundary as
+          -- sent_at below (uncapped audit on 573ee332e): a delivery that
+          -- predates the promise plus a suppressed later attempt (which
+          -- advances sent_at but not this stamp) must not keep it.
+          AND (COALESCE(e.source, '') <> 'service_report_cta'
+               OR (COALESCE(e.estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> ''
+                   AND (e.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz > CASE
+                     WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
+                     WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
+                     ELSE c.created_at
+                   END))
           -- End-of-call boundary (codex r23): bridged rows end at
           -- bridge-start + duration; late-created rows (recording/status
           -- callback) already carry post-call created_at — adding

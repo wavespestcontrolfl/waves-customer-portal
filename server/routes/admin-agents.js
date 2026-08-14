@@ -5,7 +5,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const leadAttribution = require('../services/lead-attribution');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
+const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -250,6 +250,11 @@ function lifecycleActions(item, fingerprint) {
       variant: 'primary',
     });
   }
+
+  // Informational entries (autonomous run ledgers) carry no lifecycle — they
+  // are not work awaiting anyone, so no Done/Dismiss mutations (hands-off /
+  // exception-based rule: only exceptions surface as actionable).
+  if (item.status === 'info') return actions;
 
   const endpoint = `/admin/agents/tasks/${encodeURIComponent(item.id)}/state`;
   actions.push(
@@ -788,32 +793,64 @@ async function loadReviewTasks() {
   };
 }
 
-async function loadRouteProposalTasks() {
-  if (!(await tableExists('route_optimization_proposals'))) return { missing: true, tasks: [] };
-  const rows = await db('route_optimization_proposals')
-    .whereIn('status', ['draft', 'ready'])
-    .select('id', 'scheduled_date', 'status', 'service_count', 'tech_count', 'saved_distance_meters', 'warnings', 'created_at')
+// ROUTE-TIERS is fully autonomous — there is NO approval flow, so the dispatch
+// card reads the nightly planner-run LEDGER (route_optimization_planner_runs)
+// as READ-ONLY informational entries: what ran, what it applied/skipped, and
+// where to look (the dispatch board). No mutation actions on purpose.
+async function loadPlannerRunTasks() {
+  if (!(await tableExists('route_optimization_planner_runs'))) return { missing: true, tasks: [] };
+  const rows = await db('route_optimization_planner_runs')
+    .where('created_at', '>=', addETDays(new Date(), -7))
+    .select('id', 'run_type', 'status', 'start_date', 'end_date', 'applied_count', 'skipped_count', 'failed_count', 'result', 'created_at')
     .orderBy('created_at', 'desc')
-    .limit(10);
+    .limit(3);
 
   return {
     count: rows.length,
     tasks: rows.map((row) => {
-      const warnings = parseJson(row.warnings, []);
-      const savedMiles = asNumber(row.saved_distance_meters) / 1609.344;
+      const result = parseJson(row.result, {});
+      const savedMeters = Array.isArray(result.reorders)
+        ? result.reorders.reduce((sum, r) => sum + asNumber(r.saved_meters), 0)
+        : 0;
+      const savedMiles = savedMeters / 1609.344;
+      const dayMoves = asNumber(result?.auto_dispatch?.run?.changed);
+      // ET calendar day, not UTC — an evening ET run must not label tomorrow.
+      const dateLabel = row.created_at ? etDateString(new Date(row.created_at)) : '';
+      // The nightly ledger row carries BOTH passes: the paired 4:10 day-move
+      // run rides in result.auto_dispatch.run. A degraded/failed day-move
+      // pass must surface as an exception even when the 4:20 reorder itself
+      // was healthy (codex GitHub round P2).
+      const adStatus = result?.auto_dispatch?.run?.status;
+      // result.auto_dispatch.error = the summary READ failed (codex GitHub
+      // round P2): the paired day-move pass could not be audited at all,
+      // which must surface as an exception, not render as a healthy night.
+      const failedRun = asNumber(row.failed_count) > 0 || row.status === 'failed'
+        || adStatus === 'failed' || adStatus === 'completed_with_errors'
+        || result?.auto_dispatch?.error != null;
+      // A 'skipped' row is a TICK that never ran (writer lock still held at
+      // 4:20 — see recordSkippedTick). Its zero counts are not "0 problems";
+      // the night had NO reorder pass at all, which must read as an
+      // exception, not as a quiet healthy run (codex GitHub round P2).
+      const skippedTick = row.run_type === 'route_tiers_nightly' && row.status === 'skipped';
       return task({
-        id: `route_proposal:${row.id}`,
+        id: `planner_run:${row.id}`,
         agentId: 'dispatch',
-        title: `Route proposal for ${row.scheduled_date}`,
-        summary: `${row.service_count || 0} stops · ${row.tech_count || 0} techs · ${savedMiles.toFixed(1)} mi saved`,
-        priority: warnings.some((w) => w?.severity === 'critical') ? 'high' : row.status === 'ready' ? 'medium' : 'low',
-        source: 'route_optimization_proposals',
+        title: `Route run ${dateLabel}${row.run_type === 'route_tiers_nightly' ? ' (route tiers)' : ''}`,
+        summary: skippedTick
+          ? `Nightly reorder did not run (${result.skip_reason || 'tick skipped'}) — no routes touched`
+          : `${row.applied_count || 0} reorders applied · ${row.skipped_count || 0} skipped · ${dayMoves} day-moves · ${savedMiles.toFixed(1)} mi saved`,
+        priority: failedRun || skippedTick ? 'high' : 'low',
+        // Informational, not review work: a healthy autonomous run is nobody's
+        // task. Failed runs and never-ran ticks surface as exceptions
+        // (needs_review) — hands-off, exception-based.
+        status: failedRun || skippedTick ? 'needs_review' : 'info',
+        source: 'route_optimization_planner_runs',
         sourceLabel: 'Route Planner',
         sourceId: row.id,
         createdAt: row.created_at,
         actionUrl: '/admin/dispatch',
         actionLabel: 'Open Dispatch',
-        impact: warnings.length ? `${warnings.length} warning${warnings.length === 1 ? '' : 's'}` : 'Route savings',
+        impact: row.status === 'failed' ? 'Run failed' : skippedTick ? 'Reorder tick skipped' : savedMiles > 0 ? `${savedMiles.toFixed(1)} mi saved` : 'Informational',
       });
     }),
   };
@@ -855,9 +892,12 @@ function labelize(value) {
 function buildAgents(tasks, sources) {
   return AGENTS.map((agent) => {
     const agentTasks = tasks.filter((item) => item.agentId === agent.id);
-    const critical = agentTasks.filter((item) => item.priority === 'critical').length;
-    const high = agentTasks.filter((item) => item.priority === 'high').length;
-    const needsApproval = agentTasks.filter((item) => ['needs_review', 'approval'].includes(item.status)).length;
+    // status 'info' = non-actionable activity (autonomous run ledgers) — it
+    // renders in the feed but must never count as open/approval workload.
+    const actionable = agentTasks.filter((item) => item.status !== 'info');
+    const critical = actionable.filter((item) => item.priority === 'critical').length;
+    const high = actionable.filter((item) => item.priority === 'high').length;
+    const needsApproval = actionable.filter((item) => ['needs_review', 'approval'].includes(item.status)).length;
     const erroredSource = sources.find((source) => source.status === 'error' && sourceAgentHint(source.id) === agent.id);
     const status = erroredSource
       ? 'blocked'
@@ -870,11 +910,11 @@ function buildAgents(tasks, sources) {
     return {
       ...agent,
       status,
-      openTasks: agentTasks.length,
+      openTasks: actionable.length,
       needsApproval,
       highPriority: critical + high,
       lastActivityAt: latestDate(agentTasks),
-      headline: headlineForAgent(agent, agentTasks, status),
+      headline: headlineForAgent(agent, actionable, status),
     };
   });
 }
@@ -884,7 +924,7 @@ function sourceAgentHint(sourceId) {
   if (['opportunity_queue', 'seo_actions'].includes(sourceId)) return 'seo_geo';
   if (sourceId === 'ad_campaigns') return 'ads';
   if (sourceId === 'google_reviews') return 'reviews';
-  if (sourceId === 'route_optimization_proposals') return 'dispatch';
+  if (sourceId === 'route_optimization_planner_runs') return 'dispatch';
   if (sourceId === 'pricing_engine_proposals') return 'pricing';
   return null;
 }
@@ -906,7 +946,7 @@ async function loadOverviewSources() {
     loadSource('seo_actions', 'SEO Actions', loadSeoActionTasks),
     loadSource('ad_campaigns', 'PPC', loadAdTasks),
     loadSource('google_reviews', 'Google Reviews', loadReviewTasks),
-    loadSource('route_optimization_proposals', 'Route Planner', loadRouteProposalTasks),
+    loadSource('route_optimization_planner_runs', 'Route Planner', loadPlannerRunTasks),
     loadSource('pricing_engine_proposals', 'Pricing Proposals', loadPricingProposalTasks),
   ]);
 }
@@ -967,10 +1007,12 @@ router.get('/overview', async (_req, res) => {
       agents: agents.length,
       activeAgents: agents.filter((agent) => agent.status !== 'idle').length,
       blockedAgents: agents.filter((agent) => agent.status === 'blocked').length,
-      openTasks: tasks.length,
+      // 'info' items are activity, not workload — excluded from open/approval
+      // counts (they still render in the task feed itself).
+      openTasks: tasks.filter((item) => item.status !== 'info').length,
       hiddenTasks: stateApplied.hiddenCount,
       needsApproval: tasks.filter((item) => ['needs_review', 'approval'].includes(item.status)).length,
-      highPriority: tasks.filter((item) => item.priority === 'critical' || item.priority === 'high').length,
+      highPriority: tasks.filter((item) => item.status !== 'info' && (item.priority === 'critical' || item.priority === 'high')).length,
     },
     agents,
     tasks,

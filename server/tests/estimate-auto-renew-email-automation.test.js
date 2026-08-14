@@ -124,6 +124,39 @@ describe('estimate auto-renew email automation cutover', () => {
     expect(mockEmailSend).not.toHaveBeenCalled();
   });
 
+  test('a zero-comms opted-out estimate is never renewed or emailed (uncapped audit r4 P1)', async () => {
+    // Publish-without-delivery mints (report click-to-estimate) stamp
+    // estimate_data.noEngagementAutomation — renewal would both EXTEND the
+    // estimate and email the customer; the lane promises neither.
+    const optedOut = staleEstimate({
+      id: 'estimate-optout',
+      estimate_data: JSON.stringify({ noEngagementAutomation: true }),
+    });
+    const normal = staleEstimate();
+    mockDb.__estimateQueries.push(query([optedOut, normal]), query(1));
+
+    await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+
+    // Only the normal estimate got the update + email — nothing for optout.
+    expect(mockProcessTrigger).toHaveBeenCalledTimes(1);
+    expect(mockProcessTrigger).toHaveBeenCalledWith(expect.objectContaining({
+      entityId: 'estimate-1',
+    }));
+
+    // Hydrated-jsonb shape (object, not string) opts out identically.
+    jest.clearAllMocks();
+    mockIsEnabled.mockReturnValue(true);
+    mockProcessTrigger.mockResolvedValue({ automation_count: 1, results: [] });
+    mockDb.__estimateQueries = [query([staleEstimate({
+      id: 'estimate-optout-2',
+      estimate_data: { noEngagementAutomation: true },
+    })])];
+    await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 0 });
+    expect(mockProcessTrigger).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
   test('keeps the direct template send fallback when the automation gate is disabled', async () => {
     mockIsEnabled.mockReturnValue(false);
     const estimate = staleEstimate();

@@ -390,10 +390,29 @@ router.post('/routes/reoptimize', async (req, res) => {
   try {
     const { date = etDateString(), mode = 'mixed', zone = 'all' } = req.body || {};
     const routes = await buildRoutes(date);
-    for (const route of routes) {
-      for (let i = 0; i < route.jobs.length; i += 1) {
-        await getDb()('scheduled_services').where('id', route.jobs[i].id).update({ route_order: i + 1, updated_at: new Date() });
-      }
+    // Fenced + transactional + stale-guarded (uncapped audit r22 P1): the
+    // route snapshot above is computed BEFORE the lock, so each write is
+    // keyed to the tech-day the job was routed FOR — a job that moved while
+    // we waited misses the predicate and the whole refresh rolls back (409).
+    const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    try {
+      await getDb().transaction(async (trx) => {
+        await lockTechDays(trx, routes.flatMap((r) => r.jobs.map((j) => ({ techId: j.assigned_tech_id, date }))));
+        for (const route of routes) {
+          for (let i = 0; i < route.jobs.length; i += 1) {
+            const job = route.jobs[i];
+            const updated = await trx('scheduled_services')
+              .where('id', job.id)
+              .where('scheduled_date', date)
+              .modify((q) => (job.assigned_tech_id ? q.where('technician_id', job.assigned_tech_id) : q.whereNull('technician_id')))
+              .update({ route_order: i + 1, updated_at: new Date() });
+            if (updated !== 1) throw Object.assign(new Error('schedule changed while reoptimizing'), { code: 'STALE_OPTIMIZE' });
+          }
+        }
+      });
+    } catch (e) {
+      if (e.code === 'STALE_OPTIMIZE') return res.status(409).json({ error: 'Schedule changed while reoptimizing — retry' });
+      throw e;
     }
     res.json({ routes, date, mode, zone, message: 'Canonical route order refreshed' });
   } catch (err) {

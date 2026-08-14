@@ -120,6 +120,26 @@ function categoryEligible(est, rule) {
   return lines.every((line) => allowed.has(line.key));
 }
 
+// Durable per-estimate opt-out from ALL engagement automation. Set at mint
+// time by publish-without-delivery lanes (report click-to-estimate,
+// GATE_REPORT_CLICK_TO_ESTIMATE): those estimates are published 'sent' with
+// no delivery channel under an AGENTS.md ZERO-comms exception, and the four
+// legacy followup_* flags only cover the follow-up engine — view-event and
+// quiet-sweep rules here would still email the customer (#3391 audit P1).
+// Enforced at BOTH engine entries (the view hook's enqueue and the runner,
+// which re-reads fresh state before every send), so the marker holds even
+// for jobs enqueued before it existed.
+function estimateOptedOutOfEngagement(est) {
+  try {
+    const data = typeof est.estimate_data === 'string'
+      ? JSON.parse(est.estimate_data)
+      : est.estimate_data;
+    return data?.noEngagementAutomation === true;
+  } catch {
+    return false;
+  }
+}
+
 // Rules that share a send budget: the two expiring variants are ONE expiry
 // reminder per estimate (codex 2736 r3 — a never-viewed send followed by an
 // open must not let the engaged variant re-nudge the same deadline).
@@ -193,6 +213,7 @@ async function enqueueJob(estimateId, rule, dueAt, trigger) {
 async function onEstimateViewed(estimate, nowDate = new Date()) {
   try {
     if (!estimate || !ACTIVE_STATUSES.includes(estimate.status) || estimate.archived_at) return;
+    if (estimateOptedOutOfEngagement(estimate)) return;
     if (!estimate.customer_email) return;
     const rules = await loadRules('view_event');
     if (!rules.length) return;
@@ -488,6 +509,12 @@ async function processDueBatch(now = new Date()) {
         await markJob(job.id, 'skipped', 'estimate-inactive');
         continue;
       }
+      // The runner is the SEND choke point — enforcing the opt-out here
+      // covers jobs enqueued before the marker existed and every sweep rule.
+      if (estimateOptedOutOfEngagement(est)) {
+        await markJob(job.id, 'skipped', 'engagement-opted-out');
+        continue;
+      }
       // expires_at can lapse HOURS before the daily expiration sweep flips
       // status to 'expired', and the public route already renders those
       // links as expired (codex 2736 r2) — never email a link that dead-ends.
@@ -777,6 +804,7 @@ module.exports = {
 module.exports._private = {
   loadRules,
   categoryEligible,
+  estimateOptedOutOfEngagement,
   enqueueJob,
   parseParams,
   rulePredicateStillHolds,

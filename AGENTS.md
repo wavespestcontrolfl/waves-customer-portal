@@ -405,6 +405,18 @@ finding and warns on P1. Reviewers must return JSON matching
   the review lane, never auto-apply. Caller-stated unit size +
   `relationship_to_property: tenant` outrank county building sqft for
   commercial tenants.
+  - OWNER-APPROVED EXCEPTION (ruling 2026-08-13, click-to-estimate lane):
+    a PRICED cross-sell tap (`GATE_REPORT_CLICK_TO_ESTIMATE`) mints a
+    customer-viewable estimate for the tapping customer — including an
+    existing member — because the customer is the one initiating on a
+    price the card already showed. Bounds that keep the rule's intent:
+    no LLM in the loop (the offer matrix is deterministic); only
+    `optionIsPriceable` offers reach the mint (manual-review and
+    low-confidence offers were already demoted to the unpriced CTA);
+    the recomputed per-application price must match the shown price to
+    the cent or the mint refuses; the estimate is published with ZERO
+    delivery — no send, no follow-up automation, no customer comms.
+    "Never auto-send" stands everywhere else.
 - **Lawn-diagnostic lockstep.** The four artifacts (CONDITION_LABELS /
   SUMMARY_CAUSE_RE / CONFIRMABLE_CONDITION / the GOVERNED_CAUSE test) must
   stay mirrored, plural-aware; customer-facing egress is

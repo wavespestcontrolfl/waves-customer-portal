@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { BookOpen, Brain, Gauge, Plus, ShieldCheck, Sprout } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { getAdminUser } from "../../lib/adminAuth";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -37,6 +38,15 @@ function adminFetch(path, options = {}) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json();
   });
+}
+
+// Regeneration is admin-only server-side (requireAdmin on /admin/wiki/update —
+// each call burns a DEEP-model generation); showing the button to technicians
+// would render a reachable control that only 403s. Role comes from the
+// canonical parser so this gate can never drift from the rest of the
+// admin UI.
+function staffRole() {
+  return getAdminUser()?.role || null;
 }
 
 function useIsMobile(breakpoint = 768) {
@@ -1588,13 +1598,15 @@ function FieldIntelligenceTab({ showToast, isMobile }) {
             Block
           </button>
         )}
-        <button
-          disabled={busySlug === selected.slug}
-          onClick={() => handleRegenerate(selected.slug)}
-          style={sBtn(D.border, D.text)}
-        >
-          Regenerate
-        </button>
+        {staffRole() === "admin" && (
+          <button
+            disabled={busySlug === selected.slug}
+            onClick={() => handleRegenerate(selected.slug)}
+            style={sBtn(D.border, D.text)}
+          >
+            Regenerate
+          </button>
+        )}
         <select
           value=""
           onChange={(e) => handleTierPin(selected.slug, e.target.value)}

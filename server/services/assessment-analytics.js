@@ -22,6 +22,17 @@ function slugify(t) {
   return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
 }
 
+// SQL twin of slugify() for dedupe predicates. computeProductEfficacy groups
+// name variants under one product_slug but displays whichever product_name an
+// UNORDERED outcomes query yields first, so the deterministic claim strings
+// built from it can drift in casing/punctuation between runs. Byte-equality
+// dedupe would then miss the existing open contradiction and duplicate the
+// review gate — compare slug-normalized text instead (codex P2 r4). Column
+// names are hardcoded literals at every call site, never user input.
+function slugifiedColumnSql(column) {
+  return `left(btrim(regexp_replace(lower(${column}), '[^a-z0-9]+', '-', 'g'), '-'), 190)`;
+}
+
 function avg(arr) {
   const v = arr.filter(x => x != null);
   return v.length ? Math.round((v.reduce((a, b) => a + b, 0) / v.length) * 100) / 100 : null;
@@ -651,6 +662,86 @@ async function getCustomerBenchmark(customerId) {
 // CONTRADICTION DETECTION
 // ══════════════════════════════════════════════════════════════
 
+// An open contradiction row that predates bridge attribution can carry
+// wiki_entry_id = null — the dedupe then skips re-insertion forever, so the
+// page it should gate stays agent-trusted. When the current run CAN resolve
+// the wiki entry, attribute the existing row and gate the page now. On gate
+// failure the attribution is reverted so the next weekly run retries.
+async function backfillContradictionAttribution(existing, wikiEntryId) {
+  if (!existing || !wikiEntryId) return false;
+  if (existing.wiki_entry_id === wikiEntryId) return false;
+  // MISMATCHED legacy attribution (the former unordered fuzzy .first()
+  // could pick an arbitrary variant page): move the row to the exact
+  // resolution — gate the correct page first, conditionally re-point the
+  // row, then recompute the wrongly-gated former page so it clears.
+  if (existing.wiki_entry_id) {
+    await recomputeEntryReviewGate(wikiEntryId, { assumeOpenIds: [existing.id] });
+    const moved = await db('knowledge_contradictions')
+      .where({ id: existing.id, status: 'open', wiki_entry_id: existing.wiki_entry_id })
+      .update({ wiki_entry_id: wikiEntryId });
+    const recomputeOrThrow = async (entryId, label) => {
+      try {
+        await recomputeEntryReviewGate(entryId);
+      } catch (err) {
+        try {
+          await recomputeEntryReviewGate(entryId);
+          logger.warn(`[assessment-analytics] ${label} recompute for ${entryId} succeeded on retry`);
+        } catch (retryErr) {
+          logger.error(`[assessment-analytics] ${label} recompute failed for ${entryId}: ${retryErr.message}`);
+          throw retryErr;
+        }
+      }
+    };
+    if (!moved) {
+      // Admin resolved/re-pointed the row between read and write — clear
+      // the gate this call just forced on the exact page.
+      await recomputeOrThrow(wikiEntryId, 'corrective gate');
+      return false;
+    }
+    await recomputeOrThrow(existing.wiki_entry_id, 'former-page gate');
+    return true;
+  }
+  // Gate FIRST, persist second: attribution written before a successful gate
+  // would make this function's null-check skip the row on every later run
+  // while the page stayed trusted (a crash between the two writes used to
+  // strand exactly that state). The reverse crash window — gated page,
+  // attribution not yet persisted — self-heals: the row is still
+  // unattributed, so the next weekly run re-gates and persists.
+  await recomputeEntryReviewGate(wikiEntryId, { assumeOpenIds: [existing.id] });
+  // Conditional persist: an admin may have resolved/dismissed the row between
+  // the detector's read and this write. If the claim misses, the row is no
+  // longer open — recompute WITHOUT assumeOpenIds so the gate this function
+  // just forced doesn't linger on a page whose contradiction was resolved
+  // (later detector runs select status:'open' only and would never clear it).
+  const claimed = await db('knowledge_contradictions')
+    .where({ id: existing.id, status: 'open' })
+    .whereNull('wiki_entry_id')
+    .update({ wiki_entry_id: wikiEntryId });
+  if (!claimed) {
+    try {
+      await recomputeEntryReviewGate(wikiEntryId);
+    } catch (err) {
+      // One immediate retry, then PROPAGATE (same retry-then-throw idiom as
+      // syncKbCopyTrust's gating update). A swallowed failure here leaves
+      // the gate this function just forced on a page whose contradiction is
+      // no longer open — the resolved row has no wiki_entry_id, so the admin
+      // resolve route can't recompute its page, and later detector runs
+      // select status:'open' only: nothing would ever clear it. Throwing
+      // surfaces the run as errored (weekly job_health) instead of silently
+      // recording success over an indefinitely blocked page/mirror.
+      try {
+        await recomputeEntryReviewGate(wikiEntryId);
+        logger.warn(`[assessment-analytics] corrective gate recompute for ${wikiEntryId} succeeded on retry`);
+      } catch (retryErr) {
+        logger.error(`[assessment-analytics] corrective gate recompute failed for ${wikiEntryId}: ${retryErr.message}`);
+        throw retryErr;
+      }
+    }
+    return false;
+  }
+  return true;
+}
+
 async function detectContradictions() {
   const found = [];
 
@@ -667,8 +758,67 @@ async function detectContradictions() {
       const kbName = kbEntry.title.replace(/^Product:\s*/i, '').toLowerCase();
       const content = (kbEntry.content || '').toLowerCase();
 
+      // Prefer the curated KB↔wiki pairs (populated by KnowledgeBridge.autoLink
+      // in this same weekly run) for wiki attribution — the slug-ilike lookup
+      // below stays only as a fallback, since free-text product names make it
+      // fragmentation-prone (the alias-matching lesson). One KB entry can
+      // bridge to several wiki product pages (substring matches: Bifen I/T vs
+      // Bifen XTS), so the pair is resolved per efficacy product, never once
+      // per KB entry: exact wiki-slug match first, a single unambiguous pair
+      // second, otherwise no bridge attribution.
+      const bridgePairs = await db('knowledge_bridge')
+        .where({ kb_entry_id: kbEntry.id })
+        .whereNotNull('wiki_entry_id')
+        .orderBy('relevance_score', 'desc')
+        .select('wiki_entry_id', 'wiki_slug');
+      // Exact-slug match ONLY: a lone pair is not identity — autoLink's
+      // substring matching can bridge a broad KB entry ("Bifen") to a single
+      // wiki page ("Bifen I/T") that is the wrong page for a different
+      // efficacy product ("Bifen XTS"). Anything short of an exact match
+      // falls back to the slug lookup below.
+      const bridgeFor = (productName) =>
+        bridgePairs.find((b) => b.wiki_slug === `product/${slugify(productName)}`) || null;
+
       for (const eff of efficacy) {
         if (!eff.product_name.toLowerCase().includes(kbName) && !kbName.includes(eff.product_name.toLowerCase())) continue;
+
+        const bridged = bridgeFor(eff.product_name);
+        // One wiki resolution per efficacy row, shared by BOTH rules (the
+        // seasonal rule previously skipped the slug fallback and stayed
+        // unattributed whenever no exact bridge existed). Memoized so the
+        // fallback query runs at most once per row.
+        let resolvedWikiEntryId;
+        const resolveWikiEntryId = async () => {
+          if (resolvedWikiEntryId !== undefined) return resolvedWikiEntryId;
+          if (bridged) {
+            resolvedWikiEntryId = bridged.wiki_entry_id;
+          } else {
+            // Exact slug first — the fuzzy fallback's unordered .first()
+            // could attach a broad name ("Bifen") to an arbitrary variant
+            // page and permanently gate the wrong page. Fuzzy is accepted
+            // only when the candidate set is uniquely identifiable;
+            // ambiguity leaves attribution null.
+            const productSlug = slugify(eff.product_name);
+            const exact = await db('knowledge_entries')
+              .where({ slug: `product/${productSlug}` })
+              .first('id');
+            if (exact) {
+              resolvedWikiEntryId = exact.id;
+            } else {
+              const { escapeLike } = require('./agronomic-wiki');
+              // Product namespace ONLY — an unrestricted slug scan could
+              // "uniquely" match a condition/track/seasonal page and gate
+              // the wrong page permanently.
+              const candidates = await db('knowledge_entries')
+                .where('slug', 'like', 'product/%')
+                .whereRaw("slug ILIKE ? ESCAPE '\\'", [`%${escapeLike(productSlug)}%`])
+                .select('id')
+                .limit(2);
+              resolvedWikiEntryId = candidates.length === 1 ? candidates[0].id : null;
+            }
+          }
+          return resolvedWikiEntryId;
+        };
 
         // Check: KB claims "best for" or "effective" but data shows negative delta
         if (eff.avg_delta_overall != null && eff.avg_delta_overall < -5 && eff.application_count >= 5) {
@@ -682,17 +832,19 @@ async function detectContradictions() {
               severity: Math.min(1.0, Math.abs(eff.avg_delta_overall) / 20),
             };
 
-            // Find linked wiki entry
-            const wikiEntry = await db('knowledge_entries')
-              .where('slug', 'ilike', `%${slugify(eff.product_name)}%`)
-              .first();
-
-            if (wikiEntry) contradiction.wiki_entry_id = wikiEntry.id;
+            // Find linked wiki entry — bridge pair first, slug fallback
+            contradiction.wiki_entry_id = await resolveWikiEntryId();
 
             // Check if already flagged
+            // Slug-normalized equality on the deterministic claim string —
+            // substring predicates are not product-exact ("Bifen" matches an
+            // existing "Bifen XTS" claim) and the backfill below would
+            // reattribute another product's row to the wrong wiki page, while
+            // byte equality misses when the display name's casing/punctuation
+            // drifts between runs (see slugifiedColumnSql).
             const existing = await db('knowledge_contradictions')
               .where({ kb_entry_id: kbEntry.id, contradiction_type: 'claim_vs_data' })
-              .whereRaw("kb_claim ILIKE ?", [`%${eff.product_name}%`])
+              .whereRaw(`${slugifiedColumnSql('kb_claim')} = ?`, [slugify(contradiction.kb_claim)])
               .where({ status: 'open' })
               .first();
 
@@ -715,6 +867,8 @@ async function detectContradictions() {
                 throw gateErr;
               }
               found.push(contradiction);
+            } else {
+              await backfillContradictionAttribution(existing, contradiction.wiki_entry_id);
             }
           }
         }
@@ -730,7 +884,11 @@ async function detectContradictions() {
             if (shoulderStats?.avgDelta != null && shoulderStats.avgDelta > peakStats.avgDelta + 10) {
               const contradiction = {
                 kb_entry_id: kbEntry.id,
-                wiki_entry_id: null,
+                // Same resolution as the rule above (bridge → slug fallback)
+                // so the wiki page re-gates and the Field Intelligence queue
+                // surfaces it — a null wiki_entry_id row is invisible to the
+                // review-tier machinery.
+                wiki_entry_id: await resolveWikiEntryId(),
                 contradiction_type: 'claim_vs_data',
                 kb_claim: `Claudeopedia associates ${eff.product_name} with summer/peak season`,
                 wiki_evidence: `Peak season avg delta: ${peakStats.avgDelta} (${peakStats.count} apps) vs shoulder: ${shoulderStats.avgDelta}`,
@@ -738,20 +896,60 @@ async function detectContradictions() {
                 severity: 0.6,
               };
 
+              // Slug-normalized equality on the deterministic description —
+              // product-scoped (a broad KB entry can match several products),
+              // immune to LIKE metacharacters in catalog names
+              // ("Prodiamine 65%") and to substring collisions
+              // ("Bifen" vs "Bifen XTS"), and stable across display-name
+              // casing/punctuation drift (see slugifiedColumnSql).
               const existing = await db('knowledge_contradictions')
                 .where({ kb_entry_id: kbEntry.id, contradiction_type: 'claim_vs_data' })
-                .whereRaw("description ILIKE ?", [`%peak season%shoulder%`])
+                .whereRaw(`${slugifiedColumnSql('description')} = ?`, [slugify(contradiction.description)])
                 .where({ status: 'open' })
                 .first();
 
               if (!existing) {
-                await db('knowledge_contradictions').insert(contradiction);
+                const [inserted] = await db('knowledge_contradictions').insert(contradiction).returning('id');
+                const insertedId = inserted?.id ?? inserted;
+                if (contradiction.wiki_entry_id) {
+                  // Same gate-now + roll-back-on-failure pattern as the
+                  // claim_vs_data insert above: the dedupe would otherwise
+                  // skip this row forever, leaving the page trusted.
+                  try {
+                    await recomputeEntryReviewGate(contradiction.wiki_entry_id, {
+                      assumeOpenIds: [insertedId],
+                    });
+                  } catch (gateErr) {
+                    try { await db('knowledge_contradictions').where({ id: insertedId }).del(); } catch { /* rollback best-effort */ }
+                    throw gateErr;
+                  }
+                }
                 found.push(contradiction);
+              } else {
+                await backfillContradictionAttribution(existing, contradiction.wiki_entry_id);
               }
             }
           }
         }
       }
+    }
+
+    // Self-heal stranded gates: a crash between re-pointing a
+    // contradiction row and recomputing its FORMER page — or any
+    // historical gate-write failure — leaves a page carrying
+    // 'open_contradiction' flags with no open row owning it, and nothing
+    // else ever revisits it (later runs select open rows only). Recompute
+    // clears it (getOpenContradictionIdsFor returns []); a failure here
+    // propagates into this leg's error so the run records unhealthy.
+    const flagged = await db('knowledge_entries')
+      .whereRaw("risk_flags::text LIKE ?", ['%open_contradiction%'])
+      .select('id');
+    for (const row of flagged) {
+      const open = await db('knowledge_contradictions')
+        .where({ wiki_entry_id: row.id })
+        .whereNotIn('status', ['resolved', 'dismissed'])
+        .first('id');
+      if (!open) await recomputeEntryReviewGate(row.id);
     }
 
     logger.info(`[assessment-analytics] Contradiction detection: ${found.length} new contradictions found`);

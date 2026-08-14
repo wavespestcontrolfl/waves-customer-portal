@@ -6,6 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
+const { recordServiceContactChanges } = require('../services/service-contact-events');
 
 router.use(authenticate);
 
@@ -675,19 +676,42 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
         propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
       } : null;
+      const slotUpdates = serviceContactSlotUpdates(contacts, beforeRow);
+      const consentUpdates = serviceContactConsentUpdates(contacts, updates.serviceContactsConsent);
+      let lockedBefore = beforeRow;
+      let lockedAt = null;
       await db.transaction(async (trx) => {
+        // Row lock + re-read: the audit diff below must describe the actual
+        // DB transition — a concurrent save may have moved the row since the
+        // unlocked beforeRow read, and diffing against that stale snapshot
+        // fabricates or drops timeline events. The lock-held timestamp
+        // orders the events even if a later save's insert lands first.
+        lockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
+        lockedAt = new Date();
         if (optinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           optinClaims = await claimRecipientOptins({ ...optinArgs, trx });
         }
         await trx('customers').where({ id: req.params.customerId }).update({
-          ...serviceContactSlotUpdates(contacts, beforeRow),
-          ...serviceContactConsentUpdates(contacts, updates.serviceContactsConsent),
+          ...slotUpdates,
+          ...consentUpdates,
           updated_at: new Date(),
         });
       });
       savedContacts = contacts.map(serviceContactPayload);
       if (optinClaims.length) pendingOptinDispatch = { claims: optinClaims, customer: beforeRow };
+      // Contact change events for the 360 timeline — post-commit, best-effort
+      // (the recorder never throws; a logging failure only warns and never
+      // fails the save). Awaited so the row is committed before the save
+      // reports done and events land in order.
+      await recordServiceContactChanges({
+        customerId: req.params.customerId,
+        before: lockedBefore,
+        after: { ...lockedBefore, ...slotUpdates, ...consentUpdates },
+        source: 'portal',
+        actorCustomerId: req.customerId,
+        occurredAt: lockedAt,
+      });
     } else if (updates.serviceContact !== undefined) {
       // Legacy single-contact save: writes slot 1 only. Role handling
       // mirrors the list save: the same person (matched by phone/email/name
@@ -728,21 +752,42 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
         propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
       } : null;
+      const legacySlot1Updates = {
+        service_contact_name: slot1.service_contact_name,
+        service_contact_phone: slot1.service_contact_phone,
+        service_contact_email: slot1.service_contact_email,
+        service_contact_role: slot1.service_contact_role,
+      };
+      const legacyConsentUpdates = serviceContactConsentUpdates(postSave, updates.serviceContactsConsent);
+      let legacyLockedBefore = beforeRow;
+      let legacyLockedAt = null;
       await db.transaction(async (trx) => {
+        // Same row-lock re-read as the list save — the audit diff must
+        // describe the actual DB transition, not a possibly-stale snapshot.
+        legacyLockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
+        legacyLockedAt = new Date();
         if (legacyOptinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           legacyClaims = await claimRecipientOptins({ ...legacyOptinArgs, trx });
         }
         await trx('customers').where({ id: req.params.customerId }).update({
-          service_contact_name: slot1.service_contact_name,
-          service_contact_phone: slot1.service_contact_phone,
-          service_contact_email: slot1.service_contact_email,
-          service_contact_role: slot1.service_contact_role,
-          ...serviceContactConsentUpdates(postSave, updates.serviceContactsConsent),
+          ...legacySlot1Updates,
+          ...legacyConsentUpdates,
           updated_at: new Date(),
         });
       });
       if (legacyClaims.length) pendingOptinDispatch = { claims: legacyClaims, customer: beforeRow };
+      // Same events as the list save — the legacy shape must not be a
+      // logging loophole either. Post-commit, best-effort, awaited (the
+      // recorder never throws).
+      await recordServiceContactChanges({
+        customerId: req.params.customerId,
+        before: legacyLockedBefore,
+        after: { ...legacyLockedBefore, ...legacySlot1Updates, ...legacyConsentUpdates },
+        source: 'portal',
+        actorCustomerId: req.customerId,
+        occurredAt: legacyLockedAt,
+      });
     }
 
     const existing = await ensurePrefs(req.params.customerId);

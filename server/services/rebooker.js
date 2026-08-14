@@ -492,6 +492,22 @@ class SmartRebooker {
     if (Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
       updates.technician_id = options.technicianId;
     }
+    // A day or tech change invalidates the stop's route sequence: clear it so
+    // the destination day appends the stop (every consumer sorts
+    // COALESCE(route_order, 999)) instead of interleaving the old day's
+    // number. Canonical clear for every rebooker caller — auto-dispatch tier
+    // day-moves ride this path. Same-day window-only reschedules keep their
+    // sequence.
+    {
+      const svcDay = service.scheduled_date instanceof Date
+        ? service.scheduled_date.toISOString().slice(0, 10)
+        : String(service.scheduled_date).slice(0, 10);
+      const techChanges = Object.prototype.hasOwnProperty.call(options, 'technicianId')
+        && (options.technicianId || null) !== (service.technician_id || null);
+      if (String(newDate).slice(0, 10) !== svcDay || techChanges) {
+        updates.route_order = null;
+      }
+    }
 
     await db.transaction(async (trx) => {
       // The kept technician's route is real — writing 'confirmed' on top
@@ -1055,6 +1071,9 @@ class SmartRebooker {
           status: 'confirmed',
           updated_at: trx.fn.now(),
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
+          // Day change invalidates the row's route sequence — clear it so the
+          // destination day appends the stop (consumers sort NULLs last).
+          ...(sibDateChanges ? { route_order: null } : {}),
         };
         // Rewound rows need the post-commit cleanup (tech pointer release +
         // customer tracker refresh) — collected here, applied after the trx
@@ -1095,6 +1114,11 @@ class SmartRebooker {
         ));
         if (isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
           updateData.technician_id = options.technicianId || null;
+          // Tech change also invalidates the sequence (same rule as the
+          // single-reschedule path above).
+          if ((options.technicianId || null) !== (sib.technician_id || null)) {
+            updateData.route_order = null;
+          }
           if (options.technicianId && updateData.window_start && anchorGateEnd) {
             await trx.raw(
               'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',

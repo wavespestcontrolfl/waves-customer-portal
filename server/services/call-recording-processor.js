@@ -1680,7 +1680,29 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     const wrote = await db('customers')
       .where({ id: customerId })
       .where((q) => q.whereNull(matched.roleCol).orWhere(matched.roleCol, ''))
+      // Re-assert the slot still holds the SAME person as the snapshot the
+      // role was matched against — a concurrent edit replacing the contact
+      // must make this a 0-row no-op, never a role write onto (and an audit
+      // event describing) somebody else.
+      .whereRaw('?? IS NOT DISTINCT FROM ?', [matched.name, customer[matched.name] ?? null])
+      .whereRaw('?? IS NOT DISTINCT FROM ?', [matched.phone, customer[matched.phone] ?? null])
+      .whereRaw('?? IS NOT DISTINCT FROM ?', [matched.email, customer[matched.email] ?? null])
       .update({ [matched.roleCol]: roleToRecord.slice(0, 30) });
+    // Stamp taken AFTER the UPDATE resolves: if the statement blocked behind
+    // a concurrent locked save, the stamp still lands after that save's
+    // lock-held timestamp, keeping timeline order.
+    const roleWriteAt = new Date();
+    if (wrote) {
+      // 360 timeline event — post-write, best-effort, awaited (the recorder
+      // never throws; a failure only warns and never fails the pipeline).
+      await require('./service-contact-events').recordServiceContactChanges({
+        customerId,
+        before: customer,
+        after: { ...customer, [matched.roleCol]: roleToRecord.slice(0, 30) },
+        source: 'call',
+        occurredAt: roleWriteAt,
+      });
+    }
     return !!wrote;
   };
   if (contact.phone && knownPhones.includes(last10(contact.phone))) {
@@ -1765,7 +1787,7 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
     write = write.where((q) => q.whereNull(col).orWhere(col, ''));
   }
   const contactRole = String(contact.role || '').trim().toLowerCase();
-  const updated = await write.update({
+  const slotWrite = {
     [emptySlot.name]: fullName ? capitalizeName(fullName) : null,
     [emptySlot.phone]: contact.phone || null,
     [emptySlot.email]: slotEmail,
@@ -1792,8 +1814,24 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
       service_contacts_consent_source: null,
       service_contacts_consent_text_version: null,
     } : {}),
-  });
+  };
+  const updated = await write.update(slotWrite);
+  // Stamp taken AFTER the UPDATE resolves: if it blocked behind a concurrent
+  // locked save, the stamp still lands after that save's lock-held
+  // timestamp, keeping timeline order.
+  const slotWriteAt = new Date();
   if (!updated) return 'skipped_slot_race';
+  // 360 timeline event — post-write, best-effort, awaited (the recorder
+  // never throws). The conditional WHERE proved the slot was still empty at
+  // write time, so merging slotWrite over the read snapshot diffs to exactly
+  // this one addition.
+  await require('./service-contact-events').recordServiceContactChanges({
+    customerId,
+    before: customer,
+    after: { ...customer, ...slotWrite },
+    source: 'call',
+    occurredAt: slotWriteAt,
+  });
   return 'written';
 }
 
@@ -11108,9 +11146,25 @@ const CallRecordingProcessor = {
                   const isAttachedManualBooking = String(existing.booking_source || '') !== 'phone_call';
                   let primaryRow = existing;
                   if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId) {
+                    // Tech-day membership fence + route_order clear (uncapped
+                    // audit r26 P1): unassigned → tech is a tech-day ENTRY,
+                    // so it must hold the same 'slot-reserve' fence every
+                    // other membership writer holds, and any unassigned-pool
+                    // sequence number is meaningless in the tech's run. Day
+                    // key from PG itself (to_char) like the other holders.
+                    const dayRow = await trx('scheduled_services')
+                      .where({ id: existing.id })
+                      .first(trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+                    if (dayRow?.day) {
+                      const { lockTechDays } = require('./scheduling/tech-day-lock');
+                      await lockTechDays(trx, [
+                        { techId: null, date: dayRow.day },
+                        { techId: defaultTechnicianId, date: dayRow.day },
+                      ]);
+                    }
                     const [updatedExisting] = await trx('scheduled_services')
                       .where({ id: existing.id })
-                      .update({ technician_id: defaultTechnicianId, updated_at: new Date() })
+                      .update({ technician_id: defaultTechnicianId, route_order: null, updated_at: new Date() })
                       .returning('*');
                     primaryRow = updatedExisting || existing;
                   }

@@ -39,6 +39,7 @@
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
+ *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -158,6 +159,16 @@ const gates = {
   // unless GATE_REPORT_CROSS_SELL is also on. Gate off: completions behave
   // exactly as today and the card keeps falling back to the quote CTA.
   reportCrossSellPrewarm: process.env.GATE_REPORT_CROSS_SELL_PREWARM === 'true',
+
+  // A PRICED cross-sell tap mints a customer-viewable estimate at the exact
+  // shown price and the response redirects into the estimate page (slot pick
+  // + per-application / pay-in-full acceptance). Customer-facing money
+  // surface — fail-closed ==='true' in EVERY environment, and inert unless
+  // GATE_REPORT_CROSS_SELL is also on (the tap only exists on a live card).
+  // Gate off: taps keep today's request-row + office-bell flow byte-for-byte
+  // and the response carries no estimate URL. Quote-mode (CTA) taps keep the
+  // request flow at ANY setting.
+  reportClickToEstimate: process.env.GATE_REPORT_CLICK_TO_ESTIMATE === 'true',
 
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is
@@ -1200,6 +1211,26 @@ const gates = {
   // run endpoints are unaffected by this gate (they're requireAdmin-only).
   autoDispatch: isProd ? process.env.GATE_AUTO_DISPATCH === 'true' : true,
 
+  // ROUTE-TIERS — tiered day-move radius for recurring maintenance visits
+  // inside the auto-dispatch run (≥14d: ±5 days; 7–13d: ±3; <7d: no day-moves;
+  // <72h or 72h-reminder-sent: frozen), plus the ±5-day cumulative drift
+  // budget, the ≥5-days-out destination floor, and the reminder-sent freeze.
+  // OFF = auto-dispatch's legacy flat 14-day lock, byte for byte. Read at CALL
+  // time via gateEnvValue (same pattern and rationale as
+  // GATE_DRIVE_TIME_CALIBRATION: it moves the numbers/windows scheduling
+  // decisions are made with, so the flip is a deliberate act in EVERY
+  // environment — never an ambient dev default — and needs no redeploy).
+  // Kill switch: unset GATE_ROUTE_TIERS.
+  routeTiers: gateEnvValue('GATE_ROUTE_TIERS'),
+
+  // ROUTE-TIERS nightly intra-day reorder pass (tier 3 band, 72h–7d): 4:20am
+  // cron that rewrites route_order per tech-day when savings clear the floor.
+  // Separate kill switch from routeTiers — either half can run alone. Explicit
+  // opt-in in every environment (it writes scheduled_services.route_order and
+  // can call the Google Routes API, so it must never auto-run in dev).
+  // Double-gated behind cronJobs. Kill switch: unset GATE_ROUTE_REORDER.
+  routeReorder: gateEnvValue('GATE_ROUTE_REORDER'),
+
   // Drive-Time Calibration — swaps the straight-line drive-time approximation
   // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
   // real trips: a fixed per-leg overhead plus a per-mile rate. Purely an
@@ -1213,6 +1244,20 @@ const gates = {
   // with the scheduler — with a bare === 'true' a value of `1`/`on`/`TRUE`
   // would calibrate the estimator while logGateStatus reported it disabled.
   driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
+
+  // Vision Delta Scoring — one VISION-tier call per treatment outcome's best
+  // before/after photo pair (server/services/vision-delta.js); the verdict
+  // feeds the agronomic wiki as photo-verified visual change. Paid vision
+  // per pair, so explicit opt-in in EVERY environment. Off → the sweep
+  // returns {skipped:'gated'} before any DB read and the whole lane is
+  // inert (the 3:40 ET cron leg adds no gate of its own — the check inside
+  // sweepUnscoredOutcomes is the single source of truth). Kill switch:
+  // unset or any non-truthy value.
+  // NOTE: the sweep parses this at CALL time via gateEnvValue() (tests flip
+  // the env at runtime, and a flip must not depend on this module's load
+  // moment) — registered with the SAME parser so this registry entry,
+  // logGateStatus, and the sweep can never disagree.
+  visionDelta: gateEnvValue('GATE_VISION_DELTA'),
 
   // Weekly autonomous vendor price scan -> stages a price-match draft for the
   // SiteOne rep (never auto-sends; a human reviews + sends from /admin/price-match).

@@ -11,7 +11,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
-const { stampedDivergesSql } = require('../stamped-address');
+const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
 
 const SCHEDULE_TOOLS = [
   {
@@ -190,21 +190,19 @@ async function optimizeAllRoutes(input) {
     return { error: 'Route optimizer not available' };
   }
 
-  const services = await db('scheduled_services')
-    .where({ scheduled_date: date })
-    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
-    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-    .select(
+  // Shared day-stops scaffold (services/scheduling/day-stops) — same rows as
+  // the inline query it replaced, including the stamped-address divergence
+  // guard on the coordinate fallback (codex round-9 P1).
+  const services = await dayStopsQuery(db, {
+    dateStr: date,
+    excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
+    select: [
       'scheduled_services.*',
       'customers.first_name', 'customers.last_name',
       'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
-      // Primary-home coords only stand in when the visit's stamped address
-      // doesn't DIVERGE from the primary — a divergent stamped rental with
-      // no coords drops from the optimize set (stopsWithCoords filter)
-      // instead of being modeled at the wrong house (codex round-9 P1).
-      db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
-      db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
-    );
+      ...guardedCoordSelects(db),
+    ],
+  });
 
   if (!services.length) return { message: 'No services found for this date', date };
 
@@ -250,8 +248,36 @@ async function optimizeAllRoutes(input) {
   }
 
   if (result.orderedStops) {
-    for (let i = 0; i < result.orderedStops.length; i++) {
-      await db('scheduled_services').where('id', result.orderedStops[i].id).update({ route_order: i + 1, updated_at: new Date() });
+    // Fenced + transactional rewrite — same 'slot-reserve' tech-day lock as
+    // every other route_order writer (scheduling/tech-day-lock.js); an
+    // unfenced per-row loop racing the nightly reorder leaves a mixed
+    // sequence. Locks every tech-day this board-wide rewrite touches.
+    const { lockTechDays } = require('../scheduling/tech-day-lock');
+    try {
+      await db.transaction(async (trx) => {
+        await lockTechDays(trx, services.map((s) => ({ techId: s.technician_id, date })));
+        // Stale-snapshot guard (uncapped audit r21 P1): the optimizer ran
+        // BEFORE the fence — a move that committed while we waited must not
+        // receive the stale sequence on its new tech-day. Constrain each
+        // write to the tech-day the stop was optimized FOR; a miss aborts
+        // the whole rewrite untouched.
+        const techById = new Map(services.map((s) => [s.id, s.technician_id || null]));
+        for (let i = 0; i < result.orderedStops.length; i++) {
+          const stopId = result.orderedStops[i].id;
+          const expectTech = techById.get(stopId) || null;
+          const updated = await trx('scheduled_services')
+            .where('id', stopId)
+            .where('scheduled_date', date)
+            .modify((q) => (expectTech ? q.where('technician_id', expectTech) : q.whereNull('technician_id')))
+            .update({ route_order: i + 1, updated_at: new Date() });
+          if (updated !== 1) {
+            throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+          }
+        }
+      });
+    } catch (e) {
+      if (e.code === 'STALE_OPTIMIZE') return { error: 'Schedule changed while optimizing — please retry' };
+      throw e;
     }
   }
 
@@ -271,18 +297,18 @@ async function optimizeTechRoute(input) {
     return { error: 'Route optimizer not available' };
   }
 
-  const services = await db('scheduled_services')
-    .where({ scheduled_date: date, technician_id: tech.id })
-    .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
-    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-    .select(
+  // Shared day-stops scaffold — same rows/divergence guard as before (codex round-9 P1).
+  const services = await dayStopsQuery(db, {
+    dateStr: date,
+    technicianId: tech.id,
+    excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
+    select: [
       'scheduled_services.*',
       'customers.first_name', 'customers.last_name',
       'customers.city',
-      // Same divergence guard as optimize_all_routes (codex round-9 P1).
-      db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
-      db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
-    );
+      ...guardedCoordSelects(db),
+    ],
+  });
 
   if (services.length < 2) return { message: `${tech.name} has ${services.length} stop(s) — nothing to optimize`, tech: tech.name };
 
@@ -323,8 +349,27 @@ async function optimizeTechRoute(input) {
   }
 
   if (result.orderedStops) {
-    for (let i = 0; i < result.orderedStops.length; i++) {
-      await db('scheduled_services').where('id', result.orderedStops[i].id).update({ route_order: i + 1, updated_at: new Date() });
+    // Fenced + transactional — single tech-day; same contract as
+    // optimize_all_routes above.
+    const { lockTechDays } = require('../scheduling/tech-day-lock');
+    try {
+      await db.transaction(async (trx) => {
+        await lockTechDays(trx, [{ techId: tech.id, date }]);
+        // Stale-snapshot guard — same contract as optimize_all_routes above.
+        for (let i = 0; i < result.orderedStops.length; i++) {
+          const updated = await trx('scheduled_services')
+            .where('id', result.orderedStops[i].id)
+            .where('scheduled_date', date)
+            .where('technician_id', tech.id)
+            .update({ route_order: i + 1, updated_at: new Date() });
+          if (updated !== 1) {
+            throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+          }
+        }
+      });
+    } catch (e) {
+      if (e.code === 'STALE_OPTIMIZE') return { error: 'Schedule changed while optimizing — please retry' };
+      throw e;
     }
   }
 
@@ -348,6 +393,11 @@ async function assignTechnician(input) {
       'customers.first_name', 'customers.last_name',
       'scheduled_services.service_type',
       'scheduled_services.scheduled_date',
+      'scheduled_services.technician_id as current_tech_id',
+      // Canonical YYYY-MM-DD for the tech-day fence key — a JS Date
+      // stringified any other way builds a key that never collides with the
+      // other lock holders' keys (see tech-day-lock.js).
+      db.raw("to_char(scheduled_services.scheduled_date, 'YYYY-MM-DD') as scheduled_date_str"),
       'cur_tech.name as current_tech_name',
     );
 
@@ -371,9 +421,34 @@ async function assignTechnician(input) {
     };
   }
 
-  const count = await db('scheduled_services')
-    .whereIn('id', serviceIds)
-    .update({ technician_id: tech.id, updated_at: new Date() });
+  // Reassignment edits tech-day MEMBERSHIP on both sides (the day the stop
+  // leaves and the day it joins), so it must hold the same tech-day fence the
+  // nightly reorder and the booking/reschedule writers hold — an unfenced
+  // reassign landing mid-reorder leaves the committed route_order not
+  // covering the day.
+  const { lockTechDays } = require('../scheduling/tech-day-lock');
+  const count = await db.transaction(async trx => {
+    await lockTechDays(trx, services.flatMap(s => [
+      { techId: s.current_tech_id, date: s.scheduled_date_str },
+      { techId: tech.id, date: s.scheduled_date_str },
+    ]));
+    // route_order: null ONLY for rows whose technician actually CHANGES —
+    // the old sequence number is meaningless in the day the stop joins
+    // (NULL appends after the ordered run; every consumer sorts
+    // COALESCE(route_order, 999)) until an optimizer places it. Rows
+    // already on tech.id are a no-op reassignment: clearing them would
+    // erase a valid manual/optimized position (uncapped audit r25 P1) —
+    // the predicate is on the row value the UPDATE itself observes.
+    const [{ count: alreadyOn }] = await trx('scheduled_services')
+      .whereIn('id', serviceIds)
+      .where('technician_id', tech.id)
+      .count('id as count');
+    const changed = await trx('scheduled_services')
+      .whereIn('id', serviceIds)
+      .whereRaw('technician_id IS DISTINCT FROM ?', [tech.id])
+      .update({ technician_id: tech.id, route_order: null, updated_at: new Date() });
+    return changed + Number(alreadyOn);
+  });
 
   logger.info(`[intelligence-bar:schedule] Assigned ${count} services to ${tech.name}`);
 
@@ -521,9 +596,13 @@ async function moveStopsToDay(input) {
     // movability + logs the window pair off the same read) — a concurrent
     // end-resize would otherwise still match and get a token expiry computed
     // from the stale end. Field-level CAS is the repo's established
-    // pattern for exactly this (rebooker options.expect); deliberately NOT
-    // SELECT..FOR UPDATE, which would put row locks + a transaction around a
-    // quick per-stop mover for no added safety. updated_at stays out of the
+    // pattern for exactly this (rebooker options.expect); still deliberately
+    // NOT SELECT..FOR UPDATE. The short transaction below exists solely to
+    // hold the tech-day advisory fence (a date-move edits tech-day MEMBERSHIP
+    // on both the leaving and joining day, and the nightly reorder's
+    // membership read is only fenced against writers holding the same lock —
+    // see tech-day-lock.js); the CAS predicate remains the conflict
+    // detector. updated_at stays out of the
     // predicate: knex never auto-touches it and not every mover stamps it
     // (the bulk route's UPDATE doesn't), so it isn't a reliable change
     // marker. Zero rows matched = the stop changed under us; skip it and
@@ -531,31 +610,41 @@ async function moveStopsToDay(input) {
     const observedDate = s.scheduled_date instanceof Date
       ? s.scheduled_date.toISOString().slice(0, 10)
       : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null);
-    const updatedRows = await applyTrackLifecycleCas(
-      db('scheduled_services')
-        .where('id', s.id)
-        .where('status', String(s.status))
-        .where({
-          scheduled_date: observedDate,
-          window_start: s.window_start ?? null,
-          window_end: s.window_end ?? null,
-        }),
-      // Full observed tracker/lifecycle snapshot in the CAS — any
-      // concurrent lifecycle or SMS-guard write must make this miss.
-      // See reschedule_appointment in tools.js.
-      s,
-    )
-      .update({
+    const { lockTechDays } = require('../scheduling/tech-day-lock');
+    const updatedRows = await db.transaction(async trx => {
+      await lockTechDays(trx, [
+        { techId: s.technician_id, date: observedDate },
+        { techId: s.technician_id, date: dateStr },
+      ]);
+      return applyTrackLifecycleCas(
+        trx('scheduled_services')
+          .where('id', s.id)
+          .where('status', String(s.status))
+          .where({
+            scheduled_date: observedDate,
+            window_start: s.window_start ?? null,
+            window_end: s.window_end ?? null,
+          }),
+        // Full observed tracker/lifecycle snapshot in the CAS — any
+        // concurrent lifecycle or SMS-guard write must make this miss.
+        // See reschedule_appointment in tools.js.
+        s,
+      )
+        .update({
         scheduled_date: dateStr,
+        // Old day's sequence number is meaningless on the new date — NULL
+        // appends the stop after the target day's ordered run.
+        route_order: null,
         notes: reason ? `${s.notes || ''}\nMoved from ${oldDate}: ${reason}`.trim() : s.notes,
         track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
         // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — land a
         // moved en_route/on_site stop back on 'confirmed' so it isn't left live
         // on a future date, matching the rebooker's own path.
-        ...(wasLive ? { status: 'confirmed' } : {}),
-        ...liveReset,
-        updated_at: new Date(),
-      });
+          ...(wasLive ? { status: 'confirmed' } : {}),
+          ...liveReset,
+          updated_at: new Date(),
+        });
+    });
     if (updatedRows === 0) {
       // Best-effort re-read so the operator sees the status that blocked the
       // move (falls back to the stale one if the row vanished).
@@ -752,9 +841,21 @@ async function swapTechAssignments(input) {
   const aIds = aServices.map(s => s.id);
   const bIds = bServices.map(s => s.id);
   await db.transaction(async trx => {
+    // Tech-day fence before any membership write — both real tech-days plus
+    // the transient 'unassigned' day the A-set parks on (see
+    // tech-day-lock.js; keys must match the other holders').
+    const { lockTechDays } = require('../scheduling/tech-day-lock');
+    await lockTechDays(trx, [
+      { techId: techA.id, date },
+      { techId: techB.id, date },
+      { techId: null, date },
+    ]);
+    // route_order: null on both real reassignments — each stop's sequence
+    // number belonged to its OLD tech's run; carrying it into the new tech's
+    // day would interleave stale numbers (consumers append NULLs last).
     if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
-    if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, updated_at: new Date() });
-    if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, updated_at: new Date() });
+    if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() });
+    if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() });
   });
 
   return {

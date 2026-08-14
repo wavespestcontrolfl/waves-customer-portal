@@ -87,6 +87,30 @@ describe('runPromisedEstimateWatcher', () => {
     expect(stamp).toHaveBeenCalledTimes(1);
   });
 
+  test('a zero-delivery click-to-estimate mint never counts as a kept promise (source contract, #3391)', () => {
+    // Those mints stamp sent_at for the publish-without-delivery shape but
+    // nothing was DELIVERED — a report tap after a promised-quote call must
+    // not erase the obligation.
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '../services/promised-estimate-watcher.js'), 'utf8',
+    );
+    const block = src.split('e.sent_at IS NOT NULL')[1].slice(0, 2600);
+    expect(block).toMatch(/COALESCE\(e\.source, ''\) <> 'service_report_cta'/);
+    // …but a mint an operator LATER actually delivered keeps the promise
+    // (GitHub #3391 round P2). The witness is deliveryState.firstDeliveredAt
+    // — stamped only for REAL deliveries (never suppression sentinels),
+    // durable across resends, merged even when a concurrent accept wins
+    // the send claim. Never sentChannels (sentinel-polluted) or the
+    // per-attempt channels shape (replaced wholesale per send).
+    // The witness is lastDeliveredAt compared against the SAME post-call
+    // boundary as sent_at (audit on 573ee332e): mere existence would let a
+    // pre-promise delivery + a later suppressed attempt (which advances
+    // sent_at but not the stamp) falsely keep the promise.
+    expect(block).toMatch(/\(e\.estimate_data #>> '\{deliveryState,lastDeliveredAt\}'\)::timestamptz > CASE/);
+    expect(block).not.toMatch(/sentChannels\}'\) = 'array'/);
+    expect(block).not.toMatch(/channels,email,ok/);
+  });
+
   test('quiet day skips without sending or stamping', async () => {
     const stamp = jest.fn(async () => {});
     const result = await runPromisedEstimateWatcher({

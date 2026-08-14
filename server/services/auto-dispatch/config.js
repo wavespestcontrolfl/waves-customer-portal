@@ -24,6 +24,20 @@ function boolEnv(name, def) {
   return raw === 'true';
 }
 
+// GATE_ROUTE_TIERS is read at CALL time through the shared gate parser (same
+// pattern as GATE_DRIVE_TIME_CALIBRATION, and for the same reason: it swaps the
+// eligibility/window math auto-dispatch ranks slots with, and gate OFF must be
+// byte-for-byte the legacy flat-lock behavior — so the flip is a deliberate,
+// redeploy-free act in EVERY environment, never an ambient dev default).
+function isRouteTiersEnabled() {
+  const { gateEnvValue } = require('../../config/feature-gates');
+  try {
+    return gateEnvValue('GATE_ROUTE_TIERS');
+  } catch (_) {
+    return false; // gate unreadable ⇒ off (fail closed to legacy behavior)
+  }
+}
+
 const VALID_MODES = new Set(['dry_run', 'apply']);
 
 /**
@@ -82,7 +96,12 @@ function getAutoDispatchConfig(overrides = {}) {
     // job from thrashing the same customer across daily runs.
     removeStabilityFloor: overrides.removeStabilityFloor
       ?? intEnv('AUTO_DISPATCH_RESTABILIZE_IMPROVEMENT', 35, { min: 0, max: 100 }),
+    // ROUTE-TIERS: when true, the flat lock window above is replaced by the
+    // tier ladder in ./route-tiers.js (radius by days-out + drift budget +
+    // destination floor + reminder freeze). When false, NOTHING tier-related
+    // runs — behavior is the legacy flat lock, byte for byte.
+    routeTiersEnabled: overrides.routeTiersEnabled ?? isRouteTiersEnabled(),
   };
 }
 
-module.exports = { getAutoDispatchConfig, isApplyAllowed, VALID_MODES };
+module.exports = { getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, VALID_MODES };
