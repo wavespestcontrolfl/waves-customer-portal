@@ -42,6 +42,8 @@ import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import TechTreatmentZoneModal from "../../components/tech/TechTreatmentZoneModal";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
+import SlotConflictNotice from "../../components/schedule/SlotConflictNotice";
+import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import {
   describeCardRequestState,
   describeCardRequestResult,
@@ -1271,6 +1273,32 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     }),
   );
   const hadAddonsInitially = Array.isArray(service.serviceAddons) && service.serviceAddons.length > 0;
+  // Advisory only — the save button never keys off this (warn, don't block).
+  // Duration mirrors the save payload's summed group duration (primary line
+  // + add-on lines): parent estimated_duration_minutes is the whole-visit
+  // total, and that's the span occupancy derives a missing end from.
+  const slotCheckDuration = (() => {
+    const primaryDur = parseInt(form.estimatedDuration, 10);
+    const base = Number.isInteger(primaryDur) && primaryDur > 0 ? primaryDur : 0;
+    const addonDur = serviceLines.reduce(
+      (s, l) =>
+        s +
+        ((l.serviceType || "").trim() &&
+        l.estimatedDuration !== "" &&
+        !isNaN(parseInt(l.estimatedDuration, 10))
+          ? parseInt(l.estimatedDuration, 10)
+          : 0),
+      0,
+    );
+    return base + addonDur;
+  })();
+  const { conflicts: slotConflicts } = useSlotConflicts({
+    date: form.scheduledDate,
+    windowStart: form.windowStart,
+    windowEnd: form.windowEnd,
+    durationMinutes: slotCheckDuration,
+    excludeServiceIds: [service.id],
+  });
   // Estimate provenance: if this appointment was scheduled from an accepted
   // estimate, surface the same quote/deposit/charge card the New Appointment
   // modal and the appointment detail sheet show. The endpoint resolves the
@@ -3344,6 +3372,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   />{" "}
                 </div>{" "}
               </div>{" "}
+              <SlotConflictNotice
+                conflicts={slotConflicts}
+                style={{ marginTop: -2, marginBottom: 14 }}
+              />{" "}
               {isCompletedVisit && isAdminUser && (
                 <div style={{ marginBottom: 14 }}>
                   {" "}
@@ -5699,6 +5731,20 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     ? String(service.windowStart).slice(0, 5)
     : "";
 
+  // Advisory overlap hint for the custom picker — same block derivation the
+  // submit uses (windowFor), warn-only (the Reschedule button never keys off
+  // it). Suggested options are left unannotated: the server already ranks
+  // them.
+  const manualBlock = windowFor(manualTime);
+  const { conflicts: manualConflicts } = useSlotConflicts({
+    date: manualDate,
+    windowStart: manualBlock?.start || manualTime,
+    windowEnd: manualBlock?.end,
+    durationMinutes,
+    excludeServiceIds: [service.id],
+    enabled: showManual && !!manualDate,
+  });
+
   const handleReschedule = async (opt) => {
     // Suggested starts are morning slots, but stay consistent with the
     // manual path: never submit a midnight-truncated block.
@@ -6110,6 +6156,12 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 </button>{" "}
               </div>{" "}
             </div>
+          )}
+          {showManual && (
+            <SlotConflictNotice
+              conflicts={manualConflicts}
+              style={{ marginTop: 10 }}
+            />
           )}
         </div>{" "}
         <button

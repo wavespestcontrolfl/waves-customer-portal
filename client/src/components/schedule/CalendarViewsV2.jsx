@@ -612,6 +612,8 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
         toDate={pending?.toDateLabel || ''}
         toMinutes={pending?.toMinutes}
         isRecurring={!!pending?.svc?.isRecurring}
+        serviceId={pending?.svc?.id}
+        toWindow={pending?.newWindow}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
       />
