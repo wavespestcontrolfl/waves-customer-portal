@@ -38,6 +38,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
+const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 
 /**
  * One-line lookup address from a customer_properties row (empty → '').
@@ -167,9 +168,15 @@ async function enrichPropertyById(propertyId) {
     // Touch updated_at: the lookup's own attempt stamp is resolved/
     // cache_hit (deliberately outside the cooldown), so without this the
     // flagged row would head the nightly candidate order forever. The
-    // recently_touched sink parks it for a week instead.
+    // recently_touched sink parks it for a week instead. Fenced to the
+    // ADDRESS THAT WAS LOOKED UP: an address edit (or deactivation) mid-
+    // lookup means the CORRECTED address was never looked up — parking it
+    // a week on the old address's verdict would deprioritize a legitimate
+    // fresh candidate.
     try {
-      await db('customer_properties').where({ id: propertyId }).update({ updated_at: db.fn.now() });
+      await db('customer_properties')
+        .where({ id: propertyId, address_key: row.address_key, active: true })
+        .update({ updated_at: db.fn.now() });
     } catch (err) {
       logger.warn('[call-property-lookup] flag-touch failed', { propertyId, error: errId(err) });
     }
@@ -198,9 +205,18 @@ async function enrichPropertyById(propertyId) {
   // classification must stay behind the estimator's review surfaces.
   const typeDisputed = Array.isArray(enriched.fieldVerifyFlags)
     && enriched.fieldVerifyFlags.some((f) => f?.field === 'propertyType');
-  const propertyType = (enriched._observed?.propertyType && !typeDisputed)
+  const observedType = (enriched._observed?.propertyType && !typeDisputed)
     ? snakePropertyType(enriched.propertyType)
     : null;
+  // Commercial-lane subtypes ('office', 'warehouse', 'medical_office', …)
+  // canonicalize to the literal 'commercial' BEFORE storage: tax, triage,
+  // and the never-mirror-to-customers guards all test the exact value, so a
+  // preserved subtype would read as residential downstream AND slip past the
+  // mirror fence. Predicate only — the pricing normalizer's residential
+  // outputs ('condo_ground', …) are pricing vocabulary, not this column's.
+  const propertyType = (observedType && normalizePropertyType(observedType) === 'commercial')
+    ? 'commercial'
+    : observedType;
   if (propertyType) {
     // NULLIF: admin edits can store property_type = '' verbatim (and
     // ensurePrimaryProperty copies it with ??) — a blank is MISSING, not a
@@ -236,8 +252,12 @@ async function enrichPropertyById(propertyId) {
     // outside the attempt cooldown — and leaves the row untouched, so it
     // would head the nightly candidate order and consume a batch slot
     // every night. The recently_touched sink parks it for a week instead.
+    // Same address fence as the flagged path: a row edited or deactivated
+    // during the lookup is a fresh candidate, not one to park.
     try {
-      await db('customer_properties').where({ id: propertyId }).update({ updated_at: db.fn.now() });
+      await db('customer_properties')
+        .where({ id: propertyId, address_key: row.address_key, active: true })
+        .update({ updated_at: db.fn.now() });
     } catch (err) {
       logger.warn('[call-property-lookup] no-fill touch failed', { propertyId, error: errId(err) });
     }
@@ -331,7 +351,7 @@ async function enrichPropertyById(propertyId) {
         // sales tax off an AI-inferred classification is an owner ruling
         // (pending), not an enrichment side effect. Residential types are
         // display/routing metadata only.
-        if (afterType && afterType !== 'commercial') {
+        if (afterType && normalizePropertyType(afterType) !== 'commercial') {
           mirror.property_type = db.raw("COALESCE(NULLIF(TRIM(property_type), ''), ?)", [afterType]);
         }
         if (Object.keys(mirror).length) {
@@ -657,8 +677,11 @@ async function reconcileCustomerMirrors() {
           mirror.latitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE latitude END', [lat]);
           mirror.longitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE longitude END', [lng]);
         }
+        // Normalized guard (not just the literal): an admin-typed subtype
+        // ('office') stored on the property row is still a commercial
+        // classification and must never activate taxability via the mirror.
         const cpType = String(r.cp_type || '').trim();
-        if (cpType && cpType !== 'commercial') {
+        if (cpType && normalizePropertyType(cpType) !== 'commercial') {
           mirror.property_type = db.raw("COALESCE(NULLIF(TRIM(property_type), ''), ?)", [cpType]);
         }
         if (!Object.keys(mirror).length) continue;

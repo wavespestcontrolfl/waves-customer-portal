@@ -177,6 +177,7 @@ describe('runCallPropertyLookup', () => {
     mockRowDb({
       id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
       address_line1: '123 Sample Cove', city: 'Bradenton', state: 'FL', zip: '34212',
+      address_key: 'key-nofill',
     }, updateBuilder);
     // Geocode failed (null coords) and the type is the synthesized display
     // default (_observed.propertyType false) → nothing durable is written.
@@ -194,6 +195,9 @@ describe('runCallPropertyLookup', () => {
     // batch slot every night (hook P1).
     expect(updateBuilder.update).toHaveBeenCalledTimes(1);
     expect(updateBuilder.update.mock.calls[0][0]).toEqual({ updated_at: 'NOW()' });
+    // The touch is fenced to the looked-up address: an address edited or
+    // deactivated mid-lookup is a FRESH candidate, not one to park a week.
+    expect(updateBuilder.where).toHaveBeenCalledWith({ id: 'p1', address_key: 'key-nofill', active: true });
   });
 
   test('address edited during the lookup → update matches nothing, result discarded', async () => {
@@ -217,10 +221,12 @@ describe('runCallPropertyLookup', () => {
   });
 
   test('address field-verify flag → cache warmed but nothing persisted', async () => {
+    const touchBuilder = builder(1);
     mockRowDb({
       id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
       address_line1: '123 Sample Cove', city: 'Bradenton', state: 'FL', zip: '34212',
-    });
+      address_key: 'key-flagged',
+    }, touchBuilder);
     performPropertyLookup.mockResolvedValueOnce({
       enriched: {
         lat: 27.5, lng: -82.4, propertyType: 'Single Family',
@@ -230,6 +236,9 @@ describe('runCallPropertyLookup', () => {
     });
     const res = await runCallPropertyLookup({ propertyId: 'p1' });
     expect(res).toEqual({ enriched: true, filled: [], complete: false });
+    // The flag-touch carries the same address fence as the no-fill touch.
+    expect(touchBuilder.update).toHaveBeenCalledWith({ updated_at: 'NOW()' });
+    expect(touchBuilder.where).toHaveBeenCalledWith({ id: 'p1', address_key: 'key-flagged', active: true });
   });
 
   test('numberless street → skipped before any lookup spend', async () => {
@@ -268,6 +277,67 @@ describe('runCallPropertyLookup', () => {
     expect(mirror.latitude).toBeDefined();
     // …but the commercial classification NEVER lands on customers
     // (customers.property_type feeds service_taxability — owner ruling).
+    expect(mirror.property_type).toBeUndefined();
+  });
+
+  test("commercial SUBTYPES ('Office') store as the literal 'commercial' and never mirror", async () => {
+    // Tax, triage, and the mirror guards all test the exact 'commercial'
+    // value — a preserved subtype ('office', 'warehouse') would read as
+    // residential downstream and slip past the never-mirror fence.
+    const customersBuilder = builder({
+      id: 'c1', address_line1: '400 Business Blvd', address_line2: null, city: 'Bradenton', zip: '34212',
+      latitude: null, longitude: null, property_type: null,
+    });
+    const updateBuilder = builder([{ latitude: 27.5, longitude: -82.4, property_type: 'commercial' }]);
+    mockRowDb({
+      id: 'p1', customer_id: 'c1', active: true, is_primary: true,
+      latitude: null, longitude: null, property_type: null,
+      address_line1: '400 Business Blvd', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34212',
+      address_key: require('../services/customer-properties').addressKey({
+        address_line1: '400 Business Blvd', city: 'Bradenton', zip: '34212',
+      }),
+    }, updateBuilder, { customers: customersBuilder });
+    performPropertyLookup.mockResolvedValueOnce({
+      satellite: { inServiceArea: true },
+      enriched: {
+        lat: 27.5, lng: -82.4, propertyType: 'Office',
+        _observed: { propertyType: true }, fieldVerifyFlags: [],
+      },
+    });
+    await runCallPropertyLookup({ propertyId: 'p1' });
+    // The stored value is the canonical literal, not the subtype.
+    expect(updateBuilder.update.mock.calls[0][0].property_type.bindings).toEqual(['commercial']);
+    const mirror = customersBuilder.update.mock.calls[0]?.[0] || {};
+    expect(mirror.property_type).toBeUndefined();
+  });
+
+  test("a stored commercial subtype ('office', e.g. admin-typed) never mirrors either", async () => {
+    // The guard normalizes rather than string-comparing the literal: a
+    // subtype already ON the row (concurrent/admin writer preserved by
+    // COALESCE) is still a commercial classification.
+    const customersBuilder = builder({
+      id: 'c1', address_line1: '400 Business Blvd', address_line2: null, city: 'Bradenton', zip: '34212',
+      latitude: null, longitude: null, property_type: null,
+    });
+    const updateBuilder = builder([{ latitude: 27.5, longitude: -82.4, property_type: 'office' }]);
+    mockRowDb({
+      id: 'p1', customer_id: 'c1', active: true, is_primary: true,
+      latitude: null, longitude: null, property_type: null,
+      address_line1: '400 Business Blvd', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34212',
+      address_key: require('../services/customer-properties').addressKey({
+        address_line1: '400 Business Blvd', city: 'Bradenton', zip: '34212',
+      }),
+    }, updateBuilder, { customers: customersBuilder });
+    performPropertyLookup.mockResolvedValueOnce({
+      satellite: { inServiceArea: true },
+      enriched: {
+        lat: 27.5, lng: -82.4, propertyType: 'Single Family',
+        _observed: { propertyType: true }, fieldVerifyFlags: [],
+      },
+    });
+    await runCallPropertyLookup({ propertyId: 'p1' });
+    const mirror = customersBuilder.update.mock.calls[0]?.[0] || {};
+    expect(mirror.latitude).toBeDefined();
     expect(mirror.property_type).toBeUndefined();
   });
 
@@ -558,6 +628,11 @@ describe('reconcileCustomerMirrors', () => {
       // this row has no coordinate gap → nothing to write, skipped.
       {
         customer_id: 'c2', latitude: null, longitude: null, cp_type: 'commercial', ...base,
+      },
+      // A commercial SUBTYPE (e.g. admin-typed 'office') is still a
+      // commercial classification — the guard normalizes, not string-equals.
+      {
+        customer_id: 'c4', latitude: null, longitude: null, cp_type: 'office', ...base,
       },
       // Customer address no longer matches the primary property → fenced out.
       {
