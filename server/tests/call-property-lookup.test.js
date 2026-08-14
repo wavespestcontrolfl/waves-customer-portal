@@ -169,6 +169,31 @@ describe('runCallPropertyLookup', () => {
     expect(res).toEqual({ enriched: true, filled: [], complete: false });
   });
 
+  test('lone-coordinate row with a type is unrepairable → skipped, no spend', async () => {
+    mockRowDb({
+      id: 'p1', active: true, latitude: 27.4, longitude: null, property_type: 'single_family',
+      address_line1: '123 Sample Cove', city: 'Bradenton', state: 'FL', zip: '34212',
+    });
+    expect(await runCallPropertyLookup({ propertyId: 'p1' })).toEqual({ skipped: 'unrepairable_partial' });
+    expect(performPropertyLookup).not.toHaveBeenCalled();
+  });
+
+  test("whole-profile 'all' verify flag vetoes persistence like an address flag", async () => {
+    mockRowDb({
+      id: 'p1', active: true, latitude: null, longitude: null, property_type: null,
+      address_line1: '123 Sample Cove', city: 'Bradenton', state: 'FL', zip: '34212',
+    });
+    performPropertyLookup.mockResolvedValueOnce({
+      satellite: { inServiceArea: true },
+      enriched: {
+        lat: 27.5, lng: -82.4, propertyType: 'Single Family',
+        _observed: { propertyType: true },
+        fieldVerifyFlags: [{ field: 'all', reason: 'ai_only_record' }],
+      },
+    });
+    expect(await runCallPropertyLookup({ propertyId: 'p1' })).toEqual({ enriched: true, filled: [], complete: false });
+  });
+
   test('street without ZIP → skipped before any lookup spend', async () => {
     mockRowDb({
       id: 'p1', active: true, latitude: null, longitude: null, property_type: null,

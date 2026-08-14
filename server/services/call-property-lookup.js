@@ -78,9 +78,19 @@ async function enrichPropertyById(propertyId) {
   const t0 = Date.now();
   const row = await db('customer_properties').where({ id: propertyId }).first();
   if (!row || !row.active) return { skipped: 'missing' };
-  // A paid lookup only pays for itself when something is missing.
+  // A paid lookup only pays for itself when something is missing AND this
+  // writer could actually repair it: coordinates fill only as an atomic
+  // pair (both currently null), so a row with exactly ONE coordinate and a
+  // type present is unrepairable here — running a lookup for it would burn
+  // spend (and a nightly batch slot) forever. Those rows are a human-repair
+  // case, surfaced by their lone coordinate in the admin property panel.
+  const coordsFillable = row.latitude == null && row.longitude == null;
+  const typeFillable = !row.property_type;
   if (row.latitude != null && row.longitude != null && row.property_type) {
     return { skipped: 'complete' };
+  }
+  if (!coordsFillable && !typeFillable) {
+    return { skipped: 'unrepairable_partial' };
   }
   // Street + ZIP required BEFORE spending: the call pipeline permits a
   // first property without city/ZIP, and "123 Main St, FL" is ambiguous
@@ -124,10 +134,12 @@ async function enrichPropertyById(propertyId) {
   }
   // Wrong-premise guard: an 'address' field-verify flag means the lookup
   // may describe a DIFFERENT property (snapped house number, ambiguous
-  // geocode). The cache is still warmed — the estimator surfaces show the
-  // flag — but nothing becomes a durable customer_properties fact.
+  // geocode), and the whole-profile 'all' flag means the ENTIRE result
+  // needs human verification (e.g. AI-only record, no county anchor).
+  // The cache is still warmed — the estimator surfaces show the flag —
+  // but nothing becomes a durable customer_properties fact.
   const addressQuestioned = Array.isArray(enriched.fieldVerifyFlags)
-    && enriched.fieldVerifyFlags.some((f) => f?.field === 'address');
+    && enriched.fieldVerifyFlags.some((f) => f?.field === 'address' || f?.field === 'all');
   if (addressQuestioned) {
     logger.info('[call-property-lookup] address flagged — cache warmed, no fill', {
       propertyId, elapsedMs: Date.now() - t0,
@@ -205,13 +217,30 @@ async function enrichPropertyById(propertyId) {
  * deploy), but a cheap pre-check here skips the setImmediate churn when
  * dark.
  */
-function enqueueCallPropertyLookup({ propertyId } = {}) {
+const IN_FLIGHT_RETRY_MS = 3 * 60 * 1000;
+
+function enqueueCallPropertyLookup({ propertyId, isRetry } = {}) {
   if (!gateEnvValue('GATE_CALL_PROPERTY_LOOKUP')) return;
   if (!propertyId) return;
   setImmediate(() => {
-    runCallPropertyLookup({ propertyId }).catch((err) => {
-      logger.warn('[call-property-lookup] failed', { propertyId, error: errId(err) });
-    });
+    runCallPropertyLookup({ propertyId })
+      .then((res) => {
+        // ONE bounded retry after an in-flight skip: by then the pending
+        // estimator lookup has finished, so the retry is a near-free cache
+        // hit that fills the row — without this, the nightly backfill (its
+        // OWN gate, possibly off) was the only catcher. unref() so a retry
+        // timer never holds a shutting-down process open.
+        if (res?.skipped === 'lookup_in_flight' && !isRetry) {
+          const timer = setTimeout(
+            () => enqueueCallPropertyLookup({ propertyId, isRetry: true }),
+            IN_FLIGHT_RETRY_MS,
+          );
+          if (typeof timer.unref === 'function') timer.unref();
+        }
+      })
+      .catch((err) => {
+        logger.warn('[call-property-lookup] failed', { propertyId, error: errId(err) });
+      });
   });
 }
 
@@ -248,7 +277,10 @@ async function fetchBackfillCandidates(limit, offset = 0) {
     .where('c.active', true)
     .whereNull('c.deleted_at')
     .where('cp.active', true)
-    .where((b) => b.whereNull('cp.latitude').orWhereNull('cp.longitude').orWhereNull('cp.property_type'))
+    // Only rows THIS writer can repair: the coordinate pair fills
+    // atomically (both null), so a lone-coordinate row with a type is not
+    // a candidate — it would consume a batch slot every night unrepaired.
+    .whereRaw('((cp.latitude IS NULL AND cp.longitude IS NULL) OR cp.property_type IS NULL)')
     .whereRaw("COALESCE(TRIM(cp.address_line1), '') <> ''")
     .whereRaw("COALESCE(TRIM(cp.zip), '') <> ''")
     .select('cp.*')
