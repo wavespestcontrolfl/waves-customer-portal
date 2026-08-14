@@ -318,10 +318,12 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
           <div className="flex-1" />
           <button type="button" onClick={() => setSelected(new Set())}
             className="text-11 text-zinc-400 hover:text-white">Clear</button>
-          {bulkAction === 'reschedule' && bulkConflicts.conflictCount > 0 && (
+          {bulkAction === 'reschedule' && (bulkConflicts.conflictCount > 0 || bulkConflicts.truncated) && (
             <span className="basis-full text-11" style={{ color: '#FDE68A' }}>
-              {`⚠️ ${bulkConflicts.conflictCount} of the selected visits overlap existing appointments on ${bulkDate}.`}
-              {bulkConflicts.truncated ? ' (checked first 25)' : ''}
+              {bulkConflicts.conflictCount > 0
+                ? `⚠️ ${bulkConflicts.conflictCount} of the selected visits overlap existing appointments on ${bulkDate}.`
+                : '⚠️ Overlap check covered only the first 25 selected visits.'}
+              {bulkConflicts.conflictCount > 0 && bulkConflicts.truncated ? ' (checked first 25)' : ''}
             </span>
           )}
         </div>

@@ -70,11 +70,22 @@ export function useSlotConflicts({ date, windowStart, windowEnd, excludeServiceI
   return { conflicts, checking };
 }
 
+// Half-open minutes since midnight, matching the engine's overlap predicate.
+function hhmmToMin(hhmm) {
+  const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/);
+  return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+}
+
 // Bulk-move variant: N selected services landing on one new date, each
-// keeping its own time window. One batched call, every selected id excluded
-// (so intra-selection overlap isn't reported as noise), capped at the
-// endpoint's 25-target limit — beyond that only the first 25 are checked
-// and `truncated` lets the bar say so.
+// keeping its own time window. Two conflict sources, unioned per visit:
+// the batched server check against everything ALREADY on the landing date
+// (every selected id excluded — their stored rows are the ones moving), and
+// a client-side pairwise pass among the selected windows themselves, since
+// landing visits from different source dates onto one date can create
+// overlaps no existing row shows. The server call is capped at the
+// endpoint's 25-target limit — beyond that only the first 25 are
+// server-checked (`truncated` lets the bar say so); the pairwise pass
+// covers ALL checkable selections either way.
 export function useBulkSlotConflicts({ date, services, enabled = true }) {
   const [result, setResult] = useState({ conflictCount: 0, checkedCount: 0, truncated: false });
   const [checking, setChecking] = useState(false);
@@ -99,24 +110,45 @@ export function useBulkSlotConflicts({ date, services, enabled = true }) {
       setChecking(false);
       return undefined;
     }
+    // Pairwise overlap among the selected windows on the landing date —
+    // half-open, same predicate as the server (touching windows don't clash).
+    const spans = checkable.map(({ service, end }) => ({
+      start: hhmmToMin(service.windowStart), end: hhmmToMin(end),
+    }));
+    const intraFlags = spans.map((a, i) => spans.some((b, j) => (
+      j !== i && a.start != null && a.end != null && b.start != null && b.end != null
+        && a.start < b.end && a.end > b.start
+    )));
+    // Union per visit: server conflict OR intra-selection overlap — but only
+    // when the server check actually answered. A null result means gated or
+    // failed, and the kill switch must win: reporting the client-side
+    // pairwise pass alone would keep hints alive with the gate off.
+    const finish = (serverResults) => {
+      if (!serverResults) return;
+      const serverFlagged = new Set(serverResults
+        .map((r, i) => (r?.conflicts?.length > 0 ? i : -1))
+        .filter((i) => i >= 0));
+      setResult({
+        conflictCount: intraFlags.filter((intra, i) => intra || serverFlagged.has(i)).length,
+        checkedCount: checked.length,
+        truncated: checkable.length > 25,
+      });
+    };
     const controller = new AbortController();
     setChecking(true);
     const timer = setTimeout(async () => {
+      let results = null;
       try {
-        const results = await fetchSlotCheck(checked.map(({ service, end }) => ({
+        results = await fetchSlotCheck(checked.map(({ service, end }) => ({
           date,
           window: { start: service.windowStart, end },
           excludeServiceIds: allIds,
         })), controller.signal);
-        if (!controller.signal.aborted && results) {
-          setResult({
-            conflictCount: results.filter((r) => r?.conflicts?.length > 0).length,
-            checkedCount: checked.length,
-            truncated: checkable.length > 25,
-          });
-        }
       } catch { /* advisory only */ }
-      if (!controller.signal.aborted) setChecking(false);
+      if (!controller.signal.aborted) {
+        finish(results);
+        setChecking(false);
+      }
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
     // `key` folds the services array's identity-relevant fields.
