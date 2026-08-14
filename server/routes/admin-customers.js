@@ -847,9 +847,13 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
     // Same rule as formatEstimateLine (codex r27 P1): a one-time fallback
     // line must not carry the recurring palm identity either — a
     // service_interest naming the semiannual row would otherwise resurrect
-    // the exact identity the omitted line shed.
+    // the exact identity the omitted line shed. With no one-time row the
+    // fallback is dropped entirely (local codex P0): even a null-id line
+    // keeps the semiannual NAME, and completion's exact-name lookup would
+    // resolve the recurring profile from it.
     if (!fallbackIsRecurring && matched?.service_key === 'palm_injection_semiannual') {
       matched = serviceIndex.byKey.get('palm_injection') || null;
+      if (!matched) return lines;
     }
     lines.push({
       serviceId: matched?.id || null,

@@ -789,16 +789,14 @@ describe('admin customers route helpers', () => {
     expect(line.serviceId).toBe(22);
     expect(line.serviceKey).toBe('palm_injection');
     expect(line.cadence).toBe('one_time');
-    // One-time row absent: a null identity is NOT safely unmatched — the
-    // line's name would resolve the recurring completion profile by exact
-    // name at completion — so the line is omitted, and the zero-line
-    // fallback (fed by a service_interest naming the semiannual row) must
-    // not resurrect the identity either (codex #3400 r1 P1).
+    // One-time row absent: a null identity is NOT safely unmatched — even
+    // an id-less line keeps the semiannual NAME, and completion's
+    // exact-name lookup resolves the recurring profile from it. The line
+    // is omitted AND the zero-line fallback (fed by a service_interest
+    // naming the semiannual row) is dropped entirely (codex #3400 r1 P1
+    // + local P0): no prefill at all beats a prefill that bills recurring.
     const lines = scheduleLinesFromEstimate(estimate, indexServicesForSchedule([semiannualRow]));
-    for (const fallback of lines) {
-      expect(fallback.serviceKey).not.toBe('palm_injection_semiannual');
-      expect(fallback.serviceId).not.toBe(21);
-    }
+    expect(lines).toEqual([]);
   });
 
   test('does not create fallback schedule lines from billing-only estimate rows', () => {
