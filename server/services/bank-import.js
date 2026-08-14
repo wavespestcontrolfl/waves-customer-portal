@@ -510,7 +510,16 @@ async function retryPendingReconciliations() {
 // was created from it), an amount edit there is a correction the coverage
 // cap already reflects, and unlinking would bait a duplicate create.
 async function healEditedExpenseLinks() {
-  const bad = await db('bank_transactions as bt')
+  // ONE narrow-column scan (the same accepted shape as the reconciled-
+  // payout scan: fixed query count per pass regardless of history size).
+  // The violation logic runs in JS because vendorEvidence is token logic
+  // SQL can't express: EVERY link must stay inside the amount (net or
+  // gross — applied refunds legitimately reduce the net) and date window;
+  // AUTO links must additionally keep the vendor evidence and method
+  // compatibility that justified them. Manual links keep the operator's
+  // ruling on vendor/method — they may know the books are mislabeled,
+  // same as the parking rule.
+  const links = await db('bank_transactions as bt')
     .join('expenses as e', 'e.id', 'bt.matched_expense_id')
     .joinRaw(`left join lateral (
         select coalesce(sum((rbt.suggestion->>'refundAmount')::numeric), 0) as rsum
@@ -519,32 +528,30 @@ async function healEditedExpenseLinks() {
           and rbt.suggestion->>'refundAppliedTo' = e.id::text
       ) rs on true`)
     .where('bt.status', 'matched_expense')
-    // violations: edited out of the window/amount, OR — for AUTO links only
-    // — edited to a payment method the matcher would never have accepted
-    // (methodIncompatible in SQL form). Manual links keep the operator's
-    // ruling: they may know the books are mislabeled, same as parking.
-    .whereRaw(`(
-        not (
-          e.expense_date between bt.txn_date - make_interval(days => ?) and bt.txn_date + make_interval(days => ?)
-          and (abs(e.amount - bt.amount) <= ? or abs(e.amount + rs.rsum - bt.amount) <= ?)
-        )
-        or (bt.match_method = 'expense_amount_date_vendor' and (
-             (bt.account_type = 'card' and lower(coalesce(e.payment_method, '')) in ('ach', 'check', 'cash'))
-          or (bt.account_type = 'bank' and lower(coalesce(e.payment_method, '')) = 'cash')
-        ))
-      )`, [EXPENSE_DATE_WINDOW_DAYS, EXPENSE_DATE_WINDOW_DAYS, CANDIDATE_AMOUNT_TOLERANCE, CANDIDATE_AMOUNT_TOLERANCE])
-    .select('bt.id as id', 'bt.matched_expense_id as expense_id');
+    .select('bt.id as id', 'bt.amount as bt_amount', 'bt.txn_date as txn_date', 'bt.description as description',
+      'bt.account_type as account_type', 'bt.match_method as match_method', 'bt.matched_expense_id as expense_id',
+      'e.amount as e_amount', 'e.expense_date as e_date', 'e.vendor_name as vendor_name', 'e.payment_method as payment_method',
+      db.raw('rs.rsum as rsum'));
   let reverted = 0;
-  for (const row of bad) {
+  for (const link of links) {
+    const txn = toDateStr(link.txn_date);
+    const expDate = toDateStr(link.e_date);
+    const windowOk = expDate >= addDays(txn, -EXPENSE_DATE_WINDOW_DAYS) && expDate <= addDays(txn, EXPENSE_DATE_WINDOW_DAYS);
+    const amountOk = withinCandidateTolerance(link.e_amount, link.bt_amount)
+      || withinCandidateTolerance(Number(link.e_amount) + Number(link.rsum || 0), link.bt_amount);
+    const auto = link.match_method === 'expense_amount_date_vendor';
+    const autoOk = !auto || (vendorEvidence(link.description, { vendor_name: link.vendor_name })
+      && !methodIncompatible(link.account_type, link.payment_method));
+    if (windowOk && amountOk && autoOk) continue;
     const changed = await db('bank_transactions')
-      .where({ id: row.id, status: 'matched_expense', matched_expense_id: row.expense_id })
+      .where({ id: link.id, status: 'matched_expense', matched_expense_id: link.expense_id })
       .update({
         status: 'unmatched',
         matched_expense_id: null,
         match_method: null,
         matched_at: null,
         suggestion: suggestionMerge({
-          autoRevert: { at: new Date().toISOString(), expenseId: row.expense_id, reason: 'the linked expense was edited and no longer matches this bank row (amount/date)' },
+          autoRevert: { at: new Date().toISOString(), expenseId: link.expense_id, reason: 'the linked expense was edited and no longer matches this bank row (amount/date/vendor/method)' },
         }),
         updated_at: new Date(),
       });

@@ -47,11 +47,11 @@ function makeBuilder(table) {
     // the heal queries join payouts: one scans UNRECONCILED links, the
     // amount-mismatch scan targets RECONCILED ones (both skip pending rows)
     if (table === 'bank_transactions as bt') {
-      // the edited-expense-link heal returns only VIOLATIONS (window or
-      // net/gross amount) — mirror its SQL filter over the fixtures
+      // the edited-expense-link heal is one narrow-column scan of every
+      // surviving link (violation logic runs in JS in the service) —
+      // return the joined link rows verbatim
       const expenseHealScan = b.where.mock.calls.some(c => c[0] === 'bt.status' && c[1] === 'matched_expense');
       if (expenseHealScan) {
-        const dayMs = 86400000;
         return Promise.resolve(state.bankRows
           .filter(r => r.status === 'matched_expense' && r.matched_expense_id)
           .flatMap(r => {
@@ -60,13 +60,11 @@ function makeBuilder(table) {
             const rsum = state.bankRows
               .filter(x => x.status === 'refund_applied' && x.suggestion?.refundAppliedTo === e.id)
               .reduce((s, x) => s + Number(x.suggestion.refundAmount || 0), 0);
-            const windowOk = Math.abs(new Date(`${e.expense_date}T00:00:00Z`) - new Date(`${r.txn_date}T00:00:00Z`)) <= 5 * dayMs;
-            const amountOk = Math.abs(Number(e.amount) - Number(r.amount)) <= 0.011
-              || Math.abs(Number(e.amount) + rsum - Number(r.amount)) <= 0.011;
-            const methodBad = r.match_method === 'expense_amount_date_vendor' && (
-              (r.account_type === 'card' && ['ach', 'check', 'cash'].includes(String(e.payment_method || '').toLowerCase()))
-              || (r.account_type === 'bank' && String(e.payment_method || '').toLowerCase() === 'cash'));
-            return (windowOk && amountOk && !methodBad) ? [] : [{ id: r.id, expense_id: r.matched_expense_id }];
+            return [{
+              id: r.id, bt_amount: r.amount, txn_date: r.txn_date, description: r.description,
+              account_type: r.account_type, match_method: r.match_method, expense_id: r.matched_expense_id,
+              e_amount: e.amount, e_date: e.expense_date, vendor_name: e.vendor_name, payment_method: e.payment_method, rsum,
+            }];
           })).then(resolve, reject);
       }
       // the orphan-refund heal anti-joins expenses on the suggestion target
@@ -817,6 +815,24 @@ describe('runDeterministicMatching', () => {
     const revert = state.updates.find(u => u.patch.status === 'unmatched');
     expect(revert.where).toContainEqual({ id: 'bt-1', status: 'matched_payout', matched_payout_id: 'po-1' });
     expect(sugOf(revert).autoRevert.reason).toContain('ambiguous');
+  });
+
+  test('an AUTO-linked expense whose vendor was corrected away is healed; a matching vendor survives', async () => {
+    state.bankRows = [
+      { id: 'bt-changed', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', match_method: 'expense_amount_date_vendor', matched_expense_id: 'exp-1', suggestion: null },
+      { id: 'bt-kept', txn_date: '2026-08-10', description: 'SITEONE LANDSCAPE', amount: '100.00', direction: 'debit', account_type: 'card', status: 'matched_expense', match_method: 'expense_amount_date_vendor', matched_expense_id: 'exp-2', suggestion: null },
+    ];
+    state.expenses = [
+      // operator corrected this expense to a different vendor — the auto
+      // link's justification is gone
+      { id: 'exp-1', amount: '100.00', vendor_name: 'Home Depot', expense_date: '2026-08-10', payment_method: 'card' },
+      { id: 'exp-2', amount: '100.00', vendor_name: 'SiteOne', expense_date: '2026-08-10', payment_method: 'card' },
+    ];
+    const summary = await runDeterministicMatching();
+    expect(summary.expenseLinksReverted).toBe(1);
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(revert.where).toContainEqual({ id: 'bt-changed', status: 'matched_expense', matched_expense_id: 'exp-1' });
+    expect(sugOf(revert).autoRevert.reason).toContain('vendor');
   });
 
   test('an AUTO-linked expense edited to an incompatible payment method is healed; a MANUAL link is not', async () => {
