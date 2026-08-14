@@ -4040,7 +4040,11 @@ function BankImportTab() {
   const [catPick, setCatPick] = useState({});
   const [categories, setCategories] = useState([]);
   const [hasMore, setHasMore] = useState(false);
-  const [covYear, setCovYear] = useState(String(new Date().getFullYear()));
+  // ET-derived, NOT the browser's UTC calendar: between 7pm ET and
+  // midnight on Dec 31 the UTC year is already next year, which would
+  // request an empty coverage report and drop the oldest picker option
+  const etYear = etDateString().slice(0, 4);
+  const [covYear, setCovYear] = useState(etYear);
   // last upload payload, kept only while its result reported duplicates —
   // fuels the explicit force-import path for identical-but-distinct rows
   const [dupUpload, setDupUpload] = useState(null);
@@ -4307,7 +4311,7 @@ function BankImportTab() {
           title="Coverage year — switch when backfilling a prior tax year"
         >
           {[0, 1, 2, 3].map((back) => {
-            const y = String(new Date().getFullYear() - back);
+            const y = String(Number(etYear) - back);
             return (
               <option key={y} value={y}>
                 Coverage {y}

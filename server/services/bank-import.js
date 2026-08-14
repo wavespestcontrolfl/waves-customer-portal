@@ -439,11 +439,16 @@ async function verifyPendingExpenseClaims() {
     if (candidates.length === 1 && candidates[0].id === row.matched_expense_id) {
       const done = await db('bank_transactions')
         .where({ id: row.id, status: 'matched_expense', matched_expense_id: row.matched_expense_id })
+        .whereRaw("suggestion->>'verifyPending' = 'true'")
         .update({ suggestion: db.raw("suggestion - 'verifyPending'"), updated_at: new Date() });
       if (done) cleared++;
     } else {
       const changed = await db('bank_transactions')
         .where({ id: row.id, status: 'matched_expense', matched_expense_id: row.matched_expense_id })
+        // the marker IS the claim generation — an unlink + manual relink
+        // strips it, so this stale revert must no-op instead of erasing
+        // the operator's new decision
+        .whereRaw("suggestion->>'verifyPending' = 'true'")
         .update({
           status: 'unmatched',
           matched_expense_id: null,
@@ -489,6 +494,7 @@ async function verifyPendingPayoutClaims() {
       && centsEqual(candidates[0].effective_amount, row.amount)) {
       const done = await db('bank_transactions')
         .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+        .whereRaw("suggestion->>'verifyPending' = 'true'")
         .update({ suggestion: db.raw("suggestion - 'verifyPending'"), updated_at: new Date() });
       if (done) cleared++;
       continue;
@@ -498,6 +504,11 @@ async function verifyPendingPayoutClaims() {
         const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('reconciled', 'reconciled_by');
         const undone = await trx('bank_transactions')
           .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+          // the marker IS the claim generation — an unlink + manual relink
+          // to the SAME payout strips it, and this stale rollback must
+          // no-op rather than remove the operator's new link (and reverse
+          // its freshly confirmed reconciliation)
+          .whereRaw("suggestion->>'verifyPending' = 'true'")
           .update({
             status: 'unmatched',
             matched_payout_id: null,
@@ -926,7 +937,10 @@ async function healEditedExpenseLinks() {
         if (linkOk(link, fresh, lockedRsum)) return; // corrected mid-scan — the link is valid again
       }
       const changed = await trx('bank_transactions')
-        .where({ id: link.id, status: 'matched_expense', matched_expense_id: link.expense_id })
+        // match_method binds the CAS to the SCANNED link generation: a
+        // concurrent heal + operator relink must not have this stale
+        // revert erase the fresh manual decision
+        .where({ id: link.id, status: 'matched_expense', matched_expense_id: link.expense_id, match_method: link.match_method })
         .update({
           status: 'unmatched',
           matched_expense_id: null,
@@ -1442,6 +1456,7 @@ async function runDeterministicMatching({ limit } = {}) {
               && centsEqual(after.candidates[0].effective_amount, row.amount)) {
               await db('bank_transactions')
                 .where({ id: row.id, status: 'matched_payout', matched_payout_id: exact[0].id })
+                .whereRaw("suggestion->>'verifyPending' = 'true'")
                 .update({ suggestion: db.raw("suggestion - 'verifyPending'"), updated_at: new Date() });
             } else {
               // Atomic rollback, SAME shape as the unlink route: payout
@@ -1457,6 +1472,7 @@ async function runDeterministicMatching({ limit } = {}) {
                   const sp = await trx('stripe_payouts').where('id', exact[0].id).forUpdate().first('reconciled', 'reconciled_by');
                   const undone = await trx('bank_transactions')
                     .where({ id: row.id, status: 'matched_payout', matched_payout_id: exact[0].id })
+                    .whereRaw("suggestion->>'verifyPending' = 'true'")
                     .update({
                       status: 'unmatched',
                       matched_payout_id: null,
@@ -1638,11 +1654,13 @@ async function runDeterministicMatching({ limit } = {}) {
           if (after.length === 1 && after[0].id === strong[0].id) {
             await db('bank_transactions')
               .where({ id: row.id, status: 'matched_expense', matched_expense_id: strong[0].id })
+              .whereRaw("suggestion->>'verifyPending' = 'true'")
               .update({ suggestion: db.raw("suggestion - 'verifyPending'"), updated_at: new Date() });
             summary.expensesLinked++;
           } else {
             const undone = await db('bank_transactions')
               .where({ id: row.id, status: 'matched_expense', matched_expense_id: strong[0].id })
+              .whereRaw("suggestion->>'verifyPending' = 'true'")
               .update({
                 status: 'unmatched',
                 matched_expense_id: null,

@@ -1013,7 +1013,7 @@ describe('runDeterministicMatching', () => {
     const summary = await runDeterministicMatching();
     expect(summary.expenseLinksReverted).toBe(1);
     const revert = state.updates.find(u => u.patch.status === 'unmatched');
-    expect(revert.where).toContainEqual({ id: 'bt-changed', status: 'matched_expense', matched_expense_id: 'exp-1' });
+    expect(revert.where).toContainEqual({ id: 'bt-changed', status: 'matched_expense', matched_expense_id: 'exp-1', match_method: 'expense_amount_date_vendor' });
     expect(sugOf(revert).autoRevert.reason).toContain('vendor');
   });
 
@@ -1029,7 +1029,7 @@ describe('runDeterministicMatching', () => {
     const summary = await runDeterministicMatching();
     expect(summary.expenseLinksReverted).toBe(1);
     const revert = state.updates.find(u => u.patch.status === 'unmatched');
-    expect(revert.where).toContainEqual({ id: 'bt-auto', status: 'matched_expense', matched_expense_id: 'exp-1' });
+    expect(revert.where).toContainEqual({ id: 'bt-auto', status: 'matched_expense', matched_expense_id: 'exp-1', match_method: 'expense_amount_date_vendor' });
   });
 
   test('a payout claim that crashed before its verify is finished by the sweep — plural reverts, never echoes', async () => {
@@ -1375,7 +1375,7 @@ describe('runDeterministicMatching', () => {
     const summary = await runDeterministicMatching();
     expect(summary.expenseLinksReverted).toBe(1);
     const revert = state.updates.find(u => u.patch.status === 'unmatched');
-    expect(revert.where).toContainEqual({ id: 'bt-auto', status: 'matched_expense', matched_expense_id: 'exp-1' });
+    expect(revert.where).toContainEqual({ id: 'bt-auto', status: 'matched_expense', matched_expense_id: 'exp-1', match_method: 'expense_amount_date_vendor' });
   });
 
   test('refund candidates never offer PRIOR-YEAR expenses — apply-refund would only 409 them', async () => {
