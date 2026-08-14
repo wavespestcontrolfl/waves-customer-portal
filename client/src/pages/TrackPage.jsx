@@ -421,10 +421,16 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
   if (stopsAhead == null) return null;
   const yourStop = routeProgress?.yourStop;
   const totalStops = routeProgress?.totalStops;
-  // Truck position derives from the CLAMPED count so the strip can never
-  // contradict the hero numeral.
-  const truckStop = yourStop != null ? Math.max(0, yourStop - stopsAhead - 1) : null;
-  const started = truckStop != null && truckStop >= 1;
+  // The truck's MEASURED position from the server — never derived from the
+  // clamped count. The strip renders only when the measured position AGREES
+  // with the clamped numeral: after a reorder the clamp can hold the numeral
+  // at a smaller value, and a strip built from disagreeing figures would
+  // fabricate "Now at stop X". The hero numeral still shows on its own.
+  const truckStop = routeProgress?.currentStop;
+  const stripConsistent = yourStop != null && totalStops != null
+    && Number.isFinite(truckStop)
+    && (yourStop - truckStop - 1) === stopsAhead;
+  const started = stripConsistent && truckStop >= 1;
 
   const dot = (bg, fg, iconName, size, label) => (
     <div style={{
@@ -438,7 +444,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
     <div style={{ flex: 1, height: 2, background: color, minWidth: 8 }} />
   );
   const betweenStops = [];
-  if (yourStop != null) {
+  if (stripConsistent) {
     for (let s = truckStop + 1; s < yourStop; s += 1) betweenStops.push(s);
   }
 
@@ -470,7 +476,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
         </div>
       )}
 
-      {yourStop != null && totalStops != null && (
+      {stripConsistent && (
         <div style={{ marginTop: 14 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             {started && (

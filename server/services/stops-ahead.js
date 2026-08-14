@@ -147,7 +147,16 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
          COUNT(DISTINCT ${STOP_KEY}) FILTER (
            WHERE s.status NOT IN (${routeExcl})
              AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
-         )::int AS others_all
+         )::int AS others_all,
+         COUNT(DISTINCT ${STOP_KEY}) FILTER (
+           WHERE ${PRECEDES}
+             AND (s.status = 'completed' OR s.track_state = 'complete')
+         )::int AS done_before,
+         COUNT(DISTINCT ${STOP_KEY}) FILTER (
+           WHERE ${PRECEDES}
+             AND (s.status IN ('en_route', 'on_site')
+                  OR s.track_state IN ('en_route', 'on_property'))
+         )::int AS working_before
          FROM scheduled_services s, target t
         WHERE s.technician_id = t.technician_id
           AND s.scheduled_date = t.scheduled_date
@@ -160,6 +169,14 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     const raw = Number(agg?.ahead);
     const yourStop = Number(agg?.before_all) + 1;
     const totalStops = Number(agg?.others_all) + 1;
+    // The truck's REAL position, measured — never derived from the clamped
+    // count (a clamped numeral with a derived position fabricates "Now at
+    // stop X"). currentStop = finished stops before you, +1 while the tech
+    // is actively at/driving to one of them.
+    const doneBefore = Number(agg?.done_before);
+    const workingBefore = Number(agg?.working_before);
+    const currentStop = (Number.isFinite(doneBefore) ? doneBefore : 0)
+      + (Number.isFinite(workingBefore) && workingBefore > 0 ? 1 : 0);
     if (!Number.isFinite(raw) || !Number.isFinite(yourStop) || !Number.isFinite(totalStops)) return null;
 
     // Clamp against the persisted floor — valid only for today's display.
@@ -207,7 +224,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
       if (res?.rows?.[0]) {
         const persisted = Number(res.rows[0].stops_ahead_min_shown);
         return Number.isFinite(persisted)
-          ? { stopsAhead: Math.min(persisted, clamped), yourStop, totalStops }
+          ? { stopsAhead: Math.min(persisted, clamped), yourStop, totalStops, currentStop }
           : null;
       }
       // Zero rows updated = today's stored floor is already ≤ this value
@@ -218,7 +235,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
         .first('stops_ahead_min_shown', 'stops_ahead_shown_date');
       const curMin = cur?.stops_ahead_min_shown == null ? null : Number(cur.stops_ahead_min_shown);
       if (Number.isInteger(curMin) && dateOnly(cur?.stops_ahead_shown_date) === today) {
-        return { stopsAhead: Math.min(curMin, clamped), yourStop, totalStops };
+        return { stopsAhead: Math.min(curMin, clamped), yourStop, totalStops, currentStop };
       }
     } catch (err) {
       logger.warn(`[stops-ahead] floor persist failed for ${svc.id}: ${err.message}`);

@@ -374,7 +374,7 @@ router.get('/active', async (req, res, next) => {
       const stops = await computeStopsAhead(db, canonical.id);
       formatted.stopsAhead = stops ? stops.stopsAhead : null;
       formatted.routeProgress = stops
-        ? { yourStop: stops.yourStop, totalStops: stops.totalStops }
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop }
         : null;
       // Approximate truck position for the scheduled-state map — ONLY when
       // the stops count is displayable, and ROUNDED to ~1km (2 decimal
@@ -420,7 +420,7 @@ router.get('/today', async (req, res, next) => {
       const stops = await computeStopsAhead(db, canonical.id);
       formatted.stopsAhead = stops ? stops.stopsAhead : null;
       formatted.routeProgress = stops
-        ? { yourStop: stops.yourStop, totalStops: stops.totalStops }
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop }
         : null;
       // Approximate truck position for the scheduled-state map — ONLY when
       // the stops count is displayable, and ROUNDED to ~1km (2 decimal

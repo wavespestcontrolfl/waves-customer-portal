@@ -35,7 +35,8 @@ function baseSvc(overrides = {}) {
 // the bound clamped value by default; `rawFloor` overrides it to emulate a
 // concurrent racer's smaller floor, or null for the guarded no-op write.
 function makeDb({
-  svcRow, countN = 0, beforeAll, othersAll, rawFloor, rawError = null,
+  svcRow, countN = 0, beforeAll, othersAll, doneBefore = 0, workingBefore = 0,
+  rawFloor, rawError = null,
 } = {}) {
   const queries = [];
   const dbFn = jest.fn(() => {
@@ -56,6 +57,8 @@ function makeDb({
           ahead: countN,
           before_all: beforeAll !== undefined ? beforeAll : countN,
           others_all: othersAll !== undefined ? othersAll : countN + 3,
+          done_before: doneBefore,
+          working_before: workingBefore,
         }],
       });
     }
@@ -86,11 +89,13 @@ describe('computeStopsAhead', () => {
   });
 
   test('returns count + route position and persists the floor atomically', async () => {
-    // 2 live stops ahead, 3 stops already completed earlier on the route:
-    // yourStop = 5+1 = 6, totalStops = 7+1 = 8.
-    const db = makeDb({ svcRow: baseSvc(), countN: 2, beforeAll: 5, othersAll: 7 });
+    // 2 live stops ahead, 3 stops already completed earlier on the route
+    // (truck actively working none): yourStop = 5+1 = 6, totalStops =
+    // 7+1 = 8, currentStop = MEASURED done_before (3) — never derived
+    // from the clamped count.
+    const db = makeDb({ svcRow: baseSvc(), countN: 2, beforeAll: 5, othersAll: 7, doneBefore: 3 });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY }))
-      .toEqual({ stopsAhead: 2, yourStop: 6, totalStops: 8 });
+      .toEqual({ stopsAhead: 2, yourStop: 6, totalStops: 8, currentStop: 3 });
     // Single conditional UPDATE — (today, clamped, clamped, today, id) for
     // the SET, plus (today, clamped) for the skip-unchanged-write guard.
     expect(db.updateCalls()).toHaveLength(1);
@@ -130,7 +135,7 @@ describe('computeStopsAhead', () => {
       rawFloor: null,
     });
     const res = await computeStopsAhead(db, 'svc-self', { today: TODAY });
-    expect(res).toEqual({ stopsAhead: 2, yourStop: 5, totalStops: 7 });
+    expect(res).toEqual({ stopsAhead: 2, yourStop: 5, totalStops: 7, currentStop: 0 });
   });
 
   test('a floor from a previous date is superseded (re-date resets the clamp)', async () => {
@@ -189,6 +194,17 @@ describe('computeStopsAhead', () => {
     const db = makeDb({ svcRow: baseSvc(), countN: 1, rawFloor: null });
     // fallback re-read returns baseSvc (no floor fields) → null
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
+  });
+
+  test('currentStop counts the actively-worked stop (+1 while en route/on site)', async () => {
+    // 2 done + tech currently at stop 3 → currentStop 3; 1 live stop ahead
+    // (the one being worked) + you = stop 5... measured, not derived.
+    const db = makeDb({
+      svcRow: baseSvc(), countN: 1, beforeAll: 3, othersAll: 5,
+      doneBefore: 2, workingBefore: 1,
+    });
+    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY }))
+      .toEqual({ stopsAhead: 1, yourStop: 4, totalStops: 6, currentStop: 3 });
   });
 
   test('any read error fails soft to null', async () => {

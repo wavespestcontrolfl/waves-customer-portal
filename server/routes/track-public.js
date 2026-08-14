@@ -526,7 +526,7 @@ router.get('/:token', async (req, res, next) => {
       vehicle: customerState === 'en_route' ? await buildVehicle(row) : null,
       stopsAhead: stops ? stops.stopsAhead : null,
       routeProgress: stops
-        ? { yourStop: stops.yourStop, totalStops: stops.totalStops }
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop }
         : null,
       vehicleApprox: stops ? await buildApproxVehicle(row) : null,
       summary: customerState === 'complete' ? await buildSummary(row) : null,
