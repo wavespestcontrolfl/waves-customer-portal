@@ -73,6 +73,7 @@ function bankBuilder() {
     groupBy: jest.fn(() => Promise.resolve([])),
     orderBy: jest.fn(() => b),
     limit: jest.fn(() => b),
+    offset: jest.fn(() => b),
   };
   // awaiting a bare select chain (the suggest scope query) resolves listRows
   b.then = (resolve, reject) => Promise.resolve(state.listRows || []).then(resolve, reject);
@@ -653,6 +654,16 @@ describe('refund-candidates on demand (gate on)', () => {
     // see a deleted target) stop counting as completed refunds
     const { healOrphanRefunds } = require('../services/bank-import');
     expect(healOrphanRefunds).toHaveBeenCalled();
+  });
+
+  test('the transactions page SELF-HEALS too — rendered rows must not carry actions that can only 409', async () => {
+    const { resetDanglingLinks, healUnreconciledLinks } = require('../services/bank-import');
+    resetDanglingLinks.mockClear();
+    healUnreconciledLinks.mockClear();
+    const res = await get('/admin/tax/bank-import/transactions');
+    expect(res.status).toBe(200);
+    expect(resetDanglingLinks).toHaveBeenCalled();
+    expect(healUnreconciledLinks).toHaveBeenCalled();
   });
 
   test('payout-candidates serves the full nearest-arrival list for a bank credit', async () => {

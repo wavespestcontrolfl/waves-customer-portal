@@ -74,6 +74,15 @@ function makeBuilder(table) {
           .filter(r => r.status === 'refund_applied' && r.suggestion?.refundAppliedTo
             && !state.expenses.some(e => e.id === r.suggestion.refundAppliedTo))
           .map(r => ({ id: r.id, target: r.suggestion.refundAppliedTo }));
+      } else if (b.whereRaw.mock.calls.some(c => String(c[0]).includes("reconcilePending' = 'true'"))) {
+        // the pending-ineligible heal scan: pending links joined to their
+        // payout columns
+        rows = state.bankRows
+          .filter(r => r.status === 'matched_payout' && r.matched_payout_id && r.suggestion && r.suggestion.reconcilePending === true)
+          .map(r => {
+            const p = state.payouts.find(pp => pp.id === r.matched_payout_id);
+            return { ...r, payout_amount: p && p.amount, payout_status: p && p.status, arrival_date: p && p.arrival_date, payout_reconciled: !!(p && p.reconciled) };
+          });
       } else {
         const wantReconciled = b.where.mock.calls.some(c => c[0] === 'sp.reconciled' && c[1] === true);
         rows = state.bankRows.filter(r => r.status === 'matched_payout'
@@ -1192,7 +1201,7 @@ describe('runDeterministicMatching', () => {
   test("the sweep REVERTS a link whose reconciliation a human rejected — Tax never claims what Banking rejects", async () => {
     reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-1', skipped: true, reason: 'human_rejected' });
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
-    state.payouts = [{ id: 'po-1', reconciled: false }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'paid', reconciled: false }];
     state.reconRows = [{ status: 'rejected', reconciled_by: 'adam' }]; // the locked re-check confirms the ruling still stands
     const summary = await runDeterministicMatching();
     expect(summary.reconcileRetried).toBe(0);
@@ -1209,7 +1218,7 @@ describe('runDeterministicMatching', () => {
   test('a LATER human rejection heals: the still-matched row is reverted next pass', async () => {
     // echo long done (no pending flag), then a human rejected the payout on Banking
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
-    state.payouts = [{ id: 'po-1', reconciled: false }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'paid', reconciled: false }];
     state.reconRows = [{ status: 'rejected', reconciled_by: 'adam' }];
     const summary = await runDeterministicMatching();
     expect(summary.linksReverted).toBe(1);
@@ -1262,7 +1271,7 @@ describe('runDeterministicMatching', () => {
 
   test('a linked-but-unreconciled row with NO human rejection gets its pending marker restored', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
-    state.payouts = [{ id: 'po-1', reconciled: false }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'paid', reconciled: false }];
     state.reconRows = []; // no rejection on record — this is a lost marker
     const summary = await runDeterministicMatching();
     expect(summary.linksRemarked).toBe(1);
@@ -1308,7 +1317,7 @@ describe('runDeterministicMatching', () => {
 
   test("a human DRAFT reconciliation pauses automation — no re-mark, no revert, no re-confirm", async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
-    state.payouts = [{ id: 'po-1', reconciled: false }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'paid', reconciled: false }];
     state.reconRows = [{ status: 'draft', reconciled_by: 'adam' }];
     const summary = await runDeterministicMatching();
     expect(summary.linksRemarked).toBe(0);
@@ -1379,6 +1388,15 @@ describe('runDeterministicMatching', () => {
     expect(between.b.whereBetween.mock.calls[0][1][0]).toBe('2026-01-01');
   });
 
+  test('a PENDING link whose payout turned ineligible is healed WITHOUT the retry path (page-load healer)', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '500.00', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
+    state.payouts = [{ id: 'po-1', amount: '500.00', arrival_date: '2026-08-11', status: 'failed', reconciled: false }];
+    const summary = await runDeterministicMatching();
+    expect(summary.linksReverted).toBe(1); // the heal scan itself reverts — no echo needed
+    const revert = state.updates.find(u => u.patch.status === 'unmatched');
+    expect(sugOf(revert).autoRevert.reason).toContain('no longer eligible');
+  });
+
   test('a RECONCILED link still fully eligible is left alone by the heal scan', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: null }];
     state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'paid', reconciled: true }];
@@ -1401,7 +1419,7 @@ describe('runDeterministicMatching', () => {
   test('a human-DRAFT skip keeps the pending flag — the sweep waits for the human', async () => {
     reconcilePayout.mockResolvedValueOnce({ payout_id: 'po-1', skipped: true, reason: 'human_draft' });
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', amount: '2418.66', direction: 'credit', account_type: 'bank', status: 'matched_payout', matched_payout_id: 'po-1', suggestion: { reconcilePending: true } }];
-    state.payouts = [{ id: 'po-1', reconciled: false }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'paid', reconciled: false }];
     const summary = await runDeterministicMatching();
     expect(summary.reconcileRetried).toBe(0);
     // no clear, no revert — the flag survives for the next pass

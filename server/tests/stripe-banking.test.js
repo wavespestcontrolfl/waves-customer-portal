@@ -525,32 +525,7 @@ describe('stripe banking service', () => {
       .rejects.toMatchObject({ message: 'Insufficient instant available balance', status: 400 });
   });
 
-  describe('reconcilePayout onlyIfReconciledBy guard', () => {
-    test('writes normally when the guard matches the current author (checked under the row lock)', async () => {
-      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: true, reconciled_by: 'bank-import' };
-      const result = await service.reconcilePayout('local-payout-1', 120, 'undo', 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
-      expect(result.skipped).toBeUndefined();
-      expect(reconInserts).toHaveLength(1);
-      expect(reconInserts[0]).toMatchObject({ status: 'rejected', reconciled_by: 'bank-import' });
-      // 'rejected' un-reconciles the payout
-      expect(payoutUpdate).toMatchObject({ reconciled: false, reconciled_at: null, reconciled_by: null });
-    });
-
-    test('skips atomically when someone else owns the reconciliation — nothing is written', async () => {
-      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: true, reconciled_by: 'adam' };
-      const result = await service.reconcilePayout('local-payout-1', 120, 'undo', 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
-      expect(result).toMatchObject({ payout_id: 'local-payout-1', skipped: true });
-      expect(reconInserts).toHaveLength(0);
-      expect(payoutUpdate).toBeNull();
-    });
-
-    test('skips when the payout was never reconciled', async () => {
-      payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
-      const result = await service.reconcilePayout('local-payout-1', 120, 'undo', 'bank-import', 'rejected', { onlyIfReconciledBy: 'bank-import' });
-      expect(result.skipped).toBe(true);
-      expect(reconInserts).toHaveLength(0);
-    });
-
+  describe('reconcilePayout guards', () => {
     test('onlyIfUnreconciled writes when nothing is reconciled yet', async () => {
       payoutRow = { id: 'local-payout-1', amount: '120.00', reconciled: false, reconciled_by: null };
       const result = await service.reconcilePayout('local-payout-1', 120, 'auto-match', 'bank-import', 'confirmed', { onlyIfUnreconciled: true });

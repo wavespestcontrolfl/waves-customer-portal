@@ -214,12 +214,13 @@ function addDays(dateStr, days) {
 }
 
 // node-pg returns DATE columns as local-midnight Date objects — calendar
-// arithmetic on the raw value shifts a day depending on server zone (same
-// trap and fix as pnl-report's dateCellStr). Strings pass through by prefix.
+// arithmetic on the raw value shifts a day depending on server zone.
+// Delegates to pnl-report's dateCellStr: ONE conversion implementation
+// (a parallel copy here had already diverged on null handling), so any
+// future timezone/parser fix lands everywhere at once.
+const { dateCellStr } = require('./pnl-report');
 function toDateStr(v) {
-  if (typeof v === 'string') return v.slice(0, 10);
-  const d = new Date(v);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return dateCellStr(v);
 }
 
 // A payout a human already reconciled may carry a DIFFERENT banked amount
@@ -474,7 +475,7 @@ async function verifyPendingPayoutClaims() {
     .orderBy('id', 'asc')
     .limit(26) // 25 + sentinel: leftovers beyond the batch feed morePending
     .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion', 'matched_payout_id');
-  const more = fetched.length > 25;
+  let more = fetched.length > 25;
   const rows = fetched.slice(0, 25);
   let cleared = 0;
   let reverted = 0;
@@ -516,6 +517,14 @@ async function verifyPendingPayoutClaims() {
       });
     } catch (err) {
       logger.warn(`[bank-import] payout verify rollback for row ${row.id} failed — link kept: ${err.message}`);
+      // an unfinished verification IS remaining work — without this a
+      // swallowed rollback failure read as "matching complete" while the
+      // unverified claim sat excluded from the echo batch indefinitely
+      more = true;
+      // rotation: the failed row goes to the back of the bounded batch
+      await db('bank_transactions')
+        .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+        .update({ updated_at: new Date() });
     }
   }
   return { cleared, reverted, more };
@@ -696,7 +705,44 @@ async function healUnreconciledLinks() {
       }
     });
   }
-  return { reverted: reverted + amountReverts, remarked };
+  // PENDING-flagged links are normally the retry path's revalidation job,
+  // but the page-load endpoints run this healer WITHOUT the retries — a
+  // pending link whose payout a webhook made ineligible must not keep
+  // reporting as matched until someone uploads or clicks Run matching.
+  // Reverts only: an eligible pending row is left for the echo retries,
+  // and a RECONCILED pending row belongs to the echo guard's own
+  // revalidation. The pending backlog is naturally small (echo failures).
+  const pendingLinks = await db('bank_transactions as bt')
+    .join('stripe_payouts as sp', 'sp.id', 'bt.matched_payout_id')
+    .where('bt.status', 'matched_payout')
+    .whereRaw("bt.suggestion->>'reconcilePending' = 'true'")
+    .select('bt.id as id', 'bt.amount as amount', 'bt.txn_date as txn_date', 'bt.matched_payout_id as matched_payout_id',
+      'sp.amount as payout_amount', 'sp.status as payout_status', 'sp.arrival_date as arrival_date', 'sp.reconciled as payout_reconciled');
+  let pendingReverts = 0;
+  for (const row of pendingLinks) {
+    if (row.payout_reconciled) continue; // the echo guard revalidates reconciled+pending links
+    if (linkStillEligible(row, Number(row.payout_amount))) continue;
+    await db.transaction(async (trx) => {
+      const sp = await trx('stripe_payouts').where('id', row.matched_payout_id).forUpdate().first('id', 'amount', 'status', 'arrival_date', 'reconciled');
+      if (!sp || sp.reconciled) return; // reconciled since the scan — the echo guard owns it now
+      const lockedEffective = await effectivePayoutAmount(sp, trx);
+      if (linkStillEligible({ ...row, payout_status: sp.status, arrival_date: sp.arrival_date }, lockedEffective)) return;
+      const changed = await trx('bank_transactions')
+        .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+        .update({
+          status: 'unmatched',
+          matched_payout_id: null,
+          match_method: null,
+          matched_at: null,
+          suggestion: suggestionMerge({
+            autoRevert: { at: new Date().toISOString(), payoutId: row.matched_payout_id, reason: 'the payout is no longer eligible (status/amount/arrival changed after matching)' },
+          }, ['reconcilePending', 'verifyPending']),
+          updated_at: new Date(),
+        });
+      if (changed) pendingReverts++;
+    });
+  }
+  return { reverted: reverted + amountReverts + pendingReverts, remarked };
 }
 
 // A refund_applied credit whose target expense was DELETED must leave that

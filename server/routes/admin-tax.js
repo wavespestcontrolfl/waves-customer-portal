@@ -1625,23 +1625,26 @@ const { gateEnvValue } = require('../config/feature-gates');
 
 const MAX_STATEMENT_BYTES = 2 * 1024 * 1024;
 
+// Every read endpoint the tab loads CONCURRENTLY self-heals before its own
+// snapshot (the client fires /status, /transactions and /coverage together,
+// so none may rely on a sibling's healing having landed first): dangling
+// FKs, edited/ineligible expense links, ineligible payout links (webhooks
+// fail/reschedule payouts between passes), and orphaned refunds whose
+// association lives only in suggestion JSON. All are fixed-count scans that
+// write only on actual violations.
+async function healBankImportSnapshot() {
+  await bankImport.resetDanglingLinks();
+  await bankImport.healEditedExpenseLinks();
+  await bankImport.healUnreconciledLinks();
+  await bankImport.healOrphanRefunds();
+}
+
 // /bank-import/status always answers (the client uses it to decide whether
 // to show the tab at all); every other bank-import route 404s when dark.
 router.get('/bank-import/status', async (req, res, next) => {
   try {
     if (!gateEnvValue('GATE_BANK_IMPORT')) return res.json({ enabled: false });
-    // status counts are the tab's headline claims — self-heal first, same
-    // as coverage (the client fires /status, /transactions and /coverage
-    // concurrently, so this endpoint cannot rely on coverage's healing
-    // having landed before its own snapshot). The payout-eligibility
-    // healer runs too: a webhook can fail/reschedule a linked payout
-    // between matching passes, and page load must not keep counting it.
-    await bankImport.resetDanglingLinks();
-    await bankImport.healEditedExpenseLinks();
-    await bankImport.healUnreconciledLinks();
-    // orphaned refund_applied rows too — the association lives only in
-    // suggestion JSON, so no FK heal can catch a deleted target
-    await bankImport.healOrphanRefunds();
+    await healBankImportSnapshot();
     const counts = await db('bank_transactions').select('status').count('* as n').groupBy('status');
     res.json({
       enabled: true,
@@ -1864,6 +1867,10 @@ router.post('/bank-import/upload', async (req, res, next) => {
 
 router.get('/bank-import/transactions', async (req, res, next) => {
   try {
+    // the rendered rows carry ACTIONS (Unlink/Undo) — heal before this
+    // snapshot too, or a concurrent /status heal lands after this read and
+    // the page shows stale rows whose actions can only 409
+    await healBankImportSnapshot();
     const { status, month, account } = req.query;
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
@@ -2391,7 +2398,11 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
         ...(row.matched_expense_id ? { expenseId: row.matched_expense_id } : {}),
         ...(row.matched_payout_id ? { payoutId: row.matched_payout_id } : {}),
       },
-    }, ['reconcilePending']);
+      // verifyPending stripped too: a crash-leftover marker must never
+      // cross link generations — the sweep would treat the operator's
+      // NEXT manual link as an unfinished automatic claim and could
+      // revert it (or reverse its reconciliation) for plurality
+    }, ['reconcilePending', 'verifyPending']);
     // CAS on the status AND the exact linked id (payout or expense) so a
     // concurrent change 409s instead of being clobbered — without the
     // expense id, a stale unlink read against expense A could clear a newer
@@ -2524,11 +2535,7 @@ router.get('/bank-import/coverage', async (req, res, next) => {
     // pass must not keep reporting covered outflow until someone happens to
     // upload a statement or click Run matching. Cheap: fixed-count scans,
     // writes only on actual violations.
-    await bankImport.resetDanglingLinks();
-    await bankImport.healEditedExpenseLinks();
-    // orphaned refunds skew the coverage NETTING (their adjustment no
-    // longer exists) — heal them before this money claim too
-    await bankImport.healOrphanRefunds();
+    await healBankImportSnapshot();
     const year = /^\d{4}$/.test(String(req.query.year || '')) ? String(req.query.year) : String(etParts().year);
     res.json({ year, months: await bankImport.ledgerCoverage(year) });
   } catch (err) { next(err); }

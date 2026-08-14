@@ -1062,8 +1062,6 @@ async function getCashFlow(startDate, endDate) {
  *   inside the transaction; a guard miss returns { skipped: true } instead
  *   of writing, so automation can never clobber a concurrent human
  *   reconciliation in either direction:
- *   - onlyIfReconciledBy: proceed only if the payout is CURRENTLY reconciled
- *     by that exact author (automated reversals).
  *   - onlyIfUnreconciled: proceed only if the payout is NOT currently
  *     reconciled (automated confirms).
  *   - precondition: async (trx) => boolean — arbitrary caller-owned check
@@ -1120,11 +1118,11 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
       // stamps only the payout row and the return payload; the HISTORY row
       // the ordering queries read gets the DB clock at insert (below).
       now = new Date().toISOString();
-      if (opts.onlyIfReconciledBy !== undefined || opts.onlyIfUnreconciled) {
-        const authorOk = opts.onlyIfReconciledBy === undefined
-          || (cur && cur.reconciled && cur.reconciled_by === opts.onlyIfReconciledBy);
-        const unreconciledOk = !opts.onlyIfUnreconciled || (cur && !cur.reconciled);
-        if (!cur || !authorOk || !unreconciledOk) {
+      // (an onlyIfReconciledBy author-guard variant existed here briefly —
+      // removed unused: reversal callers do their ownership check under
+      // the payout lock and pass trx directly)
+      if (opts.onlyIfUnreconciled) {
+        if (!cur || cur.reconciled) {
           skipped = 'guard';
           return;
         }
@@ -1133,20 +1131,18 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
         // ('rejected' clears the payout flag). A human ruling stands —
         // check the latest reconciliation row under the same lock and skip
         // with a DISTINCT reason so callers can un-finalize their link.
-        if (opts.onlyIfUnreconciled) {
-          const latest = await trx('bank_reconciliation')
-            .where('payout_id', payoutId)
-            .orderBy('reconciled_at', 'desc')
-            .orderBy('created_at', 'desc')
-            .orderBy('id', 'desc') // deterministic final tie-breaker
-            .first('status', 'reconciled_by');
-          if (latest && ['rejected', 'draft'].includes(latest.status) && !String(latest.reconciled_by || '').startsWith('bank-import')) {
-            // rejected = the ruling stands (callers un-finalize their link);
-            // draft = active human deliberation (callers keep their retry
-            // marker and wait — automation never writes over a draft)
-            skipped = latest.status === 'rejected' ? 'human_rejected' : 'human_draft';
-            return;
-          }
+        const latest = await trx('bank_reconciliation')
+          .where('payout_id', payoutId)
+          .orderBy('reconciled_at', 'desc')
+          .orderBy('created_at', 'desc')
+          .orderBy('id', 'desc') // deterministic final tie-breaker
+          .first('status', 'reconciled_by');
+        if (latest && ['rejected', 'draft'].includes(latest.status) && !String(latest.reconciled_by || '').startsWith('bank-import')) {
+          // rejected = the ruling stands (callers un-finalize their link);
+          // draft = active human deliberation (callers keep their retry
+          // marker and wait — automation never writes over a draft)
+          skipped = latest.status === 'rejected' ? 'human_rejected' : 'human_draft';
+          return;
         }
       }
       if (opts.precondition && !(await opts.precondition(trx))) {
