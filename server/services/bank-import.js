@@ -916,7 +916,15 @@ async function retryPendingEchoes() {
         const result = await echoPayoutReconciliation(row.id, row.matched_payout_id, Number(row.amount), `Auto-matched to bank import row ${row.id} (retry)`);
         if (!(result && result.skipped)) retried++;
         else if (result.reason === 'human_rejected') humanRejected++;
-        else if (result.reason === 'human_draft' || result.reason === 'precondition') unresolved++;
+        else if (result.reason === 'human_draft' || result.reason === 'precondition') {
+          unresolved++;
+          // rotation, same as the thrown path: 25 draft-paused rows at the
+          // front of the queue must not be re-selected every batch and
+          // starve every later pending row behind them
+          await db('bank_transactions')
+            .where({ id: row.id, status: 'matched_payout', matched_payout_id: row.matched_payout_id })
+            .update({ updated_at: new Date() });
+        }
       } catch (err) {
         logger.warn(`[bank-import] reconciliation retry for payout ${payout.id} failed again: ${err.message}`);
         unresolved++;
@@ -1378,13 +1386,18 @@ async function runDeterministicMatching({ limit } = {}) {
       .limit(limit + 1);
     const moreFresh = fresh.length > limit;
     unmatched = fresh.slice(0, limit);
-    const freshCount = unmatched.length;
     let moreExamined = false;
     if (!moreFresh) {
       // Even with NO leftover capacity (fresh pool exactly == limit), the
       // examined pool must still be probed — otherwise moreRemaining lies
-      // "done" while parked/noMatch rows still await a rescan.
-      const fill = Math.max(0, limit - unmatched.length);
+      // "done" while parked/noMatch rows still await a rescan. A
+      // RESCAN-ONLY pass (no fresh rows at all — the explicit Run matching
+      // after a ledger edit) gets a 4x budget so any realistic examined
+      // pool is fully revisited in ONE run; overflow beyond even that is
+      // genuinely unvisited work and keeps the remaining signal.
+      const fill = unmatched.length === 0
+        ? limit * 4
+        : Math.max(0, limit - unmatched.length);
       // ROTATION: the examined pool is served oldest-UPDATED first, and
       // every rescan (re-park, transfer re-check, or the markScanned bump)
       // touches updated_at — round-robin, so no examined row is starved
@@ -1398,13 +1411,11 @@ async function runDeterministicMatching({ limit } = {}) {
       moreExamined = examined.length > fill;
       unmatched = unmatched.concat(examined.slice(0, fill));
     }
-    // The examined pool is a PERMANENT rotation of reviewed rows — its
-    // size never shrinks below the fill budget, so counting its overflow
-    // as pending forever would nag the operator to re-run matching with
-    // nothing new to find. Overflow only reads as remaining while the
-    // pass also had FRESH work: new imports (and the ledger changes that
-    // accompany them) are what make a rescan of the rest worthwhile.
-    moreRemaining = moreFresh || (moreExamined && freshCount > 0);
+    // The sentinel is honest again with the 4x rescan-only budget: a
+    // typical examined pool is fully revisited in one explicit run (done
+    // reads done), and overflow beyond even the enlarged budget is rows
+    // this run genuinely never reached — remaining reads remaining.
+    moreRemaining = moreFresh || moreExamined;
   }
   // pending echoes beyond the retry batch are unfinished work too — the
   // caller's "more rows pending" surface must not read as done

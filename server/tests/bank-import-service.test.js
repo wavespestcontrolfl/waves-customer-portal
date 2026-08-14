@@ -1487,8 +1487,11 @@ describe('runDeterministicMatching', () => {
     state.payouts = [{ id: 'po-1', amount: '2418.66', arrival_date: '2026-08-11', status: 'paid', reconciled: false }];
     const summary = await runDeterministicMatching();
     expect(summary.reconcileRetried).toBe(0);
-    // no clear, no revert — the flag survives for the next pass
-    expect(state.updates).toHaveLength(0);
+    // no clear, no revert — the flag survives; the only write is the
+    // rotation bump so 25 draft-paused rows can't starve the queue
+    expect(state.updates.find(u => u.patch.status || (typeof u.patch.suggestion === 'string'))).toBeUndefined();
+    const bump = state.updates.find(u => u.patch.updated_at && !u.patch.suggestion && !u.patch.status);
+    expect(bump).toBeDefined();
   });
 
   test('a bounded pass reports moreRemaining instead of scanning everything', async () => {

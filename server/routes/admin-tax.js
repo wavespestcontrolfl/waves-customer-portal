@@ -2339,16 +2339,29 @@ router.post('/bank-import/:id/unlink', async (req, res, next) => {
       try {
         await db.transaction(async (trx) => {
           const expense = target ? await trx('expenses').where({ id: target }).forUpdate().first('id', 'amount', 'tax_deductible_amount', 'notes', 'scheduled_service_id') : null;
-          if (expense && restore && !releaseOnly) {
+          // the snapshot comparison runs in BOTH modes — Release is the
+          // escape hatch for a DRIFTED expense only; on an untouched one it
+          // would strand the applied reduction while the credit re-parks,
+          // and a second apply would then reduce the ledger twice
+          let amountUntouched = false;
+          let deductibleUntouched = false;
+          if (expense && restore) {
             const expected = Math.round((Number(restore.prevAmount) - refund) * 100) / 100;
-            const amountUntouched = Math.round(Number(expense.amount) * 100) === Math.round(expected * 100);
+            amountUntouched = Math.round(Number(expense.amount) * 100) === Math.round(expected * 100);
             // deductible must ALSO equal what apply-refund wrote — an
             // operator's later deductible/category edit would otherwise be
             // silently destroyed by restoring the old snapshot
             const appliedDeductible = restore.appliedDeductible === undefined ? null : restore.appliedDeductible;
-            const deductibleUntouched = (expense.tax_deductible_amount == null && appliedDeductible == null)
+            deductibleUntouched = (expense.tax_deductible_amount == null && appliedDeductible == null)
               || (expense.tax_deductible_amount != null && appliedDeductible != null
                 && Math.round(Number(expense.tax_deductible_amount) * 100) === Math.round(Number(appliedDeductible) * 100));
+          }
+          if (releaseOnly && expense && restore && amountUntouched && deductibleUntouched) {
+            const e = new Error('nothing has drifted — use Undo refund, which restores the expense; Release would strand the applied reduction');
+            e.status = 409;
+            throw e;
+          }
+          if (expense && restore && !releaseOnly) {
             if (!amountUntouched || !deductibleUntouched) {
               const e = new Error('the expense changed since this refund was applied — fix it manually on the Expenses tab, then use Release to clear this refund without touching the expense again');
               e.status = 409;

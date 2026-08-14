@@ -837,6 +837,19 @@ describe('apply-refund (gate on)', () => {
     expect(sugOf(claim).refundUndone.releasedWithoutRestore).toBe(true);
   });
 
+  test('Release is REFUSED while the ordinary Undo would still succeed — no stranded reductions', async () => {
+    state.bankRow = {
+      id: 'bt-1', amount: '20.00', direction: 'credit', account_type: 'card', status: 'refund_applied',
+      suggestion: { refundAppliedTo: 'exp-9', refundAmount: 20, refundRestore: { prevAmount: 58.12, prevDeductible: 29.06, appliedDeductible: 19.06 } },
+    };
+    // the expense still matches the applied snapshot exactly
+    state.expenseRow = { id: 'exp-9', amount: '38.12', tax_deductible_amount: '19.06', notes: 'n' };
+    const res = await post('/admin/tax/bank-import/bt-1/unlink', { releaseOnly: true });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain('Undo refund');
+    expect(state.bankUpdates).toHaveLength(0);
+  });
+
   test('undoing a job expense refund re-derives the job-cost rollups too', async () => {
     const { calculateJobCost } = require('../services/job-costing');
     calculateJobCost.mockClear();
