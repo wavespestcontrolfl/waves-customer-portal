@@ -1259,6 +1259,14 @@ const gates = {
   // logGateStatus, and the sweep can never disagree.
   visionDelta: gateEnvValue('GATE_VISION_DELTA'),
 
+  // Weekly Manatee pool-permit sync (ACA "Pool Permits (CSV)" report →
+  // pool_permit_records). Closes the closed-permit blind window between the
+  // open-permits GIS layer and the annual assessment roll. Off → the sync
+  // returns {skipped:'gated'} before any fetch or DB read; the read path
+  // (county-permits.js) is ungated — it just sees an empty table. Same
+  // CALL-time gateEnvValue contract as visionDelta. Kill switch: unset.
+  permitSync: gateEnvValue('GATE_PERMIT_SYNC'),
+
   // Weekly autonomous vendor price scan -> stages a price-match draft for the
   // SiteOne rep (never auto-sends; a human reviews + sends from /admin/price-match).
   // Explicit opt-in in ALL envs (it hits external vendor sites via a headless

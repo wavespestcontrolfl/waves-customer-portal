@@ -99,13 +99,24 @@ function keepNewest(current, candidate) {
   return current;
 }
 
-async function lookupManateePermits(pin, timeoutMs) {
-  const rows = await queryArcgis(
-    process.env.MANATEE_PERMITS_URL || DEFAULT_MANATEE_PERMITS_URL,
-    `SELECTPIN='${pin}' AND PERMIT_TYPE IN ('Pool_Spa','Aluminum Structure')`,
-    ['PERMIT_NO', 'PERMIT_TYPE', 'PERMIT_ISSUE'],
-    timeoutMs,
-  );
+async function lookupManateePermits(pin, timeoutMs, address) {
+  // GIS outage must not take the synced-table backstop down with it — the
+  // sync exists precisely for what the live layer can't see. A GIS failure
+  // is only rethrown at the END when the backstop found nothing, so the
+  // caller's null-means-retry contract still holds for truly-unchecked
+  // parcels; positive synced evidence wins over retry semantics.
+  let gisError = null;
+  let rows = [];
+  try {
+    rows = await queryArcgis(
+      process.env.MANATEE_PERMITS_URL || DEFAULT_MANATEE_PERMITS_URL,
+      `SELECTPIN='${pin}' AND PERMIT_TYPE IN ('Pool_Spa','Aluminum Structure')`,
+      ['PERMIT_NO', 'PERMIT_TYPE', 'PERMIT_ISSUE'],
+      timeoutMs,
+    );
+  } catch (err) {
+    gisError = err;
+  }
   let poolPermit = null;
   let enclosurePermit = null;
   for (const row of rows) {
@@ -117,6 +128,34 @@ async function lookupManateePermits(pin, timeoutMs) {
     if (row.PERMIT_TYPE === 'Pool_Spa') poolPermit = keepNewest(poolPermit, permit);
     else if (row.PERMIT_TYPE === 'Aluminum Structure') enclosurePermit = keepNewest(enclosurePermit, permit);
   }
+  // Closed-permit backstop: the GIS layer above carries OPEN permits only
+  // (STAT='O'), so a pool whose permit closed since the last assessment
+  // roll is invisible to both live sources. pool_permit_records is the
+  // weekly ACA "Pool Permits (CSV)" sync (Pool-Spa only — enclosures stay
+  // GIS-only). Its own try/catch: a missing table (migration not run,
+  // sync gate never flipped) or DB blip must not sink the GIS evidence.
+  try {
+    // Lazy require: keeps this module free of a load-time db dependency
+    // (tests drive it with a mocked global.fetch only).
+    const { findSyncedPoolPermit, looseKeyFromFreeform } = require('./manatee-permit-sync');
+    const synced = await findSyncedPoolPermit({
+      parcelPin: pin,
+      looseKey: looseKeyFromFreeform(address),
+    });
+    if (synced) poolPermit = keepNewest(poolPermit, synced);
+  } catch (err) {
+    // Code/name only — a raw Knex error message can echo the failing SQL
+    // with parcel/address bindings (AGENTS.md PII rule).
+    logger.warn('[county-permits] synced-permit read failed', {
+      error: err?.code || err?.name || 'db_error',
+    });
+  }
+  if (gisError && !poolPermit) throw gisError;
+  // gisUnavailable: the pool evidence is real (synced table), but the
+  // enclosure side was NEVER checked — callers must not persist this
+  // result as a completed "checked" marker, or the GIS layer is never
+  // retried for the enclosure.
+  if (gisError) return { poolPermit, enclosurePermit: null, gisUnavailable: true };
   return { poolPermit, enclosurePermit };
 }
 
@@ -146,7 +185,7 @@ async function lookupCharlottePermits(account, timeoutMs) {
 // or null — a successful empty query returns the empty object so callers can
 // persist "checked"), or null entirely when the county is unsupported, the
 // parcel id is unusable, the gate is off, or the provider failed (fail-open).
-async function lookupPoolPermitsByParcel({ county, parcelId } = {}, options = {}) {
+async function lookupPoolPermitsByParcel({ county, parcelId, address } = {}, options = {}) {
   if (isCountyPermitsDisabled()) {
     logger.info('[county-permits] skipped — COUNTY_PERMITS_DISABLED');
     return null;
@@ -160,7 +199,7 @@ async function lookupPoolPermitsByParcel({ county, parcelId } = {}, options = {}
   const t0 = Date.now();
   try {
     let result = null;
-    if (county === 'Manatee') result = await lookupManateePermits(digits, timeoutMs);
+    if (county === 'Manatee') result = await lookupManateePermits(digits, timeoutMs, address);
     else if (county === 'Charlotte') result = await lookupCharlottePermits(digits, timeoutMs);
     else return null; // Sarasota (no public layer) and anything unknown
     // A SUCCESSFUL empty query still returns the (empty) object: callers

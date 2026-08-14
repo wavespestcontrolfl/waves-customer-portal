@@ -235,21 +235,59 @@ async function performPropertyLookupCore(address, options = {}) {
       }
       // Permit-evidence backfill, same pattern: query once on hit, persist
       // even when empty (a checked marker), retry only on provider failure.
+      // A gisUnavailable marker (synced pool evidence returned while the
+      // GIS layer was down) also retries here — the enclosure side was
+      // never actually checked, so it must not be persisted as checked.
       if (
         !cacheOnly
         && cached.property_record
-        && cached.property_record._poolPermits === undefined
+        && (cached.property_record._poolPermits === undefined
+          || cached.property_record._poolPermits?.gisUnavailable)
         && cached.property_record._parcel?.paoParcelId
         && cached.property_record._parcel?.county
       ) {
         const permits = await lookupPoolPermitsByParcel({
           county: cached.property_record._parcel.county,
           parcelId: cached.property_record._parcel.paoParcelId,
+          address,
         }).catch(() => null);
         if (permits) {
           cached.property_record._poolPermits = permits;
-          if (persist) await attachPoolPermitsToCachedLookup(address, permits);
+          if (persist && !permits.gisUnavailable) await attachPoolPermitsToCachedLookup(address, permits);
         }
+      }
+      // Synced-table evidence is recomputed IN MEMORY on every cache hit
+      // (Manatee only): both reads are cheap local indexed queries — no GIS
+      // call, so they are allowed here — and recomputing beats persisting
+      // because the weekly permit sync keeps learning things AFTER a marker
+      // was cached (a closed pool permit, a new construction start), and a
+      // persisted upgrade would itself go stale. The pool read only fills
+      // an EMPTY marker — it never overwrites live GIS evidence. Fail-open:
+      // a missing table or DB blip is just "no signal".
+      if (!cacheOnly && cached.property_record?._parcel?.county === 'Manatee') {
+        try {
+          const { findSyncedPoolPermit, findConstructionActivity, looseKeyFromFreeform } = require('../services/property-lookup/manatee-permit-sync');
+          const looseKey = looseKeyFromFreeform(address);
+          const parcelPin = cached.property_record._parcel.paoParcelId;
+          const cachedPermits = cached.property_record._poolPermits;
+          // Sync-sourced permits carry a `status` key (GIS permits never
+          // do). Revalidate them on every hit — a permit cached while
+          // active and since Canceled must CLEAR, not ride the TTL — and
+          // fill empty markers. GIS-sourced evidence is never touched.
+          const syncSourced = Boolean(cachedPermits?.poolPermit && cachedPermits.poolPermit.status !== undefined);
+          if (cachedPermits && (!cachedPermits.poolPermit || syncSourced)) {
+            const synced = await findSyncedPoolPermit({ parcelPin, looseKey });
+            cached.property_record._poolPermits = {
+              ...cachedPermits,
+              poolPermit: synced || (syncSourced ? null : cachedPermits.poolPermit),
+            };
+          }
+          // Unconditional assign: null CLEARS evidence a prior hit
+          // attached whose signals have since expired (CO'd long ago,
+          // permit vanished) — stale construction evidence must not
+          // outlive the facts.
+          cached.property_record._constructionActivity = await findConstructionActivity({ parcelPin, looseKey });
+        } catch { /* fail-open: table missing or DB blip = no signal */ }
       }
       // House-number-audit backfill, same pattern: record-bearing rows cached
       // before the audit shipped have no _addressAudit key, so the panel's
@@ -394,8 +432,27 @@ async function performPropertyLookupCore(address, options = {}) {
       const permits = await lookupPoolPermitsByParcel({
         county: parcelMeta.county,
         parcelId: parcelMeta.paoParcelId,
+        address,
       }).catch(() => null);
       if (permits) result.propertyRecord._poolPermits = permits;
+    }
+
+    // Synced construction-permit evidence (Manatee only — the ACA report
+    // sync). underConstruction/newBuild ride the record so the estimator
+    // can tell "county says active build here" from "vision saw a dirt
+    // lot". Fresh-path only (cached rows pick it up at TTL expiry);
+    // fail-open — an empty/missing table is just "no signal".
+    if (parcelMeta?.county === 'Manatee') {
+      try {
+        const { findConstructionActivity, looseKeyFromFreeform } = require('../services/property-lookup/manatee-permit-sync');
+        const construction = await findConstructionActivity({
+          parcelPin: parcelMeta.paoParcelId,
+          looseKey: looseKeyFromFreeform(address),
+        });
+        if (construction) result.propertyRecord._constructionActivity = construction;
+      } catch (err) {
+        result.errors.push({ source: 'construction-permits', message: err?.message || String(err) });
+      }
     }
   }
 
@@ -1879,6 +1936,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // coverage, unpermitted pools, and Sarasota has no permit service.
     poolPermit: rc?._poolPermits?.poolPermit || null,
     enclosurePermit: rc?._poolPermits?.enclosurePermit || null,
+    // Synced county construction evidence (Manatee ACA reports):
+    // underConstruction = permit issued, no CO yet — satellite imagery may
+    // predate the build; newBuild = CO within 18 months — brand-new home.
+    // Evidence-only: no pricing or vision behavior keys on it here.
+    constructionActivity: rc?._constructionActivity || null,
 
     // Per-field observation provenance (codex #3367 PR r7): this profile
     // synthesizes defaults for unobserved fields ('MODERATE' densities,
