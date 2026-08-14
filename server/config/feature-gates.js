@@ -1467,6 +1467,14 @@ const gates = {
   // entry uses the SAME parser so the startup gate report can never
   // disagree with request-time enforcement ('1'/'on' variants included).
   bankImport: gateEnvValue('GATE_BANK_IMPORT'),
+
+  // Stops-away tracker count (2026-08-14): "N stops away" on the portal
+  // ServiceTracker + public /track page. Read-only, fires no comms; count
+  // is bare (never other customers' info), capped at 3, clamped monotonic
+  // per display date (owner rulings in PR). OFF everywhere until Adam
+  // flips GATE_STOPS_AWAY — read at call time via gateEnvValue so the
+  // flip needs no redeploy. Kill switch: unset the var.
+  stopsAway: gateEnvValue('GATE_STOPS_AWAY'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

@@ -11314,6 +11314,23 @@ function ServiceTracker() {
             }}>
               Your {svcType.toLowerCase()} is {step === 2 ? 'confirmed' : 'booked'}{tracker.service?.windowStart ? ` for ${window}` : ''}.
             </div>
+            {/* "N stops away" (GATE_STOPS_AWAY): stopsAhead rides the payload
+                only when the gate is on AND the clamped count is within the
+                display cap — null renders nothing, so gate-off behavior is
+                byte-for-byte unchanged. Bare count only, by owner ruling. */}
+            {tracker.stopsAhead != null && (
+              <div style={{
+                display: 'inline-block', marginTop: 12,
+                fontSize: 14, fontWeight: 700, fontFamily: FONTS.ui,
+                color: B.wavesBlue, background: `${B.wavesBlue}14`,
+                padding: '6px 12px', borderRadius: 8,
+                border: `1px solid ${B.wavesBlue}33`,
+              }}>
+                {tracker.stopsAhead === 0
+                  ? `You're next on ${techFirst}'s route`
+                  : `${tracker.stopsAhead} ${tracker.stopsAhead === 1 ? 'stop' : 'stops'} away`}
+              </div>
+            )}
             <div style={{ fontSize: 16, color: B.textBody, marginTop: 12, lineHeight: 1.5 }}>
               You'll get a text as soon as {techFirst} is on the way.
             </div>

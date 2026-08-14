@@ -10,6 +10,7 @@ const {
   finiteNumber,
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
+const { computeStopsAhead } = require('../services/stops-ahead');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 router.use(authenticate);
@@ -190,6 +191,7 @@ function formatScheduledTracker(service, tech, customer) {
     ],
     etaMinutes: null,
     etaSource: null,
+    stopsAhead: null,
     liveNotes: [],
     serviceSummary: null,
     service: {
@@ -365,6 +367,8 @@ router.get('/active', async (req, res, next) => {
       await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
       await attachRainChance(formatted, canonical, req.customer);
+      // "N stops away" (GATE_STOPS_AWAY) — bare count only, fail-soft null.
+      formatted.stopsAhead = await computeStopsAhead(db, canonical.id);
       return res.json({ tracker: formatted });
     }
 
@@ -384,6 +388,8 @@ router.get('/today', async (req, res, next) => {
       await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
       await attachRainChance(formatted, canonical, req.customer);
+      // "N stops away" (GATE_STOPS_AWAY) — bare count only, fail-soft null.
+      formatted.stopsAhead = await computeStopsAhead(db, canonical.id);
       return res.json({ tracker: formatted });
     }
 

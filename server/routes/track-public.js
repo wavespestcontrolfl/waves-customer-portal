@@ -44,6 +44,7 @@ const { resolveFreshTechPosition } = require('../services/tracking-vehicle-locat
 const { ensureCustomerGeocoded } = require('../services/geocoder');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
+const { computeStopsAhead } = require('../services/stops-ahead');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -486,6 +487,11 @@ router.get('/:token', async (req, res, next) => {
       // streaming fresh tech GPS coords and polling until token expiry
       // even though the customer is shown a terminal missed-visit card.
       vehicle: customerState === 'en_route' ? await buildVehicle(row) : null,
+      // "N stops away" (GATE_STOPS_AWAY): bare count only — never other
+      // customers' info. Pre-arrival states only; fail-soft null otherwise.
+      stopsAhead: (customerState === 'scheduled' || customerState === 'en_route')
+        ? await computeStopsAhead(db, row.id)
+        : null,
       summary: customerState === 'complete' ? await buildSummary(row) : null,
       cancellation: customerState === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }

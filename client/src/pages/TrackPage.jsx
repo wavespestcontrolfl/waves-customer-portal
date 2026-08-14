@@ -425,6 +425,22 @@ function ScheduledCard({ data }) {
         {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}
         your {data.service?.type?.toLowerCase() || 'service'} is booked{window ? ` for ${window}` : ''}.
       </div>
+      {/* "N stops away" (GATE_STOPS_AWAY): stopsAhead is null unless the
+          gate is on and the clamped count is within the display cap —
+          gate-off render is byte-for-byte unchanged. Bare count only. */}
+      {data.stopsAhead != null && (
+        <div style={{
+          display: 'inline-block', marginTop: 12,
+          fontSize: 14, fontWeight: 700,
+          color: COLORS.wavesBlue, background: `${COLORS.wavesBlue}14`,
+          padding: '6px 12px', borderRadius: 8,
+          border: `1px solid ${COLORS.wavesBlue}33`,
+        }}>
+          {data.stopsAhead === 0
+            ? `You're next on ${techFirst}'s route`
+            : `${data.stopsAhead} ${data.stopsAhead === 1 ? 'stop' : 'stops'} away`}
+        </div>
+      )}
       <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
         You'll get a text as soon as {techFirst} is on the way.
       </div>
