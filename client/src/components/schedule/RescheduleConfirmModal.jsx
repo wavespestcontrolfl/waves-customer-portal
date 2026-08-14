@@ -45,6 +45,7 @@ export default function RescheduleConfirmModal({
   toWindow, // optional 'HH:MM-HH:MM' landing window (pending.newWindow)
   customerId, // optional — enables the advisory best-times hint
   durationMinutes, // optional — best-times hint duration (engine defaults 60)
+  technicianId, // optional — scope the hint to the landing tech's route
   onConfirm,
   onCancel,
 }) {
@@ -71,6 +72,7 @@ export default function RescheduleConfirmModal({
     date: /^\d{4}-\d{2}-\d{2}$/.test(String(toDate || '')) ? toDate : null,
     customerId,
     durationMinutes,
+    technicianId,
     excludeServiceIds: serviceId != null ? [serviceId] : undefined,
     enabled: open,
   });

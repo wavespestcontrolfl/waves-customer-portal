@@ -1350,6 +1350,7 @@ export default function TimeGridDay({
         toWindow={pending?.newWindow}
         customerId={pending?.svc?.customerId || pending?.svc?.customer_id}
         durationMinutes={pending?.svc ? effectiveDuration(pending.svc) : undefined}
+        technicianId={pending?.toTech && pending.toTech !== '__unassigned__' ? pending.toTech : undefined}
         onConfirm={commitReschedule}
         onCancel={cancelReschedule}
       />

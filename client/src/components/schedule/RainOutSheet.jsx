@@ -513,6 +513,8 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     date: landingDate,
     customerId: service.customerId || service.customer_id,
     durationMinutes: service.estimatedDuration || service.duration || undefined,
+    // Quick Move keeps the visit on its own tech's route.
+    technicianId: service.technicianId || service.technician_id || undefined,
     excludeServiceIds: [service.id],
     enabled: !!landingDate,
   });

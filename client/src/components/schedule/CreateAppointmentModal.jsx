@@ -1448,6 +1448,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
     durationMinutes: slotCheckDuration,
+    // Same tech scoping as the ranged search — auto mode searches all techs.
+    technicianId: techMode === 'choose' && techId ? techId : undefined,
   });
 
   // Submit
