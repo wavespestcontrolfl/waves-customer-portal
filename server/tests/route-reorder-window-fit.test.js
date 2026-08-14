@@ -347,6 +347,24 @@ test('unit: equal-window ties are PERMUTED, not frozen in input order — the on
   expect(out.orderedStops.map((s) => s.id)).toEqual(['A', 'B']);
 });
 
+test('unit: above the cap, greedy still permutes equal-window ties — infeasible stable tie order is not a false null', async () => {
+  // Same B/A 09:00 tie as above (only A-then-B is feasible; input order is
+  // B-first), plus 8 untimed stops pushing the full-day sequence count over
+  // the cap (10!/2! ≫ 20k) so the greedy path runs. A frozen stable backbone
+  // would be infeasible and return null (uncapped audit P1); the tie space
+  // alone (2! = 2) is searched first. The A→B leg has zero slack, so every
+  // untimed stop must land after B — which greedy insertion finds.
+  const stops = [
+    stop('B', { window_start: '09:00', lng: 8 }),
+    stop('A', { window_start: '09:00', lng: 2 }),
+    ...Array.from({ length: 8 }, (_, i) => stop(`u${i}`, { lng: 9 + i, estimated_duration_minutes: 30 })),
+  ];
+  const out = computeWindowFitOrder(FAKE_RO, stops, GUARDS);
+  expect(out).not.toBeNull();
+  expect(out.orderedStops).toHaveLength(10);
+  expect(out.orderedStops.slice(0, 2).map((s) => s.id)).toEqual(['A', 'B']);
+});
+
 test('unit: fewer than 2 stops is not a reorder problem', () => {
   expect(computeWindowFitOrder(FAKE_RO, [stop('only')], GUARDS)).toBeNull();
 });

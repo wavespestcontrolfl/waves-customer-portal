@@ -229,9 +229,28 @@ function computeWindowFitOrder(RouteOptimizer, stops, guards) {
   }
   const groupStops = groups.map((g) => g.stops);
 
-  const winner = sequenceCount(stops.length, backbone.length, groupStops.map((g) => g.length)) <= EXHAUSTIVE_SEQUENCE_CAP
-    ? exhaustiveSearch(RouteOptimizer, guards, groupStops, untimed)
-    : greedyInsertion(RouteOptimizer, guards, backbone, untimed);
+  const groupSizes = groupStops.map((g) => g.length);
+  let winner;
+  if (sequenceCount(stops.length, backbone.length, groupSizes) <= EXHAUSTIVE_SEQUENCE_CAP) {
+    winner = exhaustiveSearch(RouteOptimizer, guards, groupStops, untimed);
+  } else {
+    // Greedy path: the stable tie order can be the ONE infeasible
+    // permutation of an equal-start group (uncapped audit P1 — the exact
+    // case the exhaustive path handles), so first search tie permutations
+    // of the BACKBONE ALONE (∏ gᵢ! sequences — tiny next to the full-day
+    // count that forced greedy) for the cheapest feasible backbone; a
+    // backbone infeasible in EVERY tie order proves the day infeasible
+    // (inserting stops only delays). Greedy insertion then works from
+    // that backbone; only if even the tie space exceeds the cap do we
+    // keep the stable operator-visible order.
+    let greedyBackbone = backbone;
+    if (backbone.length > 0 && sequenceCount(backbone.length, backbone.length, groupSizes) <= EXHAUSTIVE_SEQUENCE_CAP) {
+      const feasibleBackbone = exhaustiveSearch(RouteOptimizer, guards, groupStops, []);
+      if (!feasibleBackbone) return null;
+      greedyBackbone = feasibleBackbone;
+    }
+    winner = greedyInsertion(RouteOptimizer, guards, greedyBackbone, untimed);
+  }
   if (!winner) return null;
 
   // Owner ruling (2026-08-14): model-authored orders are acceptable BECAUSE
