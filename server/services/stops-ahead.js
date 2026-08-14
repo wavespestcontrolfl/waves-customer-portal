@@ -96,19 +96,26 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     //    so tracker-terminal rows drop out by track_state too — NULL-safe,
     //    since NOT IN alone silently drops NULL-track_state rows.
     // Ordering matches the dispatch day-plan (route_order, window, created)
-    // with id as deterministic tiebreak.
+    // with id as deterministic tiebreak. The count is DISTINCT customers,
+    // not rows: sibling rows for the same customer/appointment slot exist
+    // (appointment-reminders merges them) and must read as ONE stop — and
+    // every row belonging to the target's own customer is excluded, so a
+    // sibling of the target can never count as ahead of itself. A customer
+    // with two properties served the same day reads as one stop — a small
+    // deliberate undercount, which the clamp tolerates (overcounts are what
+    // it cannot take back).
     const statusPlaceholders = NOT_A_STOP_STATUSES.map(() => '?').join(', ');
     const countRes = await db.raw(
       `WITH target AS (
-         SELECT id, technician_id, scheduled_date, route_order, window_start, created_at
+         SELECT id, customer_id, technician_id, scheduled_date, route_order, window_start, created_at
            FROM scheduled_services
           WHERE id = ?::uuid
        )
-       SELECT COUNT(*)::int AS n
+       SELECT COUNT(DISTINCT s.customer_id)::int AS n
          FROM scheduled_services s, target t
         WHERE s.technician_id = t.technician_id
           AND s.scheduled_date = t.scheduled_date
-          AND s.id <> t.id
+          AND s.customer_id <> t.customer_id
           AND s.status NOT IN (${statusPlaceholders})
           AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())
           AND (s.track_state IS NULL OR s.track_state NOT IN ('complete', 'cancelled'))

@@ -87,7 +87,10 @@ describe('computeStopsAhead', () => {
     const [countSql, countBindings] = db.countCall();
     expect(countBindings).toEqual(['svc-self', ...NOT_A_STOP_STATUSES]);
     expect(NOT_A_STOP_STATUSES).toEqual(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled']);
-    expect(countSql).toContain('s.id <> t.id');
+    // DISTINCT customers, not rows (sibling rows for one appointment slot
+    // must read as one stop), and the target customer's own rows never count.
+    expect(countSql).toContain('COUNT(DISTINCT s.customer_id)');
+    expect(countSql).toContain('s.customer_id <> t.customer_id');
     // Dead estimate-slot holds must not count (hook P1: live-hold predicate).
     expect(countSql).toContain('(s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())');
     // track_state can diverge from status (markComplete can leave

@@ -45,6 +45,7 @@ const { ensureCustomerGeocoded } = require('../services/geocoder');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
 const { computeStopsAhead } = require('../services/stops-ahead');
+const { gateEnvValue } = require('../config/feature-gates');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -55,6 +56,12 @@ const TRACK_PUBLIC_GEOCODE_TIMEOUT_MS = 1500;
 // Socket broadcasts handle state transitions; this poll only refreshes
 // vehicle coords + ETA between transitions.
 const EN_ROUTE_POLL_SECONDS = 30;
+// Scheduled-state poll only exists for the stops-away count (GATE_STOPS_AWAY):
+// without it the public page would show the initial count forever — it must
+// decrement as stops complete and appear once the count drops under the cap,
+// including when stopsAhead is currently null. Gate off → 0, byte-for-byte
+// today's behavior.
+const SCHEDULED_POLL_SECONDS = 60;
 
 // Customer track page TTL — the page gets left open on a phone well past a
 // visit window (backgrounded tabs), and 15-minute links 403'd thumbnails on
@@ -510,7 +517,11 @@ router.get('/:token', async (req, res, next) => {
       },
       prepToken: null,
       meta: {
-        pollIntervalSeconds: customerState === 'en_route' ? EN_ROUTE_POLL_SECONDS : 0,
+        pollIntervalSeconds: customerState === 'en_route'
+          ? EN_ROUTE_POLL_SECONDS
+          : (customerState === 'scheduled' && gateEnvValue('GATE_STOPS_AWAY')
+            ? SCHEDULED_POLL_SECONDS
+            : 0),
       },
     };
 
