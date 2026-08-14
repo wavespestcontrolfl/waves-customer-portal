@@ -454,6 +454,18 @@ async function runRouteReorder(opts = {}) {
               summary.skipped.push({ ...entryBase, reason, ...metrics });
               continue;
             }
+            // HARD DEPENDENCY (pre-push audit P1): the fallback's whole
+            // safety case rests on the CALIBRATED drive-time model (owner
+            // ruling accepted model-authored orders on its MAE, not the
+            // legacy 30 mph constant the guard documents as
+            // underestimating). If calibration is killed or drifts off,
+            // model-authored orders must not be written — the day skips
+            // as before, tagged so the ledger says why the fallback
+            // stood down.
+            if (!gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
+              summary.skipped.push({ ...entryBase, reason, ...metrics, fallback: 'CALIBRATION_OFF' });
+              continue;
+            }
             // Pass the CURRENT RUNNING order (not raw query order — the day
             // load has no ORDER BY): equal-window backbone ties then default
             // to the sequence the operator actually sees on the board.
