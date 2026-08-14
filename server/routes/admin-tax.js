@@ -2483,8 +2483,12 @@ router.get('/bank-import/:id/refund-candidates', async (req, res, next) => {
     if (!row) return res.status(404).json({ error: 'row not found' });
     if (row.direction !== 'credit') return res.status(400).json({ error: 'only credits have refund candidates' });
     const list = await bankImport.refundCandidatesForRow(row);
+    // offset pagination: 500 per page, and the client keeps a load-more
+    // path until every one of `total` is reachable — a hard truncation
+    // would leave a valid off-page original unselectable
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     res.json({
-      candidates: list.slice(0, 500).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: dateCellStr(c.expense_date) })),
+      candidates: list.slice(offset, offset + 500).map(c => ({ id: c.id, amount: Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: dateCellStr(c.expense_date) })),
       total: list.length,
     });
   } catch (err) { next(err); }
@@ -2506,8 +2510,9 @@ router.get('/bank-import/:id/expense-candidates', async (req, res, next) => {
     // valid restore unreachable
     const list = await bankImport.surveyExpenseCandidatesForRow(row, { expenseIds: [], payoutIds: [], bankingPayoutIds: [] });
     list.sort((a, b) => String(dateCellStr(b.expense_date)).localeCompare(String(dateCellStr(a.expense_date))) || String(a.id).localeCompare(String(b.id)));
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     res.json({
-      candidates: list.slice(0, 500).map(c => ({ id: c.id, amount: c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: dateCellStr(c.expense_date) })),
+      candidates: list.slice(offset, offset + 500).map(c => ({ id: c.id, amount: c.gross_amount != null ? Number(c.gross_amount) : Number(c.amount), vendor_name: c.vendor_name, description: c.description, expense_date: dateCellStr(c.expense_date) })),
       total: list.length,
     });
   } catch (err) { next(err); }

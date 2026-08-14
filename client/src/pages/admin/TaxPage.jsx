@@ -4463,11 +4463,11 @@ function BankImportTab() {
                       onChange={(e) => {
                         const v = e.target.value;
                         if (v === "__more_candidates") {
-                          // fetch the FULL plausible list — link-expense
-                          // validates by plausibility rules, so every entry
-                          // is actionable
-                          adminFetch(`/admin/tax/bank-import/${r.id}/expense-candidates`)
-                            .then((d) => setFullExpenseCands((p) => ({ ...p, [r.id]: d.candidates || [] })))
+                          // paged load-more — link-expense validates by
+                          // plausibility rules, so every entry is actionable
+                          const have = fullExpenseCands[r.id]?.list || [];
+                          adminFetch(`/admin/tax/bank-import/${r.id}/expense-candidates?offset=${have.length}`)
+                            .then((d) => setFullExpenseCands((p) => ({ ...p, [r.id]: { list: [...have, ...(d.candidates || [])], total: d.total ?? 0 } })))
                             .catch(() => {});
                           return;
                         }
@@ -4479,15 +4479,17 @@ function BankImportTab() {
                         {r.suggestion?.ignore ? "internal transfer? · " : ""}
                         {r.suggestion.candidates.length} possible existing match{r.suggestion.candidates.length > 1 ? "es" : ""}…
                       </option>
-                      {(fullExpenseCands[r.id] || r.suggestion.candidates).map((c) => (
+                      {(fullExpenseCands[r.id]?.list || r.suggestion.candidates).map((c) => (
                         <option key={c.id} value={c.id}>
                           {(c.vendor_name || c.description || "expense").slice(0, 34)}
                           {c.amount != null ? ` · ${fmtM(c.amount)}` : ""} · {fmtD(c.expense_date)}
                         </option>
                       ))}
-                      {!fullExpenseCands[r.id] && (r.suggestion.candidatesTotal || 0) > r.suggestion.candidates.length && (
+                      {(fullExpenseCands[r.id]
+                        ? fullExpenseCands[r.id].list.length < fullExpenseCands[r.id].total
+                        : (r.suggestion.candidatesTotal || 0) > r.suggestion.candidates.length) && (
                         <option value="__more_candidates">
-                          +{r.suggestion.candidatesTotal - r.suggestion.candidates.length} more — load all…
+                          +{(fullExpenseCands[r.id]?.total ?? r.suggestion.candidatesTotal) - (fullExpenseCands[r.id]?.list.length ?? r.suggestion.candidates.length)} more — load…
                         </option>
                       )}
                     </select>
@@ -4502,11 +4504,14 @@ function BankImportTab() {
                       onChange={(e) => {
                         const v = e.target.value;
                         if (v === "__more_refunds") {
-                          // fetch the FULL plausible list — every entry is
-                          // actionable through apply-refund's plausibility
-                          // validation, so nothing stays unreachable
-                          adminFetch(`/admin/tax/bank-import/${r.id}/refund-candidates`)
-                            .then((d) => setFullRefunds((p) => ({ ...p, [r.id]: d.candidates || [] })))
+                          // paged load-more — every entry is actionable
+                          // through apply-refund's plausibility validation,
+                          // and the option stays until ALL of `total` are
+                          // loaded (a hard truncation would strand a valid
+                          // off-page original)
+                          const have = fullRefunds[r.id]?.list || [];
+                          adminFetch(`/admin/tax/bank-import/${r.id}/refund-candidates?offset=${have.length}`)
+                            .then((d) => setFullRefunds((p) => ({ ...p, [r.id]: { list: [...have, ...(d.candidates || [])], total: d.total ?? 0 } })))
                             .catch(() => {});
                           return;
                         }
@@ -4544,14 +4549,16 @@ function BankImportTab() {
                       )}
                       {!!r.suggestion?.refundCandidates?.length && (
                         <optgroup label="Original purchases — apply refund">
-                          {(fullRefunds[r.id] || r.suggestion.refundCandidates).map((c) => (
+                          {(fullRefunds[r.id]?.list || r.suggestion.refundCandidates).map((c) => (
                             <option key={`r:${c.id}`} value={`r:${c.id}`}>
                               {(c.vendor_name || c.description || "expense").slice(0, 34)} · {fmtM(c.amount)} · {fmtD(c.expense_date)}
                             </option>
                           ))}
-                          {!fullRefunds[r.id] && (r.suggestion.refundCandidatesTotal || 0) > r.suggestion.refundCandidates.length && (
+                          {(fullRefunds[r.id]
+                            ? fullRefunds[r.id].list.length < fullRefunds[r.id].total
+                            : (r.suggestion.refundCandidatesTotal || 0) > r.suggestion.refundCandidates.length) && (
                             <option value="__more_refunds">
-                              +{r.suggestion.refundCandidatesTotal - r.suggestion.refundCandidates.length} more — load all…
+                              +{(fullRefunds[r.id]?.total ?? r.suggestion.refundCandidatesTotal) - (fullRefunds[r.id]?.list.length ?? r.suggestion.refundCandidates.length)} more — load…
                             </option>
                           )}
                         </optgroup>
