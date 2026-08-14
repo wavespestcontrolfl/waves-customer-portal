@@ -17,10 +17,9 @@ exports.up = async function up(knex) {
     .update({ default_duration_minutes: 30 });
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('services'))) return;
-  await knex('services')
-    .whereIn('service_key', LANE_KEYS)
-    .where('default_duration_minutes', 30)
-    .update({ default_duration_minutes: 60 });
-};
+// Deliberate no-op: after up() runs, a 30 on these rows is indistinguishable
+// from an admin later setting 30 on purpose — a symmetric 30→60 rewrite
+// would clobber that authoritative edit (codex pre-push P1). The duration is
+// admin-editable in the services catalog; reverting is an admin edit, not a
+// schema rollback.
+exports.down = async function down() {};
