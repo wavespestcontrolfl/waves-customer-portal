@@ -12229,7 +12229,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       systemPrompt,
       userMessage: fullUserMessage,
       extraRejection: (text) => (
-        CompletionRecap.containsProductName(text, guardedProducts, { extraGenericTokens: guardGenericTokens }) ? 'trade_name' : null
+        CompletionRecap.containsProductName(text, guardedProducts, { extraGenericTokens: guardGenericTokens, wholeWord: true }) ? 'trade_name' : null
       ),
     });
     if (!generated.ok) {
@@ -12261,7 +12261,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      const fallbackReport = report && CompletionRecap.containsProductName(report, guardedProducts, { extraGenericTokens: guardGenericTokens })
+      const fallbackReport = report && CompletionRecap.containsProductName(report, guardedProducts, { extraGenericTokens: guardGenericTokens, wholeWord: true })
         ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {

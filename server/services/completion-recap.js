@@ -221,9 +221,13 @@ async function aiRecap(input = {}) {
 // True when the generated copy mentions any recorded product by name —
 // matches on each name token of 4+ letters ("Talstar", "Suspend") so partial
 // echoes ("we applied Talstar around...") are caught too.
-function containsProductName(text, products, { extraGenericTokens = null } = {}) {
+function containsProductName(text, products, { extraGenericTokens = null, wholeWord = false } = {}) {
   const hay = String(text || '').toLowerCase();
   if (!hay) return false;
+  // wholeWord: match tokens on word boundaries — 'drive' (Drive XLR8) must
+  // not match "driveway" (codex r31 on #3420). The recap path keeps its
+  // stricter substring contract by default.
+  const wordSet = wholeWord ? new Set(hay.split(/[^a-z0-9]+/)) : null;
   return safeProducts(products).some((p) => String(p.name || '')
     .toLowerCase()
     .split(/[^a-z0-9]+/)
@@ -233,7 +237,7 @@ function containsProductName(text, products, { extraGenericTokens = null } = {})
       // ignores pest-target nouns like "cockroach" that appear in catalog
       // names but legitimately belong in report copy — codex r21 on #3420).
       && !(extraGenericTokens && extraGenericTokens.has(token)))
-    .some((token) => hay.includes(token)));
+    .some((token) => (wholeWord ? wordSet.has(token) : hay.includes(token))));
 }
 const GENERIC_NAME_TOKENS = new Set([
   'insecticide', 'herbicide', 'fungicide', 'fertilizer', 'granular', 'liquid',
