@@ -218,6 +218,24 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(block).not.toContain('Pest activity');
   });
 
+  test('recommendation/prep/follow-up fields classify as future advice, never findings', () => {
+    const sections = typedFindingsPromptSections('termite_inspection', {
+      treatment_recommendation: 'Recommend liquid perimeter treatment',
+    });
+    expect(sections.advice.join(' ')).toContain('Recommend liquid perimeter treatment');
+    expect(sections.observations.join(' ')).not.toContain('Recommend');
+    expect(sections.work.join(' ')).not.toContain('Recommend');
+    const block = buildTypedFindingsPromptBlock({
+      findingsType: 'termite_inspection',
+      values: { treatment_recommendation: 'Recommend liquid perimeter treatment' },
+      nextStepChips: [],
+      companionFindings: [],
+      allowedCompanionTypes: [],
+    });
+    expect(block).toContain('Recommendations recorded (future advice');
+    expect(block).not.toMatch(/Findings observed:[^]*Recommend liquid/);
+  });
+
   test('only auto_send companions are customer-facing; internal_only stay staff-only', () => {
     expect(customerFacingCompanionTypes([
       { type: 'tree_shrub', delivery: 'auto_send' },

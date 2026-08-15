@@ -11247,8 +11247,13 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
 // customer copy).
 const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated)$|_performed$|_actions$/;
 const TYPED_PRODUCT_FIELD_RE = /product|epa|active_ingredient|concentration|gallon|dilution|_rate$|application/i;
+// Recommendation/prep/follow-up fields are FUTURE ADVICE, never findings —
+// presenting a proposed treatment as an observation would let the copy claim
+// work or conditions the visit didn't establish (codex r3 P1).
+const TYPED_ADVICE_FIELD_RE = /recommend|_prep$|instruction|followup|follow_up/i;
 function typedFieldProvenance(field) {
   if (field.type === 'applications' || TYPED_PRODUCT_FIELD_RE.test(field.key)) return 'product';
+  if (TYPED_ADVICE_FIELD_RE.test(field.key)) return 'advice';
   if (TYPED_WORK_FIELD_RE.test(field.key) || /work completed/i.test(field.section || '')) return 'work';
   return 'observation';
 }
@@ -11264,7 +11269,7 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
   // companionOnly fields (the hand-captured condition source on combined
   // visits) reach the prompt instead of being filtered by the primary slice.
   const schema = ActivityIndicators.findingsSchemaForType(findingsType, { companion });
-  const sections = { work: [], observations: [], products: [] };
+  const sections = { work: [], observations: [], products: [], advice: [] };
   if (!schema) return sections;
   let total = 0;
   for (const field of schema.fields || []) {
@@ -11292,6 +11297,7 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
     const target = typedFieldProvenance(field);
     const line = `${field.label}: ${text.slice(0, 300)}`;
     if (target === 'product') sections.products.push(line);
+    else if (target === 'advice') sections.advice.push(line);
     else if (target === 'work') sections.work.push(line);
     else sections.observations.push(line);
   }
@@ -11340,6 +11346,7 @@ function renderTypedGroupLines(sections) {
   if (sections.work.length) parts.push(`Work recorded (completed work):\n${sections.work.join('\n')}`);
   if (sections.observations.length) parts.push(`Findings observed:\n${sections.observations.join('\n')}`);
   if (sections.products.length) parts.push(`Product application record (context only — describe the work plainly, NEVER name these products in customer copy):\n${sections.products.join('\n')}`);
+  if (sections.advice.length) parts.push(`Recommendations recorded (future advice — never describe as completed work or observed findings):\n${sections.advice.join('\n')}`);
   return parts;
 }
 
@@ -11349,7 +11356,7 @@ function buildTypedFindingsPromptBlock({
 }) {
   const primarySections = findingsType
     ? typedFindingsPromptSections(findingsType, values)
-    : { work: [], observations: [], products: [] };
+    : { work: [], observations: [], products: [], advice: [] };
   const primaryActivityLine = findingsType ? typedActivityLine(findingsType, activityScore) : null;
   if (primaryActivityLine) primarySections.observations.push(primaryActivityLine);
   let chips = [];
@@ -11387,7 +11394,7 @@ function buildTypedFindingsPromptBlock({
     : 'companion';
   return `\n\nSTRUCTURED SERVICE FINDINGS (${label} form, technician-recorded)\n`
     + 'Provenance: "Work recorded" lines are [COMPLETED WORK]; "Findings observed" lines are [OBSERVED BY TECHNICIAN]; '
-    + 'the product application record is context only — never name those products in customer copy; '
+    + 'the product application record is context only — never name those products in customer copy; "Recommendations recorded" lines and '
     + '"Next steps selected" is [FUTURE ADVICE — not completed work].\n'
     + (primaryParts.length ? `${primaryParts.join('\n')}\n` : '')
     + companionSections.map((section) => `${section}\n`).join('')
@@ -11460,15 +11467,24 @@ router.post('/generate-report', async (req, res) => {
     );
     // Companion sections count independently of the primary — companion-only
     // profiles (findingsType null, e.g. lawn_tree_shrub_combo) record their
-    // facts exclusively in companion forms.
+    // facts exclusively in companion forms. A manually tapped activity score
+    // alone is substantive input, matching the primary rule (codex r3).
     const companionEntries = Array.isArray(companionFindings) ? companionFindings : [];
-    const typedHasFindingInput = (!!typedValuesRaw && (
+    const companionEntryHasInput = (entry) => valuesNonEmpty(entry?.values)
+      || (Array.isArray(entry?.nextStepChips) && entry.nextStepChips.length > 0)
+      || (Number.isInteger(entry?.activityScore) && entry.activityScore >= 0 && entry.activityScore <= 5);
+    const primaryTypedInput = !!typedValuesRaw && (
       valuesNonEmpty(typedValuesRaw)
       || (Array.isArray(nextStepChips) && nextStepChips.length > 0)
       || typedActivityScoreNum !== null
-    ))
-      || companionEntries.some((entry) => valuesNonEmpty(entry?.values)
-        || (Array.isArray(entry?.nextStepChips) && entry.nextStepChips.length > 0));
+    );
+    // Provisional gate: companion input counts here so the request survives
+    // to profile resolution, but only PROFILE-AUTHORIZED customer-facing
+    // companions may ultimately open generation — re-checked after the
+    // grounding block (codex r3: an internal_only-companion-only request
+    // must not reach the model with none of its gate-opening facts).
+    const typedHasFindingInput = primaryTypedInput
+      || companionEntries.some(companionEntryHasInput);
     const hasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
@@ -11702,6 +11718,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     let groundingServiceDate = serviceDate;
     let groundingSuppressPressure = false;
     let typedFindingsBlock = '';
+    let authorizedCompanionTypes = [];
     let typedFallbackObservations = [];
     let typedFallbackActions = [];
     let typedFallbackNextSteps = [];
@@ -11762,6 +11779,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
           // Only customer-deliverable companions may steer customer copy —
           // internal_only shadow companions stay staff-only (codex r2 P1).
           const allowedCompanionTypes = customerFacingCompanionTypes(completionProfile?.companions);
+          authorizedCompanionTypes = allowedCompanionTypes;
           const confirmedPrimaryType = typedValuesRaw && structuredFindings.type
             ? structuredFindings.type : null;
           if (confirmedPrimaryType || companionEntries.length) {
@@ -11784,6 +11802,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
               const sections = typedFindingsPromptSections(confirmedPrimaryType, typedValuesRaw);
               typedFallbackActions.push(...sections.work.slice(0, 6));
               typedFallbackObservations.push(...sections.observations.slice(0, 8));
+              typedFallbackNextSteps.push(...sections.advice.slice(0, 6));
               const scoreLine = typedActivityLine(confirmedPrimaryType, typedActivityScoreNum, { words: true });
               if (scoreLine) typedFallbackObservations.push(scoreLine);
               const typedChipsValidation = ActivityIndicators.validateNextStepChips(
@@ -11799,6 +11818,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
               const sections = typedFindingsPromptSections(entry.type, companionValues, { companion: true });
               typedFallbackActions.push(...sections.work.slice(0, 4));
               typedFallbackObservations.push(...sections.observations.slice(0, 6));
+              typedFallbackNextSteps.push(...sections.advice.slice(0, 4));
               const companionScoreLine = typedActivityLine(entry.type, entry?.activityScore, { words: true });
               if (companionScoreLine) typedFallbackObservations.push(companionScoreLine);
               const companionChipsValidation = ActivityIndicators.validateNextStepChips(
@@ -11811,6 +11831,23 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
           logger.warn('[generate-report] caller not authorized for service grounding', { scheduledServiceId, technicianId: req.technicianId || null });
         }
       }
+    }
+
+    // Strict re-check of the input gate now that companion authorization is
+    // known: if companion facts were the ONLY thing that opened the gate and
+    // none belong to a customer-facing (auto_send) companion, refuse instead
+    // of generating an ungrounded generic report over the tech's notes.
+    const companionCustomerInput = companionEntries.some((entry) => entry?.type
+      && authorizedCompanionTypes.includes(entry.type) && companionEntryHasInput(entry));
+    const baseHasReportInput = Boolean((serviceNotes || '').trim())
+      || productsText.length > 0
+      || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
+      || concernText.length > 0
+      || ratingNum !== null
+      || primaryTypedInput
+      || hasValidLawnAssessment;
+    if (!baseHasReportInput && !companionCustomerInput) {
+      return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
     }
 
     const fallbackProductNames = productsText

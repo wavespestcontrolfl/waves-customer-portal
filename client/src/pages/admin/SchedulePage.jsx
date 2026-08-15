@@ -9671,6 +9671,12 @@ export function CompletionPanel({
   const stationAutoCountsRef = useRef({});
   useEffect(() => {
     if (!stationFeatureOn) return;
+    // While an AI report request is in flight, the payload snapshot must stay
+    // what the model saw — a late station-registry load must not rewrite the
+    // counts mid-generation (codex r3). The `generating` dep re-runs this
+    // effect when the request settles, so the auto-counts still land (and the
+    // tech reviews the draft against them before completing).
+    if (generating) return;
     // Never auto-write counts for a property whose map was never populated —
     // the tech may be entering counts by hand for unmapped stations. Once
     // pins exist (preloaded or dropped), the counts follow the map, INCLUDING
@@ -9745,7 +9751,7 @@ export function CompletionPanel({
       });
     }
     stationAutoCountsRef.current = counts;
-  }, [stationFeatureOn, stationProgram, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired]);
+  }, [stationFeatureOn, stationProgram, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired, generating]);
   // Tech-side Pest Pressure rating (0-5). Companion to the customer-side
   // capture on the public service report — both flows write to
   // service_records.client_pest_rating with their respective source.
@@ -11627,7 +11633,10 @@ export function CompletionPanel({
     ))
       || companionSchemas.some((schema) => {
         const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
-        return nonEmptyValues(entry.values) || (entry.chips || []).length > 0;
+        // A manually tapped companion activity gauge is substantive on its
+        // own — same rule as the primary score (codex r3).
+        return nonEmptyValues(entry.values) || (entry.chips || []).length > 0
+          || Number.isInteger(entry.score);
       });
     // Mirror the final-submit gate (handleSubmit only sends customerConcernText
     // when the interaction is still "customer had a concern"): if the tech typed
