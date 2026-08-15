@@ -145,7 +145,9 @@ async function appendCappedVoicemail(twiml, { customerId, ledgerId, callLogId, o
   // BEFORE the message plays — an unstampable marker means silence, because
   // repeated voicemails inside the promised window are worse than a missed
   // one. No ledger row = no marker possible = silence.
-  const stamped = permitted && ledgerId ? await stampVoicemailLeft(ledgerId, { now }) : false;
+  const stamped = permitted && ledgerId
+    ? await stampVoicemailLeft(ledgerId, { customerId, now })
+    : false;
   const speak = permitted && stamped;
   if (speak) {
     twiml.say(script.genericCallbackVoicemail());

@@ -67,17 +67,60 @@ test('isMachineEnd admits only machine_end_*', () => {
   expect(isMachineEnd(undefined)).toBe(false);
 });
 
-// prb-r6: the stamp is an atomic reservation — the conditional WHERE makes
-// the overlap loser see zero rows and stay silent.
-test('the voicemail stamp is conditional on not-already-stamped', async () => {
+// prb-r6 + prb-r9: the stamp is an atomic reservation SERIALIZED BY
+// CUSTOMER — two overlapping calls carry two different ledger rows, so the
+// per-row conditional alone never contends; the customer-keyed advisory
+// xact lock + in-lock window re-check is the real boundary.
+describe('stampVoicemailLeft (customer-serialized reservation)', () => {
   const { stampVoicemailLeft } = require('../services/collections/outbound-voice/voicemail');
-  const q = {
-    where: jest.fn(() => q),
-    whereRaw: jest.fn(() => q),
-    update: jest.fn(async () => 1),
-  };
-  db.mockImplementation(() => q);
-  db.raw = jest.fn((sql, b) => ({ sql, b }));
-  await stampVoicemailLeft('led-1', { now: new Date() });
-  expect(q.whereRaw).toHaveBeenCalledWith("COALESCE(metadata->>'voicemail_left', '') <> 'true'");
+
+  function makeTrx({ already, updated = 1 } = {}) {
+    const qs = [];
+    const trx = jest.fn(() => {
+      const q = { _wheres: [], _raws: [] };
+      q.where = jest.fn((...a) => { q._wheres.push(a); return q; });
+      q.whereRaw = jest.fn((...a) => { q._raws.push(a); return q; });
+      q.first = jest.fn(async () => already);
+      q.update = jest.fn(async () => updated);
+      qs.push(q);
+      return q;
+    });
+    trx.raw = jest.fn(async (sql, bindings) => ({ sql, bindings }));
+    trx._qs = qs;
+    return trx;
+  }
+
+  test('missing customerId ⇒ refused with no db touch (fail closed — no lock key = no serialization)', async () => {
+    db.transaction = jest.fn();
+    await expect(stampVoicemailLeft('led-1', { now: new Date() })).resolves.toBe(false);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('takes the customer-keyed advisory xact lock, re-checks the window IN the lock, and refuses on a rival stamp', async () => {
+    const trx = makeTrx({ already: { id: 'other-row' } });
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    await expect(stampVoicemailLeft('led-1', { customerId: 'cust-1', now: new Date() })).resolves.toBe(false);
+    expect(trx.raw).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['collections_voicemail', 'cust-1'],
+    );
+    // The re-check is customer-scoped, inside the lock.
+    expect(trx._qs[0]._wheres[0][0]).toEqual({ customer_id: 'cust-1', channel: 'voice' });
+    // The rival stamp means NO update ran.
+    expect(trx._qs).toHaveLength(1);
+  });
+
+  test('clear window ⇒ the per-row conditional stamp lands and returns true', async () => {
+    const trx = makeTrx({ already: undefined, updated: 1 });
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    await expect(stampVoicemailLeft('led-1', { customerId: 'cust-1', now: new Date() })).resolves.toBe(true);
+    const stampQ = trx._qs[1];
+    expect(stampQ._wheres[0][0]).toEqual({ id: 'led-1' });
+    expect(stampQ._raws[0][0]).toBe("COALESCE(metadata->>'voicemail_left', '') <> 'true'");
+  });
+
+  test('transaction failure ⇒ refused (fail closed)', async () => {
+    db.transaction = jest.fn(async () => { throw new Error('db down'); });
+    await expect(stampVoicemailLeft('led-1', { customerId: 'cust-1' })).resolves.toBe(false);
+  });
 });

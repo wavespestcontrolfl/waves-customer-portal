@@ -87,6 +87,16 @@ async function runCollectionsRetentionSweep({ now = new Date() } = {}) {
         call_summary: null,
         recording_url: null,
         recording_sid: null,
+        // EVERY conversational derivative expires with the primary
+        // transcript (gh prb-r9): 'purged' excludes the row from future
+        // sweeps, so anything left here would outlive the horizon forever.
+        // Provenance stamps (model/prompt-version/status) carry no
+        // conversation and stay.
+        transcript_structured: null,
+        transcription_pre_backfill: null,
+        ai_extraction: null,
+        ai_extraction_enriched: null,
+        ai_extraction_validation_errors: null,
         transcription_status: 'purged',
         updated_at: new Date(),
       });

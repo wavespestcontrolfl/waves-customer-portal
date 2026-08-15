@@ -232,8 +232,8 @@ test('ledger insert failure ⇒ NO dial at all', async () => {
   expect(mockCallsCreate).not.toHaveBeenCalled();
 });
 
-test('calls.create failure ⇒ send_failed stamp + case back to review queue', async () => {
-  mockCallsCreate.mockRejectedValue(new Error('twilio down'));
+test('calls.create failure ⇒ send_failed stamp + case back to review queue; AMBIGUOUS failure keeps the frequency windows', async () => {
+  mockCallsCreate.mockRejectedValue(new Error('twilio down')); // no HTTP status = ambiguous
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), stateChain],
@@ -246,12 +246,39 @@ test('calls.create failure ⇒ send_failed stamp + case back to review queue', a
   });
   const res = await originateCollectionCall('case-1', { now: NOW });
   expect(res).toEqual({ dialed: false, reason: 'dial_failed' });
+  // prb-r9: a timeout/connection loss can land AFTER Twilio created the
+  // call — never stamp never_contacted on it; the row keeps consuming the
+  // voice-spacing windows so a re-approval cannot originate a second live
+  // call while the first may still be ringing.
   expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
     expect.objectContaining({ id: 'ledger-1' }),
-    expect.objectContaining({ stage: 'calls_create' }),
+    expect.objectContaining({ stage: 'calls_create', ambiguous_provider_failure: true }),
   );
+  expect(ContactLedger.markSendFailed.mock.calls[0][1]).not.toHaveProperty('never_contacted');
   expect(stateChain._updated.current_state).toBe('proposed');
   expect(stateChain._updated.approval_expires_at).toBeNull();
+});
+
+// prb-r9: never_contacted is reserved for DEFINITIVE pre-send rejections —
+// a 4xx proves Twilio refused the request before any call existed.
+test('a definitive 4xx rejection from calls.create stamps never_contacted', async () => {
+  mockCallsCreate.mockRejectedValue(Object.assign(new Error('invalid to number'), { status: 400 }));
+  const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER })],
+    call_log: [
+      chain('call_log', { first: undefined }),
+      chain('call_log', { returningRows: [{ id: 'cl-1' }] }),
+      chain('call_log'),
+    ],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res).toEqual({ dialed: false, reason: 'dial_failed' });
+  expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+    expect.objectContaining({ id: 'ledger-1' }),
+    expect.objectContaining({ stage: 'calls_create', never_contacted: true }),
+  );
 });
 
 // prb-r1: the dial boundary is the ATOMIC approved→dialing claim — a

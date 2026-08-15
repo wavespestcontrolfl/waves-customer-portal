@@ -60,24 +60,44 @@ async function voicemailPermitted(customerId, { now = new Date() } = {}) {
  * already recorded the contact before the dial — record-then-send). Merging
  * into that row keeps one contact = one ledger row; best-effort, and a failed
  * stamp only ever over-suppresses the NEXT voicemail (safe direction).
+ *
+ * The reservation serializes BY CUSTOMER, not by ledger row (gh prb-r9):
+ * two overlapping calls carry two different ledger rows, so per-row
+ * conditional updates never contend and both could stamp inside the 30-day
+ * window. A customer-keyed pg_advisory_xact_lock (the triage-locks idiom)
+ * makes the in-lock window re-check authoritative — the second caller waits,
+ * re-reads, sees the first stamp, and stays silent.
  */
-async function stampVoicemailLeft(ledgerId, { now = new Date() } = {}) {
-  if (!ledgerId) return false;
+async function stampVoicemailLeft(ledgerId, { customerId, now = new Date() } = {}) {
+  // No customer key = no serialization possible = no voicemail (fail closed).
+  if (!ledgerId || !customerId) return false;
   try {
-    const updated = await db('collections_contact_ledger')
-      .where({ id: ledgerId })
-      // Atomic reservation (gh prb-r6): two overlapping callbacks both pass
-      // the 30-day read — only the one whose conditional UPDATE lands may
-      // speak; the loser sees zero rows and stays silent.
-      .whereRaw("COALESCE(metadata->>'voicemail_left', '') <> 'true'")
-      .update({
-        metadata: db.raw(
-          "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
-          [JSON.stringify({ voicemail_left: true, voicemail_at: now.toISOString() })],
-        ),
-      });
-    // Zero rows updated = no marker persisted = the cap cannot hold.
-    return updated > 0;
+    return await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['collections_voicemail', String(customerId)],
+      );
+      const windowStart = new Date(now.getTime() - VOICEMAIL_WINDOW_DAYS * DAY_MS);
+      const already = await trx('collections_contact_ledger')
+        .where({ customer_id: customerId, channel: 'voice' })
+        .where('occurred_at', '>', windowStart)
+        .whereRaw("metadata->>'voicemail_left' = 'true'")
+        .first('id');
+      if (already) return false;
+      const updated = await trx('collections_contact_ledger')
+        .where({ id: ledgerId })
+        // Per-row idempotence stays (gh prb-r6): a duplicate callback for
+        // the SAME call sees its own stamp and refuses.
+        .whereRaw("COALESCE(metadata->>'voicemail_left', '') <> 'true'")
+        .update({
+          metadata: trx.raw(
+            "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({ voicemail_left: true, voicemail_at: now.toISOString() })],
+          ),
+        });
+      // Zero rows updated = no marker persisted = the cap cannot hold.
+      return updated > 0;
+    });
   } catch (err) {
     logger.warn(`[collections-voicemail] voicemail_left stamp failed for ledger row ${ledgerId}: ${err.message}`);
     return false;

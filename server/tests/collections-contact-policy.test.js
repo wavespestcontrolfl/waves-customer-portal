@@ -750,7 +750,23 @@ describe('call_log live conversations', () => {
       call_log: callChain,
     });
     await evalVoice();
-    expect(callChain.whereRaw).toHaveBeenCalledWith("(call_outcome IS NULL OR call_outcome NOT IN ('voicemail', 'missed', 'spam'))");
+    // prb-r9: the collections lane's own NON-LIVE outcomes are excluded too
+    // — writeCallOutcome classifies them live=false, so a completed
+    // voicemail/vestibule-only/failed collections call must not suppress
+    // SMS/email as a "live conversation". vestibule_office deliberately
+    // still counts (a press-0 transfer can become a real conversation).
+    const outcomePredicate = callChain.whereRaw.mock.calls
+      .map((c) => c[0]).find((sql) => String(sql).includes('call_outcome'));
+    expect(outcomePredicate).toContain('call_outcome IS NULL OR call_outcome NOT IN');
+    for (const excluded of [
+      "'voicemail'", "'missed'", "'spam'", "'voicemail_left'",
+      "'machine_no_voicemail'", "'no_answer'", "'vestibule_declined'",
+      "'vestibule_no_input'", "'vestibule_consent_unrecorded'",
+      "'relay_failed'", "'dial_failed'",
+    ]) {
+      expect(outcomePredicate).toContain(excluded);
+    }
+    expect(outcomePredicate).not.toContain('vestibule_office');
     expect(callChain.whereRaw).toHaveBeenCalledWith("(answered_by IS NULL OR answered_by <> 'voicemail')");
     expect(callChain.whereRaw).toHaveBeenCalledWith('(duration_seconds IS NULL OR duration_seconds >= 30)');
   });

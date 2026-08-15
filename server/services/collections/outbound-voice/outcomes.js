@@ -132,6 +132,12 @@ async function writeCallOutcome(callLogId, { outcome, captures = {}, now = new D
     ...(captures.consentRevoked ? { consent_revoked: true } : {}),
     ...(captures.wrongParty ? { wrong_party: true } : {}),
     ...(captures.payLinkSent ? { pay_link_sent: true } : {}),
+    // The scrubbed agreeing words are the durable consent evidence for the
+    // pay-link text (gh prb-r9): the call transcript expires on the
+    // retention horizon, the ledger row does not.
+    ...(captures.payLinkAgreementVerbatim
+      ? { pay_link_agreement_verbatim: String(captures.payLinkAgreementVerbatim).slice(0, 200) }
+      : {}),
     outcome_at: now.toISOString(),
   };
 

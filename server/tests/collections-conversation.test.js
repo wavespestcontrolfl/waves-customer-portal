@@ -516,3 +516,81 @@ describe('prb-r8', () => {
     expect(convo._refused).toBe('case_customer_mismatch');
   });
 });
+
+// prb-r9 pins.
+describe('prb-r9', () => {
+  test('a sensitive human-escape utterance is withheld WHOLE from the capture and the callback card', async () => {
+    const NotificationService = require('../services/notification-service');
+    const { convo } = makeConvo({ now: AFTER_HOURS_NOW });
+    await turn(convo, 'my social is 123-45-6789, get me a real person');
+    expect(convo._captures.humanEscapeUtterance).toBe('[utterance withheld — sensitive detail]');
+    const cardBody = NotificationService.notifyAdmin.mock.calls.map((c) => c[2]).join(' ');
+    expect(cardBody).not.toContain('123-45-6789');
+  });
+
+  test('model text alongside get_balance_details is NOT spoken — speech waits for the fresh figure', async () => {
+    const { convo, spoken } = makeConvo();
+    await turn(convo, 'hello');
+    convo.verified = true;
+    convo.state = 'DISCLOSE';
+    mockScriptedMessages.push(
+      {
+        stop_reason: 'tool_use',
+        content: [
+          { type: 'text', text: 'Your open balance is $999.00.' }, // pre-lookup invention
+          { type: 'tool_use', id: 't-bal', name: 'get_balance_details', input: {} },
+        ],
+      },
+      endTurn('Your open balance is $258.00.'),
+    );
+    await turn(convo, 'so how much do I owe?');
+    expect(spoken.join(' ')).not.toContain('$999');
+    expect(spoken.join(' ')).toContain('$258.00');
+  });
+
+  test('wrong-number fallback hold failure ({ ok:false }, not a rejection) falls to a durable admin card', async () => {
+    const NotificationService = require('../services/notification-service');
+    flags.flagWrongNumber.mockResolvedValue({ ok: false });
+    flags.writeFlag.mockResolvedValue({ ok: false });
+    const { convo } = makeConvo();
+    mockScriptedMessages.push(toolUse('confirm_right_party', { result: 'wrong_party', number_unknown: true }));
+    await turn(convo, 'There is no Pat at this number.');
+    expect(flags.writeFlag).toHaveBeenCalledWith(expect.objectContaining({ flag: 'collection_hold' }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'billing', 'Wrong-number report needs manual action', expect.any(String), expect.anything(),
+    );
+  });
+
+  test('post-claim init failure reconciles the case via a fenced relay_failed outcome', async () => {
+    const { loadEligibleInvoices } = require('../services/collections/contact-policy');
+    loadEligibleInvoices.mockRejectedValueOnce(new Error('invoice read down'));
+    const { convo } = makeConvo();
+    const ok = await convo._contextReady;
+    expect(ok).toBe(false);
+    expect(convo._refused).toBe('init_failed_post_claim');
+    expect(writeCallOutcome).toHaveBeenCalledWith(
+      'cl-1', expect.objectContaining({ outcome: 'relay_failed', onlyIfNoOutcome: true }),
+    );
+  });
+
+  test('a write that outlives the close drain re-persists the outcome when it finally settles', async () => {
+    jest.useFakeTimers();
+    try {
+      const { convo } = makeConvo();
+      await turn(convo, 'hello');
+      let settle;
+      const op = new Promise((resolve) => { settle = resolve; });
+      convo._pendingWrites = new Set([op]);
+      const endP = convo.end('ws_close');
+      await jest.advanceTimersByTimeAsync(5000); // drain window expires, write still pending
+      await endP;
+      const persistsAtClose = writeCallOutcome.mock.calls.length;
+      expect(persistsAtClose).toBeGreaterThan(0);
+      settle('late success');
+      await jest.advanceTimersByTimeAsync(0); // flush the reconciliation microtasks
+      expect(writeCallOutcome.mock.calls.length).toBeGreaterThan(persistsAtClose);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});

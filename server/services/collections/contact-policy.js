@@ -325,7 +325,14 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     const liveCall = await db('call_log')
       .where({ customer_id: customerId, status: 'completed' })
       .where('created_at', '>', windowStart)
-      .whereRaw("(call_outcome IS NULL OR call_outcome NOT IN ('voicemail', 'missed', 'spam'))")
+      // The collections lane's own non-live outcomes are excluded too (gh
+      // prb-r9): writeCallOutcome classifies these live=false, so a
+      // completed voicemail/vestibule-only/failed collections call must not
+      // masquerade as a live human conversation here and suppress SMS/email
+      // for a week. 'vestibule_office' deliberately still counts — a press-0
+      // transfer can become a real office conversation on the same leg
+      // (over-suppression is the safe direction there).
+      .whereRaw("(call_outcome IS NULL OR call_outcome NOT IN ('voicemail', 'missed', 'spam', 'voicemail_left', 'machine_no_voicemail', 'no_answer', 'vestibule_declined', 'vestibule_no_input', 'vestibule_consent_unrecorded', 'relay_failed', 'dial_failed'))")
       .whereRaw("(answered_by IS NULL OR answered_by <> 'voicemail')")
       .whereRaw('(duration_seconds IS NULL OR duration_seconds >= 30)')
       .orderBy('created_at', 'desc')

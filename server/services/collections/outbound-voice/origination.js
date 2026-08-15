@@ -254,10 +254,18 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     return { dialed: true, reason: 'dialed', callSid: call.sid, callLogId };
   } catch (err) {
     logger.error(`[collections-voice] dial failed for case ${caseRow.id}: ${err.message}`);
-    // calls.create threw BEFORE Twilio touched the customer (gh prb-r8):
-    // the row stands for audit but must not consume the frequency windows —
-    // the customer was never contacted.
-    await ContactLedger.markSendFailed(ledgerEntry, { stage: 'calls_create', never_contacted: true });
+    // never_contacted is reserved for DEFINITIVE pre-send rejections (gh
+    // prb-r9): a 4xx from Twilio proves the request was refused before any
+    // call existed. An ambiguous failure (timeout, connection loss) can
+    // land AFTER Twilio created and started the call, so its ledger row
+    // keeps consuming the frequency windows — the policy's voice-spacing
+    // denial is what stops a re-approval from originating a second live
+    // call while the first may still be ringing.
+    const definitiveReject = Number(err?.status) >= 400 && Number(err?.status) < 500;
+    await ContactLedger.markSendFailed(ledgerEntry, {
+      stage: 'calls_create',
+      ...(definitiveReject ? { never_contacted: true } : { ambiguous_provider_failure: true }),
+    });
     if (callLogId) {
       await db('call_log').where({ id: callLogId })
         .update({ status: 'failed', updated_at: new Date() })

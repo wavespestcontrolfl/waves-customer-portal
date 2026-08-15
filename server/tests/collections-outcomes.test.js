@@ -112,6 +112,21 @@ test('stated payment date later than 7d ⇒ stated-date + 1 business day wins', 
   expect(JSON.stringify(merged)).not.toMatch(/promise/i);
 });
 
+// prb-r9: the scrubbed agreeing words are the DURABLE consent evidence for
+// the pay-link text — the transcript expires on the retention horizon, the
+// ledger row does not.
+test('payLinkAgreementVerbatim rides the ledger metadata merge', async () => {
+  await writeCallOutcome('cl-1', {
+    outcome: 'conversation_completed',
+    captures: { payLinkSent: true, payLinkAgreementVerbatim: 'yes, text it to me' },
+    now: NOW,
+  });
+  const ledger = trxCalls.find((c) => c.table === 'collections_contact_ledger');
+  const merged = JSON.parse(ledger.patch.metadata.bindings[0]);
+  expect(merged.pay_link_sent).toBe(true);
+  expect(merged.pay_link_agreement_verbatim).toBe('yes, text it to me');
+});
+
 test('dispute ⇒ case held', async () => {
   await writeCallOutcome('cl-1', {
     outcome: 'conversation_dispute',

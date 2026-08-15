@@ -187,7 +187,9 @@ test('machine_end_beep ⇒ generic callback voicemail + ledger stamp + outcome',
   await handlerFor('/collections-vestibule')(req({ body: { AnsweredBy: 'machine_end_beep' } }), res);
   expect(res.body).toContain(script.genericCallbackVoicemail().slice(0, 40));
   expect(res.body).not.toMatch(/balance|invoice/i); // zero debt mention
-  expect(stampVoicemailLeft).toHaveBeenCalledWith('ledger-1', expect.anything());
+  // prb-r9: the stamp carries the customer key — the reservation serializes
+  // by customer, and without the key the voicemail module fails closed.
+  expect(stampVoicemailLeft).toHaveBeenCalledWith('ledger-1', expect.objectContaining({ customerId: 'cust-1' }));
   expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({ outcome: 'voicemail_left' }));
 });
 

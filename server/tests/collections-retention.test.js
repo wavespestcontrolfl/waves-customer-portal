@@ -89,6 +89,14 @@ test('aged row: recording deleted + content columns purged', async () => {
     call_summary: null,
     recording_url: null,
     recording_sid: null,
+    // prb-r9: every DERIVED conversational artifact expires with the
+    // primary transcript — 'purged' excludes the row from future sweeps,
+    // so anything left behind would outlive the horizon forever.
+    transcript_structured: null,
+    transcription_pre_backfill: null,
+    ai_extraction: null,
+    ai_extraction_enriched: null,
+    ai_extraction_validation_errors: null,
     transcription_status: 'purged',
   });
 });

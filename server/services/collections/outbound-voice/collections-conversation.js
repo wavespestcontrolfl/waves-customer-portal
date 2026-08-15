@@ -295,33 +295,47 @@ class CollectionsConversation {
       });
     if (!claimed) return this._refuse('session_already_claimed');
 
-    // Balance from the SAME eligible-invoice authority the policy used at
-    // dial time (codex prb-r1: openBalanceSummary omits legacy 'unpaid'
-    // rows the policy admits — a customer approved solely for one was told
-    // their account was settled). Read-only; the policy decided
-    // collectibility at dial, this only supplies data.
-    const { loadEligibleInvoices } = require('../contact-policy');
-    const { invoiceAmountDue } = require('../../invoice-helpers');
-    const eligibleInvoices = await loadEligibleInvoices(customer.id);
-    const balance = {
-      total: eligibleInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
-      count: eligibleInvoices.length,
-      invoices: eligibleInvoices,
-    };
+    // From here on THIS session holds the one-ever claim (gh prb-r9): a
+    // fallible read failing now would otherwise refuse the session with a
+    // plain complete frame, no failure handoff, and _persist skipping on a
+    // null _ctx — the case stranded in 'dialing' forever. Reconcile it in
+    // the failure path itself: the fenced relay_failed outcome returns the
+    // case to the review queue (onlyIfNoOutcome is belt-and-braces — we
+    // hold the claim, so no live session is mid-conversation on this call).
+    try {
+      // Balance from the SAME eligible-invoice authority the policy used at
+      // dial time (codex prb-r1: openBalanceSummary omits legacy 'unpaid'
+      // rows the policy admits — a customer approved solely for one was told
+      // their account was settled). Read-only; the policy decided
+      // collectibility at dial, this only supplies data.
+      const { loadEligibleInvoices } = require('../contact-policy');
+      const { invoiceAmountDue } = require('../../invoice-helpers');
+      const eligibleInvoices = await loadEligibleInvoices(customer.id);
+      const balance = {
+        total: eligibleInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
+        count: eligibleInvoices.length,
+        invoices: eligibleInvoices,
+      };
 
-    this._ctx = {
-      callLogId: row.id,
-      caseId: caseRow.id,
-      caseVersion: caseRow.case_version,
-      customer,
-      balance,
-      // The pay-link target is the LIVE eligible set's oldest invoice (gh
-      // prb-r5): the balance disclosed in-call is computed from it, and a
-      // link to a snapshot invoice paid since dialing would contradict the
-      // spoken figure. Snapshot ids remain on the case row for audit.
-      invoiceId: eligibleInvoices[0]?.id || null,
-    };
-    return true;
+      this._ctx = {
+        callLogId: row.id,
+        caseId: caseRow.id,
+        caseVersion: caseRow.case_version,
+        customer,
+        balance,
+        // The pay-link target is the LIVE eligible set's oldest invoice (gh
+        // prb-r5): the balance disclosed in-call is computed from it, and a
+        // link to a snapshot invoice paid since dialing would contradict the
+        // spoken figure. Snapshot ids remain on the case row for audit.
+        invoiceId: eligibleInvoices[0]?.id || null,
+      };
+      return true;
+    } catch (err) {
+      logger.error(`[collections-voice] post-claim init failed callSid=${this.callSid} callLog=${row.id}: ${err.message}`);
+      await writeCallOutcome(row.id, { outcome: 'relay_failed', onlyIfNoOutcome: true })
+        .catch((outcomeErr) => logger.error(`[collections-voice] post-claim init reconciliation failed callLog=${row.id}: ${outcomeErr.message}`));
+      return this._refuse('init_failed_post_claim');
+    }
   }
 
   _refuse(reason) {
@@ -417,10 +431,17 @@ class CollectionsConversation {
           }
         }
       }
-      try {
-        const { scrubPans } = require('../../../utils/pan-scrub');
-        this._captures.humanEscapeUtterance = scrubPans(String(rawText)).slice(0, 200);
-      } catch { this._captures.humanEscapeUtterance = null; }
+      // The SAME whole-utterance sensitive screen the model path gets (gh
+      // prb-r9): the escape capture rides a durable admin card, and a PAN
+      // scrub alone would forward an SSN/routing/account number verbatim.
+      if (utteranceHasSensitiveDetails(rawText)) {
+        this._captures.humanEscapeUtterance = '[utterance withheld — sensitive detail]';
+      } else {
+        try {
+          const { scrubPans } = require('../../../utils/pan-scrub');
+          this._captures.humanEscapeUtterance = scrubPans(String(rawText)).slice(0, 200);
+        } catch { this._captures.humanEscapeUtterance = null; }
+      }
       return this._humanEscape();
     }
 
@@ -505,8 +526,13 @@ class CollectionsConversation {
       if (this._escapeRequested) return;
 
       const text = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
+      // Speech is deferred for writes AND for get_balance_details (gh
+      // prb-r9): text emitted alongside the balance lookup was written
+      // BEFORE the model saw the fresh figure — the asserted balance
+      // authority is the tool result, so the model speaks only after it.
       const hasPendingWrite = msg.stop_reason === 'tool_use'
-        && msg.content.some((b) => b.type === 'tool_use' && WRITE_TOOLS.has(b.name));
+        && msg.content.some((b) => b.type === 'tool_use'
+          && (WRITE_TOOLS.has(b.name) || b.name === 'get_balance_details'));
       this.messages.push({
         role: 'assistant',
         content: hasPendingWrite && text ? msg.content.filter((b) => b.type !== 'text') : msg.content,
@@ -596,11 +622,28 @@ class CollectionsConversation {
         if (!wn || wn.ok === false) {
           // The wrong-number report must survive (gh prb-r6): the durable
           // fallback is a collection_hold — absolute until a human reviews.
-          await flags.writeFlag({
+          // writeFlag resolves { ok:false } rather than rejecting (gh
+          // prb-r9), so the result is CHECKED — a doubly-failed hold falls
+          // to an admin card, and a failed card to a loud log.
+          const hold = await flags.writeFlag({
             customerId: this._ctx.customer.id,
             flag: 'collection_hold',
             reason: 'wrong-number report on billing follow-up call; wrong_number flag write failed',
-          }).catch((err) => logger.error(`[collections-voice] wrong-number fallback hold failed: ${err.message}`));
+          }).catch(() => ({ ok: false }));
+          if (!hold || hold.ok === false) {
+            try {
+              const NotificationService = require('../../notification-service');
+              const card = await NotificationService.notifyAdmin(
+                'billing',
+                'Wrong-number report needs manual action',
+                'An outbound billing follow-up call reached a number where the customer is not known, and BOTH the wrong_number flag and the collection_hold fallback failed to write. Please flag the number by hand before any further outreach.',
+                { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+              );
+              if (!card) throw new Error('notifyAdmin returned no card');
+            } catch (cardErr) {
+              logger.error(`[collections-voice] WRONG-NUMBER REPORT UNPERSISTED for customer ${this._ctx.customer.id} callLog=${this._ctx.callLogId}: ${cardErr.message}`);
+            }
+          }
         }
       } else {
         const carded = await flags.fileFlagCard({
@@ -1009,6 +1052,23 @@ class CollectionsConversation {
       await this._persist(this._outcome || this._defaultOutcome()).catch(() => {});
       if (!this._persisted) {
         logger.error(`[collections-voice] OUTCOME PERSISTENCE FAILED at close callSid=${this.callSid} callLog=${this._ctx?.callLogId} — case may be stuck in 'dialing'`);
+      }
+    }
+    // A write that outlived the bounded drain keeps running uncancelled (gh
+    // prb-r9): its eventual settlement can mutate external state and the
+    // captures AFTER the outcome above persisted. Attach reconciliation:
+    // when it settles, un-latch and re-persist so the durable outcome
+    // absorbs the late capture (the jsonb merge is idempotent), with a loud
+    // log either way — a still-failing write is the pilot operator's item.
+    if (this._pendingWrites && this._pendingWrites.size) {
+      for (const op of [...this._pendingWrites]) {
+        op.then(() => {
+          logger.warn(`[collections-voice] write settled AFTER close drain callSid=${this.callSid} callLog=${this._ctx?.callLogId} — reconciling outcome`);
+          this._persisted = false;
+          return this._persist(this._outcome || this._defaultOutcome());
+        }).catch((err) => {
+          logger.error(`[collections-voice] post-close write failed or reconciliation failed callSid=${this.callSid} callLog=${this._ctx?.callLogId}: ${err?.message || err}`);
+        });
       }
     }
     logger.info(`[collections-voice] session ended callSid=${this.callSid} reason=${reason || 'ws_close'} outcome=${this._outcome}`);
