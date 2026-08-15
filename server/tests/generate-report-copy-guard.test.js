@@ -408,6 +408,18 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(openai.call).toHaveBeenCalledTimes(2);
   });
 
+  test('status-only options split out of work-classified chip fields (r18)', () => {
+    const trap = typedFindingsPromptSections('rodent_trapping', {
+      trap_actions: 'Traps reset, Damaged or missing traps found',
+    });
+    expect(trap.work.join(' ')).toContain('Traps reset');
+    expect(trap.work.join(' ')).not.toContain('Damaged or missing');
+    expect(trap.observations.join(' ')).toContain('Damaged or missing traps found');
+    const wild = typedFindingsPromptSections('wildlife_trapping', { trap_actions: 'No activity at traps' });
+    expect(wild.work).toHaveLength(0);
+    expect(wild.observations.join(' ')).toContain('No activity at traps');
+  });
+
   test('wildlife suspected species stays an observation (r15)', () => {
     const wild = typedFindingsPromptSections('wildlife_trapping', { target_animal: 'Raccoon' });
     expect(wild.observations.join(' ')).toContain('Raccoon');

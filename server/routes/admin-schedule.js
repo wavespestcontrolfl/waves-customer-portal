@@ -11343,10 +11343,11 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
     // map each option separately (mirrors buildTypedReportSnapshot) so the
     // per-option customer wording applies instead of the raw joined string.
     const multi = field.type === 'chips' || field.type === 'multi_select' || Array.isArray(raw);
-    const text = multi
+    const parts = multi
       ? (Array.isArray(raw) ? raw : String(raw ?? '').split(','))
-        .map((v) => String(v ?? '').trim()).filter(Boolean).map(toLabel).join(', ')
-      : (String(raw ?? '').trim() ? toLabel(raw) : '');
+        .map((v) => String(v ?? '').trim()).filter(Boolean).map(toLabel)
+      : [];
+    const text = multi ? parts.join(', ') : (String(raw ?? '').trim() ? toLabel(raw) : '');
     if (!text) continue;
     total += 1;
     // A declared trap SETUP relabels traps_checked to "Traps set" — the same
@@ -11372,8 +11373,23 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
       if (/product|pesticide/i.test(field.key)) sections.productValues.push(text.slice(0, 300));
     } else if (target === 'advice') sections.advice.push(line);
     else if (target === 'customer') sections.customer.push(line);
-    else if (target === 'work') sections.work.push(line);
-    else sections.observations.push(line);
+    else if (target === 'work') {
+      // Work-classified CHIP fields can carry status-only options
+      // ("Damaged or missing traps found", "No activity at traps") — those
+      // are observed conditions, not service performed, and must not ride
+      // the field-wide work provenance (codex r18). Split per option.
+      const statusOptionRe = /\bfound\b|\bno activity\b|\bobserved\b|\bnoted\b/i;
+      if (multi && parts.some((part) => statusOptionRe.test(part))) {
+        const workParts = parts.filter((part) => !statusOptionRe.test(part));
+        const statusParts = parts.filter((part) => statusOptionRe.test(part));
+        if (workParts.length) {
+          sections.work.push(`${label}: ${redactAccessCodes(workParts.join(', ').slice(0, 300))}`);
+        }
+        sections.observations.push(`${label}: ${redactAccessCodes(statusParts.join(', ').slice(0, 300))}`);
+      } else {
+        sections.work.push(line);
+      }
+    } else sections.observations.push(line);
   }
   return sections;
 }
