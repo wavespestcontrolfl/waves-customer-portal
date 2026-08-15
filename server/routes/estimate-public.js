@@ -8629,10 +8629,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     if (slotId && isRodentGuaranteeOnlyEstimate(estimate, estData)) {
       return res.status(409).json({ error: 'No appointment is needed for this renewal — accept without selecting a slot.' });
     }
+    // Adoption eligibility runs under the CONTRACT's service modes, exactly
+    // as the offer sites do (GET /data and the SSR contract) — owner ruling
+    // 2026-08-15: a structurally one-time estimate may adopt its linked
+    // upcoming appointment. The raw request serviceMode defaults to
+    // 'recurring' (no toggle renders for a one-time-only estimate), so
+    // family-checking with it rejected the very row the contract offered —
+    // the accept 409'd what the page promised. adoptionServiceModesForContract
+    // intersects every mode the customer can actually select, so an offered
+    // row stays adoptable under ANY of them; cross-family protection (codex
+    // #3228 r4/r8) is preserved because the intersection is a subset of each
+    // single mode's family set.
     const existingAppointmentRow = existingAppointmentId
       ? await findLinkedUpcomingAppointment(estimate, estData, {
         appointmentId: existingAppointmentId,
-        serviceMode,
+        serviceModes: adoptionServiceModesForContract(estimate, estData),
       })
       : null;
     if (existingAppointmentId && !existingAppointmentRow) {
@@ -9939,7 +9950,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'recurring' }),
             ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'one_time' }),
           ]);
-          const lockedFamilyKeys = estimateFamilyKeysForAdoption(estimate, estData, { serviceMode });
+          // Same contract-modes scope as the preflight above (owner ruling
+          // 2026-08-15) — the under-lock recheck must never reject a row the
+          // preflight admitted, or a structurally one-time accept dies here
+          // with a re-pick 409 the customer cannot act on.
+          const lockedFamilyKeys = estimateFamilyKeysForAdoption(estimate, estData, {
+            serviceModes: adoptionServiceModesForContract(estimate, estData),
+          });
           const lockedFamilyOk = lockedAnyModeKeys.size === 0
             || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys);
           if (!lockedAdoptRow || lockedAdoptRow.is_callback === true || !lockedFamilyOk) {
@@ -9963,17 +9980,23 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             rowServiceType: existingAppointmentRow.service_type,
           });
           if (adoptedTierStamp) Object.assign(updates, adoptedTierStamp);
-          // NOTE (deferred, see PR #3328): the adopted-appointment path does NOT
-          // stamp catalog identity. Adding it here is blocked on a PRE-EXISTING
-          // eligibility bug, not on this change: the preflight lookup above
-          // (:8595) and the locked revalidation just above both family-check
-          // with the RAW `serviceMode`, while the contract lookup at :8262 uses
-          // adoptionServiceModesForContract. For a structurally one-time
-          // estimate whose request mode defaults to 'recurring', the valid
-          // appointment is rejected 409 before any stamp could run. Aligning
-          // those checks changes WHICH appointments may be adopted — an owner
-          // decision, tracked separately. Until then an adopted visit keeps
-          // service_id NULL exactly as it does today.
+          // Catalog identity for the adopted row (deferred in #3328,
+          // unblocked by the owner ruling 2026-08-15 that aligned the
+          // eligibility checks above with the contract modes). The guards
+          // deliberately differ from the graduating-hold rule (#3328 r6):
+          // this row is a REAL pre-existing appointment, never a hold (held
+          // rows commit via commitReservation above), so an existing
+          // service_id may be an admin repoint and is NEVER overwritten,
+          // and an unresolved lookup stamps nothing rather than clearing.
+          if (!adoptedTierStamp) {
+            const adoptedCatalogStamp = await adoptedAppointmentCatalogStamp(trx, {
+              existingAppointmentRow,
+              estimate: acceptedEstimateForScheduling,
+              serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
+              selectedFrequency: acceptedSchedulingFrequencyKey,
+            });
+            if (adoptedCatalogStamp) Object.assign(updates, adoptedCatalogStamp);
+          }
           const updatedCount = await trx('scheduled_services')
             .where({ id: existingAppointmentRow.id })
             .whereIn('status', ['pending', 'confirmed'])
@@ -14114,6 +14137,51 @@ function adoptionServiceModesForContract(estimate = {}, estData = null) {
     }
   }
   return def === 'recurring' && canToggleOneTime ? ['recurring', 'one_time'] : [def];
+}
+
+// Catalog identity for an ADOPTED pre-existing appointment (#3328 follow-up,
+// owner ruling 2026-08-15). Resolves the accepted profile with the accept-path
+// triple (accepted estimate + resolved mode + accepted frequency — never raw
+// request values, codex #3328 r4) and reuses the reservation paths' engine-key
+// resolver so identity has exactly one authority. Returns {service_id} or null.
+//
+// Guards (all fail toward "no stamp", which is today's behavior):
+// - Never overwrite: an existing service_id on a REAL customer visit is an
+//   admin repoint. (The graduating-hold overwrite rule, #3328 r6, applies only
+//   to reservation holds with customer_id NULL — held rows never reach this
+//   path; they commit via commitReservation.)
+// - Single-service accepts only: the adopted row PRE-EXISTS, so in a
+//   multi-service accept it may be a different visit than the profile primary
+//   — stamping the primary's identity onto it would be a WRONG identity.
+//   Multi-service one-time bundles stay untagged (owner ruling 2026-08-15;
+//   #3328 r7 rebuttal stands).
+async function adoptedAppointmentCatalogStamp(conn, {
+  existingAppointmentRow = {},
+  estimate = null,
+  serviceMode = 'recurring',
+  selectedFrequency = '',
+} = {}) {
+  if (!estimate || existingAppointmentRow?.service_id) return null;
+  const estimateSlotAvailability = require('../services/estimate-slot-availability');
+  if (typeof estimateSlotAvailability.resolveEstimateSlotProfile !== 'function') return null;
+  let profile = null;
+  try {
+    profile = estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
+      serviceMode,
+      selectedFrequency,
+    });
+  } catch {
+    return null;
+  }
+  const profileServices = Array.isArray(profile?.services)
+    ? profile.services.filter(Boolean)
+    : [];
+  if (profileServices.length !== 1) return null;
+  // Savepoint-confined inside the resolver — a lookup hiccup cannot poison
+  // the accept transaction (#3328 pre-push P1: try/catch alone is NOT
+  // fail-open inside a txn).
+  const catalogServiceId = await slotReservation.catalogServiceIdForProfile(conn, profile);
+  return catalogServiceId ? { service_id: catalogServiceId } : null;
 }
 
 function shouldPersistPestOnlyRecurringChoice(estimate = {}, estData = {}) {
@@ -21652,6 +21720,7 @@ module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFami
 module.exports.serviceFamilyKeyForAdoption = serviceFamilyKeyForAdoption;
 module.exports.recurringServicesWithSupplements = recurringServicesWithSupplements;
 module.exports.adoptionServiceModesForContract = adoptionServiceModesForContract;
+module.exports.adoptedAppointmentCatalogStamp = adoptedAppointmentCatalogStamp;
 module.exports.netManualDiscountIntoFrequencyRow = netManualDiscountIntoFrequencyRow;
 module.exports.pricingBundleLacksManualDiscountNetting = pricingBundleLacksManualDiscountNetting;
 module.exports.estimateTotalsReflectManualDiscount = estimateTotalsReflectManualDiscount;
