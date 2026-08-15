@@ -203,12 +203,13 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
         async update(patch) {
           updates.push({ table, wheres: this._wheres, whereNulls: this._whereNulls, whereNotIn: this._whereNotIn, patch });
           const preds = Object.assign({}, ...this._wheres.filter((w) => typeof w === 'object'));
-          // Honor whereNull/whereIn like the real builder — the label
-          // fences (whereNull('label'), whereIn('label', suggestions))
-          // are load-bearing in the promote/relabel assertions.
+          // Honor whereNull/whereIn/whereNotIn like the real builder — the
+          // label fences and the terminal-status pin exclusion are
+          // load-bearing in the promote/relabel/parent-stamp assertions.
           const hits = (rows[table] || []).filter((r) => Object.entries(preds).every(([k, v]) => r[k] === v)
             && this._whereNulls.every((c) => r[c] == null)
-            && (this._whereIns || []).every(([c, v]) => v.includes(r[c])));
+            && (this._whereIns || []).every(([c, v]) => v.includes(r[c]))
+            && (!this._whereNotIn || !this._whereNotIn[1].includes(r[this._whereNotIn[0]])));
           hits.forEach((r) => Object.assign(r, patch));
           return hits.length;
         },
@@ -216,6 +217,7 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
       return q;
     };
     trx.raw = (sql, bindings) => ({ __raw: sql, bindings });
+    trx.schema = { hasColumn: async () => true };
     trx._updates = updates;
     return trx;
   }
@@ -279,8 +281,8 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     // rows stamped to the old primary — the second scheduled_services update
     // stamps the old primary's own coords, fenced to NULL-coord rows only.
     const ssUpdates = trx._updates.filter((x) => x.table === 'scheduled_services');
-    expect(ssUpdates).toHaveLength(2);
-    const backfill = ssUpdates[1];
+    expect(ssUpdates).toHaveLength(3); // pin + live-series parent stamp + coord backfill
+    const backfill = ssUpdates[2];
     expect(backfill.patch).toMatchObject({ lat: 27.4, lng: -82.4 });
     expect(backfill.whereNulls).toEqual(expect.arrayContaining(['lat', 'lng']));
     expect(backfill.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped', 'rescheduled']]);
@@ -329,8 +331,37 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
       customerId: 'cust-1',
       proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
     });
-    // Only the pin update — never a backfill stamping NULL over NULL.
-    expect(trx._updates.filter((x) => x.table === 'scheduled_services')).toHaveLength(1);
+    // Pin + parent stamp only — never a backfill stamping NULL over NULL.
+    expect(trx._updates.filter((x) => x.table === 'scheduled_services')).toHaveLength(2);
+  });
+
+  test('a COMPLETED-but-live recurring template parent is stamped to the old primary (codex r10)', async () => {
+    const old = { ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1' };
+    // Auto-extension clones the PARENT's stamp: an unstamped completed
+    // parent would send every future extension to the flipped mirror.
+    const parent = {
+      id: 'v-parent', customer_id: 'cust-1', status: 'completed',
+      is_recurring: true, recurring_ongoing: true,
+      property_id: null, service_address_line1: null, source_estimate_id: null, lat: null, lng: null,
+    };
+    const done = {
+      id: 'v-done', customer_id: 'cust-1', status: 'completed',
+      is_recurring: false,
+      property_id: null, service_address_line1: null, source_estimate_id: null, lat: null, lng: null,
+    };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [parent, done] } });
+    await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
+    });
+    // The live-series parent gets the old primary's stamp despite its
+    // completed status…
+    expect(parent.property_id).toBe('prop-old');
+    expect(parent.service_address_line1).toBe('8380 Sea Breeze Ct');
+    // …while an ordinary completed visit stays untouched (historical).
+    expect(done.property_id).toBeNull();
+    expect(done.service_address_line1).toBeNull();
   });
 
   test('companion occupancy_change before the flip still relabels the Rental-labeled promoted row (codex r8)', async () => {

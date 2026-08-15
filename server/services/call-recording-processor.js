@@ -8300,20 +8300,27 @@ const CallRecordingProcessor = {
             // occupancy through its own fences.
             if (v2RoleProp) {
               const v2Persist = [
-                { ...roleView, is_rental: false },
+                { ...roleView, is_rental: false, __mainEntry: true },
                 ...roleAdditionalProps,
               ];
               for (const entry of v2Persist) {
                 const entryCity = String(entry.city || '').trim();
                 const entryZip = String(entry.zip || '').trim();
-                if (!String(entry.address_line1 || '').trim() || !entryCity || !entryZip) continue;
+                if (!String(entry.address_line1 || '').trim()) continue;
+                // City+ZIP completeness is a SECONDARY-address rule (dedup
+                // key match). The customer's FIRST service address is
+                // recorded regardless of completeness — the V1 lane's
+                // exception (codex #3418 r10) — so a V2-only partial main
+                // street on an addressless customer still gets a durable
+                // row for the role staging to match.
+                if (!(entry.__mainEntry && isFirstAddress) && (!entryCity || !entryZip)) continue;
                 const recordedV2 = await customerProperties.recordCallProperty({
                   customerId,
                   address_line1: entry.address_line1,
                   address_line2: entry.address_line2 || null,
-                  city: entryCity,
+                  city: entryCity || null,
                   state: entry.state || extracted.state,
-                  zip: entryZip,
+                  zip: entryZip || null,
                   occupancyType: entry.is_rental ? 'rental_investment' : 'unknown',
                   source: 'call_pipeline',
                 });

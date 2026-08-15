@@ -481,8 +481,14 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       const currentOcc = knownOccupancy(newPrimary.occupancy_type);
       if (currentOcc && currentOcc !== 'owner_occupied') { skipped += 1; continue; }
 
+      // FOR UPDATE (codex #3418 r10): the visit pin below copies this
+      // row's coordinates — an in-flight enrichment fill must serialize,
+      // or the pin could stamp pre-fill nulls while the worker's linked-
+      // visit scan misses the not-yet-pinned rows (coordless until the
+      // nightly reconciliation).
       const oldPrimary = await trx('customer_properties')
         .where({ customer_id: customerId, is_primary: true, active: true })
+        .forUpdate()
         .first();
       // Stale-state fence: the flip was judged against the portfolio the
       // card recorded. If the CURRENT primary is a different row than the
@@ -524,6 +530,35 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
             lng: trx.raw('COALESCE(lng, ?)', [oldPrimary.longitude ?? null]),
             updated_at: new Date(),
           });
+
+        // A COMPLETED-but-LIVE recurring template parent still creates
+        // every future visit by copying its own property/address stamp
+        // (admin-schedule auto-extension), so the terminal-status pin
+        // above leaving it unstamped would make each new extension fall
+        // back to the flipped customer mirror — dispatched to the new
+        // residence instead of the property the series was established on
+        // (codex #3418 r10). Stamp live-series parents despite completed
+        // status; a cancelled series has recurring_ongoing=false and is
+        // untouched. Column-existence check keeps pre-migration envs
+        // working (no ongoing column = no auto-extension either).
+        if (await trx.schema.hasColumn('scheduled_services', 'recurring_ongoing')) {
+          await trx('scheduled_services')
+            .where({ customer_id: customerId, is_recurring: true, recurring_ongoing: true })
+            .whereNull('property_id')
+            .whereNull('service_address_line1')
+            .whereNull('source_estimate_id')
+            .update({
+              property_id: oldPrimary.id,
+              service_address_line1: oldPrimary.address_line1,
+              service_address_line2: oldPrimary.address_line2 || null,
+              service_address_city: oldPrimary.city,
+              service_address_state: oldPrimary.state || 'FL',
+              service_address_zip: oldPrimary.zip,
+              lat: trx.raw('COALESCE(lat, ?)', [oldPrimary.latitude ?? null]),
+              lng: trx.raw('COALESCE(lng, ?)', [oldPrimary.longitude ?? null]),
+              updated_at: new Date(),
+            });
+        }
 
         // Coordinate backfill for visits ALREADY identified as the old
         // primary (codex #3418 r6): a non-terminal row linked by
