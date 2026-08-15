@@ -294,6 +294,9 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
   test('reportCopyRejection rejects copy carrying an access code', () => {
     expect(reportCopyRejection('We treated the perimeter. The rear gate code 1234 was used for entry.')).toBe('access_code');
     expect(reportCopyRejection('We treated the perimeter and closed the rear gate after service.')).toBeNull();
+    // measurements beside location words are NOT credentials (codex r30)
+    expect(reportCopyRejection('We treated 120 linear feet around the garage and rear entry areas.')).toBeNull();
+    expect(reportCopyRejection('The keypad 4521 was used for access.')).toBe('access_code');
   });
 
   test('product-record raw values ride productValues for the trade-name output guard', () => {

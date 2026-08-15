@@ -6509,6 +6509,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const companionActivityInserts = [];
           if (validatedCompanions.length) {
             const companionSnapshots = [];
+            // Companion-only profiles (no typed primary) have no primary
+            // snapshot to carry the reviewed AI report — the FIRST
+            // customer-facing companion is the governing story and receives
+            // the parser-approved body, so its todaysResult can accept it
+            // and report-data's summary gate can promote the copy
+            // (codex r30 #3420). Exactly one carrier: embedding the same
+            // body in every companion section would duplicate it per card.
+            const companionBodyCarrierType = !serviceData.typedReportSnapshot
+              ? (validatedCompanions.find(
+                (c) => (companionDeliveryByType.get(c.type) || 'internal_only') === 'auto_send',
+              )?.type || null)
+              : null;
             for (const companion of validatedCompanions) {
               const companionIndicator = ActivityIndicators.getActivityIndicator(companion.type);
               let companionActivity = null;
@@ -6539,6 +6551,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 visitSequence: companionVisitSequence,
                 activity: companionActivity,
                 photoSummary: null,
+                technicianReportBody: companion.type === companionBodyCarrierType
+                  ? technicianReportBody
+                  : null,
                 // A standard primary with a trapping COMPANION has no typed
                 // primary snapshot to carry the confirmed override — freeze
                 // it on the trapping companion so the render-time summary

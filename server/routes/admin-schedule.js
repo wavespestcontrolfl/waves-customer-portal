@@ -11094,6 +11094,9 @@ function reportCopyCacheSet(key, value) {
 // Reject empty or liability-laden AI report copy before it reaches the operator
 // (mirrors the photo-analysis / ai-summary banned-copy guards). Returns null
 // when the copy is acceptable, else a short reason string for the retry/error path.
+// Code-noun anchored: a number counts as a credential only beside an actual
+// code/PIN noun, in either order.
+const REPORT_ACCESS_CODE_RE = /\b(?:code|pin|combo|combination|passcode|password|keypad|lock\s?box)\b[^\n.!?]{0,25}\b[a-z]?\d{2,8}\b|\b[a-z]?\d{2,8}\b[^\n.!?]{0,15}\b(?:code|pin|combo|combination|passcode|password)\b/i;
 function reportCopyRejection(report) {
   const text = String(report || '').trim();
   if (!text) return 'empty';
@@ -11113,10 +11116,12 @@ function reportCopyRejection(report) {
     if (!COUNT_NOUN_AFTER.test(after)) return 'numeric_rating';
   }
   // Entry secrets never egress on a customer report (AGENTS.md report/track
-  // egress). Inputs are redacted before the model call, but free-text notes
-  // and a model that reconstructs a code from context still need the output
-  // gate — reuse the grounding path's redactor as the detector (codex r4).
-  if (redactAccessCodes(text) !== text) return 'access_code';
+  // egress). Inputs are redacted before the model call with the broad
+  // grounding scrubber; the OUTPUT gate uses a narrower detector requiring
+  // actual code/credential context — the scrubber's location-keyword
+  // heuristic would reject valid measurements like "120 linear feet around
+  // the garage" (codex r30).
+  if (REPORT_ACCESS_CODE_RE.test(text)) return 'access_code';
   const banned = ActivityIndicators.findBannedCustomerCopy(text);
   return banned.length ? `banned:${banned.join(',')}` : null;
 }
@@ -12136,7 +12141,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       && !areas.length && !actions.length && !obs.length && !recs.length
       && !concernText.length
       && ratingNum === null
-      && !typedHasFindingInput;
+      // Only PROFILE-AUTHORIZED customer-facing typed input counts here —
+      // internal_only companion facts never reach the prompt, so they must
+      // not defeat the assessment-only retryable 503 (codex r30).
+      && !(primaryTypedInput || companionCustomerInput);
     if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
       return res.status(503).json({
         error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',
