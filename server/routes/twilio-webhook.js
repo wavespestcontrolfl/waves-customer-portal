@@ -210,6 +210,29 @@ router.post('/sms', async (req, res) => {
         .catch(err => logger.debug(`[twilio-webhook] event rescore failed: ${err.message}`));
     };
 
+    // Contact-correction queue slot, reserved at webhook ENTRY (round-13):
+    // the three enqueue sites below run after different awaited work, so
+    // reserving here — right after the customer match — is what pins the
+    // per-customer correction order to Twilio arrival order. Unused slots
+    // (a branch with no correction site, or an error path) self-cancel.
+    const contactCorrection = require('../services/contact-correction');
+    const correctionSlot = (Body && !smsReaction && customer?.id
+      && contactCorrection.detectContactCorrectionIntent(Body))
+      ? contactCorrection.reserveSmsCorrectionSlot(customer.id)
+      : null;
+    const fireContactCorrection = (smsLogId) => {
+      if (!correctionSlot) return;
+      const correctionArgs = { customer, body: Body, smsLogId: smsLogId || null, senderPhone: From };
+      // Deliberate fire-and-forget: the runner is fail-soft internally and
+      // never rejects; the guard here only logs (id-only, no message
+      // content) if that contract is ever broken.
+      setImmediate(() => {
+        void correctionSlot.run(correctionArgs).catch((err) => {
+          logger.warn(`[contact-correction] post-ack run rejected for customer ${customer.id}, sms_log ${correctionArgs.smsLogId || 'n/a'}: ${err.message}`);
+        });
+      });
+    };
+
     // Dual-write to unified messages table. Wrapped in fire-and-forget
     // because old sms_log writes still happen below; if this errors the
     // legacy path keeps Virginia's inbox working.
@@ -419,19 +442,8 @@ router.post('/sms', async (req, res) => {
           // A handled reschedule reply can still CONTAIN an explicit contact
           // correction ("1. Also, my email is wrong; use …") — the
           // correction block further down is unreachable past this return,
-          // so it fires here too (round-11). Same contract as the other
-          // sites: post-ack, fire-and-forget, fail-soft.
-          if (Body && !smsReaction && customer?.id) {
-            const contactCorrection = require('../services/contact-correction');
-            if (contactCorrection.detectContactCorrectionIntent(Body)) {
-              const correctionArgs = { customer, body: Body, smsLogId: rescheduleSmsLogId, senderPhone: From };
-              setImmediate(() => {
-                void contactCorrection.runSmsContactCorrection(correctionArgs).catch((err) => {
-                  logger.warn(`[contact-correction] post-ack run rejected for customer ${customer.id}, sms_log ${correctionArgs.smsLogId || 'n/a'}: ${err.message}`);
-                });
-              });
-            }
-          }
+          // so it fires here too (round-11), through the entry-reserved slot.
+          fireContactCorrection(rescheduleSmsLogId);
           return res.type('text/xml').send('<Response></Response>');
         }
       } catch (e) { logger.error(`Reschedule reply check failed: ${e.message}`); }
@@ -480,20 +492,10 @@ router.post('/sms', async (req, res) => {
           // A consumed intake reply can still CONTAIN an explicit contact
           // correction (an awaiting_address customer correcting their email,
           // say) — the correction block further down is unreachable past
-          // this return, so it fires here too (round-10). Same contract:
-          // post-ack, fire-and-forget, fail-soft, linked customer only; the
-          // gate and the LLM extraction decide whether anything applies.
-          if (Body && !smsReaction && customer?.id) {
-            const contactCorrection = require('../services/contact-correction');
-            if (contactCorrection.detectContactCorrectionIntent(Body)) {
-              const correctionArgs = { customer, body: Body, smsLogId: intakeSmsLogId, senderPhone: From };
-              setImmediate(() => {
-                void contactCorrection.runSmsContactCorrection(correctionArgs).catch((err) => {
-                  logger.warn(`[contact-correction] post-ack run rejected for customer ${customer.id}, sms_log ${correctionArgs.smsLogId || 'n/a'}: ${err.message}`);
-                });
-              });
-            }
-          }
+          // this return, so it fires here too (round-10), through the
+          // entry-reserved slot. The gate and the LLM extraction decide
+          // whether anything applies.
+          fireContactCorrection(intakeSmsLogId);
           return res.type('text/xml').send('<Response></Response>');
         }
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
@@ -681,20 +683,7 @@ router.post('/sms', async (req, res) => {
     // regex prefilter here; the LLM extraction and the writes run post-ack
     // and fail-soft, so the webhook ack is never delayed and an error here
     // can never affect inbound SMS handling.
-    if (Body && !smsReaction && customer?.id) {
-      const contactCorrection = require('../services/contact-correction');
-      if (contactCorrection.detectContactCorrectionIntent(Body)) {
-        const correctionArgs = { customer, body: Body, smsLogId: smsLogEntry?.id || null, senderPhone: From };
-        // Deliberate fire-and-forget: the runner is fail-soft internally and
-        // never rejects; the guard here only logs (id-only, no message
-        // content) if that contract is ever broken.
-        setImmediate(() => {
-          void contactCorrection.runSmsContactCorrection(correctionArgs).catch((err) => {
-            logger.warn(`[contact-correction] post-ack run rejected for customer ${customer.id}, sms_log ${correctionArgs.smsLogId || 'n/a'}: ${err.message}`);
-          });
-        });
-      }
-    }
+    fireContactCorrection(smsLogEntry?.id || null);
 
     // Event-driven health rescore for any matched customer (the opt-out branch
     // above already fired for cancellations). Not gated on messageType: an

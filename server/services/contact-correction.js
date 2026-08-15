@@ -56,7 +56,7 @@ const ADDRESS_FIELDS = Object.freeze(['address_line1', 'address_line2', 'city', 
 // correction language — ordinary calls state identity fields all the time
 // (a spouse booking, a different property) and none of that is a mandate
 // to rewrite the profile.
-const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b/i;
+const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
 
 // Ownership disclaimers are NOT name corrections: "the account is not in my
 // name — my name is Jane Smith" is a caller explaining the account belongs
@@ -80,7 +80,7 @@ const NAME_OWNERSHIP_DISCLAIMER_RE = /\b(?:not|isn'?t|no longer|never|won'?t be)
 // jane@x.com" beside an address correction is identification, not a
 // mandate. Clauses split on sentence boundaries (dot only when followed by
 // whitespace, so emails and street abbreviations survive).
-const CW_SRC = '(?:wrong|incorrect|misspell\\w*|spell\\w*|typo|actually|correct\\w*|fix\\w*|updat\\w*|chang\\w*|should\\s+be|not\\b|new\\b|old\\b)';
+const CW_SRC = '(?:wrong|incorrect|misspell\\w*|spell\\w*|typo|actually|correct\\w*|fix\\w*|updat\\w*|chang\\w*|remov\\w*|drop\\w*|delet\\w*|no\\s+longer|should\\s+be|not\\b|new\\b|old\\b)';
 const ADDR_TOPIC_SRC = '(?:address|street|city|zip|unit|apt|apartment|suite|lot)';
 const CW_RE = new RegExp(CW_SRC, 'gi');
 const TOPIC_RES = [
@@ -168,6 +168,16 @@ function tail10(p) {
   return String(p || '').replace(/[^0-9]/g, '').slice(-10);
 }
 
+// Token-delimited phrase grounding (round-13, both lanes): the needle must
+// appear word-bounded in the haystack — plain substring would let a
+// hallucinated "Lee" ground on the word "please".
+function tokenBoundedIncludes(haystack, needle) {
+  const n = normValue(needle).replace(/\s+/g, ' ');
+  if (!n) return false;
+  const escaped = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+');
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}(?:[^\\p{L}\\p{N}]|$)`, 'iu').test(String(haystack || ''));
+}
+
 // Explicit unit-REMOVAL language (round-11): an empty address_line2 is the
 // one replacement value with no text to ground, so it needs affirmative
 // removal evidence in the message — "my unit is wrong, please fix it" must
@@ -233,12 +243,11 @@ async function extractSmsContactCorrections({ body }) {
     // The REPLACEMENT value must be grounded too (round-10): "my email is
     // wrong, please fix it" is a genuine quote, but a model that invents
     // the new value alongside it would sail through quote grounding — a
-    // value the customer never typed never applies. Empty = explicit clear,
-    // which carries no text by definition.
-    const valueInBody = (v) => {
-      const needle = normValue(v).replace(/\s+/g, ' ').toLowerCase();
-      return needle === '' || haystack.includes(needle);
-    };
+    // value the customer never typed never applies. Token-delimited
+    // (round-13): "Lee" must not ground on "please". Empty = explicit
+    // clear, which carries no text by definition (removal-language-gated
+    // below).
+    const valueInBody = (v) => normValue(v) === '' || tokenBoundedIncludes(text, v);
     // An empty address_line2 (explicit unit clear) has no value text to
     // ground — require affirmative removal language in the message instead
     // (round-11).
@@ -548,7 +557,11 @@ async function applyContactCorrections({ customerId, corrections, source, source
       // that carries city+zip for the group check is the same property, and
       // silently dropping its unit would corrupt the address; without move
       // evidence the unit stays unless explicitly replaced or removed.
-      if (moveContext && updates.address_line1 !== undefined && !byField.has('address_line2') && normValue(before.address_line2)) {
+      // Keyed to the STAGED street group, not the diff (round-13): a move
+      // where the new street text happens to equal the old one ("123 Main
+      // St" in a different city) skips the street as unchanged, but the old
+      // unit is still gone.
+      if (moveContext && byField.has('address_line1') && !byField.has('address_line2') && normValue(before.address_line2)) {
         updates.address_line2 = null;
         applied.push({ field: 'address_line2', oldValue: normValue(before.address_line2), newValue: null, quote: byField.get('address_line1')?.quote || null });
       }
@@ -690,6 +703,34 @@ function serializePerCustomer(customerId, fn) {
     if (customerRunChain.get(customerId) === tail) customerRunChain.delete(customerId);
   });
   return run;
+}
+
+// Queue-position reservation for webhook callers (round-13): the three
+// webhook branches invoke the runner after DIFFERENT awaited work, so
+// invoke-time chaining would not preserve Twilio arrival order — a newer
+// message on a fast branch could enter the queue before an older message on
+// a slow branch. Reserving the slot at webhook ENTRY (right after the
+// customer match) pins arrival order; the slot then waits for its runner
+// args. A reservation that is never run (the request died or took a branch
+// with no correction site) self-cancels after 60s so it can't wedge the
+// customer's queue.
+function reserveSmsCorrectionSlot(customerId) {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const slot = serializePerCustomer(customerId, () => gate.then((fn) => (fn ? fn() : { applied: [], skipped: [], reason: 'slot_cancelled' })));
+  const timer = setTimeout(() => release(null), 60_000);
+  if (typeof timer?.unref === 'function') timer.unref();
+  return {
+    run(args) {
+      clearTimeout(timer);
+      release(() => runSmsContactCorrectionInner(args));
+      return slot;
+    },
+    cancel() {
+      clearTimeout(timer);
+      release(null);
+    },
+  };
 }
 
 async function runSmsContactCorrection(args) {
@@ -878,13 +919,8 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     // otherwise carry a hallucinated surname into auto-apply. Matching is
     // token-delimited (round-12) — plain substring would let "Lee" ground
     // on the word "please".
-    const valueGroundedInCallerSpeech = (v) => {
-      const needle = normValue(v).replace(/\s+/g, ' ');
-      if (!needle) return false;
-      const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+');
-      const re = new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}(?:[^\\p{L}\\p{N}]|$)`, 'iu');
-      return callerLines.some((line) => re.test(line));
-    };
+    const valueGroundedInCallerSpeech = (v) => normValue(v) !== ''
+      && callerLines.some((line) => tokenBoundedIncludes(line, v));
 
     const seenFields = new Set();
     const candidates = rows.filter((c) => {
@@ -1031,6 +1067,7 @@ module.exports = {
   extractSmsContactCorrections,
   applyContactCorrections,
   runSmsContactCorrection,
+  reserveSmsCorrectionSlot,
   runCallContactCorrection,
   APPLYABLE_FIELDS,
   _private: { FIELD_VALIDATORS, CORRECTION_HINT_RE, CALL_CONFIDENCE_FLOOR, CALL_AUTO_FIELDS, CALL_PROPOSE_FIELDS, sameValue, addressGroupComplete },

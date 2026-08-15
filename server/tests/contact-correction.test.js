@@ -1595,6 +1595,92 @@ describe('round-12 hardening', () => {
   });
 });
 
+describe('round-13 hardening', () => {
+  const { reserveSmsCorrectionSlot } = require('../services/contact-correction');
+
+  it('SMS replacement values also match on token boundaries ("Lee" vs "please")', async () => {
+    const body = 'My last name is wrong, please fix it';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'last_name', new_value: 'Lee', quote: 'my last name is wrong, please fix it', confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res).toEqual([]);
+  });
+
+  it('entry-reserved slots keep arrival order even when branches finish out of order', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic
+      // First runner to EXECUTE is the older message's (slot A) — arrival
+      // order, not run()-call order.
+      .mockImplementationOnce(async () => ({
+        ok: true,
+        json: { corrections: [{ field: 'last_name', new_value: 'Riverson', quote: 'my last name is wrong, it should be Riverson', confidence: 'high' }] },
+      }))
+      .mockImplementationOnce(async () => ({
+        ok: true,
+        json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'actually my last name is Rivers', confidence: 'high' }] },
+      }));
+    // msg A (older) and msg B (newer) both reserve at webhook entry…
+    const slotA = reserveSmsCorrectionSlot(CUSTOMER_ID);
+    const slotB = reserveSmsCorrectionSlot(CUSTOMER_ID);
+    // …but B's (fast) branch invokes its runner FIRST.
+    const pB = slotB.run({ customer: { id: CUSTOMER_ID }, body: 'Actually my last name is Rivers', knex });
+    const pA = slotA.run({ customer: { id: CUSTOMER_ID }, body: 'My last name is wrong, it should be Riverson', knex });
+    const [rB, rA] = await Promise.all([pB, pA]);
+    expect(rA.applied.map((a) => a.field)).toEqual(['last_name']);
+    expect(rB.applied.map((a) => a.field)).toEqual(['last_name']);
+    expect(rB.applied[0].oldValue).toBe('Riverson'); // B ran second, over A's commit
+    expect(knex._data.customers[0].last_name).toBe('Rivers'); // newest message wins
+  });
+
+  it('a cancelled slot never wedges the customer queue', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const abandoned = reserveSmsCorrectionSlot(CUSTOMER_ID);
+    abandoned.cancel();
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'You spelled my last name wrong, it is Rivers', knex });
+    expect(res.applied.map((a) => a.field)).toEqual(['last_name']);
+    expect(knex._data.customers[0].last_name).toBe('Rivers');
+  });
+
+  it('a move to a same-named street in a new city still clears the old unit', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '12 Oak St', quote: 'we moved to 12 Oak St in Sampleton' }, // same street text
+        { field: 'city', newValue: 'Sampleton', quote: 'we moved' },
+        { field: 'zip', newValue: '34299', quote: 'we moved' },
+      ],
+      source: 'sms',
+      knex,
+      moveContext: true,
+    });
+    expect(res.applied.map((a) => a.field).sort()).toEqual(['address_line2', 'city', 'zip']);
+    expect(knex._data.customers[0].address_line2).toBeNull(); // old unit gone with the move
+    expect(knex._data.customers[0].city).toBe('Sampleton');
+  });
+
+  it('prefilter admits explicit unit-removal messages', () => {
+    expect(detectContactCorrectionIntent('Please remove the apartment from my address')).toBe(true);
+    expect(detectContactCorrectionIntent('The unit no longer applies')).toBe(true);
+  });
+
+  it('an explicit removal message clears the unit end to end', async () => {
+    const body = 'Please remove the apartment from my address';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'address_line2', new_value: '', quote: 'remove the apartment from my address', confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res).toEqual([{ field: 'address_line2', newValue: '', quote: 'remove the apartment from my address' }]);
+  });
+});
+
 describe('field allowlist', () => {
   it('never includes phone', () => {
     expect(APPLYABLE_FIELDS).not.toContain('phone');
