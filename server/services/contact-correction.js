@@ -81,20 +81,44 @@ const NAME_OWNERSHIP_DISCLAIMER_RE = /\b(?:not|isn'?t|no longer|never|won'?t be)
 // mandate. Clauses split on sentence boundaries (dot only when followed by
 // whitespace, so emails and street abbreviations survive).
 const CW_SRC = '(?:wrong|incorrect|misspell\\w*|spell\\w*|typo|actually|correct\\w*|fix\\w*|updat\\w*|chang\\w*|should\\s+be|not\\b|new\\b|old\\b)';
-const NAME_CLAUSE_RE = new RegExp(`\\b(?:name|surname)\\b[\\s\\S]{0,60}${CW_SRC}|${CW_SRC}[\\s\\S]{0,60}\\b(?:name|surname)\\b`, 'i');
-const EMAIL_CLAUSE_RE = new RegExp(`\\be-?mail\\b[\\s\\S]{0,60}${CW_SRC}|${CW_SRC}[\\s\\S]{0,60}\\be-?mail\\b`, 'i');
 const ADDR_TOPIC_SRC = '(?:address|street|city|zip|unit|apt|apartment|suite|lot)';
-const ADDRESS_CLAUSE_RE = new RegExp(`\\b${ADDR_TOPIC_SRC}\\b[\\s\\S]{0,60}${CW_SRC}|${CW_SRC}[\\s\\S]{0,60}\\b${ADDR_TOPIC_SRC}\\b`, 'i');
+const CW_RE = new RegExp(CW_SRC, 'gi');
+const TOPIC_RES = [
+  ['name', /\b(?:name|surname)\b/gi],
+  ['email', /\be-?mail\b/gi],
+  ['address', new RegExp(`\\b${ADDR_TOPIC_SRC}\\b`, 'gi')],
+];
+// Nearest-topic pairing (round-11): within a clause, each correction word
+// binds to its CLOSEST field-topic word — comma-joined independent clauses
+// like "my email is wrong, my name is Jane Smith" leave "wrong" nearer
+// "email" than "name", so the name candidate finds no correction word of
+// its own. (Splitting on commas instead would break real corrections like
+// "my last name is Rivers, not Riverz".)
+function clauseBindsCategory(clause, cat) {
+  const topics = [];
+  for (const [tcat, re] of TOPIC_RES) {
+    re.lastIndex = 0;
+    for (const m of clause.matchAll(re)) topics.push({ pos: m.index, cat: tcat });
+  }
+  if (!topics.some((t) => t.cat === cat)) return false;
+  CW_RE.lastIndex = 0;
+  for (const m of clause.matchAll(CW_RE)) {
+    let best = null;
+    for (const t of topics) {
+      const d = Math.abs(t.pos - m.index);
+      if (d <= 60 && (best === null || d < best.d)) best = { d, cat: t.cat };
+    }
+    if (best && best.cat === cat) return true;
+  }
+  return false;
+}
 const CLAUSE_SPLIT_RE = /[;!?\n]+|\.(?=\s|$)/;
 function quoteCarriesFieldIntent(field, quote) {
-  const clauses = normValue(quote).split(CLAUSE_SPLIT_RE);
-  if (field === 'email') return clauses.some((cl) => EMAIL_CLAUSE_RE.test(cl));
-  if (ADDRESS_FIELDS.includes(field)) {
+  const cat = field === 'email' ? 'email' : ADDRESS_FIELDS.includes(field) ? 'address' : 'name';
+  return normValue(quote).split(CLAUSE_SPLIT_RE).some((cl) =>
     // A stated move IS address-correction language even without the word
     // "address" ("we just moved to 99 Pine Ave").
-    return clauses.some((cl) => MOVE_EVIDENCE_RE.test(cl) || ADDRESS_CLAUSE_RE.test(cl));
-  }
-  return clauses.some((cl) => NAME_CLAUSE_RE.test(cl));
+    (cat === 'address' && MOVE_EVIDENCE_RE.test(cl)) || clauseBindsCategory(cl, cat));
 }
 
 // Post-extraction format guards — the model proposes, these dispose.
@@ -136,6 +160,19 @@ Only include a correction when the message states it explicitly. When unsure, om
 function normValue(v) {
   return String(v == null ? '' : v).trim();
 }
+
+// Comparable phone identity: US numbers arrive in mixed formats
+// (+1XXXXXXXXXX, (XXX) XXX-XXXX, bare 10-digit) — the trailing 10 digits
+// are the identity.
+function tail10(p) {
+  return String(p || '').replace(/[^0-9]/g, '').slice(-10);
+}
+
+// Explicit unit-REMOVAL language (round-11): an empty address_line2 is the
+// one replacement value with no text to ground, so it needs affirmative
+// removal evidence in the message — "my unit is wrong, please fix it" must
+// not clear the unit on a model's empty-string guess.
+const UNIT_REMOVAL_RE = /\b(?:no|without|remove[ds]?|removing|drop(?:ped)?|delete[ds]?)\s+(?:the\s+|an?\s+|my\s+|that\s+)?(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[^.?!\n]{0,40}\b(?:removed?|gone|no longer|doesn'?t (?:exist|apply))\b|\b(?:was|were)\s+(?:our|my|the)\s+old\s+(?:apartment|unit)\b|\bold\s+(?:apartment|unit)\b/i;
 
 // PII-safe error tag for warn logs: database errors can embed the very
 // contact values being written (e.g. a unique address_key collision quotes
@@ -202,8 +239,13 @@ async function extractSmsContactCorrections({ body }) {
       const needle = normValue(v).replace(/\s+/g, ' ').toLowerCase();
       return needle === '' || haystack.includes(needle);
     };
+    // An empty address_line2 (explicit unit clear) has no value text to
+    // ground — require affirmative removal language in the message instead
+    // (round-11).
+    const clearEvidenceOk = (c) => !(c.field === 'address_line2' && normValue(c.new_value) === '')
+      || UNIT_REMOVAL_RE.test(text);
     const base = list.filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field)
-      && quoteInBody(c.quote) && valueInBody(c.new_value));
+      && quoteInBody(c.quote) && valueInBody(c.new_value) && clearEvidenceOk(c));
     // Each candidate's own quote must carry correction intent bound to its
     // field category — the message-level prefilter is not per-field
     // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
@@ -271,7 +313,7 @@ const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?(?:
  * @param {string|null} [args.sourceId]  sms_log id or call_log id
  * @param {object} [args.knex]           injectable (tests)
  */
-async function applyContactCorrections({ customerId, corrections, source, sourceId = null, knex = db, postApply = null, moveContext = false, expectedValues = null }) {
+async function applyContactCorrections({ customerId, corrections, source, sourceId = null, knex = db, postApply = null, moveContext = false, expectedValues = null, senderPhone = null }) {
   const applied = [];
   const skipped = [];
   try {
@@ -406,6 +448,17 @@ async function applyContactCorrections({ customerId, corrections, source, source
       if (!before) { skipped.push({ field: null, reason: 'no_customer' }); return; }
       customerName = [before.first_name, before.last_name].filter(Boolean).join(' ') || 'Customer';
 
+      // (round-11) Bind the batch to the ORIGINAL sender: the snapshot
+      // below is read post-ack, so a reassignment landing between the
+      // webhook's phone match and that read would self-compare. The number
+      // the message actually ARRIVED from is the anchor of record — if the
+      // locked row's phone no longer matches it, this is no longer the
+      // sender's record and the whole batch is stale.
+      if (senderPhone && tail10(before.phone) !== tail10(senderPhone)) {
+        for (const { field } of byField.values()) skipped.push({ field, reason: 'concurrent_change' });
+        byField.clear();
+        return;
+      }
       // (round-10) The sender's phone is the identity anchor for the WHOLE
       // batch: if it was changed or reassigned while extraction was in
       // flight, the correction may no longer come from this customer at all
@@ -601,7 +654,7 @@ async function applyContactCorrections({ customerId, corrections, source, source
 /**
  * SMS entry point — webhook post-ack, fire-and-forget, linked customer only.
  */
-async function runSmsContactCorrection({ customer, body, smsLogId = null, knex = db }) {
+async function runSmsContactCorrection({ customer, body, smsLogId = null, knex = db, senderPhone = null }) {
   try {
     if (!require('../config/feature-gates').isEnabled('contactCorrection')) return { applied: [], skipped: [], reason: 'gate_off' };
     if (!customer?.id) return { applied: [], skipped: [], reason: 'unlinked' };
@@ -624,6 +677,10 @@ async function runSmsContactCorrection({ customer, body, smsLogId = null, knex =
       sourceId: smsLogId,
       knex,
       expectedValues: expectedValues || null,
+      // The number the webhook matched this message FROM — binds the batch
+      // to the original sender even if the customer's phone is reassigned
+      // between the webhook match and the snapshot read above.
+      senderPhone,
       // Message-level move evidence tightens the address-group requirement:
       // a stated move must carry street+city+zip, not locality alone.
       moveContext: MOVE_EVIDENCE_RE.test(String(body || '')),
@@ -725,7 +782,6 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     // owner. Name auto-apply requires the call to have come from the
     // customer's PRIMARY phone; everything else stays in the
     // proposal/pending lane.
-    const tail10 = (p) => String(p || '').replace(/[^0-9]/g, '').slice(-10);
     let callerIsPrimary = false;
     let call = null;
     let expectedValues = null;
@@ -771,6 +827,14 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     const quoteGrounded = (q) => {
       const needle = normValue(q).replace(/\s+/g, ' ').toLowerCase();
       return needle.length >= 4 && callerLines.some((line) => line.includes(needle));
+    };
+    // The replacement VALUE must be caller speech too (round-11): the
+    // staging writer derives the recommended value independently of the
+    // evidence quote, so a grounded "my last name is wrong" quote could
+    // otherwise carry a hallucinated surname into auto-apply.
+    const valueGroundedInCallerSpeech = (v) => {
+      const needle = normValue(v).replace(/\s+/g, ' ').toLowerCase();
+      return Boolean(needle) && callerLines.some((line) => line.includes(needle));
     };
 
     const seenFields = new Set();
@@ -846,7 +910,8 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
 
     const nameCandidates = callerIsPrimary
       ? candidates.filter((c) => CALL_AUTO_FIELDS[c.field_name]
-        && quoteBindsNameField(c.field_name, c.evidence_quote))
+        && quoteBindsNameField(c.field_name, c.evidence_quote)
+        && valueGroundedInCallerSpeech(c.final_recommended_value))
       : [];
     if (!nameCandidates.length) {
       if (!callerIsPrimary && candidates.some((c) => CALL_AUTO_FIELDS[c.field_name])) {
@@ -866,6 +931,9 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       sourceId: callId,
       knex,
       expectedValues,
+      // The number the call actually came FROM (captured at processing time)
+      // — same original-sender batch binding as the SMS lane.
+      senderPhone: call?.from_phone || null,
       // Same-transaction stamp of exactly the candidate rows whose VALUE was
       // applied — two pending candidates for one field with different values
       // must not both read as auto_applied, and an applied field can never

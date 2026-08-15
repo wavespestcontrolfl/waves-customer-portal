@@ -119,24 +119,35 @@ async function regeocodeCustomerAddressGuarded(customerId) {
   const result = await geocodeAddress(address);
   if (!result) return null;
   const written = await db.transaction(async (trx) => {
-    let guarded = trx('customers').where({ id: customerId });
-    for (const [col, val] of [['latitude', c.latitude], ['longitude', c.longitude]]) {
-      guarded = val == null ? guarded.whereNull(col) : guarded.where(col, val);
-    }
-    for (const col of ['address_line1', 'city', 'state', 'zip']) {
-      guarded = c[col] == null ? guarded.whereNull(col) : guarded.where(col, c[col]);
-    }
-    const count = await guarded.update({
-      latitude: result.lat,
-      longitude: result.lng,
-      updated_at: new Date(),
-    });
+    const count = await guardedCoordWrite(trx, customerId, c, result);
     if (count) {
       await require('./customer-properties').syncPrimaryCoordsFromCustomer(customerId, trx);
     }
     return count;
   });
   return written ? result : null;
+}
+
+// Shared coordinate-write guard (guarded re-geocode + backstop sweep): write
+// ONLY while both coordinates and the FULL address identity — unit included
+// — still match the snapshot that was geocoded. buildAddress() ignores
+// line 2, so two unit-only corrections geocode identically, but the loser
+// of that race must still no-op rather than stamp the row on behalf of an
+// address snapshot that no longer exists. Returns the update count
+// (0 = raced; caller treats as no-op/unresolved).
+async function guardedCoordWrite(trx, customerId, snapshot, location) {
+  let guarded = trx('customers').where({ id: customerId });
+  for (const [col, val] of [['latitude', snapshot.latitude], ['longitude', snapshot.longitude]]) {
+    guarded = val == null ? guarded.whereNull(col) : guarded.where(col, val);
+  }
+  for (const col of ['address_line1', 'address_line2', 'city', 'state', 'zip']) {
+    guarded = snapshot[col] == null ? guarded.whereNull(col) : guarded.where(col, snapshot[col]);
+  }
+  return guarded.update({
+    latitude: location.lat,
+    longitude: location.lng,
+    updated_at: new Date(),
+  });
 }
 
 /**
@@ -222,18 +233,7 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
         // path) share one transaction so a sync failure rolls both back
         // and the customer stays sweep-eligible.
         const written = await db.transaction(async (trx) => {
-          let guarded = trx('customers').where({ id: row.id });
-          for (const [col, val] of [['latitude', c.latitude], ['longitude', c.longitude]]) {
-            guarded = val == null ? guarded.whereNull(col) : guarded.where(col, val);
-          }
-          for (const col of ['address_line1', 'city', 'state', 'zip']) {
-            guarded = c[col] == null ? guarded.whereNull(col) : guarded.where(col, c[col]);
-          }
-          const count = await guarded.update({
-            latitude: location.lat,
-            longitude: location.lng,
-            updated_at: new Date(),
-          });
+          const count = await guardedCoordWrite(trx, row.id, c, location);
           if (count) {
             await require('./customer-properties').syncPrimaryCoordsFromCustomer(row.id, trx);
           }

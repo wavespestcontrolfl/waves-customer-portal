@@ -408,10 +408,30 @@ router.post('/sms', async (req, res) => {
         if (rescheduleResult?.handled) {
           logger.info(`Reschedule reply handled for ${customer.first_name}: ${rescheduleResult.action}`);
           // Still log the inbound message
-          await db('sms_log').insert({
-            customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
-            message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'reschedule_reply',
-          }).catch(() => {});
+          let rescheduleSmsLogId = null;
+          try {
+            const inserted = await db('sms_log').insert({
+              customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
+              message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'reschedule_reply',
+            }).returning('id');
+            rescheduleSmsLogId = inserted?.[0]?.id ?? inserted?.[0] ?? null;
+          } catch { /* logging is best-effort, as before */ }
+          // A handled reschedule reply can still CONTAIN an explicit contact
+          // correction ("1. Also, my email is wrong; use …") — the
+          // correction block further down is unreachable past this return,
+          // so it fires here too (round-11). Same contract as the other
+          // sites: post-ack, fire-and-forget, fail-soft.
+          if (Body && !smsReaction && customer?.id) {
+            const contactCorrection = require('../services/contact-correction');
+            if (contactCorrection.detectContactCorrectionIntent(Body)) {
+              const correctionArgs = { customer, body: Body, smsLogId: rescheduleSmsLogId, senderPhone: From };
+              setImmediate(() => {
+                void contactCorrection.runSmsContactCorrection(correctionArgs).catch((err) => {
+                  logger.warn(`[contact-correction] post-ack run rejected for customer ${customer.id}, sms_log ${correctionArgs.smsLogId || 'n/a'}: ${err.message}`);
+                });
+              });
+            }
+          }
           return res.type('text/xml').send('<Response></Response>');
         }
       } catch (e) { logger.error(`Reschedule reply check failed: ${e.message}`); }
@@ -466,7 +486,7 @@ router.post('/sms', async (req, res) => {
           if (Body && !smsReaction && customer?.id) {
             const contactCorrection = require('../services/contact-correction');
             if (contactCorrection.detectContactCorrectionIntent(Body)) {
-              const correctionArgs = { customer, body: Body, smsLogId: intakeSmsLogId };
+              const correctionArgs = { customer, body: Body, smsLogId: intakeSmsLogId, senderPhone: From };
               setImmediate(() => {
                 void contactCorrection.runSmsContactCorrection(correctionArgs).catch((err) => {
                   logger.warn(`[contact-correction] post-ack run rejected for customer ${customer.id}, sms_log ${correctionArgs.smsLogId || 'n/a'}: ${err.message}`);
@@ -664,7 +684,7 @@ router.post('/sms', async (req, res) => {
     if (Body && !smsReaction && customer?.id) {
       const contactCorrection = require('../services/contact-correction');
       if (contactCorrection.detectContactCorrectionIntent(Body)) {
-        const correctionArgs = { customer, body: Body, smsLogId: smsLogEntry?.id || null };
+        const correctionArgs = { customer, body: Body, smsLogId: smsLogEntry?.id || null, senderPhone: From };
         // Deliberate fire-and-forget: the runner is fail-soft internally and
         // never rejects; the guard here only logs (id-only, no message
         // content) if that contract is ever broken.

@@ -1393,6 +1393,113 @@ describe('round-10 hardening', () => {
   });
 });
 
+describe('round-11 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('binds the batch to the ORIGINAL sender, not the re-read phone', async () => {
+    // Phone reassigned between the webhook's match and the post-ack runner:
+    // the snapshot would self-compare, but the senderPhone anchor catches it.
+    const body = 'You spelled my last name wrong, it is Rivers';
+    const knex = makeStubKnex({ customers: [{ ...baseCustomer(), phone: '+15559998888' }], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex, senderPhone: PRIMARY_PHONE });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'last_name', reason: 'concurrent_change' });
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+  });
+
+  it('a matching sender still applies (positive path with senderPhone)', async () => {
+    const body = 'You spelled my last name wrong, it is Rivers';
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex, senderPhone: PRIMARY_PHONE });
+    expect(res.applied.map((a) => a.field)).toEqual(['last_name']);
+    expect(knex._data.customers[0].last_name).toBe('Rivers');
+  });
+
+  it('a hallucinated replacement value never auto-applies from a call', async () => {
+    const quote = 'my last name is wrong';
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [candidate({ id: 'h1', final_recommended_value: 'Fabricated', evidence_quote: quote })],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+    expect(knex._data.customer_field_candidates[0].status).toBe('pending');
+  });
+
+  it('comma-joined clauses: correction word binds its NEAREST topic', async () => {
+    const body = 'My email is wrong, my name is Jane Smith. Use jordan.rivers@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'email', new_value: 'jordan.rivers@example.com', quote: 'my email is wrong, my name is Jane Smith', confidence: 'high' },
+          { field: 'first_name', new_value: 'Jane', quote: 'my email is wrong, my name is Jane Smith', confidence: 'high' },
+          { field: 'last_name', new_value: 'Smith', quote: 'my email is wrong, my name is Jane Smith', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['email']);
+  });
+
+  it('comma-joined clauses: an email correction never licenses a trailing address', async () => {
+    const body = 'My email is wrong, service address is 99 Pine Ave, Sarasota 34231. Use jordan.rivers@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'email', new_value: 'jordan.rivers@example.com', quote: 'my email is wrong, service address is 99 Pine Ave', confidence: 'high' },
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'my email is wrong, service address is 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'my email is wrong, service address is 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'my email is wrong, service address is 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['email']);
+  });
+
+  it('an empty unit clear needs explicit removal language', async () => {
+    const body = 'My unit is wrong, please fix it';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'address_line2', new_value: '', quote: 'my unit is wrong, please fix it', confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res).toEqual([]);
+  });
+
+  it('explicit removal language still clears the unit', async () => {
+    const body = 'There is no unit, that was our old apartment';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'address_line2', new_value: '', quote: 'no unit, that was our old apartment', confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res).toEqual([{ field: 'address_line2', newValue: '', quote: 'no unit, that was our old apartment' }]);
+  });
+});
+
 describe('field allowlist', () => {
   it('never includes phone', () => {
     expect(APPLYABLE_FIELDS).not.toContain('phone');
