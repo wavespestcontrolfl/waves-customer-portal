@@ -124,7 +124,17 @@ function buildPropertyRoleProposals({ classified = [], properties = [] }) {
         });
       }
     }
-    if (entry.is_primary_residence === true) primaryClaims.push({ entry, row });
+    // A primary-residence claim contradicted by the SAME entry's occupancy
+    // (a rental/seasonal/commercial/vacant property is by definition not
+    // the home the caller lives in) is a model inconsistency — drop the
+    // claim rather than let it drive a flip (codex #3418 r2).
+    if (entry.is_primary_residence === true) {
+      if (entry.occupancy && entry.occupancy !== 'owner_occupied') {
+        logger.warn('[property-role] primary-residence claim contradicts its own occupancy classification — claim dropped');
+      } else {
+        primaryClaims.push({ entry, row });
+      }
+    }
   }
 
   if (primaryClaims.length === 1) {
@@ -283,13 +293,14 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
             updated_at: new Date(),
           });
 
+        // The demote NEVER writes occupancy — the old row's reclassification
+        // rides the sibling occupancy_change proposal, whose compare-and-swap
+        // yields to any newer admin edit; copying old_primary_occupancy here
+        // would bypass that fence (codex #3418 r2). Only the label moves,
+        // and only when the row carries no label beyond the vacated
+        // 'Primary'.
         const oldPatch = { is_primary: false, updated_at: new Date() };
-        const oldOccupancy = normalizeOccupancy(p.old_primary_occupancy);
-        if (oldOccupancy && oldOccupancy !== 'unknown' && oldPrimary.id === p.old_primary_property_id) {
-          oldPatch.occupancy_type = oldOccupancy;
-        }
-        if (p.old_primary_label && oldPrimary.id === p.old_primary_property_id
-          && (!oldPrimary.label || oldPrimary.label === 'Primary')) {
+        if (p.old_primary_label && (!oldPrimary.label || oldPrimary.label === 'Primary')) {
           oldPatch.label = p.old_primary_label;
         }
         await trx('customer_properties').where({ id: oldPrimary.id }).update(oldPatch);

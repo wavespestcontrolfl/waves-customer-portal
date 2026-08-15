@@ -69,6 +69,14 @@ describe('buildPropertyRoleProposals', () => {
     expect(occ).toMatchObject({ property_id: 'prop-old', current_occupancy: 'owner_occupied', proposed_occupancy: 'rental_investment' });
   });
 
+  test('a primary claim contradicted by its own non-owner occupancy is dropped', () => {
+    const { proposals } = buildPropertyRoleProposals({
+      classified: [{ address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: 'rental_investment', is_primary_residence: true }],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    expect(proposals.filter((p) => p.kind === 'primary_flip')).toHaveLength(0);
+  });
+
   test('two primary-residence claimants = contradiction — no flip proposed', () => {
     const { proposals } = buildPropertyRoleProposals({
       classified: [
@@ -162,7 +170,10 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     expect(pin.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped']]);
     // 2/3. demote before promote (one_primary partial unique)
     const propUpdates = u.filter((x) => x.table === 'customer_properties');
-    expect(propUpdates[0].patch).toMatchObject({ is_primary: false, occupancy_type: 'rental_investment', label: 'Rental' });
+    // The demote deliberately does NOT write occupancy — the reclassification
+    // rides the sibling occupancy_change proposal's compare-and-swap.
+    expect(propUpdates[0].patch).toMatchObject({ is_primary: false, label: 'Rental' });
+    expect(propUpdates[0].patch.occupancy_type).toBeUndefined();
     expect(propUpdates[1].patch).toMatchObject({ is_primary: true, occupancy_type: 'owner_occupied', label: 'Primary' });
     // 4. customers mirror follows the NEW primary
     const mirror = u.find((x) => x.table === 'customers');

@@ -325,17 +325,29 @@ router.post('/:id/apply-property-roles', async (req, res) => {
     if (!OPEN_STATES.includes(item.status)) {
       return res.status(409).json({ error: `Item already ${item.status}` });
     }
-    const payload = typeof item.payload === 'string' ? JSON.parse(item.payload) : (item.payload || {});
-    const proposals = Array.isArray(payload.property_role_proposals) ? payload.property_role_proposals : [];
-    const customerId = payload.customer_id || null;
-    if (!customerId || !proposals.length) {
-      return res.status(400).json({ error: 'Card carries no applicable proposals' });
-    }
 
     let outcome;
     await db.transaction(async (trx) => {
       // Same global lock order as every triage writer: advisory call lock first.
       await lockTriageCall(trx, item.call_log_id);
+      // Re-read the card UNDER the lock (codex #3418 r2): a force-reprocess
+      // merges refreshed proposals into the open card, and the pre-lock read
+      // could otherwise apply a superseded payload and then resolve the
+      // newer card.
+      const live = await trx('triage_items').where({ id: item.id }).first();
+      if (!live || !OPEN_STATES.includes(live.status)) {
+        const lost = new Error('card resolved concurrently');
+        lost.conflict = true;
+        throw lost;
+      }
+      const payload = typeof live.payload === 'string' ? JSON.parse(live.payload) : (live.payload || {});
+      const proposals = Array.isArray(payload.property_role_proposals) ? payload.property_role_proposals : [];
+      const customerId = payload.customer_id || null;
+      if (!customerId || !proposals.length) {
+        const empty = new Error('no applicable proposals');
+        empty.noProposals = true;
+        throw empty;
+      }
       outcome = await applyPropertyRoleProposals(trx, { customerId, proposals });
       // Applied-count zero means every proposal went stale — still resolve
       // (nothing left to confirm) but say so in the note.
@@ -371,6 +383,7 @@ router.post('/:id/apply-property-roles', async (req, res) => {
     return res.json({ ok: true, ...outcome });
   } catch (err) {
     if (err.conflict) return res.status(409).json({ error: 'Item already resolved' });
+    if (err.noProposals) return res.status(400).json({ error: 'Card carries no applicable proposals' });
     logger.error(`[admin-triage] apply-property-roles failed: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to apply property roles' });
   }
