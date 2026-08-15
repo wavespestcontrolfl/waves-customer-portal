@@ -171,10 +171,16 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     // 2/3. demote before promote (one_primary partial unique)
     const propUpdates = u.filter((x) => x.table === 'customer_properties');
     // The demote deliberately does NOT write occupancy — the reclassification
-    // rides the sibling occupancy_change proposal's compare-and-swap.
-    expect(propUpdates[0].patch).toMatchObject({ is_primary: false, label: 'Rental' });
+    // rides the sibling occupancy_change proposal's compare-and-swap — and
+    // every label/occupancy suggestion lands via its own predicate-fenced
+    // update (r4 TOCTOU hardening).
+    expect(propUpdates[0].patch).toMatchObject({ is_primary: false });
     expect(propUpdates[0].patch.occupancy_type).toBeUndefined();
-    expect(propUpdates[1].patch).toMatchObject({ is_primary: true, occupancy_type: 'owner_occupied', label: 'Primary' });
+    expect(propUpdates.some((x) => x.patch.label === 'Rental')).toBe(true);
+    expect(propUpdates.some((x) => x.patch.is_primary === true)).toBe(true);
+    expect(propUpdates.some((x) => x.patch.occupancy_type === 'owner_occupied'
+      && x.wheres.some((w) => w && w.occupancy_type === 'unknown'))).toBe(true);
+    expect(propUpdates.some((x) => x.patch.label === 'Primary')).toBe(true);
     // 4. customers mirror follows the NEW primary
     const mirror = u.find((x) => x.table === 'customers');
     expect(mirror.patch).toMatchObject({ address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', latitude: 27.5 });
@@ -296,6 +302,11 @@ describe('promote occupancy fence (codex r3)', () => {
     expect(applied).toBe(1);
     const promote = updates.find((u) => u.table === 'customer_properties' && u.patch.is_primary === true);
     expect(promote.patch.occupancy_type).toBeUndefined();
-    expect(promote.patch.label).toBe('Primary');
+    // owner_occupied only arrives via the atomic occupancy-fenced update,
+    // whose 'unknown' predicate cannot match this admin-set 'seasonal' row —
+    // so the row's occupancy survives the flip.
+    expect(rows[0].occupancy_type).toBe('seasonal');
+    // The label suggestion is its own whereNull-fenced update.
+    expect(updates.some((u) => u.patch.label === 'Primary')).toBe(true);
   });
 });

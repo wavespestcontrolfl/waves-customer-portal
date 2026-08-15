@@ -102,6 +102,14 @@ function buildPropertyRoleProposals({ classified = [], properties = [] }) {
   }
   const currentPrimary = properties.find((p) => p.is_primary) || null;
 
+  // Contradiction is judged across ALL classified entries, matched or not
+  // (codex #3418 r4): an unmatched claimant — e.g. an extra whose
+  // incomplete city/ZIP meant no row was persisted — still proves the
+  // extraction contradicts itself, and a flip must not ride the one claim
+  // that happened to match a row.
+  const claimedPrimaryTotal = classified.filter((c) => c.is_primary_residence === true
+    && (!c.occupancy || c.occupancy === 'owner_occupied')).length;
+
   const primaryClaims = [];
   for (const entry of classified) {
     const key = addressKey(entry);
@@ -137,7 +145,9 @@ function buildPropertyRoleProposals({ classified = [], properties = [] }) {
     }
   }
 
-  if (primaryClaims.length === 1) {
+  if (claimedPrimaryTotal > 1) {
+    logger.warn(`[property-role] ${claimedPrimaryTotal} properties classified as primary residence on one call — skipping flip proposal (contradiction)`);
+  } else if (primaryClaims.length === 1) {
     const { entry, row } = primaryClaims[0];
     if (!row.is_primary) {
       // The demoted row's suggested role: the call's classification of it if
@@ -160,8 +170,6 @@ function buildPropertyRoleProposals({ classified = [], properties = [] }) {
         evidence: entry.evidence || null,
       });
     }
-  } else if (primaryClaims.length > 1) {
-    logger.warn(`[property-role] ${primaryClaims.length} properties classified as primary residence on one call — skipping flip proposal (contradiction)`);
   }
 
   return { fills, proposals };
@@ -183,7 +191,7 @@ async function resolveSupersededCard(db, callLogId) {
     const { lockTriageCall } = require('../utils/triage-locks');
     await db.transaction(async (trx) => {
       await lockTriageCall(trx, callLogId);
-      await trx('triage_items')
+      const resolved = await trx('triage_items')
         .where({ call_log_id: callLogId, reason_code: REASON_CODE })
         .whereIn('status', ['open', 'in_progress'])
         .update({
@@ -192,6 +200,20 @@ async function resolveSupersededCard(db, callLogId) {
           resolved_at: new Date(),
           updated_at: new Date(),
         });
+      // Same call_log.review_status aggregation as the triage transitions
+      // (codex #3418 r4): resolving the call's last live card must move the
+      // aggregate off 'open'.
+      if (resolved > 0) {
+        const stillOpen = await trx('triage_items')
+          .where({ call_log_id: callLogId })
+          .whereIn('status', ['open', 'in_progress'])
+          .count('* as n')
+          .first();
+        const remaining = parseInt(stillOpen?.n || 0, 10);
+        await trx('call_log')
+          .where({ id: callLogId })
+          .update({ review_status: remaining > 0 ? 'open' : 'resolved', updated_at: new Date() });
+      }
     });
   } catch (e) {
     logger.warn(`[property-role] superseded-card cleanup skipped: ${e.code || e.name || 'db_error'}`);
@@ -270,8 +292,6 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
     if (p.kind === 'occupancy_change') {
       const occupancy = normalizeOccupancy(p.proposed_occupancy);
       if (!OCCUPANCY_TYPES.includes(occupancy) || occupancy === 'unknown') { skipped += 1; continue; }
-      const patch = { occupancy_type: occupancy, updated_at: new Date() };
-      if (p.proposed_label) patch.label = p.proposed_label;
       // Compare-and-swap on the occupancy the card was judged against — an
       // admin edit that landed after the card was parked wins; the stale
       // proposal skips rather than overwriting the newer human fact.
@@ -282,7 +302,16 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
           active: true,
           occupancy_type: p.current_occupancy,
         })
-        .update(patch);
+        .update({ occupancy_type: occupancy, updated_at: new Date() });
+      // The label suggestion lands only on a still-empty label, fenced in
+      // the predicate — an admin's label-only edit after staging survives
+      // (codex #3418 r4 P2).
+      if (n > 0 && p.proposed_label) {
+        await trx('customer_properties')
+          .where({ id: p.property_id, customer_id: customerId, active: true })
+          .whereNull('label')
+          .update({ label: p.proposed_label, updated_at: new Date() });
+      }
       if (n > 0) applied += 1; else skipped += 1;
       continue;
     }
@@ -308,10 +337,15 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       }
 
       if (oldPrimary) {
+        // Estimate-born visits are excluded: their effective address comes
+        // from the creating estimate (which may target another property),
+        // so blanket-pinning them to the old primary could re-home them —
+        // the estimate-property-linkage pass owns those (codex #3418 r4).
         await trx('scheduled_services')
           .where({ customer_id: customerId })
           .whereNull('property_id')
           .whereNull('service_address_line1')
+          .whereNull('source_estimate_id')
           .whereNotIn('status', TERMINAL_VISIT_STATUSES)
           .update({
             property_id: oldPrimary.id,
@@ -325,25 +359,50 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
 
         // The demote NEVER writes occupancy — the old row's reclassification
         // rides the sibling occupancy_change proposal, whose compare-and-swap
-        // yields to any newer admin edit; copying old_primary_occupancy here
-        // would bypass that fence (codex #3418 r2). Only the label moves,
-        // and only when the row carries no label beyond the vacated
-        // 'Primary'.
-        const oldPatch = { is_primary: false, updated_at: new Date() };
-        if (p.old_primary_label && (!oldPrimary.label || oldPrimary.label === 'Primary')) {
-          oldPatch.label = p.old_primary_label;
+        // yields to any newer admin edit (codex #3418 r2). The label
+        // suggestion lands only on the vacated 'Primary' or an empty label,
+        // fenced IN THE PREDICATE so an admin label edit between staging
+        // and apply always wins (codex #3418 r4 P2).
+        await trx('customer_properties')
+          .where({ id: oldPrimary.id })
+          .update({ is_primary: false, updated_at: new Date() });
+        if (p.old_primary_label) {
+          const relabeled = await trx('customer_properties')
+            .where({ id: oldPrimary.id, label: 'Primary' })
+            .update({ label: p.old_primary_label, updated_at: new Date() });
+          if (relabeled === 0) {
+            await trx('customer_properties')
+              .where({ id: oldPrimary.id })
+              .whereNull('label')
+              .update({ label: p.old_primary_label, updated_at: new Date() });
+          }
         }
-        await trx('customer_properties').where({ id: oldPrimary.id }).update(oldPatch);
       }
 
-      // The promote adopts owner_occupied only onto a still-unclassified
-      // row — an occupancy an admin set after staging outranks the card
-      // (same fence discipline as the demote/CAS sides, codex #3418 r3).
-      const promotePatch = { is_primary: true, label: 'Primary', updated_at: new Date() };
-      if (!knownOccupancy(newPrimary.occupancy_type)) promotePatch.occupancy_type = 'owner_occupied';
+      // Promote in fenced steps: the flags land unconditionally, while
+      // owner_occupied is adopted via an ATOMIC update predicated on the
+      // occupancy still being 'unknown' (a read-time check was a TOCTOU
+      // race against the admin PATCH — codex #3418 r4), and the 'Primary'
+      // label lands only on an unlabeled row so an admin's own name for
+      // the property survives.
       await trx('customer_properties')
         .where({ id: newPrimary.id })
-        .update(promotePatch);
+        .update({ is_primary: true, updated_at: new Date() });
+      await trx('customer_properties')
+        .where({ id: newPrimary.id, occupancy_type: 'unknown' })
+        .update({ occupancy_type: 'owner_occupied', updated_at: new Date() });
+      const primaryLabeled = await trx('customer_properties')
+        .where({ id: newPrimary.id })
+        .whereNull('label')
+        .update({ label: 'Primary', updated_at: new Date() });
+      if (primaryLabeled === 0 && LABEL_BY_OCCUPANCY[knownOccupancy(newPrimary.occupancy_type)]) {
+        // A stale suggestion label ('Rental'/'Seasonal') on the row now
+        // becoming primary is corrected; a bespoke admin name is kept.
+        await trx('customer_properties')
+          .where({ id: newPrimary.id })
+          .whereIn('label', Object.values(LABEL_BY_OCCUPANCY))
+          .update({ label: 'Primary', updated_at: new Date() });
+      }
 
       const mirror = {
         address_line1: newPrimary.address_line1,
@@ -353,6 +412,19 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         zip: newPrimary.zip,
         latitude: newPrimary.latitude ?? null,
         longitude: newPrimary.longitude ?? null,
+        // Property-grained attributes follow the primary too — estimator
+        // inputs (e.g. customers.property_sqft = measured turf) must
+        // describe the NEW primary, and a null here is better than a value
+        // describing the demoted property (same doctrine as the coords in
+        // syncPrimaryAddress). Field set mirrors ensurePrimaryProperty's.
+        property_type: newPrimary.property_type ?? null,
+        lawn_type: newPrimary.lawn_type ?? null,
+        property_sqft: newPrimary.property_sqft ?? null,
+        lot_sqft: newPrimary.lot_sqft ?? null,
+        bed_sqft: newPrimary.bed_sqft ?? null,
+        linear_ft_perimeter: newPrimary.linear_ft_perimeter ?? null,
+        palm_count: newPrimary.palm_count ?? null,
+        canopy_type: newPrimary.canopy_type ?? null,
         updated_at: new Date(),
       };
       const loc = resolveLocation(newPrimary.city || '');
