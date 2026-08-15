@@ -11844,6 +11844,12 @@ export function CompletionPanel({
   }
   function applyProtocolAction(action) {
     if (!action) return;
+    // Same freeze + invalidation contract as every other payload mutation:
+    // a productless protocol action (or one whose product is already
+    // selected) never reaches addProduct's guards, but it still changes
+    // actionsCompleted at completion (codex r37).
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     const noteText =
       action.note || action.label || action.raw || "Completed protocol item";
     appendUniqueLabel(setSelectedProtocolActionLabels, noteText);

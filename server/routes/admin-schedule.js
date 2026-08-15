@@ -48,7 +48,7 @@ const {
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
-const { technicianReportCustomerCopy, REPORT_ACCESS_CODE_RE } = require('../services/service-report/technician-report-copy');
+const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
 const CompletionRecap = require('../services/completion-recap');
 const {
   stampSeriesPrepaid,
@@ -11118,7 +11118,7 @@ function reportCopyRejection(report) {
   // actual code/credential context — the scrubber's location-keyword
   // heuristic would reject valid measurements like "120 linear feet around
   // the garage" (codex r30).
-  if (REPORT_ACCESS_CODE_RE.test(text)) return 'access_code';
+  if (containsReportAccessCode(text)) return 'access_code';
   const banned = ActivityIndicators.findBannedCustomerCopy(text);
   return banned.length ? `banned:${banned.join(',')}` : null;
 }
