@@ -49,6 +49,10 @@ const FIELD_GROUPS = {
     // card, so replay variance here is office-visible.
     'service_address_occupancy',
     'service_address_is_primary_residence',
+    // Derived signature over additional_properties[] role fields (occupancy
+    // + is_primary_residence per entry) — the nested values flatView keeps
+    // as an array, compared as one order-insensitive string (codex #3418 r3).
+    'additional_property_roles',
   ],
   low: [
     'lead_quality',
@@ -595,11 +599,31 @@ function transcriptDeltaMetrics(storedTranscript, replayTranscript) {
   };
 }
 
+// Order-insensitive signature of the per-entry role classification on
+// additional_properties — street|occupancy|primary-flag per entry. Lets the
+// variance compare treat the nested array like a scalar field.
+function additionalPropertyRolesSignature(flat) {
+  const entries = Array.isArray(flat?.additional_properties) ? flat.additional_properties : [];
+  const parts = entries
+    .map((e) => [
+      String(e?.address_line1 || '').toLowerCase().trim(),
+      e?.occupancy || '',
+      e?.is_primary_residence === true ? 'primary' : (e?.is_primary_residence === false ? 'not_primary' : ''),
+    ].join('|'))
+    .filter((sig) => sig !== '||')
+    .sort();
+  return parts.length ? parts.join(';') : null;
+}
+
 function compareFlatFields(oldFlat, currentFlat, includeValues) {
   const variances = [];
   for (const field of COMPARED_FIELDS) {
-    const oldValue = oldFlat?.[field] ?? null;
-    const currentValue = currentFlat?.[field] ?? null;
+    const oldValue = field === 'additional_property_roles'
+      ? additionalPropertyRolesSignature(oldFlat)
+      : (oldFlat?.[field] ?? null);
+    const currentValue = field === 'additional_property_roles'
+      ? additionalPropertyRolesSignature(currentFlat)
+      : (currentFlat?.[field] ?? null);
     const oldNorm = normalizeField(field, oldValue);
     const currentNorm = normalizeField(field, currentValue);
     if (oldNorm === currentNorm) continue;

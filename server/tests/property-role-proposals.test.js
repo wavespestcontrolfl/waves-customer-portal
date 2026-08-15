@@ -274,3 +274,28 @@ describe('stale-state fences (codex r1)', () => {
     expect(trx._updates).toHaveLength(0);
   });
 });
+
+describe('promote occupancy fence (codex r3)', () => {
+  test('an admin-set occupancy on the new primary survives the flip', async () => {
+    const rows = [{ id: 'prop-new', customer_id: 'cust-1', active: true, is_primary: false, occupancy_type: 'seasonal', address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', state: 'FL' }];
+    const updates = [];
+    const trx = (table) => ({
+      _wheres: [],
+      where(w) { this._wheres.push(w); return this; },
+      whereNull() { return this; }, whereNotIn() { return this; }, whereIn() { return this; },
+      async first() {
+        const preds = Object.assign({}, ...this._wheres);
+        return (table === 'customer_properties' ? rows : []).find((r) => Object.entries(preds).every(([k, v]) => r[k] === v)) || null;
+      },
+      async update(patch) { updates.push({ table, patch }); return 1; },
+    });
+    const { applied } = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: null }],
+    });
+    expect(applied).toBe(1);
+    const promote = updates.find((u) => u.table === 'customer_properties' && u.patch.is_primary === true);
+    expect(promote.patch.occupancy_type).toBeUndefined();
+    expect(promote.patch.label).toBe('Primary');
+  });
+});

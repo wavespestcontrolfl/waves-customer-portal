@@ -173,11 +173,39 @@ function buildPropertyRoleProposals({ classified = [], properties = [] }) {
  * shared knex instance; `buildTriageItem` is injected to avoid a require
  * cycle with call-routing-gates.
  */
+// A reprocessed extraction that no longer supports any proposal must not
+// leave a stale open card presenting superseded evidence (codex #3418 r3).
+// Resolving our own advisory card is the same self-cleanup shape as the
+// transcript-rejection path's stale-card dismissal; single row by the
+// open-unique index, under the shared per-call triage lock.
+async function resolveSupersededCard(db, callLogId) {
+  try {
+    const { lockTriageCall } = require('../utils/triage-locks');
+    await db.transaction(async (trx) => {
+      await lockTriageCall(trx, callLogId);
+      await trx('triage_items')
+        .where({ call_log_id: callLogId, reason_code: REASON_CODE })
+        .whereIn('status', ['open', 'in_progress'])
+        .update({
+          status: 'resolved',
+          resolution_note: 'Superseded — the reprocessed extraction proposes no property-role changes.',
+          resolved_at: new Date(),
+          updated_at: new Date(),
+        });
+    });
+  } catch (e) {
+    logger.warn(`[property-role] superseded-card cleanup skipped: ${e.code || e.name || 'db_error'}`);
+  }
+}
+
 async function stagePropertyRoleReview({
   db, customerId, callLogId, extracted, additionalProps, extraction, buildTriageItem,
 }) {
   const classified = classifiedPropertiesFromExtraction(extracted, additionalProps);
-  if (!classified.some((c) => c.occupancy || c.is_primary_residence === true)) return { fills: 0, parked: false };
+  if (!classified.some((c) => c.occupancy || c.is_primary_residence === true)) {
+    await resolveSupersededCard(db, callLogId);
+    return { fills: 0, parked: false };
+  }
 
   const properties = await db('customer_properties')
     .where({ customer_id: customerId, active: true })
@@ -194,7 +222,9 @@ async function stagePropertyRoleReview({
   }
 
   let parked = false;
-  if (proposals.length) {
+  if (!proposals.length) {
+    await resolveSupersededCard(db, callLogId);
+  } else {
     const card = buildTriageItem({
       callLogId,
       flag: REASON_CODE,
@@ -306,14 +336,14 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         await trx('customer_properties').where({ id: oldPrimary.id }).update(oldPatch);
       }
 
+      // The promote adopts owner_occupied only onto a still-unclassified
+      // row — an occupancy an admin set after staging outranks the card
+      // (same fence discipline as the demote/CAS sides, codex #3418 r3).
+      const promotePatch = { is_primary: true, label: 'Primary', updated_at: new Date() };
+      if (!knownOccupancy(newPrimary.occupancy_type)) promotePatch.occupancy_type = 'owner_occupied';
       await trx('customer_properties')
         .where({ id: newPrimary.id })
-        .update({
-          is_primary: true,
-          occupancy_type: 'owner_occupied',
-          label: 'Primary',
-          updated_at: new Date(),
-        });
+        .update(promotePatch);
 
       const mirror = {
         address_line1: newPrimary.address_line1,

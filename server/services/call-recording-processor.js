@@ -8236,27 +8236,39 @@ const CallRecordingProcessor = {
         if (require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')) {
           try {
             const { stagePropertyRoleReview } = require('./property-role-proposals');
-            // V2 canonical extraction is the AUTHORITY for the role fields
-            // (codex #3418 r1) — the legacy V1 result only fills in when V2
-            // did not run or carried nothing.
-            const v2RoleProp = v2CanonicalExtraction?.property || {};
+            // V2 canonical extraction is the SOLE authority for the role
+            // classification when it ran (codex #3418 r1+r3): a valid-V2
+            // null means "the call didn't say", and the independently
+            // generated V1 values must not fill it in — per-field fallback
+            // let V1/V2 disagreement stage writes neither extractor fully
+            // supports. V1 supplies the roles ONLY when V2 is absent
+            // entirely; the same authority rule picks the additional-props
+            // list the staging reads (resolveCallAdditionalProperties
+            // prefers V1, so it is not used here).
+            const v2RoleProp = v2CanonicalExtraction?.property || null;
             const roleView = {
               ...extracted,
               address_line2: callUnit,
-              service_address_occupancy: v2RoleProp.service_address_occupancy
-                || extracted.service_address_occupancy || null,
-              service_address_is_primary_residence: typeof v2RoleProp.service_address_is_primary_residence === 'boolean'
-                ? v2RoleProp.service_address_is_primary_residence
+              service_address_occupancy: v2RoleProp
+                ? (v2RoleProp.service_address_occupancy || null)
+                : (extracted.service_address_occupancy || null),
+              service_address_is_primary_residence: v2RoleProp
+                ? (typeof v2RoleProp.service_address_is_primary_residence === 'boolean'
+                  ? v2RoleProp.service_address_is_primary_residence
+                  : null)
                 : (typeof extracted.service_address_is_primary_residence === 'boolean'
                   ? extracted.service_address_is_primary_residence
                   : null),
             };
+            const roleAdditionalProps = v2RoleProp
+              ? require('../utils/extraction-compat').mapAdditionalPropertiesToLegacy(v2RoleProp.additional_properties)
+              : callAdditionalProps;
             const staged = await stagePropertyRoleReview({
               db,
               customerId,
               callLogId: call.id,
               extracted: roleView,
-              additionalProps: callAdditionalProps,
+              additionalProps: roleAdditionalProps,
               extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
               buildTriageItem,
             });
