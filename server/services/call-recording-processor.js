@@ -6563,6 +6563,11 @@ const CallRecordingProcessor = {
       await require('./property-role-proposals').resolveSupersededCard(
         db, call.id,
         `Superseded — the call was reclassified ${extracted.is_spam ? 'spam' : 'non-workable voicemail'} on reprocess.`,
+        // Generation-fenced (codex #3418 r14) like the invalidation sweep
+        // below: the terminal write just cleared our token, so only the
+        // generation proves a newer pass hasn't claimed and staged a
+        // VALID card this cleanup would wrongly resolve.
+        { procGeneration },
       );
       // SECOND invalidation pass, after the terminal status committed
       // (codex P1, PR #3304 GH r8g): the pre-write pass stamps the durable
@@ -7567,6 +7572,8 @@ const CallRecordingProcessor = {
       // r11). Fail-soft, locked inside the helper.
       await require('./property-role-proposals').resolveSupersededCard(
         db, call.id, 'Superseded — the reprocessed extraction was hard-vetoed before canonical writes.',
+        // Generation-fenced (codex #3418 r14) — see the spam-path call.
+        { procGeneration },
       );
       await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
       logger.info(`[call-proc] V2 hard veto for ${callSid}; skipped canonical writes (customer/lead/appointment)`);
@@ -8336,7 +8343,18 @@ const CallRecordingProcessor = {
             // 'unknown' (rental only on the entry's own explicit signal)
             // — the role staging right below fills/parks the classified
             // occupancy through its own fences.
-            if (v2RoleProp) {
+            // Claim fence BEFORE the durable inserts (codex #3418 r14):
+            // staging's own fence stops the fill/card writes, but this
+            // persistence loop precedes it — a stalled worker reclaimed by
+            // a newer pass must not attach its obsolete extraction's
+            // addresses (and paid enrichment lookups) to the customer.
+            const persistClaimLive = v2RoleProp
+              ? await db('call_log').where({ id: call.id, processing_token: procToken }).first('id')
+              : null;
+            if (v2RoleProp && !persistClaimLive) {
+              logger.warn(`[property-role] V2 persistence skipped for ${maskSid(callSid)} — processing claim lost to a newer worker`);
+            }
+            if (v2RoleProp && persistClaimLive) {
               const v2Persist = [
                 { ...roleView, is_rental: false, __mainEntry: true },
                 ...roleAdditionalProps,

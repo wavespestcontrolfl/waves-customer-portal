@@ -174,6 +174,18 @@ describe('buildPropertyRoleProposals', () => {
     expect(proposals).toHaveLength(0);
   });
 
+  test('a residence claim rejected against a commercial row drops its occupancy signal too (codex r14)', () => {
+    const commercialNew = { ...NEW_HOME, property_type: 'commercial', occupancy_type: 'unknown' };
+    const { fills, proposals } = buildPropertyRoleProposals({
+      classified: [{ address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: 'owner_occupied', is_primary_residence: true }],
+      properties: [OLD_HOME, commercialNew],
+    });
+    // Neither the owner_occupied fill nor a flip — the whole claim is
+    // contradictory against a commercial-typed row.
+    expect(fills).toHaveLength(0);
+    expect(proposals).toHaveLength(0);
+  });
+
   test('matching stored occupancy produces neither fill nor proposal', () => {
     const { fills, proposals } = buildPropertyRoleProposals({
       classified: [{ address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: 'owner_occupied', is_primary_residence: null }],

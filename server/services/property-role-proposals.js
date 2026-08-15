@@ -167,7 +167,17 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
     const row = key ? rowsByKey.get(key) : null;
     if (!row) continue; // nothing durable to label — the persistence step records rows first
 
-    if (entry.occupancy) {
+    // A residence claim on a commercial-typed row is rejected wholesale
+    // (codex #3418 r14): the flip guard below already refuses the claim,
+    // so the SAME entry's occupancy signal must not land either — a
+    // rejected "this is my home" must not fill owner_occupied (or park a
+    // change) onto the commercial row it was rejected against.
+    const commercialResidenceClaim = entry.is_primary_residence === true
+      && String(row.property_type || '').trim().toLowerCase() === 'commercial';
+    if (commercialResidenceClaim && entry.occupancy) {
+      logger.warn('[property-role] occupancy signal dropped — it rides a residence claim rejected against a commercial-typed property');
+    }
+    if (entry.occupancy && !commercialResidenceClaim) {
       const stored = knownOccupancy(row.occupancy_type);
       if (!stored) {
         fills.push({ property_id: row.id, occupancy: entry.occupancy });
@@ -315,11 +325,28 @@ async function resolveSupersededInTrx(trx, callLogId, note) {
   }
 }
 
-async function resolveSupersededCard(db, callLogId, note) {
+async function resolveSupersededCard(db, callLogId, note, opts = {}) {
   try {
     const { lockTriageCall } = require('../utils/triage-locks');
     await db.transaction(async (trx) => {
       await lockTriageCall(trx, callLogId);
+      // Generation fence (codex #3418 r14): the terminal write that
+      // precedes this cleanup CLEARS the processing token, so a newer
+      // force-reprocess can claim the call (bumping the generation) and
+      // stage a VALID card before this old pass gets here — resolving on
+      // call_log_id alone would silently remove the newer pass's review.
+      // Claims bump processing_generation before any staging, and staging
+      // runs under this same triage lock, so a live-generation check here
+      // is race-free.
+      if (opts.procGeneration != null) {
+        const liveGen = await trx('call_log')
+          .where({ id: callLogId })
+          .first('processing_generation');
+        if (liveGen && liveGen.processing_generation != null
+          && Number(liveGen.processing_generation) > Number(opts.procGeneration)) {
+          return;
+        }
+      }
       await resolveSupersededInTrx(trx, callLogId, note);
     });
   } catch (e) {

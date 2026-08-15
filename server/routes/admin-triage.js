@@ -376,6 +376,20 @@ router.post('/:id/apply-property-roles', async (req, res) => {
         lost.conflict = true;
         throw lost;
       }
+      // A customer-dedupe merge repoints call_log.customer_id and the
+      // property rows to the WINNER while this card's payload keeps the
+      // loser id (codex #3418 r14) — applying under the stale id would
+      // find none of the moved rows, skip every proposal, and still
+      // resolve the card. Surface as a conflict (card stays open) so a
+      // reprocess can re-stage against the merged profile.
+      const liveCall = item.call_log_id
+        ? await trx('call_log').where({ id: item.call_log_id }).first('customer_id')
+        : null;
+      if (liveCall && liveCall.customer_id && String(liveCall.customer_id) !== String(customerId)) {
+        const lost = new Error('card customer was merged — proposals need re-staging');
+        lost.conflict = true;
+        throw lost;
+      }
       if (!customerId || !proposals.length) {
         const empty = new Error('no applicable proposals');
         empty.noProposals = true;
