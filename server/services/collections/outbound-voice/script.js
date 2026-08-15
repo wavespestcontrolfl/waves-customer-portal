@@ -46,6 +46,15 @@ const CONSENT_REVOKED_CONFIRMATION =
   + 'Our office is still available if you need anything. Goodbye.';
 
 // Press 0 outside staffed hours (or transfer failed).
+// Missed transfer DURING staffed hours (gh prb-r2): the office is open but
+// the line was busy/unanswered — never announce a false closure.
+function transferMissedCallback() {
+  return (
+    'I was not able to reach our office just now, so I have asked the team to give you a call back shortly. '
+    + `You can also reach us directly at ${callbackNumber()}. Goodbye.`
+  );
+}
+
 function callbackPromise() {
   return (
     'Our office is closed right now, so I have asked the team to give you a call back. '
@@ -114,6 +123,7 @@ module.exports = {
   vestibuleScript,
   CONSENT_REVOKED_CONFIRMATION,
   callbackPromise,
+  transferMissedCallback,
   TRANSFER_ANNOUNCEMENT,
   genericCallbackVoicemail,
   relayGreeting,

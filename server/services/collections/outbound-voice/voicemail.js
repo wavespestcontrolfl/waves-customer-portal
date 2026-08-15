@@ -64,7 +64,7 @@ async function voicemailPermitted(customerId, { now = new Date() } = {}) {
 async function stampVoicemailLeft(ledgerId, { now = new Date() } = {}) {
   if (!ledgerId) return false;
   try {
-    await db('collections_contact_ledger')
+    const updated = await db('collections_contact_ledger')
       .where({ id: ledgerId })
       .update({
         metadata: db.raw(
@@ -72,7 +72,8 @@ async function stampVoicemailLeft(ledgerId, { now = new Date() } = {}) {
           [JSON.stringify({ voicemail_left: true, voicemail_at: now.toISOString() })],
         ),
       });
-    return true;
+    // Zero rows updated = no marker persisted = the cap cannot hold.
+    return updated > 0;
   } catch (err) {
     logger.warn(`[collections-voicemail] voicemail_left stamp failed for ledger row ${ledgerId}: ${err.message}`);
     return false;

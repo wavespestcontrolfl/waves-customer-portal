@@ -914,3 +914,25 @@ describe('stopped-sequence exclusion', () => {
     expect(result.eligibleInvoiceIds).toEqual(['inv-1']);
   });
 });
+
+// gh prb-r2: the ACTIVE collections call's own ledger row must not veto its
+// in-call pay-link — but only THAT row; any other recent contact still counts.
+test('excludeCollectionCaseId exempts exactly the active call from the 24h window', async () => {
+  const activeCallRow = {
+    channel: 'voice', occurred_at: new Date(WED_11AM_EDT.getTime() - 10 * 60 * 1000).toISOString(),
+    metadata: JSON.stringify({ collectionCaseId: 'case-7' }),
+  };
+  armAllowedBaseline({ ledger: [activeCallRow] });
+  const exempted = await ContactPolicy.evaluate('cust-1', {
+    channel: 'sms', purpose: 'late_payment', excludeCollectionCaseId: 'case-7', now: WED_11AM_EDT,
+  });
+  expect(exempted.denialReasons).not.toContain('contact_within_24h');
+  expect(exempted.allowed).toBe(true);
+
+  // A DIFFERENT case's call still counts.
+  armAllowedBaseline({ ledger: [activeCallRow] });
+  const other = await ContactPolicy.evaluate('cust-1', {
+    channel: 'sms', purpose: 'late_payment', excludeCollectionCaseId: 'case-9', now: WED_11AM_EDT,
+  });
+  expect(other.denialReasons).toContain('contact_within_24h');
+});

@@ -590,7 +590,8 @@ violations at the severity noted.
   `/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound),
   `/api/webhooks/twilio/collections-vestibule[-key|-noinput]` +
   `/api/webhooks/twilio/collections-relay-complete` +
-  `/api/webhooks/twilio/collections-transfer-complete` (POST; machine-to-machine
+  `/api/webhooks/twilio/collections-transfer-complete` +
+  `/api/webhooks/twilio/collections-call-status` (POST; machine-to-machine
   TwiML webhooks for the OUTBOUND collections voice lane — Twilio-signature
   validated at the mount like every Twilio inbound route, and additionally
   fail-closed to a bare `<Hangup/>` unless `GATE_VOICE_LATE_PAYMENT` is exactly

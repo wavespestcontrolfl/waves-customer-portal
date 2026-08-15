@@ -119,18 +119,23 @@ function appendVestibuleGather(twiml, { firstName, callLogId }) {
 /** Speak the generic callback voicemail if the 30-day cap allows, else silence. */
 async function appendCappedVoicemail(twiml, { customerId, ledgerId, callLogId, outcome, now = new Date() }) {
   const permitted = await voicemailPermitted(customerId, { now });
-  if (permitted) {
+  // RESERVE-THEN-SPEAK (gh prb-r2): the 30-day cap marker must persist
+  // BEFORE the message plays — an unstampable marker means silence, because
+  // repeated voicemails inside the promised window are worse than a missed
+  // one. No ledger row = no marker possible = silence.
+  const stamped = permitted && ledgerId ? await stampVoicemailLeft(ledgerId, { now }) : false;
+  const speak = permitted && stamped;
+  if (speak) {
     twiml.say(script.genericCallbackVoicemail());
-    if (ledgerId) await stampVoicemailLeft(ledgerId, { now });
   }
   twiml.hangup();
   if (callLogId) {
     await writeCallOutcome(callLogId, {
-      outcome: permitted ? outcome : 'machine_no_voicemail',
+      outcome: speak ? outcome : 'machine_no_voicemail',
       now,
     }).catch(() => {});
   }
-  return permitted;
+  return speak;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -353,13 +358,70 @@ router.post('/collections-transfer-complete', async (req, res) => {
       } catch (err) {
         logger.error(`[collections-transfer-complete] callback card failed: ${err.message}`);
       }
-      twiml.say(script.callbackPromise());
+      // gh prb-r2: the office was OPEN — a busy/unanswered line must not
+      // announce a false closure.
+      twiml.say(script.transferMissedCallback());
     }
     twiml.hangup();
     return sendTwiml(res, twiml);
   } catch (err) {
     logger.error(`[collections-transfer-complete] failed: ${err.message}`);
     return sendTwiml(res, hangupXml());
+  }
+});
+
+// Terminal status for an outbound collections dial (gh prb-r2). busy /
+// no-answer / canceled / failed calls never reach the vestibule, so this is
+// the ONLY path that returns the case from 'dialing', records the missed
+// outcome, and stamps the ledger attempt undelivered. Answered calls
+// ('completed') are owned by the vestibule/relay handlers — untouched here.
+const UNANSWERED_STATUSES = new Set(['busy', 'no-answer', 'canceled', 'failed']);
+
+router.post('/collections-call-status', async (req, res) => {
+  try {
+    const twStatus = String(req.body?.CallStatus || '').toLowerCase();
+    if (!UNANSWERED_STATUSES.has(twStatus)) return res.sendStatus(204);
+    const call = await loadCollectionsCall(req);
+    if (!call) return res.sendStatus(204);
+    const meta = call.meta || {};
+
+    await db('call_log').where({ id: call.row.id }).update({
+      status: twStatus,
+      call_outcome: 'missed',
+      updated_at: new Date(),
+    }).catch((err) => logger.warn(`[collections-call-status] call_log update failed: ${err.message}`));
+
+    // Back to the review queue for a fresh human approval — never an
+    // automatic redial. Guarded on 'dialing' so an answered call's later
+    // race can't regress a live case.
+    if (meta.collectionCaseId) {
+      await db('collection_cases')
+        .where({ id: meta.collectionCaseId, current_state: 'dialing' })
+        .update({
+          current_state: 'proposed',
+          approved_by: null,
+          approved_at: null,
+          approval_expires_at: null,
+          hold_reason: `dial_${twStatus}`,
+          updated_at: db.fn.now(),
+        })
+        .catch((err) => logger.warn(`[collections-call-status] case reset failed: ${err.message}`));
+    }
+    // Ledger attempt stands (frequency window: an attempt IS a contact
+    // attempt — over-suppression is the safe direction) but is stamped
+    // undelivered via jsonb merge — never a wholesale metadata replace.
+    if (meta.ledgerId) {
+      await db('collections_contact_ledger').where({ id: meta.ledgerId }).update({
+        metadata: db.raw(
+          "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ send_failed: true, dial_status: twStatus })],
+        ),
+      }).catch((err) => logger.warn(`[collections-call-status] ledger stamp failed: ${err.message}`));
+    }
+    return res.sendStatus(204);
+  } catch (err) {
+    logger.error(`[collections-call-status] failed: ${err.message}`);
+    return res.sendStatus(204);
   }
 });
 

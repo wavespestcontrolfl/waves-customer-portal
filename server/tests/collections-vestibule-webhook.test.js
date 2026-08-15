@@ -305,3 +305,56 @@ test('language rules: no fixed copy ever says collections/debt/delinquent; the v
   expect(script.genericCallbackVoicemail()).toContain('(941) 297-5749');
   expect(script.genericCallbackVoicemail()).not.toMatch(/balance|invoice|owe|payment/i);
 });
+
+// gh prb-r2 pins: unanswered-status reconciliation, stamp-before-speak,
+// missed-transfer copy.
+describe('prb-r2', () => {
+  test('collections-call-status: an unanswered dial resets the case, records missed, stamps the ledger', async () => {
+    const caseChain = chain();
+    const ledgerChain = chain();
+    const callChain = chain({ first: CALL_ROW });
+    const callUpdate = chain();
+    const queues = {
+      call_log: [callChain, callUpdate],
+      customers: [chain({ first: CUSTOMER })],
+      collection_cases: [caseChain],
+      collections_contact_ledger: [ledgerChain],
+    };
+    db.mockImplementation((t) => (queues[t] && queues[t].length ? queues[t].shift() : chain()));
+    const res = mockRes();
+    res.sendStatus = jest.fn(() => res);
+    await handlerFor('/collections-call-status')(req({ body: { CallStatus: 'no-answer' } }), res);
+    expect(res.sendStatus).toHaveBeenCalledWith(204);
+    expect(callUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'no-answer', call_outcome: 'missed' }));
+    // Back to the review queue, approval cleared, guarded on 'dialing'.
+    expect(caseChain.where).toHaveBeenCalledWith({ id: 'case-1', current_state: 'dialing' });
+    expect(caseChain.update).toHaveBeenCalledWith(expect.objectContaining({ current_state: 'proposed', hold_reason: 'dial_no-answer' }));
+    // Ledger stamped via jsonb MERGE, never a wholesale metadata replace.
+    expect(ledgerChain.update).toHaveBeenCalled();
+  });
+
+  test('collections-call-status: an answered (completed) call is a no-op — the vestibule owns it', async () => {
+    setDb();
+    const res = mockRes();
+    res.sendStatus = jest.fn(() => res);
+    await handlerFor('/collections-call-status')(req({ body: { CallStatus: 'completed' } }), res);
+    expect(res.sendStatus).toHaveBeenCalledWith(204);
+  });
+
+  test('voicemail speaks ONLY after the cap stamp persists — a failed stamp means silence', async () => {
+    setDb();
+    stampVoicemailLeft.mockResolvedValue(false);
+    const res = mockRes();
+    await handlerFor('/collections-vestibule-noinput')(req(), res);
+    expect(res.body).not.toContain(script.genericCallbackVoicemail());
+    expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({ outcome: 'machine_no_voicemail' }));
+  });
+
+  test('a missed transfer during STAFFED hours never announces a closure', async () => {
+    setDb();
+    const res = mockRes();
+    await handlerFor('/collections-transfer-complete')(req({ body: { DialCallStatus: 'no-answer' } }), res);
+    expect(res.body).toContain('not able to reach our office');
+    expect(res.body).not.toContain('closed right now');
+  });
+});

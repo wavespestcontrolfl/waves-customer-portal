@@ -264,3 +264,17 @@ test('a lost dial claim stands down: no ledger row, no call_log insert, no calls
   expect(mockCallsCreate).not.toHaveBeenCalled();
   expect(claimChain._updated).toEqual(expect.objectContaining({ current_state: 'dialing' }));
 });
+
+// gh prb-r2: a FAILED dial's row never blocks the human's re-approval.
+test('the idempotency probe excludes failed rows (query pin) and a fresh dial proceeds after a failure', async () => {
+  const probeChain = chain('call_log', { first: undefined });
+  const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER })],
+    call_log: [probeChain, chain('call_log', { returningRows: [{ id: 'cl-2' }] }), chain('call_log')],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res.dialed).toBe(true);
+  expect(probeChain.whereRaw).toHaveBeenCalledWith("COALESCE(status, '') <> 'failed'");
+});

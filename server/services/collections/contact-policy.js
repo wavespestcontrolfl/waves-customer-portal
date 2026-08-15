@@ -179,7 +179,7 @@ async function loadEligibleInvoices(customerId) {
   return eligible;
 }
 
-async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0 } = {}) {
+async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null } = {}) {
   const result = {
     allowed: false,
     denialReasons: [],
@@ -306,7 +306,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
 
     // ── Rolling frequency windows (collections ledger) ──────────────────
     const windowStart = new Date(now.getTime() - 7 * DAY_MS);
-    const recent = await db('collections_contact_ledger')
+    let recent = await db('collections_contact_ledger')
       .where({ customer_id: customerId })
       .where('occurred_at', '>', windowStart)
       .orderBy('occurred_at', 'desc')
@@ -334,6 +334,18 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       // appended newer call behind an older ledger row would propose an
       // eligibility earlier than the real seven-day boundary.
       recent.sort((a, b) => new Date(b.occurred_at) - new Date(a.occurred_at));
+    }
+    // The ACTIVE collections call's own ledger row must not veto its
+    // in-call writes (gh prb-r2: the pay-link consult always found the
+    // current call inside the 24h window). Scoped to call-shaped rows
+    // carrying exactly this case id — every other contact still counts.
+    if (excludeCollectionCaseId) {
+      recent = recent.filter((row) => {
+        if (!isVoiceLike(row.channel)) return true;
+        let meta = row.metadata;
+        if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+        return String(meta?.collectionCaseId || '') !== String(excludeCollectionCaseId);
+      });
     }
     result.recentContacts = recent;
     const within = (row, ms) => now.getTime() - new Date(row.occurred_at).getTime() < ms;

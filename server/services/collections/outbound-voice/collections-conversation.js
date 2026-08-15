@@ -571,11 +571,32 @@ class CollectionsConversation {
     let verbatim = null;
     try { verbatim = input.verbatim_request ? scrubPans(String(input.verbatim_request)).slice(0, 300) : null; } catch { verbatim = null; }
     const res = await flags.revokeAutomatedVoiceConsent(this._ctx.customer.id, { reason: verbatim || undefined });
+    let allCallsRecorded = true;
     if (input.scope === 'all_calls' && res.ok) {
-      await flags.writeFlag({ customerId: this._ctx.customer.id, flag: 'do_not_call', reason: verbatim || 'customer asked for no calls' });
+      // gh prb-r2: the second write's failure was silently discarded —
+      // reporting success while manual calls stay permitted loses half the
+      // customer's instruction.
+      const second = await flags.writeFlag({ customerId: this._ctx.customer.id, flag: 'do_not_call', reason: verbatim || 'customer asked for no calls' });
+      allCallsRecorded = Boolean(second && second.ok);
+      if (!allCallsRecorded) {
+        try {
+          const NotificationService = require('../../notification-service');
+          await NotificationService.notifyAdmin(
+            'billing',
+            'Do-not-call request needs manual action',
+            'A customer asked for NO calls of any kind during a billing follow-up call. The automated-voice stop recorded, but the all-calls flag write failed — please set it by hand.',
+            { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+          );
+        } catch (cardErr) {
+          logger.warn(`[collections-voice] do-not-call fallback card failed: ${cardErr.message}`);
+        }
+      }
     }
     if (!res.ok) return 'Could not record that. Tell the caller a person will make sure it is honored, and end politely.';
     this._captures.consentRevoked = true;
+    if (input.scope === 'all_calls' && !allCallsRecorded) {
+      return 'Automated calls are stopped, but the full no-calls request could not be completely recorded — tell the caller a person will make sure no calls of any kind happen.';
+    }
     return 'Recorded — automated calls are stopped. Confirm that to the caller.';
   }
 
@@ -596,6 +617,9 @@ class CollectionsConversation {
       channel: 'sms',
       purpose: 'late_payment',
       now: this._now(),
+      // The ACTIVE call's own ledger row must not veto this in-call write
+      // (gh prb-r2: the any-channel 24h window always found it).
+      excludeCollectionCaseId: this._ctx.caseId,
       logTag: 'collections-voice-paylink',
     });
     if (!permitted) return 'A text cannot be sent to this customer. Offer the office number for payment instead.';

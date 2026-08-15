@@ -115,6 +115,10 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
   const prior = await db('call_log')
     .where({ source: CALL_SOURCE })
     .whereRaw("metadata->>'collectionsIdempotencyKey' = ?", [idempotencyKey])
+    // A FAILED dial's row must not block the human's re-approval (gh
+    // prb-r2) — the failure path resets the case to 'proposed' precisely so
+    // it can be retried. COALESCE keeps the NULL leg explicit.
+    .whereRaw("COALESCE(status, '') <> 'failed'")
     .first('id');
   if (prior) return { dialed: false, reason: 'already_dialed', callLogId: prior.id };
 
@@ -183,8 +187,11 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
       // hangup — never a voicemail on an uncertain result).
       machineDetection: 'DetectMessageEnd',
       url: `https://${domain}/api/webhooks/twilio/collections-vestibule?${params.toString()}`,
-      statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
-      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+      // gh prb-r2: busy/no-answer/canceled/failed calls never reach the
+      // vestibule — the collections status route is the ONLY thing that can
+      // return the case from 'dialing' and record the missed outcome.
+      statusCallback: `https://${domain}/api/webhooks/twilio/collections-call-status`,
+      statusCallbackEvent: ['completed'],
     });
 
     if (callLogId) {
