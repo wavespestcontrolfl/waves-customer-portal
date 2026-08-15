@@ -544,3 +544,14 @@ describe('prb-r13', () => {
     expect(writeCallOutcome).not.toHaveBeenCalled();
   });
 });
+
+// prb-r14: the completed reconciliation is Twilio's LAST signal — an
+// unpersisted write must return retryable, never a swallowing 204.
+test('completed reconciliation that fails twice returns 500 so Twilio retries', async () => {
+  setDb();
+  writeCallOutcome.mockResolvedValue({ ok: false });
+  const res = mockRes();
+  res.sendStatus = jest.fn(() => res);
+  await handlerFor('/collections-call-status')(req({ body: { CallStatus: 'completed' } }), res);
+  expect(res.sendStatus).toHaveBeenCalledWith(500);
+});

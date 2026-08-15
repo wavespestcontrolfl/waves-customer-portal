@@ -177,6 +177,11 @@ const SENSITIVE_UTTERANCE_RE = new RegExp(
     '\\b\\d{3}[- ]\\d{2}[- ]\\d{4}\\b', // SSN shape
     '\\b(?:social security|ssn)\\b',
     '\\brouting (?:number|#)\\b',
+    // Ordinary phrasing too (gh prb-r14): "my routing is 021000021" and
+    // "my checking account is 123456789" carry no "number" label and are
+    // too short for the PAN scrubber.
+    '\\brouting\\b[^.]{0,25}\\d{4,}',
+    '\\b(?:checking|savings|bank)\\s+account\\b[^.]{0,25}\\d{4,}',
     '\\baccount number\\b[^.]{0,20}\\d{4,}',
     '\\bcvv\\b|\\bsecurity code\\b|\\bcard number\\b',
     '\\b(?:one[- ]time|verification) (?:code|password|pin)\\b',
@@ -198,7 +203,10 @@ const HUMAN_REQUEST_RE = /\b(human|real person|actual person|representative|oper
 // Spoken opt-outs recorded IN CODE (combo escapes + the turn-cap failsafe).
 // Widened (gh prb-r8); broad-scope phrasing (gh prb-r11) additionally writes
 // do_not_call — "all calls"/"do not contact" is not an automated-only ask.
-const SPOKEN_OPT_OUT_RE = /\b(stop calling|don'?t call|do not call|no more calls|take me off|remove me from|never call|revoke (my )?consent|opt(-| )?out|quit calling|do not contact)\b/i;
+// "stop these automated calls" / "stop the robot calls" / "stop the calls"
+// ride the `stop … calls` arm (gh prb-r14) — the model must never be the
+// only thing standing between a stop request and the flag.
+const SPOKEN_OPT_OUT_RE = /\b(stop calling|stop(?: \w+){0,2} calls|don'?t call|do not call|no more calls|take me off|remove me from|never call|revoke (my )?consent|opt(-| )?out|quit calling|do not contact)\b/i;
 const BROAD_OPT_OUT_RE = /\b(?:all|any) calls?\b|\bdo not contact\b|\bnever call\b|\bno more calls\b|\btake me off\b|\bremove me from\b/i;
 
 function buildSystemPrompt({ firstName, today }) {
@@ -424,7 +432,11 @@ class CollectionsConversation {
       const text = String(this._turns[i].text || '');
       const turnTokens = text.match(/\d+/g) || [];
       turnTokens.forEach((t) => tokens.add(t));
-      if (turnTokens.length > 1) tokens.add(turnTokens.join(''));
+      // The joined form is added ONLY for a genuinely spaced-digit answer
+      // (gh prb-r14: no letters in the turn at all) — "the street might be
+      // 41, and the unit is 28" must never synthesize a 4128 the caller
+      // did not say; a mixed answer just re-asks for bare digits.
+      if (turnTokens.length > 1 && !/[a-z]/i.test(text)) tokens.add(turnTokens.join(''));
     }
     return tokens;
   }
@@ -672,7 +684,9 @@ class CollectionsConversation {
     }
     this.say(exhaustionCard
       ? 'Sorry — that is taking me longer than it should. Our office will follow up. Is there anything else?'
-      : 'Sorry — that is taking me longer than it should. You can reach our office at the number on your invoice. Is there anything else?');
+      // ("website", not "invoice" — this line can be spoken PRE-verification
+      // and must pass the pre-verify vocabulary screen.)
+      : 'Sorry — that is taking me longer than it should. You can reach our office at the number on our website. Is there anything else?');
   }
 
   async _executeToolBounded(name, input) {
@@ -895,6 +909,15 @@ class CollectionsConversation {
     const { normalizeIntendedPaymentDate } = require('./outcomes');
     const date = normalizeIntendedPaymentDate(input.intended_payment_date, this._now());
     if (!date) return 'That is not a usable calendar date. Ask for a specific day (or record nothing).';
+    // The date must be GROUNDED in the caller's words (gh prb-r14): the
+    // caller's latest turn has to carry SOME temporal signal (a digit, a
+    // day/month word, payday, next/week/…) — "I don't know when I can pay"
+    // must never become an invented future date that suppresses follow-up.
+    const lastCallerTurn = this._lastCallerText();
+    const TEMPORAL_RE = /\d|\b(today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weekend|month|payday|pay ?day|next|first|fifteenth|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
+    if (!TEMPORAL_RE.test(lastCallerTurn)) {
+      return 'Refused: the customer has not stated a date. Only record a date they actually said — if they are unsure, record nothing and do not press.';
+    }
     this._captures.customerIntendedPaymentDate = date;
     return `Recorded: the customer intends to pay on ${date}. Thank them — do not press further.`;
   }
@@ -1031,6 +1054,25 @@ class CollectionsConversation {
     const lastCallerTurn = this._lastCallerText();
     if (!AFFIRM_RE.test(lastCallerTurn) || NEGATE_RE.test(lastCallerTurn)) {
       return 'Refused: the customer\'s own last words do not clearly agree. Ask plainly if they would like the link texted, and call this tool right after they say yes.';
+    }
+    // The affirmative must be ABOUT the text (gh prb-r14): "yes, that
+    // amount is correct" is not SMS consent. Either the caller's words
+    // mention the text/link themselves, or the agent line they are
+    // answering was the pay-link offer.
+    const SMS_CONTEXT_RE = /\b(text|txt|sms|message|link|send it|send that|phone)\b/i;
+    if (!SMS_CONTEXT_RE.test(lastCallerTurn)) {
+      let lastCallerIdx = -1;
+      for (let i = this._turns.length - 1; i >= 0; i--) {
+        if (this._turns[i].role === 'caller') { lastCallerIdx = i; break; }
+      }
+      let precedingAgent = null;
+      for (let i = lastCallerIdx - 1; i >= 0; i--) {
+        if (this._turns[i].role === 'agent') { precedingAgent = String(this._turns[i].text || ''); break; }
+      }
+      const offerMade = Boolean(precedingAgent && /\b(?:text|send)\b[^.?]{0,60}\blink\b|\bpayment link\b|\btext you\b/i.test(precedingAgent));
+      if (!offerMade) {
+        return 'Refused: the customer\'s agreement was not about receiving a text. Offer the payment link plainly ("would you like me to text you a secure payment link?") and call this tool right after they agree.';
+      }
     }
     // Consent evidence persists on EVERY path past the fence (gh prb-r6):
     // stashed before the branches so the send path records it too.

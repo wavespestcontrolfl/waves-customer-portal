@@ -528,10 +528,14 @@ router.post('/collections-call-status', async (req, res) => {
       // wins; this only fills the void). Non-live; excluded from the
       // live-call predicate.
       if (!call.row.call_outcome) {
-        await writeOutcomeResilient(call.row.id, {
+        const reconciled = await writeOutcomeResilient(call.row.id, {
           outcome: 'completed_no_outcome',
           onlyIfNoOutcome: true,
         });
+        // This is Twilio's LAST callback for the call (gh prb-r14): an
+        // unpersisted reconciliation must return retryable, not swallow
+        // the only remaining repair signal. Idempotent under replay.
+        if (!reconciled || reconciled.ok === false) return res.sendStatus(500);
       }
       return res.sendStatus(204);
     }

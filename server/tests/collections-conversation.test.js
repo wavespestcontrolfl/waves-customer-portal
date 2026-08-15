@@ -856,7 +856,95 @@ describe('prb-r13', () => {
     second.convo.state = 'DISCLOSE';
     for (let i = 0; i < 4; i++) mockScriptedMessages.push(toolUse('get_balance_details'));
     await turn(second.convo, 'how much?');
-    expect(second.spoken.join(' ')).toContain('number on your invoice');
+    expect(second.spoken.join(' ')).toContain('number on our website');
     expect(second.spoken.join(' ')).not.toContain('Our office will follow up');
+  });
+});
+
+// prb-r14 pins.
+describe('prb-r14', () => {
+  test('ordinary routing/checking-account phrasing triggers the security interrupt', async () => {
+    const { convo, spoken } = makeConvo();
+    await turn(convo, 'my routing is 021000021');
+    expect(spoken).toContain(script.SECURITY_INTERRUPT);
+    expect(JSON.stringify(convo._turns) + JSON.stringify(convo.messages)).not.toContain('021000021');
+
+    mockScriptedMessages.length = 0;
+    await turn(convo, 'my checking account is 123456789');
+    expect(JSON.stringify(convo._turns) + JSON.stringify(convo.messages)).not.toContain('123456789');
+  });
+
+  test('"stop these automated calls" / "stop the calls" hit the deterministic opt-out path', async () => {
+    for (const phrase of ['stop these automated calls', 'stop the robot calls', 'stop the calls please']) {
+      jest.clearAllMocks();
+      flags.revokeAutomatedVoiceConsent.mockResolvedValue({ ok: true, created: true });
+      flags.writeFlag.mockResolvedValue({ ok: true, created: true });
+      setDb();
+      const { convo } = makeConvo();
+      mockScriptedMessages.push(endTurn('Understood, the calls are stopped.'));
+      await turn(convo, phrase);
+      expect(flags.revokeAutomatedVoiceConsent).toHaveBeenCalled();
+    }
+  });
+
+  test('digit-joining only applies to pure spaced-digit answers — mixed sentences never synthesize a factor', async () => {
+    setDb();
+    const { convo } = makeConvo();
+    mockScriptedMessages.push(
+      toolUse('confirm_right_party', { result: 'confirmed' }),
+      endTurn('Street number or billing ZIP?'),
+    );
+    await turn(convo, 'Speaking.');
+    mockScriptedMessages.push(
+      toolUse('verify_identity', { street_number: '4128' }),
+      endTurn('Could you say just the digits?'),
+    );
+    await turn(convo, 'the street might be 41, and the unit is 28');
+    expect(convo.verified).toBe(false);
+    expect(convo.verifyAttempts).toBe(0);
+  });
+
+  test('a generic affirmative about something ELSE is not SMS consent; agreement after a tracked offer is', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    // "yes, that amount is correct" — affirmative, but not about a text,
+    // and the preceding agent line was the balance, not an offer.
+    mockScriptedMessages.push(
+      toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it' }),
+      endTurn('Understood.'),
+    );
+    await turn(convo, 'yes, that amount is correct');
+    expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+
+    // Now the agent makes the offer and a bare "yes please" suffices.
+    mockScriptedMessages.push(endTurn('Would you like me to text you a secure payment link?'));
+    await turn(convo, 'how can I pay?');
+    mockScriptedMessages.push(
+      toolUse('send_pay_link', { customer_agreement_verbatim: 'yes please' }),
+      endTurn('Sent!'),
+    );
+    await turn(convo, 'yes please');
+    expect(InvoiceService.sendViaSMS).toHaveBeenCalledTimes(1);
+  });
+
+  test('an intended payment date with no temporal signal in the caller turn is refused', async () => {
+    const { convo } = makeConvo();
+    await turn(convo, 'hello');
+    convo.state = 'RESOLUTION';
+    convo._turns.push({ role: 'caller', text: "I don't know when I can pay", at: Date.now() });
+    const out = await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-20' });
+    expect(out).toContain('has not stated a date');
+    expect(convo._captures.customerIntendedPaymentDate).toBeUndefined();
+
+    convo._turns.push({ role: 'caller', text: 'I can pay on Friday', at: Date.now() });
+    const ok = await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-14' });
+    expect(ok).toContain('Recorded');
+  });
+
+  test('the relay-failure close promises nothing and names no billing vocabulary', () => {
+    expect(script.RELAY_FAILURE_CLOSE).not.toMatch(/follow up/i);
+    expect(script.RELAY_FAILURE_CLOSE).not.toMatch(/invoice|balance/i);
   });
 });

@@ -209,7 +209,11 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     })
     .returning(['id']);
   } catch (err) {
-    await ContactLedger.markSendFailed(ledgerEntry, { stage: 'call_log_insert' });
+    // Provably pre-provider (gh prb-r14): the call_log insert precedes any
+    // Twilio touch, so the row must not consume the frequency windows — a
+    // retry after the claim release would otherwise see its own unsent
+    // voice row inside the 7-day spacing and cancel the approved case.
+    await ContactLedger.markSendFailed(ledgerEntry, { stage: 'call_log_insert', never_contacted: true });
     await releaseClaim();
     throw err;
   }

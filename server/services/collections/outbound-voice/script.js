@@ -120,9 +120,15 @@ const SECURITY_INTERRUPT =
   + 'I am not able to take payment information. Any payment link we send goes to our secure payment page. '
   + 'Is there anything else I can help with?';
 
-// Relay-leg technical failure close (never mentions the balance).
+// Relay-leg technical failure close (never mentions the balance). NO
+// follow-up promise (gh prb-r14): this path files no callback card — the
+// case just returns to the review queue, and a queue state is not an
+// assigned follow-up. The customer gets the number instead of a promise
+// nobody recorded.
+// ("invoice"/"balance" vocabulary is deliberately absent — this line can be
+// spoken PRE-verification and must pass the pre-verify screen.)
 const RELAY_FAILURE_CLOSE =
-  'Sorry, I am having technical trouble. Our office will follow up. Goodbye.';
+  'Sorry, I am having technical trouble. Please reach our office at the number on our website. Goodbye.';
 
 // Words that must never be spoken to the customer. The conversation screens
 // model output against these before emission (belt-and-braces on top of the
