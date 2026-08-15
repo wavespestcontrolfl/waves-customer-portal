@@ -321,7 +321,7 @@ export default function AiChartsPanel() {
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") onGenerate(); }}
           placeholder="e.g. new customers per month by city, last 6 months — or attach an image"
-          className="flex-1 h-9 px-3 text-13 border-hairline border-zinc-300 rounded-sm u-focus-ring"
+          className="flex-1 min-w-0 h-9 px-3 text-13 border-hairline border-zinc-300 rounded-sm u-focus-ring"
         />
         <DictationButton
           onAppend={(t) => setPrompt((p) => (p ? `${p} ${t}` : t))}
