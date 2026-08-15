@@ -11238,6 +11238,70 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
   return 'WHAT WE DID\n\nWe completed the scheduled service and documented the work performed.\n\nWHAT WE FOUND\n\nThe visit details were recorded for continued monitoring at the next scheduled service.';
 }
 
+// Renders technician-recorded typed findings into prompt lines for the
+// generate-report user message. Mirrors buildFindingsRecapPrompt's field
+// rules (admin-dispatch): `internal` fields are tech-facing data (compliance
+// entries, pricing calibration) and never reach customer-facing prompts;
+// empty values drop; values are bounded so a pasted wall of text can't
+// balloon the prompt.
+function typedFindingsPromptLines(findingsType, values) {
+  const schema = ActivityIndicators.findingsSchemaForType(findingsType);
+  if (!schema) return [];
+  return (schema.fields || [])
+    .filter((field) => !field.internal)
+    .map((field) => {
+      const raw = values?.[field.key];
+      // Select values are stored as machine tokens ("none_observed") — map
+      // each through the customer label registry so the copy (and the
+      // deterministic fallback that echoes these lines) reads plainly.
+      const toLabel = (v) => {
+        const raw2 = String(v ?? '').trim();
+        const label = ActivityIndicators.customerLabelForValue(field.key, raw2);
+        // Unmapped machine tokens ("none_observed") read as words.
+        return label === raw2 && /^[a-z0-9_]+$/.test(label) ? label.replace(/_/g, ' ') : label;
+      };
+      const text = Array.isArray(raw)
+        ? raw.map((v) => String(v ?? '').trim()).filter(Boolean).map(toLabel).join(', ')
+        : (String(raw ?? '').trim() ? toLabel(raw) : '');
+      if (!text) return null;
+      return `${field.label}: ${text.slice(0, 300)}`;
+    })
+    .filter(Boolean)
+    .slice(0, 60);
+}
+
+// The STRUCTURED SERVICE FINDINGS block for the generate-report prompt.
+// Chips validate against the confirmed findings type (invalid ones drop —
+// advisory here, enforced strictly at completion). Companion sections are
+// rendered per typed schema; their values are technician-recorded visit data
+// with the same provenance as the primary findings.
+function buildTypedFindingsPromptBlock({ findingsType, values, nextStepChips, companionFindings }) {
+  const lines = typedFindingsPromptLines(findingsType, values);
+  const chipsValidation = ActivityIndicators.validateNextStepChips(
+    nextStepChips, findingsType, values || {},
+  );
+  const chips = chipsValidation.ok ? chipsValidation.chips : [];
+  const companionSections = (Array.isArray(companionFindings) ? companionFindings : [])
+    .slice(0, 4)
+    .map((entry) => {
+      if (!ActivityIndicators.isTypedFindingsType(entry?.type)) return null;
+      const companionValues = entry?.values && typeof entry.values === 'object' && !Array.isArray(entry.values)
+        ? entry.values : {};
+      const companionLines = typedFindingsPromptLines(entry.type, companionValues);
+      if (!companionLines.length) return null;
+      const label = ActivityIndicators.findingsSchemaForType(entry.type)?.label || entry.type;
+      return `Companion findings (${label}):\n${companionLines.join('\n')}`;
+    })
+    .filter(Boolean);
+  if (!lines.length && !chips.length && !companionSections.length) return '';
+  const label = ActivityIndicators.findingsSchemaForType(findingsType)?.label || findingsType;
+  return `\n\nSTRUCTURED SERVICE FINDINGS (${label} form, technician-recorded)\n`
+    + 'Treat these findings as [OBSERVED BY TECHNICIAN]; "Next steps selected" is [FUTURE ADVICE — not completed work].\n'
+    + (lines.length ? `${lines.join('\n')}\n` : '')
+    + companionSections.map((section) => `${section}\n`).join('')
+    + `Next steps selected: ${chips.length ? chips.join(', ') : 'None'}`;
+}
+
 // POST /api/admin/schedule/generate-report — AI customer-facing service report copy
 router.post('/generate-report', async (req, res) => {
   try {
@@ -11249,6 +11313,7 @@ router.post('/generate-report', async (req, res) => {
       areasServiced, actionsCompleted, observations, recommendations,
       customerInteraction, customerConcern, pestActivityRating, photoCount,
       includeCustomerComms,
+      structuredFindings, nextStepChips, companionFindings,
     } = req.body;
 
     if (scheduledServiceId && !(await technicianOwnsScheduledService(req, scheduledServiceId))) {
@@ -11286,11 +11351,27 @@ router.post('/generate-report', async (req, res) => {
           .first('id'));
       } catch { /* fail toward not-substantive */ }
     }
+    // Typed completion findings (unified Generate action, owner 2026-08-15 —
+    // the recommendations-only findings-recap draft is retired). Shape-check
+    // only here; the prompt block is assembled further down ONLY after the
+    // appointment's completion profile confirms the findings type (same
+    // profile-authority rule as the old draft route).
+    const typedValuesRaw = structuredFindings && typeof structuredFindings === 'object'
+      && structuredFindings.values && typeof structuredFindings.values === 'object'
+      && !Array.isArray(structuredFindings.values)
+      ? structuredFindings.values : null;
+    const typedHasFindingInput = !!typedValuesRaw && (
+      Object.values(typedValuesRaw).some(
+        (v) => (Array.isArray(v) ? v.length > 0 : String(v ?? '').trim() !== ''),
+      )
+      || (Array.isArray(nextStepChips) && nextStepChips.length > 0)
+    );
     const hasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
       || concernText.length > 0
       || ratingNum !== null
+      || typedHasFindingInput
       || hasValidLawnAssessment;
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
 
@@ -11517,6 +11598,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     let groundingServiceType = serviceType;
     let groundingServiceDate = serviceDate;
     let groundingSuppressPressure = false;
+    let typedFindingsBlock = '';
+    let typedFallbackObservations = [];
+    let typedFallbackNextSteps = [];
     if (scheduledServiceId) {
       const svc = await db('scheduled_services')
         .where({ id: scheduledServiceId })
@@ -11556,6 +11640,35 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
               && completionProfile.serviceKey !== 'pest_re_service'
               && !svc.is_callback)
           ));
+          // Structured typed findings reach the prompt only when the
+          // appointment's profile confirms the client-declared type — a
+          // crafted type must not steer customer-facing copy (mirrors the
+          // retired findings-recap draft's profile-authority 409).
+          if (typedValuesRaw && structuredFindings.type) {
+            if (completionProfile?.findingsType !== structuredFindings.type) {
+              return res.status(409).json({
+                error: 'This service does not use that findings form.',
+                code: 'findings_type_mismatch',
+              });
+            }
+            typedFindingsBlock = buildTypedFindingsPromptBlock({
+              findingsType: structuredFindings.type,
+              values: typedValuesRaw,
+              nextStepChips,
+              companionFindings,
+            });
+            // The deterministic last-resort copy can't read the prompt block,
+            // so a typed-only request during a double-provider miss needs the
+            // findings as plain observation/recommendation facts or it would
+            // 503 with real visit data in hand.
+            typedFallbackObservations = typedFindingsPromptLines(
+              structuredFindings.type, typedValuesRaw,
+            ).slice(0, 8);
+            const typedChipsValidation = ActivityIndicators.validateNextStepChips(
+              nextStepChips, structuredFindings.type, typedValuesRaw,
+            );
+            typedFallbackNextSteps = typedChipsValidation.ok ? typedChipsValidation.chips : [];
+          }
         } else {
           logger.warn('[generate-report] caller not authorized for service grounding', { scheduledServiceId, technicianId: req.technicianId || null });
         }
@@ -11629,9 +11742,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       }
     }
 
-    const fullUserMessage = `${userMessage}${contextText}${commsBlock}`;
+    const fullUserMessage = `${userMessage}${typedFindingsBlock}${contextText}${commsBlock}`;
+    // v6: typed structured findings joined the prompt payload (2026-08-15).
     const cacheKey = crypto.createHash('sha256')
-      .update(`v5|openai:${primaryModel}|anthropic:${backupModel}|${fullUserMessage}`)
+      .update(`v6|openai:${primaryModel}|anthropic:${backupModel}|${fullUserMessage}`)
       .digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true });
@@ -11654,8 +11768,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
         serviceType: groundingServiceType,
         areas,
         actions,
-        observations: obs,
-        recommendations: recs,
+        // Typed structured findings ride the fallback as technician
+        // observations / next steps (profile-confirmed above) — a typed-only
+        // request must not 503 when the free-text fields are empty.
+        observations: [...obs, ...typedFallbackObservations],
+        recommendations: [...recs, ...typedFallbackNextSteps],
         ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
       });
       if (!report) {
@@ -12625,6 +12742,7 @@ router._test = {
   reportCopyRejection,
   generateReportCopyWithFallback,
   buildDeterministicReportCopy,
+  buildTypedFindingsPromptBlock,
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
   calculateVisitFinancialsForAddons,

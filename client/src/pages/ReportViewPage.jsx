@@ -8953,6 +8953,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             stationMap={data.stationMap}
             trapPins={Boolean(data.rodentReportRefresh)}
             animate={Boolean(data.rodentReportRefresh)}
+            stationPins={Boolean(data.termiteStationPins)}
           />
         )}
 

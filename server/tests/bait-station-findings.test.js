@@ -341,3 +341,23 @@ describe('validation', () => {
     expect(findBannedCustomerCopy(allCopy)).toEqual([]);
   });
 });
+
+describe('termite bait-station pin animation flag (GATE_TERMITE_BAIT_PINS)', () => {
+  const { termiteStationPinsFlag } = require('../services/service-report/report-data');
+  const termiteMap = { available: true, program: 'termite' };
+
+  test('true only for an available termite map on a live view with the gate on', () => {
+    expect(termiteStationPinsFlag({ stationMap: termiteMap, mode: 'live', gateValue: 'true' })).toBe(true);
+  });
+
+  test('gate dark / non-live / other programs / unavailable maps stay undefined', () => {
+    expect(termiteStationPinsFlag({ stationMap: termiteMap, mode: 'live', gateValue: undefined })).toBeUndefined();
+    expect(termiteStationPinsFlag({ stationMap: termiteMap, mode: 'live', gateValue: 'false' })).toBeUndefined();
+    expect(termiteStationPinsFlag({ stationMap: termiteMap, mode: 'pdf', gateValue: 'true' })).toBeUndefined();
+    expect(termiteStationPinsFlag({ stationMap: termiteMap, mode: 'static', gateValue: 'true' })).toBeUndefined();
+    expect(termiteStationPinsFlag({ stationMap: { available: true, program: 'rodent' }, mode: 'live', gateValue: 'true' })).toBeUndefined();
+    expect(termiteStationPinsFlag({ stationMap: { available: true, program: 'trapping' }, mode: 'live', gateValue: 'true' })).toBeUndefined();
+    expect(termiteStationPinsFlag({ stationMap: { available: false, program: 'termite' }, mode: 'live', gateValue: 'true' })).toBeUndefined();
+    expect(termiteStationPinsFlag({ stationMap: null, mode: 'live', gateValue: 'true' })).toBeUndefined();
+  });
+});

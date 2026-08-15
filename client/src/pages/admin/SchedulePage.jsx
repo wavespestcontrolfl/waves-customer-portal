@@ -6580,11 +6580,6 @@ export function TypedFindingsSection({
   onToggleChip,
   recommendations,
   onRecommendationsChange,
-  aiDrafting,
-  aiError,
-  includeComms,
-  onIncludeCommsChange,
-  onAiDraft,
   pesticideProductPresent = true,
 }) {
   const mobile = variant === "mobile";
@@ -6813,9 +6808,12 @@ export function TypedFindingsSection({
         </div>
         )}
       </div>
-      {/* Recommendations textarea + AI draft stay PRIMARY-only: companion
-          sections pass onRecommendationsChange={null} and are chips-first
-          deterministic copy (combined-service-completions.md). */}
+      {/* Recommendations textarea stays PRIMARY-only: companion sections pass
+          onRecommendationsChange={null} and are chips-first deterministic copy
+          (combined-service-completions.md). The old recommendations-only
+          "AI draft" was retired 2026-08-15 (owner): typed completions now use
+          the panel's single full "Generate AI report" action, whose payload
+          carries these structured findings (buildAiReportPayload). */}
       {onRecommendationsChange && (
       <div style={{ marginBottom: 4 }}>
         <div style={fieldLabelStyle}>Recommendations (optional)</div>
@@ -6836,58 +6834,6 @@ export function TypedFindingsSection({
             boxSizing: "border-box",
           }}
         />
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            marginTop: 8,
-            flexWrap: "wrap",
-          }}
-        >
-          <button
-            type="button"
-            onClick={onAiDraft}
-            disabled={aiDrafting}
-            style={{
-              height: 36,
-              padding: "0 14px",
-              borderRadius: 999,
-              background: "transparent",
-              color: accent,
-              border: `1px solid ${accent}`,
-              fontSize: 14,
-              fontWeight: 500,
-              cursor: aiDrafting ? "wait" : "pointer",
-              opacity: aiDrafting ? 0.5 : 1,
-            }}
-          >
-            {aiDrafting ? "Drafting..." : "AI draft"}
-          </button>
-          <label
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              fontSize: 14,
-              color: textColor,
-              cursor: "pointer",
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={includeComms}
-              onChange={(e) => onIncludeCommsChange(e.target.checked)}
-              style={{ width: 16, height: 16, accentColor: accent }}
-            />
-            Include recent customer calls/texts/emails
-          </label>
-        </div>
-        {aiError && (
-          <div style={{ fontSize: 12, color: requiredColor, marginTop: 6 }}>
-            {aiError}
-          </div>
-        )}
       </div>
       )}
     </div>
@@ -9839,13 +9785,6 @@ export function CompletionPanel({
   const [typedRecommendations, setTypedRecommendations] = useState("");
   const [typedRecommendationsEdited, setTypedRecommendationsEdited] =
     useState(false);
-  const [typedAiDrafting, setTypedAiDrafting] = useState(false);
-  const [typedAiError, setTypedAiError] = useState("");
-  // Customer calls/texts/emails reach the AI prompt only on explicit opt-in
-  // — they can carry PII, so the box starts unchecked.
-  // Default CHECKED (ratified Q13 — the owner is the only tech and uses it).
-  const [typedAiIncludeComms, setTypedAiIncludeComms] = useState(true);
-  const [typedAiDraftUsed, setTypedAiDraftUsed] = useState(false);
   // AI photo analysis (optional, never blocks submit): summary is editable,
   // captions attach to the photo entries. Not draft-persisted — photos
   // themselves aren't, and a summary without its photos would be stale.
@@ -11629,7 +11568,38 @@ export function CompletionPanel({
     const recommendations = [
       ...activeSelectedLabels(selectedRecommendationLabels),
       ...freeTextLines(recommendationsText),
+      // Typed completions keep their own recommendations box (inside the
+      // findings section) — since the recap-only draft was retired, the full
+      // generate action is the one AI path and must see that text too.
+      ...(isTypedFindings ? freeTextLines(typedRecommendations) : []),
     ];
+    // Typed structured findings ground the prompt the same way the retired
+    // findings-recap draft grounded its recommendations: only non-empty
+    // values ship, and companion sections ride along by schema type.
+    const typedFindingsPayload = isTypedFindings && typedFindingsSchema
+      ? {
+        structuredFindings: {
+          type: typedFindingsSchema.type,
+          values: findingsValues,
+        },
+        nextStepChips: typedNextStepChips,
+        ...(companionSchemas.length
+          ? {
+            companionFindings: companionSchemas.map((schema) => ({
+              type: schema.type,
+              values: (companionState[schema.type] || EMPTY_COMPANION_ENTRY).values,
+            })),
+          }
+          : {}),
+      }
+      : {};
+    const typedHasFindingInput = isTypedFindings && (
+      Object.values(findingsValues || {}).some(
+        (v) => (Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== ""),
+      )
+      || typedNextStepChips.length > 0
+      || typedActivityScore != null
+    );
     // Mirror the final-submit gate (handleSubmit only sends customerConcernText
     // when the interaction is still "customer had a concern"): if the tech typed
     // a concern then switched the interaction away, the concern input is hidden
@@ -11705,9 +11675,15 @@ export function CompletionPanel({
       recommendations,
       customerInteraction: interactionLabel,
       customerConcern: concern,
-      pestActivityRating: clientPestRating ?? null,
+      // Typed panels rate activity on their own 0–5 gauge (derived from the
+      // findings until the tech pins it); untyped panels use the customer
+      // pest-rating chip row. Same 0–5 scale either way.
+      pestActivityRating: isTypedFindings
+        ? (Number.isInteger(typedActivityScore) ? typedActivityScore : null)
+        : (clientPestRating ?? null),
       photoCount: Array.isArray(servicePhotos) ? servicePhotos.length : 0,
       includeCustomerComms: aiReportIncludeComms,
+      ...typedFindingsPayload,
     };
     const hasReportInput =
       Boolean(payload.serviceNotes) ||
@@ -11718,6 +11694,7 @@ export function CompletionPanel({
       recommendations.length > 0 ||
       Boolean(concern) ||
       payload.pestActivityRating !== null ||
+      typedHasFindingInput ||
       // A confirmed photo-scored assessment is substantive visit detail on
       // its own — a scores-only lawn visit can still generate.
       Boolean(payload.lawnAssessmentId) ||
@@ -12850,7 +12827,10 @@ export function CompletionPanel({
         body.completionTelemetry = {
           ...completionTelemetryRef.current,
           submitClickedAt: new Date().toISOString(),
-          aiDraftUsed: typedAiDraftUsed,
+          // The recommendations-only recap draft was retired 2026-08-15 for
+          // the unified Generate AI report (which drafts NOTES); no draft
+          // ever writes this field now.
+          aiDraftUsed: false,
           recommendationTextEdited: typedRecommendationsEdited,
           activityScoreTouched: typedActivityTouched,
         };
@@ -13142,47 +13122,6 @@ export function CompletionPanel({
           : [...entry.chips, chip];
       return { ...prev, [type]: { ...entry, chips } };
     });
-  }
-  // Optional AI polish — failures surface inline and never block submit;
-  // the Complete button stays usable while a draft is in flight.
-  async function handleTypedAiDraft() {
-    if (typedAiDrafting || !typedFindingsSchema) return;
-    setTypedAiError("");
-    setTypedAiDrafting(true);
-    try {
-      const r = await adminFetch(
-        `/admin/dispatch/${service.id}/findings-recap/draft`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            structuredFindings: {
-              type: typedFindingsSchema.type,
-              values: findingsValues,
-            },
-            nextStepChips: typedNextStepChips,
-            // Tech-chosen solutions feed the draft prompt; productId lets
-            // the server derive the T&S treatment chips from the catalog.
-            products: selectedProducts.map((p) => ({
-              productId: p.productId,
-              name: p.displayName || p.name,
-              applicationMethod: p.applicationMethod || null,
-              targets: Array.isArray(p.targets) ? p.targets.slice(0, 6) : [],
-            })),
-            includeCustomerComms: typedAiIncludeComms,
-          }),
-        },
-      );
-      if (r?.draft) {
-        setTypedRecommendations(r.draft);
-        setTypedRecommendationsEdited(false);
-        setTypedAiDraftUsed(true);
-      } else {
-        setTypedAiError("AI draft unavailable — write manually or skip.");
-      }
-    } catch {
-      setTypedAiError("AI draft unavailable — write manually or skip.");
-    }
-    setTypedAiDrafting(false);
   }
   // Optional AI photo analysis — sends the attached photos (still local
   // data-URLs pre-submit) for a customer-facing summary + per-photo
@@ -14469,11 +14408,6 @@ export function CompletionPanel({
                 onToggleChip={toggleTypedNextStepChip}
                 recommendations={typedRecommendations}
                 onRecommendationsChange={handleTypedRecommendationsChange}
-                aiDrafting={typedAiDrafting}
-                aiError={typedAiError}
-                includeComms={typedAiIncludeComms}
-                onIncludeCommsChange={setTypedAiIncludeComms}
-                onAiDraft={handleTypedAiDraft}
               />
             )}
             {/* Companion sections — one typed form per companion schema,
@@ -14502,11 +14436,6 @@ export function CompletionPanel({
                   }
                   recommendations=""
                   onRecommendationsChange={null}
-                  aiDrafting={false}
-                  aiError=""
-                  includeComms={false}
-                  onIncludeCommsChange={() => {}}
-                  onAiDraft={() => {}}
                 />
               );
             })}
@@ -16649,11 +16578,6 @@ export function CompletionPanel({
               onToggleChip={toggleTypedNextStepChip}
               recommendations={typedRecommendations}
               onRecommendationsChange={handleTypedRecommendationsChange}
-              aiDrafting={typedAiDrafting}
-              aiError={typedAiError}
-              includeComms={typedAiIncludeComms}
-              onIncludeCommsChange={setTypedAiIncludeComms}
-              onAiDraft={handleTypedAiDraft}
             />
           )}
           {/* Companion sections — one typed form per companion schema,
@@ -16680,11 +16604,6 @@ export function CompletionPanel({
                 }
                 recommendations=""
                 onRecommendationsChange={null}
-                aiDrafting={false}
-                aiError=""
-                includeComms={false}
-                onIncludeCommsChange={() => {}}
-                onAiDraft={() => {}}
               />
             );
           })}

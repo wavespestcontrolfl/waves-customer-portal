@@ -4553,6 +4553,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // would keep serving stale cached PDFs across a gate flip (codex P2
     // #3004) — non-live renders keep the legacy layout unconditionally.
     rodentReportRefresh: (rodentReportRefresh && opts.mode === 'live') || undefined,
+    // Client-side switch for the termite bait-station pin animation (owner ask
+    // 2026-08-15): staggered pop-in + activity-pulse halo on the station map.
+    // Same contract as rodentReportRefresh — LIVE VIEWS ONLY (stored PDF keys
+    // don't carry this gate; non-live renders never mount the map anyway), and
+    // the gate dark keeps today's static pins bit-for-bit.
+    termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
     visitTimeline,
     serviceLocations,
@@ -4653,8 +4659,20 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   };
 }
 
+// Pure — the termite bait-station pin-animation payload flag
+// (GATE_TERMITE_BAIT_PINS, owner ask 2026-08-15). Live views only; gate dark
+// (or any non-termite / unavailable map) = undefined, keeping today's static
+// pins bit-for-bit. Exported for the contract test.
+function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE_TERMITE_BAIT_PINS }) {
+  return (stationMap?.available === true
+    && stationMap?.program === 'termite'
+    && gateValue === 'true'
+    && mode === 'live') || undefined;
+}
+
 module.exports = {
   buildReportV1Data,
+  termiteStationPinsFlag,
   // Pure — exported so the rainfall-provenance contract can be tested against
   // the real implementation rather than a copy of it.
   buildLawnWaterContext,

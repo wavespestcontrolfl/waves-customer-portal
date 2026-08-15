@@ -157,3 +157,58 @@ describe('deterministic report fallback', () => {
     expect(buildDeterministicReportCopy({ serviceType: 'General Pest Control' })).toBeNull();
   });
 });
+
+describe('generate-report typed findings prompt block (buildTypedFindingsPromptBlock)', () => {
+  const { buildTypedFindingsPromptBlock } = require('../routes/admin-schedule')._test;
+
+  test('renders labeled lines, valid chips, and the provenance framing', () => {
+    const block = buildTypedFindingsPromptBlock({
+      findingsType: 'termite_bait_station',
+      values: { total_stations: '12', stations_checked: '11', stations_with_activity: '1' },
+      nextStepChips: ['Continue scheduled monitoring'],
+      companionFindings: [],
+    });
+    expect(block).toContain('STRUCTURED SERVICE FINDINGS (Termite Bait Station Inspection form');
+    expect(block).toContain('[OBSERVED BY TECHNICIAN]');
+    expect(block).toContain('[FUTURE ADVICE — not completed work]');
+    expect(block).toMatch(/Total stations.*12/i);
+    expect(block).toContain('Next steps selected: Continue scheduled monitoring');
+  });
+
+  test('drops empty values, invalid chips, and internal fields', () => {
+    const block = buildTypedFindingsPromptBlock({
+      findingsType: 'rodent_trapping',
+      // trap_visit_type is `internal` — tech-facing data that must never
+      // reach a customer-facing prompt (same rule as buildFindingsRecapPrompt)
+      values: { trap_visit_type: 'setup', traps_checked: '4', traps_set: '' },
+      nextStepChips: ['Not a real chip for this type'],
+      companionFindings: [],
+    });
+    expect(block).not.toContain('setup');
+    expect(block).not.toContain('trap_visit_type');
+    expect(block).toContain('Next steps selected: None');
+    expect(block).toMatch(/4/);
+  });
+
+  test('renders bounded companion sections and returns empty when nothing survives', () => {
+    const withCompanion = buildTypedFindingsPromptBlock({
+      findingsType: 'termite_bait_station',
+      values: { total_stations: '8' },
+      nextStepChips: [],
+      companionFindings: [
+        { type: 'cockroach', values: { species: 'German cockroach' } },
+        { type: 'not_a_type', values: { species: 'ignored' } },
+      ],
+    });
+    expect(withCompanion).toContain('Companion findings (');
+    expect(withCompanion).toContain('German cockroach');
+    expect(withCompanion).not.toContain('ignored');
+
+    expect(buildTypedFindingsPromptBlock({
+      findingsType: 'termite_bait_station',
+      values: { total_stations: '' },
+      nextStepChips: ['bogus'],
+      companionFindings: [],
+    })).toBe('');
+  });
+});

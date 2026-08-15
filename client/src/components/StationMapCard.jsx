@@ -263,6 +263,24 @@ function useAmbientRatCycle(enabled, eligibleIndices) {
   return run;
 }
 
+// Bait-station pin animation (termite program, GATE_TERMITE_BAIT_PINS): the
+// numbered circle pins pop in staggered, and any pin with recorded termite
+// activity carries a slow pulsing halo so the red state reads at a glance
+// (owner ask 2026-08-15 — the bait animation is the termite report's map
+// treatment; the spray trace never renders on bait lanes). Live report views
+// only; disabled wholesale under prefers-reduced-motion.
+const STATION_PIN_STYLES = `
+  .station-pin { transform-box: fill-box; transform-origin: center; }
+  .station-pin-pop { animation: station-pop 0.45s cubic-bezier(0.2, 1.4, 0.4, 1) backwards; animation-delay: calc(var(--pin-i, 0) * 0.1s); }
+  @keyframes station-pop { from { transform: scale(0); } to { transform: scale(1); } }
+  .station-pulse { animation: station-pulse 2.8s ease-out infinite; animation-delay: calc(var(--pin-i, 0) * 0.1s + 0.45s); }
+  @keyframes station-pulse { 0% { r: 12; opacity: 0.7; } 70% { r: 24; opacity: 0; } 100% { r: 24; opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .station-pin-pop, .station-pulse { animation: none; }
+    .station-pulse { display: none; }
+  }
+`;
+
 const TRAP_PIN_STYLES = `
   .trap-pin { transform-box: fill-box; transform-origin: center; }
   .trap-pin-pop { animation: trap-pop 0.45s cubic-bezier(0.2, 1.4, 0.4, 1) backwards; animation-delay: calc(var(--trap-i, 0) * 0.1s); }
@@ -281,9 +299,14 @@ const TRAP_PIN_STYLES = `
   }
 `;
 
-export function StationMapCard({ stationMap, sectionId = 'station-map', variant = 'report', hideTitle = false, trapPins = false, animate = false }) {
+export function StationMapCard({ stationMap, sectionId = 'station-map', variant = 'report', hideTitle = false, trapPins = false, animate = false, stationPins = false }) {
   const stations = Array.isArray(stationMap?.stations) ? stationMap.stations : [];
   const useTrapPins = trapPins && stationMap?.program === 'trapping' && variant !== 'plan';
+  // Animated circle pins are scoped to the TERMITE bait-station program on the
+  // per-visit report card. The 'plan' embed aggregates checks across visits, so
+  // a pop-in there would suggest this-visit motion the data doesn't carry; the
+  // rodent programs keep their own treatments (static circles / trap pins).
+  const useStationPinAnim = stationPins && stationMap?.program === 'termite' && variant !== 'plan' && !useTrapPins;
   // A declared trap SETUP is a per-VISIT fact, so it never applies to the
   // 'plan' variant (that embed aggregates the latest check across visits).
   const initialSetup = variant !== 'plan' && stationMap?.initialSetup === true;
@@ -348,6 +371,7 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
         >
           <image href={stationMap.image.url} x="0" y="0" width={width} height={height} preserveAspectRatio="xMidYMid slice" />
           {useTrapPins && <style>{TRAP_PIN_STYLES}</style>}
+          {useStationPinAnim && <style>{STATION_PIN_STYLES}</style>}
           {stations.map((station, index) => {
             const meta = STATION_STATUS_META[station.status]
               ? stationStatusMeta(station.status, programMeta, plan, initialSetup)
@@ -375,10 +399,19 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
               );
             }
             return (
-              <g key={station.id}>
+              <g
+                key={station.id}
+                className={useStationPinAnim ? 'station-pin station-pin-pop' : undefined}
+                style={useStationPinAnim ? { '--pin-i': index } : undefined}
+              >
                 <title>
                   {`Station ${station.number}${station.label ? ` — ${station.label}` : ''}: ${meta.label}`}
                 </title>
+                {/* pulsing halo on activity pins — decorative restatement of the
+                    legend color, so it carries no label of its own */}
+                {useStationPinAnim && station.status === 'activity' && (
+                  <circle className="station-pulse" cx={cx} cy={cy} r={12} fill="none" stroke={meta.color} strokeWidth={2} aria-hidden="true" />
+                )}
                 <circle cx={cx} cy={cy} r={12} fill={meta.color} stroke="#fff" strokeWidth={2.5} />
                 <text x={cx} y={cy + 4} textAnchor="middle" fontSize={12} fontWeight={700} fill="#fff">
                   {station.number}
