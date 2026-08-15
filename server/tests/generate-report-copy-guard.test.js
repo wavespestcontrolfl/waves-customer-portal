@@ -376,6 +376,29 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(ts.work).toHaveLength(1);
   });
 
+  test('a shaped response with parser-only forbidden terms is rejected (r15)', async () => {
+    const provider = (name, responses) => ({
+      name, model: `${name}-model`,
+      call: jest.fn().mockImplementation(() => Promise.resolve(responses.shift())),
+    });
+    const goodShape = 'WHAT WE DID\n\nWe serviced the bait stations.\n\nWHAT WE FOUND\n\nActivity was light.';
+    // parses, but the parser's own screens null the body ('infestation')
+    const parserRejected = 'WHAT WE DID\n\nWe treated the infestation areas.\n\nWHAT WE FOUND\n\nActivity was light.';
+    const openai = provider('openai', [{ ok: true, text: parserRejected }, { ok: true, text: goodShape }]);
+    const result = await generateReportCopyWithFallback({
+      systemPrompt: 's', userMessage: 'u', providers: [openai, provider('anthropic', [])],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.report).toBe(goodShape);
+    expect(openai.call).toHaveBeenCalledTimes(2);
+  });
+
+  test('wildlife suspected species stays an observation (r15)', () => {
+    const wild = typedFindingsPromptSections('wildlife_trapping', { target_animal: 'Raccoon' });
+    expect(wild.observations.join(' ')).toContain('Raccoon');
+    expect(wild.work).toHaveLength(0);
+  });
+
   test('treatment targets are completed-work context, not findings (r14)', () => {
     const treat = typedFindingsPromptSections('termite_treatment', { target_termite: 'Unknown / preventive' });
     expect(treat.work.join(' ')).toContain('Unknown / preventive');

@@ -11198,8 +11198,12 @@ async function generateReportCopyWithFallback({
       // would look usable in the panel and then silently publish the
       // deterministic fallback at completion (codex r14). Reject here so
       // malformed output retries/crosses providers instead.
+      // The parser must APPROVE the copy, not merely parse it — a shaped
+      // response can still trip its parser-only screens (bare 'infestation',
+      // 'safe', …), which return { body: null }. Only parser-approved copy
+      // may replace the notes (AGENTS.md report egress; codex r15).
       const rejection = reportCopyRejection(report)
-        || (technicianReportCustomerCopy(report) ? null : 'malformed_shape')
+        || (technicianReportCustomerCopy(report)?.body ? null : 'malformed_shape')
         || (typeof extraRejection === 'function' ? extraRejection(report) : null);
       if (!rejection) {
         return { ok: true, report, provider: provider.name, model: provider.model, failures };
@@ -11271,7 +11275,9 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
 // a different prompt provenance group — and only observations/work may feed
 // the deterministic fallback (product fields would put trade names in
 // customer copy).
-const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas|plant_groups|areas_inspected|structures_inspected)$|^target_|_target$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|_serviced$|^treated_|notice/;
+// target_animal is EXEMPT from the target rule: wildlife's "Suspected
+// species" is an observation, not what a treatment targets (codex r15).
+const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas|plant_groups|areas_inspected|structures_inspected)$|^target_(?!animal\b)|_target$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|_serviced$|^treated_|notice/;
 const TYPED_PRODUCT_FIELD_RE = /product|epa|active_ingredient|concentration|gallon|dilution|_rate$|application|pesticide|^percent_|_solution$|linear_feet|square_footage|trench_depth/i;
 // Recommendation/prep/follow-up fields are FUTURE ADVICE, never findings —
 // presenting a proposed treatment as an observation would let the copy claim
