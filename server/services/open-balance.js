@@ -69,7 +69,14 @@ function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db }
 
 // The per-row self-pay test the SQL cannot make alone: cents-authoritative
 // remainder plus the LIVE payer re-resolution (fail-closed toward DROP).
-async function rowIsSelfPayDue(customerId, row) {
+// `onResolveFailure` (optional) fires when the drop is a RESOLVE FAILURE
+// rather than a genuine payer: dropping the row keeps disclosure fail-closed,
+// but it also silently UNDERSTATES any total built from the survivors —
+// callers that would present that total as a definitive figure (the SMS
+// balance line) must be able to tell "smaller balance" from "incomplete
+// balance" and suppress instead. Existing callers that render the invoices
+// individually (email note, sweep) are unchanged.
+async function rowIsSelfPayDue(customerId, row, { onResolveFailure = null } = {}) {
   if (!(invoiceAmountDue(row) > 0)) return false;
   const PayerService = require('./payer');
   try {
@@ -81,12 +88,13 @@ async function rowIsSelfPayDue(customerId, row) {
     if (resolved?.payerId) return false;
   } catch (err) {
     logger.warn(`[open-balance] payer resolve failed for invoice ${row.invoice_number} — dropping from balance (fail closed): ${err.message}`);
+    if (typeof onResolveFailure === 'function') onResolveFailure(err);
     return false;
   }
   return true;
 }
 
-async function openBalanceInvoices(customerId, { excludeInvoiceId = null, database = db } = {}) {
+async function openBalanceInvoices(customerId, { excludeInvoiceId = null, database = db, onResolveFailure = null } = {}) {
   if (!customerId) return [];
   const rows = await openInvoiceQuery(customerId, { excludeInvoiceId, database });
   if (rows.length >= MAX_OPEN_INVOICES) {
@@ -95,8 +103,8 @@ async function openBalanceInvoices(customerId, { excludeInvoiceId = null, databa
 
   const selfPay = [];
   for (const row of rows) {
-     
-    if (await rowIsSelfPayDue(customerId, row)) selfPay.push(row);
+
+    if (await rowIsSelfPayDue(customerId, row, { onResolveFailure })) selfPay.push(row);
   }
   return selfPay;
 }
@@ -205,21 +213,37 @@ async function openBalanceSummary(customerId, { displayLimit = 5, ...opts } = {}
  * deployed — same rollout discipline as {reservice_line}).
  *
  * `excludeInvoiceId` is the visit's OWN invoice — it is today's bill, not a
- * past-due balance. Selection (self-pay only, live payer re-resolution,
+ * previous balance. Selection (self-pay only, live payer re-resolution,
  * remainders not face values) is openBalanceSummary's — payer-billed debt is
  * never presented to the homeowner.
+ *
+ * The clause says "previous balance", NEVER "past due" (codex P1): the
+ * shared selection is delivered-and-unpaid (sent/viewed/overdue), which
+ * includes invoices still inside their payment terms — the email note uses
+ * the same words for the same reason. And a total any survivor-dropping
+ * resolve failure made INCOMPLETE is suppressed outright (codex P2): a
+ * too-small figure asserted over SMS reads as the whole balance, so saying
+ * nothing beats saying something wrong.
  */
 async function pastDueSmsLineForCustomer(customerId, { excludeInvoiceId = null } = {}) {
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!customerId || !isEnabled('completionSmsBalance')) return '';
-    const prev = await openBalanceSummary(customerId, { excludeInvoiceId });
+    let resolveFailed = false;
+    const prev = await openBalanceSummary(customerId, {
+      excludeInvoiceId,
+      onResolveFailure: () => { resolveFailed = true; },
+    });
+    if (resolveFailed) {
+      logger.warn(`[open-balance] SMS balance line suppressed for ${customerId} — a payer resolve failed, so the total may understate`);
+      return '';
+    }
     if (!(prev.total > 0)) return '';
     const amount = `$${prev.total.toFixed(2)}`;
     const source = prev.count === 1 ? 'an earlier invoice' : `${prev.count} earlier invoices`;
-    return `Reminder: your account also has a past-due balance of ${amount} from ${source}, separate from today's invoice.\n\n`;
+    return `Reminder: your account also has a previous balance of ${amount} from ${source}, separate from today's invoice.\n\n`;
   } catch (err) {
-    logger.warn(`[open-balance] past-due SMS line failed for ${customerId}: ${err.message}`);
+    logger.warn(`[open-balance] SMS balance line failed for ${customerId}: ${err.message}`);
     return '';
   }
 }

@@ -10399,8 +10399,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // (today's bill is not a past-due balance). '' unless
         // GATE_COMPLETION_SMS_BALANCE is on AND the customer has an older
         // open self-pay balance; never throws.
+        // Suppressed outside the 8AM-8PM send window (codex P1): a late
+        // completion's rendered body is FROZEN into the scheduled-SMS queue
+        // (dispatch_completion_deferred below) and replayed verbatim at the
+        // window open — a balance settled overnight (portal payment, sweep)
+        // would still be asserted at 8 AM with no recheck. The pay link
+        // tolerates that staleness (its target renders live paid state); a
+        // static sentence claiming money owed does not, so a deferred
+        // completion simply carries no balance line.
+        const { isWithinSendWindowET } = require('../services/messaging/send-window');
         const { pastDueSmsLineForCustomer } = require('../services/open-balance');
-        const completionPastDueLine = (invoiceCreated && payUrl && allowCompletionInvoiceLink)
+        const completionPastDueLine = (invoiceCreated && payUrl && allowCompletionInvoiceLink && isWithinSendWindowET())
           ? await pastDueSmsLineForCustomer(svc.customer_id, { excludeInvoiceId: invoice?.id || null })
           : '';
         const serviceReportV1SmsContext = serviceReportV1Delivery

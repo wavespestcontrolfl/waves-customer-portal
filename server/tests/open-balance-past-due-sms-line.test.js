@@ -88,7 +88,7 @@ describe('pastDueSmsLineForCustomer', () => {
       { id: 'a', invoice_number: 'INV-A', total: '52.10', credit_applied: 0, scheduled_service_id: null },
     ];
     expect(await pastDueSmsLineForCustomer('cust-1', { excludeInvoiceId: 'inv-now' })).toBe(
-      "Reminder: your account also has a past-due balance of $52.10 from an earlier invoice, separate from today's invoice.\n\n",
+      "Reminder: your account also has a previous balance of $52.10 from an earlier invoice, separate from today's invoice.\n\n",
     );
   });
 
@@ -99,7 +99,7 @@ describe('pastDueSmsLineForCustomer', () => {
       { id: 'b', invoice_number: 'INV-B', total: '100.00', credit_applied: '25.00', scheduled_service_id: null },
     ];
     expect(await pastDueSmsLineForCustomer('cust-1')).toBe(
-      "Reminder: your account also has a past-due balance of $127.10 from 2 earlier invoices, separate from today's invoice.\n\n",
+      "Reminder: your account also has a previous balance of $127.10 from 2 earlier invoices, separate from today's invoice.\n\n",
     );
   });
 
@@ -118,6 +118,21 @@ describe('pastDueSmsLineForCustomer', () => {
       { id: 'a', invoice_number: 'INV-A', total: '52.10', credit_applied: 0, scheduled_service_id: 'svc-a' },
     ];
     mockResolveForInvoice.mockImplementation(async () => ({ payerId: 'payer-1' }));
+    expect(await pastDueSmsLineForCustomer('cust-1')).toBe('');
+  });
+
+  test('a PARTIAL resolve failure suppresses the whole line — an understated total must not be asserted (codex P2)', async () => {
+    mockIsEnabled.mockImplementation((k) => k === 'completionSmsBalance');
+    tableResults.rows = [
+      { id: 'a', invoice_number: 'INV-A', total: '52.10', credit_applied: 0, scheduled_service_id: null },
+      { id: 'b', invoice_number: 'INV-B', total: '75.00', credit_applied: 0, scheduled_service_id: 'svc-b' },
+    ];
+    // INV-B's resolve blows up; INV-A survives — the $52.10 remainder is an
+    // INCOMPLETE figure, so the clause must be suppressed, not rendered.
+    mockResolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => {
+      if (scheduledServiceId === 'svc-b') throw new Error('payer service down');
+      return { payerId: null };
+    });
     expect(await pastDueSmsLineForCustomer('cust-1')).toBe('');
   });
 
