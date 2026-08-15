@@ -954,9 +954,9 @@ const COMMON_PROSE_WORDS = new Set([
   // retrieve/vacuum/document/discuss) are additionally in the
   // directive-verb capture so their OBJECTS still ground strictly.
   'perform', 'performs', 'performed', 'performing', 'provide', 'provides', 'provided', 'providing',
-  'context', 'account', 'accounts', 'recurring', 'initial', 'initially', 'availability', 'available',
+  'context', 'account', 'accounts', 'availability', 'available',
   'information', 'scheduling',
-  'accepted', 'accepting', 'waves', 'retrieve',
+  'waves', 'retrieve',
   'transition', 'transitions', 'standing', 'minute', 'minutes', 'resident', 'residents',
   'list', 'lists', 'site', 'sites',
   'communication', 'communications',
@@ -966,12 +966,16 @@ const COMMON_PROSE_WORDS = new Set([
   'vacuum', 'vacuuming', 'follow-up', 'walk-through',
 ]);
 
-// WaveGuard tier names: real business vocabulary, never common prose — an
-// ungrounded tier mention is an invented account fact (codex #3423 r1).
-// A tier word in the output must be word-boundary grounded; when it is,
-// a tier-carrying capitalized capture ("Accepted Bronze") is prose, not a
-// product reference.
-const TIER_WORDS = new Set(['bronze', 'silver', 'gold', 'platinum']);
+// Business-state vocabulary, never common prose: WaveGuard tier names
+// (codex #3423 r1) and cadence/acceptance terms (r4 — "Apply Initial
+// Treatment" / "Payment accepted" on empty facts would store an invented
+// cadence or account status). These words must be word-boundary grounded;
+// when they are, a capitalized capture carrying them ("Accepted Bronze")
+// is prose about the account, not a product reference.
+const GROUNDED_ONLY_WORDS = new Set([
+  'bronze', 'silver', 'gold', 'platinum',
+  'accepted', 'accepting', 'initial', 'initially', 'recurring',
+]);
 
 // Short/common organism names — too short (or too domain-loaded) for the
 // rare-word scan and unsound to substring-ground ('rat' matches inside
@@ -1116,16 +1120,17 @@ function findUngroundedClaim(body, grounding) {
   const allWordsCommon = (term) => String(term).toLowerCase().split(/\s+/).every((w) => (
     w.length < 4 || REFERENCE_STOP_WORDS.has(w) || COMMON_PROSE_WORDS.has(w)
   ));
-  // Capitalized-run tier prose ("Accepted Bronze"): a tier word makes the
-  // capture product-shaped, but a GROUNDED tier plus common prose is a
-  // sentence about the account, not a product name. Ungrounded tier words
-  // never pass (and the rare-word pass rejects them in any field). Used by
-  // the capitalized-run product path ONLY — application-verb objects keep
-  // the strict skip so "Apply Silver Control" still parks as a product.
+  // Capitalized-run business-state prose ("Accepted Bronze"): a
+  // grounded-only word makes the capture product-shaped, but when it IS
+  // grounded the phrase is a sentence about the account, not a product
+  // name. Ungrounded grounded-only words never pass (and the rare-word
+  // pass rejects them in any field). Used by the capitalized-run product
+  // path ONLY — application-verb objects keep the strict skip so "Apply
+  // Silver Control" still parks as a product.
   const boundaryGroundedWord = (w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedText);
-  const commonOrGroundedTier = (term) => String(term).toLowerCase().split(/\s+/).every((w) => (
+  const commonOrGroundedProse = (term) => String(term).toLowerCase().split(/\s+/).every((w) => (
     w.length < 4 || REFERENCE_STOP_WORDS.has(w) || COMMON_PROSE_WORDS.has(w)
-    || (TIER_WORDS.has(w) && boundaryGroundedWord(w))
+    || (GROUNDED_ONLY_WORDS.has(w) && boundaryGroundedWord(w))
   ));
   // Instruction fields (priorities, watch_items) direct the technician —
   // an application-verb product reference there must name a product on
@@ -1236,7 +1241,7 @@ function findUngroundedClaim(body, grounding) {
     }
     const refs = extractOutputReferences(String(field.text));
     for (const term of refs.products) {
-      if (commonOrGroundedTier(term)) continue;
+      if (commonOrGroundedProse(term)) continue;
       // A sentence-case application verb rides into the capitalized-run
       // capture ("Applied Prodiamine") — the verb is not part of the
       // product name; ground the remainder.

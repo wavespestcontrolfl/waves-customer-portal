@@ -499,6 +499,18 @@ describe('grounded allowlist validation of LLM output', () => {
     expect(verdict.body).toBeTruthy();
   });
 
+  test('ungrounded cadence and acceptance claims reject (codex #3423 r4)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Apply Initial Treatment', 'Apply Recurring Treatment', 'Payment accepted']) {
+      const verdict = validateBriefJson(
+        { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], watch_items: [claim] },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
   test('ungrounded equipment directives and service-history claims reject (codex #3423 r3)', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
@@ -515,7 +527,13 @@ describe('grounded allowlist validation of LLM output', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = {
       catalogVocabulary: { names: [], targets: [] },
-      llmFacts: { membership: { tier: 'Bronze' }, serviceType: 'Quarterly Pest Control Service' },
+      // 'accepted' is grounded-only vocabulary (r4) — grounded here via the
+      // estimate status, as real acceptance groundings are.
+      llmFacts: {
+        membership: { tier: 'Bronze' },
+        serviceType: 'Quarterly Pest Control Service',
+        openScope: { pendingEstimate: { status: 'accepted' } },
+      },
     };
     const verdict = validateBriefJson(
       {
