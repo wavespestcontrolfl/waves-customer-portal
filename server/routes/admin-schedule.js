@@ -11257,16 +11257,27 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
 // a different prompt provenance group — and only observations/work may feed
 // the deterministic fallback (product fields would put trade names in
 // customer copy).
-const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated)$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$/;
-const TYPED_PRODUCT_FIELD_RE = /product|epa|active_ingredient|concentration|gallon|dilution|_rate$|application/i;
+const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas)$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|^treated_/;
+const TYPED_PRODUCT_FIELD_RE = /product|epa|active_ingredient|concentration|gallon|dilution|_rate$|application|pesticide|^percent_|_solution$/i;
 // Recommendation/prep/follow-up fields are FUTURE ADVICE, never findings —
 // presenting a proposed treatment as an observation would let the copy claim
 // work or conditions the visit didn't establish (codex r3 P1).
 const TYPED_ADVICE_FIELD_RE = /recommend|_prep$|instruction|followup|follow_up/i;
+// Customer-communication fields (mosquito_event customer_reported /
+// customer_discussed) are the homeowner's words, not technician findings —
+// they render in their own attributed group and never feed the deterministic
+// fallback's "The technician noted" line (codex r5 P1).
+const TYPED_CUSTOMER_FIELD_RE = /^customer_(?:reported|discussed)$/;
+const TYPED_CUSTOMER_SECTION_RE = /customer communication/i;
+// Work sections/keys beyond the suffix families (r4): named completed-action
+// keys surfaced by the full-schema sweep — zones treated, source reduction,
+// sensitive-area handling, exclusion/sanitation work.
+const TYPED_WORK_SECTION_RE = /work completed|areas serviced/i;
 function typedFieldProvenance(field) {
   if (field.type === 'applications' || TYPED_PRODUCT_FIELD_RE.test(field.key)) return 'product';
+  if (TYPED_CUSTOMER_FIELD_RE.test(field.key) || TYPED_CUSTOMER_SECTION_RE.test(field.section || '')) return 'customer';
   if (TYPED_ADVICE_FIELD_RE.test(field.key)) return 'advice';
-  if (TYPED_WORK_FIELD_RE.test(field.key) || /work completed/i.test(field.section || '')) return 'work';
+  if (TYPED_WORK_FIELD_RE.test(field.key) || TYPED_WORK_SECTION_RE.test(field.section || '')) return 'work';
   return 'observation';
 }
 
@@ -11283,7 +11294,7 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
   const schema = ActivityIndicators.findingsSchemaForType(findingsType, { companion });
   // productValues carries the RAW text of product-record fields so the
   // output validator can reject echoed trade names (codex r4).
-  const sections = { work: [], observations: [], products: [], advice: [], productValues: [] };
+  const sections = { work: [], observations: [], products: [], advice: [], customer: [], productValues: [] };
   if (!schema) return sections;
   let total = 0;
   for (const field of schema.fields || []) {
@@ -11317,6 +11328,7 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
       sections.products.push(line);
       sections.productValues.push(text.slice(0, 300));
     } else if (target === 'advice') sections.advice.push(line);
+    else if (target === 'customer') sections.customer.push(line);
     else if (target === 'work') sections.work.push(line);
     else sections.observations.push(line);
   }
@@ -11366,6 +11378,7 @@ function renderTypedGroupLines(sections) {
   if (sections.observations.length) parts.push(`Findings observed:\n${sections.observations.join('\n')}`);
   if (sections.products.length) parts.push(`Product application record (context only — describe the work plainly, NEVER name these products in customer copy):\n${sections.products.join('\n')}`);
   if (sections.advice.length) parts.push(`Recommendations recorded (future advice — never describe as completed work or observed findings):\n${sections.advice.join('\n')}`);
+  if (sections.customer.length) parts.push(`Customer communication (the homeowner's words / what was discussed — attribute it, NEVER present as a technician-verified finding):\n${sections.customer.join('\n')}`);
   return parts;
 }
 
@@ -11375,7 +11388,7 @@ function buildTypedFindingsPromptBlock({
 }) {
   const primarySections = findingsType
     ? typedFindingsPromptSections(findingsType, values)
-    : { work: [], observations: [], products: [], advice: [] };
+    : { work: [], observations: [], products: [], advice: [], customer: [] };
   const primaryActivityLine = findingsType ? typedActivityLine(findingsType, activityScore) : null;
   if (primaryActivityLine) primarySections.observations.push(primaryActivityLine);
   let chips = [];
@@ -11495,6 +11508,7 @@ router.post('/generate-report', async (req, res) => {
     const sectionsHaveFacts = (sections) => !!sections && (
       sections.work.length > 0 || sections.observations.length > 0
       || sections.advice.length > 0 || sections.products.length > 0
+      || sections.customer.length > 0
     );
     const companionEntryHasInput = (entry) => (
       ActivityIndicators.isTypedFindingsType(entry?.type)
@@ -11570,7 +11584,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 7. **Input provenance — do not cross categories.** The inputs are grouped by where they came from. Treat them accordingly:
    - **Completed work** (Service Notes, Actions completed, Areas serviced, Products applied, and the "Work recorded" lines of a STRUCTURED SERVICE FINDINGS block): what was actually done — safe to describe in WHAT WE DID.
-   - **Reported by customer** (Customer concern): what the customer *said*, NOT a verified finding. If you mention it, attribute it ("the homeowner noted…") — never state it as something the technician found or confirmed.
+   - **Reported by customer** (Customer concern, and the "Customer communication" lines of a STRUCTURED SERVICE FINDINGS block): what the customer *said* or what was discussed with them, NOT a verified finding. If you mention it, attribute it ("the homeowner noted…") — never state it as something the technician found or confirmed.
    - **Observed by technician** (Observations, Pest activity rating, and ONLY the "Findings observed" lines of a STRUCTURED SERVICE FINDINGS block): conditions noted on site — fine for WHAT WE FOUND. Station/bait/trap counts and states in those lines are recorded facts you may cite exactly. Lines in the block's other groups keep their own provenance — "Work recorded" is completed work, never a finding.
    - **Future advice** (Recommendations, plus "Next steps selected" and the "Recommendations recorded" lines in a STRUCTURED SERVICE FINDINGS block): planned/suggested next steps — NEVER describe these as completed work. "Schedule interior next visit" means interior was NOT treated this visit.
    Do not convert a customer-reported concern or a recommendation into a confirmed finding or completed action.

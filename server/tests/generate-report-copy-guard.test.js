@@ -268,6 +268,45 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(sections.productValues).toEqual(['Termidor HE']);
   });
 
+  test('named action fields and work sections classify as work (r5)', () => {
+    const mosq = typedFindingsPromptSections('mosquito_event', {
+      treatment_zones: 'Backyard foliage, fence line',
+      source_reduction: 'Tipped plant saucers',
+      sensitive_areas_avoided: 'Pollinator garden',
+      standing_water: 'Birdbath',
+    });
+    expect(mosq.work).toHaveLength(3);
+    expect(mosq.observations.join(' ')).toContain('Birdbath');
+    expect(mosq.observations.join(' ')).not.toContain('fence line');
+    const excl = typedFindingsPromptSections('rodent_exclusion', { entry_points_addressed: 'Garage corner gap sealed' });
+    expect(excl.work).toHaveLength(1);
+  });
+
+  test('customer-communication fields keep their reported-by-customer provenance (r5)', () => {
+    const sections = typedFindingsPromptSections('mosquito_event', {
+      customer_reported: 'Bites on the lanai at dusk',
+      customer_discussed: 'Dumping standing water weekly',
+    });
+    expect(sections.customer).toHaveLength(2);
+    expect(sections.observations).toHaveLength(0);
+    const block = buildTypedFindingsPromptBlock({
+      findingsType: 'mosquito_event',
+      values: { customer_reported: 'Bites on the lanai at dusk' },
+      nextStepChips: [],
+      companionFindings: [],
+      allowedCompanionTypes: [],
+    });
+    expect(block).toContain('Customer communication (');
+    expect(block).toContain('NEVER present as a technician-verified finding');
+    expect(block).not.toMatch(/Findings observed:[^]*lanai/);
+  });
+
+  test('percent_solution is application-record data, never an observation (r5)', () => {
+    const sections = typedFindingsPromptSections('termite_treatment', { percent_solution: '0.06' });
+    expect(sections.products.join(' ')).toContain('0.06');
+    expect(sections.observations).toHaveLength(0);
+  });
+
   test('only auto_send companions are customer-facing; internal_only stay staff-only', () => {
     expect(customerFacingCompanionTypes([
       { type: 'tree_shrub', delivery: 'auto_send' },
