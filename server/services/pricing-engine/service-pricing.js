@@ -2923,7 +2923,13 @@ function resolveCommercialTurfSqFt(property = {}) {
 function priceCommercialLawn(property = {}, options = {}) {
   const cfg = COMMERCIAL_LAWN;
   const { turfSf, turfBasis, estimated } = resolveCommercialTurfSqFt(property);
-  const visits = cfg.programVisits;
+  // Admin apps/year override (estimator "Lawn cadence override"). Labor, drive,
+  // and reserves scale with the visit count; the annual material budget is
+  // turf-driven and stays constant (the same agronomic program spread over the
+  // sold visit count). Billing stays monthly (annual/12) at any cadence.
+  const visits = Number.isFinite(options.lawnVisits) && options.lawnVisits > 0
+    ? options.lawnVisits
+    : cfg.programVisits;
   const annualMaterial = cfg.materialAnnualPerK * (turfSf / 1000);
   const materialCostPerVisit = annualMaterial / visits;
 
@@ -2985,7 +2991,12 @@ function priceCommercialLawn(property = {}, options = {}) {
     pricingBasis: 'COMMERCIAL_COST_BUILDUP',
     pricingConfidence,
     minApplied,
-    program: { fertApps: 4, preEmergentApps: 2, postEmergentApps: 4, insectApps: 2 },
+    // The app-mix breakdown describes the default 8-visit program; at an
+    // overridden cadence the mix shifts on-site, so claiming the default
+    // split would be wrong — omit it rather than misstate it.
+    ...(visits === cfg.programVisits
+      ? { program: { fertApps: 4, preEmergentApps: 2, postEmergentApps: 4, insectApps: 2 } }
+      : {}),
     taxable: cfg.taxable,
     taxCategory: cfg.taxCategory,
     costs: {

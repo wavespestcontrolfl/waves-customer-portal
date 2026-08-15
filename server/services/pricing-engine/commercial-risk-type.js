@@ -72,6 +72,22 @@ function resolveCommercialPestCadenceOverride(cadence) {
   return COMMERCIAL_PEST_CADENCE_VISITS[key] || null;
 }
 
+// Admin LAWN apps/year override (owner request 2026-08-15): the estimator's
+// "Lawn cadence override" select sells the commercial turf program at a direct
+// applications-per-year count when the 8-visit default isn't what the deal
+// needs. LAWN only, and a whitelist like the pest map — commercial lawn bills
+// MONTHLY regardless (annual/12), so this changes the priced visit count, not
+// the billing cadence. Unset/unrecognized → null, so callers keep
+// COMMERCIAL_LAWN.programVisits.
+const COMMERCIAL_LAWN_CADENCE_APPS = [4, 6, 8, 10, 12];
+const COMMERCIAL_LAWN_CADENCE_SET = new Set(COMMERCIAL_LAWN_CADENCE_APPS);
+
+function resolveCommercialLawnCadenceOverride(cadence) {
+  if (cadence === null || cadence === undefined || cadence === '') return null;
+  const n = Number(cadence);
+  return COMMERCIAL_LAWN_CADENCE_SET.has(n) ? n : null;
+}
+
 module.exports = {
   COMMERCIAL_RISK_TYPES,
   COMMERCIAL_RISK_TYPE_CADENCE,
@@ -80,4 +96,6 @@ module.exports = {
   isCommercialRiskType,
   resolveCommercialCadence,
   resolveCommercialPestCadenceOverride,
+  COMMERCIAL_LAWN_CADENCE_APPS,
+  resolveCommercialLawnCadenceOverride,
 };
