@@ -420,6 +420,23 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(wild.observations.join(' ')).toContain('No activity at traps');
   });
 
+  test('customer-reported evidence options split to customer provenance (r24)', () => {
+    const bb = typedFindingsPromptSections('bed_bug', {
+      evidence_observed: 'Live bed bugs, Bites reported by customer',
+    });
+    expect(bb.observations.join(' ')).toContain('Live bed bugs');
+    expect(bb.observations.join(' ')).not.toContain('Bites reported');
+    expect(bb.customer.join(' ')).toContain('Bites reported by customer');
+  });
+
+  test('historical Completed-previously status is not future advice (r24)', () => {
+    const excl = typedFindingsPromptSections('rodent_trapping', {
+      exclusion_recommendation: 'Completed previously',
+    });
+    expect(excl.advice).toHaveLength(0);
+    expect(excl.observations).toHaveLength(1);
+  });
+
   test('negative answers on work fields are status, not completed work (r20)', () => {
     const neg = typedFindingsPromptSections('rodent_bait_station', { bait_replaced: 'No' });
     expect(neg.work).toHaveLength(0);

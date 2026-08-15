@@ -9725,6 +9725,14 @@ export function CompletionPanel({
     // reading the ref inside them would see the values we're about to
     // write below and misread every auto-owned field as hand-edited.
     const lastAuto = { ...stationAutoCountsRef.current };
+    // Auto-written counts that CHANGE after a report was installed are typed
+    // edits too — a deferred registry write or mid-generation pin edit lands
+    // here, bypassing the mutation handlers, and must invalidate an
+    // untouched draft the same way (codex r24). Unchanged re-runs (e.g. the
+    // generating->false re-fire) never clear a fresh draft.
+    const autoCountsChanged = Object.entries(counts)
+      .some(([key, value]) => String(lastAuto[key] ?? '') !== String(value));
+    if (autoCountsChanged) invalidateGeneratedReportOnTypedEdit();
     const applyCounts = (values) => {
       let changed = false;
       const next = { ...values };
@@ -10921,6 +10929,9 @@ export function CompletionPanel({
         // (billing-409 detour, reload) or the resumed completion records
         // aiDraftUsed: false for an AI-installed report (codex r17).
         aiReportUsed,
+        // The installed-report identity restores too, so an UNTOUCHED
+        // restored draft stays invalidatable on later typed edits (codex r24).
+        generatedReportText: generatedReportTextRef.current,
         nextVisitNote,
         showNextVisitNote,
         treeShrubCloseout,
@@ -11196,6 +11207,9 @@ export function CompletionPanel({
     setChipLinesDetached(savedDraft.chipLinesDetached === true);
     // Older drafts lack the field → false, matching their pre-AI notes.
     setAiReportUsed(savedDraft.aiReportUsed === true);
+    generatedReportTextRef.current = typeof savedDraft.generatedReportText === "string" && savedDraft.generatedReportText
+      ? savedDraft.generatedReportText
+      : null;
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
     setTreeShrubCloseout(
@@ -11662,12 +11676,16 @@ export function CompletionPanel({
     // Only chips that don't conflict with the recorded findings count — a
     // stale conflicted selection stays tappable for removal but the server's
     // validatedChipCount gate would 400 a request it alone opened (codex r12).
-    const validChipCount = (schemaType, chips, values) => (chips || []).filter(
-      (chip) => !typedNextStepChipConflict(schemaType, chip, values),
+    // Membership in the CURRENT schema's chip list is required too — a
+    // restored draft can carry a chip removed from the schema, which the
+    // server's validateNextStepChips rejects (codex r24).
+    const validChipCount = (schema, chips, values) => (chips || []).filter(
+      (chip) => (schema?.nextStepChips || []).includes(chip)
+        && !typedNextStepChipConflict(schema?.type, chip, values),
     ).length;
     const typedHasFindingInput = (isTypedFindings && (
       nonInternalValuesNonEmpty(typedFindingsSchema, findingsValues)
-      || (typedFindingsSchema && validChipCount(typedFindingsSchema.type, typedNextStepChips, findingsValues) > 0)
+      || (typedFindingsSchema && validChipCount(typedFindingsSchema, typedNextStepChips, findingsValues) > 0)
       || typedActivityScore != null
     ))
       || companionSchemas.some((schema) => {
@@ -11680,7 +11698,7 @@ export function CompletionPanel({
         // A manually tapped companion activity gauge is substantive on its
         // own — same rule as the primary score (codex r3).
         return nonInternalValuesNonEmpty(schema, entry.values)
-          || validChipCount(schema.type, entry.chips, entry.values) > 0
+          || validChipCount(schema, entry.chips, entry.values) > 0
           || Number.isInteger(entry.score);
       });
     // Mirror the final-submit gate (handleSubmit only sends customerConcernText

@@ -301,3 +301,52 @@ describe('flea technician report body (codex r21 #3420)', () => {
     expect(r.body).toContain('Flea control works best');
   });
 });
+
+// r24 (#3420): tree_shrub, rodent_exclusion, and rodent_inspection join the
+// technician-report consumers — mandated disclosure/recommendation lines
+// carry in every body.
+describe('typed branches consume the reviewed report body (codex r24 #3420)', () => {
+  const { buildTodaysResult } = require('../services/service-report/activity-indicators');
+
+  test('tree_shrub keeps the Ganoderma answer beside the draft', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Good', plant_groups: 'Palms', ganoderma_conk_observed: 'No', palm_trunk_concern: 'No' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'We will recheck.',
+      technicianReportBody: 'We treated the palms and ornamental beds today.',
+    });
+    expect(r.bodySource).toBe('technician_report');
+    expect(r.body).toContain('ornamental beds');
+    expect(r.body).toContain('No visible Ganoderma conks');
+  });
+
+  test('rodent_exclusion keeps the remaining-concerns disclosure', () => {
+    const r = buildTodaysResult({
+      projectType: 'rodent_exclusion',
+      values: { exclusion_work_completed: 'Yes', remaining_concerns: 'No remaining concerns observed' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'Next visit soon.',
+      technicianReportBody: 'We sealed the garage corner gap today.',
+    });
+    expect(r.bodySource).toBe('technician_report');
+    expect(r.body).toContain('garage corner gap');
+    expect(r.body).toContain('No remaining concerns were observed today.');
+  });
+
+  test('rodent_inspection keeps the service recommendation', () => {
+    const r = buildTodaysResult({
+      projectType: 'rodent_inspection',
+      values: { activity_found: 'Yes', recommended_service: 'Rodent trapping program', urgency: 'High' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'Call with questions.',
+      technicianReportBody: 'We inspected the attic and garage today.',
+    });
+    expect(r.bodySource).toBe('technician_report');
+    expect(r.body).toContain('attic and garage');
+    expect(r.body).toContain('we recommend rodent trapping program');
+  });
+});

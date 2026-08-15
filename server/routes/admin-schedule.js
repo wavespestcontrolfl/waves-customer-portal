@@ -11371,8 +11371,17 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
       // Actives are deliberately excluded too: constraint #4 tells the model
       // to use active-ingredient names in the output.
       if (/product|pesticide/i.test(field.key)) sections.productValues.push(text.slice(0, 300));
-    } else if (target === 'advice') sections.advice.push(line);
-    else if (target === 'customer') sections.customer.push(line);
+    } else if (target === 'advice') {
+      // A historical-status option in a recommendation field ("Completed
+      // previously") records the past, not advice — the fallback must not
+      // say "Recommended next steps include … Completed previously"
+      // (codex r24).
+      if (/^completed(?:\s+previously)?$/i.test(String(raw ?? '').trim())) {
+        sections.observations.push(line);
+      } else {
+        sections.advice.push(line);
+      }
+    } else if (target === 'customer') sections.customer.push(line);
     else if (target === 'work') {
       // Work-classified CHIP fields can mix actions with observed status
       // ("Damaged or missing traps found"), recommendations ("Insulation
@@ -11404,6 +11413,17 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
       } else {
         sections.work.push(line);
       }
+    } else if (multi && parts.some((part) => /reported by (?:the )?customer/i.test(part))) {
+      // Customer-reported evidence options ("Bites reported by customer")
+      // are the homeowner's words even inside an observation chips field —
+      // they split into the customer-provenance group so the prompt can't
+      // present them as technician-confirmed (codex r24).
+      const customerParts = parts.filter((part) => /reported by (?:the )?customer/i.test(part));
+      const observedParts = parts.filter((part) => !/reported by (?:the )?customer/i.test(part));
+      if (observedParts.length) {
+        sections.observations.push(`${label}: ${redactAccessCodes(observedParts.join(', ').slice(0, 300))}`);
+      }
+      sections.customer.push(`${label}: ${redactAccessCodes(customerParts.join(', ').slice(0, 300))}`);
     } else sections.observations.push(line);
   }
   return sections;

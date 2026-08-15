@@ -3185,10 +3185,14 @@ function buildTodaysResult({
             : ' No visible Ganoderma conks were observed on the palms today.';
         }
       }
+      // Reviewed Generate-AI copy replaces the scope/what-we-did portion
+      // (owner 2026-08-11 rule); the Ganoderma answer and next step are
+      // mandated and carry in EVERY body (codex r24 #3420).
       return {
         headline,
-        body: `${scopeSentence} ${whatWeDid}${palmNote} ${nextStep}`.replace(/\s+/g, ' ').trim(),
+        body: `${technicianReportBody || `${scopeSentence} ${whatWeDid}`}${palmNote} ${nextStep}`.replace(/\s+/g, ' ').trim(),
         nextStep,
+        ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
       };
     }
   }
@@ -3208,22 +3212,30 @@ function buildTodaysResult({
     const concerns = String(values.remaining_concerns || '')
       .split(',').map((s) => s.trim()).filter(Boolean);
     const realConcerns = concerns.filter((c) => c !== 'No remaining concerns observed');
-    const sentences = [
-      areas.length
-        ? `Completed rodent exclusion work today around the ${joinPhrases(areas)}.`
-        : 'Completed rodent exclusion work today.',
-      points.length ? `Entry points addressed included the ${joinPhrases(points)}.` : null,
-      whatWeDid,
-      materials.length ? `Materials used included ${joinPhrases(materials)}.` : null,
+    // Reviewed Generate-AI copy replaces the repair-story sentences (owner
+    // 2026-08-11 rule); the remaining-concerns disclosure and next step are
+    // mandated and carry in EVERY body (codex r24 #3420).
+    const exclusionMandated = [
       realConcerns.length
         ? `Remaining concerns: ${joinPhrases(realConcerns.map((c) => c.toLowerCase()))}.`
         : 'No remaining concerns were observed today.',
       nextStep,
     ].filter(Boolean);
+    const exclusionDescriptive = technicianReportBody
+      ? [technicianReportBody]
+      : [
+        areas.length
+          ? `Completed rodent exclusion work today around the ${joinPhrases(areas)}.`
+          : 'Completed rodent exclusion work today.',
+        points.length ? `Entry points addressed included the ${joinPhrases(points)}.` : null,
+        whatWeDid,
+        materials.length ? `Materials used included ${joinPhrases(materials)}.` : null,
+      ].filter(Boolean);
     return {
       headline: 'Exclusion repairs were completed to reduce rodent access and help prevent re-entry.',
-      body: sentences.join(' ').replace(/\s+/g, ' ').trim(),
+      body: [...exclusionDescriptive, ...exclusionMandated].join(' ').replace(/\s+/g, ' ').trim(),
       nextStep,
+      ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 
@@ -3282,24 +3294,32 @@ function buildTodaysResult({
     const found = String(values.activity_found) === 'Yes';
     const service = String(values.recommended_service || '');
     const urgency = String(values.urgency || '');
-    const sentences = [
-      areas.length
-        ? `We inspected the ${joinPhrases(areas)}.`
-        : 'We completed a rodent inspection of the property today.',
-      values.entry_points_found
-        ? `Possible entry points were noted: ${String(values.entry_points_found).trim().replace(/\.$/, '')}.`
-        : null,
+    // Reviewed Generate-AI copy replaces the inspection narrative (owner
+    // 2026-08-11 rule); the service recommendation and next step are
+    // mandated and carry in EVERY body (codex r24 #3420).
+    const inspectionMandated = [
       service && service !== 'No service needed at this time'
         ? `Based on today's findings, we recommend ${service.charAt(0).toLowerCase()}${service.slice(1)}${urgency === 'High' ? ' — scheduling soon is recommended' : ''}.`
         : 'No service is needed at this time based on today’s findings.',
       nextStep,
     ].filter(Boolean);
+    const inspectionDescriptive = technicianReportBody
+      ? [technicianReportBody]
+      : [
+        areas.length
+          ? `We inspected the ${joinPhrases(areas)}.`
+          : 'We completed a rodent inspection of the property today.',
+        values.entry_points_found
+          ? `Possible entry points were noted: ${String(values.entry_points_found).trim().replace(/\.$/, '')}.`
+          : null,
+      ].filter(Boolean);
     return {
       headline: found
         ? 'Rodent activity was found during today’s inspection.'
         : 'No current rodent activity was observed during today’s inspection.',
-      body: sentences.join(' ').replace(/\s+/g, ' ').trim(),
+      body: [...inspectionDescriptive, ...inspectionMandated].join(' ').replace(/\s+/g, ' ').trim(),
       nextStep,
+      ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 
