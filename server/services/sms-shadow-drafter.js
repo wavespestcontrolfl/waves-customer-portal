@@ -73,7 +73,10 @@ const DRAFTER = 'house_voice';
 // retired; auto-send alone still refuses amounts). Access-code values never
 // appear in prompts or replies. The verifier shares the block, so every
 // added fact also becomes checkable ground truth.
-const PROMPT_VERSION = 'house_voice_v10';
+// v11 (codex #3423 r5): sealed-exam generation budget 600 -> 1000 —
+// version-bumped so completed v10 runs stay attributed to the old cap
+// and no run mixes both budgets under one version identity.
+const PROMPT_VERSION = 'house_voice_v11';
 const SHADOW_STATUS = 'shadow';
 
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then

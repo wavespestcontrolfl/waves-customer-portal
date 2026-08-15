@@ -954,7 +954,7 @@ const COMMON_PROSE_WORDS = new Set([
   // retrieve/vacuum/document/discuss) are additionally in the
   // directive-verb capture so their OBJECTS still ground strictly.
   'perform', 'performs', 'performed', 'performing', 'provide', 'provides', 'provided', 'providing',
-  'context', 'account', 'accounts', 'availability', 'available',
+  'context', 'account', 'accounts',
   'information', 'scheduling',
   'waves', 'retrieve',
   'transition', 'transitions', 'standing', 'minute', 'minutes', 'resident', 'residents',
@@ -975,7 +975,20 @@ const COMMON_PROSE_WORDS = new Set([
 const GROUNDED_ONLY_WORDS = new Set([
   'bronze', 'silver', 'gold', 'platinum',
   'accepted', 'accepting', 'initial', 'initially', 'recurring',
+  // r5: "Customer available Monday" is a scheduling fact, not prose.
+  'available', 'availability',
 ]);
+
+// Grounding match for a single candidate word: grounded-only vocabulary
+// must match on a WORD BOUNDARY — substring grounding let 'silver' ground
+// on "silverfish" and 'gold' on "marigold" (codex #3423 r5). Ordinary
+// words keep substring matching (the light-stem tiers rely on it).
+function groundedWordMatch(v, groundedText) {
+  if (GROUNDED_ONLY_WORDS.has(v)) {
+    return new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedText);
+  }
+  return groundedText.includes(v);
+}
 
 // Short/common organism names — too short (or too domain-loaded) for the
 // rare-word scan and unsound to substring-ground ('rat' matches inside
@@ -1018,7 +1031,7 @@ function isGroundedReference(candidate, groundedText) {
     .filter((w) => /^[a-z][a-z'-]{3,}$/.test(w))
     .filter((w) => !wordVariants(w).some((v) => REFERENCE_STOP_WORDS.has(v) || COMMON_PROSE_WORDS.has(v)));
   if (!words.length) return true;
-  return words.every((w) => wordVariants(w).some((v) => groundedText.includes(v)));
+  return words.every((w) => wordVariants(w).some((v) => groundedWordMatch(v, groundedText)));
 }
 
 // Allowlist-extraction of product-ish / target-ish references from brief
@@ -1193,7 +1206,7 @@ function findUngroundedClaim(body, grounding) {
     // prose words asserts nothing beyond its verb.
     const significant = words.filter((w) => !COMMON_PROSE_WORDS.has(w));
     if (!significant.length) return true;
-    return significant.every((w) => wordVariants(w).some((v) => groundedText.includes(v)));
+    return significant.every((w) => wordVariants(w).some((v) => groundedWordMatch(v, groundedText)));
   };
   const labeledFields = [
     ...(body.priorities || []).map((text) => ({ text, instructional: true })),
@@ -1331,7 +1344,7 @@ function findUngroundedClaim(body, grounding) {
     REFERENCE_STOP_WORDS.has(v)
     || COMMON_PROSE_WORDS.has(v)
     || selfReported.has(v)
-    || groundedText.includes(v)
+    || groundedWordMatch(v, groundedText)
   ));
   for (const field of outputFields) {
     // 4+ characters: 'mice'/'rats'/'tick'/'flea'-length organisms must

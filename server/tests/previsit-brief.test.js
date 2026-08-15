@@ -472,7 +472,7 @@ describe('grounded allowlist validation of LLM output', () => {
       {
         ...CLEAN_LLM_JSON,
         mentioned_terms: [],
-        priorities: ['Perform a walkthrough and provide an update on availability'],
+        priorities: ['Perform a walkthrough and provide an update on arrival'],
       },
       grounding,
     );
@@ -502,7 +502,7 @@ describe('grounded allowlist validation of LLM output', () => {
   test('ungrounded cadence and acceptance claims reject (codex #3423 r4)', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
-    for (const claim of ['Apply Initial Treatment', 'Apply Recurring Treatment', 'Payment accepted']) {
+    for (const claim of ['Apply Initial Treatment', 'Apply Recurring Treatment', 'Payment accepted', 'Customer available Monday']) {
       const verdict = validateBriefJson(
         { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], watch_items: [claim] },
         grounding,
@@ -1707,5 +1707,35 @@ describe('sweep', () => {
     expect(out.generated).toBe(1);
     expect(out.failed).toBe(1);
     expect(state.updates.scheduled_services).toHaveLength(1);
+  });
+});
+
+describe('grounded-only words require WORD-BOUNDARY grounding (codex #3423 r5)', () => {
+  test('a tier word never grounds on a substring host (silverfish/marigold)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { target: 'silverfish', note: 'marigold bed by the door' },
+    };
+    for (const claim of ['Silver membership on file', 'Gold membership on file']) {
+      const verdict = validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('a boundary-grounded tier word still passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { membership: { tier: 'Silver' } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Silver membership on file' },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
   });
 });

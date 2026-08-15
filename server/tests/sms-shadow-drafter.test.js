@@ -15,8 +15,8 @@ const {
 const { CUSTOMER_SMS_HOUSE_VOICE, AGENT_CONFIG } = require('../services/ai-assistant/managed-agent-config');
 
 describe('few-shot voice grounding (v7)', () => {
-  test('prompt version bumped to v10', () => {
-    expect(PROMPT_VERSION).toBe('house_voice_v10');
+  test('prompt version bumped to v11', () => {
+    expect(PROMPT_VERSION).toBe('house_voice_v11');
   });
 
   describe('formatExemplarBlock — pure', () => {
@@ -749,7 +749,7 @@ describe('sms shadow drafter — structural unsendability', () => {
 
   test('telemetry identity constants are stable for the judge pass', () => {
     expect(DRAFTER).toBe('house_voice');
-    expect(PROMPT_VERSION).toBe('house_voice_v10');
+    expect(PROMPT_VERSION).toBe('house_voice_v11');
     expect(INTENDED_ACTION_TYPES).toContain('escalate');
     expect(INTENDED_ACTION_TYPES).toContain('none');
   });
