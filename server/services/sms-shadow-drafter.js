@@ -717,7 +717,10 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
     const laneSuffix = lane === 'live' ? '' : `:${lane}`;
     const routed = await dispatchWithFallback(
       { name: `smsShadow:${route.provider}${laneSuffix}`, primary: route, ...(fallback ? { fallback } : {}) },
-      { system, text: userContent, jsonMode: false, maxTokens: 600, anthropicClient: client },
+      // 600 truncated a few sealed-exam drafts per day mid-response
+      // ("unparseable (response truncated at max_tokens=600)", prod
+      // 08-14/15) — the leg then read as a provider failure in the digest.
+      { system, text: userContent, jsonMode: false, maxTokens: 1000, anthropicClient: client },
       { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
     );
     if (routed.ok) return { parsed: parseShadowResponse(routed.text), model: routed.model };

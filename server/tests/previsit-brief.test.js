@@ -463,6 +463,66 @@ describe('grounded allowlist validation of LLM output', () => {
     expect(verdict.body).toBeTruthy();
   });
 
+  test('generic business prose self-grounds — no literal grounding demanded (08-15 tuning)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    // Live briefs template-fell ~96% on ordinary vocabulary ("perform",
+    // "provide", "availability") the grounding JSON never spells out.
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: [],
+        priorities: ['Perform a walkthrough and provide an update on availability'],
+      },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('common-prose target phrases pass the fuzzy tier with stemming (08-15 tuning)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: [],
+        priorities: [],
+        watch_items: ['Ask about a prior scheduled service', 'Customer monitors camera near the driveway'],
+      },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('tier names in descriptive prose are not product-shaped (08-15 tuning)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: [],
+        priorities: [],
+        customer_context: 'Accepted Bronze pest control after the visit.',
+      },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('an ungrounded organism still rejects even inside common prose (08-15 tuning)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: [],
+        priorities: ['Perform an inspection for chinch bugs'],
+      },
+      grounding,
+    );
+    expect(verdict.reason).toMatch(/^ungrounded_novel_target:chinch/);
+  });
+
   test('an invented dollar amount is rejected; a grounded one passes (codex P1)', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = {

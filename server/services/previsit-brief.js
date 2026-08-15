@@ -932,6 +932,22 @@ const COMMON_PROSE_WORDS = new Set([
   'asks', 'same', 'soon', 'once', 'twice', 'edge', 'best', 'back', 'full', 'half',
   'away', 'near', 'upon', 'very', 'much', 'many', 'wear', 'shoe', 'shoes', 'rain',
   'wind', 'heat', 'cold', 'warm', 'soil', 'seed', 'file', 'down', 'knock', 'card', 'paid', 'owed', 'owes', 'due', 'dues', 'crew', 'team', 'unit', 'step', 'path', 'walk', 'tarp', 'hose', 'pump', 'tank', 'mask', 'kit',
+  // Generic vocabulary from the live rejection histogram (08-14/15: 96% of
+  // briefs template-fell on words like "perform" ×79, "provide",
+  // "availability"). Deliberately NO organisms, product names, or
+  // direction/scope words (interior/attic-class) — those must still ground,
+  // and the preference-conflict scan enforces opted-out scopes regardless.
+  'perform', 'performs', 'performed', 'performing', 'provide', 'provides', 'provided', 'providing',
+  'context', 'account', 'accounts', 'recurring', 'initial', 'initially', 'availability', 'available',
+  'information', 'irrigation', 'scheduling', 'camera', 'cameras', 'room', 'rooms',
+  'bronze', 'silver', 'gold', 'platinum', 'accepted', 'accepting', 'waves', 'retrieve',
+  'transition', 'transitions', 'standing', 'minute', 'minutes', 'resident', 'residents',
+  'list', 'lists', 'missing', 'site', 'sites', 'raised', 'raises', 'occupancy', 'occupied',
+  'communication', 'communications', 'application', 'applications', 'credentials',
+  'included', 'includes', 'including', 'state', 'stated', 'states', 'show', 'shows', 'shown',
+  'past', 'introduction', 'discuss', 'discussing', 'baseline', 'relevant', 'mindful',
+  'missed', 'someone', 'presence', 'documented', 'structural', 'quiet', 'runtime', 'severe',
+  'recovery', 'regrowth', 'vacuum', 'vacuuming', 'control', 'follow-up', 'walk-through',
 ]);
 
 // Short/common organism names — too short (or too domain-loaded) for the
@@ -942,7 +958,7 @@ const SHORT_ORGANISM_RE = /\b(rats?|mouse|mice|ants?|bees?|fly|flies|wasps?|tick
 // Ordinary short ALLCAPS abbreviations a brief legitimately uses without
 // grounding (times, zones, business boilerplate) — everything else
 // ALLCAPS-short must ground or reject (bare-product scan below).
-const ACRONYM_PROSE_WORDS = new Set(['am', 'pm', 'et', 'est', 'edt', 'asap', 'hoa', 'ac', 'id', 'ok', 'po', 'llc', 'inc', 'na']);
+const ACRONYM_PROSE_WORDS = new Set(['am', 'pm', 'et', 'est', 'edt', 'asap', 'hoa', 'ac', 'id', 'ok', 'po', 'llc', 'inc', 'na', 'sms']);
 
 // Light stemming for the rare-word pass — plurals/participles of known or
 // grounded words must not read as novel.
@@ -964,10 +980,18 @@ function isGroundedReference(candidate, groundedText) {
   const phrase = String(candidate || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
   if (!phrase) return true;
   if (groundedText.includes(phrase)) return true;
+  // Common-prose words assert nothing product- or organism-wise — the same
+  // principle as the rare-word pass and the instructed-claim skip — so only
+  // the remaining words must ground, with the same light stemming
+  // ("monitors" grounds on "monitor"). Requiring literal grounding of
+  // ordinary prose rejected ~96% of live briefs (prod histogram 08-14/15:
+  // "a prior scheduled service", "customer monitors camera"). Organisms and
+  // product names are never in the prose sets, so they still must ground.
   const words = phrase.split(' ')
-    .filter((w) => /^[a-z][a-z'-]{3,}$/.test(w) && !REFERENCE_STOP_WORDS.has(w));
+    .filter((w) => /^[a-z][a-z'-]{3,}$/.test(w))
+    .filter((w) => !wordVariants(w).some((v) => REFERENCE_STOP_WORDS.has(v) || COMMON_PROSE_WORDS.has(v)));
   if (!words.length) return true;
-  return words.every((w) => groundedText.includes(w));
+  return words.every((w) => wordVariants(w).some((v) => groundedText.includes(v)));
 }
 
 // Allowlist-extraction of product-ish / target-ish references from brief
@@ -1389,7 +1413,10 @@ async function generateBriefBody(grounding, deps = {}) {
   const callModel = deps.callModel
     || ((payload, opts) => dispatchWithFallback(MODELS.TEXT_POLICIES.visitBrief, {
       jsonMode: true,
-      maxTokens: 1000,
+      // 1000 truncated real responses mid-JSON (prod 08-14/15: 36 empty_json
+      // legs + "not_an_object (response truncated at max_tokens=1000)") —
+      // the body plus mentioned_terms self-report doesn't reliably fit.
+      maxTokens: 2000,
       ...payload,
     }, opts));
   try {
