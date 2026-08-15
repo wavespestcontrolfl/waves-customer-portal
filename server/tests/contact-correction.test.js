@@ -200,7 +200,19 @@ const baseCustomer = () => ({
   state: 'FL',
   zip: '34200',
 });
-const callLogRow = (over = {}) => ({ id: CALL_ID, from_phone: PRIMARY_PHONE, ...over });
+// Diarized transcript (the call-recording processor's "Agent:"/"Caller:"
+// format) covering every caller quote the call-lane fixtures use — candidate
+// quotes must ground against a CALLER line or the lane fails closed.
+const DIARIZED_TRANSCRIPT = [
+  'Agent: thanks for calling, how can I help you today?',
+  'Caller: you spelled my name wrong, it is Rivers with an S',
+  'Caller: my last name is spelled wrong, it is Rivers',
+  'Caller: you have the wrong email, it is jordan dot rivers at example dot com',
+  'Caller: the email is wrong, it is jordan dot rivers at example dot com',
+  'Caller: the address is wrong, we are at 99 Pine Ave',
+  'Caller: this is Jordan Rivers calling about my lawn',
+].join('\n');
+const callLogRow = (over = {}) => ({ id: CALL_ID, from_phone: PRIMARY_PHONE, transcription: DIARIZED_TRANSCRIPT, ...over });
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -738,6 +750,110 @@ describe('round-4 hardening', () => {
     expect(detectContactCorrectionIntent('My email should be jane@example.com, not jan@example.com')).toBe(true);
     expect(detectContactCorrectionIntent('Please update my email to jane@example.com')).toBe(true);
     expect(detectContactCorrectionIntent('Can you change the address to 99 Pine Ave')).toBe(true);
+  });
+});
+
+describe('round-6 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('a plain self-identification never auto-applies a name (explicit correction language required)', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      // Grounded as a caller line, so it is the INTENT bar that rejects it.
+      call_log: [callLogRow({ transcription: 'Caller: hi, my name is Jordan Rivers, I need a quote' })],
+      customer_field_candidates: [
+        candidate({ id: 'weak', evidence_quote: 'my name is Jordan Rivers' }),
+      ],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('no_candidates');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+    expect(knex._data.customer_field_candidates[0].status).toBe('pending');
+  });
+
+  it('rejects a quote that only appears on an AGENT line (both lanes)', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({
+        transcription: [
+          'Agent: you spelled my name wrong, it is Rivers with an S',
+          'Agent: the email is wrong, it is jordan dot rivers at example dot com',
+          'Caller: sure, whatever works',
+        ].join('\n'),
+      })],
+      customer_field_candidates: [
+        candidate({ id: 'nm' }),
+        candidate({ id: 'em', field_name: 'email', final_recommended_value: 'jordan.rivers@example.com', evidence_quote: 'the email is wrong, it is jordan dot rivers at example dot com' }),
+      ],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('no_candidates');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the call has no stored transcript', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: null })],
+      customer_field_candidates: [
+        candidate({ id: 'nm' }),
+        candidate({ id: 'em', field_name: 'email', final_recommended_value: 'jordan.rivers@example.com', evidence_quote: 'the email is wrong, it is jordan dot rivers at example dot com' }),
+      ],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('no_candidates');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('rejects a fabricated quote absent from the transcript', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: 'Caller: calling about my mosquito service' })],
+      customer_field_candidates: [candidate({ id: 'fab' })],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('no_candidates');
+    expect(knex._data.customer_field_candidates[0].status).toBe('pending');
+  });
+
+  it('canonicalizes BEFORE validating — a spelled-out state becomes its code instead of being discarded', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [{ field: 'state', newValue: 'Georgia' }],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied).toContainEqual({ field: 'state', oldValue: 'FL', newValue: 'GA', quote: null });
+    expect(knex._data.customers[0].state).toBe('GA');
+  });
+
+  it('stamps the applied candidate even when its raw value needed canonicalization', async () => {
+    const quote = 'you spelled my name wrong, it is MCGOWAN';
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [
+        candidate({ id: 'raw', final_recommended_value: 'MCGOWAN', evidence_quote: quote }),
+      ],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied).toContainEqual(expect.objectContaining({ field: 'last_name', newValue: 'McGowan' }));
+    expect(knex._data.customers[0].last_name).toBe('McGowan');
+    expect(knex._data.customer_field_candidates[0].status).toBe('auto_applied');
   });
 });
 

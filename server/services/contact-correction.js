@@ -204,9 +204,11 @@ async function applyContactCorrections({ customerId, corrections, source, source
       const { field } = correction || {};
       if (byField.has(field)) { skipped.push({ field, reason: 'duplicate_field' }); continue; }
       const rawValue = normValue(correction?.newValue);
-      const validator = FIELD_VALIDATORS[field];
-      if (!validator || !validator(rawValue)) { skipped.push({ field, reason: 'invalid' }); continue; }
+      // Canonicalize FIRST, validate the canonical form — "Georgia" must
+      // become GA before STATE_RE sees it, not be discarded raw.
       const newValue = rawValue === '' ? '' : normValue(canonicalizeValue(field, rawValue));
+      const validator = FIELD_VALIDATORS[field];
+      if (!validator || !validator(newValue)) { skipped.push({ field, reason: 'invalid' }); continue; }
       byField.set(field, { field, newValue, quote: correction?.quote || null });
     }
     if (!addressGroupComplete(byField)) {
@@ -430,6 +432,14 @@ const CALL_AUTO_FIELDS = Object.freeze({
 });
 const CALL_PROPOSE_FIELDS = Object.freeze(['email', 'address_line1', 'address_line2', 'city', 'state', 'zip']);
 
+// Explicit-correction bar for CALL name candidates. The SMS hint regex keeps
+// a weak "name … is" branch (a customer-initiated correction text has that
+// shape), but callers state their names on practically every call — "my name
+// is Jane" while booking is identification, not a mandate to rewrite the
+// record. A name candidate only counts when the quote carries explicit
+// correction language NEAR the word "name" (either order).
+const CALL_NAME_CORRECTION_RE = /\b(?:name|surname)\b[\s\S]{0,60}\b(?:wrong|incorrect|misspell\w*|spell\w*|typo|actually|not\b)|\b(?:wrong|incorrect|misspell\w*|spell\w*|typo|actually|not(?:\s+(?:my|the))?)\b[\s\S]{0,60}\b(?:name|surname)\b/i;
+
 // Quote-component binding for shared name_full evidence: the staging writer
 // assigns one quote to BOTH name candidates, but "my last name is spelled
 // Rivers" is not a mandate to touch the first name (and vice versa). A quote
@@ -469,30 +479,59 @@ async function runCallContactCorrection({ callId, customerId, knex = db }) {
       // dedupe below keeps the newest.
       .orderBy('created_at', 'desc')
       .select('id', 'field_name', 'final_recommended_value', 'evidence_quote');
+    if (!rows.length) return { applied: [], skipped: [], reason: 'no_candidates' };
+
+    // Caller-identity guard inputs + the transcript itself: a call from a
+    // service_contact*_phone links to the OWNING customer, but the caller
+    // correcting their own name is not a mandate to rename the account
+    // owner. Name auto-apply requires the call to have come from the
+    // customer's PRIMARY phone; everything else stays in the
+    // proposal/pending lane.
+    const tail10 = (p) => String(p || '').replace(/[^0-9]/g, '').slice(-10);
+    let callerIsPrimary = false;
+    let call = null;
+    try {
+      let owner = null;
+      [call, owner] = await Promise.all([
+        knex('call_log').where({ id: callId }).first('from_phone', 'transcription'),
+        knex('customers').where({ id: customerId }).first('phone'),
+      ]);
+      const callerTail = tail10(call?.from_phone);
+      callerIsPrimary = Boolean(callerTail) && callerTail === tail10(owner?.phone);
+    } catch { callerIsPrimary = false; call = null; }
+
+    // Transcript grounding — the diarized transcript ("Agent:"/"Caller:"
+    // turns) is the source of record, and only the CALLER's own lines can
+    // evidence a correction: an agent reading back the OLD (wrong) value, or
+    // misciting one, must not ground a rewrite of the record. A candidate
+    // quote must substring-match (whitespace/case-normalized) a non-agent
+    // line; a call with no stored transcript grounds nothing (fail closed).
+    // Applies to BOTH lanes — name auto-apply and the proposal bell.
+    const callerLines = String(call?.transcription || '')
+      .split(/\r?\n/)
+      .filter((line) => !/^\s*agent\s*:/i.test(line))
+      .map((line) => line.replace(/\s+/g, ' ').trim().toLowerCase())
+      .filter(Boolean);
+    const quoteGrounded = (q) => {
+      const needle = normValue(q).replace(/\s+/g, ' ').toLowerCase();
+      return needle.length >= 4 && callerLines.some((line) => line.includes(needle));
+    };
+
     const seenFields = new Set();
     const candidates = rows.filter((c) => {
-      if (!detectContactCorrectionIntent(c.evidence_quote)) return false;
+      // Name candidates take the stricter explicit-correction bar — routine
+      // calls state names constantly; email/address keep the shared intent
+      // check (they only ever feed the proposal bell).
+      const intentOk = CALL_AUTO_FIELDS[c.field_name]
+        ? CALL_NAME_CORRECTION_RE.test(String(c.evidence_quote || ''))
+        : detectContactCorrectionIntent(c.evidence_quote);
+      if (!intentOk) return false;
+      if (!quoteGrounded(c.evidence_quote)) return false;
       if (seenFields.has(c.field_name)) return false;
       seenFields.add(c.field_name);
       return true;
     });
     if (!candidates.length) return { applied: [], skipped: [], reason: 'no_candidates' };
-
-    // Caller-identity guard: a call from a service_contact*_phone links to
-    // the OWNING customer, but the caller correcting their own name is not
-    // a mandate to rename the account owner. Name auto-apply requires the
-    // call to have come from the customer's PRIMARY phone; everything else
-    // stays in the proposal/pending lane.
-    const tail10 = (p) => String(p || '').replace(/[^0-9]/g, '').slice(-10);
-    let callerIsPrimary = false;
-    try {
-      const [call, owner] = await Promise.all([
-        knex('call_log').where({ id: callId }).first('from_phone'),
-        knex('customers').where({ id: customerId }).first('phone'),
-      ]);
-      const callerTail = tail10(call?.from_phone);
-      callerIsPrimary = Boolean(callerTail) && callerTail === tail10(owner?.phone);
-    } catch { callerIsPrimary = false; }
 
     // Email/address: propose, never write. One bell for the batch; the
     // candidate rows stay pending for review on the customer page.
@@ -551,9 +590,13 @@ async function runCallContactCorrection({ callId, customerId, knex = db }) {
       // must not both read as auto_applied, and an applied field can never
       // commit without its stamp.
       postApply: async (trx, applied) => {
+        // Compare against the CANONICALIZED candidate value — applyContact-
+        // Corrections canonicalizes before writing (raw "MCGOWAN" is stored
+        // as "McGowan"), so a raw-value compare would leave the very
+        // candidate that was applied stranded in pending.
         const appliedIds = nameCandidates
           .filter((c) => applied.some((a) => a.field === CALL_AUTO_FIELDS[c.field_name]
-            && sameValue(a.field, a.newValue, c.final_recommended_value)))
+            && sameValue(a.field, a.newValue, canonicalizeValue(a.field, normValue(c.final_recommended_value)))))
           .map((c) => c.id);
         if (appliedIds.length) {
           await trx('customer_field_candidates')
