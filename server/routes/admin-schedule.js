@@ -11238,60 +11238,120 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
   return 'WHAT WE DID\n\nWe completed the scheduled service and documented the work performed.\n\nWHAT WE FOUND\n\nThe visit details were recorded for continued monitoring at the next scheduled service.';
 }
 
-// Renders technician-recorded typed findings into prompt lines for the
-// generate-report user message. Carries forward the retired recap draft's field
-// rules (admin-dispatch): `internal` fields are tech-facing data (compliance
-// entries, pricing calibration) and never reach customer-facing prompts;
-// empty values drop; values are bounded so a pasted wall of text can't
-// balloon the prompt.
-function typedFindingsPromptLines(findingsType, values, { companion = false } = {}) {
+// Provenance classifier for typed findings fields (codex r2). Some fields
+// record COMPLETED WORK (bed-bug work_completed, termite treatment_method),
+// some are the product application record (products_used, EPA/dilution
+// detail), and the rest are conditions observed on site. Each class maps to
+// a different prompt provenance group — and only observations/work may feed
+// the deterministic fallback (product fields would put trade names in
+// customer copy).
+const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated)$|_performed$|_actions$/;
+const TYPED_PRODUCT_FIELD_RE = /product|epa|active_ingredient|concentration|gallon|dilution|_rate$|application/i;
+function typedFieldProvenance(field) {
+  if (field.type === 'applications' || TYPED_PRODUCT_FIELD_RE.test(field.key)) return 'product';
+  if (TYPED_WORK_FIELD_RE.test(field.key) || /work completed/i.test(field.section || '')) return 'work';
+  return 'observation';
+}
+
+// Renders technician-recorded typed findings into provenance-grouped prompt
+// lines for the generate-report user message. Carries forward the retired
+// recap draft's field rules: `internal` fields are tech-facing data
+// (compliance entries, pricing calibration) and never reach customer-facing
+// prompts; empty values drop; values are bounded so a pasted wall of text
+// can't balloon the prompt.
+function typedFindingsPromptSections(findingsType, values, { companion = false } = {}) {
   // Companion sections render with the companion schema variant so
   // companionOnly fields (the hand-captured condition source on combined
   // visits) reach the prompt instead of being filtered by the primary slice.
   const schema = ActivityIndicators.findingsSchemaForType(findingsType, { companion });
-  if (!schema) return [];
-  return (schema.fields || [])
-    .filter((field) => !field.internal)
-    .map((field) => {
-      const raw = values?.[field.key];
-      // Select values are stored as machine tokens ("none_observed") — map
-      // each through the customer label registry so the copy (and the
-      // deterministic fallback that echoes these lines) reads plainly.
-      const toLabel = (v) => {
-        const raw2 = String(v ?? '').trim();
-        const label = ActivityIndicators.customerLabelForValue(field.key, raw2);
-        // Unmapped machine tokens ("none_observed") read as words.
-        return label === raw2 && /^[a-z0-9_]+$/.test(label) ? label.replace(/_/g, ' ') : label;
-      };
-      // chips / multi_select persist as comma-joined selections — split and
-      // map each option separately (mirrors buildTypedReportSnapshot) so the
-      // per-option customer wording applies instead of the raw joined string.
-      const multi = field.type === 'chips' || field.type === 'multi_select' || Array.isArray(raw);
-      const text = multi
-        ? (Array.isArray(raw) ? raw : String(raw ?? '').split(','))
-          .map((v) => String(v ?? '').trim()).filter(Boolean).map(toLabel).join(', ')
-        : (String(raw ?? '').trim() ? toLabel(raw) : '');
-      if (!text) return null;
-      return `${field.label}: ${text.slice(0, 300)}`;
-    })
-    .filter(Boolean)
-    .slice(0, 60);
+  const sections = { work: [], observations: [], products: [] };
+  if (!schema) return sections;
+  let total = 0;
+  for (const field of schema.fields || []) {
+    if (field.internal || total >= 60) continue;
+    const raw = values?.[field.key];
+    // Select values are stored as machine tokens ("none_observed") — map
+    // each through the customer label registry so the copy (and the
+    // deterministic fallback that echoes these lines) reads plainly.
+    const toLabel = (v) => {
+      const raw2 = String(v ?? '').trim();
+      const label = ActivityIndicators.customerLabelForValue(field.key, raw2);
+      // Unmapped machine tokens ("none_observed") read as words.
+      return label === raw2 && /^[a-z0-9_]+$/.test(label) ? label.replace(/_/g, ' ') : label;
+    };
+    // chips / multi_select persist as comma-joined selections — split and
+    // map each option separately (mirrors buildTypedReportSnapshot) so the
+    // per-option customer wording applies instead of the raw joined string.
+    const multi = field.type === 'chips' || field.type === 'multi_select' || Array.isArray(raw);
+    const text = multi
+      ? (Array.isArray(raw) ? raw : String(raw ?? '').split(','))
+        .map((v) => String(v ?? '').trim()).filter(Boolean).map(toLabel).join(', ')
+      : (String(raw ?? '').trim() ? toLabel(raw) : '');
+    if (!text) continue;
+    total += 1;
+    const target = typedFieldProvenance(field);
+    const line = `${field.label}: ${text.slice(0, 300)}`;
+    if (target === 'product') sections.products.push(line);
+    else if (target === 'work') sections.work.push(line);
+    else sections.observations.push(line);
+  }
+  return sections;
+}
+
+// Generic 0-5 severity words for typed activity scores — always paired with
+// the indicator's OWN label ("Bait Station Activity: high"), never the
+// generic pest-rating framing, so bait-consumption scores can't read as an
+// interior infestation claim (codex r2).
+const TYPED_SCORE_WORDS = { 0: 'none', 1: 'very low', 2: 'low', 3: 'moderate', 4: 'high', 5: 'severe' };
+// `words: true` drops the numeric form entirely — the deterministic fallback
+// echoes these lines verbatim into customer copy, where reportCopyRejection
+// (correctly) rejects any "N/5" as numeric_rating. The prompt block keeps the
+// number: it is model INPUT, and the system prompt already orders ratings to
+// be worded, never quoted.
+function typedActivityLine(findingsType, score, { words = false } = {}) {
+  if (!Number.isInteger(score) || score < 0 || score > 5) return null;
+  const indicator = ActivityIndicators.ACTIVITY_INDICATORS[findingsType];
+  const label = indicator?.label || 'Recorded activity';
+  return words
+    ? `${label}: ${TYPED_SCORE_WORDS[score]}`
+    : `${label}: ${score}/5 (${TYPED_SCORE_WORDS[score]})`;
+}
+
+// Customer-facing generation may only read companions the profile delivers
+// to the customer — internal_only shadow companions are staff-only surfaces
+// (docs/design/combined-service-completions.md), so their findings must
+// never steer the customer narrative (codex r2 P1).
+function customerFacingCompanionTypes(companions) {
+  return (Array.isArray(companions) ? companions : [])
+    .filter((c) => c && c.type && String(c.delivery || 'auto_send') === 'auto_send')
+    .map((c) => c.type);
 }
 
 // The STRUCTURED SERVICE FINDINGS block for the generate-report prompt.
 // Chips validate against the confirmed findings type (invalid ones drop —
 // advisory here, enforced strictly at completion). Companion sections render
-// with the companion schema variant and are limited to the appointment
-// profile's declared companion types (`allowedCompanionTypes`) — their
-// values/chips/scores are technician-recorded visit data with the same
-// provenance as the primary findings. `findingsType` may be null on
-// companion-only profiles (e.g. lawn_tree_shrub_combo): the block then
-// carries companions alone.
+// with the companion schema variant and are limited to `allowedCompanionTypes`
+// (the profile's customer-deliverable companions) — their values/chips/scores
+// are technician-recorded visit data with the same provenance split as the
+// primary findings. `findingsType` may be null on companion-only profiles
+// (e.g. lawn_tree_shrub_combo): the block then carries companions alone.
+function renderTypedGroupLines(sections) {
+  const parts = [];
+  if (sections.work.length) parts.push(`Work recorded (completed work):\n${sections.work.join('\n')}`);
+  if (sections.observations.length) parts.push(`Findings observed:\n${sections.observations.join('\n')}`);
+  if (sections.products.length) parts.push(`Product application record (context only — describe the work plainly, NEVER name these products in customer copy):\n${sections.products.join('\n')}`);
+  return parts;
+}
+
 function buildTypedFindingsPromptBlock({
   findingsType = null, values = null, nextStepChips = [], companionFindings = [],
-  allowedCompanionTypes = [],
+  allowedCompanionTypes = [], activityScore = null,
 }) {
-  const lines = findingsType ? typedFindingsPromptLines(findingsType, values) : [];
+  const primarySections = findingsType
+    ? typedFindingsPromptSections(findingsType, values)
+    : { work: [], observations: [], products: [] };
+  const primaryActivityLine = findingsType ? typedActivityLine(findingsType, activityScore) : null;
+  if (primaryActivityLine) primarySections.observations.push(primaryActivityLine);
   let chips = [];
   if (findingsType) {
     const chipsValidation = ActivityIndicators.validateNextStepChips(
@@ -11299,6 +11359,7 @@ function buildTypedFindingsPromptBlock({
     );
     chips = chipsValidation.ok ? chipsValidation.chips : [];
   }
+  const primaryParts = renderTypedGroupLines(primarySections);
   const allowed = new Set(allowedCompanionTypes);
   const companionSections = (Array.isArray(companionFindings) ? companionFindings : [])
     .slice(0, 4)
@@ -11306,29 +11367,29 @@ function buildTypedFindingsPromptBlock({
       if (!ActivityIndicators.isTypedFindingsType(entry?.type) || !allowed.has(entry.type)) return null;
       const companionValues = entry?.values && typeof entry.values === 'object' && !Array.isArray(entry.values)
         ? entry.values : {};
-      const companionLines = typedFindingsPromptLines(entry.type, companionValues, { companion: true });
+      const sections = typedFindingsPromptSections(entry.type, companionValues, { companion: true });
+      const activityLine = typedActivityLine(entry.type, entry?.activityScore);
+      if (activityLine) sections.observations.push(activityLine);
       const companionChipsValidation = ActivityIndicators.validateNextStepChips(
         entry?.nextStepChips, entry.type, companionValues,
       );
       const companionChips = companionChipsValidation.ok ? companionChipsValidation.chips : [];
-      const score = Number.isInteger(entry?.activityScore)
-        && entry.activityScore >= 0 && entry.activityScore <= 5
-        ? entry.activityScore : null;
-      if (!companionLines.length && !companionChips.length && score === null) return null;
-      const label = ActivityIndicators.findingsSchemaForType(entry.type)?.label || entry.type;
-      const parts = [...companionLines];
-      if (score !== null) parts.push(`Activity rating: ${score}/5`);
+      const parts = renderTypedGroupLines(sections);
+      if (!parts.length && !companionChips.length) return null;
       parts.push(`Next steps selected (future advice): ${companionChips.length ? companionChips.join(', ') : 'None'}`);
+      const label = ActivityIndicators.findingsSchemaForType(entry.type)?.label || entry.type;
       return `Companion findings (${label}):\n${parts.join('\n')}`;
     })
     .filter(Boolean);
-  if (!lines.length && !chips.length && !companionSections.length) return '';
+  if (!primaryParts.length && !chips.length && !companionSections.length) return '';
   const label = findingsType
     ? (ActivityIndicators.findingsSchemaForType(findingsType)?.label || findingsType)
     : 'companion';
   return `\n\nSTRUCTURED SERVICE FINDINGS (${label} form, technician-recorded)\n`
-    + 'Treat these findings as [OBSERVED BY TECHNICIAN]; "Next steps selected" is [FUTURE ADVICE — not completed work].\n'
-    + (lines.length ? `${lines.join('\n')}\n` : '')
+    + 'Provenance: "Work recorded" lines are [COMPLETED WORK]; "Findings observed" lines are [OBSERVED BY TECHNICIAN]; '
+    + 'the product application record is context only — never name those products in customer copy; '
+    + '"Next steps selected" is [FUTURE ADVICE — not completed work].\n'
+    + (primaryParts.length ? `${primaryParts.join('\n')}\n` : '')
     + companionSections.map((section) => `${section}\n`).join('')
     + (findingsType ? `Next steps selected: ${chips.length ? chips.join(', ') : 'None'}` : '');
 }
@@ -11344,7 +11405,7 @@ router.post('/generate-report', async (req, res) => {
       areasServiced, actionsCompleted, observations, recommendations,
       customerInteraction, customerConcern, pestActivityRating, photoCount,
       includeCustomerComms,
-      structuredFindings, nextStepChips, companionFindings,
+      structuredFindings, nextStepChips, companionFindings, typedActivityScore,
     } = req.body;
 
     if (scheduledServiceId && !(await technicianOwnsScheduledService(req, scheduledServiceId))) {
@@ -11387,6 +11448,9 @@ router.post('/generate-report', async (req, res) => {
     // only here; the prompt block is assembled further down ONLY after the
     // appointment's completion profile confirms the findings type (same
     // profile-authority rule as the old draft route).
+    const typedActivityScoreNum = Number.isInteger(typedActivityScore)
+      && typedActivityScore >= 0 && typedActivityScore <= 5
+      ? typedActivityScore : null;
     const typedValuesRaw = structuredFindings && typeof structuredFindings === 'object'
       && structuredFindings.values && typeof structuredFindings.values === 'object'
       && !Array.isArray(structuredFindings.values)
@@ -11401,6 +11465,7 @@ router.post('/generate-report', async (req, res) => {
     const typedHasFindingInput = (!!typedValuesRaw && (
       valuesNonEmpty(typedValuesRaw)
       || (Array.isArray(nextStepChips) && nextStepChips.length > 0)
+      || typedActivityScoreNum !== null
     ))
       || companionEntries.some((entry) => valuesNonEmpty(entry?.values)
         || (Array.isArray(entry?.nextStepChips) && entry.nextStepChips.length > 0));
@@ -11638,6 +11703,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     let groundingSuppressPressure = false;
     let typedFindingsBlock = '';
     let typedFallbackObservations = [];
+    let typedFallbackActions = [];
     let typedFallbackNextSteps = [];
     if (scheduledServiceId) {
       const svc = await db('scheduled_services')
@@ -11693,8 +11759,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
               code: 'findings_type_mismatch',
             });
           }
-          const allowedCompanionTypes = (completionProfile?.companions || [])
-            .map((c) => c?.type).filter(Boolean);
+          // Only customer-deliverable companions may steer customer copy —
+          // internal_only shadow companions stay staff-only (codex r2 P1).
+          const allowedCompanionTypes = customerFacingCompanionTypes(completionProfile?.companions);
           const confirmedPrimaryType = typedValuesRaw && structuredFindings.type
             ? structuredFindings.type : null;
           if (confirmedPrimaryType || companionEntries.length) {
@@ -11704,15 +11771,21 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
               nextStepChips,
               companionFindings: companionEntries,
               allowedCompanionTypes,
+              activityScore: typedActivityScoreNum,
             });
             // The deterministic last-resort copy can't read the prompt block,
             // so a typed-only request during a double-provider miss needs the
-            // findings as plain observation/recommendation facts or it would
-            // 503 with real visit data in hand.
+            // findings as plain facts or it would 503 with real visit data in
+            // hand. Provenance carries through: work fields feed the fallback
+            // ACTIONS, observation fields its observations, and product
+            // application fields are DROPPED (trade names must not surface in
+            // the deterministic copy — codex r2).
             if (confirmedPrimaryType) {
-              typedFallbackObservations.push(...typedFindingsPromptLines(
-                confirmedPrimaryType, typedValuesRaw,
-              ).slice(0, 8));
+              const sections = typedFindingsPromptSections(confirmedPrimaryType, typedValuesRaw);
+              typedFallbackActions.push(...sections.work.slice(0, 6));
+              typedFallbackObservations.push(...sections.observations.slice(0, 8));
+              const scoreLine = typedActivityLine(confirmedPrimaryType, typedActivityScoreNum, { words: true });
+              if (scoreLine) typedFallbackObservations.push(scoreLine);
               const typedChipsValidation = ActivityIndicators.validateNextStepChips(
                 nextStepChips, confirmedPrimaryType, typedValuesRaw,
               );
@@ -11723,9 +11796,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
                 || !allowedCompanionTypes.includes(entry.type)) continue;
               const companionValues = entry?.values && typeof entry.values === 'object' && !Array.isArray(entry.values)
                 ? entry.values : {};
-              typedFallbackObservations.push(...typedFindingsPromptLines(
-                entry.type, companionValues, { companion: true },
-              ).slice(0, 6));
+              const sections = typedFindingsPromptSections(entry.type, companionValues, { companion: true });
+              typedFallbackActions.push(...sections.work.slice(0, 4));
+              typedFallbackObservations.push(...sections.observations.slice(0, 6));
+              const companionScoreLine = typedActivityLine(entry.type, entry?.activityScore, { words: true });
+              if (companionScoreLine) typedFallbackObservations.push(companionScoreLine);
               const companionChipsValidation = ActivityIndicators.validateNextStepChips(
                 entry?.nextStepChips, entry.type, companionValues,
               );
@@ -11777,7 +11852,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       && !productsText.length
       && !areas.length && !actions.length && !obs.length && !recs.length
       && !concernText.length
-      && ratingNum === null;
+      && ratingNum === null
+      && !typedHasFindingInput;
     if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
       return res.status(503).json({
         error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',
@@ -11830,10 +11906,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       const report = buildDeterministicReportCopy({
         serviceType: groundingServiceType,
         areas,
-        actions,
-        // Typed structured findings ride the fallback as technician
-        // observations / next steps (profile-confirmed above) — a typed-only
-        // request must not 503 when the free-text fields are empty.
+        actions: [...actions, ...typedFallbackActions],
+        // Typed structured findings ride the fallback as technician work /
+        // observations / next steps (profile-confirmed above; product
+        // application fields excluded) — a typed-only request must not 503
+        // when the free-text fields are empty.
         observations: [...obs, ...typedFallbackObservations],
         recommendations: [...recs, ...typedFallbackNextSteps],
         ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
@@ -12806,6 +12883,10 @@ router._test = {
   generateReportCopyWithFallback,
   buildDeterministicReportCopy,
   buildTypedFindingsPromptBlock,
+  typedFindingsPromptSections,
+  typedFieldProvenance,
+  typedActivityLine,
+  customerFacingCompanionTypes,
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
   calculateVisitFinancialsForAddons,

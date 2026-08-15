@@ -159,7 +159,73 @@ describe('deterministic report fallback', () => {
 });
 
 describe('generate-report typed findings prompt block (buildTypedFindingsPromptBlock)', () => {
-  const { buildTypedFindingsPromptBlock } = require('../routes/admin-schedule')._test;
+  const {
+    buildTypedFindingsPromptBlock,
+    typedFindingsPromptSections,
+    typedActivityLine,
+    customerFacingCompanionTypes,
+  } = require('../routes/admin-schedule')._test;
+
+  test('work fields classify as completed work; product fields as application record', () => {
+    const block = buildTypedFindingsPromptBlock({
+      findingsType: 'termite_treatment',
+      values: { treatment_method: 'Spot treatment', products_used: 'Termidor HE', areas_treated: 'Garage slab' },
+      nextStepChips: [],
+      companionFindings: [],
+      allowedCompanionTypes: [],
+    });
+    expect(block).toContain('Work recorded (completed work):');
+    expect(block).toMatch(/Work recorded \(completed work\):[^]*Treatment method: Spot treatment/);
+    expect(block).toMatch(/Work recorded \(completed work\):[^]*Areas treated: Garage slab/);
+    // product fields live in the context-only application record, never the
+    // observed/work groups
+    expect(block).toContain('Product application record (context only');
+    expect(block).toMatch(/Product application record[^]*Termidor HE/);
+    expect(block).toContain('[COMPLETED WORK]');
+  });
+
+  test('fallback sections drop product fields and split work from observations', () => {
+    const sections = typedFindingsPromptSections('termite_treatment', {
+      treatment_method: 'Trenching',
+      products_used: 'Termidor HE',
+      target_termite: 'Subterranean termites',
+    });
+    expect(sections.work.join(' ')).toContain('Trenching');
+    expect(sections.observations.join(' ')).toContain('Subterranean termites');
+    expect(sections.products.join(' ')).toContain('Termidor HE');
+    expect(sections.work.join(' ')).not.toContain('Termidor');
+    expect(sections.observations.join(' ')).not.toContain('Termidor');
+  });
+
+  test('typed activity scores carry the indicator label, never generic pest wording', () => {
+    expect(typedActivityLine('rodent_bait_station', 4)).toBe('Bait Station Activity: 4/5 (high)');
+    // fallback copy is customer-facing verbatim — words only, or the output
+    // guard rejects the whole deterministic report as numeric_rating
+    expect(typedActivityLine('rodent_bait_station', 4, { words: true })).toBe('Bait Station Activity: high');
+    expect(reportCopyRejection(`x ${typedActivityLine('rodent_bait_station', 4, { words: true })}`)).toBeNull();
+    expect(typedActivityLine('termite_bait_station', 0)).toBe('Termite Activity: 0/5 (none)');
+    expect(typedActivityLine('rodent_bait_station', 7)).toBeNull();
+    expect(typedActivityLine('rodent_bait_station', null)).toBeNull();
+    const block = buildTypedFindingsPromptBlock({
+      findingsType: 'rodent_bait_station',
+      values: { stations_checked: '6' },
+      nextStepChips: [],
+      companionFindings: [],
+      allowedCompanionTypes: [],
+      activityScore: 4,
+    });
+    expect(block).toContain('Bait Station Activity: 4/5 (high)');
+    expect(block).not.toContain('Pest activity');
+  });
+
+  test('only auto_send companions are customer-facing; internal_only stay staff-only', () => {
+    expect(customerFacingCompanionTypes([
+      { type: 'tree_shrub', delivery: 'auto_send' },
+      { type: 'cockroach', delivery: 'internal_only' },
+      { type: 'flea' },
+    ])).toEqual(['tree_shrub', 'flea']);
+    expect(customerFacingCompanionTypes(null)).toEqual([]);
+  });
 
   test('renders labeled lines, valid chips, and the provenance framing', () => {
     const block = buildTypedFindingsPromptBlock({
@@ -235,7 +301,7 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(block).toContain('STRUCTURED SERVICE FINDINGS');
     expect(block).toContain('Yellowing / chlorosis');
     expect(block).toContain('Leaf spot');
-    expect(block).toContain('Activity rating: 2/5');
+    expect(block).toContain(': 2/5 (low)');
     expect(block).toContain('Next steps selected (future advice): Continue Tree & Shrub program');
   });
 

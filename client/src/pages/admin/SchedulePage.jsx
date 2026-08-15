@@ -11615,6 +11615,7 @@ export function CompletionPanel({
             values: findingsValues,
           },
           nextStepChips: typedNextStepChips,
+          typedActivityScore: Number.isInteger(typedActivityScore) ? typedActivityScore : null,
         }
         : {}),
       ...companionPayload,
@@ -11703,12 +11704,12 @@ export function CompletionPanel({
       recommendations,
       customerInteraction: interactionLabel,
       customerConcern: concern,
-      // Typed panels rate activity on their own 0–5 gauge (derived from the
-      // findings until the tech pins it); untyped panels use the customer
-      // pest-rating chip row. Same 0–5 scale either way.
-      pestActivityRating: isTypedFindings
-        ? (Number.isInteger(typedActivityScore) ? typedActivityScore : null)
-        : (clientPestRating ?? null),
+      // The generic pest-rating field stays the untyped customer chip row —
+      // typed panels send their 0–5 gauge as typedActivityScore instead, so
+      // the server can pair it with the indicator's OWN label ("Bait Station
+      // Activity") and bait-consumption scores never read as generic pest
+      // activity (codex r2).
+      pestActivityRating: clientPestRating ?? null,
       photoCount: Array.isArray(servicePhotos) ? servicePhotos.length : 0,
       includeCustomerComms: aiReportIncludeComms,
       ...typedFindingsPayload,
