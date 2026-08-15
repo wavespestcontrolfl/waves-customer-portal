@@ -110,6 +110,11 @@ async function ensureCustomerGeocoded(customerId) {
 async function regeocodeCustomerAddressGuarded(customerId) {
   const c = await db('customers').where({ id: customerId }).first();
   if (!c) return null;
+  // Locality-only rows never geocode (round-10): with no street the
+  // provider returns a city/ZIP centroid and route optimization would
+  // treat it as the customer's location — the same nonblank-street
+  // eligibility the backstop sweep below enforces.
+  if (!String(c.address_line1 || '').trim()) return null;
   const address = buildAddress(c);
   const result = await geocodeAddress(address);
   if (!result) return null;

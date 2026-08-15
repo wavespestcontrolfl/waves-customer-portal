@@ -448,11 +448,32 @@ router.post('/sms', async (req, res) => {
           // The machine ANSWERED the customer (asked for the address, or
           // drafted and alerted the owner) — it owns this reply end to end.
           logger.info(`[lead-intake] Handled for ${customer.first_name}: ${customer.lead_intake_status} → ${intakeResult.next}`);
-          await db('sms_log').insert({
-            customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
-            message_body: Body, twilio_sid: MessageSid, status: 'received',
-            message_type: 'lead_intake',
-          }).catch(() => {});
+          let intakeSmsLogId = null;
+          try {
+            const inserted = await db('sms_log').insert({
+              customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
+              message_body: Body, twilio_sid: MessageSid, status: 'received',
+              message_type: 'lead_intake',
+            }).returning('id');
+            intakeSmsLogId = inserted?.[0]?.id ?? inserted?.[0] ?? null;
+          } catch { /* logging is best-effort, as before */ }
+          // A consumed intake reply can still CONTAIN an explicit contact
+          // correction (an awaiting_address customer correcting their email,
+          // say) — the correction block further down is unreachable past
+          // this return, so it fires here too (round-10). Same contract:
+          // post-ack, fire-and-forget, fail-soft, linked customer only; the
+          // gate and the LLM extraction decide whether anything applies.
+          if (Body && !smsReaction && customer?.id) {
+            const contactCorrection = require('../services/contact-correction');
+            if (contactCorrection.detectContactCorrectionIntent(Body)) {
+              const correctionArgs = { customer, body: Body, smsLogId: intakeSmsLogId };
+              setImmediate(() => {
+                void contactCorrection.runSmsContactCorrection(correctionArgs).catch((err) => {
+                  logger.warn(`[contact-correction] post-ack run rejected for customer ${customer.id}, sms_log ${correctionArgs.smsLogId || 'n/a'}: ${err.message}`);
+                });
+              });
+            }
+          }
           return res.type('text/xml').send('<Response></Response>');
         }
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }

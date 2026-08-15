@@ -193,7 +193,17 @@ async function extractSmsContactCorrections({ body }) {
       const needle = normValue(q).replace(/\s+/g, ' ').toLowerCase();
       return needle.length >= 4 && haystack.includes(needle);
     };
-    const base = list.filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field) && quoteInBody(c.quote));
+    // The REPLACEMENT value must be grounded too (round-10): "my email is
+    // wrong, please fix it" is a genuine quote, but a model that invents
+    // the new value alongside it would sail through quote grounding — a
+    // value the customer never typed never applies. Empty = explicit clear,
+    // which carries no text by definition.
+    const valueInBody = (v) => {
+      const needle = normValue(v).replace(/\s+/g, ' ').toLowerCase();
+      return needle === '' || haystack.includes(needle);
+    };
+    const base = list.filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field)
+      && quoteInBody(c.quote) && valueInBody(c.new_value));
     // Each candidate's own quote must carry correction intent bound to its
     // field category — the message-level prefilter is not per-field
     // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
@@ -239,7 +249,11 @@ function addressGroupComplete(byField) {
 // OLD street fabricates a hybrid address exactly like a street without its
 // locality would. When the message says the customer MOVED, the whole
 // street+city+zip group is required or every address field is rejected.
-const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?moved\b|\bnew address\b|\bmoving\s+to\b/i;
+// Destination language required (round-10): bare "I/we moved" also covers
+// "I moved the traps" — only a move WITH a destination ("moved to/into",
+// "are moving to", "new address") is residential-move evidence that may
+// license an address group.
+const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?(?:moved|(?:are|will be)\s+moving)\s+(?:to|into)\b|\bmoving\s+(?:to|into)\b|\bnew address\b/i;
 
 /**
  * Apply validated corrections to a linked customer record.
@@ -391,6 +405,18 @@ async function applyContactCorrections({ customerId, corrections, source, source
         .first();
       if (!before) { skipped.push({ field: null, reason: 'no_customer' }); return; }
       customerName = [before.first_name, before.last_name].filter(Boolean).join(' ') || 'Customer';
+
+      // (round-10) The sender's phone is the identity anchor for the WHOLE
+      // batch: if it was changed or reassigned while extraction was in
+      // flight, the correction may no longer come from this customer at all
+      // — stale the entire batch, not just a field. (phone is never an
+      // applyable field, so the per-field CAS below can't see this.)
+      if (expectedValues && Object.prototype.hasOwnProperty.call(expectedValues, 'phone')
+        && normValue(before.phone) !== normValue(expectedValues.phone)) {
+        for (const { field } of byField.values()) skipped.push({ field, reason: 'concurrent_change' });
+        byField.clear();
+        return;
+      }
 
       // (round-9) A concurrent change to ANY address component stales a
       // staged address group AS A WHOLE: skipping just the changed field and
@@ -583,10 +609,12 @@ async function runSmsContactCorrection({ customer, body, smsLogId = null, knex =
     // transaction: extraction is an in-flight LLM call, and a field an admin
     // (or a newer message) changed underneath it must not be overwritten by
     // this pass's stale proposal.
+    // Includes phone (round-10): the sender's number is the batch's identity
+    // anchor — a concurrent phone change/reassignment stales the whole batch.
     const expectedValues = await knex('customers')
       .where({ id: customer.id })
       .whereNull('deleted_at')
-      .first([...APPLYABLE_FIELDS]);
+      .first([...APPLYABLE_FIELDS, 'phone']);
     const corrections = await extractSmsContactCorrections({ body });
     if (!corrections.length) return { applied: [], skipped: [], reason: 'none_detected' };
     return await applyContactCorrections({
@@ -711,8 +739,9 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       callerIsPrimary = Boolean(callerTail) && callerTail === tail10(owner?.phone);
       // Snapshot for the compare-and-set in the apply transaction — a name
       // an admin corrected between this read and the commit must not be
-      // overwritten by this pass's staged (older) extraction.
-      if (owner) expectedValues = { first_name: owner.first_name, last_name: owner.last_name };
+      // overwritten by this pass's staged (older) extraction; the phone is
+      // the identity anchor and stales the whole batch if reassigned.
+      if (owner) expectedValues = { first_name: owner.first_name, last_name: owner.last_name, phone: owner.phone };
     } catch { callerIsPrimary = false; call = null; }
 
     // Processing-pass fence: the call processor lets a peer reclaim a stuck
@@ -747,12 +776,14 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     const seenFields = new Set();
     const candidates = rows.filter((c) => {
       // Name candidates take the stricter explicit-correction bar — routine
-      // calls state names constantly; email/address keep the shared intent
-      // check (they only ever feed the proposal bell).
+      // calls state names constantly. Email/address proposals take the same
+      // clause-bound field predicate as the SMS lane (round-10): "my email
+      // is jane@example.com" while booking is identity collection, and a
+      // bell claiming corrected info was stated would be a false proposal.
       const intentOk = CALL_AUTO_FIELDS[c.field_name]
         ? (CALL_NAME_CORRECTION_RE.test(String(c.evidence_quote || ''))
           && !NAME_OWNERSHIP_DISCLAIMER_RE.test(String(c.evidence_quote || '')))
-        : detectContactCorrectionIntent(c.evidence_quote);
+        : quoteCarriesFieldIntent(c.field_name, c.evidence_quote);
       if (!intentOk) return false;
       if (!quoteGrounded(c.evidence_quote)) return false;
       if (seenFields.has(c.field_name)) return false;

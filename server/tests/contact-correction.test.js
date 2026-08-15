@@ -1316,6 +1316,83 @@ describe('round-9 hardening', () => {
   });
 });
 
+describe('round-10 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('a concurrent phone change stales the whole batch (identity anchor)', async () => {
+    const body = 'You spelled my last name wrong, it is Rivers';
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockImplementation(async () => {
+      // Admin reassigns the customer's phone DURING the in-flight extraction
+      // — the sender is no longer this record's identity anchor.
+      knex._data.customers[0].phone = '+15559998888';
+      return {
+        ok: true,
+        json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
+      };
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'last_name', reason: 'concurrent_change' });
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+  });
+
+  it('a fabricated replacement value never applies even under a genuine quote', async () => {
+    const body = 'My email is wrong, please fix it';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          // Genuine grounded quote, invented value — the customer never
+          // typed an address to replace it with.
+          { field: 'email', new_value: 'jordan.rivers@example.com', quote: 'my email is wrong, please fix it', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res).toEqual([]);
+  });
+
+  it('moving an OBJECT is not move evidence — destination language required', async () => {
+    const body = 'I moved the traps to the garage. Service is at 99 Pine Ave, Sarasota 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'service is at 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'service is at 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'service is at 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res).toEqual([]);
+  });
+
+  it('routine identity collection on a call never rings a proposal bell', async () => {
+    const quote = 'my email is jane at example dot com';
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [candidate({ id: 'e1', field_name: 'email', final_recommended_value: 'jane@example.com', evidence_quote: quote, confidence: null })],
+      notifications: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('no_candidates');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+});
+
 describe('field allowlist', () => {
   it('never includes phone', () => {
     expect(APPLYABLE_FIELDS).not.toContain('phone');

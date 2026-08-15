@@ -183,3 +183,28 @@ describe('sweepUngeocodedCustomers', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 });
+
+describe('regeocodeCustomerAddressGuarded', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('refuses to geocode a customer with no street (city-centroid guard)', async () => {
+    const { regeocodeCustomerAddressGuarded } = require('../services/geocoder');
+    installDb({
+      listRows: [],
+      customersById: {
+        c1: { id: 'c1', address_line1: '   ', city: 'Tampa', state: 'FL', zip: '33602', latitude: null, longitude: null },
+      },
+    });
+    mockGoogle('OK', { lat: 27.95, lng: -82.46 });
+
+    const result = await regeocodeCustomerAddressGuarded('c1');
+
+    // A locality-only geocode would persist a city centroid that route
+    // optimization treats as the customer's location — same nonblank-street
+    // eligibility the sweep enforces.
+    expect(result).toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});
