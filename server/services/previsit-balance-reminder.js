@@ -307,14 +307,14 @@ async function runSweep({ now = new Date() } = {}) {
         customerId: visit.customer_id,
         channel: 'sms',
         purpose: 'balance_reminder',
-        aggregateDuesCents: duesCents,
+        offLedgerBalanceCents: duesCents,
         logTag: 'previsit-balance',
       });
       const emailPolicyPermitted = await collectionsChannelPermitted({
         customerId: visit.customer_id,
         channel: 'email',
         purpose: 'balance_reminder',
-        aggregateDuesCents: duesCents,
+        offLedgerBalanceCents: duesCents,
         logTag: 'previsit-balance',
       });
       if (!smsPolicyPermitted && !emailPolicyPermitted) { skipped++; continue; }

@@ -526,8 +526,12 @@ describe('collections policy + ledger on the payment reminder', () => {
     expect(result).toEqual({ sent: false, reason: 'collections_policy_denied' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+    // r7: the plan invoice is 'draft' (never in the eligible set) — the
+    // consult is aggregate (invoiceId null) with the validated plan amount
+    // riding the off-ledger carve-out.
     expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder',
+      invoiceId: null, offLedgerBalanceCents: 39204,
     }));
   });
 

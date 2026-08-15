@@ -4348,11 +4348,17 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
     // A denial is an expected hold, not a failure: release the claim so a
     // later day retries once the hold clears.
     const { collectionsChannelPermitted } = require('./collections/rail-guard');
+    // invoiceId stays null (codex r7): the plan selector persists this
+    // invoice as 'draft', which the eligibility loader never admits — the
+    // membership check would kill every prepay reminder under the gate.
+    // The validated plan amount rides the off-ledger carve-out instead;
+    // flags, suppression, and frequency windows all still apply.
     const policyPermitted = await collectionsChannelPermitted({
       customerId: customer.id,
-      invoiceId: invoice.id,
+      invoiceId: null,
       channel: 'sms',
       purpose: 'balance_reminder',
+      offLedgerBalanceCents: Math.round(amountDue * 100),
       logTag: 'annual-prepay',
     });
     if (!policyPermitted) {

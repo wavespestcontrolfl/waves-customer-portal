@@ -142,7 +142,7 @@ async function deliveredDunningTouches(invoice) {
   return touches;
 }
 
-async function evaluate(customerId, { channel, purpose, now = new Date(), aggregateDuesCents = 0 } = {}) {
+async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0 } = {}) {
   const result = {
     allowed: false,
     denialReasons: [],
@@ -222,6 +222,21 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), aggreg
         if (await rowIsSelfPayDue(customerId, row)) eligible.push(row);
       }
     }
+    // Admin-stopped dunning sequences (codex r7): 'stopped' is documented
+    // as "stop ALL automated dunning for this invoice" — such an invoice
+    // can neither back a voice case nor count as dunning-eligible balance.
+    // A check error EXCLUDES the invoice (fail closed).
+    if (eligible.length) {
+      const { isDunningStopped } = require('../invoice-followups');
+      const kept = [];
+      for (const inv of eligible) {
+        try {
+          if (!(await isDunningStopped(inv.id))) kept.push(inv);
+        } catch { /* excluded — fail closed */ }
+      }
+      eligible.length = 0;
+      eligible.push(...kept);
+    }
     result.eligibleInvoiceIds = eligible.map((inv) => inv.id);
     result.eligibleBalanceCents = eligible.reduce(
       (sum, inv) => sum + Math.round(invoiceAmountDue(inv) * 100),
@@ -235,10 +250,15 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), aggreg
     // (call-shaped channels and late_payment purposes still require a real
     // invoice — the voice pilot is invoice-anchored by design). Flags,
     // frequency windows, and every other denial still apply.
-    const duesQualifies = purpose === 'balance_reminder'
+    // Off-ledger carve-out: monthly-membership DUES (not invoiced until
+    // collected — previsit rail) and a customer-selected PREPAY plan whose
+    // invoice is still 'draft' (secure plan selector; codex r7) both carry
+    // a validated balance no open invoice represents. Substitutes ONLY for
+    // the balance-existence check, ONLY for text/email balance_reminder.
+    const offLedgerQualifies = purpose === 'balance_reminder'
       && !isVoiceLike(channel)
-      && Number.isFinite(aggregateDuesCents) && aggregateDuesCents > 0;
-    if (!eligible.length && !duesQualifies) deny('no_eligible_balance');
+      && Number.isFinite(offLedgerBalanceCents) && offLedgerBalanceCents > 0;
+    if (!eligible.length && !offLedgerQualifies) deny('no_eligible_balance');
 
     // ── Hard flags ──────────────────────────────────────────────────────
     const flags = await db('collections_flags')

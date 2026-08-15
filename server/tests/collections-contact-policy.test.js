@@ -28,6 +28,9 @@ jest.mock('../services/messaging/validators/line-type', () => ({
 jest.mock('../services/stripe', () => ({
   isInvoiceAwaitingMicrodepositVerification: jest.fn(async () => false),
 }));
+jest.mock('../services/invoice-followups', () => ({
+  isDunningStopped: jest.fn(async () => false),
+}));
 
 const db = require('../models/db');
 const { openBalanceInvoices } = require('../services/open-balance');
@@ -208,7 +211,7 @@ describe('structural denials', () => {
     // dues amount so the balance-existence check doesn't wrongly deny.
     armAllowedBaseline({ invoices: [] });
     const result = await ContactPolicy.evaluate('cust-1', {
-      channel: 'sms', purpose: 'balance_reminder', aggregateDuesCents: 12800, now: WED_11AM_EDT,
+      channel: 'sms', purpose: 'balance_reminder', offLedgerBalanceCents: 12800, now: WED_11AM_EDT,
     });
     expect(result.allowed).toBe(true);
     expect(result.denialReasons).toEqual([]);
@@ -217,17 +220,17 @@ describe('structural denials', () => {
   test('dues context is NOT a bypass: zero dues, voice channel, and late_payment purpose all still require an invoice', async () => {
     armAllowedBaseline({ invoices: [] });
     const zeroDues = await ContactPolicy.evaluate('cust-1', {
-      channel: 'sms', purpose: 'balance_reminder', aggregateDuesCents: 0, now: WED_11AM_EDT,
+      channel: 'sms', purpose: 'balance_reminder', offLedgerBalanceCents: 0, now: WED_11AM_EDT,
     });
     expect(zeroDues.denialReasons).toContain('no_eligible_balance');
     armAllowedBaseline({ invoices: [] });
     const voice = await ContactPolicy.evaluate('cust-1', {
-      channel: 'voice', purpose: 'late_payment', aggregateDuesCents: 12800, now: WED_11AM_EDT,
+      channel: 'voice', purpose: 'late_payment', offLedgerBalanceCents: 12800, now: WED_11AM_EDT,
     });
     expect(voice.denialReasons).toContain('no_eligible_balance');
     armAllowedBaseline({ invoices: [] });
     const latePayment = await ContactPolicy.evaluate('cust-1', {
-      channel: 'sms', purpose: 'late_payment', aggregateDuesCents: 12800, now: WED_11AM_EDT,
+      channel: 'sms', purpose: 'late_payment', offLedgerBalanceCents: 12800, now: WED_11AM_EDT,
     });
     expect(latePayment.denialReasons).toContain('no_eligible_balance');
   });
@@ -235,7 +238,7 @@ describe('structural denials', () => {
   test('dues carve-out leaves every other denial standing (flag still blocks)', async () => {
     armAllowedBaseline({ invoices: [], flags: [{ flag: 'do_not_text', customer_id: 'cust-1', released_at: null }] });
     const result = await ContactPolicy.evaluate('cust-1', {
-      channel: 'sms', purpose: 'balance_reminder', aggregateDuesCents: 12800, now: WED_11AM_EDT,
+      channel: 'sms', purpose: 'balance_reminder', offLedgerBalanceCents: 12800, now: WED_11AM_EDT,
     });
     expect(result.allowed).toBe(false);
     expect(result.denialReasons).toContain('flag_do_not_text');
@@ -873,5 +876,34 @@ describe('microdeposit-pending pilot denial', () => {
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
     const sms = await ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'late_payment', now: WED_11AM_EDT });
     expect(sms.allowed).toBe(true);
+  });
+});
+
+// r7: an admin-stopped follow-up sequence means "stop ALL automated
+// dunning for this invoice" — it can neither back a voice case nor count
+// as dunning-eligible balance; a check error excludes it (fail closed).
+describe('stopped-sequence exclusion', () => {
+  const { isDunningStopped } = require('../services/invoice-followups');
+
+  test('a stopped invoice leaves the eligible set entirely', async () => {
+    armAllowedBaseline();
+    isDunningStopped.mockResolvedValueOnce(true);
+    const result = await evalVoice();
+    expect(result.eligibleInvoiceIds).toEqual([]);
+    expect(result.denialReasons).toContain('no_eligible_balance');
+  });
+
+  test('a stopped-check ERROR excludes the invoice (fail closed)', async () => {
+    armAllowedBaseline();
+    isDunningStopped.mockRejectedValueOnce(new Error('db down'));
+    const result = await evalVoice();
+    expect(result.eligibleInvoiceIds).toEqual([]);
+  });
+
+  test('an unstopped invoice passes through unchanged', async () => {
+    armAllowedBaseline();
+    const result = await evalVoice();
+    expect(result.allowed).toBe(true);
+    expect(result.eligibleInvoiceIds).toEqual(['inv-1']);
   });
 });

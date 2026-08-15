@@ -67,10 +67,10 @@ describe('gate on', () => {
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: null })).resolves.toBe(true);
   });
 
-  test('aggregateDuesCents is passed through to the policy (the previsit dues-only path)', async () => {
+  test('offLedgerBalanceCents is passed through to the policy (the previsit dues-only path)', async () => {
     ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: [], denialReasons: [] });
-    await collectionsChannelPermitted({ ...BASE, purpose: 'balance_reminder', invoiceId: null, aggregateDuesCents: 12800 });
-    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ aggregateDuesCents: 12800 }));
+    await collectionsChannelPermitted({ ...BASE, purpose: 'balance_reminder', invoiceId: null, offLedgerBalanceCents: 12800 });
+    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ offLedgerBalanceCents: 12800 }));
   });
 
   test('evaluate() rejecting is a denial, never a bypass', async () => {

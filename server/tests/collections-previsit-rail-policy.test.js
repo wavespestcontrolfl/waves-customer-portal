@@ -177,7 +177,7 @@ test('an unavailable ledger on the email leg skips that email (record-then-send)
   expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
 });
 
-test('dues-only visit (monthly membership, no overdue invoices) supplies aggregateDuesCents to the policy consult', async () => {
+test('dues-only visit (monthly membership, no overdue invoices) supplies offLedgerBalanceCents to the policy consult', async () => {
   const { resolveBillingLane, monthlyDuesCollected } = require('../services/billing-lane');
   resolveBillingLane.mockReturnValue({ mode: 'monthly_membership' });
   monthlyDuesCollected.mockResolvedValue(false);
@@ -195,9 +195,9 @@ test('dues-only visit (monthly membership, no overdue invoices) supplies aggrega
   const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
   expect(result).toMatchObject({ sent: 1 });
   expect(collectionsChannelPermitted).toHaveBeenCalledWith(
-    expect.objectContaining({ channel: 'sms', aggregateDuesCents: 12800 }),
+    expect.objectContaining({ channel: 'sms', offLedgerBalanceCents: 12800 }),
   );
   expect(collectionsChannelPermitted).toHaveBeenCalledWith(
-    expect.objectContaining({ channel: 'email', aggregateDuesCents: 12800 }),
+    expect.objectContaining({ channel: 'email', offLedgerBalanceCents: 12800 }),
   );
 });
