@@ -173,18 +173,54 @@ exports.up = async function up(knex) {
         }
       }
 
+      // Re-point FK references from losers to the winner BEFORE deleting.
+      // Move-or-delete semantics: some referencing tables are unique per
+      // call (e.g. call_spam_verdicts on (call_log_id, classifier_version))
+      // and BOTH rows of a race pair were processed independently — the
+      // unique violation on re-point is itself proof the winner already
+      // holds the equivalent per-call record, so the loser's copy is a
+      // duplicate observation of the same call and is dropped (first prod
+      // run failed exactly here and blocked deploys). Drops are counted and
+      // recorded on the winner's metadata under dedupe_dropped_refs.
+      const loserIds = losers.map((r) => r.id);
+      const idList = loserIds.map((id) => `'${id}'::uuid`).join(', ');
+      const droppedRefs = {};
+      for (const fk of fks) {
+        const countRefs = async (where) => {
+          const { rows } = await knex.raw(`SELECT count(*)::int AS n FROM "${fk.tbl}" WHERE ${where}`);
+          return rows[0].n;
+        };
+        const beforeLoser = await countRefs(`"${fk.col}" IN (${idList})`);
+        if (beforeLoser === 0) continue;
+        const beforeWinner = await countRefs(`"${fk.col}" = '${winner.id}'::uuid`);
+        await knex.raw(`
+          DO $mig$
+          DECLARE r RECORD;
+          BEGIN
+            FOR r IN SELECT ctid FROM "${fk.tbl}" WHERE "${fk.col}" IN (${idList}) LOOP
+              BEGIN
+                UPDATE "${fk.tbl}" SET "${fk.col}" = '${winner.id}'::uuid WHERE ctid = r.ctid;
+              EXCEPTION WHEN unique_violation THEN
+                DELETE FROM "${fk.tbl}" WHERE ctid = r.ctid;
+              END;
+            END LOOP;
+          END
+          $mig$;
+        `);
+        const afterWinner = await countRefs(`"${fk.col}" = '${winner.id}'::uuid`);
+        const dropped = beforeLoser - (afterWinner - beforeWinner);
+        if (dropped > 0) droppedRefs[fk.tbl] = (droppedRefs[fk.tbl] || 0) + dropped;
+      }
+      if (Object.keys(droppedRefs).length > 0) {
+        mergedMeta.dedupe_dropped_refs = droppedRefs;
+        update.metadata = JSON.stringify(mergedMeta);
+      }
+
       if (Object.keys(update).length > 0) {
         update.updated_at = knex.fn.now();
         await knex('call_log').where({ id: winner.id }).update(update);
       }
 
-      const loserIds = losers.map((r) => r.id);
-      for (const fk of fks) {
-        await knex.raw(
-          `UPDATE "${fk.tbl}" SET "${fk.col}" = ? WHERE "${fk.col}" = ANY(?::uuid[])`,
-          [winner.id, loserIds]
-        );
-      }
       await knex('call_log').whereIn('id', loserIds).del();
     }
   }
