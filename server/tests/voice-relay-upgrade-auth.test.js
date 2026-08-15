@@ -440,3 +440,29 @@ describe('ws upgrade — fail-closed attach', () => {
     expect(httpServer.listenerCount('upgrade')).toBe(0);
   });
 });
+
+// gh prb-r19: the source read happens BEFORE the irreversible burn — a
+// transient read failure must not consume the one-use token, so the same
+// authenticated URL succeeds on Twilio's retry once the DB recovers.
+test('a failed source read rejects the upgrade WITHOUT burning the token', async () => {
+  jest.clearAllMocks();
+  mockBurned.clear();
+  mockBurnFails = false;
+  mockCallLogFails = true;
+  process.env.VOICE_RELAY_ENABLED = 'true';
+  process.env.ANTHROPIC_API_KEY = 'sk-test';
+  process.env.VOICE_RELAY_WS_SECRET = SECRET;
+  const httpServer = attach();
+  const token = mintCallToken('CA-retry-1', { secret: SECRET });
+  const socket = await upgrade(httpServer, `/ws/voice-agent?callSid=CA-retry-1&t=${token}`);
+  expect(socket.destroy).toHaveBeenCalled();
+  expect(mockBurned.size).toBe(0); // credential NOT consumed
+  // DB recovers — the SAME token now completes the upgrade.
+  mockCallLogFails = false;
+  await upgrade(httpServer, `/ws/voice-agent?callSid=CA-retry-1&t=${token}`);
+  expect(handleUpgrade).toHaveBeenCalledTimes(1);
+  mockCallLogFails = false;
+  delete process.env.VOICE_RELAY_ENABLED;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.VOICE_RELAY_WS_SECRET;
+});

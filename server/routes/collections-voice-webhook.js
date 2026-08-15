@@ -352,7 +352,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
         } catch (cardErr) {
           logger.error(`[collections-vestibule] opt-out fallback card failed: ${cardErr.message}`);
         }
-        twiml.say(optOutCard
+        twiml.say((optOutCard && optOutCard.id)
           ? 'Understood. A member of our team will make sure automated calls to this number are stopped. Goodbye.'
           : script.callbackNumberOnly());
       }
@@ -388,7 +388,9 @@ router.post('/collections-vestibule-key', async (req, res) => {
         logger.error(`[collections-vestibule] callback card failed: ${err.message}`);
       }
       // Promise the callback only if the card persisted (gh prb-r3).
-      twiml.say(officeCard ? script.callbackPromise() : script.callbackNumberOnly());
+      // A card counts only with a real id (gh prb-r19): notifyAdmin's
+      // suppressed sentinel { id: null } is truthy but persists nothing.
+      twiml.say((officeCard && officeCard.id) ? script.callbackPromise() : script.callbackNumberOnly());
       twiml.hangup();
       await writeOutcomeResilient(call.row.id, { outcome: 'vestibule_office' });
       return sendTwiml(res, twiml);
@@ -489,22 +491,44 @@ router.post('/collections-transfer-complete', async (req, res) => {
     const dialStatus = String(req.body?.DialCallStatus || '').toLowerCase();
     if (dialStatus !== 'completed') {
       // Office did not pick up — promise the callback, file the card.
+      // ONE card per call (gh prb-r19): a Twilio replay of this action
+      // webhook must not file duplicate actionable callbacks — the
+      // conditional metadata claim on the call row is the dedupe; the
+      // loser of a replay speaks the promise on the ALREADY-filed card.
       let missCard = null;
+      let cardClaim = 0;
       try {
-        const NotificationService = require('../services/notification-service');
-        missCard = await NotificationService.notifyAdmin(
-          'billing',
-          'Missed transfer on billing follow-up call',
-          'A customer asked to be connected during a billing follow-up call but the office line did not answer. Please call them back.',
-          { link: `/admin/customers/${call.customer.id}`, metadata: { source: 'collections_voice', callLogId: call.row.id } },
-        );
-      } catch (err) {
-        logger.error(`[collections-transfer-complete] callback card failed: ${err.message}`);
+        cardClaim = await db('call_log').where({ id: call.row.id })
+          .whereRaw("COALESCE(metadata->>'transfer_miss_card_at', '') = ''")
+          .update({
+            metadata: db.raw(
+              "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+              [JSON.stringify({ transfer_miss_card_at: new Date().toISOString() })],
+            ),
+          });
+      } catch (claimErr) {
+        logger.warn(`[collections-transfer-complete] card claim failed for ${call.row.id}: ${claimErr.message}`);
+      }
+      if (!cardClaim && call.meta.transfer_miss_card_at) {
+        // Replay: the first invocation already filed it — keep the promise.
+        missCard = { id: 'already-filed' };
+      } else if (cardClaim) {
+        try {
+          const NotificationService = require('../services/notification-service');
+          missCard = await NotificationService.notifyAdmin(
+            'billing',
+            'Missed transfer on billing follow-up call',
+            'A customer asked to be connected during a billing follow-up call but the office line did not answer. Please call them back.',
+            { link: `/admin/customers/${call.customer.id}`, metadata: { source: 'collections_voice', callLogId: call.row.id } },
+          );
+        } catch (err) {
+          logger.error(`[collections-transfer-complete] callback card failed: ${err.message}`);
+        }
       }
       // gh prb-r2: the office was OPEN — a busy/unanswered line must not
       // announce a false closure. And the callback half of that copy is
       // only spoken when its card persisted (gh prb-r3).
-      twiml.say(missCard ? script.transferMissedCallback() : script.callbackNumberOnly());
+      twiml.say((missCard && missCard.id) ? script.transferMissedCallback() : script.callbackNumberOnly());
     }
     twiml.hangup();
     return sendTwiml(res, twiml);

@@ -1241,3 +1241,72 @@ describe('prb-r18', () => {
     expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-18' })).toContain('Recorded');
   });
 });
+
+// prb-r19 pins.
+describe('prb-r19', () => {
+  test('a PAN read in FOUR chunks is caught by the widened window', async () => {
+    const { convo, spoken } = makeConvo();
+    for (const chunk of ['4242', '4242', '4242']) {
+      mockScriptedMessages.push(endTurn('Go on.'));
+      await turn(convo, chunk);
+    }
+    await turn(convo, '4242');
+    expect(spoken).toContain(script.SECURITY_INTERRUPT);
+    expect(JSON.stringify(convo.messages)).not.toContain('4242');
+  });
+
+  test('"tomorrow" across the spring-forward night resolves by ET calendar day, not +24h', async () => {
+    // Sat 2026-03-07 23:30 ET — the next ET calendar day is Mar 8 (DST).
+    const { convo } = makeConvo({ now: new Date('2026-03-08T04:30:00Z') });
+    await turn(convo, 'hello');
+    convo.state = 'RESOLUTION';
+    convo._turns.push({ role: 'caller', text: 'tomorrow works', at: Date.now() });
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-03-09' })).toContain('does not match today/tomorrow');
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-03-08' })).toContain('Recorded');
+  });
+
+  test('word ordinals and "next month" ground', async () => {
+    const { convo } = makeConvo(); // Wed 2026-08-12 ET
+    await turn(convo, 'hello');
+    convo.state = 'RESOLUTION';
+    convo._turns.push({ role: 'caller', text: 'I can pay on the fifteenth', at: Date.now() });
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-20' })).toContain('does not match');
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-15' })).toContain('Recorded');
+    convo._turns.push({ role: 'caller', text: 'sometime next month', at: Date.now() });
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-10-05' })).toContain('not in next month');
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-09-05' })).toContain('Recorded');
+  });
+
+  test('a misread "confirmed" without an affirmative caller turn never leaves RIGHT_PARTY', async () => {
+    const { convo } = makeConvo();
+    mockScriptedMessages.push(
+      toolUse('confirm_right_party', { result: 'confirmed' }),
+      endTurn('Could I just confirm — am I speaking with Pat?'),
+    );
+    await turn(convo, "No, Pat isn't available right now.");
+    expect(convo.state).toBe('RIGHT_PARTY');
+    mockScriptedMessages.push(
+      toolUse('confirm_right_party', { result: 'confirmed' }),
+      endTurn('Thanks!'),
+    );
+    await turn(convo, 'Yes, this is Pat.');
+    expect(convo.state).toBe('VERIFY');
+  });
+
+  test('a negated stop-calling phrase records NO opt-out', async () => {
+    const { convo } = makeConvo();
+    mockScriptedMessages.push(endTurn('Understood, we will keep you posted.'));
+    await turn(convo, "please don't stop calling me, I want the reminders");
+    expect(flags.revokeAutomatedVoiceConsent).not.toHaveBeenCalled();
+    expect(convo._captures.consentRevoked).toBeUndefined();
+  });
+
+  test('a bell-suppressed notifyAdmin sentinel never earns the callback promise', async () => {
+    const NotificationService = require('../services/notification-service');
+    NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true });
+    const { convo, spoken } = makeConvo({ now: AFTER_HOURS_NOW });
+    await turn(convo, 'human please');
+    expect(spoken).toContain(script.callbackNumberOnly());
+    expect(spoken).not.toContain(script.callbackPromise());
+  });
+});

@@ -188,19 +188,14 @@ function attachVoiceRelay(httpServer) {
     // The burn is a DB round trip, so the upgrade completes asynchronously. The
     // socket is not handed to `ws` until it wins the claim; a loser (or an
     // error) is destroyed exactly as an unauthenticated one is.
-    burnCallToken(token, callSid).then(async (won) => {
-      if (!won) {
-        logger.warn(`[voice-relay] rejected ws upgrade: token already used callSid=${callSid}`);
-        try { socket.destroy(); } catch { /* socket already gone */ }
-        return;
-      }
-      // The authenticated call's SOURCE is resolved HERE, before any frame
-      // exists (gh prb-r11): the setup frame's session_mode label is
-      // unverified input in both directions — a collections call whose label
-      // was stripped must never enter the generic lead flow, not even for
-      // the window a detached check would leave open. The upgrade already
-      // fails closed on a DB failure (the burn), so an unreadable source
-      // keeps the same envelope: reject the upgrade.
+    (async () => {
+      // The authenticated call's SOURCE is resolved FIRST, before any frame
+      // exists (gh prb-r11) and BEFORE the burn (gh prb-r19): the burn is
+      // irreversible, so a transient read failure after it would consume the
+      // one-use credential and drop an otherwise valid call — read-then-burn
+      // lets Twilio's retry of the same URL succeed once the DB recovers.
+      // An unreadable source still rejects (fail closed, the burn's
+      // envelope); the read is idempotent so the ordering is safe.
       let collectionsCall = false;
       try {
         const db = require('../../models/db');
@@ -210,6 +205,12 @@ function attachVoiceRelay(httpServer) {
         collectionsCall = Boolean(row && row.source === 'collections_voice');
       } catch (e) {
         logger.warn(`[voice-relay] rejected ws upgrade: source resolution failed callSid=${callSid}: ${e.message}`);
+        try { socket.destroy(); } catch { /* socket already gone */ }
+        return;
+      }
+      const won = await burnCallToken(token, callSid);
+      if (!won) {
+        logger.warn(`[voice-relay] rejected ws upgrade: token already used callSid=${callSid}`);
         try { socket.destroy(); } catch { /* socket already gone */ }
         return;
       }
@@ -234,7 +235,7 @@ function attachVoiceRelay(httpServer) {
       // deterministically on the nonce's lexicographic order.
       req.relaySessionGeneration = parseInt(String(req.relaySessionKey || '').slice(0, 12), 16) || null;
       wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
-    }).catch(() => {
+    })().catch(() => {
       try { socket.destroy(); } catch { /* socket already gone */ }
     });
   });

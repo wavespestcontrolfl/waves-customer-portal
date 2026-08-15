@@ -422,20 +422,29 @@ class CollectionsConversation {
 
   // The follow-up promise needs an artifact, EVERYWHERE (gh prb-r15/r16):
   // shared by the tool-timeout, tool-error, and round-exhaustion paths.
-  // Returns the card (truthy = the promise may be spoken) or null.
+  // Returns the card (truthy = the promise may be spoken) or null. A card
+  // counts ONLY with a real id (gh prb-r19): notifyAdmin can resolve the
+  // truthy suppressed sentinel { id: null, suppressed: true } when the
+  // bell policy mutes the category — no row exists, so no promise.
   async _fileFollowUpCard(detail) {
     try {
       const NotificationService = require('../../notification-service');
-      return await NotificationService.notifyAdmin(
+      const card = await NotificationService.notifyAdmin(
         'billing',
         'Follow-up needed after automated billing call',
         detail,
         { link: `/admin/customers/${this._ctx?.customer?.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx?.callLogId } },
       );
+      return card && card.id ? card : null;
     } catch (cardErr) {
       logger.error(`[collections-voice] follow-up card failed: ${cardErr.message}`);
       return null;
     }
+  }
+
+  // Same rule for every other card site in this file.
+  static _cardPersisted(card) {
+    return Boolean(card && card.id) ? card : null;
   }
 
   // Grounding sources (gh prb-r12): what the CALLER actually said, for
@@ -477,6 +486,12 @@ class CollectionsConversation {
   // fallback card names every flag that failed.
   async _recordSpokenOptOut(rawText) {
     if (!SPOKEN_OPT_OUT_RE.test(rawText)) return;
+    // A NEGATED or corrective phrasing must not opt anyone out (gh
+    // prb-r19): "please don't stop calling me" / "I never said stop
+    // calling" embed the trigger phrase but express the opposite intent.
+    if (/\b(don'?t stop|do not stop|never said|didn'?t (?:say|mean|ask)|did not (?:say|mean|ask)|keep calling|not asking (?:you )?to stop|no need to stop)\b/i.test(rawText)) {
+      return;
+    }
     // An explicit automated-only qualifier ("remove me from the automated
     // call list") narrows the scope (gh prb-r12): do_not_call would block
     // permitted manual calls contrary to the caller's stated ask.
@@ -569,8 +584,10 @@ class CollectionsConversation {
     if (!utteranceHasSensitiveDetails(callerText)) {
       try {
         const { scrubSegments } = require('../../../utils/pan-scrub');
+        // Five prior turns, not two (gh prb-r19): a card read in four
+        // natural STT chunks ("4242" ×4) must land inside one window.
         const priorTexts = [];
-        for (let i = this._turns.length - 1; i >= 0 && priorTexts.length < 2; i--) {
+        for (let i = this._turns.length - 1; i >= 0 && priorTexts.length < 5; i--) {
           if (this._turns[i].role === 'caller') priorTexts.unshift(String(this._turns[i].text || ''));
         }
         if (priorTexts.length) {
@@ -583,14 +600,14 @@ class CollectionsConversation {
     if (crossTurnSensitive) {
       const WITHHELD = '[utterance withheld — sensitive detail]';
       let sanitized = 0;
-      for (let i = this.messages.length - 1; i >= 0 && sanitized < 2; i--) {
+      for (let i = this.messages.length - 1; i >= 0 && sanitized < 5; i--) {
         const m = this.messages[i];
         if (m.role === 'user' && typeof m.content === 'string' && /\d/.test(m.content)) {
           m.content = WITHHELD;
           sanitized++;
         }
       }
-      for (let i = this._turns.length - 1, s = 0; i >= 0 && s < 2; i--) {
+      for (let i = this._turns.length - 1, s = 0; i >= 0 && s < 5; i--) {
         if (this._turns[i].role === 'caller' && /\d/.test(String(this._turns[i].text || ''))) {
           this._turns[i].text = WITHHELD;
           s++;
@@ -762,7 +779,7 @@ class CollectionsConversation {
     } catch (cardErr) {
       logger.error(`[collections-voice] tool-exhaustion follow-up card failed: ${cardErr.message}`);
     }
-    this.say(exhaustionCard
+    this.say((exhaustionCard && exhaustionCard.id)
       ? 'Sorry — that is taking me longer than it should. Our office will follow up. Is there anything else?'
       // ("website", not "invoice" — this line can be spoken PRE-verification
       // and must pass the pre-verify vocabulary screen.)
@@ -841,6 +858,17 @@ class CollectionsConversation {
   async _toolConfirmRightParty(input) {
     const result = String(input.result || '');
     if (result === 'confirmed') {
+      // Confirmation is GROUNDED in the caller's words (gh prb-r19): a
+      // model misread of "No, Pat isn't available" as confirmed would let
+      // a household member — who often knows the street number — reach
+      // disclosure. The caller's last turn must read affirmative and
+      // non-negating; anything else re-asks.
+      const t = this._lastCallerText();
+      const CONFIRM_RE = /\b(yes|yeah|yep|speaking|this is (?:he|she|they|me|\w+)|that'?s me|it'?s me|correct|i am|i'?m \w+|you(?:'ve| have) (?:got|reached) (?:him|her|them|me))\b/i;
+      const DENY_RE = /\b(no\b|not\b|isn'?t|is not|aren'?t|unavailable|not here|wrong|busy|out right now)\b/i;
+      if (!CONFIRM_RE.test(t) || DENY_RE.test(t)) {
+        return 'Refused: the caller has not clearly confirmed being the customer. Ask directly ("Am I speaking with them?") and call this tool only after a clear yes.';
+      }
       this.state = 'VERIFY';
       return 'Right party confirmed. Now ask the customer to tell you their street number or billing ZIP so you can verify the account.';
     }
@@ -877,7 +905,7 @@ class CollectionsConversation {
                 'An outbound billing follow-up call reached a number where the customer is not known, and BOTH the wrong_number flag and the collection_hold fallback failed to write. Please flag the number by hand before any further outreach.',
                 { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
               );
-              if (!card) throw new Error('notifyAdmin returned no card');
+              if (!card || !card.id) throw new Error('notifyAdmin returned no persisted card');
             } catch (cardErr) {
               logger.error(`[collections-voice] WRONG-NUMBER REPORT UNPERSISTED for customer ${this._ctx.customer.id} callLog=${this._ctx.callLogId}: ${cardErr.message}`);
             }
@@ -1065,10 +1093,12 @@ class CollectionsConversation {
       return 'Refused: that day of the month does not match what the customer said. Record exactly what they said.';
     }
     if (/\b(today|tomorrow)\b/i.test(lastCallerTurn)) {
-      const { etCalendarDayOf } = require('../../../utils/datetime-et');
+      // addETDays, never +24h in milliseconds (gh prb-r19): across the
+      // spring DST transition a fixed day of ms can skip an ET calendar day.
+      const { etCalendarDayOf, addETDays } = require('../../../utils/datetime-et');
       const now = this._now();
       const expected = /\btomorrow\b/i.test(lastCallerTurn)
-        ? etCalendarDayOf(new Date(now.getTime() + 24 * 60 * 60 * 1000))
+        ? etCalendarDayOf(addETDays(now, 1))
         : etCalendarDayOf(now);
       if (date !== expected) {
         return 'Refused: that date does not match today/tomorrow. Convert using today\'s date from your instructions.';
@@ -1090,6 +1120,23 @@ class CollectionsConversation {
       for (const [re, lo, hi] of windows) {
         if (re.test(lastCallerTurn) && (daysOut < lo || daysOut > hi)) {
           return 'Refused: that date does not fit the timeframe the customer said. Ask them for the specific day, or record nothing.';
+        }
+      }
+      // Word-form ordinals and month-relative phrasing ground too (gh
+      // prb-r19): "the fifteenth"/"the first" pin the day; "next month"
+      // pins the month; a bare "payday"/"month" with no other component
+      // stays temporal-only and needs a specific day.
+      const WORD_ORDINALS = { first: 1, second: 2, third: 3, fifth: 5, tenth: 10, fifteenth: 15, twentieth: 20, thirtieth: 30 };
+      for (const [word, dayNum] of Object.entries(WORD_ORDINALS)) {
+        if (new RegExp(`\\bthe ${word}\\b`, 'i').test(lastCallerTurn) && d.getUTCDate() !== dayNum) {
+          return 'Refused: that day of the month does not match what the customer said. Record exactly what they said.';
+        }
+      }
+      if (/\bnext month\b/i.test(lastCallerTurn)) {
+        const { etCalendarDayOf } = require('../../../utils/datetime-et');
+        const nowMonth = parseInt(etCalendarDayOf(this._now()).slice(5, 7), 10) - 1;
+        if (d.getUTCMonth() !== (nowMonth + 1) % 12) {
+          return 'Refused: that date is not in next month. Ask for the specific day, or record nothing.';
         }
       }
     }
@@ -1123,7 +1170,7 @@ class CollectionsConversation {
       // Either way the CAPTURE records the dispute so the outcome writer
       // holds the case instead of returning it to the queue.
       this._captures.disputeSummary = summary || 'dispute raised (hold write failed)';
-      return disputeCard
+      return (disputeCard && disputeCard.id)
         ? 'The dispute has been passed to the office for review — assure the customer, and end politely.'
         : 'Could not record the dispute automatically. Apologize, give the office number so they can raise it directly, and end politely.';
     }
@@ -1191,13 +1238,13 @@ class CollectionsConversation {
           logger.error(`[collections-voice] spoken opt-out fallback card failed: ${cardErr.message}`);
         }
       }
-      return optOutCard
+      return (optOutCard && optOutCard.id)
         ? 'Could not record that automatically, but the office has been asked to stop the calls — tell the caller a person will make sure it is honored, and end politely.'
         : 'Could not record that. Apologize, give the office number so they can confirm it directly, and end politely.';
     }
     if (input.scope === 'all_calls' && !allCallsRecorded) {
       // The promise stands only on a persisted card (gh prb-r6).
-      return allCallsCard
+      return (allCallsCard && allCallsCard.id)
         ? 'Automated calls are stopped, but the full no-calls request could not be completely recorded — tell the caller a person will make sure no calls of any kind happen.'
         : 'Automated calls are stopped, but the full no-calls request could not be recorded — apologize and give the office number so they can confirm the full stop directly.';
     }
@@ -1411,7 +1458,7 @@ class CollectionsConversation {
     // A callback is only PROMISED when its card actually persisted (gh
     // prb-r3: notifyAdmin resolves null on a failed insert) — otherwise
     // the honest copy gives the number without the promise.
-    this.say(callbackCard ? script.callbackPromise() : script.callbackNumberOnly());
+    this.say((callbackCard && callbackCard.id) ? script.callbackPromise() : script.callbackNumberOnly());
     await this._finish('conversation_transferred', { endSession: true, handoff: { next: 'callback' } });
   }
 

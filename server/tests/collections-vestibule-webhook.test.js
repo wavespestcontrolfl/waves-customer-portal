@@ -83,7 +83,7 @@ const CUSTOMER = { id: 'cust-1', first_name: 'Pat' };
 
 function chain({ first } = {}) {
   const q = {};
-  ['where', 'whereNull', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereNull', 'whereRaw', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => first);
   q.update = jest.fn(async () => 1);
   q.catch = () => Promise.resolve();
@@ -617,4 +617,36 @@ test('a replayed machine callback with the cap already stamped writes the fallba
     outcome: 'machine_no_voicemail',
     onlyIfNoOutcome: true,
   }));
+});
+
+// prb-r19: one missed-transfer card per call — a Twilio replay keeps the
+// promise on the already-filed card instead of filing a duplicate.
+test('a replayed transfer-complete files NO duplicate card but keeps the promise', async () => {
+  const replayRow = {
+    ...CALL_ROW,
+    metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', transfer_miss_card_at: '2026-08-15T18:00:00Z' }),
+  };
+  const claimChain = chain();
+  claimChain.update = jest.fn(async () => 0); // claim already taken
+  const queues = {
+    call_log: [chain({ first: replayRow }), claimChain],
+    collection_cases: [chain({ first: LINKED_CASE })],
+    customers: [chain({ first: CUSTOMER })],
+  };
+  db.mockImplementation((t) => (queues[t] && queues[t].length ? queues[t].shift() : chain()));
+  const res = mockRes();
+  await handlerFor('/collections-transfer-complete')(req({ body: { DialCallStatus: 'no-answer' } }), res);
+  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  expect(res.body).toContain('not able to reach our office'); // promise preserved
+});
+
+// prb-r19: notifyAdmin's suppressed sentinel {id:null} never earns the promise.
+test('a bell-suppressed press-0 card yields the number-only copy', async () => {
+  setDb();
+  isStaffedHours.mockReturnValue(false);
+  NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true });
+  const res = mockRes();
+  await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '0' } }), res);
+  expect(res.body).toContain('the team will help right away');
+  expect(res.body).not.toContain('give you a call back');
 });
