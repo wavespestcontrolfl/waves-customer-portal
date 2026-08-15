@@ -44,7 +44,8 @@ function mockRowDb(row, updateBuilder, extra = {}) {
       // current state, not the pre-lookup snapshot).
       if (cpCalls === 1) return builder(row);
       if (cpCalls === 2) return updateBuilder || builder(1);
-      return builder({ is_primary: row.is_primary, address_key: row.address_key, customer_id: row.customer_id });
+      return builder(extra.liveRole
+        || { is_primary: row.is_primary, address_key: row.address_key, customer_id: row.customer_id });
     }
     if (table === 'scheduled_services') {
       // The visit mirror now SELECTS candidates (canonical-key fence in
@@ -283,6 +284,43 @@ describe('runCallPropertyLookup', () => {
     // …but the commercial classification NEVER lands on customers
     // (customers.property_type feeds service_taxability — owner ruling).
     expect(mirror.property_type).toBeUndefined();
+  });
+
+  test('an address edited during the lookup discards the customer mirror (fence survives the live re-read)', async () => {
+    // The row was re-addressed between the fenced property update and the
+    // mirror decision: liveRole carries the NEW address_key while the
+    // looked-up facts describe the OLD one — nothing may mirror.
+    const customersBuilder = builder({
+      id: 'c1', address_line1: '456 Moved Ln', address_line2: null, city: 'Bradenton', zip: '34212',
+      latitude: null, longitude: null, property_type: null,
+    });
+    const oldKey = require('../services/customer-properties').addressKey({
+      address_line1: '123 Sample Cove', city: 'Bradenton', zip: '34212',
+    });
+    mockRowDb({
+      id: 'p1', customer_id: 'c1', active: true, is_primary: true,
+      latitude: null, longitude: null, property_type: null,
+      address_line1: '123 Sample Cove', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34212',
+      address_key: oldKey,
+    }, builder([{ latitude: 27.5, longitude: -82.4, property_type: 'single_family' }]), {
+      customers: customersBuilder,
+      liveRole: {
+        is_primary: true,
+        customer_id: 'c1',
+        address_key: require('../services/customer-properties').addressKey({
+          address_line1: '456 Moved Ln', city: 'Bradenton', zip: '34212',
+        }),
+      },
+    });
+    performPropertyLookup.mockResolvedValueOnce({
+      satellite: { inServiceArea: true },
+      enriched: {
+        lat: 27.5, lng: -82.4, propertyType: 'Single Family',
+        _observed: { propertyType: true }, fieldVerifyFlags: [],
+      },
+    });
+    await runCallPropertyLookup({ propertyId: 'p1' });
+    expect(customersBuilder.update).not.toHaveBeenCalled();
   });
 
   test("commercial SUBTYPES ('Office') store as the literal 'commercial' and never mirror", async () => {

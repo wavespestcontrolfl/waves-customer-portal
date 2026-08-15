@@ -355,6 +355,26 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     expect(neu.label).toBe('Primary');
   });
 
+  test('a flip whose companion occupancy CAS went stale is skipped, not promoted (codex r9)', async () => {
+    // Card: companion rental→owner_occupied + flip. An admin re-typed the
+    // row 'seasonal' after staging: the CAS misses, and the flip must not
+    // ride on — re-read occupancy is neither owner_occupied nor unknown.
+    const old = { ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, state: 'FL', active: true, customer_id: 'cust-1', occupancy_type: 'seasonal' };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    const out = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [
+        { kind: 'occupancy_change', property_id: 'prop-new', current_occupancy: 'rental_investment', proposed_occupancy: 'owner_occupied' },
+        { kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' },
+      ],
+    });
+    expect(out).toEqual({ applied: 0, skipped: 2 });
+    expect(neu.is_primary).toBe(false);
+    expect(neu.occupancy_type).toBe('seasonal');
+    expect(old.is_primary).toBe(true);
+  });
+
   test('a flip whose new primary was re-typed COMMERCIAL after parking is skipped (codex r8)', async () => {
     const old = { ...OLD_HOME, state: 'FL', active: true, customer_id: 'cust-1' };
     const neu = { ...NEW_HOME, state: 'FL', active: true, customer_id: 'cust-1', property_type: 'commercial' };
@@ -463,8 +483,13 @@ describe('stale-state fences (codex r1)', () => {
   });
 });
 
-describe('promote occupancy fence (codex r3)', () => {
-  test('an admin-set occupancy on the new primary survives the flip', async () => {
+describe('promote occupancy fence (codex r3 → r9)', () => {
+  test('an admin-set non-owner occupancy on the new primary SKIPS the flip entirely', async () => {
+    // Superseded r3 behavior (promote anyway, occupancy survives): since
+    // r9 a row currently rental/seasonal/commercial/vacant cannot become
+    // the primary residence — the companion occupancy_change went stale
+    // (or never existed), so promoting would store a non-owner-occupied
+    // primary residence. The admin's occupancy still survives.
     const rows = [{ id: 'prop-new', customer_id: 'cust-1', active: true, is_primary: false, occupancy_type: 'seasonal', address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', state: 'FL' }];
     const updates = [];
     const trx = (table) => ({
@@ -477,18 +502,39 @@ describe('promote occupancy fence (codex r3)', () => {
       },
       async update(patch) { updates.push({ table, patch }); return 1; },
     });
-    const { applied } = await applyPropertyRoleProposals(trx, {
+    const out = await applyPropertyRoleProposals(trx, {
       customerId: 'cust-1',
       proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: null }],
     });
-    expect(applied).toBe(1);
-    const promote = updates.find((u) => u.table === 'customer_properties' && u.patch.is_primary === true);
-    expect(promote.patch.occupancy_type).toBeUndefined();
-    // owner_occupied only arrives via the atomic occupancy-fenced update,
-    // whose 'unknown' predicate cannot match this admin-set 'seasonal' row —
-    // so the row's occupancy survives the flip.
+    expect(out).toEqual({ applied: 0, skipped: 1 });
+    expect(updates.filter((u) => u.table === 'customer_properties')).toHaveLength(0);
     expect(rows[0].occupancy_type).toBe('seasonal');
-    // The label suggestion is its own whereNull-fenced update.
-    expect(updates.some((u) => u.patch.label === 'Primary')).toBe(true);
+    expect(rows[0].is_primary).toBe(false);
+  });
+
+});
+
+describe('already-primary residence correction (codex r9)', () => {
+  test('a primary claim on the already-primary row stored non-owner parks an occupancy_change', () => {
+    const rentalPrimary = { ...OLD_HOME, occupancy_type: 'rental_investment' };
+    const { fills, proposals } = buildPropertyRoleProposals({
+      classified: [{ address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true }],
+      properties: [rentalPrimary, NEW_HOME],
+    });
+    expect(fills).toHaveLength(0);
+    expect(proposals).toEqual([expect.objectContaining({
+      kind: 'occupancy_change', property_id: 'prop-old',
+      current_occupancy: 'rental_investment', proposed_occupancy: 'owner_occupied',
+    })]);
+  });
+
+  test('a primary claim on the already-primary row stored unknown fills owner_occupied directly', () => {
+    const unknownPrimary = { ...OLD_HOME, occupancy_type: 'unknown' };
+    const { fills, proposals } = buildPropertyRoleProposals({
+      classified: [{ address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true }],
+      properties: [unknownPrimary, NEW_HOME],
+    });
+    expect(fills).toEqual([{ property_id: 'prop-old', occupancy: 'owner_occupied' }]);
+    expect(proposals).toHaveLength(0);
   });
 });

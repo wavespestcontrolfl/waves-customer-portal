@@ -248,6 +248,30 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
           : (LABEL_BY_OCCUPANCY[oldOccupancy] || null),
         evidence: entry.evidence || null,
       });
+    } else if (!entry.occupancy) {
+      // The claimed residence row is ALREADY the primary — no flip, but a
+      // stored occupancy contradicting the claim gets the same treatment
+      // as the promotion path (codex #3418 r9): fill a still-'unknown'
+      // row directly; park an explicit change otherwise. Skipped when the
+      // entry carried its own occupancy — the per-entry loop above
+      // already produced that fill/proposal.
+      const stored = knownOccupancy(row.occupancy_type);
+      if (!stored) {
+        if (!fills.some((f) => f.property_id === row.id)) {
+          fills.push({ property_id: row.id, occupancy: 'owner_occupied' });
+        }
+      } else if (stored !== 'owner_occupied'
+        && !proposals.some((q) => q.kind === 'occupancy_change' && q.property_id === row.id)) {
+        proposals.push({
+          kind: 'occupancy_change',
+          property_id: row.id,
+          address: shortAddress(row),
+          current_occupancy: stored,
+          proposed_occupancy: 'owner_occupied',
+          proposed_label: null,
+          evidence: entry.evidence || null,
+        });
+      }
     }
   }
 
@@ -431,8 +455,14 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
     }
 
     if (p.kind === 'primary_flip') {
+      // FOR UPDATE (codex #3418 r9): an in-flight enrichment lookup's
+      // fenced fill must serialize against this transaction — a plain read
+      // could pass the commercial guard on a pre-fill null type and then
+      // mirror stale nulls while the lookup lands 'commercial' underneath.
+      // Locked, the fill either committed (we see it) or waits for us.
       const newPrimary = await trx('customer_properties')
         .where({ id: p.new_primary_property_id, customer_id: customerId, active: true })
+        .forUpdate()
         .first();
       if (!newPrimary) { skipped += 1; continue; }
       if (newPrimary.is_primary) { applied += 1; continue; } // already done — idempotent re-click
@@ -442,6 +472,14 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       // Staging suppresses these flips; this catches a row RE-TYPED
       // commercial between parking and the click.
       if (String(newPrimary.property_type || '').trim().toLowerCase() === 'commercial') { skipped += 1; continue; }
+      // The flip rides on the row's CURRENT occupancy being compatible
+      // with "primary residence" (codex #3418 r9): owner_occupied (the
+      // companion occupancy_change just landed, or it always was) or
+      // unknown (the promote fence fills it). Anything else means the
+      // companion CAS went stale against a newer admin edit — promoting
+      // anyway would store a non-owner-occupied primary residence.
+      const currentOcc = knownOccupancy(newPrimary.occupancy_type);
+      if (currentOcc && currentOcc !== 'owner_occupied') { skipped += 1; continue; }
 
       const oldPrimary = await trx('customer_properties')
         .where({ customer_id: customerId, is_primary: true, active: true })

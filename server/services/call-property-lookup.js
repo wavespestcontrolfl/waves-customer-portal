@@ -346,7 +346,14 @@ async function enrichPropertyById(propertyId) {
     const liveRole = await db('customer_properties')
       .where({ id: propertyId, active: true })
       .first('is_primary', 'address_key', 'customer_id');
-    if (liveRole?.is_primary) {
+    // The looked-up-address fence STAYS on the re-read (codex #3418 r9):
+    // an address edit between the fenced property update and this point
+    // gives the row a NEW address_key while mirrorLat/afterType still
+    // describe the OLD address — matching the customer against the new
+    // key would mirror stale facts onto it (and old coords can make
+    // ensureCustomerGeocoded skip the re-geocode). Facts mirror only
+    // while the row still IS the address that was looked up.
+    if (liveRole?.is_primary && liveRole.address_key === row.address_key) {
       const customer = await db('customers').where({ id: liveRole.customer_id }).first();
       // Fence: mirror only while the customers primary-address mirror still
       // IS this property's address — and the SAME captured address columns
