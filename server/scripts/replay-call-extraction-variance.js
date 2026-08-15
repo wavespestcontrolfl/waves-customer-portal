@@ -607,10 +607,13 @@ function additionalPropertyRolesSignature(flat) {
   const parts = entries
     .map((e) => [
       String(e?.address_line1 || '').toLowerCase().trim(),
+      String(e?.address_line2 || '').toLowerCase().trim(),
+      String(e?.city || '').toLowerCase().trim(),
+      String(e?.zip || '').trim(),
       e?.occupancy || '',
       e?.is_primary_residence === true ? 'primary' : (e?.is_primary_residence === false ? 'not_primary' : ''),
     ].join('|'))
-    .filter((sig) => sig !== '||')
+    .filter((sig) => sig !== '|||||')
     .sort();
   return parts.length ? parts.join(';') : null;
 }

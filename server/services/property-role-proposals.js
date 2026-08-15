@@ -256,12 +256,18 @@ async function stagePropertyRoleReview({
     });
     // MERGE, not ignore, on the open-card unique (codex #3418 r1): a
     // force-reprocessed call re-derives its classification, and the open
-    // card must present the NEWEST proposals — an ignored conflict would
-    // leave the office applying a superseded extraction.
-    await db('triage_items')
-      .insert(card)
-      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-      .merge({ payload: card.payload, summary: card.summary, updated_at: new Date() });
+    // card must present the NEWEST proposals. The write runs under the
+    // shared per-call triage lock (codex #3418 r5) so it serializes with
+    // Apply's locked read-then-resolve — a refresh can no longer land
+    // between Apply's payload read and its resolve.
+    const { lockTriageCall } = require('../utils/triage-locks');
+    await db.transaction(async (trx) => {
+      await lockTriageCall(trx, callLogId);
+      await trx('triage_items')
+        .insert(card)
+        .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+        .merge({ payload: card.payload, summary: card.summary, updated_at: new Date() });
+    });
     parked = true;
   }
   return { fills: fills.length, parked };
@@ -287,6 +293,12 @@ async function stagePropertyRoleReview({
 async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
   let applied = 0;
   let skipped = 0;
+
+  // LOCK ORDER: the customers row FIRST, then customer_properties — the
+  // same order admin-customers' address save uses (customer → primary
+  // property). Locking properties first here could deadlock against a
+  // concurrent Customer 360 save (codex #3418 r5).
+  await trx('customers').where({ id: customerId }).forUpdate().first();
 
   for (const p of proposals) {
     if (p.kind === 'occupancy_change') {
@@ -354,6 +366,12 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
             service_address_city: oldPrimary.city,
             service_address_state: oldPrimary.state || 'FL',
             service_address_zip: oldPrimary.zip,
+            // Coordinates ride the stamp (codex #3418 r5): once the
+            // customer mirror flips, stampedDivergesSql disables the
+            // customer-coord fallback for these rows — without their own
+            // lat/lng, dispatch and route optimization would go blind.
+            lat: oldPrimary.latitude ?? null,
+            lng: oldPrimary.longitude ?? null,
             updated_at: new Date(),
           });
 

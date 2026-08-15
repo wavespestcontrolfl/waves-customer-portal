@@ -8246,20 +8246,33 @@ const CallRecordingProcessor = {
             // list the staging reads (resolveCallAdditionalProperties
             // prefers V1, so it is not used here).
             const v2RoleProp = v2CanonicalExtraction?.property || null;
-            const roleView = {
-              ...extracted,
-              address_line2: callUnit,
-              service_address_occupancy: v2RoleProp
-                ? (v2RoleProp.service_address_occupancy || null)
-                : (extracted.service_address_occupancy || null),
-              service_address_is_primary_residence: v2RoleProp
-                ? (typeof v2RoleProp.service_address_is_primary_residence === 'boolean'
-                  ? v2RoleProp.service_address_is_primary_residence
-                  : null)
-                : (typeof extracted.service_address_is_primary_residence === 'boolean'
-                  ? extracted.service_address_is_primary_residence
-                  : null),
-            };
+            // Single-extractor coherence (codex #3418 r5): in V2 mode the
+            // MAIN entry's address comes from V2's own service_address, not
+            // the V1-canonical `extracted` row — pairing V1's address with
+            // V2's classification could label the property V1 named with a
+            // judgment V2 made about a different one.
+            const v2Addr = v2RoleProp?.service_address || null;
+            const roleView = v2RoleProp
+              ? {
+                address_line1: v2Addr?.street_line_1 || null,
+                address_line2: v2Addr?.street_line_2 || null,
+                city: v2Addr?.city || null,
+                zip: v2Addr?.postal_code || null,
+                service_address_occupancy: v2RoleProp.service_address_occupancy || null,
+                service_address_is_primary_residence:
+                  typeof v2RoleProp.service_address_is_primary_residence === 'boolean'
+                    ? v2RoleProp.service_address_is_primary_residence
+                    : null,
+              }
+              : {
+                ...extracted,
+                address_line2: callUnit,
+                service_address_occupancy: extracted.service_address_occupancy || null,
+                service_address_is_primary_residence:
+                  typeof extracted.service_address_is_primary_residence === 'boolean'
+                    ? extracted.service_address_is_primary_residence
+                    : null,
+              };
             const roleAdditionalProps = v2RoleProp
               ? require('../utils/extraction-compat').mapAdditionalPropertiesToLegacy(v2RoleProp.additional_properties)
               : callAdditionalProps;

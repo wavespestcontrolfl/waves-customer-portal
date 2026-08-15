@@ -273,6 +273,16 @@ function sendTransitionResult(res, result, id, nextStatus) {
 async function transition(req, res, nextStatus) {
   const { id } = req.params;
   const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null;
+  // property_role_confirm cards are admin-territory end to end (codex
+  // #3418 r5): hiding them from the tech list is not enforcement — a tech
+  // holding the UUID must not be able to resolve/dismiss a pending admin
+  // property correction through these shared transitions either.
+  if (req.techRole !== 'admin') {
+    const guarded = await db('triage_items').where({ id }).first('reason_code');
+    if (guarded && guarded.reason_code === 'property_role_confirm') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+  }
   const result = await transitionCore({ id, nextStatus, note, assignedTo: req.technicianId });
   return sendTransitionResult(res, result, id, nextStatus);
 }

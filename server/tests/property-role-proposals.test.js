@@ -124,6 +124,7 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
         _table: table, _wheres: [], _whereNulls: [], _whereNotIn: null,
         where(w) { this._wheres.push(w); return this; },
         whereNull(c) { this._whereNulls.push(c); return this; },
+        forUpdate() { return this; },
         whereNotIn(c, v) { this._whereNotIn = [c, v]; return this; },
         whereIn() { return this; },
         async first() {
@@ -235,6 +236,7 @@ describe('stale-state fences (codex r1)', () => {
       _wheres: [], _whereNulls: [],
       where(w) { this._wheres.push(w); return this; },
       whereNull(c) { this._whereNulls.push(c); return this; },
+      forUpdate() { return this; },
       whereNotIn() { return this; },
       whereIn() { return this; },
       async first() {
@@ -288,7 +290,7 @@ describe('promote occupancy fence (codex r3)', () => {
     const trx = (table) => ({
       _wheres: [],
       where(w) { this._wheres.push(w); return this; },
-      whereNull() { return this; }, whereNotIn() { return this; }, whereIn() { return this; },
+      whereNull() { return this; }, whereNotIn() { return this; }, whereIn() { return this; }, forUpdate() { return this; },
       async first() {
         const preds = Object.assign({}, ...this._wheres);
         return (table === 'customer_properties' ? rows : []).find((r) => Object.entries(preds).every(([k, v]) => r[k] === v)) || null;
