@@ -49,15 +49,15 @@ describe('past_due_line template migration', () => {
   });
 
   test('clause renders on its own paragraph when non-empty (clause carries its trailing separator)', () => {
-    const clause = "Reminder: your account also has a past-due balance of $52.10 from an earlier invoice, separate from today's invoice.\n\n";
+    const clause = "Reminder: your account also has a previous balance of $52.10 from an earlier invoice, separate from today's invoice.\n\n";
     const render = (body) => body.split('{past_due_line}').join(clause).replace(/\n{3,}/g, '\n\n').trim();
     const prod = "Hello {first_name}! Your {service_type} report is ready: {portal_url}\n\nInvoice for today's visit: {pay_url}";
     expect(render(migration.insertPlaceholder(prod))).toBe(
-      "Hello {first_name}! Your {service_type} report is ready: {portal_url}\n\nInvoice for today's visit: {pay_url}\n\nReminder: your account also has a past-due balance of $52.10 from an earlier invoice, separate from today's invoice.",
+      "Hello {first_name}! Your {service_type} report is ready: {portal_url}\n\nInvoice for today's visit: {pay_url}\n\nReminder: your account also has a previous balance of $52.10 from an earlier invoice, separate from today's invoice.",
     );
     const seeded = "Hi! Bill: {pay_url}\n\nQuestions or requests? Reply here.";
     expect(render(migration.insertPlaceholder(seeded))).toBe(
-      "Hi! Bill: {pay_url}\n\nReminder: your account also has a past-due balance of $52.10 from an earlier invoice, separate from today's invoice.\n\nQuestions or requests? Reply here.",
+      "Hi! Bill: {pay_url}\n\nReminder: your account also has a previous balance of $52.10 from an earlier invoice, separate from today's invoice.\n\nQuestions or requests? Reply here.",
     );
   });
 
