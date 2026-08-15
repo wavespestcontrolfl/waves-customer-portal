@@ -34,6 +34,8 @@ import EstimateProvenanceCard from './EstimateProvenanceCard';
 import useModalFocus from '../../hooks/useModalFocus';
 import SlotConflictNotice from './SlotConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
+import BestTimeHint from './BestTimeHint';
+import { useBestTimes } from './useBestTimes';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -1438,6 +1440,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     windowEnd: windowStart && slotCheckDuration > 0
       ? computeWindowEnd(windowStart, slotCheckDuration)
       : null,
+  });
+  // Advisory drive-detour suggestions for the picked day — a chip only sets
+  // the start time (window end is derived from durations at submit), and is
+  // separate from the ranged "Find best times" panel above.
+  const { bestTimes } = useBestTimes({
+    date: apptDate ? String(apptDate).split('T')[0] : null,
+    customerId: selectedCustomer?.id,
+    durationMinutes: slotCheckDuration,
+    // Same tech scoping as the ranged search — auto mode searches all techs.
+    technicianId: techMode === 'choose' && techId ? techId : undefined,
   });
 
   // Submit
@@ -2936,6 +2948,23 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
           </div>
           <SlotConflictNotice conflicts={slotConflicts} style={{ marginBottom: 10 }} />
+          <BestTimeHint
+            bestTimes={bestTimes}
+            currentStart={windowStart}
+            currentTechnicianId={techMode === 'choose' ? techId : null}
+            onPick={(slot) => {
+              // Mirror applySlot: the detour was scored for a specific
+              // technician, so picking the chip adopts that tech too —
+              // leaving auto mode would let assignment land elsewhere and
+              // falsify the advertised detour.
+              setWindowStart(slot.start);
+              if (slot.technicianId) {
+                setTechMode('choose');
+                setTechId(slot.technicianId);
+              }
+            }}
+            style={{ marginBottom: 10 }}
+          />
 
           {hasRecurringServices && firstCustomRecurringIndex < 0 && (
             <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 10, marginTop: 4 }}>

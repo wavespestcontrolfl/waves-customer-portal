@@ -1905,6 +1905,11 @@ module.exports = {
   previewCustomSms,
   checkTarget,
   checkSlots,
+  // Tech-blind occupancy guard, consumed by the find-time hint path —
+  // the slot engine walks per-technician routes, so technician-null rows
+  // are invisible to it and only this predicate can veto those hours.
+  loadOccupancy,
+  conflictsForTarget,
   _test: {
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,

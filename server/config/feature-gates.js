@@ -1513,6 +1513,17 @@ const gates = {
   // flips GATE_STOPS_AWAY — read at call time via gateEnvValue so the
   // flip needs no redeploy. Kill switch: unset the var.
   stopsAway: gateEnvValue('GATE_STOPS_AWAY'),
+
+  // Best-time hints (2026-08-14): advisory "Best times this day" chips on
+  // the admin date/time pickers (edit, reschedule, create), ranked by the
+  // existing find-time drive-detour engine. Warn-only by design — picking a
+  // chip only fills the time fields; no save is ever blocked or disabled on
+  // this data. OFF in every environment until Adam flips it; the find-time
+  // route reads the env through gateEnvValue() at call time (hint requests
+  // only — the ungated Find-a-Time button never sends `hint`) so a flip
+  // needs no redeploy. Kill switch: unset — hint requests answer gated:true
+  // with no slots and every picker renders exactly as today.
+  bestTimeHints: gateEnvValue('GATE_BEST_TIME_HINTS'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

@@ -44,6 +44,8 @@ import TechTreatmentZoneModal from "../../components/tech/TechTreatmentZoneModal
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
 import SlotConflictNotice from "../../components/schedule/SlotConflictNotice";
 import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
+import BestTimeHint from "../../components/schedule/BestTimeHint";
+import { useBestTimes } from "../../components/schedule/useBestTimes";
 import {
   describeCardRequestState,
   describeCardRequestResult,
@@ -1297,6 +1299,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     windowStart: form.windowStart,
     windowEnd: form.windowEnd,
     durationMinutes: slotCheckDuration,
+    excludeServiceIds: [service.id],
+  });
+  // Advisory drive-detour suggestions for the same fixed day — picking a
+  // chip only fills the window fields (never saves).
+  const { bestTimes } = useBestTimes({
+    date: form.scheduledDate,
+    serviceId: service.id,
+    customerId: service.customerId || service.customer_id,
+    durationMinutes: slotCheckDuration,
+    technicianId: form.technicianId || undefined,
     excludeServiceIds: [service.id],
   });
   // Estimate provenance: if this appointment was scheduled from an accepted
@@ -3374,6 +3386,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               </div>{" "}
               <SlotConflictNotice
                 conflicts={slotConflicts}
+                style={{ marginTop: -2, marginBottom: 14 }}
+              />{" "}
+              <BestTimeHint
+                bestTimes={bestTimes}
+                currentStart={form.windowStart}
+                currentTechnicianId={form.technicianId}
+                onPick={(slot) =>
+                  // An unassigned visit searched all techs, so the detour
+                  // is slot.technicianId's — adopt that tech with the
+                  // window (visible in the Technician select before save),
+                  // mirroring the create modal. An assigned visit's search
+                  // was already scoped; its tech never changes here.
+                  setForm((f) => ({
+                    ...f,
+                    windowStart: slot.start,
+                    windowEnd: slot.end,
+                    technicianId: !f.technicianId && slot.technicianId
+                      ? slot.technicianId
+                      : f.technicianId,
+                  }))
+                }
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               {isCompletedVisit && isAdminUser && (
@@ -5744,6 +5777,19 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     excludeServiceIds: [service.id],
     enabled: showManual && !!manualDate,
   });
+  // Advisory drive-detour suggestions for the picked day — a chip only sets
+  // the start select, never submits the reschedule.
+  const { bestTimes: manualBestTimes } = useBestTimes({
+    date: manualDate,
+    serviceId: service.id,
+    customerId: service.customerId || service.customer_id,
+    durationMinutes,
+    technicianId: service.technicianId || service.technician_id || undefined,
+    excludeServiceIds: [service.id],
+    // The reschedule submit can't change assignment, so an unassigned
+    // visit's all-tech detours would be unactionable — no tech, no hint.
+    enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
+  });
 
   const handleReschedule = async (opt) => {
     // Suggested starts are morning slots, but stay consistent with the
@@ -6160,6 +6206,15 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           {showManual && (
             <SlotConflictNotice
               conflicts={manualConflicts}
+              style={{ marginTop: 10 }}
+            />
+          )}
+          {showManual && (
+            <BestTimeHint
+              bestTimes={manualBestTimes}
+              currentStart={manualTime}
+              currentTechnicianId={service.technicianId || service.technician_id}
+              onPick={(slot) => setManualTime(slot.start)}
               style={{ marginTop: 10 }}
             />
           )}
