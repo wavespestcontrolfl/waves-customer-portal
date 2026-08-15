@@ -179,19 +179,41 @@ router.post('/', async (req, res) => {
       // recommends can sit on an unassigned visit the commit will still
       // reject. Mirror the dispatch slot-check occupancy guard (tech-blind,
       // same overlap predicate, excludeServiceIds honored) and veto those
-      // hours. Fail-open like checkSlots: a snapshot failure keeps the
-      // engine's answer — this whole path is advisory.
+      // hours. The engine emits only the EARLIEST start per route gap, so a
+      // vetoed candidate must not discard its whole gap — walk the gap
+      // through latest_start_min at the request's step and keep the first
+      // clear start (detour is position-independent within a gap). Fail-open
+      // like checkSlots: a snapshot failure keeps the engine's answer —
+      // this whole path is advisory.
       try {
         const occupancyByDate = new Map();
         await Promise.all([...new Set(result.slots.map((s) => s.date))].map(async (d) => {
           occupancyByDate.set(d, await loadOccupancy({ dateFrom: d, dateTo: d }));
         }));
         const excluded = (excludeServiceIds || []).map(String);
-        result.slots = result.slots.filter((s) => conflictsForTarget(
-          occupancyByDate.get(s.date), null, s.date,
-          { start: s.start_time, end: s.end_time },
-          { excludeServiceIds: excluded },
-        ).length === 0);
+        const toMin = (hhmm) => {
+          const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/);
+          return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+        };
+        const toHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+        const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : 1;
+        const spanMin = Math.max(15, parseInt(durationMinutes, 10) || 60);
+        result.slots = result.slots.flatMap((s) => {
+          const baseMin = toMin(s.start_time);
+          if (baseMin == null) return [];
+          const latest = Number.isFinite(s.latest_start_min) ? s.latest_start_min : baseMin;
+          for (let m = baseMin; m <= latest; m += step) {
+            const window = { start: toHHMM(m), end: toHHMM(m + spanMin) };
+            const clear = conflictsForTarget(
+              occupancyByDate.get(s.date), null, s.date, window,
+              { excludeServiceIds: excluded },
+            ).length === 0;
+            if (clear) {
+              return [m === baseMin ? s : { ...s, start_time: window.start, end_time: window.end }];
+            }
+          }
+          return [];
+        });
       } catch (guardErr) {
         logger.warn('[find-time] hint occupancy guard failed (fail-open):', guardErr.message);
       }

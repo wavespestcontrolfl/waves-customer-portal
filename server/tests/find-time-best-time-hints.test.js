@@ -179,6 +179,21 @@ test('the guard honors excludeServiceIds — a reschedule never collides with it
   expect(body.slots.map((s) => s.start_time)).toEqual(['09:00']);
 });
 
+test('a vetoed earliest start slides within its gap instead of discarding it', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  // One wide gap: earliest start 09:00, latest viable start 14:00.
+  findAvailableSlots.mockResolvedValue({
+    slots: [{ rank: 1, date: '2026-09-01', start_time: '09:00', end_time: '10:00', detour_minutes: 4, latest_start_min: 14 * 60 }],
+    evaluated: 1,
+  });
+  loadOccupancy.mockResolvedValue({ ...emptyOccupancy(), rows: [occupiedRow()] });
+  const res = await post({ ...BASE, hint: true, slotStepMinutes: 60 });
+  const body = await res.json();
+  // 09:00 is occupied by the tech-null row; the gap's next aligned start
+  // survives with the same detour.
+  expect(body.slots.map((s) => [s.start_time, s.end_time, s.detour_minutes])).toEqual([['10:00', '11:00', 4]]);
+});
+
 test('the guard fails OPEN — a snapshot error keeps the engine answer', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   loadOccupancy.mockRejectedValue(new Error('snapshot down'));
