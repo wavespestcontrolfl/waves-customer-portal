@@ -147,7 +147,16 @@ async function runShadowSweep({ now = new Date() } = {}) {
       const verdict = await ContactPolicy.evaluate(customerId, {
         channel: 'voice', purpose: 'late_payment', now,
       });
-      if (!verdict.allowed) continue;
+      if (!verdict.allowed) {
+        // A transient evaluation ERROR is unknown, not a denial (codex r6):
+        // during a DB/Stripe blip every customer would read denied and the
+        // retirement pass would lapse EVERY valid case + dismiss its card.
+        // Preserve the case; only definitive denials lapse.
+        if (verdict.denialReasons.includes('policy_evaluation_error')) {
+          stillEligible.add(customerId);
+        }
+        continue;
+      }
       stillEligible.add(customerId);
 
       const customer = await db('customers').where({ id: customerId }).first();
@@ -168,6 +177,31 @@ async function runShadowSweep({ now = new Date() } = {}) {
       // requalifies must advance its version monotonically — treating it
       // as new would reuse the globally-unique version-1 idempotency key,
       // fail the insert, and file no card.
+      // Self-heal to ONE live shadow case (codex r6): a customer merge
+      // repoints the loser's case onto the winner, leaving two live rows —
+      // the lookup would forever update one while the other's stale card
+      // stands. Keep the newest (by update recency), lapse the rest and
+      // retire their cards through the same read_at mechanism.
+      const liveShadow = await db('collection_cases')
+        .where({ customer_id: customerId, current_state: 'shadow' })
+        .orderBy([{ column: 'updated_at', order: 'desc' }, { column: 'case_version', order: 'desc' }])
+        .select('id', 'idempotency_key');
+      if (liveShadow.length > 1) {
+        const extras = liveShadow.slice(1);
+        await db('collection_cases')
+          .whereIn('id', extras.map((c) => c.id))
+          .update({ current_state: 'lapsed', updated_at: db.fn.now() });
+        const extraKeys = extras.map((c) => c.idempotency_key).filter(Boolean);
+        if (extraKeys.length) {
+          await db('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereNull('read_at')
+            .whereIn(db.raw("metadata->>'dedupeKey'"), extraKeys)
+            .update({ read_at: db.fn.now() })
+            .catch((err) => logger.warn(`[collections-shadow] duplicate-case card retirement failed: ${err.message}`));
+        }
+      }
+
       const existing = await db('collection_cases')
         .where({ customer_id: customerId })
         .whereIn('current_state', ['shadow', 'lapsed'])
