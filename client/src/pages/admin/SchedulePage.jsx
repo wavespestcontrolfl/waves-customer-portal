@@ -1305,6 +1305,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // chip only fills the window fields (never saves).
   const { bestTimes } = useBestTimes({
     date: form.scheduledDate,
+    serviceId: service.id,
     customerId: service.customerId || service.customer_id,
     durationMinutes: slotCheckDuration,
     technicianId: form.technicianId || undefined,
@@ -5780,6 +5781,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // the start select, never submits the reschedule.
   const { bestTimes: manualBestTimes } = useBestTimes({
     date: manualDate,
+    serviceId: service.id,
     customerId: service.customerId || service.customer_id,
     durationMinutes,
     technicianId: service.technicianId || service.technician_id || undefined,

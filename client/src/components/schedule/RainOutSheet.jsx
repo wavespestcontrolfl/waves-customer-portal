@@ -511,6 +511,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const landingDate = isCustom ? customDate : (selected?.date || null);
   const { bestTimes } = useBestTimes({
     date: landingDate,
+    serviceId: service.id,
     customerId: service.customerId || service.customer_id,
     // The sheet always books a fixed one-hour block (hourWindow / the
     // preset options' server windows) — mirror THAT, not the service's own
@@ -523,6 +524,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     // detours would be unactionable — no tech, no hint.
     enabled: !!landingDate && !!(service.technicianId || service.technician_id),
   });
+  // A same-day landing is floored at the next top-of-hour — raised further
+  // by running_late (server enforces target_not_later). Never advertise an
+  // hour that goes customElapsed the moment it's tapped.
+  const floorBestTimes = landingDate === todayStr
+    ? bestTimes.filter((s) => (hhmmToMin(s.start) ?? 0) >= minTodayStartMin)
+    : bestTimes;
 
   // Two lists, one scope toggle (codex #3375 P2 ×2):
   //   conflicts      — what the ANCHOR's window hits. A route-scope push
@@ -808,7 +815,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 active (they set the custom start); a preset target is fixed,
                 so the chips go display-only. */}
             <BestTimeHint
-              bestTimes={bestTimes}
+              bestTimes={floorBestTimes}
               currentStart={isCustom ? customStart : selected?.window?.start}
               currentTechnicianId={service.technicianId || service.technician_id}
               onPick={isCustom ? (slot) => setCustomStart(slot.start) : undefined}

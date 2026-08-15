@@ -212,6 +212,53 @@ test('technician/time pairs sharing an hour dedupe BEFORE the topN slice', async
   expect(body.slots.map((s) => [s.start_time, s.technician.id])).toEqual([['09:00', 't1'], ['10:00', 't1']]);
 });
 
+test('serviceId resolves the VISIT\'s stamped coords, never the customer primary', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const db = require('../models/db');
+  db.raw = jest.fn((sql) => sql);
+  db.mockReturnValue({
+    where: () => ({
+      leftJoin: () => ({
+        first: async () => ({
+          visit_lat: 27.11, visit_lng: -82.22,
+          visit_line1: '9 Rental Way', visit_city: 'Parrish', visit_state: 'FL', visit_zip: '34219',
+          visit_customer_id: 'c9', visit_profile_label: null,
+        }),
+      }),
+    }),
+  });
+  const res = await post({ hint: true, serviceId: 'svc-9', customerId: 'c9', durationMinutes: 60, dateFrom: '2026-09-01', dateTo: '2026-09-01' });
+  expect(res.status).toBe(200);
+  const opts = findAvailableSlots.mock.calls[0][0];
+  expect([opts.lat, opts.lng]).toEqual([27.11, -82.22]);
+  expect((await res.json()).target.source).toBe('visit_stamp');
+});
+
+test('a divergent coordless stamp geocodes the STAMPED address, not the primary', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const db = require('../models/db');
+  const { geocodeAddress } = require('../services/geocoder');
+  db.raw = jest.fn((sql) => sql);
+  db.mockReturnValue({
+    where: () => ({
+      leftJoin: () => ({
+        first: async () => ({
+          visit_lat: null, visit_lng: null,
+          visit_line1: '9 Rental Way', visit_city: 'Parrish', visit_state: 'FL', visit_zip: '34219',
+          visit_customer_id: 'c9', visit_profile_label: null,
+        }),
+      }),
+    }),
+  });
+  geocodeAddress.mockResolvedValue({ lat: 27.5, lng: -82.4 });
+  const res = await post({ hint: true, serviceId: 'svc-9', customerId: 'c9', durationMinutes: 60, dateFrom: '2026-09-01', dateTo: '2026-09-01' });
+  expect(res.status).toBe(200);
+  expect(geocodeAddress).toHaveBeenCalledWith('9 Rental Way, Parrish, FL, 34219');
+  expect((await res.json()).target.source).toBe('address_geocoded_now');
+  const opts = findAvailableSlots.mock.calls[0][0];
+  expect([opts.lat, opts.lng]).toEqual([27.5, -82.4]);
+});
+
 test('the guard fails OPEN — a snapshot error keeps the engine answer', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   loadOccupancy.mockRejectedValue(new Error('snapshot down'));

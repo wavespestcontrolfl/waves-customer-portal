@@ -18,14 +18,14 @@ function authHeaders() {
   };
 }
 
-export function useBestTimes({ date, customerId, durationMinutes, technicianId, excludeServiceIds, enabled = true }) {
+export function useBestTimes({ date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds, enabled = true }) {
   const [bestTimes, setBestTimes] = useState([]);
   const [checking, setChecking] = useState(false);
   // Stable dep for the (usually tiny) id array.
   const excludeKey = (excludeServiceIds || []).map(String).join(',');
   useEffect(() => {
     setBestTimes([]);
-    if (!enabled || !customerId || !/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) {
+    if (!enabled || (!customerId && !serviceId) || !/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) {
       setChecking(false);
       return undefined;
     }
@@ -39,6 +39,10 @@ export function useBestTimes({ date, customerId, durationMinutes, technicianId, 
           signal: controller.signal,
           body: JSON.stringify({
             hint: true,
+            // Existing-visit surfaces pass serviceId so the server ranks at
+            // the VISIT's stamped address (secondary/rental properties),
+            // not the customer's primary home.
+            serviceId: serviceId || undefined,
             customerId,
             dateFrom: date,
             dateTo: date,
@@ -79,6 +83,6 @@ export function useBestTimes({ date, customerId, durationMinutes, technicianId, 
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, customerId, durationMinutes, technicianId, excludeKey]);
+  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey]);
   return { bestTimes, checking };
 }

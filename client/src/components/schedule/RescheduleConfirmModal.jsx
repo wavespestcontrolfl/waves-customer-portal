@@ -70,11 +70,15 @@ export default function RescheduleConfirmModal({
   // shows as selected.
   const { bestTimes } = useBestTimes({
     date: /^\d{4}-\d{2}-\d{2}$/.test(String(toDate || '')) ? toDate : null,
+    serviceId: serviceId != null ? serviceId : undefined,
     customerId,
     durationMinutes,
     technicianId,
     excludeServiceIds: serviceId != null ? [serviceId] : undefined,
-    enabled: open,
+    // No landing tech (unassigned-rail drops, unassigned visits) means the
+    // all-tech detours would advertise a route the confirm can't take —
+    // display-only chips can't adopt a technician. No tech, no hint.
+    enabled: open && technicianId != null,
   });
 
   // The modal stays mounted between drags (open just flips), so a previous

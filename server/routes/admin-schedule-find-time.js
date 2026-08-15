@@ -10,6 +10,7 @@
  *     dateFrom?, dateTo?,     // default: today → +7 days
  *     technicianId?,          // restrict to one tech
  *     topN?,                  // default 10
+ *     serviceId?,             // existing-visit surfaces: rank at the VISIT's stamped address
  *     excludeServiceIds?,     // drop these visits from occupancy (reschedule self-exclusion)
  *     slotStepMinutes?,       // snap starts to this granularity (1–120)
  *     hint?,                  // advisory best-times consumer — gated (GATE_BEST_TIME_HINTS)
@@ -26,6 +27,7 @@ const { loadOccupancy, conflictsForTarget } = require('../services/rain-out');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { stampedDivergesSql } = require('../services/stamped-address');
 
 const MAX_FIND_TIME_DAYS = 90;
 
@@ -51,14 +53,55 @@ function isYmd(value) {
   return Number.isFinite(parsed.getTime()) && etDateString(parsed) === value;
 }
 
-async function resolveFindTimeTarget({ customerId, address, lat, lng }) {
+async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng }) {
   let targetLat = finiteNumber(lat);
   let targetLng = finiteNumber(lng);
   let source = targetLat != null && targetLng != null ? 'request_coordinates' : null;
   let customer = null;
   let targetAddress = address || null;
+  let resolvedCustomerId = customerId || null;
+  let profileLabel = null;
 
-  if (customerId && (targetLat == null || targetLng == null)) {
+  // Existing-visit surfaces rank at the VISIT's stamped address — a call
+  // booking for a secondary/rental property must not score detours at the
+  // customer's primary home. Same divergence rule as the schedule API and
+  // find-time occupancy: stamped coords win; the customer mirror only
+  // backfills a NON-divergent stamp; a divergent coordless stamp degrades
+  // to geocoding the stamped address, never the wrong house.
+  if (serviceId && (targetLat == null || targetLng == null)) {
+    const visit = await db('scheduled_services')
+      .where('scheduled_services.id', serviceId)
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .first(
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as visit_lat`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as visit_lng`),
+        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as visit_line1'),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as visit_city'),
+        db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as visit_state'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as visit_zip'),
+        'scheduled_services.customer_id as visit_customer_id',
+        'customers.profile_label as visit_profile_label',
+      );
+    if (!visit) throw httpError(404, 'Visit not found');
+    resolvedCustomerId = resolvedCustomerId || visit.visit_customer_id || null;
+    profileLabel = visit.visit_profile_label || null;
+    targetAddress = targetAddress
+      || [visit.visit_line1, visit.visit_city, visit.visit_state, visit.visit_zip].filter(Boolean).join(', ')
+      || null;
+    const vLat = finiteNumber(visit.visit_lat);
+    const vLng = finiteNumber(visit.visit_lng);
+    if (vLat != null && vLng != null) {
+      targetLat = vLat;
+      targetLng = vLng;
+      source = 'visit_stamp';
+    }
+  }
+
+  // With a serviceId in hand the visit resolution above is authoritative —
+  // falling through to the customer's PRIMARY coords here would re-center a
+  // divergent (coordless) stamp on the wrong house; the stamped address
+  // geocodes below instead.
+  if (!serviceId && customerId && (targetLat == null || targetLng == null)) {
     customer = await db('customers')
       .where({ id: customerId })
       .first('id', 'latitude', 'longitude', 'address_line1', 'city', 'state', 'zip', 'profile_label');
@@ -98,8 +141,8 @@ async function resolveFindTimeTarget({ customerId, address, lat, lng }) {
     lng: targetLng,
     address: targetAddress,
     source,
-    customerId: customer?.id || customerId || null,
-    profileLabel: customer?.profile_label || null,
+    customerId: customer?.id || resolvedCustomerId,
+    profileLabel: customer?.profile_label || profileLabel,
   };
 }
 
@@ -109,7 +152,7 @@ router.post('/', async (req, res) => {
       customerId, address, lat, lng,
       durationMinutes, dateFrom, dateTo,
       technicianId, topN,
-      hint, excludeServiceIds, slotStepMinutes,
+      hint, serviceId, excludeServiceIds, slotStepMinutes,
     } = req.body || {};
 
     // Best-time hint consumers go dark behind GATE_BEST_TIME_HINTS — read
@@ -149,7 +192,7 @@ router.post('/', async (req, res) => {
     const maxTo = etDateString(addETDays(parseETDateTime(`${from}T12:00`), MAX_FIND_TIME_DAYS));
     const clampedTo = to > maxTo ? maxTo : to;
 
-    const target = await resolveFindTimeTarget({ customerId, address, lat, lng });
+    const target = await resolveFindTimeTarget({ serviceId, customerId, address, lat, lng });
 
     const requestedTopN = Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100);
     const result = await findAvailableSlots({
