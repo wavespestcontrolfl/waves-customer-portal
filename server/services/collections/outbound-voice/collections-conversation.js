@@ -291,14 +291,11 @@ class CollectionsConversation {
       caseVersion: caseRow.case_version,
       customer,
       balance,
-      invoiceId: (() => {
-        try {
-          const ids = Array.isArray(caseRow.eligible_invoice_ids)
-            ? caseRow.eligible_invoice_ids
-            : JSON.parse(caseRow.eligible_invoice_ids || '[]');
-          return ids[0] || null;
-        } catch { return null; }
-      })(),
+      // The pay-link target is the LIVE eligible set's oldest invoice (gh
+      // prb-r5): the balance disclosed in-call is computed from it, and a
+      // link to a snapshot invoice paid since dialing would contradict the
+      // spoken figure. Snapshot ids remain on the case row for audit.
+      invoiceId: eligibleInvoices[0]?.id || null,
     };
     return true;
   }
@@ -640,7 +637,25 @@ class CollectionsConversation {
         }
       }
     }
-    if (!res.ok) return 'Could not record that. Tell the caller a person will make sure it is honored, and end politely.';
+    if (!res.ok) {
+      // The promise needs an artifact (gh prb-r5): file the fallback card;
+      // if that fails too, the copy drops the promise.
+      let optOutCard = null;
+      try {
+        const NotificationService = require('../../notification-service');
+        optOutCard = await NotificationService.notifyAdmin(
+          'billing',
+          'Opt-out needs manual action',
+          'A customer asked to stop automated billing calls during a call, but the durable flag write failed. Please set automated_voice_consent_revoked by hand.',
+          { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+        );
+      } catch (cardErr) {
+        logger.error(`[collections-voice] spoken opt-out fallback card failed: ${cardErr.message}`);
+      }
+      return optOutCard
+        ? 'Could not record that automatically, but the office has been asked to stop the calls — tell the caller a person will make sure it is honored, and end politely.'
+        : 'Could not record that. Apologize, give the office number so they can confirm it directly, and end politely.';
+    }
     this._captures.consentRevoked = true;
     if (input.scope === 'all_calls' && !allCallsRecorded) {
       return 'Automated calls are stopped, but the full no-calls request could not be completely recorded — tell the caller a person will make sure no calls of any kind happen.';
@@ -654,8 +669,13 @@ class CollectionsConversation {
     // words ride the tool call, persist to the captures for the pilot's
     // transcript review, and an empty/absent agreement refuses the send.
     const agreement = String(input?.customer_agreement_verbatim || '').trim();
-    if (agreement.length < 2) {
-      return 'Refused: ask the customer if they would like the link texted, and pass their agreeing words verbatim.';
+    // The verbatim must read AFFIRMATIVE in code (gh prb-r5): "no" or
+    // "not now" passed the old length check. A crude bar, but real — the
+    // pilot's transcript review sees the stored verbatim either way.
+    const AFFIRM_RE = /\b(yes|yeah|yep|sure|ok(?:ay)?|please|fine|send( it)?|text( it| me)?|go ahead|sounds good|that works|absolutely|definitely)\b/i;
+    const NEGATE_RE = /\b(no|not|don'?t|do not|never|stop|later|maybe)\b/i;
+    if (agreement.length < 2 || !AFFIRM_RE.test(agreement) || NEGATE_RE.test(agreement)) {
+      return 'Refused: the customer has not clearly agreed. Ask plainly if they would like the link texted, and pass their agreeing words verbatim.';
     }
     if (!isPayLinkEnabled()) {
       return 'The pay-link text is not available. Offer the office number for payment instead.';
@@ -775,7 +795,16 @@ class CollectionsConversation {
   }
 
   async _finish(outcome, { endSession = false, handoff = null } = {}) {
-    if (this._finished) return;
+    if (this._finished) {
+      // A prior finish whose outcome write resolved { ok:false } left
+      // _persisted false (gh prb-r5): this re-entry is the retry.
+      if (!this._persisted) {
+        await this._persist(this._outcome || outcome).catch((err) => {
+          logger.error(`[collections-voice] persist retry failed callSid=${this.callSid}: ${err.message}`);
+        });
+      }
+      return;
+    }
     this._finished = true;
     this._outcome = outcome;
     this.ended = true;
@@ -823,7 +852,11 @@ class CollectionsConversation {
 
   /** Socket closed (hangup or teardown). Idempotent with _finish. */
   async end(reason) {
-    if (this._finished) return;
+    if (this._finished && this._persisted) return;
+    // A close racing _init() must WAIT for it (gh prb-r5): finalizing
+    // before _ctx carries the call-log linkage would strand the case in
+    // 'dialing' with no outcome, and the latch would block every retry.
+    try { await this._contextReady; } catch { /* init failure logged there */ }
     if (!this._ctx) {
       this._finished = true;
       this.ended = true;

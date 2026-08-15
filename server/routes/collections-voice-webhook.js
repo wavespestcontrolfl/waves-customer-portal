@@ -94,12 +94,14 @@ async function loadCollectionsCall(req) {
 /** Metadata-only pre-consent logging: merge keys into the call_log row. */
 async function stampCallMeta(callLogId, patch) {
   try {
-    await db('call_log').where({ id: callLogId }).update({
+    const updated = await db('call_log').where({ id: callLogId }).update({
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(patch)]),
       updated_at: new Date(),
     });
+    return updated > 0;
   } catch (err) {
     logger.warn(`[collections-vestibule] metadata stamp failed for ${callLogId}: ${err.message}`);
+    return false;
   }
 }
 
@@ -130,10 +132,22 @@ async function appendCappedVoicemail(twiml, { customerId, ledgerId, callLogId, o
   }
   twiml.hangup();
   if (callLogId) {
-    await writeCallOutcome(callLogId, {
+    // writeCallOutcome resolves { ok:false } on a failed transaction (gh
+    // prb-r5) — retry once, then log LOUDLY: the case would otherwise sit
+    // in 'dialing' silently. The supervised pilot's operator owns the rest.
+    let outcomeRes = await writeCallOutcome(callLogId, {
       outcome: speak ? outcome : 'machine_no_voicemail',
       now,
-    }).catch(() => {});
+    }).catch(() => ({ ok: false }));
+    if (!outcomeRes || outcomeRes.ok === false) {
+      outcomeRes = await writeCallOutcome(callLogId, {
+        outcome: speak ? outcome : 'machine_no_voicemail',
+        now,
+      }).catch(() => ({ ok: false }));
+    }
+    if (!outcomeRes || outcomeRes.ok === false) {
+      logger.error(`[collections-vestibule] OUTCOME WRITE FAILED TWICE for callLog ${callLogId} — case may be stuck in 'dialing'`);
+    }
   }
   return speak;
 }
@@ -193,9 +207,17 @@ router.post('/collections-vestibule-key', async (req, res) => {
     const twiml = new VoiceResponse();
 
     if (digit === '1') {
-      // Consent given → the relay leg, in collections session mode, with a
-      // per-call minted token bound to THIS CallSid (relay-protocol).
-      await stampCallMeta(call.row.id, { vestibule_consent_at: new Date().toISOString() });
+      // Consent given → the relay leg — but ONLY once the consent stamp
+      // provably persisted (gh prb-r5): opening ConversationRelay without
+      // durable evidence of the press-1 defeats the vestibule's purpose.
+      // Unstampable = apologize with the office number, no audio processing.
+      const consentStamped = await stampCallMeta(call.row.id, { vestibule_consent_at: new Date().toISOString() });
+      if (!consentStamped) {
+        twiml.say(script.callbackNumberOnly());
+        twiml.hangup();
+        await writeCallOutcome(call.row.id, { outcome: 'vestibule_consent_unrecorded' }).catch(() => {});
+        return sendTwiml(res, twiml);
+      }
       const { buildRelayTwiML, RELAY_WS_PATH } = require('../services/voice-agent/relay-protocol');
       const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
       const xml = buildRelayTwiML({
@@ -334,7 +356,11 @@ router.post('/collections-relay-complete', async (req, res) => {
     const failed = !!errorCode || ['failed', 'error', 'disconnected'].includes(sessionStatus);
 
     const twiml = new VoiceResponse();
-    if (handoff && handoff.next === 'transfer' && isStaffedHours()) {
+    // The transfer decision was made IN-SESSION moments ago (gh prb-r5):
+    // re-checking the clock here would announce a closure to a caller who
+    // was just told they are being connected. Attempt the dial; a miss
+    // takes the missed-transfer path, never the closed copy.
+    if (handoff && handoff.next === 'transfer') {
       const adminPhone = process.env.ADAM_PHONE || '+19415993489';
       twiml.dial(
         { action: `${TRANSFER_COMPLETE_ACTION}?callLogId=${encodeURIComponent(call.row.id)}`, method: 'POST', timeout: 20 },

@@ -13,7 +13,11 @@
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const fn = jest.fn();
+  fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  return fn;
+});
 const mockRemove = jest.fn();
 jest.mock('twilio', () => jest.fn(() => ({ recordings: jest.fn(() => ({ remove: mockRemove })) })));
 jest.mock('../config', () => ({ twilio: { accountSid: 'ACtest', authToken: 'tok' } }));
@@ -32,6 +36,7 @@ function selectChain(rows) {
   q.whereNot = jest.fn((...a) => { q._wheres.push(a); return q; });
   q.whereRaw = jest.fn((...a) => { q._wheres.push(a); return q; });
   q.select = jest.fn(() => q);
+  q.orderBy = jest.fn(() => q);
   q.limit = jest.fn(async () => rows);
   return q;
 }
@@ -105,7 +110,12 @@ test('other Twilio failure DEFERS the row (no column purge, retried next sweep)'
   const res = await runCollectionsRetentionSweep({ now: NOW });
   expect(res.purged).toBe(0);
   expect(res.failed).toBe(1);
-  expect(upd.update).not.toHaveBeenCalled();
+  // prb-r5: the ONLY write on a failure is the 20h deferral stamp — never
+  // the content purge columns.
+  expect(upd.update).toHaveBeenCalledTimes(1);
+  const patch = upd.update.mock.calls[0][0];
+  expect(Object.keys(patch)).toEqual(['metadata']);
+  expect(JSON.stringify(patch.metadata)).toContain('retention_last_failed_at');
 });
 
 test('rows without a recording purge transcript columns without touching Twilio', async () => {

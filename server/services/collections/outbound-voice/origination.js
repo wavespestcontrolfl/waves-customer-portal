@@ -72,6 +72,21 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
   if (caseRow.current_state !== 'approved') {
     return { dialed: false, reason: `case_not_approved:${caseRow.current_state}` };
   }
+
+  // The relay leg must be LIVE before anything dials (gh prb-r5): with the
+  // collections gate on but the relay unattached (VOICE_RELAY_ENABLED off,
+  // missing key/secret), the customer would press 1 into a dead socket.
+  // isRelayAttached is in-process truth — origination runs in the same
+  // server that attached (or refused to attach) the ws endpoint.
+  try {
+    const { isRelayAttached } = require('../../voice-agent/relay-server');
+    if (!isRelayAttached()) {
+      return { dialed: false, reason: 'relay_unavailable' };
+    }
+  } catch (err) {
+    logger.error(`[collections-voice] relay availability check failed: ${err.message}`);
+    return { dialed: false, reason: 'relay_unavailable' };
+  }
   const expiresAt = caseRow.approval_expires_at ? new Date(caseRow.approval_expires_at) : null;
   if (!expiresAt || Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() <= now.getTime()) {
     await setCaseState(caseRow, { current_state: 'expired', hold_reason: 'approval_expired_before_dial' });

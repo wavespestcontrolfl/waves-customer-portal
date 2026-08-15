@@ -15,6 +15,11 @@
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The relay leg must be live before anything dials (prb-r5) — attached in
+// these tests; the refusal has its own pin.
+jest.mock('../services/voice-agent/relay-server', () => ({
+  isRelayAttached: jest.fn(() => true),
+}));
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.fn = { now: jest.fn(() => 'NOW()') };
@@ -292,4 +297,17 @@ test('ledger failure after the claim releases dialing back to approved', async (
   await expect(originateCollectionCall('case-1', { now: NOW })).rejects.toThrow('insert failed');
   expect(releaseChain.where).toHaveBeenCalledWith({ id: 'case-1', current_state: 'dialing', case_version: 3 });
   expect(releaseChain._updated).toEqual(expect.objectContaining({ current_state: 'approved' }));
+});
+
+
+// prb-r5: with the relay unattached, nothing dials — the customer would
+// press 1 into a dead socket.
+test('relay unavailable refuses before any claim, ledger, or Twilio touch', async () => {
+  const { isRelayAttached } = require('../services/voice-agent/relay-server');
+  isRelayAttached.mockReturnValueOnce(false);
+  setDb({ collection_cases: [chain('collection_cases', { first: { ...CASE } })] });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res).toEqual({ dialed: false, reason: 'relay_unavailable' });
+  expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+  expect(mockCallsCreate).not.toHaveBeenCalled();
 });

@@ -56,6 +56,14 @@ async function runCollectionsRetentionSweep({ now = new Date() } = {}) {
     .where({ source: 'collections_voice' })
     .where('created_at', '<', horizon)
     .whereRaw("(transcription_status IS NULL OR transcription_status <> 'purged')")
+    // Deterministic order + failure deferral (gh prb-r5): oldest first, and
+    // a row that failed within the last 20h sits out today's batch so 200
+    // persistent failures can never starve the backlog behind them.
+    .whereRaw(
+      "(metadata->>'retention_last_failed_at' IS NULL OR (metadata->>'retention_last_failed_at')::timestamptz < ?)",
+      [new Date(now.getTime() - 20 * 3600 * 1000)],
+    )
+    .orderBy('created_at', 'asc')
     .select('id', 'recording_sid')
     .limit(200);
 
@@ -85,7 +93,10 @@ async function runCollectionsRetentionSweep({ now = new Date() } = {}) {
       purged++;
     } catch (err) {
       failed++;
-      logger.warn(`[collections-retention] purge failed for call_log ${row.id}: ${err.message} — will retry next sweep`);
+      await db('call_log').where({ id: row.id }).update({
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ retention_last_failed_at: new Date().toISOString() })]),
+      }).catch(() => {});
+      logger.warn(`[collections-retention] purge failed for call_log ${row.id}: ${err.message} — deferred 20h`);
     }
   }
   if (rows.length) {
