@@ -769,11 +769,37 @@ describe('ledger-based dunning touches (balance-reminder workflow)', () => {
       call_log: chain({ first: undefined }),
     });
     await evalVoice();
-    expect(countChain.whereIn).toHaveBeenCalledWith('source', ['balance_reminder_workflow', 'balance_reminder_late_payment_check']);
+    // r2 ruling: the workflow's paylink leg (purpose balance_reminder) is a
+    // pre-visit nudge, not dunning history — only the late-payment leg counts.
+    expect(countChain.whereIn).toHaveBeenCalledWith('source', ['balance_reminder_late_payment_check']);
     // gh-r2: only POSITIVELY delivered rows count, and the distinct key
     // collapses the sms+email legs of one reminder run into one touch.
     expect(countChain.whereRaw).toHaveBeenCalledWith("metadata->>'delivered' = 'true'");
     expect(db.raw).toHaveBeenCalledWith("COUNT(DISTINCT COALESCE(metadata->>'template_key', id::text)) as count");
     expect(countChain.whereRaw).toHaveBeenCalledWith('invoice_ids @> ?::jsonb', ['["inv-1"]']);
   });
+});
+
+// r2: a call_log conversation NEWER than the latest ledger row must drive
+// nextEligibleAt — the appended call re-sorts the combined set newest-first.
+test('a newer call_log conversation sets nextEligibleAt from ITS 7-day boundary, not an older ledger row', async () => {
+  const HOUR = 3600 * 1000;
+  const olderLedgerVoice = { channel: 'voice', occurred_at: new Date(WED_11AM_EDT.getTime() - 6 * 24 * HOUR).toISOString() };
+  const newerCallAt = new Date(WED_11AM_EDT.getTime() - 1 * 24 * HOUR);
+  armAllowedBaseline();
+  setDbTables({
+    customers: chain({ first: customerRow() }),
+    collections_flags: chain({ result: [] }),
+    collections_contact_ledger: chain({ result: [olderLedgerVoice] }),
+    invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
+    activity_log: chain({ result: [{ count: '0' }] }),
+    messaging_suppression: chain({ first: undefined }),
+    call_log: chain({ first: { created_at: newerCallAt.toISOString() } }),
+  });
+  const result = await ContactPolicy.evaluate('cust-1', { channel: 'voice', purpose: 'late_payment', now: WED_11AM_EDT });
+  expect(result.allowed).toBe(false);
+  expect(result.denialReasons).toContain('voice_contact_within_7d');
+  // 7 days after the NEWER call, not the older ledger contact.
+  expect(new Date(result.nextEligibleAt).getTime())
+    .toBeGreaterThanOrEqual(newerCallAt.getTime() + 7 * 24 * HOUR);
 });

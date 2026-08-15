@@ -116,20 +116,25 @@ async function deliveredDunningTouches(invoice) {
     .count('* as count');
   touches += parseInt(row?.count || 0, 10);
 
-  // The balance-reminder WORKFLOW's touches live only in the collections
-  // ledger (codex gh-r1) — without this arm, customers it dunned can never
-  // satisfy the floor. Sources are restricted to that workflow because the
-  // checker (activity_log) and followups engine (touches_sent) are already
-  // counted above. A ledger ROW is a reservation, not a delivery (codex
-  // gh-r2): only rows the rail positively stamped delivered count, and the
-  // SMS + email legs of one reminder run share a template_key so a
-  // dual-channel run is ONE touch. A missing best-effort stamp under-counts
-  // ⇒ voice denied — the safe direction.
+  // The balance-reminder WORKFLOW's late-payment touches live only in the
+  // collections ledger (codex gh-r1) — without this arm, customers it
+  // dunned can never satisfy the floor. Source allowlist is exactly the
+  // late-payment leg: the checker (activity_log) and followups engine
+  // (touches_sent) are already counted above, and the workflow's PAYLINK
+  // leg (source balance_reminder_workflow, purpose balance_reminder) is a
+  // pre-visit balance nudge, not dunning history — deliberately excluded
+  // (codex r2: a purpose filter that silently zeroed a listed source was
+  // the bug; the ruling is the source doesn't belong). A ledger ROW is a
+  // reservation, not a delivery (codex gh-r2): only rows the rail
+  // positively stamped delivered count, and the SMS + email legs of one
+  // reminder run share a template_key so a dual-channel run is ONE touch.
+  // A missing best-effort stamp under-counts ⇒ voice denied — the safe
+  // direction.
   const [led] = await db('collections_contact_ledger')
     .whereRaw('invoice_ids @> ?::jsonb', [JSON.stringify([invoice.id])])
     .whereIn('channel', ['sms', 'email'])
     .where({ purpose: 'late_payment' })
-    .whereIn('source', ['balance_reminder_workflow', 'balance_reminder_late_payment_check'])
+    .whereIn('source', ['balance_reminder_late_payment_check'])
     .whereRaw("metadata->>'delivered' = 'true'")
     .select(db.raw("COUNT(DISTINCT COALESCE(metadata->>'template_key', id::text)) as count"));
   touches += parseInt(led?.count || 0, 10);
@@ -279,6 +284,11 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), aggreg
       .first('created_at');
     if (liveCall) {
       recent.push({ channel: 'voice', occurred_at: liveCall.created_at, source: 'call_log' });
+      // Keep newest-first after the append (codex r2): find() picks the
+      // FIRST qualifying row, and nextEligibleAt is derived from it — an
+      // appended newer call behind an older ledger row would propose an
+      // eligibility earlier than the real seven-day boundary.
+      recent.sort((a, b) => new Date(b.occurred_at) - new Date(a.occurred_at));
     }
     result.recentContacts = recent;
     const within = (row, ms) => now.getTime() - new Date(row.occurred_at).getTime() < ms;
