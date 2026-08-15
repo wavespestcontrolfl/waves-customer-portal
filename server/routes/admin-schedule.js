@@ -11264,7 +11264,11 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
   if (!found.length) found.push('The visit details were documented for continued monitoring at the next scheduled service.');
 
   const report = `WHAT WE DID\n\n${did.join(' ')}\n\nWHAT WE FOUND\n\n${found.join(' ')}`;
-  if (!reportCopyRejection(report)) return report;
+  // Same egress rule as the AI path (codex r16): the completion parser must
+  // APPROVE the copy — echoed typed free text can carry parser-only terms
+  // (bare 'infestation'), and returning it would hand the tech a report that
+  // completion later discards for another template.
+  if (!reportCopyRejection(report) && technicianReportCustomerCopy(report)?.body) return report;
   return 'WHAT WE DID\n\nWe completed the scheduled service and documented the work performed.\n\nWHAT WE FOUND\n\nThe visit details were recorded for continued monitoring at the next scheduled service.';
 }
 
@@ -11905,7 +11909,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
           // profile's declared companion types, so companion-only profiles
           // (findingsType null, e.g. lawn_tree_shrub_combo) still ground the
           // prompt in their recorded facts.
-          if (typedValuesRaw && structuredFindings.type
+          // During a resolution OUTAGE the profile is unknowable — the 503
+          // above already handled outage-with-facts, and an outage with an
+          // EMPTY typed container must keep the fail-soft notes/products
+          // path instead of a misleading 409 (codex r16).
+          if (!profileResolutionFailed && typedValuesRaw && structuredFindings.type
             && completionProfile?.findingsType !== structuredFindings.type) {
             return res.status(409).json({
               error: 'This service does not use that findings form.',

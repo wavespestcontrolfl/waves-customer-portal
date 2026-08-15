@@ -37,6 +37,21 @@ describe('generate-report output guard (reportCopyRejection)', () => {
   });
 });
 
+describe('deterministic fallback parser approval (r16)', () => {
+  test('echoed typed free text with parser-only terms degrades to the generic template', () => {
+    const report = buildDeterministicReportCopy({
+      serviceType: 'Termite Inspection Service',
+      areas: [], actions: [],
+      observations: ['Infestation extent: localized infestation at the garage sill'],
+      recommendations: [], ratingLabel: null,
+    });
+    // parser-only 'infestation' nulls the body — the fallback must degrade
+    // to the generic template rather than hand back undeliverable copy
+    expect(report).toContain('We completed the scheduled service');
+    expect(report).not.toContain('Infestation extent');
+  });
+});
+
 describe('generate-report output shape gate (r14)', () => {
   test('prose missing the parser shape is rejected so it retries instead of silently falling back at completion', async () => {
     const provider = (name, responses) => ({

@@ -12902,6 +12902,19 @@ export function CompletionPanel({
           activityScoreTouched: typedActivityTouched,
         };
       }
+      // Companion-only profiles (findingsType null, e.g. lawn_tree_shrub_combo)
+      // never enter the typed branch above, but their techs use the same
+      // unified Generate action — persist the telemetry so ai_draft_used
+      // doesn't undercount this supported flow (codex r16).
+      if (!body.completionTelemetry && companionSchemas.length && !isIncompleteVisit) {
+        body.completionTelemetry = {
+          ...completionTelemetryRef.current,
+          submitClickedAt: new Date().toISOString(),
+          aiDraftUsed: aiReportUsed,
+          recommendationTextEdited: typedRecommendationsEdited,
+          activityScoreTouched: typedActivityTouched,
+        };
+      }
       // Companion findings payload (combined-service-completions.md) —
       // ordered as the schemas arrived (declared profile order). Skipped on
       // incomplete visits; the server skips companions for them entirely.
