@@ -420,6 +420,15 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(wild.observations.join(' ')).toContain('No activity at traps');
   });
 
+  test('bare "Noises reported" is second-hand evidence too (r25)', () => {
+    const wild = typedFindingsPromptSections('wildlife_trapping', {
+      evidence_observed: 'Droppings, Noises reported',
+    });
+    expect(wild.observations.join(' ')).toContain('Droppings');
+    expect(wild.observations.join(' ')).not.toContain('Noises');
+    expect(wild.customer.join(' ')).toContain('Noises reported');
+  });
+
   test('customer-reported evidence options split to customer provenance (r24)', () => {
     const bb = typedFindingsPromptSections('bed_bug', {
       evidence_observed: 'Live bed bugs, Bites reported by customer',

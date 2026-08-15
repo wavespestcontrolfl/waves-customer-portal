@@ -11699,7 +11699,10 @@ export function CompletionPanel({
         // own — same rule as the primary score (codex r3).
         return nonInternalValuesNonEmpty(schema, entry.values)
           || validChipCount(schema, entry.chips, entry.values) > 0
-          || Number.isInteger(entry.score);
+          // A zero score alone can't open Generate — bait-station zero
+          // states replace the drafted body with fixed wording at
+          // completion (codex r25); the server gate mirrors this.
+          || (Number.isInteger(entry.score) && entry.score > 0);
       });
     // Mirror the final-submit gate (handleSubmit only sends customerConcernText
     // when the interaction is still "customer had a concern"): if the tech typed

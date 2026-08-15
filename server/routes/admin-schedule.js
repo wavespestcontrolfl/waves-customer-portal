@@ -11413,13 +11413,18 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
       } else {
         sections.work.push(line);
       }
-    } else if (multi && parts.some((part) => /reported by (?:the )?customer/i.test(part))) {
+    } else if (multi && parts.some((part) => /reported(?:\s+by\s+(?:the\s+)?customer)?\s*$/i.test(part))) {
       // Customer-reported evidence options ("Bites reported by customer")
       // are the homeowner's words even inside an observation chips field —
       // they split into the customer-provenance group so the prompt can't
       // present them as technician-confirmed (codex r24).
-      const customerParts = parts.filter((part) => /reported by (?:the )?customer/i.test(part));
-      const observedParts = parts.filter((part) => !/reported by (?:the )?customer/i.test(part));
+      // "Noises reported" (wildlife) is second-hand the same way "Noises
+      // reported by customer" is — anything ENDING in "reported[ by
+      // customer]" is the reporter's account, not a technician sighting
+      // (codex r25).
+      const reportedRe = /reported(?:\s+by\s+(?:the\s+)?customer)?\s*$/i;
+      const customerParts = parts.filter((part) => reportedRe.test(part));
+      const observedParts = parts.filter((part) => !reportedRe.test(part));
       if (observedParts.length) {
         sections.observations.push(`${label}: ${redactAccessCodes(observedParts.join(', ').slice(0, 300))}`);
       }
@@ -11632,7 +11637,11 @@ router.post('/generate-report', async (req, res) => {
     )
       || validatedChipCount(entry?.nextStepChips, entry?.type,
         entry?.values && typeof entry?.values === 'object' && !Array.isArray(entry?.values) ? entry.values : {}) > 0
-      || (Number.isInteger(entry?.activityScore) && entry.activityScore >= 0 && entry.activityScore <= 5);
+      // A ZERO companion score alone can't open generation: bait-station
+      // zero states reject the drafted body at completion in favor of fixed
+      // wording, so score-0-only generation would hand the tech copy the
+      // report never publishes (codex r25).
+      || (Number.isInteger(entry?.activityScore) && entry.activityScore >= 1 && entry.activityScore <= 5);
     const primaryTypedInput = !!typedValuesRaw && (
       (ActivityIndicators.isTypedFindingsType(structuredFindings.type)
         && sectionsHaveFacts(typedFindingsPromptSections(structuredFindings.type, typedValuesRaw)))
