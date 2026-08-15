@@ -945,20 +945,24 @@ const COMMON_PROSE_WORDS = new Set([
   // (structural/control — "Apply Structural Control" must park as a
   // product) and condition-bearing descriptors (severe/regrowth/raised/
   // missing/recovery/occupancy/presence — "Watch for severe regrowth" is
-  // an invented field condition unless the facts state it). The action
-  // verbs below (perform/provide/retrieve/vacuum/document/discuss) are
-  // additionally in the directive-verb capture so their OBJECTS still
-  // ground strictly.
+  // an invented field condition unless the facts state it); customer
+  // equipment (camera/cameras/irrigation/runtime — "Check cameras" on
+  // empty facts is an unsupported equipment instruction) and
+  // service-history claim words (missed/application(s) — "Missed
+  // application" must come from the facts; both appear in real groundings
+  // whenever the claim is true). The action verbs below (perform/provide/
+  // retrieve/vacuum/document/discuss) are additionally in the
+  // directive-verb capture so their OBJECTS still ground strictly.
   'perform', 'performs', 'performed', 'performing', 'provide', 'provides', 'provided', 'providing',
   'context', 'account', 'accounts', 'recurring', 'initial', 'initially', 'availability', 'available',
-  'information', 'irrigation', 'scheduling', 'camera', 'cameras',
+  'information', 'scheduling',
   'accepted', 'accepting', 'waves', 'retrieve',
   'transition', 'transitions', 'standing', 'minute', 'minutes', 'resident', 'residents',
   'list', 'lists', 'site', 'sites',
-  'communication', 'communications', 'application', 'applications',
+  'communication', 'communications',
   'included', 'includes', 'including', 'state', 'stated', 'states', 'show', 'shows', 'shown',
   'past', 'introduction', 'discuss', 'discussing', 'baseline', 'relevant', 'mindful',
-  'missed', 'someone', 'documented', 'quiet', 'runtime',
+  'someone', 'documented', 'quiet',
   'vacuum', 'vacuuming', 'follow-up', 'walk-through',
 ]);
 

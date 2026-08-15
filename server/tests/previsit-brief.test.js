@@ -481,7 +481,12 @@ describe('grounded allowlist validation of LLM output', () => {
 
   test('common-prose target phrases pass the fuzzy tier with stemming (08-15 tuning)', () => {
     const { validateBriefJson } = PrevisitBrief._test;
-    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    // "camera" is customer equipment (never common prose) — it grounds here
+    // via the flag detail; "monitors" grounds on stemmed common "monitor".
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'security camera at the front door' }] },
+    };
     const verdict = validateBriefJson(
       {
         ...CLEAN_LLM_JSON,
@@ -492,6 +497,18 @@ describe('grounded allowlist validation of LLM output', () => {
       grounding,
     );
     expect(verdict.body).toBeTruthy();
+  });
+
+  test('ungrounded equipment directives and service-history claims reject (codex #3423 r3)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Check cameras', 'Inspect irrigation', 'Missed application']) {
+      const verdict = validateBriefJson(
+        { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], watch_items: [claim] },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
   });
 
   test('a GROUNDED tier name in descriptive prose is not product-shaped (08-15 tuning)', () => {
