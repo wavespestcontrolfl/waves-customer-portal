@@ -486,6 +486,19 @@ async function applyContactCorrections({ customerId, corrections, source, source
         }
       }
 
+      // (round-12) A whole-name batch is ONE statement: when both
+      // components are staged and either hits a compare-and-set miss,
+      // applying the survivor would commit a hybrid name nobody stated
+      // (admin's "James" + the message's "Doe" from a proposed "Jane Doe").
+      const NAME_GROUP = ['first_name', 'last_name'];
+      if (expectedValues && NAME_GROUP.every((f) => byField.has(f))) {
+        const nameCasMiss = NAME_GROUP.some((f) => Object.prototype.hasOwnProperty.call(expectedValues, f)
+          && !sameValue(f, before[f], expectedValues[f]));
+        if (nameCasMiss) {
+          for (const f of NAME_GROUP) { skipped.push({ field: f, reason: 'concurrent_change' }); byField.delete(f); }
+        }
+      }
+
       const updates = {};
       for (const { field, newValue, quote } of byField.values()) {
         // Compare-and-set (round-8): the caller snapshots the row BEFORE its
@@ -529,9 +542,13 @@ async function applyContactCorrections({ customerId, corrections, source, source
         updates[field] = newValue === '' ? null : newValue;
         applied.push({ field, oldValue: normValue(before[field]) || null, newValue: newValue || null, quote: quote || null });
       }
-      // A full new street implies the old unit is gone unless the message
-      // restated one — clear address_line2 alongside the group.
-      if (updates.address_line1 !== undefined && !byField.has('address_line2') && normValue(before.address_line2)) {
+      // A MOVE implies the old unit is gone unless the message restated one
+      // — clear address_line2 alongside the group. Only on stated moves
+      // (round-12): a street-SPELLING fix ("123 Mane St" → "123 Main St")
+      // that carries city+zip for the group check is the same property, and
+      // silently dropping its unit would corrupt the address; without move
+      // evidence the unit stays unless explicitly replaced or removed.
+      if (moveContext && updates.address_line1 !== undefined && !byField.has('address_line2') && normValue(before.address_line2)) {
         updates.address_line2 = null;
         applied.push({ field: 'address_line2', oldValue: normValue(before.address_line2), newValue: null, quote: byField.get('address_line1')?.quote || null });
       }
@@ -654,7 +671,34 @@ async function applyContactCorrections({ customerId, corrections, source, source
 /**
  * SMS entry point — webhook post-ack, fire-and-forget, linked customer only.
  */
-async function runSmsContactCorrection({ customer, body, smsLogId = null, knex = db, senderPhone = null }) {
+// Per-customer in-process run queue (round-12): two detached SMS runners
+// for the same customer must not snapshot concurrently — with parallel
+// runs, both snapshot the ORIGINAL value and whichever transaction commits
+// first wins, so an older message's slow extraction could beat (and then
+// CAS-reject) the customer's newer correction. Chaining runs in webhook
+// arrival order makes the second run snapshot AFTER the first commits, so
+// the newest message wins. (The portal is a single-process deploy;
+// a cross-instance race still fails closed on the CAS rather than
+// interleaving.)
+const customerRunChain = new Map();
+function serializePerCustomer(customerId, fn) {
+  const prev = customerRunChain.get(customerId) || Promise.resolve();
+  const run = prev.catch(() => {}).then(fn);
+  const tail = run.catch(() => {});
+  customerRunChain.set(customerId, tail);
+  tail.then(() => {
+    if (customerRunChain.get(customerId) === tail) customerRunChain.delete(customerId);
+  });
+  return run;
+}
+
+async function runSmsContactCorrection(args) {
+  const customerId = args?.customer?.id;
+  if (!customerId) return { applied: [], skipped: [], reason: 'unlinked' };
+  return serializePerCustomer(customerId, () => runSmsContactCorrectionInner(args));
+}
+
+async function runSmsContactCorrectionInner({ customer, body, smsLogId = null, knex = db, senderPhone = null }) {
   try {
     if (!require('../config/feature-gates').isEnabled('contactCorrection')) return { applied: [], skipped: [], reason: 'gate_off' };
     if (!customer?.id) return { applied: [], skipped: [], reason: 'unlinked' };
@@ -831,10 +875,15 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     // The replacement VALUE must be caller speech too (round-11): the
     // staging writer derives the recommended value independently of the
     // evidence quote, so a grounded "my last name is wrong" quote could
-    // otherwise carry a hallucinated surname into auto-apply.
+    // otherwise carry a hallucinated surname into auto-apply. Matching is
+    // token-delimited (round-12) — plain substring would let "Lee" ground
+    // on the word "please".
     const valueGroundedInCallerSpeech = (v) => {
-      const needle = normValue(v).replace(/\s+/g, ' ').toLowerCase();
-      return Boolean(needle) && callerLines.some((line) => line.includes(needle));
+      const needle = normValue(v).replace(/\s+/g, ' ');
+      if (!needle) return false;
+      const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+');
+      const re = new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}(?:[^\\p{L}\\p{N}]|$)`, 'iu');
+      return callerLines.some((line) => re.test(line));
     };
 
     const seenFields = new Set();

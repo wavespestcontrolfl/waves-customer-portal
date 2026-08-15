@@ -391,7 +391,7 @@ describe('applyContactCorrections', () => {
     expect(mockAddressFanout).not.toHaveBeenCalled();
   });
 
-  it('applies a complete address group, clears the stale unit, and runs address fan-outs', async () => {
+  it('applies a complete address group, clears the stale unit on a MOVE, and runs address fan-outs', async () => {
     const knex = makeStubKnex({ customers: [baseCustomer()], call_log: [callLogRow()], agent_decisions: [] });
     const res = await applyContactCorrections({
       customerId: CUSTOMER_ID,
@@ -402,6 +402,8 @@ describe('applyContactCorrections', () => {
       ],
       source: 'sms',
       knex,
+      // The quotes state a move — the unit auto-clear is move-only (round-12).
+      moveContext: true,
     });
     const fields = res.applied.map((a) => a.field).sort();
     expect(fields).toEqual(['address_line1', 'address_line2', 'city', 'zip']);
@@ -1497,6 +1499,99 @@ describe('round-11 hardening', () => {
     });
     const res = await extractSmsContactCorrections({ body });
     expect(res).toEqual([{ field: 'address_line2', newValue: '', quote: 'no unit, that was our old apartment' }]);
+  });
+});
+
+describe('round-12 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('a short hallucinated value cannot ground inside another word ("Lee" vs "please")', async () => {
+    const quote = 'my last name is wrong, please fix it';
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [candidate({ id: 'lee', final_recommended_value: 'Lee', evidence_quote: quote })],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+  });
+
+  it('concurrent SMS corrections serialize per customer — the newest message wins', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    let releaseFirst;
+    mockCallAnthropic
+      // msg1 (older): extraction hangs until released
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseFirst = () => resolve({
+          ok: true,
+          json: { corrections: [{ field: 'last_name', new_value: 'Riverson', quote: 'my last name is wrong, it should be Riverson', confidence: 'high' }] },
+        });
+      }))
+      // msg2 (newer): fast extraction
+      .mockImplementationOnce(async () => ({
+        ok: true,
+        json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'actually my last name is Rivers', confidence: 'high' }] },
+      }));
+    const p1 = runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My last name is wrong, it should be Riverson', knex });
+    const p2 = runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'Actually my last name is Rivers', knex });
+    // Let msg1 reach its (hung) extraction, then release it — msg2 must not
+    // have started; it runs only after msg1 commits.
+    await new Promise((r) => { setImmediate(r); });
+    expect(mockCallAnthropic).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1.applied.map((a) => a.field)).toEqual(['last_name']);
+    expect(r2.applied.map((a) => a.field)).toEqual(['last_name']);
+    expect(r2.applied[0].oldValue).toBe('Riverson'); // snapshot taken AFTER msg1 committed
+    expect(knex._data.customers[0].last_name).toBe('Rivers'); // newest message wins
+  });
+
+  it('a street-spelling fix preserves the existing unit (no move stated)', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '12 Oakes St', quote: 'the street is spelled wrong' },
+        { field: 'city', newValue: 'Testville', quote: 'the street is spelled wrong' },
+        { field: 'zip', newValue: '34200', quote: 'the street is spelled wrong' },
+      ],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied.map((a) => a.field)).toEqual(['address_line1']);
+    expect(knex._data.customers[0].address_line2).toBe('Unit 4'); // unit preserved
+  });
+
+  it('a whole-name batch rejects as a group when one component hits a CAS miss', async () => {
+    // Admin changed first_name to James while extraction was in flight —
+    // applying only the surname would commit the hybrid "James Doe".
+    const knex = makeStubKnex({ customers: [{ ...baseCustomer(), first_name: 'James' }], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'first_name', newValue: 'Jane', quote: 'my name is wrong, it is Jane Doe' },
+        { field: 'last_name', newValue: 'Doe', quote: 'my name is wrong, it is Jane Doe' },
+      ],
+      source: 'sms',
+      knex,
+      expectedValues: { ...baseCustomer() }, // snapshot still says Jordan
+    });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'first_name', reason: 'concurrent_change' });
+    expect(res.skipped).toContainEqual({ field: 'last_name', reason: 'concurrent_change' });
+    expect(knex._data.customers[0].first_name).toBe('James');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
   });
 });
 
