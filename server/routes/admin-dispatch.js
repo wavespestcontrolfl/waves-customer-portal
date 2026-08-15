@@ -6510,17 +6510,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (validatedCompanions.length) {
             const companionSnapshots = [];
             // Companion-only profiles (no typed primary) have no primary
-            // snapshot to carry the reviewed AI report — the FIRST
-            // customer-facing companion is the governing story and receives
-            // the parser-approved body, so its todaysResult can accept it
-            // and report-data's summary gate can promote the copy
-            // (codex r30 #3420). Exactly one carrier: embedding the same
-            // body in every companion section would duplicate it per card.
-            const companionBodyCarrierType = !serviceData.typedReportSnapshot
-              ? (validatedCompanions.find(
-                (c) => (companionDeliveryByType.get(c.type) || 'internal_only') === 'auto_send',
-              )?.type || null)
-              : null;
+            // snapshot to carry the reviewed AI report — the first
+            // customer-facing companion whose story ACCEPTS the body (stamps
+            // bodySource) becomes the carrier; a fixed zero-state companion
+            // that refuses it passes the body along to the next auto_send
+            // companion (codex r30/r35 #3420). Exactly one carrier: embedding
+            // the same body in every companion section would duplicate it
+            // per card.
+            let companionBodyCarried = false;
             for (const companion of validatedCompanions) {
               const companionIndicator = ActivityIndicators.getActivityIndicator(companion.type);
               let companionActivity = null;
@@ -6551,7 +6548,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 visitSequence: companionVisitSequence,
                 activity: companionActivity,
                 photoSummary: null,
-                technicianReportBody: companion.type === companionBodyCarrierType
+                technicianReportBody: !serviceData.typedReportSnapshot
+                  && !companionBodyCarried
+                  && (companionDeliveryByType.get(companion.type) || 'internal_only') === 'auto_send'
                   ? technicianReportBody
                   : null,
                 // A standard primary with a trapping COMPANION has no typed
@@ -6565,6 +6564,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 // The frozen per-section delivery rides the snapshot itself
                 // so report-data filters without re-reading the live profile.
                 companionSnapshot.delivery = companionDeliveryByType.get(companion.type) || 'internal_only';
+                if (companionSnapshot.todaysResult?.bodySource === 'technician_report') {
+                  companionBodyCarried = true;
+                }
                 companionSnapshots.push(companionSnapshot);
               }
               if (companionActivity) companionActivityInserts.push(companionActivity);

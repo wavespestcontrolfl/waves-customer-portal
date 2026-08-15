@@ -124,6 +124,7 @@ function technicianReportCustomerCopy(notes) {
  */
 function summaryCopySignature(service = {}) {
   let snapshot = null;
+  let companionSnapshots = [];
   try {
     const data = typeof service.service_data === 'string'
       ? JSON.parse(service.service_data)
@@ -133,12 +134,27 @@ function summaryCopySignature(service = {}) {
       && data.typedReportSnapshot.type
       ? data.typedReportSnapshot
       : null;
+    // Companion-only completions govern through their customer-visible
+    // companion snapshots (PDFs are customer-facing → auto_send only).
+    companionSnapshots = !snapshot && data && Array.isArray(data.companionReportSnapshots)
+      ? data.companionReportSnapshots.filter((snap) => snap
+        && typeof snap === 'object' && snap.delivery === 'auto_send')
+      : [];
   } catch {
     snapshot = null;
+    companionSnapshots = [];
   }
   const parsed = technicianReportCustomerCopy(service.technician_notes);
-  const drivesSummary = !!parsed?.body
-    && (!snapshot || snapshot.todaysResult?.bodySource === 'technician_report');
+  // Mirrors report-data's promotion gate exactly (codex r35 #3420): the
+  // governing typed story must have ACCEPTED the body — bodySource stamped
+  // or a frozen reconcileConfirmed (the person's override) — else the PDF
+  // signature would diverge from the live summary and serve a stale cache.
+  const governing = [snapshot, ...(snapshot ? [] : companionSnapshots)]
+    .filter((snap) => snap?.todaysResult);
+  const typedStoryAcceptedBody = !governing.length
+    || governing.some((snap) => snap.todaysResult?.bodySource === 'technician_report'
+      || snap.todaysResult?.reconcileConfirmed === true);
+  const drivesSummary = !!parsed?.body && typedStoryAcceptedBody;
   if (!drivesSummary) return '';
   return `-tr${crypto.createHash('sha256').update(parsed.body).digest('hex').slice(0, 8)}`;
 }

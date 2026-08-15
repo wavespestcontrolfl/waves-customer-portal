@@ -221,23 +221,51 @@ async function aiRecap(input = {}) {
 // True when the generated copy mentions any recorded product by name —
 // matches on each name token of 4+ letters ("Talstar", "Suspend") so partial
 // echoes ("we applied Talstar around...") are caught too.
+// Short formulation suffixes (SE/SC/EC/WDG …) are label codes, not brand
+// identity — they never gate copy on their own (codex r35 on #3420).
+const FORMULATION_SUFFIX_TOKENS = new Set([
+  'se', 'sc', 'ec', 'wp', 'wdg', 'wsp', 'me', 'ew', 'cs', 'sg', 'df', 'gr',
+  'xl', 'ii', 'iii', 'iv', 'lo', 'hi', 'g', 'l', 'd', 'f', 't', 'e',
+]);
 function containsProductName(text, products, { extraGenericTokens = null, wholeWord = false } = {}) {
   const hay = String(text || '').toLowerCase();
   if (!hay) return false;
   // wholeWord: match tokens on word boundaries — 'drive' (Drive XLR8) must
   // not match "driveway" (codex r31 on #3420). The recap path keeps its
   // stricter substring contract by default.
-  const wordSet = wholeWord ? new Set(hay.split(/[^a-z0-9]+/)) : null;
-  return safeProducts(products).some((p) => String(p.name || '')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((token) => token.length >= 4
-      && !GENERIC_NAME_TOKENS.has(token)
+  const hayWords = wholeWord ? hay.split(/[^a-z0-9]+/).filter(Boolean) : null;
+  const wordSet = wholeWord ? new Set(hayWords) : null;
+  const normHay = wholeWord ? ` ${hayWords.join(' ')} ` : null;
+  return safeProducts(products).some((p) => {
+    const nameTokens = String(p.name || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    const isGeneric = (token) => GENERIC_NAME_TOKENS.has(token)
       // Callers may widen the generic set (e.g. the generate-report guard
       // ignores pest-target nouns like "cockroach" that appear in catalog
       // names but legitimately belong in report copy — codex r21 on #3420).
-      && !(extraGenericTokens && extraGenericTokens.has(token)))
-    .some((token) => (wholeWord ? wordSet.has(token) : hay.includes(token))));
+      || (extraGenericTokens && extraGenericTokens.has(token));
+    const longDistinctive = nameTokens.filter((token) => token.length >= 4 && !isGeneric(token));
+    if (longDistinctive.some((token) => (wholeWord ? wordSet.has(token) : hay.includes(token)))) {
+      return true;
+    }
+    if (!wholeWord) return false;
+    // A name whose long tokens are all generic/short ("T-Zone SE",
+    // "PGF Complete 16-4-8") still gates: distinctive short acronyms
+    // (2-3 chars, non-numeric, not a formulation suffix) match as whole
+    // words, and the full normalized name matches as a phrase
+    // (codex r35 on #3420).
+    if (longDistinctive.length) return false;
+    const shortDistinctive = nameTokens.filter((token) => token.length >= 2
+      && token.length <= 3
+      && !/^\d+$/.test(token)
+      && !FORMULATION_SUFFIX_TOKENS.has(token)
+      && !isGeneric(token));
+    if (shortDistinctive.some((token) => wordSet.has(token))) return true;
+    if (nameTokens.length >= 2) {
+      const phrase = ` ${nameTokens.join(' ')} `;
+      if (normHay.includes(phrase)) return true;
+    }
+    return false;
+  });
 }
 const GENERIC_NAME_TOKENS = new Set([
   'insecticide', 'herbicide', 'fungicide', 'fertilizer', 'granular', 'liquid',
