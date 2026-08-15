@@ -248,4 +248,24 @@ async function pastDueSmsLineForCustomer(customerId, { excludeInvoiceId = null }
   }
 }
 
-module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, rowIsSelfPayDue, pastDueSmsLineForCustomer, MAX_OPEN_INVOICES };
+/**
+ * Remove a rendered balance clause from an already-rendered SMS body — the
+ * quiet-hours seam of the {past_due_line} rollout (codex P2, round 2): the
+ * completion route's send-window PREcheck can pass at 19:5x ET while the
+ * authoritative validator at the provider handoff still defers the send, so
+ * the frozen replay body queued for the 8 AM window open could carry a
+ * figure an overnight payment has invalidated. Callers strip the clause at
+ * the moment the deferral is KNOWN (QUIET_HOURS_HOLD), which makes the
+ * replay body identical to what the precheck-suppressed path would have
+ * rendered. Mirrors the renderer's own post-processing (collapse \n{3,},
+ * trim) so removing the sentence leaves no blank paragraph behind. A falsy
+ * or absent clause returns the body unchanged.
+ */
+function stripBalanceLineFromBody(body, line) {
+  if (typeof body !== 'string' || !line || typeof line !== 'string') return body;
+  const clause = line.trim();
+  if (!clause || !body.includes(clause)) return body;
+  return body.split(clause).join('').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, rowIsSelfPayDue, pastDueSmsLineForCustomer, stripBalanceLineFromBody, MAX_OPEN_INVOICES };

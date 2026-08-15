@@ -10699,13 +10699,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 completionSmsStatus: 'deferred',
                 completionSmsDeferredTo: smsResult.nextAllowedAt,
               };
+              // The balance clause never rides a frozen replay body (codex
+              // P2, round 2): the send-window PREcheck at the line's compute
+              // site can pass at 19:5x while the authoritative validator at
+              // the provider handoff defers the send — this hold IS that
+              // deferral, so strip the clause here and the queued body
+              // matches what the precheck-suppressed path would have
+              // rendered. The pay link stays (its target renders live paid
+              // state); only the static balance sentence is removed.
+              const deferredReplayBody = require('../services/open-balance')
+                .stripBalanceLineFromBody(sentSmsBody, completionPastDueLine);
               await db.transaction(async (trx) => {
                 await trx('sms_log').insert({
                 customer_id: svc.customer_id,
                 direction: 'outbound',
                 from_phone: TWILIO_NUMBERS.getOutboundNumber(),
                 to_phone: svc.cust_phone,
-                message_body: sentSmsBody,
+                message_body: deferredReplayBody,
                 status: 'scheduled',
                 scheduled_for: new Date(smsResult.nextAllowedAt),
                 message_type: sentSmsType,

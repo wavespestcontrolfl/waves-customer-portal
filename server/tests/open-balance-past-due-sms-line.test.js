@@ -48,7 +48,7 @@ jest.mock('../models/db', () => {
   return dbFn;
 });
 
-const { pastDueSmsLineForCustomer } = require('../services/open-balance');
+const { pastDueSmsLineForCustomer, stripBalanceLineFromBody } = require('../services/open-balance');
 
 describe('pastDueSmsLineForCustomer', () => {
   beforeEach(() => {
@@ -140,5 +140,34 @@ describe('pastDueSmsLineForCustomer', () => {
     mockIsEnabled.mockImplementation((k) => k === 'completionSmsBalance');
     tableResults.rows = new Error('db down');
     await expect(pastDueSmsLineForCustomer('cust-1')).resolves.toBe('');
+  });
+});
+
+describe('stripBalanceLineFromBody (quiet-hours deferral seam)', () => {
+  const clause = "Reminder: your account also has a previous balance of $52.10 from an earlier invoice, separate from today's invoice.\n\n";
+
+  test('removes the rendered clause and leaves no blank paragraph (end placement)', () => {
+    const body = "Hello Sam! Your Pest Control report is ready: link\n\nInvoice for today's visit: pay\n\nReminder: your account also has a previous balance of $52.10 from an earlier invoice, separate from today's invoice.";
+    expect(stripBalanceLineFromBody(body, clause)).toBe(
+      "Hello Sam! Your Pest Control report is ready: link\n\nInvoice for today's visit: pay",
+    );
+  });
+
+  test('removes a mid-body clause and collapses the seam to one paragraph break', () => {
+    const body = "Hi! Bill: pay\n\nReminder: your account also has a previous balance of $52.10 from an earlier invoice, separate from today's invoice.\n\nQuestions or requests? Reply here.";
+    expect(stripBalanceLineFromBody(body, clause)).toBe(
+      "Hi! Bill: pay\n\nQuestions or requests? Reply here.",
+    );
+  });
+
+  test('body unchanged when the clause is empty (precheck already suppressed) or absent', () => {
+    const body = "Hello Sam! Your report is ready: link";
+    expect(stripBalanceLineFromBody(body, '')).toBe(body);
+    expect(stripBalanceLineFromBody(body, clause)).toBe(body);
+    expect(stripBalanceLineFromBody(body, null)).toBe(body);
+  });
+
+  test('non-string body passes through untouched', () => {
+    expect(stripBalanceLineFromBody(null, clause)).toBe(null);
   });
 });
