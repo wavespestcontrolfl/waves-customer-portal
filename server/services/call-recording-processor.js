@@ -8146,13 +8146,32 @@ const CallRecordingProcessor = {
         const customerProperties = require('./customer-properties');
         // Unit/line2 from the V2 service_address (legacy extraction + flatView drop it).
         const callUnit = extracted.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
+        // ONE canonical address authority per call (codex #3418 r11+r13):
+        // when the role lane is on and valid V2 exists, EVERY property
+        // mutation in this block draws from V2 — the persistence loops
+        // below skip their V1 writes, and the primary-completion here
+        // must not graft V1's city/ZIP either (V1 matching an existing
+        // partial primary street while V2 names another address would
+        // complete the mirror with the wrong extractor's facts).
+        const v2SoleAddressAuthority = require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')
+          && !!v2CanonicalExtraction?.property;
+        const v2SvcAddrForComplete = v2SoleAddressAuthority
+          ? (v2CanonicalExtraction.property.service_address || null)
+          : null;
         // When this call is the customer's PRIMARY street but adds city/ZIP/unit
         // the records lack, complete the mirror AND the existing primary property
         // (recomputing its key) BEFORE snapshotting — otherwise the primary is
         // captured partial / unitless and a later full-address call duplicates it.
-        await customerProperties.completePrimaryFromCall(customerId, {
-          address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip,
-        });
+        await customerProperties.completePrimaryFromCall(customerId, v2SoleAddressAuthority
+          ? {
+            address_line1: v2SvcAddrForComplete?.street_line_1 || null,
+            address_line2: v2SvcAddrForComplete?.street_line_2 || null,
+            city: v2SvcAddrForComplete?.city || null,
+            zip: v2SvcAddrForComplete?.postal_code || null,
+          }
+          : {
+            address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip,
+          });
         // Rental signal — works in BOTH shadow and enforce (DRIVES_ROUTING) modes:
         // the shadow bridge may not have run, so re-derive from the V2 extraction.
         // Computed BEFORE ensurePrimaryProperty so a first-call tenant/rental
@@ -8209,14 +8228,8 @@ const CallRecordingProcessor = {
           }
         };
         enqueueLookup(ensured);
-        // ONE canonical persistence set per call (codex #3418 r11): when
-        // the role lane is on and valid V2 exists, the V2 loop below is
-        // the SOLE property persister — running the V1-preferred writes
-        // too would let extractor disagreement silently create phantom
-        // duplicate properties. Role lane off (or no valid V2) keeps the
-        // V1 writes exactly as before.
-        const v2SoleAddressAuthority = require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')
-          && !!v2CanonicalExtraction?.property;
+        // V1 persistence writes yield under V2 sole authority (codex
+        // #3418 r11) — see the authority decision above.
         if (!v2SoleAddressAuthority
           && (isFirstAddress || (bridgeNeedsConfirmation.includes('second_service_address') && hasFullAddress))) {
           const recorded = await customerProperties.recordCallProperty({
@@ -8360,6 +8373,11 @@ const CallRecordingProcessor = {
               additionalProps: roleAdditionalProps,
               extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
               buildTriageItem,
+              // Claim fence (codex #3418 r13): staging verifies this
+              // token is still the live claim inside its locked trx, so
+              // a stalled worker reclaimed by a newer pass cannot fill
+              // occupancies or replace the card with obsolete proposals.
+              procToken,
             });
             if (staged.fills || staged.parked) {
               logger.info(`[property-role] ${maskSid(callSid)}: ${staged.fills} occupancy fill(s)${staged.parked ? ' + review card parked' : ''}`);

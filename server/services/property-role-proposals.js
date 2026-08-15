@@ -329,10 +329,32 @@ async function resolveSupersededCard(db, callLogId, note) {
 
 async function stagePropertyRoleReview({
   db, customerId, callLogId, extracted, additionalProps, extraction, buildTriageItem,
+  procToken = null,
 }) {
+  // Claim fence (codex #3418 r13): a stalled worker whose processing
+  // claim was reclaimed must not fill occupancies or replace the card
+  // with its obsolete payload after a newer worker's corrected pass —
+  // verified INSIDE each locked transaction, right before the writes.
+  const claimHeld = async (trx) => {
+    if (!procToken) return true;
+    const owned = await trx('call_log')
+      .where({ id: callLogId, processing_token: procToken })
+      .first('id');
+    return !!owned;
+  };
+
   const classified = classifiedPropertiesFromExtraction(extracted, additionalProps);
   if (!classified.some((c) => c.occupancy || c.is_primary_residence === true)) {
-    await resolveSupersededCard(db, callLogId);
+    try {
+      const { lockTriageCall } = require('../utils/triage-locks');
+      await db.transaction(async (trx) => {
+        await lockTriageCall(trx, callLogId);
+        if (!(await claimHeld(trx))) return;
+        await resolveSupersededInTrx(trx, callLogId);
+      });
+    } catch (e) {
+      logger.warn(`[property-role] superseded-card cleanup skipped: ${e.code || e.name || 'db_error'}`);
+    }
     return { fills: 0, parked: false };
   }
 
@@ -353,6 +375,10 @@ async function stagePropertyRoleReview({
     // (the fills) was the staging-side AB-BA half. Same order as Apply.
     await trx('customers').where({ id: customerId }).forUpdate().first();
     await lockTriageCall(trx, callLogId);
+    if (!(await claimHeld(trx))) {
+      logger.warn('[property-role] staging skipped — processing claim lost to a newer worker');
+      return;
+    }
     const properties = await trx('customer_properties')
       .where({ customer_id: customerId, active: true })
       .select('id', 'address_line1', 'address_line2', 'city', 'zip', 'occupancy_type', 'is_primary', 'label', 'property_type');
@@ -430,6 +456,43 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
   // Reentrant: the route pre-acquires both in this same transaction.
   await require('../utils/customer-comms-lock').lockCustomerComms(trx, customerId);
   await trx('customers').where({ id: customerId }).forUpdate().first();
+
+  // PREFLIGHT a batch that carries a primary flip (codex #3418 r13): the
+  // proposals execute sequentially, so a flip that would skip on stale
+  // state (row gone/re-typed commercial/non-owner occupancy no companion
+  // in THIS batch can fix, or a re-arranged portfolio) must be detected
+  // BEFORE its companion occupancy changes run — otherwise the card
+  // resolves with half its story applied (e.g. old primary re-marked
+  // rental while staying primary). A non-viable flip skips the WHOLE
+  // batch: nothing mutates, and the card resolves as all-stale (the next
+  // reprocess re-stages from live state).
+  const flipP = proposals.find((p) => p.kind === 'primary_flip');
+  if (flipP) {
+    const target = await trx('customer_properties')
+      .where({ id: flipP.new_primary_property_id, customer_id: customerId, active: true })
+      .forUpdate()
+      .first();
+    let viable = !!target;
+    if (viable && !target.is_primary) { // already-primary = idempotent, always viable
+      if (String(target.property_type || '').trim().toLowerCase() === 'commercial') viable = false;
+      const targetOcc = knownOccupancy(target.occupancy_type);
+      if (viable && targetOcc && targetOcc !== 'owner_occupied') {
+        // Only viable if a companion in THIS batch corrects it and that
+        // companion's CAS will actually match the row's current value.
+        viable = proposals.some((q) => q.kind === 'occupancy_change'
+          && q.property_id === flipP.new_primary_property_id
+          && normalizeOccupancy(q.proposed_occupancy) === 'owner_occupied'
+          && q.current_occupancy === target.occupancy_type);
+      }
+      if (viable) {
+        const livePrimary = await trx('customer_properties')
+          .where({ customer_id: customerId, is_primary: true, active: true })
+          .first('id');
+        if ((livePrimary ? livePrimary.id : null) !== (flipP.old_primary_property_id || null)) viable = false;
+      }
+    }
+    if (!viable) return { applied: 0, skipped: proposals.length };
+  }
 
   for (const p of proposals) {
     if (p.kind === 'occupancy_change') {
@@ -546,7 +609,8 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         // status; a cancelled series has recurring_ongoing=false and is
         // untouched. Column-existence check keeps pre-migration envs
         // working (no ongoing column = no auto-extension either).
-        if (await trx.schema.hasColumn('scheduled_services', 'recurring_ongoing')) {
+        const hasOngoing = await trx.schema.hasColumn('scheduled_services', 'recurring_ongoing');
+        if (hasOngoing) {
           await trx('scheduled_services')
             .where({ customer_id: customerId, is_recurring: true, recurring_ongoing: true })
             .whereNull('property_id')
@@ -574,23 +638,43 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         // coordless. Stamp the old primary's own coords onto exactly those
         // rows; real coordinates are never overwritten (NULL-only fence).
         if (oldPrimary.latitude != null && oldPrimary.longitude != null) {
+          // Per-column COALESCE and an OR-null predicate (codex #3418
+          // r13): dispatch's per-column customer-mirror fallback dies for
+          // BOTH columns post-flip, so a row missing only one coordinate
+          // must have that one filled — the both-null requirement skipped
+          // exactly those rows.
+          const coordPatch = {
+            lat: trx.raw('COALESCE(lat, ?)', [oldPrimary.latitude]),
+            lng: trx.raw('COALESCE(lng, ?)', [oldPrimary.longitude]),
+            updated_at: new Date(),
+          };
+          const oldPrimaryStampMatch = (qb) => qb
+            .where({ property_id: oldPrimary.id })
+            .orWhere((qb2) => qb2
+              .whereRaw('lower(service_address_line1) = lower(?)', [oldPrimary.address_line1 || ''])
+              .andWhere((qb3) => qb3
+                .whereNull('service_address_zip')
+                .orWhere('service_address_zip', oldPrimary.zip)));
+          const anyCoordMissing = (qb) => qb.whereNull('lat').orWhereNull('lng');
           await trx('scheduled_services')
             .where({ customer_id: customerId })
             .whereNotIn('status', TERMINAL_VISIT_STATUSES)
-            .whereNull('lat')
-            .whereNull('lng')
-            .where((qb) => qb
-              .where({ property_id: oldPrimary.id })
-              .orWhere((qb2) => qb2
-                .whereRaw('lower(service_address_line1) = lower(?)', [oldPrimary.address_line1 || ''])
-                .andWhere((qb3) => qb3
-                  .whereNull('service_address_zip')
-                  .orWhere('service_address_zip', oldPrimary.zip))))
-            .update({
-              lat: oldPrimary.latitude,
-              lng: oldPrimary.longitude,
-              updated_at: new Date(),
-            });
+            .where(anyCoordMissing)
+            .where(oldPrimaryStampMatch)
+            .update(coordPatch);
+          // Live recurring template parents get the SAME coordinate repair
+          // despite completed status (codex #3418 r13): a parent already
+          // stamped to the old primary with null coords is skipped by the
+          // parent-stamp above (it IS stamped) and was excluded here by
+          // the terminal filter — yet auto-extension copies its null
+          // coords into every future child, route-blind post-flip.
+          if (hasOngoing) {
+            await trx('scheduled_services')
+              .where({ customer_id: customerId, is_recurring: true, recurring_ongoing: true })
+              .where(anyCoordMissing)
+              .where(oldPrimaryStampMatch)
+              .update(coordPatch);
+          }
         }
 
         // The demote NEVER writes occupancy — the old row's reclassification

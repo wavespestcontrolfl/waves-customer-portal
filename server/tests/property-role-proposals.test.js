@@ -287,11 +287,17 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     // rows stamped to the old primary — the second scheduled_services update
     // stamps the old primary's own coords, fenced to NULL-coord rows only.
     const ssUpdates = trx._updates.filter((x) => x.table === 'scheduled_services');
-    expect(ssUpdates).toHaveLength(3); // pin + live-series parent stamp + coord backfill
+    // pin + live-series parent stamp + coord backfill (live rows) +
+    // coord backfill (live recurring template parents, r13)
+    expect(ssUpdates).toHaveLength(4);
     const backfill = ssUpdates[2];
-    expect(backfill.patch).toMatchObject({ lat: 27.4, lng: -82.4 });
-    expect(backfill.whereNulls).toEqual(expect.arrayContaining(['lat', 'lng']));
+    // Per-column COALESCE fill (r13): whichever coordinate is missing is
+    // filled independently — never a bare overwrite, never both-null-only.
+    expect(backfill.patch.lat).toMatchObject({ __raw: expect.stringContaining('COALESCE(lat'), bindings: [27.4] });
+    expect(backfill.patch.lng).toMatchObject({ __raw: expect.stringContaining('COALESCE(lng'), bindings: [-82.4] });
     expect(backfill.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped', 'rescheduled']]);
+    const recurringBackfill = ssUpdates[3];
+    expect(recurringBackfill.wheres[0]).toMatchObject({ is_recurring: true, recurring_ongoing: true });
   });
 
   test('pin coords are FILL-ONLY (COALESCE) — existing visit coords survive a coordless old primary (codex r7)', async () => {
@@ -413,6 +419,28 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     expect(old.occupancy_type).toBe('seasonal');
     expect(old.label).toBe('Seasonal');
     expect(old.is_primary).toBe(false);
+  });
+
+  test('a non-viable flip skips the WHOLE batch — companion changes never run alone (codex r13)', async () => {
+    // The new primary was re-typed rental after staging (no companion in
+    // the batch corrects it). Previously the old primary's companion
+    // occupancy_change executed and THEN the flip skipped — leaving the
+    // still-primary row re-marked rental with the card resolved. Now the
+    // preflight skips everything: nothing mutates.
+    const old = { ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, state: 'FL', active: true, customer_id: 'cust-1', occupancy_type: 'rental_investment' };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    const out = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [
+        { kind: 'occupancy_change', property_id: 'prop-old', current_occupancy: 'owner_occupied', proposed_occupancy: 'rental_investment' },
+        { kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' },
+      ],
+    });
+    expect(out).toEqual({ applied: 0, skipped: 2 });
+    expect(old.occupancy_type).toBe('owner_occupied');
+    expect(old.is_primary).toBe(true);
+    expect(trx._updates).toHaveLength(0);
   });
 
   test('a flip whose companion occupancy CAS went stale is skipped, not promoted (codex r9)', async () => {
