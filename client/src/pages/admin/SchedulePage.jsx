@@ -9803,6 +9803,10 @@ export function CompletionPanel({
   const [typedRecommendations, setTypedRecommendations] = useState("");
   const [typedRecommendationsEdited, setTypedRecommendationsEdited] =
     useState(false);
+  // True once a unified Generate AI report result was installed into the
+  // notes — persisted at completion as ai_draft_used (adoption telemetry,
+  // specialty completion contract).
+  const [aiReportUsed, setAiReportUsed] = useState(false);
   // AI photo analysis (optional, never blocks submit): summary is editable,
   // captions attach to the photo entries. Not draft-persisted — photos
   // themselves aren't, and a summary without its photos would be stale.
@@ -11507,6 +11511,9 @@ export function CompletionPanel({
   // pills UI takes over as the deselect handle. (notes still holds the
   // pre-draft text here; setNotes(report) hasn't applied yet.)
   function applyGeneratedReport(reportText) {
+    // Telemetry (specialty completion contract): an installed AI report is
+    // an AI-assisted completion — persisted as ai_draft_used (codex r14).
+    setAiReportUsed(true);
     if (!chipLinesDetached) {
       setSelectedProtocolActionLabels(
         labelsStillInNotes(selectedProtocolActionLabels),
@@ -12887,9 +12894,10 @@ export function CompletionPanel({
           ...completionTelemetryRef.current,
           submitClickedAt: new Date().toISOString(),
           // The recommendations-only recap draft was retired 2026-08-15 for
-          // the unified Generate AI report (which drafts NOTES); no draft
-          // ever writes this field now.
-          aiDraftUsed: false,
+          // the unified Generate AI report (which drafts NOTES) — this flag
+          // now records an installed unified generation, keeping the
+          // ai_draft_used adoption metric meaningful (codex r14).
+          aiDraftUsed: aiReportUsed,
           recommendationTextEdited: typedRecommendationsEdited,
           activityScoreTouched: typedActivityTouched,
         };

@@ -37,6 +37,25 @@ describe('generate-report output guard (reportCopyRejection)', () => {
   });
 });
 
+describe('generate-report output shape gate (r14)', () => {
+  test('prose missing the parser shape is rejected so it retries instead of silently falling back at completion', async () => {
+    const provider = (name, responses) => ({
+      name, model: `${name}-model`,
+      call: jest.fn().mockImplementation(() => Promise.resolve(responses.shift())),
+    });
+    const goodShape = 'WHAT WE DID\n\nWe serviced the bait stations.\n\nWHAT WE FOUND\n\nActivity was light.';
+    const badShape = 'We serviced the stations and found light activity.'; // no headers
+    const openai = provider('openai', [{ ok: true, text: badShape }, { ok: true, text: goodShape }]);
+    const anthropic = provider('anthropic', []);
+    const result = await generateReportCopyWithFallback({
+      systemPrompt: 's', userMessage: 'u', providers: [openai, anthropic],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.report).toBe(goodShape);
+    expect(openai.call).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('generate-report provider fallback', () => {
   const cleanReport = 'WHAT WE DID\n\nWe treated the exterior entry points.\n\nWHAT WE FOUND\n\nActivity was low.';
   const provider = (name, responses) => ({
@@ -191,7 +210,9 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
       target_termite: 'Subterranean termites',
     });
     expect(sections.work.join(' ')).toContain('Trenching');
-    expect(sections.observations.join(' ')).toContain('Subterranean termites');
+    // target_termite is completed-work context since r14 (what the
+    // treatment targets, not a sighting)
+    expect(sections.work.join(' ')).toContain('Subterranean termites');
     expect(sections.products.join(' ')).toContain('Termidor HE');
     expect(sections.work.join(' ')).not.toContain('Termidor');
     expect(sections.observations.join(' ')).not.toContain('Termidor');
@@ -353,6 +374,15 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(palm.observations).toHaveLength(0);
     const ts = typedFindingsPromptSections('tree_shrub', { plant_groups: 'Palms, Shrubs' });
     expect(ts.work).toHaveLength(1);
+  });
+
+  test('treatment targets are completed-work context, not findings (r14)', () => {
+    const treat = typedFindingsPromptSections('termite_treatment', { target_termite: 'Unknown / preventive' });
+    expect(treat.work.join(' ')).toContain('Unknown / preventive');
+    expect(treat.observations).toHaveLength(0);
+    const pest = typedFindingsPromptSections('one_time_pest_treatment', { target_pest: 'Ghost ants' });
+    expect(pest.work.join(' ')).toContain('Ghost ants');
+    expect(pest.observations).toHaveLength(0);
   });
 
   test('inspected scope is completed work; NOT-inspected scope stays an observation (r9)', () => {
