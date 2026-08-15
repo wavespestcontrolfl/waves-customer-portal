@@ -179,7 +179,7 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     const block = buildTypedFindingsPromptBlock({
       findingsType: 'rodent_trapping',
       // trap_visit_type is `internal` — tech-facing data that must never
-      // reach a customer-facing prompt (same rule as buildFindingsRecapPrompt)
+      // reach a customer-facing prompt (the retired recap draft enforced the same rule)
       values: { trap_visit_type: 'setup', traps_checked: '4', traps_set: '' },
       nextStepChips: ['Not a real chip for this type'],
       companionFindings: [],
@@ -198,17 +198,59 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
       companionFindings: [
         { type: 'cockroach', values: { species: 'German cockroach' } },
         { type: 'not_a_type', values: { species: 'ignored' } },
+        // a real type NOT declared on the profile must not render either
+        { type: 'flea', values: { flea_activity: 'heavy' } },
       ],
+      allowedCompanionTypes: ['cockroach'],
     });
     expect(withCompanion).toContain('Companion findings (');
     expect(withCompanion).toContain('German cockroach');
     expect(withCompanion).not.toContain('ignored');
+    expect(withCompanion).not.toContain('heavy');
 
     expect(buildTypedFindingsPromptBlock({
       findingsType: 'termite_bait_station',
       values: { total_stations: '' },
       nextStepChips: ['bogus'],
       companionFindings: [],
+      allowedCompanionTypes: [],
     })).toBe('');
+  });
+
+  test('companion-only profiles (findingsType null) still render companion facts, chips, and score', () => {
+    const block = buildTypedFindingsPromptBlock({
+      findingsType: null,
+      values: null,
+      nextStepChips: [],
+      companionFindings: [{
+        type: 'tree_shrub',
+        // observed_conditions is companionOnly — the companion schema
+        // variant must serve it (primary slice filters it out)
+        values: { observed_conditions: 'Yellowing / chlorosis, Leaf spot' },
+        nextStepChips: ['Continue Tree & Shrub program'],
+        activityScore: 2,
+      }],
+      allowedCompanionTypes: ['tree_shrub'],
+    });
+    expect(block).toContain('STRUCTURED SERVICE FINDINGS');
+    expect(block).toContain('Yellowing / chlorosis');
+    expect(block).toContain('Leaf spot');
+    expect(block).toContain('Activity rating: 2/5');
+    expect(block).toContain('Next steps selected (future advice): Continue Tree & Shrub program');
+  });
+
+  test('comma-joined chips/multi_select values map each option through the customer label registry', () => {
+    const block = buildTypedFindingsPromptBlock({
+      findingsType: 'palm_injection',
+      values: { deficiency_signs: 'None observed today, Iron chlorosis' },
+      nextStepChips: [],
+      companionFindings: [],
+      allowedCompanionTypes: [],
+    });
+    // 'None observed today' has deliberately scoped customer wording — the
+    // per-option mapping must apply, not the raw joined technician string
+    expect(block).toContain("No nutrient deficiency signs were observed at today's service");
+    expect(block).toContain('Iron chlorosis');
+    expect(block).not.toContain('None observed today,');
   });
 });

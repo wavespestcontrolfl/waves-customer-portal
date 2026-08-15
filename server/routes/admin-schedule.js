@@ -11239,13 +11239,16 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
 }
 
 // Renders technician-recorded typed findings into prompt lines for the
-// generate-report user message. Mirrors buildFindingsRecapPrompt's field
+// generate-report user message. Carries forward the retired recap draft's field
 // rules (admin-dispatch): `internal` fields are tech-facing data (compliance
 // entries, pricing calibration) and never reach customer-facing prompts;
 // empty values drop; values are bounded so a pasted wall of text can't
 // balloon the prompt.
-function typedFindingsPromptLines(findingsType, values) {
-  const schema = ActivityIndicators.findingsSchemaForType(findingsType);
+function typedFindingsPromptLines(findingsType, values, { companion = false } = {}) {
+  // Companion sections render with the companion schema variant so
+  // companionOnly fields (the hand-captured condition source on combined
+  // visits) reach the prompt instead of being filtered by the primary slice.
+  const schema = ActivityIndicators.findingsSchemaForType(findingsType, { companion });
   if (!schema) return [];
   return (schema.fields || [])
     .filter((field) => !field.internal)
@@ -11260,8 +11263,13 @@ function typedFindingsPromptLines(findingsType, values) {
         // Unmapped machine tokens ("none_observed") read as words.
         return label === raw2 && /^[a-z0-9_]+$/.test(label) ? label.replace(/_/g, ' ') : label;
       };
-      const text = Array.isArray(raw)
-        ? raw.map((v) => String(v ?? '').trim()).filter(Boolean).map(toLabel).join(', ')
+      // chips / multi_select persist as comma-joined selections — split and
+      // map each option separately (mirrors buildTypedReportSnapshot) so the
+      // per-option customer wording applies instead of the raw joined string.
+      const multi = field.type === 'chips' || field.type === 'multi_select' || Array.isArray(raw);
+      const text = multi
+        ? (Array.isArray(raw) ? raw : String(raw ?? '').split(','))
+          .map((v) => String(v ?? '').trim()).filter(Boolean).map(toLabel).join(', ')
         : (String(raw ?? '').trim() ? toLabel(raw) : '');
       if (!text) return null;
       return `${field.label}: ${text.slice(0, 300)}`;
@@ -11272,34 +11280,57 @@ function typedFindingsPromptLines(findingsType, values) {
 
 // The STRUCTURED SERVICE FINDINGS block for the generate-report prompt.
 // Chips validate against the confirmed findings type (invalid ones drop —
-// advisory here, enforced strictly at completion). Companion sections are
-// rendered per typed schema; their values are technician-recorded visit data
-// with the same provenance as the primary findings.
-function buildTypedFindingsPromptBlock({ findingsType, values, nextStepChips, companionFindings }) {
-  const lines = typedFindingsPromptLines(findingsType, values);
-  const chipsValidation = ActivityIndicators.validateNextStepChips(
-    nextStepChips, findingsType, values || {},
-  );
-  const chips = chipsValidation.ok ? chipsValidation.chips : [];
+// advisory here, enforced strictly at completion). Companion sections render
+// with the companion schema variant and are limited to the appointment
+// profile's declared companion types (`allowedCompanionTypes`) — their
+// values/chips/scores are technician-recorded visit data with the same
+// provenance as the primary findings. `findingsType` may be null on
+// companion-only profiles (e.g. lawn_tree_shrub_combo): the block then
+// carries companions alone.
+function buildTypedFindingsPromptBlock({
+  findingsType = null, values = null, nextStepChips = [], companionFindings = [],
+  allowedCompanionTypes = [],
+}) {
+  const lines = findingsType ? typedFindingsPromptLines(findingsType, values) : [];
+  let chips = [];
+  if (findingsType) {
+    const chipsValidation = ActivityIndicators.validateNextStepChips(
+      nextStepChips, findingsType, values || {},
+    );
+    chips = chipsValidation.ok ? chipsValidation.chips : [];
+  }
+  const allowed = new Set(allowedCompanionTypes);
   const companionSections = (Array.isArray(companionFindings) ? companionFindings : [])
     .slice(0, 4)
     .map((entry) => {
-      if (!ActivityIndicators.isTypedFindingsType(entry?.type)) return null;
+      if (!ActivityIndicators.isTypedFindingsType(entry?.type) || !allowed.has(entry.type)) return null;
       const companionValues = entry?.values && typeof entry.values === 'object' && !Array.isArray(entry.values)
         ? entry.values : {};
-      const companionLines = typedFindingsPromptLines(entry.type, companionValues);
-      if (!companionLines.length) return null;
+      const companionLines = typedFindingsPromptLines(entry.type, companionValues, { companion: true });
+      const companionChipsValidation = ActivityIndicators.validateNextStepChips(
+        entry?.nextStepChips, entry.type, companionValues,
+      );
+      const companionChips = companionChipsValidation.ok ? companionChipsValidation.chips : [];
+      const score = Number.isInteger(entry?.activityScore)
+        && entry.activityScore >= 0 && entry.activityScore <= 5
+        ? entry.activityScore : null;
+      if (!companionLines.length && !companionChips.length && score === null) return null;
       const label = ActivityIndicators.findingsSchemaForType(entry.type)?.label || entry.type;
-      return `Companion findings (${label}):\n${companionLines.join('\n')}`;
+      const parts = [...companionLines];
+      if (score !== null) parts.push(`Activity rating: ${score}/5`);
+      parts.push(`Next steps selected (future advice): ${companionChips.length ? companionChips.join(', ') : 'None'}`);
+      return `Companion findings (${label}):\n${parts.join('\n')}`;
     })
     .filter(Boolean);
   if (!lines.length && !chips.length && !companionSections.length) return '';
-  const label = ActivityIndicators.findingsSchemaForType(findingsType)?.label || findingsType;
+  const label = findingsType
+    ? (ActivityIndicators.findingsSchemaForType(findingsType)?.label || findingsType)
+    : 'companion';
   return `\n\nSTRUCTURED SERVICE FINDINGS (${label} form, technician-recorded)\n`
     + 'Treat these findings as [OBSERVED BY TECHNICIAN]; "Next steps selected" is [FUTURE ADVICE — not completed work].\n'
     + (lines.length ? `${lines.join('\n')}\n` : '')
     + companionSections.map((section) => `${section}\n`).join('')
-    + `Next steps selected: ${chips.length ? chips.join(', ') : 'None'}`;
+    + (findingsType ? `Next steps selected: ${chips.length ? chips.join(', ') : 'None'}` : '');
 }
 
 // POST /api/admin/schedule/generate-report — AI customer-facing service report copy
@@ -11360,12 +11391,19 @@ router.post('/generate-report', async (req, res) => {
       && structuredFindings.values && typeof structuredFindings.values === 'object'
       && !Array.isArray(structuredFindings.values)
       ? structuredFindings.values : null;
-    const typedHasFindingInput = !!typedValuesRaw && (
-      Object.values(typedValuesRaw).some(
-        (v) => (Array.isArray(v) ? v.length > 0 : String(v ?? '').trim() !== ''),
-      )
-      || (Array.isArray(nextStepChips) && nextStepChips.length > 0)
+    const valuesNonEmpty = (obj) => Object.values(obj || {}).some(
+      (v) => (Array.isArray(v) ? v.length > 0 : String(v ?? '').trim() !== ''),
     );
+    // Companion sections count independently of the primary — companion-only
+    // profiles (findingsType null, e.g. lawn_tree_shrub_combo) record their
+    // facts exclusively in companion forms.
+    const companionEntries = Array.isArray(companionFindings) ? companionFindings : [];
+    const typedHasFindingInput = (!!typedValuesRaw && (
+      valuesNonEmpty(typedValuesRaw)
+      || (Array.isArray(nextStepChips) && nextStepChips.length > 0)
+    ))
+      || companionEntries.some((entry) => valuesNonEmpty(entry?.values)
+        || (Array.isArray(entry?.nextStepChips) && entry.nextStepChips.length > 0));
     const hasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
@@ -11642,32 +11680,57 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
           ));
           // Structured typed findings reach the prompt only when the
           // appointment's profile confirms the client-declared type — a
-          // crafted type must not steer customer-facing copy (mirrors the
-          // retired findings-recap draft's profile-authority 409).
-          if (typedValuesRaw && structuredFindings.type) {
-            if (completionProfile?.findingsType !== structuredFindings.type) {
-              return res.status(409).json({
-                error: 'This service does not use that findings form.',
-                code: 'findings_type_mismatch',
-              });
-            }
+          // crafted type must not steer customer-facing copy (the
+          // profile-authority 409 the retired findings-recap draft enforced).
+          // Companion sections are authorized independently against the
+          // profile's declared companion types, so companion-only profiles
+          // (findingsType null, e.g. lawn_tree_shrub_combo) still ground the
+          // prompt in their recorded facts.
+          if (typedValuesRaw && structuredFindings.type
+            && completionProfile?.findingsType !== structuredFindings.type) {
+            return res.status(409).json({
+              error: 'This service does not use that findings form.',
+              code: 'findings_type_mismatch',
+            });
+          }
+          const allowedCompanionTypes = (completionProfile?.companions || [])
+            .map((c) => c?.type).filter(Boolean);
+          const confirmedPrimaryType = typedValuesRaw && structuredFindings.type
+            ? structuredFindings.type : null;
+          if (confirmedPrimaryType || companionEntries.length) {
             typedFindingsBlock = buildTypedFindingsPromptBlock({
-              findingsType: structuredFindings.type,
+              findingsType: confirmedPrimaryType,
               values: typedValuesRaw,
               nextStepChips,
-              companionFindings,
+              companionFindings: companionEntries,
+              allowedCompanionTypes,
             });
             // The deterministic last-resort copy can't read the prompt block,
             // so a typed-only request during a double-provider miss needs the
             // findings as plain observation/recommendation facts or it would
             // 503 with real visit data in hand.
-            typedFallbackObservations = typedFindingsPromptLines(
-              structuredFindings.type, typedValuesRaw,
-            ).slice(0, 8);
-            const typedChipsValidation = ActivityIndicators.validateNextStepChips(
-              nextStepChips, structuredFindings.type, typedValuesRaw,
-            );
-            typedFallbackNextSteps = typedChipsValidation.ok ? typedChipsValidation.chips : [];
+            if (confirmedPrimaryType) {
+              typedFallbackObservations.push(...typedFindingsPromptLines(
+                confirmedPrimaryType, typedValuesRaw,
+              ).slice(0, 8));
+              const typedChipsValidation = ActivityIndicators.validateNextStepChips(
+                nextStepChips, confirmedPrimaryType, typedValuesRaw,
+              );
+              if (typedChipsValidation.ok) typedFallbackNextSteps.push(...typedChipsValidation.chips);
+            }
+            for (const entry of companionEntries.slice(0, 4)) {
+              if (!ActivityIndicators.isTypedFindingsType(entry?.type)
+                || !allowedCompanionTypes.includes(entry.type)) continue;
+              const companionValues = entry?.values && typeof entry.values === 'object' && !Array.isArray(entry.values)
+                ? entry.values : {};
+              typedFallbackObservations.push(...typedFindingsPromptLines(
+                entry.type, companionValues, { companion: true },
+              ).slice(0, 6));
+              const companionChipsValidation = ActivityIndicators.validateNextStepChips(
+                entry?.nextStepChips, entry.type, companionValues,
+              );
+              if (companionChipsValidation.ok) typedFallbackNextSteps.push(...companionChipsValidation.chips);
+            }
           }
         } else {
           logger.warn('[generate-report] caller not authorized for service grounding', { scheduledServiceId, technicianId: req.technicianId || null });

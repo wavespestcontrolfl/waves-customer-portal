@@ -6581,6 +6581,7 @@ export function TypedFindingsSection({
   recommendations,
   onRecommendationsChange,
   pesticideProductPresent = true,
+  frozen = false,
 }) {
   const mobile = variant === "mobile";
   const labelCss = mobile ? CP_EYEBROW : labelStyle;
@@ -6656,6 +6657,16 @@ export function TypedFindingsSection({
       <label style={labelCss}>
         {onRecommendationsChange ? "Service findings" : schema.label || "Service findings"}
       </label>
+      {/* While an AI report is generating, the request's findings snapshot
+          must stay what completion will persist — a disabled fieldset
+          natively freezes every descendant control (fields, chips, activity
+          buttons, recommendations) for pointer AND keyboard input, same rule
+          the notes/observations fields already follow. */}
+      <fieldset
+        disabled={frozen}
+        aria-disabled={frozen || undefined}
+        style={{ border: "none", margin: 0, padding: 0, minWidth: 0, opacity: frozen ? 0.55 : 1 }}
+      >
       {primaryFields.map(renderField)}
       {detailFields.length > 0 && (
         <details style={{ marginBottom: 12 }}>
@@ -6836,6 +6847,7 @@ export function TypedFindingsSection({
         />
       </div>
       )}
+      </fieldset>
     </div>
   );
 }
@@ -11575,31 +11587,47 @@ export function CompletionPanel({
     ];
     // Typed structured findings ground the prompt the same way the retired
     // findings-recap draft grounded its recommendations: only non-empty
-    // values ship, and companion sections ride along by schema type.
-    const typedFindingsPayload = isTypedFindings && typedFindingsSchema
+    // values ship. Companion sections ride along INDEPENDENTLY of the
+    // primary — companion-only profiles (e.g. lawn_tree_shrub_combo) have no
+    // primary findings type, and each companion carries its own chips and
+    // activity score with the same provenance split the server prompt draws.
+    const nonEmptyValues = (obj) => Object.values(obj || {}).some(
+      (v) => (Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== ""),
+    );
+    const companionPayload = companionSchemas.length
       ? {
-        structuredFindings: {
-          type: typedFindingsSchema.type,
-          values: findingsValues,
-        },
-        nextStepChips: typedNextStepChips,
-        ...(companionSchemas.length
-          ? {
-            companionFindings: companionSchemas.map((schema) => ({
-              type: schema.type,
-              values: (companionState[schema.type] || EMPTY_COMPANION_ENTRY).values,
-            })),
-          }
-          : {}),
+        companionFindings: companionSchemas.map((schema) => {
+          const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
+          return {
+            type: schema.type,
+            values: entry.values,
+            nextStepChips: entry.chips,
+            activityScore: Number.isInteger(entry.score) ? entry.score : null,
+          };
+        }),
       }
       : {};
-    const typedHasFindingInput = isTypedFindings && (
-      Object.values(findingsValues || {}).some(
-        (v) => (Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== ""),
-      )
+    const typedFindingsPayload = {
+      ...(isTypedFindings && typedFindingsSchema
+        ? {
+          structuredFindings: {
+            type: typedFindingsSchema.type,
+            values: findingsValues,
+          },
+          nextStepChips: typedNextStepChips,
+        }
+        : {}),
+      ...companionPayload,
+    };
+    const typedHasFindingInput = (isTypedFindings && (
+      nonEmptyValues(findingsValues)
       || typedNextStepChips.length > 0
       || typedActivityScore != null
-    );
+    ))
+      || companionSchemas.some((schema) => {
+        const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
+        return nonEmptyValues(entry.values) || (entry.chips || []).length > 0;
+      });
     // Mirror the final-submit gate (handleSubmit only sends customerConcernText
     // when the interaction is still "customer had a concern"): if the tech typed
     // a concern then switched the interaction away, the concern input is hidden
@@ -14397,6 +14425,7 @@ export function CompletionPanel({
             {isTypedFindings && (
               <TypedFindingsSection
                 variant="mobile"
+                frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
                 schema={typedFindingsSchema}
                 values={findingsValues}
@@ -14419,6 +14448,7 @@ export function CompletionPanel({
                 <TypedFindingsSection
                   key={schema.type}
                   variant="mobile"
+                  frozen={generating}
                   pesticideProductPresent={pesticideProductPresent}
                   schema={schema}
                   values={entry.values}
@@ -16567,6 +16597,7 @@ export function CompletionPanel({
           {isTypedFindings && (
             <TypedFindingsSection
               variant="desktop"
+              frozen={generating}
               pesticideProductPresent={pesticideProductPresent}
               schema={typedFindingsSchema}
               values={findingsValues}
@@ -16589,6 +16620,7 @@ export function CompletionPanel({
               <TypedFindingsSection
                 key={schema.type}
                 variant="desktop"
+                frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
                 schema={schema}
                 values={entry.values}
