@@ -98,6 +98,26 @@ function normValue(v) {
   return String(v == null ? '' : v).trim();
 }
 
+// PII-safe error tag for warn logs: database errors can embed the very
+// contact values being written (e.g. a unique address_key collision quotes
+// the street) — never log err.message from this lane.
+function errTag(err) {
+  return (err && (err.code || err.name)) || 'error';
+}
+
+// Canonical normalization (same utilities the Customer-360 path uses) so an
+// extracted "fl" / "RIVERS" / double-spaced street stores in house shape.
+// properCase preserves deliberate mixed casing (McDonald, O'Brien), so this
+// composes with the case-sensitive compare rather than fighting it.
+const { normalizeEmail, properCaseName, collapseWhitespace } = require('../utils/contact-normalize');
+function canonicalizeValue(field, value) {
+  const v = collapseWhitespace(value);
+  if (field === 'email') return normalizeEmail(v);
+  if (field === 'first_name' || field === 'last_name' || field === 'city') return properCaseName(v);
+  if (field === 'state') return String(v).toUpperCase();
+  return v;
+}
+
 // Field-aware equality: email is case-insensitive (case never matters for
 // delivery), but names/addresses are display text — "Mcdonald" → "McDonald"
 // is a real correction and must not read as unchanged.
@@ -132,7 +152,7 @@ async function extractSmsContactCorrections({ body }) {
       .filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field))
       .map((c) => ({ field: c.field, newValue: normValue(c.new_value), quote: normValue(c.quote) || null }));
   } catch (err) {
-    logger.warn(`[contact-correction] sms extraction failed: ${err.message}`);
+    logger.warn(`[contact-correction] sms extraction failed: ${errTag(err)}`);
     return [];
   }
 }
@@ -171,14 +191,16 @@ async function applyContactCorrections({ customerId, corrections, source, source
       return { applied, skipped, reason: 'nothing_to_apply' };
     }
 
-    // Dedupe to one proposal per field (first wins) and validate shape.
+    // Dedupe to one proposal per field (first wins — callers order newest
+    // first), validate shape, then canonicalize into house form.
     const byField = new Map();
     for (const correction of corrections) {
       const { field } = correction || {};
       if (byField.has(field)) { skipped.push({ field, reason: 'duplicate_field' }); continue; }
-      const newValue = normValue(correction?.newValue);
+      const rawValue = normValue(correction?.newValue);
       const validator = FIELD_VALIDATORS[field];
-      if (!validator || !validator(newValue)) { skipped.push({ field, reason: 'invalid' }); continue; }
+      if (!validator || !validator(rawValue)) { skipped.push({ field, reason: 'invalid' }); continue; }
+      const newValue = rawValue === '' ? '' : normValue(canonicalizeValue(field, rawValue));
       byField.set(field, { field, newValue, quote: correction?.quote || null });
     }
     if (!addressGroupComplete(byField)) {
@@ -211,13 +233,16 @@ async function applyContactCorrections({ customerId, corrections, source, source
         // canonical Customer-360 path blocks with its cross-account conflict
         // check. Same semantics here (email only; phone is never applied).
         if (field === 'email') {
-          const conflict = await trx('customers')
+          // ALL matches, not .first() — with the email on both a sibling
+          // profile and an unrelated account, an unordered first() could
+          // return the sibling and mask the real conflict.
+          const matches = await trx('customers')
             .whereNull('deleted_at')
             .whereNot({ id: customerId })
             .whereRaw('LOWER(email) = ?', [newValue.toLowerCase()])
-            .first('id', 'account_id');
+            .select('id', 'account_id');
           const ownAccount = before.account_id ? String(before.account_id) : String(before.id);
-          if (conflict && String(conflict.account_id || conflict.id) !== ownAccount) {
+          if (matches.some((m) => String(m.account_id || m.id) !== ownAccount)) {
             skipped.push({ field, reason: 'email_in_use' });
             continue;
           }
@@ -304,11 +329,11 @@ async function applyContactCorrections({ customerId, corrections, source, source
     }
     if (emailSync?.heldNewsletterResume) {
       require('./lead-first-touch-resume').resumeHeldNewsletterPostCommit(emailSync.heldNewsletterResume)
-        .catch((err) => logger.warn(`[contact-correction] held newsletter resume failed for ${customerId}: ${err.message}`));
+        .catch((err) => logger.warn(`[contact-correction] held newsletter resume failed for ${customerId}: ${errTag(err)}`));
     }
     if (emailSync?.pendingConfirmation) {
       require('./customer-email-fanout').resendPendingConfirmation(emailSync.pendingConfirmation)
-        .catch((err) => logger.warn(`[contact-correction] pending confirmation resend failed for ${customerId}: ${err.message}`));
+        .catch((err) => logger.warn(`[contact-correction] pending confirmation resend failed for ${customerId}: ${errTag(err)}`));
     }
 
     if (applied.length) {
@@ -326,7 +351,7 @@ async function applyContactCorrections({ customerId, corrections, source, source
           metadata: { customerId, source, sourceId, applied },
         },
       ).catch((err) => {
-        logger.warn(`[contact-correction] FYI bell failed for ${customerId}: ${err.message}`);
+        logger.warn(`[contact-correction] FYI bell failed for ${customerId}: ${errTag(err)}`);
       });
       logger.info(`[contact-correction] applied ${applied.length} field(s) for customer ${customerId} via ${source}`);
     }
@@ -334,7 +359,7 @@ async function applyContactCorrections({ customerId, corrections, source, source
   } catch (err) {
     // Transaction rolled back — nothing half-applied. Report the batch as
     // skipped rather than throwing into a webhook/pipeline caller.
-    logger.warn(`[contact-correction] apply failed for ${customerId}: ${err.message}`);
+    logger.warn(`[contact-correction] apply failed for ${customerId}: ${errTag(err)}`);
     return { applied: [], skipped, reason: 'error' };
   }
 }
@@ -355,7 +380,7 @@ async function runSmsContactCorrection({ customer, body, smsLogId = null }) {
       sourceId: smsLogId,
     });
   } catch (err) {
-    logger.warn(`[contact-correction] sms run failed: ${err.message}`);
+    logger.warn(`[contact-correction] sms run failed: ${errTag(err)}`);
     return { applied: [], skipped: [], reason: 'error' };
   }
 }
@@ -403,10 +428,45 @@ async function runCallContactCorrection({ callId, customerId, knex = db }) {
       .where({ call_log_id: callId, status: 'pending', customer_id: customerId })
       .whereIn('field_name', [...Object.keys(CALL_AUTO_FIELDS), ...CALL_PROPOSE_FIELDS])
       .whereNotNull('evidence_quote')
-      .where('confidence', '>=', CALL_CONFIDENCE_FLOOR)
+      .where(function confidenceFloor() {
+        // The staging writer's confidence map never scores email (only
+        // caller_identity / service_address / service category), so email
+        // candidates carry NULL confidence by construction; they only ever
+        // feed the proposal bell, where the intent-quote check is the bar.
+        this.where('confidence', '>=', CALL_CONFIDENCE_FLOOR)
+          .orWhere(function emailNullConfidence() {
+            this.where('field_name', 'email').whereNull('confidence');
+          });
+      })
+      // Deterministic under re-staging: a forced reprocess can leave two
+      // pending candidates for one field — newest first, and the per-field
+      // dedupe below keeps the newest.
+      .orderBy('created_at', 'desc')
       .select('id', 'field_name', 'final_recommended_value', 'evidence_quote');
-    const candidates = rows.filter((c) => detectContactCorrectionIntent(c.evidence_quote));
+    const seenFields = new Set();
+    const candidates = rows.filter((c) => {
+      if (!detectContactCorrectionIntent(c.evidence_quote)) return false;
+      if (seenFields.has(c.field_name)) return false;
+      seenFields.add(c.field_name);
+      return true;
+    });
     if (!candidates.length) return { applied: [], skipped: [], reason: 'no_candidates' };
+
+    // Caller-identity guard: a call from a service_contact*_phone links to
+    // the OWNING customer, but the caller correcting their own name is not
+    // a mandate to rename the account owner. Name auto-apply requires the
+    // call to have come from the customer's PRIMARY phone; everything else
+    // stays in the proposal/pending lane.
+    const tail10 = (p) => String(p || '').replace(/[^0-9]/g, '').slice(-10);
+    let callerIsPrimary = false;
+    try {
+      const [call, owner] = await Promise.all([
+        knex('call_log').where({ id: callId }).first('from_phone'),
+        knex('customers').where({ id: customerId }).first('phone'),
+      ]);
+      const callerTail = tail10(call?.from_phone);
+      callerIsPrimary = Boolean(callerTail) && callerTail === tail10(owner?.phone);
+    } catch { callerIsPrimary = false; }
 
     // Email/address: propose, never write. One bell for the batch; the
     // candidate rows stay pending for review on the customer page.
@@ -423,11 +483,16 @@ async function runCallContactCorrection({ callId, customerId, knex = db }) {
           bell: true,
           metadata: { customerId, source: 'call', sourceId: callId, proposed: proposals.map((p) => p.field_name) },
         },
-      ).catch((err) => logger.warn(`[contact-correction] proposal bell failed for call ${callId}: ${err.message}`));
+      ).catch((err) => logger.warn(`[contact-correction] proposal bell failed for call ${callId}: ${errTag(err)}`));
     }
 
-    const nameCandidates = candidates.filter((c) => CALL_AUTO_FIELDS[c.field_name]);
+    const nameCandidates = callerIsPrimary
+      ? candidates.filter((c) => CALL_AUTO_FIELDS[c.field_name])
+      : [];
     if (!nameCandidates.length) {
+      if (!callerIsPrimary && candidates.some((c) => CALL_AUTO_FIELDS[c.field_name])) {
+        return { applied: [], skipped: [{ field: 'name', reason: 'caller_not_primary' }], reason: proposals.length ? 'proposed_only' : 'caller_not_primary' };
+      }
       return { applied: [], skipped: [], reason: proposals.length ? 'proposed_only' : 'no_candidates' };
     }
     const corrections = nameCandidates.map((c) => ({
@@ -458,7 +523,7 @@ async function runCallContactCorrection({ callId, customerId, knex = db }) {
       },
     });
   } catch (err) {
-    logger.warn(`[contact-correction] call run failed for ${callId}: ${err.message}`);
+    logger.warn(`[contact-correction] call run failed for ${callId}: ${errTag(err)}`);
     return { applied: [], skipped: [], reason: 'error' };
   }
 }

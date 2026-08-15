@@ -124,6 +124,7 @@ function makeStubKnex(rowsByTable = {}) {
       },
       whereNotNull(col) { preds.push((r) => r[col] != null); return chain; },
       whereIn(col, list) { preds.push((r) => list.includes(r[col])); return chain; },
+      orderBy() { return chain; }, // fixtures are pre-sorted newest-first
       forUpdate() { return chain; },
       first(cols) {
         const row = data[table].find((r) => preds.every((p) => p(r)));
@@ -180,18 +181,21 @@ function makeStubKnex(rowsByTable = {}) {
   return builder;
 }
 
+const PRIMARY_PHONE = '+15550001111';
 const baseCustomer = () => ({
   id: CUSTOMER_ID,
   deleted_at: null,
   first_name: 'Jordan',
   last_name: 'Riverz',
   email: 'jordan.riverz@example.com',
+  phone: PRIMARY_PHONE,
   address_line1: '12 Oak St',
   address_line2: 'Unit 4',
   city: 'Testville',
   state: 'FL',
   zip: '34200',
 });
+const callLogRow = (over = {}) => ({ id: CALL_ID, from_phone: PRIMARY_PHONE, ...over });
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -261,7 +265,7 @@ describe('applyContactCorrections', () => {
   });
 
   it('applies valid corrections with audit rows, fan-outs, and one FYI bell', async () => {
-    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const knex = makeStubKnex({ customers: [baseCustomer()], call_log: [callLogRow()], agent_decisions: [] });
     const res = await applyContactCorrections({
       customerId: CUSTOMER_ID,
       corrections: [
@@ -298,7 +302,7 @@ describe('applyContactCorrections', () => {
   });
 
   it('rolls the customer mutation back when the audit insert fails', async () => {
-    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const knex = makeStubKnex({ customers: [baseCustomer()], call_log: [callLogRow()], agent_decisions: [] });
     knex._failInsertOn.table = 'agent_decisions';
     const res = await applyContactCorrections({
       customerId: CUSTOMER_ID,
@@ -364,7 +368,7 @@ describe('applyContactCorrections', () => {
   });
 
   it('applies a complete address group, clears the stale unit, and runs address fan-outs', async () => {
-    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const knex = makeStubKnex({ customers: [baseCustomer()], call_log: [callLogRow()], agent_decisions: [] });
     const res = await applyContactCorrections({
       customerId: CUSTOMER_ID,
       corrections: [
@@ -385,7 +389,7 @@ describe('applyContactCorrections', () => {
   });
 
   it('supports an explicit unit clear (empty address_line2)', async () => {
-    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const knex = makeStubKnex({ customers: [baseCustomer()], call_log: [callLogRow()], agent_decisions: [] });
     const res = await applyContactCorrections({
       customerId: CUSTOMER_ID,
       corrections: [{ field: 'address_line2', newValue: '', quote: 'no unit, that was the old apartment' }],
@@ -414,7 +418,7 @@ describe('runCallContactCorrection', () => {
 
   it('auto-applies NAME candidates with correction-intent quotes and stamps them in the same transaction', async () => {
     const knex = makeStubKnex({
-      customers: [baseCustomer()],
+      customers: [baseCustomer()], call_log: [callLogRow()],
       customer_field_candidates: [candidate({ id: 'cand-1' })],
       agent_decisions: [],
     });
@@ -429,7 +433,7 @@ describe('runCallContactCorrection', () => {
 
   it('rolls the candidate stamp back with the correction (same transaction)', async () => {
     const knex = makeStubKnex({
-      customers: [baseCustomer()],
+      customers: [baseCustomer()], call_log: [callLogRow()],
       customer_field_candidates: [candidate({ id: 'cand-1' })],
       agent_decisions: [],
     });
@@ -442,7 +446,7 @@ describe('runCallContactCorrection', () => {
 
   it('PROPOSES email/address candidates via FYI bell without writing (spoken values are not auto-applied)', async () => {
     const knex = makeStubKnex({
-      customers: [baseCustomer()],
+      customers: [baseCustomer()], call_log: [callLogRow()],
       customer_field_candidates: [
         candidate({ id: 'em', field_name: 'email', final_recommended_value: 'jordan.rivers@example.com', evidence_quote: 'you have the wrong email, it is jordan dot rivers at example dot com' }),
         candidate({ id: 'ad', field_name: 'address_line1', final_recommended_value: '99 Pine Ave', evidence_quote: 'the address is wrong, we are at 99 Pine Ave' }),
@@ -462,7 +466,7 @@ describe('runCallContactCorrection', () => {
 
   it('ignores routine mentions — an evidence quote without correction intent is not a mandate', async () => {
     const knex = makeStubKnex({
-      customers: [baseCustomer()],
+      customers: [baseCustomer()], call_log: [callLogRow()],
       customer_field_candidates: [
         candidate({ id: 'routine', evidence_quote: 'this is Jordan Rivers calling about my lawn' }),
       ],
@@ -474,7 +478,7 @@ describe('runCallContactCorrection', () => {
 
   it('ignores candidates not linked to this customer (relinked-call safety)', async () => {
     const knex = makeStubKnex({
-      customers: [baseCustomer()],
+      customers: [baseCustomer()], call_log: [callLogRow()],
       customer_field_candidates: [
         candidate({ id: 'other', customer_id: '00000000-0000-4000-8000-0000000000ff' }),
         candidate({ id: 'nullc', customer_id: null }),
@@ -487,7 +491,7 @@ describe('runCallContactCorrection', () => {
 
   it('stamps only the candidate whose value was actually applied', async () => {
     const knex = makeStubKnex({
-      customers: [baseCustomer()],
+      customers: [baseCustomer()], call_log: [callLogRow()],
       customer_field_candidates: [
         candidate({ id: 'winner' }),
         candidate({ id: 'loser', final_recommended_value: 'Riverssen' }),
@@ -502,7 +506,7 @@ describe('runCallContactCorrection', () => {
 
   it('ignores low-confidence, unquoted, phone, and non-pending candidates', async () => {
     const knex = makeStubKnex({
-      customers: [baseCustomer()],
+      customers: [baseCustomer()], call_log: [callLogRow()],
       customer_field_candidates: [
         candidate({ id: 'lo', confidence: 0.5 }),
         candidate({ id: 'nq', evidence_quote: null }),
@@ -516,7 +520,7 @@ describe('runCallContactCorrection', () => {
   });
 
   it('does nothing for unlinked calls or with the gate off', async () => {
-    const knex = makeStubKnex({ customers: [baseCustomer()], customer_field_candidates: [candidate()] });
+    const knex = makeStubKnex({ customers: [baseCustomer()], call_log: [callLogRow()], customer_field_candidates: [candidate()] });
     expect((await runCallContactCorrection({ callId: CALL_ID, customerId: null, knex })).reason).toBe('unlinked');
     mockIsEnabled.mockReturnValue(false);
     expect((await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex })).reason).toBe('gate_off');
@@ -573,7 +577,7 @@ describe('SMS safety rails (round-2)', () => {
       pendingConfirmation: { token: 'pc-1' },
       heldNewsletterResume: { id: 'hn-1' },
     });
-    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const knex = makeStubKnex({ customers: [baseCustomer()], call_log: [callLogRow()], agent_decisions: [] });
     await applyContactCorrections({
       customerId: CUSTOMER_ID,
       corrections: [{ field: 'email', newValue: 'jordan.rivers@example.com' }],
@@ -583,6 +587,94 @@ describe('SMS safety rails (round-2)', () => {
     await new Promise((r) => setImmediate(r));
     expect(mockResendPendingConfirmation).toHaveBeenCalledWith({ token: 'pc-1' });
     expect(mockNewsletterResume).toHaveBeenCalledWith({ id: 'hn-1' });
+  });
+});
+
+describe('round-3 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('never renames the account owner from a service-contact caller', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ from_phone: '+15559998888' })], // tenant/spouse handset
+      customer_field_candidates: [candidate()],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied).toEqual([]);
+    expect(res.reason).toBe('caller_not_primary');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+    expect(knex._data.customer_field_candidates[0].status).toBe('pending');
+  });
+
+  it('newest pending candidate wins when re-staging left two for one field', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()], call_log: [callLogRow()],
+      // pre-sorted newest-first (stub orderBy is a no-op)
+      customer_field_candidates: [
+        candidate({ id: 'newest', final_recommended_value: 'Rivers' }),
+        candidate({ id: 'older', final_recommended_value: 'Riverson' }),
+      ],
+      agent_decisions: [],
+    });
+    await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(knex._data.customers[0].last_name).toBe('Rivers');
+    const byId = Object.fromEntries(knex._data.customer_field_candidates.map((c) => [c.id, c.status]));
+    expect(byId.newest).toBe('auto_applied');
+    expect(byId.older).toBe('pending');
+  });
+
+  it('proposes NULL-confidence email candidates (staging never scores email)', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()], call_log: [callLogRow()],
+      customer_field_candidates: [
+        candidate({ id: 'em', field_name: 'email', final_recommended_value: 'jordan.rivers@example.com', confidence: null, evidence_quote: 'the email is wrong, it is jordan dot rivers at example dot com' }),
+      ],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('proposed_only');
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(knex._data.customers[0].email).toBe('jordan.riverz@example.com');
+  });
+
+  it('canonicalizes extracted values into house shape', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], call_log: [callLogRow()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'last_name', newValue: 'MCGOWAN' },
+        { field: 'state', newValue: 'fl' },
+      ],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied).toContainEqual({ field: 'last_name', oldValue: 'Riverz', newValue: 'McGowan', quote: null });
+    // state 'fl' canonicalizes to 'FL' — identical to stored → unchanged.
+    expect(res.skipped).toContainEqual({ field: 'state', reason: 'unchanged' });
+    expect(knex._data.customers[0].last_name).toBe('McGowan');
+  });
+
+  it('blocks an email held by an unrelated account even when a sibling shares it', async () => {
+    const sibling = { id: '00000000-0000-4000-8000-0000000000s1', account_id: CUSTOMER_ID, deleted_at: null, email: 'shared@example.com' };
+    const stranger = { id: '00000000-0000-4000-8000-0000000000x1', account_id: null, deleted_at: null, email: 'shared@example.com' };
+    const knex = makeStubKnex({ customers: [baseCustomer(), sibling, stranger], call_log: [callLogRow()] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [{ field: 'email', newValue: 'shared@example.com' }],
+      source: 'sms',
+      knex,
+    });
+    expect(res.skipped).toContainEqual({ field: 'email', reason: 'email_in_use' });
+    expect(knex._data.customers[0].email).toBe('jordan.riverz@example.com');
   });
 });
 
