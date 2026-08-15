@@ -263,10 +263,29 @@ async function runShadowSweep({ now = new Date() } = {}) {
   // every shadow case — correct: nobody is eligible.
   let casesLapsed = 0;
   try {
-    casesLapsed = await db('collection_cases')
+    const toLapse = await db('collection_cases')
       .where({ current_state: 'shadow' })
       .whereNotIn('customer_id', [...stillEligible])
-      .update({ current_state: 'lapsed', updated_at: db.fn.now() });
+      .select('id', 'idempotency_key');
+    if (toLapse.length) {
+      casesLapsed = await db('collection_cases')
+        .whereIn('id', toLapse.map((c) => c.id))
+        .update({ current_state: 'lapsed', updated_at: db.fn.now() });
+      // The proposal card must retire WITH its case (codex r5): a frozen
+      // actionable card for an ineligible customer misleads, and a later
+      // requalification would stack a second card beside it. Marking read
+      // uses the bell's own dismissal mechanism; best-effort — a missed
+      // stamp only leaves a stale card, never sends anything.
+      const keys = toLapse.map((c) => c.idempotency_key).filter(Boolean);
+      if (keys.length) {
+        await db('notifications')
+          .where({ recipient_type: 'admin' })
+          .whereNull('read_at')
+          .whereIn(db.raw("metadata->>'dedupeKey'"), keys)
+          .update({ read_at: db.fn.now() })
+          .catch((err) => logger.warn(`[collections-shadow] card retirement failed: ${err.message}`));
+      }
+    }
   } catch (err) {
     logger.error(`[collections-shadow] stale-case retirement failed: ${err.message}`);
   }

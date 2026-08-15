@@ -18,6 +18,7 @@
  *   pilot_requires_single_invoice, pilot_balance_below_minimum,
  *   pilot_balance_above_maximum, pilot_not_overdue_long_enough,
  *   pilot_overdue_too_long, pilot_insufficient_dunning_history,
+ *   pilot_awaiting_microdeposit_verification,
  *   line_type_unknown, line_type_not_mobile, commercial_customer,
  *   consent_no_evidence, rnd_check_required,
  *   policy_evaluation_error
@@ -369,6 +370,26 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), aggreg
 
           const touches = await deliveredDunningTouches(invoice);
           if (touches < PILOT_MIN_DUNNING_TOUCHES) deny('pilot_insufficient_dunning_history');
+
+          // Microdeposit-blocked invoices (codex r5 P1): the customer
+          // isn't ignoring the bill — they haven't confirmed their two ACH
+          // micro-deposits, and the SMS rails deliberately divert them to
+          // verification copy. An automated voice call asking them to PAY
+          // would contradict that. Same definitive check the rails use;
+          // an error is a denial (fail closed). This denies ONLY the
+          // call-shaped pilot — the invoice stays in the eligible set so
+          // the SMS rails' membership check still permits their
+          // verification re-nudge.
+          if (invoice.stripe_payment_intent_id) {
+            try {
+              const StripeService = require('../stripe');
+              const mdPending = await StripeService.isInvoiceAwaitingMicrodepositVerification(invoice);
+              if (mdPending) deny('pilot_awaiting_microdeposit_verification');
+            } catch (mdErr) {
+              logger.warn(`[contact-policy] microdeposit check failed for invoice ${invoice.id}: ${mdErr.message} — denying voice`);
+              deny('pilot_awaiting_microdeposit_verification');
+            }
+          }
         }
 
         // Mobile line only, from the EXISTING phone-keyed Lookup cache.

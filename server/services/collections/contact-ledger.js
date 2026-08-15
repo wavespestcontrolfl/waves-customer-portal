@@ -60,6 +60,13 @@ async function recordContact({
     .where({ idempotency_key: idempotencyKey })
     .first('id', 'metadata');
   if (!existing) throw new Error('collections ledger reservation neither inserted nor found');
+  // A reused reservation is being re-attempted NOW (codex r5): refresh
+  // occurred_at so the 24h frequency window starts at the actual delivery
+  // attempt, not the first failed one. Later timestamp = longer window —
+  // the safe direction; a refresh failure propagates (caller holds).
+  await db('collections_contact_ledger')
+    .where({ id: existing.id })
+    .update({ occurred_at: occurredAt });
   const existingMeta = typeof existing.metadata === 'string'
     ? JSON.parse(existing.metadata)
     : (existing.metadata || {});

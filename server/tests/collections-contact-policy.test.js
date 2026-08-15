@@ -25,6 +25,9 @@ jest.mock('../services/collections/consent-provenance', () => ({
 jest.mock('../services/messaging/validators/line-type', () => ({
   readCachedLineType: jest.fn(async () => ({ state: 'miss' })),
 }));
+jest.mock('../services/stripe', () => ({
+  isInvoiceAwaitingMicrodepositVerification: jest.fn(async () => false),
+}));
 
 const db = require('../models/db');
 const { openBalanceInvoices } = require('../services/open-balance');
@@ -831,4 +834,44 @@ test('a customer whose only debt is a legacy-unpaid invoice still has an eligibl
   const result = await ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'late_payment', now: WED_11AM_EDT });
   expect(result.denialReasons).not.toContain('no_eligible_balance');
   expect(result.eligibleInvoiceIds).toEqual(['inv-1']);
+});
+
+// r5 P1: a microdeposit-blocked invoice must never get an allowed voice
+// verdict — the SMS rails divert it to verification copy, and a call
+// demanding payment would contradict them. Voice-only: the invoice stays
+// eligible so the rails' membership check still permits the re-nudge.
+describe('microdeposit-pending pilot denial', () => {
+  const StripeService = require('../services/stripe');
+  const PI_INVOICE = () => invoiceRow({ stripe_payment_intent_id: 'pi_1' });
+
+  test('pending verification denies the voice pilot', async () => {
+    armAllowedBaseline({ invoices: [PI_INVOICE()] });
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValueOnce(true);
+    const result = await evalVoice();
+    expect(result.allowed).toBe(false);
+    expect(result.denialReasons).toContain('pilot_awaiting_microdeposit_verification');
+    expect(result.eligibleInvoiceIds).toEqual(['inv-1']); // stays eligible for the rails
+  });
+
+  test('a cleared PI allows; a check ERROR denies (fail closed); no PI never calls Stripe', async () => {
+    armAllowedBaseline({ invoices: [PI_INVOICE()] });
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValueOnce(false);
+    expect((await evalVoice()).allowed).toBe(true);
+
+    armAllowedBaseline({ invoices: [PI_INVOICE()] });
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockRejectedValueOnce(new Error('stripe down'));
+    expect((await evalVoice()).denialReasons).toContain('pilot_awaiting_microdeposit_verification');
+
+    armAllowedBaseline(); // PI null
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockClear();
+    await evalVoice();
+    expect(StripeService.isInvoiceAwaitingMicrodepositVerification).not.toHaveBeenCalled();
+  });
+
+  test('sms/email verdicts ignore the microdeposit state (their rails divert on their own)', async () => {
+    armAllowedBaseline({ invoices: [PI_INVOICE()] });
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
+    const sms = await ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'late_payment', now: WED_11AM_EDT });
+    expect(sms.allowed).toBe(true);
+  });
 });

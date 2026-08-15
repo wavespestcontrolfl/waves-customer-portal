@@ -86,3 +86,13 @@ test('markDelivered stamps by key and never throws on failure', async () => {
   await expect(markDelivered('followup-replay:rk-1')).resolves.toBe(false);
   await expect(markDelivered(null)).resolves.toBe(false);
 });
+
+test('a reused reservation refreshes occurred_at to the current attempt (codex r5)', async () => {
+  const q = insertChain({ returned: [] });
+  q.first = jest.fn(async () => ({ id: 'led-9', metadata: null }));
+  db.mockReturnValue(q);
+  const at = new Date('2026-08-15T12:00:00Z');
+  const entry = await recordContact({ ...ARGS, idempotencyKey: 'followup-replay:rk-1', occurredAt: at });
+  expect(entry).toMatchObject({ id: 'led-9', reused: true });
+  expect(q.update).toHaveBeenCalledWith({ occurred_at: at });
+});
