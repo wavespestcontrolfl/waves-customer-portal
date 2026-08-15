@@ -56,3 +56,26 @@ describe('isImplausibleTranscript', () => {
     expect(isImplausibleTranscript(hallucination, 5)).toBe(true);
   });
 });
+
+describe('transcriptRejectionUpdate (terminal columns for a rejected transcript)', () => {
+  const { transcriptRejectionUpdate } = _test;
+
+  test('finalizes transcription_status as terminal — never left at pending', () => {
+    // 47 prod rows (2026-07-13→08-13) sat at 'pending' forever because the
+    // rejection write finalized every column EXCEPT transcription_status.
+    const update = transcriptRejectionUpdate('{"transcription_rejected":true}');
+    expect(update.transcription_status).toBe('rejected');
+    expect(update.processing_status).toBe('voicemail');
+    expect(update.call_outcome).toBe('voicemail');
+    expect(update.transcription).toMatch(/no usable speech/);
+    expect(update.transcription_metadata).toBe('{"transcription_rejected":true}');
+  });
+
+  test('clears every extraction artifact and releases the processing token', () => {
+    const update = transcriptRejectionUpdate('{}');
+    for (const col of ['ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status', 'disposition', 'review_status', 'customer_id', 'processing_token']) {
+      expect(update[col]).toBeNull();
+    }
+    expect(update.updated_at).toBeInstanceOf(Date);
+  });
+});
