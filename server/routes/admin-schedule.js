@@ -11096,7 +11096,7 @@ function reportCopyCacheSet(key, value) {
 // when the copy is acceptable, else a short reason string for the retry/error path.
 // Code-noun anchored: a number counts as a credential only beside an actual
 // code/PIN noun, in either order.
-const REPORT_ACCESS_CODE_RE = /\b(?:code|pin|combo|combination|passcode|password|keypad|lock\s?box)\b[^\n.!?]{0,25}\b[a-z]?\d{2,8}\b|\b[a-z]?\d{2,8}\b[^\n.!?]{0,15}\b(?:code|pin|combo|combination|passcode|password)\b/i;
+const REPORT_ACCESS_CODE_RE = /\b(?:code|pin|combo|combination|passcode|password|keypad|lock\s?box)\b[^\n.!?]{0,25}\b[a-z]?\d{2,8}\b|\b[a-z]?\d{2,8}\b[^\n.!?]{0,15}\b(?:code|pin|combo|combination|passcode|password)\b|\b(?:code|pin|combo|combination|passcode|password)\b\s*(?:is|:|=|-)?\s*(?:["'][A-Za-z0-9#*]{2,12}["']|[A-Z0-9#*]{2,12}\b|[A-Za-z]*\d[A-Za-z0-9#*]*\b)/;
 function reportCopyRejection(report) {
   const text = String(report || '').trim();
   if (!text) return 'empty';
@@ -11859,6 +11859,16 @@ WHAT WE FOUND
 
 Do not include the client name as a header. Do not add greetings, sign-offs, or any text outside these two sections.`;
 
+    // Free-text inputs are redacted with the canonical scrubber BEFORE they
+    // reach the model — an alphabetic credential ("gate code BLUE") in the
+    // notes must never be available to echo (codex r34; the typed block
+    // already redacts its own lines).
+    const promptNotes = redactAccessCodes((serviceNotes || '').trim());
+    const promptActions = actions.map((x) => redactAccessCodes(x));
+    const promptAreas = areas.map((x) => redactAccessCodes(x));
+    const promptObs = obs.map((x) => redactAccessCodes(x));
+    const promptRecs = recs.map((x) => redactAccessCodes(x));
+    const promptConcern = redactAccessCodes(concernText);
     const userMessage = `Generate the service report copy for this visit.
 
 INPUTS
@@ -11870,21 +11880,21 @@ Service Date: ${serviceDate || 'Not specified'}
 Arrival Time: ${arrivalTime || 'Not specified'}
 
 [COMPLETED WORK]
-Service Notes: ${(serviceNotes || '').trim() || 'Not specified'}
-Actions completed: ${actions.length ? actions.join('; ') : 'Not specified'}
-Areas serviced: ${areas.length ? areas.join(', ') : 'Not specified'}
+Service Notes: ${promptNotes || 'Not specified'}
+Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}
+Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
 Products Applied / Active Ingredients: ${productsText || 'Not specified'}
 
 [OBSERVED BY TECHNICIAN]
-Observations: ${obs.length ? obs.join('; ') : 'None noted'}
+Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}
 Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
 
 [REPORTED BY CUSTOMER]
 Customer interaction: ${customerInteraction || 'Not specified'}
-Customer concern (as reported, not a verified finding): ${concernText || 'None'}
+Customer concern (as reported, not a verified finding): ${promptConcern || 'None'}
 
 [FUTURE ADVICE — not completed work]
-Recommendations: ${recs.length ? recs.join('; ') : 'None'}
+Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
 
 Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you cannot see them; do not describe their contents)`;
 
@@ -12208,6 +12218,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // only the distinctive half rejects (codex r32/r33)
       'care', 'guard', 'shield', 'defense', 'complete', 'advance', 'advanced',
       'zone', 'zones', 'select', 'super', 'total', 'ultra', 'prime',
+      // color + green-up vocabulary ("LESCO Green Flo", nitrogen green-up
+      // targets) — the distinctive tokens (lesco/flo…) still reject
+      // (codex r34)
+      'green', 'blue', 'red', 'black', 'white', 'gold', 'silver',
     ]);
     const guardedProducts = [
       ...(Array.isArray(products) ? products : []),
@@ -12257,14 +12271,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       }
       const report = buildDeterministicReportCopy({
         serviceType: groundingServiceType,
-        areas,
-        actions: [...actions, ...typedFallbackActions],
+        areas: promptAreas,
+        actions: [...promptActions, ...typedFallbackActions],
         // Typed structured findings ride the fallback as technician work /
         // observations / next steps (profile-confirmed above; product
         // application fields excluded) — a typed-only request must not 503
-        // when the free-text fields are empty.
-        observations: [...obs, ...typedFallbackObservations],
-        recommendations: [...recs, ...typedFallbackNextSteps],
+        // when the free-text fields are empty. All free-text inputs arrive
+        // pre-redacted (codex r34).
+        observations: [...promptObs, ...typedFallbackObservations],
+        recommendations: [...promptRecs, ...typedFallbackNextSteps],
         ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
       });
       // Same request-specific trade-name guard as the AI path (codex r19):

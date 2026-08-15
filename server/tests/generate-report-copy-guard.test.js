@@ -297,6 +297,10 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     // measurements beside location words are NOT credentials (codex r30)
     expect(reportCopyRejection('We treated 120 linear feet around the garage and rear entry areas.')).toBeNull();
     expect(reportCopyRejection('The keypad 4521 was used for access.')).toBe('access_code');
+    // alphabetic / quoted credentials after a code noun reject too (r34)
+    expect(reportCopyRejection('We entered using the gate code BLUE and treated the perimeter.')).toBe('access_code');
+    expect(reportCopyRejection('The keypad code is "sunset7" for the side door.')).toBe('access_code');
+    expect(reportCopyRejection('The billing code was updated in our office records.')).toBeNull();
   });
 
   test('product-record raw values ride productValues for the trade-name output guard', () => {

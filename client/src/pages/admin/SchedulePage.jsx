@@ -11574,6 +11574,12 @@ export function CompletionPanel({
   // actions). Products added by a protocol action stay — they have their own
   // remove control, same as deleting a tagged line never removed them.
   function removeSelectedLabel(kind, label) {
+    // Same freeze + invalidation contract as every other payload mutation
+    // (codex r34): the ×-pill changes the actions/observations/
+    // recommendations the completion submits, so it can't run mid-request
+    // and it clears an untouched installed draft.
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     if (kind === "protocol") {
       setSelectedProtocolActionLabels((prev) =>
         prev.filter((item) => item !== label),
