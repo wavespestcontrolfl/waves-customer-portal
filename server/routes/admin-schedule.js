@@ -11829,8 +11829,13 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // gate — the model would return prose with none of the findings that
       // authorized generation. Fail retryably instead (codex r8, twin of the
       // profile-resolution rule).
+      // Lookup failures fail retryably only when SUBSTANTIVE typed facts
+      // were supplied — an empty structuredFindings container (every typed
+      // panel sends one) must not break the route's fail-soft behavior for
+      // a notes/products-grounded report (codex r12).
+      const substantiveTypedFacts = primaryTypedInput || companionEntries.some(companionEntryHasInput);
       if (svc === 'lookup_failed') {
-        if (typedValuesRaw || companionEntries.length) {
+        if (substantiveTypedFacts) {
           return res.status(503).json({
             error: 'Service lookup is unavailable right now — try again in a moment.',
             retryable: true,
@@ -11866,7 +11871,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
           // the typed/companion facts (empty allowlist -> prose from the
           // primary lane alone) or 409 a legitimate typed request — fail
           // retryably instead (codex r7).
-          if (profileResolutionFailed && (typedValuesRaw || companionEntries.length)) {
+          if (profileResolutionFailed && substantiveTypedFacts) {
             return res.status(503).json({
               error: 'Service profile lookup is unavailable right now — try again in a moment.',
               retryable: true,

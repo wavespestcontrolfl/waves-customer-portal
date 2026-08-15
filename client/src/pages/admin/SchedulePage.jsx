@@ -11635,9 +11635,15 @@ export function CompletionPanel({
         : {}),
       ...companionPayload,
     };
+    // Only chips that don't conflict with the recorded findings count — a
+    // stale conflicted selection stays tappable for removal but the server's
+    // validatedChipCount gate would 400 a request it alone opened (codex r12).
+    const validChipCount = (schemaType, chips, values) => (chips || []).filter(
+      (chip) => !typedNextStepChipConflict(schemaType, chip, values),
+    ).length;
     const typedHasFindingInput = (isTypedFindings && (
       nonInternalValuesNonEmpty(typedFindingsSchema, findingsValues)
-      || typedNextStepChips.length > 0
+      || (typedFindingsSchema && validChipCount(typedFindingsSchema.type, typedNextStepChips, findingsValues) > 0)
       || typedActivityScore != null
     ))
       || companionSchemas.some((schema) => {
@@ -11650,7 +11656,7 @@ export function CompletionPanel({
         // A manually tapped companion activity gauge is substantive on its
         // own — same rule as the primary score (codex r3).
         return nonInternalValuesNonEmpty(schema, entry.values)
-          || (entry.chips || []).length > 0
+          || validChipCount(schema.type, entry.chips, entry.values) > 0
           || Number.isInteger(entry.score);
       });
     // Mirror the final-submit gate (handleSubmit only sends customerConcernText
@@ -13106,6 +13112,11 @@ export function CompletionPanel({
     }
   }
   function handleTypedFindingChange(key, value) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
     markTypedFirstFieldTouch();
     setFindingsValues((prev) => ({ ...prev, [key]: value }));
     // Derived prefill (contract §4): while the picker is untouched, the
@@ -13117,12 +13128,22 @@ export function CompletionPanel({
     }
   }
   function handleTypedActivityTap(n) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
     markTypedFirstFieldTouch();
     // First tap pins technician-set, even when the value doesn't change.
     setTypedActivityTouched(true);
     setTypedActivityScore(n);
   }
   function toggleTypedNextStepChip(chip) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
     markTypedFirstFieldTouch();
     setTypedNextStepChips((prev) => {
       if (prev.includes(chip)) return prev.filter((c) => c !== chip);
@@ -13131,6 +13152,11 @@ export function CompletionPanel({
     });
   }
   function handleTypedRecommendationsChange(value) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
     markTypedFirstFieldTouch();
     setTypedRecommendations(value);
     setTypedRecommendationsEdited(true);
@@ -13140,6 +13166,11 @@ export function CompletionPanel({
   // untouched, its score recomputes from the schema's derive-field select on
   // every change; the first tap pins technician-set.
   function handleCompanionFieldChange(type, key, value) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
     markTypedFirstFieldTouch();
     setCompanionState((prev) => {
       const entry = prev[type] || EMPTY_COMPANION_ENTRY;
@@ -13153,6 +13184,11 @@ export function CompletionPanel({
     });
   }
   function handleCompanionActivityTap(type, n) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
     markTypedFirstFieldTouch();
     // First tap pins technician-set, even when the value doesn't change.
     setCompanionState((prev) => ({
@@ -13165,6 +13201,11 @@ export function CompletionPanel({
     }));
   }
   function toggleCompanionNextStepChip(type, chip) {
+    // While a Generate request is in flight the snapshot must stay what the
+    // model saw — the disabled fieldset stops taps, but a running per-field
+    // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
+    // so the WRITE is the freeze point.
+    if (generating) return;
     markTypedFirstFieldTouch();
     setCompanionState((prev) => {
       const entry = prev[type] || EMPTY_COMPANION_ENTRY;
