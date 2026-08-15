@@ -351,7 +351,18 @@ describe('termite bait-station pin animation flag (GATE_TERMITE_BAIT_PINS)', () 
   });
 
   test('gate dark / non-live / other programs / unavailable maps stay undefined', () => {
-    expect(termiteStationPinsFlag({ stationMap: termiteMap, mode: 'live', gateValue: undefined })).toBeUndefined();
+    // The helper's default param reads process.env — clear it for the
+    // absent-gate case so the assertion holds in feature-enabled CI too
+    // (codex r10), then restore.
+    const savedGate = process.env.GATE_TERMITE_BAIT_PINS;
+    delete process.env.GATE_TERMITE_BAIT_PINS;
+    try {
+      expect(termiteStationPinsFlag({ stationMap: termiteMap, mode: 'live' })).toBeUndefined();
+    } finally {
+      if (savedGate === undefined) delete process.env.GATE_TERMITE_BAIT_PINS;
+      else process.env.GATE_TERMITE_BAIT_PINS = savedGate;
+    }
+    expect(termiteStationPinsFlag({ stationMap: termiteMap, mode: 'live', gateValue: '' })).toBeUndefined();
     expect(termiteStationPinsFlag({ stationMap: termiteMap, mode: 'live', gateValue: 'false' })).toBeUndefined();
     expect(termiteStationPinsFlag({ stationMap: termiteMap, mode: 'pdf', gateValue: 'true' })).toBeUndefined();
     expect(termiteStationPinsFlag({ stationMap: termiteMap, mode: 'static', gateValue: 'true' })).toBeUndefined();

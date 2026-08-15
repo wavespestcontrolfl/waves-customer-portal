@@ -362,6 +362,18 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(insp.observations.join(' ')).not.toContain('Attic');
   });
 
+  test('contamination severity is an observation; urgency is advice (r10)', () => {
+    const san = typedFindingsPromptSections('rodent_sanitation', {
+      sanitation_areas: 'Attic',
+      contamination_level: 'Heavy',
+    });
+    expect(san.work.join(' ')).toContain('Attic');
+    expect(san.observations.join(' ')).toContain('Heavy');
+    const insp = typedFindingsPromptSections('rodent_inspection', { urgency: 'High' });
+    expect(insp.advice.join(' ')).toContain('High');
+    expect(insp.observations).toHaveLength(0);
+  });
+
   test('only auto_send companions are customer-facing; internal_only stay staff-only', () => {
     expect(customerFacingCompanionTypes([
       { type: 'tree_shrub', delivery: 'auto_send' },

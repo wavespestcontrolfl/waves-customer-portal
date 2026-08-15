@@ -11272,11 +11272,17 @@ const TYPED_CUSTOMER_SECTION_RE = /customer communication/i;
 // Work sections/keys beyond the suffix families (r4): named completed-action
 // keys surfaced by the full-schema sweep — zones treated, source reduction,
 // sensitive-area handling, exclusion/sanitation work.
-const TYPED_WORK_SECTION_RE = /work completed|areas serviced/i;
+// Section rules stay NARROW: 'Areas serviced' was dropped from the work rule
+// because it also houses observed conditions (rodent contamination_level),
+// and the explicit sanitation_areas key already covers the work field in
+// that section (codex r10). A 'Recommendation(s)' section is advice —
+// urgency qualifies the recommended next step, not a finding.
+const TYPED_WORK_SECTION_RE = /work completed/i;
+const TYPED_ADVICE_SECTION_RE = /recommendation/i;
 function typedFieldProvenance(field) {
   if (field.type === 'applications' || TYPED_PRODUCT_FIELD_RE.test(field.key)) return 'product';
   if (TYPED_CUSTOMER_FIELD_RE.test(field.key) || TYPED_CUSTOMER_SECTION_RE.test(field.section || '')) return 'customer';
-  if (TYPED_ADVICE_FIELD_RE.test(field.key)) return 'advice';
+  if (TYPED_ADVICE_FIELD_RE.test(field.key) || TYPED_ADVICE_SECTION_RE.test(field.section || '')) return 'advice';
   if (TYPED_WORK_FIELD_RE.test(field.key) || TYPED_WORK_SECTION_RE.test(field.section || '')) return 'work';
   return 'observation';
 }
