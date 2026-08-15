@@ -12107,7 +12107,15 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
   let alert = null;
   let parentId = null;
   if (idParam.startsWith('derived-')) {
-    parentId = parseInt(idParam.replace('derived-', ''));
+    // Derived alert ids carry the parent scheduled_services UUID verbatim
+    // (GET builds `derived-${plan.id}`). parseInt() here truncated the UUID
+    // to its leading digits (or NaN), so EVERY action on a derived renewal
+    // row 500'd against the uuid id column — the REVIEW buttons only ever
+    // worked for queue-backed rows. Validate the shape, keep the string.
+    parentId = idParam.replace('derived-', '');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parentId)) {
+      return { status: 404, body: { error: 'parent service not found' } };
+    }
   } else {
     alert = await conn('recurring_plan_alerts').where({ id: parseInt(idParam) }).first();
     if (!alert) return { status: 404, body: { error: 'alert not found' } };

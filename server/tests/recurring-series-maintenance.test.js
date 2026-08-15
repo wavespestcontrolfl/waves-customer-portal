@@ -690,7 +690,7 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     // let_lapse (derived ongoing_plan_exhausted id) stops the plan…
     const { state, handler } = alertActionScenario({ parentOverrides: { recurring_ongoing: true }, seriesRows });
     const conn = makeConn(handler);
-    const out = await runRecurringAlertAction(conn, { idParam: 'derived-10', action: 'let_lapse', count: undefined, adminUserId: 'admin-1' });
+    const out = await runRecurringAlertAction(conn, { idParam: 'derived-00000000-0000-4000-8000-000000000010', action: 'let_lapse', count: undefined, adminUserId: 'admin-1' });
     expect(out.status).toBe(200);
     expect(out.body).toMatchObject({ success: true, action: 'let_lapse', created: 0 });
     expect(state.insertedVisits).toHaveLength(0);
@@ -700,12 +700,12 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     const clear = state.flagWrites.find((calls) => calls.some((c) => c[0] === 'update' && c[1] && c[1].recurring_ongoing === false));
     expect(clear).toBeDefined();
     expect(clear).toEqual(expect.arrayContaining([
-      ['whereFn', [['where', 'id', 10], ['orWhere', 'recurring_parent_id', 10]]],
+      ['whereFn', [['where', 'id', '00000000-0000-4000-8000-000000000010'], ['orWhere', 'recurring_parent_id', '00000000-0000-4000-8000-000000000010']]],
       ['where', 'recurring_ongoing', true],
     ]));
     // Resolution audit row + the plan-stop activity stamp.
     expect(state.auditInserts).toHaveLength(1);
-    expect(state.auditInserts[0]).toMatchObject({ recurring_parent_id: 10, resolved_action: 'let_lapse' });
+    expect(state.auditInserts[0]).toMatchObject({ recurring_parent_id: '00000000-0000-4000-8000-000000000010', resolved_action: 'let_lapse' });
     expect(state.activityInserts).toHaveLength(1);
     expect(state.activityInserts[0]).toMatchObject({ action: 'recurring_plan_stopped', customer_id: 5 });
 
@@ -777,7 +777,7 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
         { scheduled_date: '2098-10-15', status: 'pending' },
       ],
     });
-    const out = await runRecurringAlertAction(makeConn(handler), { idParam: 'derived-10', action: 'extend', count: 4, adminUserId: null });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: 'derived-00000000-0000-4000-8000-000000000010', action: 'extend', count: 4, adminUserId: null });
     expect(out.status).toBe(200);
     expect(out.body).toMatchObject({ success: true, created: 0, alreadyResolved: true });
     expect(state.insertedVisits).toHaveLength(0);
