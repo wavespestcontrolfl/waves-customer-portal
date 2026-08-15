@@ -108,7 +108,7 @@ const CUSTOMER = {
 
 function chain({ first } = {}) {
   const q = {};
-  ['where', 'whereNull', 'whereRaw', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereIn', 'whereNull', 'whereRaw', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => first);
   q.update = jest.fn(async () => 1);
   return q;
@@ -157,6 +157,11 @@ beforeEach(() => {
   // clearAllMocks does NOT reset implementations set with mockResolvedValue —
   // restore the defaults so per-test overrides never leak forward.
   collectionsChannelPermitted.mockResolvedValue(true);
+  flags.revokeAutomatedVoiceConsent.mockResolvedValue({ ok: true, created: true });
+  flags.placeDisputeHold.mockResolvedValue({ ok: true, created: true });
+  flags.flagWrongNumber.mockResolvedValue({ ok: true, created: true });
+  flags.writeFlag.mockResolvedValue({ ok: true, created: true });
+  flags.fileFlagCard.mockResolvedValue(true);
   ContactLedger.recordContact.mockResolvedValue({ id: 'ledger-sms-1', metadata: {} });
   ContactLedger.markSendFailed.mockResolvedValue(true);
   InvoiceService.sendViaSMS.mockResolvedValue({ sent: true, ok: true });
@@ -629,5 +634,100 @@ describe('prb-r9', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+// prb-r11 pins.
+describe('prb-r11', () => {
+  test('a close racing an IN-FLIGHT persist awaits it and retries the {ok:false} result', async () => {
+    const { convo } = makeConvo();
+    await turn(convo, 'hello');
+    let settleFirst;
+    writeCallOutcome.mockImplementationOnce(() => new Promise((r) => { settleFirst = r; }));
+    const finishP = convo._toolEndCall(); // persist hangs on the first outcome write
+    await new Promise((r) => { setImmediate(r); });
+    const endP = convo.end('ws_close'); // must await the in-flight attempt, not trust the latch
+    settleFirst({ ok: false });
+    await finishP;
+    await endP;
+    // The close retried after seeing the settled failure.
+    expect(writeCallOutcome.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(convo._persisted).toBe(true);
+  });
+
+  test('a broad combo opt-out ("never call me again" + human) writes do_not_call too', async () => {
+    const { convo } = makeConvo({ now: STAFFED_NOW });
+    await turn(convo, 'never call me again, get me a representative');
+    expect(flags.revokeAutomatedVoiceConsent).toHaveBeenCalled();
+    expect(flags.writeFlag).toHaveBeenCalledWith(expect.objectContaining({ flag: 'do_not_call' }));
+    expect(convo._captures.consentRevoked).toBe(true);
+  });
+
+  test('an opt-out on the turn-capped utterance is still recorded before the goodbye', async () => {
+    const { convo } = makeConvo();
+    await turn(convo, 'hello');
+    convo._turnCount = 30; // MAX_CALL_TURNS — the next turn is over the cap
+    await turn(convo, 'stop calling me');
+    expect(flags.revokeAutomatedVoiceConsent).toHaveBeenCalled();
+    expect(convo._captures.consentRevoked).toBe(true);
+    expect(convo.ended).toBe(true);
+  });
+
+  test('a DTMF escape set during a tool block stops the REMAINING tools', async () => {
+    const { convo } = makeConvo();
+    await turn(convo, 'hello');
+    convo.verified = true;
+    convo.disclosed = true;
+    convo.state = 'RESOLUTION';
+    const convoRef = convo;
+    flags.revokeAutomatedVoiceConsent.mockImplementation(async () => {
+      convoRef._escapeRequested = true; // 0 pressed while this write ran
+      return { ok: true };
+    });
+    mockScriptedMessages.push({
+      stop_reason: 'tool_use',
+      content: [
+        { type: 'tool_use', id: 't-dnc', name: 'record_do_not_call', input: { scope: 'automated_calls' } },
+        { type: 'tool_use', id: 't-pay', name: 'send_pay_link', input: { customer_agreement_verbatim: 'yes send it' } },
+      ],
+    });
+    await turn(convo, 'stop the calls');
+    // The second tool's machinery never ran.
+    expect(collectionsChannelPermitted).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+  });
+
+  test('an empty ELIGIBLE set with a surviving raw open row is indeterminate, never "settled"', async () => {
+    const { loadEligibleInvoices } = require('../services/collections/contact-policy');
+    const { convo } = makeConvo();
+    await turn(convo, 'hello');
+    convo.verified = true;
+    convo.state = 'DISCLOSE';
+    loadEligibleInvoices.mockResolvedValueOnce([]); // resolution failures dropped everything
+    db.mockImplementation((t) => (t === 'invoices' ? chain({ first: { id: 'inv-raw-1' } }) : chain()));
+    const out = await convo._toolGetBalance();
+    expect(out).toContain('could not be verified');
+    expect(out).not.toContain('NO open balance');
+    expect(convo.disclosed).toBe(false);
+  });
+
+  test('an empty eligible set with a provably empty raw read earns the settled copy', async () => {
+    const { loadEligibleInvoices } = require('../services/collections/contact-policy');
+    const { convo } = makeConvo();
+    await turn(convo, 'hello');
+    convo.verified = true;
+    convo.state = 'DISCLOSE';
+    loadEligibleInvoices.mockResolvedValueOnce([]);
+    db.mockImplementation(() => chain({ first: undefined }));
+    const out = await convo._toolGetBalance();
+    expect(out).toContain('NO open balance');
+  });
+
+  test('the system prompt carries the current ET date for relative-date conversion', async () => {
+    const { convo } = makeConvo({ now: STAFFED_NOW }); // Wed 2026-08-12 ET
+    mockScriptedMessages.push(endTurn('Hello!'));
+    await turn(convo, 'hello');
+    const system = mockStreamCalls[0].system.map((b) => b.text).join(' ');
+    expect(system).toContain("Today's date is Wednesday, 2026-08-12");
   });
 });

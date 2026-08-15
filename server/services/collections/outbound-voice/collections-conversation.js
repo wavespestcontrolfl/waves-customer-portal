@@ -195,10 +195,20 @@ function utteranceHasSensitiveDetails(text) {
 
 const HUMAN_REQUEST_RE = /\b(human|real person|actual person|representative|operator|speak (?:to|with) (?:someone|somebody|a person)|talk (?:to|with) (?:someone|somebody|a person))\b/i;
 
-function buildSystemPrompt({ firstName }) {
+// Spoken opt-outs recorded IN CODE (combo escapes + the turn-cap failsafe).
+// Widened (gh prb-r8); broad-scope phrasing (gh prb-r11) additionally writes
+// do_not_call — "all calls"/"do not contact" is not an automated-only ask.
+const SPOKEN_OPT_OUT_RE = /\b(stop calling|don'?t call|do not call|no more calls|take me off|remove me from|never call|revoke (my )?consent|opt(-| )?out|quit calling|do not contact)\b/i;
+const BROAD_OPT_OUT_RE = /\b(?:all|any) calls?\b|\bdo not contact\b|\bnever call\b|\bno more calls\b|\btake me off\b|\bremove me from\b/i;
+
+function buildSystemPrompt({ firstName, today }) {
   const who = firstName || 'the customer';
   return [
     'You are Sandy, the automated billing assistant for Waves Pest Control, on a RECORDED outbound phone call about an open balance. Keep every reply to one or two short spoken sentences. Never use emojis or read out symbols.',
+    // The current ET calendar date rides the prompt (gh prb-r11): without
+    // it, "this Friday" becomes a guessed YYYY-MM-DD that passes the 90-day
+    // validator and lands next_eligible_at on the wrong day.
+    ...(today ? [`Today's date is ${today} (US Eastern). Use it to convert any relative date the customer gives ("this Friday", "in two weeks") into the exact calendar date before calling record_payment_intent.`] : []),
     '',
     'NON-NEGOTIABLE RULES:',
     `- FIRST confirm you are speaking with ${who} (call confirm_right_party). Until confirmed AND verified, never mention any balance, invoice, service, or account detail of any kind.`,
@@ -391,6 +401,46 @@ class CollectionsConversation {
 
   interrupt() { /* barge-in: nothing buffered server-side to cancel */ }
 
+  // Spoken opt-out recorded in CODE — shared by the combo human-escape
+  // branch and the turn-cap failsafe (gh prb-r11). Broad phrasing carries
+  // the FULL scope: do_not_call is written too, independently, and the
+  // fallback card names every flag that failed.
+  async _recordSpokenOptOut(rawText) {
+    if (!SPOKEN_OPT_OUT_RE.test(rawText)) return;
+    const broad = BROAD_OPT_OUT_RE.test(rawText);
+    const rev = await flags.revokeAutomatedVoiceConsent(this._ctx.customer.id, {
+      reason: 'spoken opt-out during a billing follow-up call (recorded in code)',
+    }).catch(() => ({ ok: false }));
+    let dnc = { ok: true };
+    if (broad) {
+      dnc = await flags.writeFlag({
+        customerId: this._ctx.customer.id,
+        flag: 'do_not_call',
+        reason: 'broad spoken opt-out ("all calls"/"do not contact") during a billing follow-up call',
+      }).catch(() => ({ ok: false }));
+    }
+    if ((rev && rev.ok) || (broad && dnc && dnc.ok)) this._captures.consentRevoked = true;
+    const revFailed = !(rev && rev.ok);
+    const dncFailed = broad && !(dnc && dnc.ok);
+    if (revFailed || dncFailed) {
+      const flagsNeeded = [
+        ...(revFailed ? ['automated_voice_consent_revoked'] : []),
+        ...(dncFailed ? ['do_not_call'] : []),
+      ].join(' AND ');
+      try {
+        const NotificationService = require('../../notification-service');
+        await NotificationService.notifyAdmin(
+          'billing',
+          'Opt-out needs manual action',
+          `A customer asked to stop ${broad ? 'ALL calls' : 'automated calls'} on a billing follow-up call, and a durable flag write failed. Please set ${flagsNeeded} by hand.`,
+          { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+        );
+      } catch (cardErr) {
+        logger.error(`[collections-voice] spoken opt-out fallback card failed: ${cardErr.message}`);
+      }
+    }
+  }
+
   async _handlePrompt(rawText) {
     if (this.ended) return;
     const ok = await this._contextReady;
@@ -399,38 +449,14 @@ class CollectionsConversation {
       this.say(script.RELAY_FAILURE_CLOSE);
       return this._finish('relay_failed', { endSession: true });
     }
-    if (++this._turnCount > MAX_CALL_TURNS) {
-      this.say('Thanks for your time today. Goodbye.');
-      return this._finish(this._defaultOutcome(), { endSession: true });
-    }
-
-    // Human escape by phrase — any state, checked in CODE before the model.
+    // Human escape by phrase — any state, checked in CODE before the model
+    // AND before the turn cap (gh prb-r11): an opt-out or human request on
+    // the capped turn must still be honored, never swallowed by a goodbye.
     if (HUMAN_REQUEST_RE.test(rawText)) {
       // "Stop calling me and let me speak to a person" (gh prb-r7): the
       // opt-out half must be RECORDED before the escape ends the session —
       // the model never sees this utterance.
-      // Widened (gh prb-r8) — and EVERY escape utterance also rides the
-      // callback/transfer card verbatim (scrubbed), so a phrasing this
-      // regex misses still reaches a human's eyes with the request.
-      if (/\b(stop calling|don'?t call|do not call|no more calls|take me off|remove me from|never call|revoke (my )?consent|opt(-| )?out|quit calling|do not contact)\b/i.test(rawText)) {
-        const rev = await flags.revokeAutomatedVoiceConsent(this._ctx.customer.id, {
-          reason: 'combined opt-out + human request during a billing follow-up call',
-        }).catch(() => ({ ok: false }));
-        if (rev && rev.ok) this._captures.consentRevoked = true;
-        else {
-          try {
-            const NotificationService = require('../../notification-service');
-            await NotificationService.notifyAdmin(
-              'billing',
-              'Opt-out needs manual action',
-              'A customer asked to stop calls while requesting a human on a billing follow-up call, and the durable flag write failed. Please set automated_voice_consent_revoked by hand.',
-              { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
-            );
-          } catch (cardErr) {
-            logger.error(`[collections-voice] combo opt-out fallback card failed: ${cardErr.message}`);
-          }
-        }
-      }
+      await this._recordSpokenOptOut(rawText);
       // The SAME whole-utterance sensitive screen the model path gets (gh
       // prb-r9): the escape capture rides a durable admin card, and a PAN
       // scrub alone would forward an SSN/routing/account number verbatim.
@@ -443,6 +469,14 @@ class CollectionsConversation {
         } catch { this._captures.humanEscapeUtterance = null; }
       }
       return this._humanEscape();
+    }
+
+    if (++this._turnCount > MAX_CALL_TURNS) {
+      // The cap's goodbye must not swallow a spoken opt-out either (gh
+      // prb-r11): the model is out of turns, so the code records it.
+      await this._recordSpokenOptOut(rawText);
+      this.say('Thanks for your time today. Goodbye.');
+      return this._finish(this._defaultOutcome(), { endSession: true });
     }
 
     // Security interrupt: fixed copy, and the model sees only scrubbed text.
@@ -477,9 +511,20 @@ class CollectionsConversation {
 
   async _modelTurn() {
     if (!this._systemBlocks) {
+      // ET calendar day + weekday via datetime-et / an explicit timeZone —
+      // never raw new Date() ET math (the timestamptz trap).
+      let today = null;
+      try {
+        const { etCalendarDayOf } = require('../../../utils/datetime-et');
+        const now = this._now();
+        const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'long' }).format(now);
+        today = `${weekday}, ${etCalendarDayOf(now)}`;
+      } catch (err) {
+        logger.warn(`[collections-voice] ET date for prompt failed: ${err.message}`);
+      }
       this._systemBlocks = [{
         type: 'text',
-        text: buildSystemPrompt({ firstName: this._ctx.customer.first_name }),
+        text: buildSystemPrompt({ firstName: this._ctx.customer.first_name, today }),
         cache_control: { type: 'ephemeral' },
       }];
     }
@@ -547,6 +592,11 @@ class CollectionsConversation {
           const out = await this._executeToolBounded(block.name, block.input || {});
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
           if (this.ended) return; // a terminal tool closed the call
+          // A 0 pressed while a tool ran preempts the REST of the block too
+          // (gh prb-r11): no later write (a pay link, another record) may
+          // execute ahead of the queued human escape, which ends the
+          // session — the dangling tool_use never reaches the model again.
+          if (this._escapeRequested) return;
         }
         this.messages.push({ role: 'user', content: results });
         continue;
@@ -726,7 +776,29 @@ class CollectionsConversation {
     }
     const b = this._ctx.balance || { total: 0, count: 0 };
     if (!b.count || !(b.total > 0)) {
-      // The balance cleared between dial and now — say so and wrap up.
+      // An EMPTY eligible set is NOT proof of settlement (gh prb-r11):
+      // eligibility DROPS rows when payer re-resolution or the dunning-stop
+      // lookup fails — fail-closed is right for outreach, but "settled" is
+      // a stronger claim than "not collectible right now". Only a raw
+      // zero-open-rows read earns the settled copy; a surviving raw row
+      // (resolution failure, dunning-stopped) is indeterminate and
+      // discloses nothing.
+      try {
+        const rawOpen = await db('invoices')
+          .where({ customer_id: this._ctx.customer.id })
+          .whereIn('status', ['sent', 'viewed', 'overdue', 'unpaid'])
+          .whereNull('payer_id')
+          .whereNull('payer_statement_id')
+          .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
+          .first('id');
+        if (rawOpen) {
+          return 'The balance could not be verified right now. Apologize, give the office number, and end politely — do NOT state any figure and do NOT say the account is settled.';
+        }
+      } catch (err) {
+        logger.error(`[collections-voice] settled-claim probe failed callSid=${this.callSid}: ${err.message}`);
+        return 'The balance could not be checked right now. Apologize, give the office number, and end politely — do NOT state any figure.';
+      }
+      // The balance genuinely cleared between dial and now — say so and wrap up.
       this.state = 'RESOLUTION';
       this.disclosed = true;
       return 'The account shows NO open balance right now. Tell the customer everything looks settled, apologize for the call, and end politely.';
@@ -1018,6 +1090,22 @@ class CollectionsConversation {
 
   async _persist(outcome) {
     if (this._persisted) return;
+    // The in-flight attempt is TRACKED (gh prb-r11): _persisted latches
+    // optimistically at entry, so a socket close racing this write used to
+    // read the latch as durable success, skip its retry, and the
+    // { ok:false } un-latch arrived only after the last event had already
+    // been discarded — the case stayed in 'dialing'. end() awaits this
+    // promise before trusting the latch.
+    const attempt = this._doPersist(outcome);
+    this._persistInFlight = attempt;
+    try {
+      await attempt;
+    } finally {
+      if (this._persistInFlight === attempt) this._persistInFlight = null;
+    }
+  }
+
+  async _doPersist(outcome) {
     this._persisted = true;
     // Transcript: the SAME writer the inbound relay uses (scrubbing +
     // provider stamp 'conversation_relay', which every corpus miner already
@@ -1052,6 +1140,13 @@ class CollectionsConversation {
 
   /** Socket closed (hangup or teardown). Idempotent with _finish. */
   async end(reason) {
+    // A terminal tool's persistence may still be IN FLIGHT (gh prb-r11):
+    // await it so the latch below reflects the SETTLED result, not the
+    // optimistic entry latch — otherwise the only close event is discarded
+    // and a subsequent { ok:false } un-latch has no retry left.
+    if (this._persistInFlight) {
+      try { await this._persistInFlight; } catch { /* logged in _persist */ }
+    }
     if (this._finished && this._persisted) return;
     // Drain any timed-out writes still in flight (gh prb-r7), bounded —
     // their settlements belong IN the terminal outcome, not after it.

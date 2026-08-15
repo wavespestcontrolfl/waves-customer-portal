@@ -188,12 +188,32 @@ function attachVoiceRelay(httpServer) {
     // The burn is a DB round trip, so the upgrade completes asynchronously. The
     // socket is not handed to `ws` until it wins the claim; a loser (or an
     // error) is destroyed exactly as an unauthenticated one is.
-    burnCallToken(token, callSid).then((won) => {
+    burnCallToken(token, callSid).then(async (won) => {
       if (!won) {
         logger.warn(`[voice-relay] rejected ws upgrade: token already used callSid=${callSid}`);
         try { socket.destroy(); } catch { /* socket already gone */ }
         return;
       }
+      // The authenticated call's SOURCE is resolved HERE, before any frame
+      // exists (gh prb-r11): the setup frame's session_mode label is
+      // unverified input in both directions — a collections call whose label
+      // was stripped must never enter the generic lead flow, not even for
+      // the window a detached check would leave open. The upgrade already
+      // fails closed on a DB failure (the burn), so an unreadable source
+      // keeps the same envelope: reject the upgrade.
+      let collectionsCall = false;
+      try {
+        const db = require('../../models/db');
+        const row = await db('call_log')
+          .where({ twilio_call_sid: callSid })
+          .first('source');
+        collectionsCall = Boolean(row && row.source === 'collections_voice');
+      } catch (e) {
+        logger.warn(`[voice-relay] rejected ws upgrade: source resolution failed callSid=${callSid}: ${e.message}`);
+        try { socket.destroy(); } catch { /* socket already gone */ }
+        return;
+      }
+      req.authenticatedCollectionsCall = collectionsCall;
       // ⭐ THE AUTHENTICATED CallSid RIDES WITH THE SOCKET. The token was
       // verified against THIS CallSid, and the setup frame that follows is
       // unverified input: honouring the frame's own callSid would let a valid
@@ -225,6 +245,9 @@ function attachVoiceRelay(httpServer) {
     // socket is allowed to be. Absent only if something bypassed the upgrade
     // path, which the setup handler treats as unauthenticated.
     const authenticatedCallSid = (req && req.authenticatedCallSid) || null;
+    // Resolved at UPGRADE time from the call_log row (gh prb-r11) — the
+    // routing truth for the setup frame, never the frame's own label.
+    const authenticatedCollectionsCall = Boolean(req && req.authenticatedCollectionsCall);
     const relaySessionKey = (req && req.relaySessionKey) || null;
     const relaySessionGeneration = (req && req.relaySessionGeneration) || null;
 
@@ -321,7 +344,11 @@ function attachVoiceRelay(httpServer) {
           // acting on anything — a mislabeled or forged frame gets a fixed
           // polite close, never a session. Without the label (every inbound
           // call today) this branch is untouched, byte-identical.
-          if (p.session_mode === 'collections') {
+          // Routing = the frame label OR the upgrade-time source proof (gh
+          // prb-r11): a collections call with a stripped label still routes
+          // here; a forged label on a non-collections call routes here and
+          // dies on CollectionsConversation's own server-side re-proof.
+          if (p.session_mode === 'collections' || authenticatedCollectionsCall) {
             try {
               const { CollectionsConversation } = require('../collections/outbound-voice/collections-conversation');
               convo = new CollectionsConversation({
@@ -339,31 +366,6 @@ function attachVoiceRelay(httpServer) {
             logger.info(`[voice-relay] collections session setup callSid=${convo.callSid}`);
             break;
           }
-          // The label is UNVERIFIED frame input in BOTH directions (gh
-          // prb-r10): a collections call whose session_mode Parameter was
-          // stripped or altered must not run the anonymous lead/capture flow
-          // — that would bypass the collections state machine, its opt-out
-          // handling, and its outcome writes. The authenticated CallSid's
-          // call_log row is the truth; a positive collections match tears the
-          // generic session down. A failed read logs loudly and lets the
-          // generic session stand (fail-open here protects LIVE inbound
-          // availability; a mislabeled collections call's context reads
-          // would be failing on the same DB anyway, and its vestibule action
-          // route still reconciles the case).
-          void (async () => {
-            try {
-              const db = require('../../models/db');
-              const row = await db('call_log')
-                .where({ twilio_call_sid: authenticatedCallSid })
-                .first('source');
-              if (row && row.source === 'collections_voice') {
-                logger.warn(`[voice-relay] collections call reached the GENERIC relay branch (label missing/altered) callSid=${authenticatedCallSid} — terminating`);
-                teardown('collections_call_on_generic_relay');
-              }
-            } catch (e) {
-              logger.error(`[voice-relay] collections-source guard read failed callSid=${authenticatedCallSid}: ${e.message} — generic session continues`);
-            }
-          })();
           convo = new RelayConversation({
             // ALWAYS the authenticated one — never the frame's.
             callSid: authenticatedCallSid,

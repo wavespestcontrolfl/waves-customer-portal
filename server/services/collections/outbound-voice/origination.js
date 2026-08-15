@@ -215,6 +215,10 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
   }
   const callLogId = callLogRow?.id;
 
+  // Flipped immediately before the ONE network call below (gh prb-r11):
+  // any throw while it is still false (missing Twilio config, client
+  // construction) provably happened before the provider was touched.
+  let providerRequestStarted = false;
   try {
     const twilio = require('twilio');
     const config = require('../../../config');
@@ -225,6 +229,7 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
     const params = new URLSearchParams({ callLogId: String(callLogId || '') });
 
+    providerRequestStarted = true;
     const call = await client.calls.create({
       to: toPhone,
       from,
@@ -264,7 +269,12 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     // keeps consuming the frequency windows — the policy's voice-spacing
     // denial is what stops a re-approval from originating a second live
     // call while the first may still be ringing.
-    const definitiveReject = Number(err?.status) >= 400 && Number(err?.status) < 500;
+    // A local preflight failure (Twilio unconfigured, client construction)
+    // is equally definitive (gh prb-r11): the provider request never
+    // started, so the row must not consume the frequency windows —
+    // restoring credentials and re-approving should be able to dial.
+    const definitiveReject = !providerRequestStarted
+      || (Number(err?.status) >= 400 && Number(err?.status) < 500);
     await ContactLedger.markSendFailed(ledgerEntry, {
       stage: 'calls_create',
       ...(definitiveReject ? { never_contacted: true } : { ambiguous_provider_failure: true }),

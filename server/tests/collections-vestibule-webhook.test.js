@@ -347,6 +347,17 @@ describe('prb-r2', () => {
     expect(ledgerChain.update).toHaveBeenCalled();
   });
 
+  // prb-r11: a failed reconciliation must be RETRYABLE — 204 would ack the
+  // webhook with nothing persisted and strand the case in 'dialing'.
+  test('collections-call-status: a failed reconciliation transaction returns 500 so Twilio retries', async () => {
+    setDb();
+    db.transaction = jest.fn(async () => { throw new Error('pg outage'); });
+    const res = mockRes();
+    res.sendStatus = jest.fn(() => res);
+    await handlerFor('/collections-call-status')(req({ body: { CallStatus: 'no-answer' } }), res);
+    expect(res.sendStatus).toHaveBeenCalledWith(500);
+  });
+
   test('collections-call-status: an answered (completed) call is a no-op — the vestibule owns it', async () => {
     setDb();
     const res = mockRes();

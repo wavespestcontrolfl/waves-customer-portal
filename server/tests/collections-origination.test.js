@@ -265,6 +265,36 @@ test('calls.create failure ⇒ send_failed stamp + case back to review queue; AM
   expect(dialErrLog).not.toContain('twilio down'); // raw err.message never logged
 });
 
+// prb-r11: a LOCAL preflight failure (Twilio unconfigured) provably never
+// touched the provider — never_contacted, so restoring credentials and
+// re-approving can dial without a phantom frequency window.
+test('missing Twilio config stamps never_contacted (no provider request ever started)', async () => {
+  const config = require('../config');
+  const savedSid = config.twilio.accountSid;
+  config.twilio.accountSid = null;
+  try {
+    const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+    setDb({
+      collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), stateChain],
+      customers: [chain('customers', { first: CUSTOMER })],
+      call_log: [
+        chain('call_log', { first: undefined }),
+        chain('call_log', { returningRows: [{ id: 'cl-1' }] }),
+        chain('call_log'),
+      ],
+    });
+    const res = await originateCollectionCall('case-1', { now: NOW });
+    expect(res).toEqual({ dialed: false, reason: 'dial_failed' });
+    expect(mockCallsCreate).not.toHaveBeenCalled();
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ledger-1' }),
+      expect.objectContaining({ stage: 'calls_create', never_contacted: true }),
+    );
+  } finally {
+    config.twilio.accountSid = savedSid;
+  }
+});
+
 // prb-r9: never_contacted is reserved for DEFINITIVE pre-send rejections —
 // a 4xx proves Twilio refused the request before any call existed.
 test('a definitive 4xx rejection from calls.create stamps never_contacted', async () => {

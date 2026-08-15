@@ -103,10 +103,19 @@ async function markDelivered(target) {
 async function markSendFailed(entry, extra = {}) {
   if (!entry || !entry.id) return false;
   try {
+    // Atomic jsonb MERGE, never a whole-object replace from the caller's
+    // (possibly stale) snapshot (gh prb-r11): an ambiguous provider failure
+    // can race a live call that already stamped voicemail_left or an
+    // outcome onto this row — a replace built from the pre-dial entry
+    // would erase them (losing voicemail_left re-permits a voicemail
+    // inside the 30-day cap).
     await db('collections_contact_ledger')
       .where({ id: entry.id })
       .update({
-        metadata: JSON.stringify({ ...(entry.metadata || {}), send_failed: true, ...extra }),
+        metadata: db.raw(
+          "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ send_failed: true, ...extra })],
+        ),
       });
     return true;
   } catch (err) {
