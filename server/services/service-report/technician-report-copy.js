@@ -41,6 +41,15 @@
 
 const crypto = require('crypto');
 const { findBannedCustomerCopy } = require('./activity-indicators');
+
+// Code-noun anchored credential detector (shared with the generate-report
+// output gate): a number or short alpha/quoted token counts as a credential
+// only beside an actual code/PIN noun, in either order — location keywords
+// alone ("120 linear feet around the garage") never trip it. Post-generation
+// inline edits go through THIS parser at completion, so the screen must live
+// here or an edited "gate code 4545" line reaches the permanent report
+// (codex r36 #3420).
+const REPORT_ACCESS_CODE_RE = /\b(?:code|pin|combo|combination|passcode|password|keypad|lock\s?box)\b[^\n.!?]{0,25}\b[a-z]?\d{2,8}\b|\b[a-z]?\d{2,8}\b[^\n.!?]{0,15}\b(?:code|pin|combo|combination|passcode|password)\b|\b(?:code|pin|combo|combination|passcode|password)\b\s*(?:is|:|=|-)?\s*(?:["'][A-Za-z0-9#*]{2,12}["']|[A-Z0-9#*]{2,12}\b|[A-Za-z]*\d[A-Za-z0-9#*]*\b)/;
 const { validateCustomerCopy } = require('./premium-experience');
 const { EXTRA_FORBIDDEN } = require('./visit-summary-narrative');
 
@@ -98,6 +107,7 @@ function technicianReportCustomerCopy(notes) {
   const violations = [
     ...findBannedCustomerCopy(body),
     ...EXTRA_FORBIDDEN.map((rx) => body.match(rx)?.[0] || null).filter(Boolean),
+    ...(REPORT_ACCESS_CODE_RE.test(body) ? ['access_code'] : []),
   ];
   if (!violations.length && !validateCustomerCopy(body)) violations.push('forbidden_language');
   return {
@@ -161,6 +171,7 @@ function summaryCopySignature(service = {}) {
 
 module.exports = {
   technicianReportCustomerCopy,
+  REPORT_ACCESS_CODE_RE,
   summaryCopySignature,
   MAX_REPORT_CHARS,
 };

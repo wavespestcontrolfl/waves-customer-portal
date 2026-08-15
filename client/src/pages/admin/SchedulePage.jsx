@@ -9821,6 +9821,10 @@ export function CompletionPanel({
   // (codex r23). An edited draft is the tech's reviewed copy and is theirs.
   const generatedReportTextRef = useRef(null);
   const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
+  // Baseline for the generation-inputs watcher below — null means "not yet
+  // initialized" (fresh mount or just-restored draft), so the first run
+  // records without invalidating.
+  const generationInputsRef = useRef(null);
   // AI photo analysis (optional, never blocks submit): summary is editable,
   // captions attach to the photo entries. Not draft-persisted — photos
   // themselves aren't, and a summary without its photos would be stale.
@@ -11218,6 +11222,9 @@ export function CompletionPanel({
       && typeof savedDraft.stationAutoCounts === "object"
       ? { ...savedDraft.stationAutoCounts }
       : {};
+    // Restoring sets the watched generation inputs — reset the watcher
+    // baseline so the restore itself never invalidates the restored draft.
+    generationInputsRef.current = null;
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
     setTreeShrubCloseout(
@@ -13197,6 +13204,28 @@ export function CompletionPanel({
         new Date().toISOString();
     }
   }
+  // EVERY generation input invalidates an untouched draft when it changes —
+  // buildAiReportPayload sends areas/observations/recommendations/
+  // interaction/concern/rating, and the typed branches now publish the
+  // reviewed prose, so an edit to any of them after generation can't leave
+  // stale copy beside the final record (codex r36). A value-diff watcher
+  // covers the many inline setters without wrapping each; the baseline
+  // resets on draft restore so restoring never invalidates.
+  useEffect(() => {
+    const snapshot = JSON.stringify([
+      areasServiced, observationsText, recommendationsText,
+      customerInteraction, customerConcern, clientPestRating,
+    ]);
+    if (generationInputsRef.current === null) {
+      generationInputsRef.current = snapshot;
+      return;
+    }
+    if (generationInputsRef.current !== snapshot) {
+      generationInputsRef.current = snapshot;
+      if (!generating) invalidateGeneratedReportOnTypedEdit();
+    }
+  }, [areasServiced, observationsText, recommendationsText,
+    customerInteraction, customerConcern, clientPestRating, generating]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
   // publish it beside contradicting structured findings (codex r23). Prose

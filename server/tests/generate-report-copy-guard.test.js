@@ -301,6 +301,18 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('We entered using the gate code BLUE and treated the perimeter.')).toBe('access_code');
     expect(reportCopyRejection('The keypad code is "sunset7" for the side door.')).toBe('access_code');
     expect(reportCopyRejection('The billing code was updated in our office records.')).toBeNull();
+    // the shared parser screens post-generation inline edits too (r36)
+    const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+    const edited = technicianReportCustomerCopy('WHAT WE DID\n\nWe treated the home. Use gate code 4545 next time.\n\nWHAT WE FOUND\n\nActivity was low.');
+    expect(edited.body).toBeNull();
+    expect(edited.violations).toContain('access_code');
+  });
+
+  test('abbreviated trade-name echoes still reject; plain vocabulary passes (r36)', () => {
+    const { containsProductName } = require('../services/completion-recap');
+    const o = { wholeWord: true, extraGenericTokens: new Set(['zone', 'zones']) };
+    expect(containsProductName('We applied T-Zone along the walkway edges.', [{ name: 'T-Zone SE' }], o)).toBe(true);
+    expect(containsProductName('We treated the affected zone today.', [{ name: 'T-Zone SE' }], o)).toBe(false);
   });
 
   test('product-record raw values ride productValues for the trade-name output guard', () => {

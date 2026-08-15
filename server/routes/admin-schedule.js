@@ -48,7 +48,7 @@ const {
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
-const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+const { technicianReportCustomerCopy, REPORT_ACCESS_CODE_RE } = require('../services/service-report/technician-report-copy');
 const CompletionRecap = require('../services/completion-recap');
 const {
   stampSeriesPrepaid,
@@ -11094,9 +11094,6 @@ function reportCopyCacheSet(key, value) {
 // Reject empty or liability-laden AI report copy before it reaches the operator
 // (mirrors the photo-analysis / ai-summary banned-copy guards). Returns null
 // when the copy is acceptable, else a short reason string for the retry/error path.
-// Code-noun anchored: a number counts as a credential only beside an actual
-// code/PIN noun, in either order.
-const REPORT_ACCESS_CODE_RE = /\b(?:code|pin|combo|combination|passcode|password|keypad|lock\s?box)\b[^\n.!?]{0,25}\b[a-z]?\d{2,8}\b|\b[a-z]?\d{2,8}\b[^\n.!?]{0,15}\b(?:code|pin|combo|combination|passcode|password)\b|\b(?:code|pin|combo|combination|passcode|password)\b\s*(?:is|:|=|-)?\s*(?:["'][A-Za-z0-9#*]{2,12}["']|[A-Z0-9#*]{2,12}\b|[A-Za-z]*\d[A-Za-z0-9#*]*\b)/;
 function reportCopyRejection(report) {
   const text = String(report || '').trim();
   if (!text) return 'empty';

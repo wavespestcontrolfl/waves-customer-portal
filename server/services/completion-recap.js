@@ -263,6 +263,19 @@ function containsProductName(text, products, { extraGenericTokens = null, wholeW
     if (nameTokens.length >= 2) {
       const phrase = ` ${nameTokens.join(' ')} `;
       if (normHay.includes(phrase)) return true;
+      // Abbreviated echoes drop the formulation suffix ("T-Zone" for
+      // "T-Zone SE") — adjacent token pairs match as phrases too, when the
+      // pair carries at least one token that isn't generic vocabulary, a
+      // formulation suffix, or a pure number, so ordinary "zone" alone
+      // still passes (codex r36 #3420).
+      for (let i = 0; i < nameTokens.length - 1; i += 1) {
+        const pair = [nameTokens[i], nameTokens[i + 1]];
+        // A single-letter/suffix token still carries identity INSIDE a
+        // phrase ("t zone") — only fully-generic pairs are skipped.
+        const hasIdentity = pair.some((token) => !isGeneric(token)
+          && !/^\d+$/.test(token));
+        if (hasIdentity && normHay.includes(` ${pair[0]} ${pair[1]} `)) return true;
+      }
     }
     return false;
   });
