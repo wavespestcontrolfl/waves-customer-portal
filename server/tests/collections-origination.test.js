@@ -219,7 +219,7 @@ test('idempotency: prior dial under the same key refuses', async () => {
 test('ledger insert failure ⇒ NO dial at all', async () => {
   ContactLedger.recordContact.mockRejectedValue(new Error('insert failed'));
   setDb({
-    collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 })],
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), chain('collection_cases', { result: 1 })],
     customers: [chain('customers', { first: CUSTOMER })],
     call_log: [chain('call_log', { first: undefined })],
   });
@@ -277,4 +277,19 @@ test('the idempotency probe excludes failed rows (query pin) and a fresh dial pr
   const res = await originateCollectionCall('case-1', { now: NOW });
   expect(res.dialed).toBe(true);
   expect(probeChain.whereRaw).toHaveBeenCalledWith("COALESCE(status, '') NOT IN ('failed', 'busy', 'no-answer', 'canceled')");
+});
+
+// prb-r4: a pre-dial persistence failure RELEASES the claim — no Twilio
+// call exists, so no callback will ever reconcile it.
+test('ledger failure after the claim releases dialing back to approved', async () => {
+  ContactLedger.recordContact.mockRejectedValue(new Error('insert failed'));
+  const releaseChain = chain('collection_cases', { result: 1 });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), releaseChain],
+    customers: [chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined })],
+  });
+  await expect(originateCollectionCall('case-1', { now: NOW })).rejects.toThrow('insert failed');
+  expect(releaseChain.where).toHaveBeenCalledWith({ id: 'case-1', current_state: 'dialing', case_version: 3 });
+  expect(releaseChain._updated).toEqual(expect.objectContaining({ current_state: 'approved' }));
 });

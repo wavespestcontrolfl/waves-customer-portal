@@ -82,3 +82,5 @@ review.
     settled by credit and nothing further is owed on it). Ledger row is
     written BEFORE the send (record-then-send); a send failure stamps
     `send_failed` and the model is told to offer the office number instead.
+
+13. **AMD retained (prb-gh3 challenge).** machineDetection=DetectMessageEnd is Twilio carrier-side call-progress classification — no audio reaches our systems or ConversationRelay before press-1, and nothing records. The vestibule blocker (counsel review item) was consent before CR audio processing, which still holds. Counsel should confirm this reading in the pre-flip pass; the alternative (no AMD) plays the voicemail message into answering machines mid-greeting.

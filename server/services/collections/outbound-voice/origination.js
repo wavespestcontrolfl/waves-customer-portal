@@ -135,10 +135,23 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     .update({ current_state: 'dialing', updated_at: db.fn.now() });
   if (!claimed) return { dialed: false, reason: 'dial_claim_lost' };
 
+  // From here to calls.create, a thrown persistence failure must RELEASE
+  // the claim (gh prb-r4): no Twilio call exists yet, so no status callback
+  // will ever reconcile the case — without this it stays stuck in
+  // 'dialing' and every retry refuses.
+  const releaseClaim = async () => {
+    await db('collection_cases')
+      .where({ id: caseRow.id, current_state: 'dialing', case_version: caseRow.case_version })
+      .update({ current_state: 'approved', updated_at: db.fn.now() })
+      .catch((err) => logger.error(`[collections-voice] dial-claim release failed for case ${caseRow.id}: ${err.message}`));
+  };
+
   // ── RECORD-THEN-DIAL: ledger row before any Twilio touch ───────────────
   // recordContact THROWS on failure; the throw propagates and no dial happens
   // (no unledgered customer contact, ever).
-  const ledgerEntry = await ContactLedger.recordContact({
+  let ledgerEntry;
+  try {
+    ledgerEntry = await ContactLedger.recordContact({
     customerId: caseRow.customer_id,
     channel: 'voice',
     purpose: 'late_payment',
@@ -147,12 +160,18 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     metadata: { collectionCaseId: caseRow.id, caseVersion: caseRow.case_version, idempotencyKey },
     occurredAt: now,
   });
+  } catch (err) {
+    await releaseClaim();
+    throw err;
+  }
 
   const TWILIO_NUMBERS = require('../../../config/twilio-numbers');
   const from = TWILIO_NUMBERS.mainLine.number;
 
   // call_log BEFORE calls.create (admin click-to-call pattern).
-  const [callLogRow] = await db('call_log')
+  let callLogRow;
+  try {
+    [callLogRow] = await db('call_log')
     .insert({
       customer_id: caseRow.customer_id,
       direction: 'outbound',
@@ -168,6 +187,11 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
       }),
     })
     .returning(['id']);
+  } catch (err) {
+    await ContactLedger.markSendFailed(ledgerEntry, { stage: 'call_log_insert' });
+    await releaseClaim();
+    throw err;
+  }
   const callLogId = callLogRow?.id;
 
   try {

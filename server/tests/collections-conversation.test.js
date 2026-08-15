@@ -345,7 +345,7 @@ test('send_pay_link with sub-gate OFF ⇒ refused, zero sends', async () => {
   const { convo } = makeConvo();
   await verifyAndDisclose(convo);
   mockScriptedMessages.push(
-    toolUse('send_pay_link'),
+    toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it to me' }),
     endTurn('I am not able to text a link right now — our office can help.'),
   );
   await turn(convo, 'Text me the link.');
@@ -363,14 +363,14 @@ test('send_pay_link: rail-guard consulted first, RECORD-THEN-SEND ordering, once
 
   const { convo } = makeConvo();
   await verifyAndDisclose(convo);
-  mockScriptedMessages.push(toolUse('send_pay_link'), endTurn('Sent — check your texts.'));
+  mockScriptedMessages.push(toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it to me' }), endTurn('Sent — check your texts.'));
   await turn(convo, 'Yes please text it.');
   expect(order).toEqual(['guard', 'ledger', 'send']);
   expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true });
   expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms', invoiceId: 'inv-1' }));
 
   // Second attempt on the same call is refused without another send.
-  mockScriptedMessages.push(toolUse('send_pay_link'), endTurn('It is already on its way.'));
+  mockScriptedMessages.push(toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it to me' }), endTurn('It is already on its way.'));
   await turn(convo, 'Send it again?');
   expect(InvoiceService.sendViaSMS).toHaveBeenCalledTimes(1);
 });
@@ -381,7 +381,7 @@ test('send_pay_link: rail-guard denial ⇒ no ledger row, no send', async () => 
   collectionsChannelPermitted.mockResolvedValue(false);
   const { convo } = makeConvo();
   await verifyAndDisclose(convo);
-  mockScriptedMessages.push(toolUse('send_pay_link'), endTurn('I cannot text this number — our office can help.'));
+  mockScriptedMessages.push(toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it to me' }), endTurn('I cannot text this number — our office can help.'));
   await turn(convo, 'Text me.');
   expect(ContactLedger.recordContact).not.toHaveBeenCalled();
   expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
@@ -393,7 +393,7 @@ test('send failure ⇒ send_failed stamp on the pre-recorded ledger row', async 
   InvoiceService.sendViaSMS.mockRejectedValue(new Error('carrier down'));
   const { convo } = makeConvo();
   await verifyAndDisclose(convo);
-  mockScriptedMessages.push(toolUse('send_pay_link'), endTurn('That did not go through.'));
+  mockScriptedMessages.push(toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it to me' }), endTurn('That did not go through.'));
   await turn(convo, 'Text me.');
   expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
     expect.objectContaining({ id: 'ledger-sms-1' }), expect.anything(),
@@ -455,5 +455,26 @@ describe('prb-r3', () => {
     expect(stored).not.toContain('123456789');
     expect(stored).not.toContain('123-45-6789');
     expect(stored).toContain('[utterance withheld');
+  });
+});
+
+// prb-r4 pins.
+describe('prb-r4', () => {
+  test('pre-verification, model text naming a balance is deflected wholesale', async () => {
+    const { convo, spoken } = makeConvo();
+    mockScriptedMessages.push(endTurn('You have an open balance of $258 on your invoice.'));
+    await turn(convo, 'what is this about?');
+    expect(spoken.join(' ')).not.toContain('open balance');
+    expect(spoken.join(' ')).not.toContain('$258');
+    expect(spoken.join(' ')).toContain('confirmed I am speaking with the right person');
+  });
+
+  test('send_pay_link without the customer\'s verbatim agreement is refused before any gate/consult', async () => {
+    const { convo } = makeConvo();
+    await turn(convo, 'hi');
+    convo.verified = true;
+    convo.disclosed = true;
+    const out = await convo._toolSendPayLink({});
+    expect(out).toContain('agreeing words verbatim');
   });
 });

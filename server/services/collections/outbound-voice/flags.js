@@ -40,13 +40,15 @@ async function writeFlag({ customerId, flag, reason, createdBy = 'system:collect
 async function fileFlagCard({ customerId, flag, detail }) {
   try {
     const NotificationService = require('../../notification-service');
-    await NotificationService.notifyAdmin(
+    const card = await NotificationService.notifyAdmin(
       'billing',
       `Billing follow-up call: ${flag.replace(/_/g, ' ')}`,
       detail,
       { link: `/admin/customers/${customerId}`, metadata: { customerId, flag, source: 'collections_voice' } },
     );
-    return true;
+    // notifyAdmin resolves null on a failed insert (gh prb-r4) — a card
+    // that never persisted is not filed.
+    return Boolean(card && (card.id || card.suppressed));
   } catch (err) {
     logger.warn(`[collections-flags] admin card failed for customer ${customerId} (${flag}): ${err.message}`);
     return false;

@@ -335,7 +335,7 @@ describe('prb-r2', () => {
     expect(res.sendStatus).toHaveBeenCalledWith(204);
     expect(callUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'no-answer', call_outcome: 'missed' }));
     // Back to the review queue, approval cleared, guarded on 'dialing'.
-    expect(caseChain.where).toHaveBeenCalledWith({ id: 'case-1', current_state: 'dialing' });
+    expect(caseChain.where).toHaveBeenCalledWith({ id: 'case-1', current_state: 'dialing', case_version: 3 });
     expect(caseChain.update).toHaveBeenCalledWith(expect.objectContaining({ current_state: 'proposed', hold_reason: 'dial_no-answer' }));
     // Ledger stamped via jsonb MERGE, never a wholesale metadata replace.
     expect(ledgerChain.update).toHaveBeenCalled();
@@ -385,5 +385,39 @@ describe('prb-r3', () => {
     await handlerFor('/collections-transfer-complete')(req({ body: { DialCallStatus: 'busy' } }), res);
     expect(res.body).toContain('the team will help right away');
     expect(res.body).not.toContain('give you a call back');
+  });
+});
+
+// prb-r4: answered rows finalize; press-9 failure files the fallback card.
+describe('prb-r4', () => {
+  test('a completed call finalizes call_log status+duration and touches nothing else', async () => {
+    const callUpdate = chain();
+    const queues = {
+      call_log: [chain({ first: CALL_ROW }), callUpdate],
+      customers: [chain({ first: CUSTOMER })],
+    };
+    db.mockImplementation((t) => (queues[t] && queues[t].length ? queues[t].shift() : chain()));
+    const res = mockRes();
+    res.sendStatus = jest.fn(() => res);
+    await handlerFor('/collections-call-status')(req({ body: { CallStatus: 'completed', CallDuration: '95' } }), res);
+    expect(callUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', duration_seconds: 95 }));
+    expect(callUpdate.update).toHaveBeenCalledWith(expect.not.objectContaining({ call_outcome: expect.anything() }));
+  });
+
+  test('press-9 flag-write failure files the fallback card; card failure drops the promise', async () => {
+    setDb();
+    flags.revokeAutomatedVoiceConsent.mockResolvedValue({ ok: false });
+    NotificationService.notifyAdmin.mockResolvedValue({ id: 'n9' });
+    let res = mockRes();
+    await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '9' } }), res);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('billing', 'Opt-out needs manual action', expect.anything(), expect.anything());
+    expect(res.body).toContain('team will make sure');
+
+    setDb();
+    NotificationService.notifyAdmin.mockResolvedValue(null);
+    res = mockRes();
+    await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '9' } }), res);
+    expect(res.body).not.toContain('team will make sure');
+    expect(res.body).toContain('the team will help right away');
   });
 });

@@ -57,6 +57,12 @@ function transferMissedCallback() {
 
 // Card persistence failed — give the number WITHOUT promising a callback
 // nobody recorded (gh prb-r3).
+// Pre-verification vocabulary screen (gh prb-r4): before identity is
+// verified, the agent must not confirm that any balance, invoice, or amount
+// exists — not even in generic words the post-verify screen permits.
+const PRE_VERIFY_FORBIDDEN_RE = /\b(balance|invoice|amount|owe[sd]?|owing|past.?due|overdue|payment link|pay link)\b|\$\s?\d/i;
+const PRE_VERIFY_DEFLECTION = 'I can only go into the details once I have confirmed I am speaking with the right person. Is this a good time?';
+
 function callbackNumberOnly() {
   return `Please reach us at ${callbackNumber()} and the team will help right away. Goodbye.`;
 }
@@ -130,6 +136,8 @@ module.exports = {
   CONSENT_REVOKED_CONFIRMATION,
   callbackPromise,
   callbackNumberOnly,
+  PRE_VERIFY_FORBIDDEN_RE,
+  PRE_VERIFY_DEFLECTION,
   transferMissedCallback,
   TRANSFER_ANNOUNCEMENT,
   genericCallbackVoicemail,

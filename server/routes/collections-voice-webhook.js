@@ -219,8 +219,25 @@ router.post('/collections-vestibule-key', async (req, res) => {
       if (result.ok) {
         twiml.say(script.CONSENT_REVOKED_CONFIRMATION);
       } else {
-        // Flag write failed — do NOT claim it is done; promise a human.
-        twiml.say('Understood. A member of our team will make sure automated calls to this number are stopped. Goodbye.');
+        // Flag write failed — do NOT claim it is done; promise a human,
+        // and file the fallback task that MAKES the promise true (gh
+        // prb-r4). If the card also fails, the honest copy gives the
+        // number without the promise.
+        let optOutCard = null;
+        try {
+          const NotificationService = require('../services/notification-service');
+          optOutCard = await NotificationService.notifyAdmin(
+            'billing',
+            'Opt-out needs manual action',
+            'A customer pressed 9 to stop automated billing calls, but the durable flag write failed. Please set automated_voice_consent_revoked by hand.',
+            { link: `/admin/customers/${call.customer.id}`, metadata: { source: 'collections_voice', callLogId: call.row.id } },
+          );
+        } catch (cardErr) {
+          logger.error(`[collections-vestibule] opt-out fallback card failed: ${cardErr.message}`);
+        }
+        twiml.say(optOutCard
+          ? 'Understood. A member of our team will make sure automated calls to this number are stopped. Goodbye.'
+          : script.callbackNumberOnly());
       }
       twiml.hangup();
       await writeCallOutcome(call.row.id, {
@@ -388,10 +405,25 @@ router.post('/collections-call-status', async (req, res) => {
     // visibly stuck in 'dialing' — the kill switch means FULL stop.
     if (!isVoiceLatePaymentEnabled()) return res.sendStatus(204);
     const twStatus = String(req.body?.CallStatus || '').toLowerCase();
-    if (!UNANSWERED_STATUSES.has(twStatus)) return res.sendStatus(204);
     const call = await loadCollectionsCall(req);
     if (!call) return res.sendStatus(204);
     const meta = call.meta || {};
+
+    // Answered calls finalize their call_log row here (gh prb-r4 P2): the
+    // vestibule/relay outcome writers own the ledger + case, but nothing
+    // else stamps status/duration on the row — without this, successful
+    // calls read 'initiated' forever. call_outcome is left to the
+    // conversation's own writer.
+    if (twStatus === 'completed') {
+      const duration = parseInt(req.body?.CallDuration, 10);
+      await db('call_log').where({ id: call.row.id }).update({
+        status: 'completed',
+        ...(Number.isFinite(duration) ? { duration_seconds: duration } : {}),
+        updated_at: new Date(),
+      }).catch((err) => logger.warn(`[collections-call-status] completed stamp failed: ${err.message}`));
+      return res.sendStatus(204);
+    }
+    if (!UNANSWERED_STATUSES.has(twStatus)) return res.sendStatus(204);
 
     // ONE transaction (gh prb-r3): the missed outcome, the case reset, and
     // the ledger stamp land together or not at all — a partial write must
@@ -408,7 +440,10 @@ router.post('/collections-call-status', async (req, res) => {
       // regress a live case; never an automatic redial.
       if (meta.collectionCaseId) {
         await trx('collection_cases')
-          .where({ id: meta.collectionCaseId, current_state: 'dialing' })
+          // case_version fences the callback to ITS OWN dial attempt (gh
+          // prb-r4 P2): a delayed retry from an older attempt must not
+          // reset a case a newer approval is actively dialing.
+          .where({ id: meta.collectionCaseId, current_state: 'dialing', case_version: meta.caseVersion })
           .update({
             current_state: 'proposed',
             approved_by: null,

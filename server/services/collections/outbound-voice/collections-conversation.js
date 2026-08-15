@@ -147,8 +147,17 @@ const TOOLS = [
   },
   {
     name: 'send_pay_link',
-    description: 'Text the customer a secure payment link for the open invoice. Only after they agree to receive it.',
-    input_schema: { type: 'object', properties: {} },
+    description: 'Text the customer a secure payment link for the open invoice. Only after they EXPLICITLY agree to receive a text — pass their agreeing words verbatim.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_agreement_verbatim: {
+          type: 'string',
+          description: "The customer's own words agreeing to receive the text, e.g. 'yes, text it to me'.",
+        },
+      },
+      required: ['customer_agreement_verbatim'],
+    },
   },
   {
     name: 'transfer_to_human',
@@ -302,10 +311,20 @@ class CollectionsConversation {
 
   say(text) {
     if (this.ended || !text) return;
+    // Pre-verification, ANY balance/invoice vocabulary is withheld (gh
+    // prb-r4): the tool fence keeps figures unreadable, but raw model text
+    // must not confirm to an unverified answerer that a balance exists.
+    let screened = text;
+    // (The fixed SECURITY_INTERRUPT is exempt — it names "payment link"
+    // without confirming any balance exists.)
+    if (!this.verified && screened !== script.SECURITY_INTERRUPT
+        && script.PRE_VERIFY_FORBIDDEN_RE.test(screened)) {
+      screened = script.PRE_VERIFY_DEFLECTION;
+    }
     // Belt-and-braces language screen on EVERYTHING spoken (model or fixed).
-    const line = script.FORBIDDEN_SPOKEN_RE.test(text)
+    const line = script.FORBIDDEN_SPOKEN_RE.test(screened)
       ? 'Our office can go over the details with you directly. Is there anything else I can help with?'
-      : text;
+      : screened;
     this._turns.push({ role: 'agent', text: line, at: Date.now() });
     try { this._send(line); } catch (e) { logger.error(`[collections-voice] send failed: ${e.message}`); }
   }
@@ -420,6 +439,10 @@ class CollectionsConversation {
         clearTimeout(timer);
       }
 
+      // The socket may have closed while finalMessage was pending (gh
+      // prb-r4): a late model response must neither speak nor run writes.
+      if (this.ended) return;
+
       const text = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
       const hasPendingWrite = msg.stop_reason === 'tool_use'
         && msg.content.some((b) => b.type === 'tool_use' && WRITE_TOOLS.has(b.name));
@@ -480,7 +503,7 @@ class CollectionsConversation {
       case 'record_payment_intent': return this._toolRecordPaymentIntent(input);
       case 'record_dispute': return this._toolRecordDispute(input);
       case 'record_do_not_call': return this._toolRecordDoNotCall(input);
-      case 'send_pay_link': return this._toolSendPayLink();
+      case 'send_pay_link': return this._toolSendPayLink(input);
       case 'transfer_to_human': return this._toolTransfer();
       case 'end_call': return this._toolEndCall();
       default: return `Unknown tool.`;
@@ -500,11 +523,22 @@ class CollectionsConversation {
           detail: 'answerer said the customer is not known at this number',
         });
       } else {
-        await flags.fileFlagCard({
+        const carded = await flags.fileFlagCard({
           customerId: this._ctx.customer.id,
           flag: 'wrong_party_review',
           detail: 'An outbound billing follow-up call was answered by someone other than the customer. No account details were shared. Review before any further outreach.',
-        }).catch(() => {});
+        }).catch(() => false);
+        if (!carded) {
+          // The card is the only review artifact before the case returns
+          // to the queue (gh prb-r4) — when it fails, the DURABLE fallback
+          // is a collection_hold flag: absolute, blocks every channel
+          // until a human reviews and releases it.
+          await flags.writeFlag({
+            customerId: this._ctx.customer.id,
+            flag: 'collection_hold',
+            reason: 'wrong-party answer on billing follow-up call; review card failed to file',
+          }).catch((err) => logger.error(`[collections-voice] wrong-party fallback hold failed: ${err.message}`));
+        }
       }
       this.say(script.WRONG_PARTY_CLOSE);
       await this._finish('wrong_party', { endSession: true });
@@ -614,8 +648,15 @@ class CollectionsConversation {
     return 'Recorded — automated calls are stopped. Confirm that to the caller.';
   }
 
-  async _toolSendPayLink() {
+  async _toolSendPayLink(input) {
     if (!this.verified || !this.disclosed) return 'Refused: only after verification and the balance discussion.';
+    // Code-level consent evidence (gh prb-r4): the customer's own agreeing
+    // words ride the tool call, persist to the captures for the pilot's
+    // transcript review, and an empty/absent agreement refuses the send.
+    const agreement = String(input?.customer_agreement_verbatim || '').trim();
+    if (agreement.length < 2) {
+      return 'Refused: ask the customer if they would like the link texted, and pass their agreeing words verbatim.';
+    }
     if (!isPayLinkEnabled()) {
       return 'The pay-link text is not available. Offer the office number for payment instead.';
     }
@@ -661,7 +702,8 @@ class CollectionsConversation {
       if (result && result.covered_by_credit) {
         // Account credit fully covered the invoice — nothing was texted and
         // nothing is owed on it. The truth, not a false "link sent".
-        this.payLinkSent = true;
+        this._captures.payLinkAgreementVerbatim = (() => { try { const { scrubPans } = require('../../../utils/pan-scrub'); return scrubPans(agreement).slice(0, 200); } catch { return null; } })();
+    this.payLinkSent = true;
         return 'No text was needed: account credit covered that invoice in full. Tell the customer it is settled.';
       }
       if (result && (result.sent || result.ok)) {
@@ -767,11 +809,15 @@ class CollectionsConversation {
       logger.error(`[collections-voice] transcript write failed callSid=${this.callSid}: ${err.message}`);
     }
     if (this._ctx?.callLogId) {
-      await writeCallOutcome(this._ctx.callLogId, {
+      const res = await writeCallOutcome(this._ctx.callLogId, {
         outcome,
         captures: this._captures,
         now: this._now(),
       });
+      // A resolved-but-failed outcome write (gh prb-r4: writeCallOutcome
+      // catches and resolves { ok: false }) must not latch persistence —
+      // the next persistence trigger retries the ledger/case outcome.
+      if (res && res.ok === false) this._persisted = false;
     }
   }
 
