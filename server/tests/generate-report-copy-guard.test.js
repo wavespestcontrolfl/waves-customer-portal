@@ -236,6 +236,38 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(block).not.toMatch(/Findings observed:[^]*Recommend liquid/);
   });
 
+  test('completed-action suffixes classify as work (r4: _replaced/_placed/_applied/_cleaned)', () => {
+    const rodent = typedFindingsPromptSections('rodent_bait_station', { bait_replaced: 'Yes' });
+    expect(rodent.work.length).toBe(1);
+    expect(rodent.observations.length).toBe(0);
+    const roach = typedFindingsPromptSections('german_roach_knockdown', { monitors_placed: '4' });
+    expect(roach.work.join(' ')).toContain('4');
+    const ts = typedFindingsPromptSections('tree_shrub', { pre_emergent_applied: 'Yes' }, { companion: true });
+    expect(ts.work.length).toBe(1);
+  });
+
+  test('typed free-text values are access-code redacted before the prompt', () => {
+    const sections = typedFindingsPromptSections('termite_treatment', {
+      areas_treated: 'Rear beds, gate code 4321, garage slab',
+    });
+    const all = [...sections.work, ...sections.observations].join(' ');
+    expect(all).not.toContain('4321');
+    expect(all).toContain('[redacted]');
+  });
+
+  test('reportCopyRejection rejects copy carrying an access code', () => {
+    expect(reportCopyRejection('We treated the perimeter. The rear gate code 1234 was used for entry.')).toBe('access_code');
+    expect(reportCopyRejection('We treated the perimeter and closed the rear gate after service.')).toBeNull();
+  });
+
+  test('product-record raw values ride productValues for the trade-name output guard', () => {
+    const sections = typedFindingsPromptSections('termite_treatment', {
+      products_used: 'Termidor HE',
+      treatment_method: 'Trenching',
+    });
+    expect(sections.productValues).toEqual(['Termidor HE']);
+  });
+
   test('only auto_send companions are customer-facing; internal_only stay staff-only', () => {
     expect(customerFacingCompanionTypes([
       { type: 'tree_shrub', delivery: 'auto_send' },

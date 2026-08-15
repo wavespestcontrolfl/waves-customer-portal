@@ -11597,9 +11597,18 @@ export function CompletionPanel({
     // primary — companion-only profiles (e.g. lawn_tree_shrub_combo) have no
     // primary findings type, and each companion carries its own chips and
     // activity score with the same provenance split the server prompt draws.
-    const nonEmptyValues = (obj) => Object.values(obj || {}).some(
-      (v) => (Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== ""),
-    );
+    // Schema-internal fields (compliance/calibration) never reach the prompt,
+    // so they can't open the generation gate either — mirrors the server's
+    // sections-based check (codex r4).
+    const nonInternalValuesNonEmpty = (schema, obj) => {
+      const internalKeys = new Set(
+        (schema?.fields || []).filter((f) => f.internal).map((f) => f.key),
+      );
+      return Object.entries(obj || {}).some(
+        ([key, v]) => !internalKeys.has(key)
+          && (Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== ""),
+      );
+    };
     const companionPayload = companionSchemas.length
       ? {
         companionFindings: companionSchemas.map((schema) => {
@@ -11627,7 +11636,7 @@ export function CompletionPanel({
       ...companionPayload,
     };
     const typedHasFindingInput = (isTypedFindings && (
-      nonEmptyValues(findingsValues)
+      nonInternalValuesNonEmpty(typedFindingsSchema, findingsValues)
       || typedNextStepChips.length > 0
       || typedActivityScore != null
     ))
@@ -11635,7 +11644,8 @@ export function CompletionPanel({
         const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
         // A manually tapped companion activity gauge is substantive on its
         // own — same rule as the primary score (codex r3).
-        return nonEmptyValues(entry.values) || (entry.chips || []).length > 0
+        return nonInternalValuesNonEmpty(schema, entry.values)
+          || (entry.chips || []).length > 0
           || Number.isInteger(entry.score);
       });
     // Mirror the final-submit gate (handleSubmit only sends customerConcernText
