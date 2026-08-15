@@ -581,7 +581,13 @@ export default function TriageInboxTabV2() {
                           ) : (
                             <Badge tone="neutral">Auto-routed{item.sms_enqueued ? " · SMS sent" : ""}</Badge>
                           )}
-                          <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
+                          {/* route_feedback joins by call_log_id, so a verdict
+                              on the call's ROUTING card would render here as if
+                              it judged this still-pending property card — the
+                              two resolve independently. */}
+                          {!isPropertyRoleCard && (
+                            <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
+                          )}
                         </div>
                         <div className="text-12 text-ink-tertiary mt-0.5">
                           {(item.customer_phone || item.from_phone || "")}{" · "}

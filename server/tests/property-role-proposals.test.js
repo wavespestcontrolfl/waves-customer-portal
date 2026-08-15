@@ -105,6 +105,53 @@ describe('buildPropertyRoleProposals', () => {
     expect(proposals).toHaveLength(0);
   });
 
+  // The extraction schema doesn't enforce unique addresses — one property can
+  // appear as the main entry AND again in additional_properties (codex r6).
+  test('duplicate entries for one address with CONFLICTING occupancies drop that occupancy signal', () => {
+    const { fills, proposals } = buildPropertyRoleProposals({
+      classified: [
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: 'seasonal', is_primary_residence: null },
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: 'rental_investment', is_primary_residence: null },
+      ],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    expect(fills).toHaveLength(0); // stored 'unknown' — but the model contradicted itself, so no first-write-wins fill
+    expect(proposals).toHaveLength(0);
+  });
+
+  test('duplicate entries for one address with complementary signals merge into ONE classification', () => {
+    const { fills, proposals } = buildPropertyRoleProposals({
+      classified: [
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true },
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: 'owner_occupied', is_primary_residence: null },
+      ],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    expect(fills).toEqual([{ property_id: 'prop-new', occupancy: 'owner_occupied' }]);
+    // Merged = ONE primary claimant, not two — the flip still proposes.
+    expect(proposals.filter((p) => p.kind === 'primary_flip')).toHaveLength(1);
+  });
+
+  test('conflicting primary-residence claims on ONE address drop the claim; agreeing duplicates count once', () => {
+    const conflicted = buildPropertyRoleProposals({
+      classified: [
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true },
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: false },
+      ],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    expect(conflicted.proposals.filter((p) => p.kind === 'primary_flip')).toHaveLength(0);
+    const agreeing = buildPropertyRoleProposals({
+      classified: [
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true },
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true },
+      ],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    // Same address twice ≠ two claimant properties — no false contradiction.
+    expect(agreeing.proposals.filter((p) => p.kind === 'primary_flip')).toHaveLength(1);
+  });
+
   test('matching stored occupancy produces neither fill nor proposal', () => {
     const { fills, proposals } = buildPropertyRoleProposals({
       classified: [{ address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: 'owner_occupied', is_primary_residence: null }],
@@ -186,6 +233,41 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     const mirror = u.find((x) => x.table === 'customers');
     expect(mirror.patch).toMatchObject({ address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', latitude: 27.5 });
     expect(mirror.patch.nearest_location_id).toBeTruthy();
+  });
+
+  test('backfills coords onto visits ALREADY stamped/linked to the old primary with NULL lat/lng (codex r6)', async () => {
+    const old = { ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1' };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{
+        kind: 'primary_flip',
+        new_primary_property_id: 'prop-new',
+        old_primary_property_id: 'prop-old',
+      }],
+    });
+    // Post-flip, stampedDivergesSql kills the customer-coord fallback for
+    // rows stamped to the old primary — the second scheduled_services update
+    // stamps the old primary's own coords, fenced to NULL-coord rows only.
+    const ssUpdates = trx._updates.filter((x) => x.table === 'scheduled_services');
+    expect(ssUpdates).toHaveLength(2);
+    const backfill = ssUpdates[1];
+    expect(backfill.patch).toMatchObject({ lat: 27.4, lng: -82.4 });
+    expect(backfill.whereNulls).toEqual(expect.arrayContaining(['lat', 'lng']));
+    expect(backfill.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped']]);
+  });
+
+  test('coord backfill is skipped entirely when the old primary has no coordinates', async () => {
+    const old = { ...OLD_HOME, state: 'FL', latitude: null, longitude: null, active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, state: 'FL', active: true, customer_id: 'cust-1' };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
+    });
+    // Only the pin update — never a backfill stamping NULL over NULL.
+    expect(trx._updates.filter((x) => x.table === 'scheduled_services')).toHaveLength(1);
   });
 
   test('re-click on an already-flipped card is idempotent (applied, no writes)', async () => {

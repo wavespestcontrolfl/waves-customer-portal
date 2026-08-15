@@ -83,6 +83,53 @@ function classifiedPropertiesFromExtraction(extracted = {}, additionalProps = []
 }
 
 /**
+ * The extraction schema does not enforce unique addresses — one property can
+ * appear both as the main entry and again in additional_properties. Merge
+ * duplicates by addressKey so a single address yields ONE classification
+ * (codex #3418 r6): agreeing signals combine; a conflicting occupancy or
+ * primary-residence claim across duplicates means the model contradicted
+ * itself about that address, so that signal is DROPPED (logged), never
+ * resolved by array order. Keyless entries can't be grouped (or matched to
+ * rows) and pass through untouched.
+ */
+function dedupeClassified(classified) {
+  const out = [];
+  const byKey = new Map();
+  for (const entry of classified) {
+    const key = addressKey(entry);
+    if (!key) { out.push(entry); continue; }
+    const prev = byKey.get(key);
+    if (!prev) {
+      const merged = { ...entry };
+      byKey.set(key, merged);
+      out.push(merged);
+      continue;
+    }
+    if (entry.occupancy) {
+      if (prev._occupancy_conflict || (prev.occupancy && prev.occupancy !== entry.occupancy)) {
+        logger.warn('[property-role] one address classified with conflicting occupancies across duplicate entries — occupancy signal dropped for that address');
+        prev.occupancy = null;
+        prev._occupancy_conflict = true;
+      } else if (!prev.occupancy) {
+        prev.occupancy = entry.occupancy;
+      }
+    }
+    if (typeof entry.is_primary_residence === 'boolean') {
+      if (prev._primary_conflict
+        || (typeof prev.is_primary_residence === 'boolean' && prev.is_primary_residence !== entry.is_primary_residence)) {
+        logger.warn('[property-role] one address carries conflicting primary-residence claims across duplicate entries — claim dropped for that address');
+        prev.is_primary_residence = null;
+        prev._primary_conflict = true;
+      } else if (prev.is_primary_residence === null) {
+        prev.is_primary_residence = entry.is_primary_residence;
+      }
+    }
+    if (!prev.evidence && entry.evidence) prev.evidence = entry.evidence;
+  }
+  return out;
+}
+
+/**
  * Pure core: match classified properties to the customer's current rows and
  * split into direct fills vs parked proposals.
  *
@@ -92,7 +139,8 @@ function classifiedPropertiesFromExtraction(extracted = {}, additionalProps = []
  * classified as the caller's primary residence and it is not already the
  * primary row — two claimants is a model contradiction, so nothing flips.
  */
-function buildPropertyRoleProposals({ classified = [], properties = [] }) {
+function buildPropertyRoleProposals({ classified: rawClassified = [], properties = [] }) {
+  const classified = dedupeClassified(rawClassified);
   const fills = [];
   const proposals = [];
   const rowsByKey = new Map();
@@ -375,6 +423,34 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
             updated_at: new Date(),
           });
 
+        // Coordinate backfill for visits ALREADY identified as the old
+        // primary (codex #3418 r6): a non-terminal row linked by
+        // property_id or address-stamped to the old primary but carrying
+        // NULL lat/lng was relying on the customer-coordinate fallback —
+        // valid while its stamp matched the mirror. After the flip,
+        // stampedDivergesSql disables that fallback and the stop goes
+        // coordless. Stamp the old primary's own coords onto exactly those
+        // rows; real coordinates are never overwritten (NULL-only fence).
+        if (oldPrimary.latitude != null && oldPrimary.longitude != null) {
+          await trx('scheduled_services')
+            .where({ customer_id: customerId })
+            .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+            .whereNull('lat')
+            .whereNull('lng')
+            .where((qb) => qb
+              .where({ property_id: oldPrimary.id })
+              .orWhere((qb2) => qb2
+                .whereRaw('lower(service_address_line1) = lower(?)', [oldPrimary.address_line1 || ''])
+                .andWhere((qb3) => qb3
+                  .whereNull('service_address_zip')
+                  .orWhere('service_address_zip', oldPrimary.zip))))
+            .update({
+              lat: oldPrimary.latitude,
+              lng: oldPrimary.longitude,
+              updated_at: new Date(),
+            });
+        }
+
         // The demote NEVER writes occupancy — the old row's reclassification
         // rides the sibling occupancy_change proposal, whose compare-and-swap
         // yields to any newer admin edit (codex #3418 r2). The label
@@ -467,6 +543,7 @@ module.exports = {
   _test: {
     knownOccupancy,
     classifiedPropertiesFromExtraction,
+    dedupeClassified,
     buildPropertyRoleProposals,
   },
 };

@@ -8276,6 +8276,39 @@ const CallRecordingProcessor = {
             const roleAdditionalProps = v2RoleProp
               ? require('../utils/extraction-compat').mapAdditionalPropertiesToLegacy(v2RoleProp.additional_properties)
               : callAdditionalProps;
+            // Persist the V2 address set BEFORE matching (codex #3418 r6):
+            // the persistence loop above records `extracted` and the
+            // V1-preferred additional list, so when V1/V2 disagree a
+            // V2-only address has no durable row and its classification
+            // would be silently dropped by the staging's no-matching-row
+            // skip. recordCallProperty dedups on the full address key, so
+            // addresses V1 also carried are no-ops; same city+ZIP
+            // completeness rule as the V1 loop. Occupancy stays
+            // 'unknown' (rental only on the entry's own explicit signal)
+            // — the role staging right below fills/parks the classified
+            // occupancy through its own fences.
+            if (v2RoleProp) {
+              const v2Persist = [
+                { ...roleView, is_rental: false },
+                ...roleAdditionalProps,
+              ];
+              for (const entry of v2Persist) {
+                const entryCity = String(entry.city || '').trim();
+                const entryZip = String(entry.zip || '').trim();
+                if (!String(entry.address_line1 || '').trim() || !entryCity || !entryZip) continue;
+                const recordedV2 = await customerProperties.recordCallProperty({
+                  customerId,
+                  address_line1: entry.address_line1,
+                  address_line2: entry.address_line2 || null,
+                  city: entryCity,
+                  state: entry.state || extracted.state,
+                  zip: entryZip,
+                  occupancyType: entry.is_rental ? 'rental_investment' : 'unknown',
+                  source: 'call_pipeline',
+                });
+                enqueueLookup(recordedV2);
+              }
+            }
             const staged = await stagePropertyRoleReview({
               db,
               customerId,
