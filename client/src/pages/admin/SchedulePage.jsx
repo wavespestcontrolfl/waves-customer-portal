@@ -3390,6 +3390,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <BestTimeHint
                 bestTimes={bestTimes}
                 currentStart={form.windowStart}
+                currentTechnicianId={form.technicianId}
                 onPick={(slot) =>
                   // An unassigned visit searched all techs, so the detour
                   // is slot.technicianId's — adopt that tech with the
@@ -6210,6 +6211,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
             <BestTimeHint
               bestTimes={manualBestTimes}
               currentStart={manualTime}
+              currentTechnicianId={service.technicianId || service.technician_id}
               onPick={(slot) => setManualTime(slot.start)}
               style={{ marginTop: 10 }}
             />

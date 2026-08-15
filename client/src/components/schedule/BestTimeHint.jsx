@@ -24,7 +24,7 @@ export function bestTimeLabel(slot) {
   return slot.technicianName ? `${base} · ${slot.technicianName}` : base;
 }
 
-export default function BestTimeHint({ bestTimes, onPick, currentStart, style }) {
+export default function BestTimeHint({ bestTimes, onPick, currentStart, currentTechnicianId, style }) {
   if (!bestTimes?.length) return null;
   const interactive = typeof onPick === 'function';
   return (
@@ -36,13 +36,20 @@ export default function BestTimeHint({ bestTimes, onPick, currentStart, style })
       <span>Best times this day:</span>
       {bestTimes.slice(0, 3).map((slot) => {
         const current = currentStart && String(currentStart).slice(0, 5) === String(slot.start).slice(0, 5);
+        // A current-time chip goes inert only when picking it would be a
+        // no-op — on surfaces where a pick also adopts the slot's tech
+        // (create/edit, passed via currentTechnicianId), a matching time
+        // with a DIFFERENT tech must stay tappable or the operator can't
+        // take the route the detour was scored for.
+        const techMatches = !slot.technicianId
+          || String(slot.technicianId) === String(currentTechnicianId ?? '');
         const chipStyle = {
           padding: '3px 8px', borderRadius: 6, fontSize: 12,
           border: `1px solid ${current ? '#A1A1AA' : '#D4D4D8'}`,
           background: current ? '#F4F4F5' : 'transparent',
           color: current ? '#18181B' : '#52525B',
         };
-        if (!interactive || current) {
+        if (!interactive || (current && techMatches)) {
           return (
             <span key={slot.start} style={chipStyle}>
               {bestTimeLabel(slot)}

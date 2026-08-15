@@ -810,6 +810,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
             <BestTimeHint
               bestTimes={bestTimes}
               currentStart={isCustom ? customStart : selected?.window?.start}
+              currentTechnicianId={service.technicianId || service.technician_id}
               onPick={isCustom ? (slot) => setCustomStart(slot.start) : undefined}
               style={{ marginTop: -8, marginBottom: 18 }}
             />
