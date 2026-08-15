@@ -12204,9 +12204,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // customer copy for the matching lawn action; only distinctive brand
       // tokens ("Dispatch") may reject (codex r28)
       'wetting', 'agent', 'sprayable', 'spreader', 'sticker', 'adjuvant',
-      // common English words inside brand names ("Bora-Care") — only the
-      // distinctive half rejects (codex r32)
+      // common English words inside brand names ("Bora-Care", "T-Zone SE") —
+      // only the distinctive half rejects (codex r32/r33)
       'care', 'guard', 'shield', 'defense', 'complete', 'advance', 'advanced',
+      'zone', 'zones', 'select', 'super', 'total', 'ultra', 'prime',
     ]);
     const guardedProducts = [
       ...(Array.isArray(products) ? products : []),
