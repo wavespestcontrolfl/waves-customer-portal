@@ -11549,8 +11549,10 @@ export function CompletionPanel({
     // Telemetry (specialty completion contract): an installed AI report is
     // an AI-assisted completion — persisted as ai_draft_used (codex r14).
     // A double-provider miss returns deterministic template copy, which is
-    // NOT AI-assisted and must not inflate the metric (codex r19).
-    if (!deterministic) setAiReportUsed(true);
+    // NOT AI-assisted and must not inflate the metric (codex r19) — and a
+    // deterministic REGENERATION replaces a previously installed AI report,
+    // so the flag follows each installed result exactly (codex r29).
+    setAiReportUsed(!deterministic);
     generatedReportTextRef.current = String(reportText || "").trim();
     setGeneratedReportCleared(false);
     if (!chipLinesDetached) {
