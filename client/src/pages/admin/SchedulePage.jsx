@@ -10911,6 +10911,10 @@ export function CompletionPanel({
         // post-AI-draft (no chip lines in notes) must restore as detached or
         // labelsStillInNotes would silently drop every structured selection.
         chipLinesDetached,
+        // AI-usage telemetry must survive the supported draft-resume flows
+        // (billing-409 detour, reload) or the resumed completion records
+        // aiDraftUsed: false for an AI-installed report (codex r17).
+        aiReportUsed,
         nextVisitNote,
         showNextVisitNote,
         treeShrubCloseout,
@@ -10980,6 +10984,7 @@ export function CompletionPanel({
     observationsText,
     recommendationsText,
     chipLinesDetached,
+    aiReportUsed,
     nextVisitNote,
     showNextVisitNote,
     treeShrubCloseout,
@@ -11183,6 +11188,8 @@ export function CompletionPanel({
     // Drafts saved before the detached-selection model lack the field → false,
     // which matches their notes still carrying the chip-marker lines.
     setChipLinesDetached(savedDraft.chipLinesDetached === true);
+    // Older drafts lack the field → false, matching their pre-AI notes.
+    setAiReportUsed(savedDraft.aiReportUsed === true);
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
     setTreeShrubCloseout(
