@@ -1145,3 +1145,36 @@ describe('prb-r16', () => {
     expect(ContactLedger.recordContact).not.toHaveBeenCalled();
   });
 });
+
+// prb-r17 pins.
+describe('prb-r17', () => {
+  test('"yes, send that link by email" is honored as email — no SMS goes out', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    mockScriptedMessages.push(
+      toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, send it' }),
+      endTurn('I can only text it — our office can email you.'),
+    );
+    await turn(convo, 'yes, send that link by email');
+    expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+  });
+
+  test('numeric ("8/20"), ordinal ("the 20th"), and relative ("tomorrow") dates all ground', async () => {
+    const { convo } = makeConvo(); // now = Wed 2026-08-12 ET
+    await turn(convo, 'hello');
+    convo.state = 'RESOLUTION';
+
+    convo._turns.push({ role: 'caller', text: "I'll pay on 8/20", at: Date.now() });
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-28' })).toContain('does not match');
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-20' })).toContain('Recorded');
+
+    convo._turns.push({ role: 'caller', text: 'the 20th works', at: Date.now() });
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-21' })).toContain('does not match');
+
+    convo._turns.push({ role: 'caller', text: 'tomorrow works', at: Date.now() });
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-20' })).toContain('does not match today/tomorrow');
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-13' })).toContain('Recorded');
+  });
+});

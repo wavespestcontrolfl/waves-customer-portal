@@ -586,3 +586,22 @@ test('press-1 with a newly active suppression hangs up before any ConversationRe
   expect(res.body).toContain('<Hangup/>');
   expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({ outcome: 'suppressed_at_answer' }));
 });
+
+// prb-r17: unanswered dials finalize their ledger row NON-LIVE — an
+// outcome-less voice row reads as an in-flight live conversation to the
+// sms/email policy and would silence texts for a week.
+test('an unanswered dial finalizes the ledger row with a non-live outcome', async () => {
+  const ledgerChain = chain();
+  const queues = {
+    call_log: [chain({ first: CALL_ROW }), chain()],
+    collection_cases: [chain({ first: LINKED_CASE }), chain()],
+    customers: [chain({ first: CUSTOMER })],
+    collections_contact_ledger: [ledgerChain],
+  };
+  db.mockImplementation((t) => (queues[t] && queues[t].length ? queues[t].shift() : chain()));
+  const res = mockRes();
+  res.sendStatus = jest.fn(() => res);
+  await handlerFor('/collections-call-status')(req({ body: { CallStatus: 'no-answer' } }), res);
+  const payload = JSON.parse(ledgerChain.update.mock.calls[0][0].metadata.bindings[0]);
+  expect(payload).toMatchObject({ send_failed: true, outcome: 'missed', live_conversation: false });
+});

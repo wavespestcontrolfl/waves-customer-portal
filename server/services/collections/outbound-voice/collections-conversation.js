@@ -1000,6 +1000,31 @@ class CollectionsConversation {
     if (saidMonth >= 0 && spokenNumbers.length && !spokenNumbers.includes(d.getUTCDate())) {
       return 'Refused: that day of the month does not match what the customer said. Record exactly what they said.';
     }
+    // Numeric and relative forms ground too (gh prb-r17): "8/20", a bare
+    // ordinal ("the 20th"), and today/tomorrow each pin the component they
+    // carry — no named month required.
+    const numericDate = lastCallerTurn.match(/\b(\d{1,2})\s*[/-]\s*(\d{1,2})\b/);
+    if (numericDate) {
+      const nm = parseInt(numericDate[1], 10);
+      const nd = parseInt(numericDate[2], 10);
+      if (d.getUTCMonth() + 1 !== nm || d.getUTCDate() !== nd) {
+        return 'Refused: that date does not match the numbers the customer said. Record exactly what they said.';
+      }
+    }
+    const ordinal = lastCallerTurn.match(/\b([1-9]|[12]\d|3[01])(?:st|nd|rd|th)\b/i);
+    if (ordinal && d.getUTCDate() !== parseInt(ordinal[1], 10)) {
+      return 'Refused: that day of the month does not match what the customer said. Record exactly what they said.';
+    }
+    if (/\b(today|tomorrow)\b/i.test(lastCallerTurn)) {
+      const { etCalendarDayOf } = require('../../../utils/datetime-et');
+      const now = this._now();
+      const expected = /\btomorrow\b/i.test(lastCallerTurn)
+        ? etCalendarDayOf(new Date(now.getTime() + 24 * 60 * 60 * 1000))
+        : etCalendarDayOf(now);
+      if (date !== expected) {
+        return 'Refused: that date does not match today/tomorrow. Convert using today\'s date from your instructions.';
+      }
+    }
     this._captures.customerIntendedPaymentDate = date;
     return `Recorded: the customer intends to pay on ${date}. Thank them — do not press further.`;
   }
@@ -1136,6 +1161,13 @@ class CollectionsConversation {
     const lastCallerTurn = this._lastCallerText();
     if (!AFFIRM_RE.test(lastCallerTurn) || NEGATE_RE.test(lastCallerTurn)) {
       return 'Refused: the customer\'s own last words do not clearly agree. Ask plainly if they would like the link texted, and call this tool right after they say yes.';
+    }
+    // A caller who NAMES a different channel gets that instruction honored
+    // (gh prb-r17): "yes, send that link by email" is not SMS consent —
+    // only an explicit text/SMS term alongside overrides it.
+    if (/\b(e-?mail|mail (?:it|me|that))\b/i.test(lastCallerTurn)
+        && !/\b(text|txt|sms)\b/i.test(lastCallerTurn)) {
+      return 'Refused: the customer asked for a different channel, not a text. This call can only text the link — offer the office number or the office email instead.';
     }
     // The affirmative must be ABOUT the text (gh prb-r14): "yes, that
     // amount is correct" is not SMS consent. Either the caller's words

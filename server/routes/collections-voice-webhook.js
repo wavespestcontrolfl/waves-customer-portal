@@ -601,12 +601,16 @@ router.post('/collections-call-status', async (req, res) => {
       }
       // The attempt stands in the frequency window (over-suppression is the
       // safe direction) but is stamped undelivered via jsonb merge — never
-      // a wholesale metadata replace.
+      // a wholesale metadata replace. The row is FINALIZED non-live too
+      // (gh prb-r17): an outcome-less voice row reads as an in-flight live
+      // conversation to the sms/email policy, so an unanswered dial would
+      // otherwise silence texts for a full week instead of its intended
+      // 24h/voice-spacing windows.
       if (meta.ledgerId) {
         await trx('collections_contact_ledger').where({ id: meta.ledgerId }).update({
           metadata: trx.raw(
             "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
-            [JSON.stringify({ send_failed: true, dial_status: twStatus })],
+            [JSON.stringify({ send_failed: true, dial_status: twStatus, outcome: 'missed', live_conversation: false })],
           ),
         });
       }
