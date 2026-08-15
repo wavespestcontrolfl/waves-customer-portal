@@ -2,43 +2,50 @@
 // not serialized with the /call-status inbound fallback — an instantly-
 // terminal call (no-answer/busy) whose status callback beat the /voice
 // delivery double-inserted the SID (14 sub-second race pairs in prod, all
-// bare rows: no recording/transcript/extraction). Dedupe those artifacts,
-// then add the partial unique index as the permanent backstop for the
+// bare rows: no recording/transcript/extraction). Merge each duplicate group
+// into one canonical row, re-point any FK references, delete the merged-away
+// rows, then add the partial unique index as the permanent backstop for the
 // now-serialized webhook writers.
 //
-// Dedupe is deliberately conservative: only later-created rows that are BARE
-// (no recording, transcription, or extraction) and referenced by no FK are
-// deleted. If an unexpected dup survives, the index is SKIPPED with a loud
-// log instead of failing the migration — a blocked deploy is worse than a
-// missing backstop (the advisory-lock serialization holds either way).
+// Nothing is discarded: scalar linkage (customer link, terminal status,
+// duration, outcome) and metadata keys are folded into the kept row first,
+// and FK references are moved, not orphaned. The only unresolvable shape —
+// two rows for one SID BOTH carrying recording/transcript/extraction
+// artifacts — throws, deliberately failing the migration for manual
+// resolution rather than guessing which call history to keep.
+
+const TERMINAL_CALL_STATUSES = ['completed', 'no-answer', 'busy', 'failed', 'canceled'];
+
+function hasArtifacts(row) {
+  return Boolean(row.recording_sid || row.transcription || row.ai_extraction || row.ai_extraction_enriched);
+}
+
+function asMetaObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string' && value) {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
 
 exports.up = async function up(knex) {
   const hasTable = await knex.schema.hasTable('call_log');
   if (!hasTable) return;
 
-  // Loser candidates: per duplicated SID, everything after the first-created
-  // row, provided the row is bare.
-  const { rows: losers } = await knex.raw(`
-    SELECT id FROM (
-      SELECT id, recording_sid, transcription, ai_extraction, ai_extraction_enriched,
-             row_number() OVER (PARTITION BY twilio_call_sid ORDER BY created_at, id) AS rn
-      FROM call_log
-      WHERE twilio_call_sid IN (
-        SELECT twilio_call_sid FROM call_log
-        WHERE twilio_call_sid IS NOT NULL
-        GROUP BY twilio_call_sid HAVING count(*) > 1
-      )
-    ) d
-    WHERE rn > 1
-      AND recording_sid IS NULL AND transcription IS NULL
-      AND ai_extraction IS NULL AND ai_extraction_enriched IS NULL
-  `);
-  let loserIds = losers.map((r) => r.id);
+  const dupGroups = await knex('call_log')
+    .select('twilio_call_sid')
+    .whereNotNull('twilio_call_sid')
+    .groupBy('twilio_call_sid')
+    .havingRaw('count(*) > 1');
 
-  if (loserIds.length > 0) {
-    // Drop any candidate another table points at — discovered live from
-    // pg_constraint so a future FK can never be silently orphaned by this
-    // migration re-running in another environment.
+  if (dupGroups.length > 0) {
+    // FK set discovered live from pg_constraint so a future referencing table
+    // can never be silently orphaned by this migration running elsewhere.
     const { rows: fks } = await knex.raw(`
       SELECT c.conrelid::regclass::text AS tbl, a.attname AS col
       FROM pg_constraint c
@@ -46,33 +53,64 @@ exports.up = async function up(knex) {
       JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
       WHERE c.confrelid = 'call_log'::regclass AND c.contype = 'f'
     `);
-    for (const fk of fks) {
-      if (loserIds.length === 0) break;
-      const { rows: referenced } = await knex.raw(
-        `SELECT DISTINCT "${fk.col}" AS id FROM "${fk.tbl}" WHERE "${fk.col}" = ANY(?::uuid[])`,
-        [loserIds]
+
+    for (const group of dupGroups) {
+      const rows = await knex('call_log')
+        .where('twilio_call_sid', group.twilio_call_sid)
+        .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }]);
+
+      // Canonical row: the artifact-bearing one if exactly one exists,
+      // otherwise the first-created. Two artifact-bearing rows = unresolvable.
+      const withArtifacts = rows.filter(hasArtifacts);
+      if (withArtifacts.length > 1) {
+        throw new Error(
+          `[migration call_log_twilio_sid_unique] twilio_call_sid ${group.twilio_call_sid} has ${withArtifacts.length} rows carrying recording/transcript/extraction artifacts — resolve by hand before this migration can dedupe.`
+        );
+      }
+      const winner = withArtifacts[0] || rows[0];
+      const losers = rows.filter((r) => r.id !== winner.id);
+
+      // Fold every non-redundant scalar into the winner. Terminal status wins
+      // over a transient one ('ringing'/'in-progress' from the /voice leg);
+      // duration takes the largest observed value; metadata keeps the
+      // winner's values on shared keys and adopts keys only a loser wrote.
+      const loserTerminal = losers.map((r) => r.status).find((s) => TERMINAL_CALL_STATUSES.includes(s));
+      const mergedStatus = TERMINAL_CALL_STATUSES.includes(winner.status)
+        ? winner.status
+        : (loserTerminal || winner.status);
+      const durations = rows.map((r) => r.duration_seconds).filter((d) => d !== null && d !== undefined);
+      const mergedDuration = durations.length > 0 ? Math.max(...durations) : null;
+      const mergedMeta = Object.assign(
+        {},
+        ...losers.map((r) => asMetaObject(r.metadata)),
+        asMetaObject(winner.metadata)
       );
-      const referencedIds = new Set(referenced.map((r) => r.id));
-      loserIds = loserIds.filter((id) => !referencedIds.has(id));
-    }
-    if (loserIds.length > 0) {
+      const firstLoserValue = (col) => losers.map((r) => r[col]).find((v) => v !== null && v !== undefined);
+
+      await knex('call_log').where({ id: winner.id }).update({
+        customer_id: winner.customer_id || firstLoserValue('customer_id') || null,
+        status: mergedStatus,
+        duration_seconds: mergedDuration,
+        answered_by: winner.answered_by || firstLoserValue('answered_by') || null,
+        call_outcome: winner.call_outcome || firstLoserValue('call_outcome') || null,
+        metadata: JSON.stringify(mergedMeta),
+        updated_at: knex.fn.now(),
+      });
+
+      const loserIds = losers.map((r) => r.id);
+      for (const fk of fks) {
+        await knex.raw(
+          `UPDATE "${fk.tbl}" SET "${fk.col}" = ? WHERE "${fk.col}" = ANY(?::uuid[])`,
+          [winner.id, loserIds]
+        );
+      }
       await knex('call_log').whereIn('id', loserIds).del();
     }
   }
 
-  const { rows: remaining } = await knex.raw(`
-    SELECT twilio_call_sid FROM call_log
-    WHERE twilio_call_sid IS NOT NULL
-    GROUP BY twilio_call_sid HAVING count(*) > 1
-  `);
-  if (remaining.length > 0) {
-     
-    console.warn(
-      `[migration call_log_twilio_sid_unique] ${remaining.length} duplicated twilio_call_sid value(s) survived the conservative dedupe (non-bare or FK-referenced) — SKIPPING the unique index. Resolve by hand, then re-create: CREATE UNIQUE INDEX call_log_twilio_call_sid_unique ON call_log (twilio_call_sid) WHERE twilio_call_sid IS NOT NULL;`
-    );
-    return;
-  }
-
+  // No skip path: if a duplicate somehow survives, index creation throws and
+  // the migration retries on the next deploy instead of being marked applied
+  // without its backstop.
   await knex.raw(`
     CREATE UNIQUE INDEX IF NOT EXISTS call_log_twilio_call_sid_unique
     ON call_log (twilio_call_sid)
@@ -83,6 +121,6 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   const hasTable = await knex.schema.hasTable('call_log');
   if (!hasTable) return;
-  // Deleted race-artifact rows are not restorable; down only removes the index.
+  // Merged-away race-artifact rows are not restorable; down only removes the index.
   await knex.raw('DROP INDEX IF EXISTS call_log_twilio_call_sid_unique');
 };

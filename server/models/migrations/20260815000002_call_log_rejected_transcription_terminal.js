@@ -17,13 +17,9 @@ exports.up = async function up(knex) {
     .update({ transcription_status: 'rejected', updated_at: knex.fn.now() });
 };
 
-exports.down = async function down(knex) {
-  const hasTable = await knex.schema.hasTable('call_log');
-  if (!hasTable) return;
-  const hasMeta = await knex.schema.hasColumn('call_log', 'transcription_metadata');
-  if (!hasMeta) return;
-  await knex('call_log')
-    .where('transcription_status', 'rejected')
-    .whereRaw("transcription_metadata->>'transcription_rejected' = 'true'")
-    .update({ transcription_status: 'pending', updated_at: knex.fn.now() });
+exports.down = async function down() {
+  // Irreversible by design: after this migration ships, the processor stamps
+  // 'rejected' on NEW rejections too, so a predicate-based reversal would
+  // also flip legitimately-rejected future rows back to 'pending' and
+  // recreate the stranded state this migration exists to fix. No-op.
 };
