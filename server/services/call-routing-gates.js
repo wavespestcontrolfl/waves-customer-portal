@@ -241,6 +241,10 @@ function buildTriageItem({
     missing_last_name: 'name_review',
     rental_or_tenant_occupied: 'customer_field_conflict',
     second_service_address: 'address_review',
+    // Call-classified property roles (occupancy contradiction / primary-
+    // residence flip) awaiting the office's one-click apply — the card
+    // payload carries property_role_proposals (property-role-proposals.js).
+    property_role_confirm: 'address_review',
     address_recovered: 'address_review',
     address_readback: 'address_review',
     secondary_contact_captured: 'customer_field_conflict',

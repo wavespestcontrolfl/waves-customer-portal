@@ -1,0 +1,265 @@
+// Property-role classification → fill-or-park (GATE_CALL_PROPERTY_ROLE).
+// Origin: a 2026-08-13 multi-property call — the pipeline recorded the
+// caller's new primary residence as a secondary property and left the serviced
+// rental flagged primary; the correction was a careful by-hand runbook.
+// These tests pin the mechanized version of that runbook.
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const {
+  buildPropertyRoleProposals,
+  classifiedPropertiesFromExtraction,
+  applyPropertyRoleProposals,
+} = require('../services/property-role-proposals');
+
+const OLD_HOME = {
+  id: 'prop-old', address_line1: '8380 Sea Breeze Ct', address_line2: null,
+  city: 'Bradenton', zip: '34212', occupancy_type: 'owner_occupied', is_primary: true, label: 'Primary',
+};
+const NEW_HOME = {
+  id: 'prop-new', address_line1: '660 Shell Cove', address_line2: null,
+  city: 'Bradenton', zip: '34212', occupancy_type: 'unknown', is_primary: false, label: null,
+};
+
+describe('classifiedPropertiesFromExtraction', () => {
+  test('main address + extras with occupancy fallbacks and tri-state primary flags', () => {
+    const out = classifiedPropertiesFromExtraction(
+      {
+        address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212',
+        service_address_occupancy: 'owner_occupied', service_address_is_primary_residence: true,
+      },
+      [
+        { address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: 'rental_investment', is_primary_residence: false },
+        { address_line1: '12 Legacy St', city: 'Venice', zip: '34285', is_rental: true }, // legacy V1 shape
+      ],
+    );
+    expect(out).toHaveLength(3);
+    expect(out[0]).toMatchObject({ occupancy: 'owner_occupied', is_primary_residence: true });
+    expect(out[1]).toMatchObject({ occupancy: 'rental_investment', is_primary_residence: false });
+    expect(out[2]).toMatchObject({ occupancy: 'rental_investment', is_primary_residence: null });
+  });
+
+  test('unstated signals stay null — never coerced', () => {
+    const [main] = classifiedPropertiesFromExtraction({ address_line1: '1 Main St' }, []);
+    expect(main.occupancy).toBeNull();
+    expect(main.is_primary_residence).toBeNull();
+  });
+});
+
+describe('buildPropertyRoleProposals', () => {
+  test('the new-home-plus-rental case: flip proposal + rental reclassification of the old primary', () => {
+    const { fills, proposals } = buildPropertyRoleProposals({
+      classified: [
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: 'owner_occupied', is_primary_residence: true, evidence: 'we live at the new house' },
+        { address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: 'rental_investment', is_primary_residence: false, evidence: null },
+      ],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    // The new home's stored occupancy is 'unknown' → direct fill, not a proposal.
+    expect(fills).toEqual([{ property_id: 'prop-new', occupancy: 'owner_occupied' }]);
+    const flip = proposals.find((p) => p.kind === 'primary_flip');
+    expect(flip).toMatchObject({
+      new_primary_property_id: 'prop-new',
+      old_primary_property_id: 'prop-old',
+      old_primary_occupancy: 'rental_investment',
+      old_primary_label: 'Rental',
+    });
+    // Sea Breeze owner_occupied → rental_investment is a stored-fact CHANGE → parked.
+    const occ = proposals.find((p) => p.kind === 'occupancy_change');
+    expect(occ).toMatchObject({ property_id: 'prop-old', current_occupancy: 'owner_occupied', proposed_occupancy: 'rental_investment' });
+  });
+
+  test('two primary-residence claimants = contradiction — no flip proposed', () => {
+    const { proposals } = buildPropertyRoleProposals({
+      classified: [
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true },
+        { address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true },
+      ],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    expect(proposals.filter((p) => p.kind === 'primary_flip')).toHaveLength(0);
+  });
+
+  test('claim on the row that is ALREADY primary proposes nothing', () => {
+    const { proposals } = buildPropertyRoleProposals({
+      classified: [{ address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true }],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    expect(proposals).toHaveLength(0);
+  });
+
+  test('an address with no matching stored row is ignored (nothing durable to label)', () => {
+    const { fills, proposals } = buildPropertyRoleProposals({
+      classified: [{ address_line1: '99 Nowhere Ln', city: 'Venice', zip: '34285', occupancy: 'seasonal', is_primary_residence: true }],
+      properties: [OLD_HOME],
+    });
+    expect(fills).toHaveLength(0);
+    expect(proposals).toHaveLength(0);
+  });
+
+  test('matching stored occupancy produces neither fill nor proposal', () => {
+    const { fills, proposals } = buildPropertyRoleProposals({
+      classified: [{ address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: 'owner_occupied', is_primary_residence: null }],
+      properties: [OLD_HOME],
+    });
+    expect(fills).toHaveLength(0);
+    expect(proposals).toHaveLength(0);
+  });
+});
+
+describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
+  // Minimal fluent fake of the knex trx surface the apply path uses.
+  function makeTrx({ rows }) {
+    const updates = [];
+    const trx = (table) => {
+      const q = {
+        _table: table, _wheres: [], _whereNulls: [], _whereNotIn: null,
+        where(w) { this._wheres.push(w); return this; },
+        whereNull(c) { this._whereNulls.push(c); return this; },
+        whereNotIn(c, v) { this._whereNotIn = [c, v]; return this; },
+        whereIn() { return this; },
+        async first() {
+          const preds = Object.assign({}, ...this._wheres);
+          return (rows[table] || []).find((r) => Object.entries(preds).every(([k, v]) => r[k] === v)) || null;
+        },
+        async update(patch) {
+          updates.push({ table, wheres: this._wheres, whereNulls: this._whereNulls, whereNotIn: this._whereNotIn, patch });
+          const preds = Object.assign({}, ...this._wheres.filter((w) => typeof w === 'object'));
+          const hits = (rows[table] || []).filter((r) => Object.entries(preds).every(([k, v]) => r[k] === v));
+          hits.forEach((r) => Object.assign(r, patch));
+          return hits.length;
+        },
+      };
+      return q;
+    };
+    trx._updates = updates;
+    return trx;
+  }
+
+  test('pins unstamped pending visits to the OLD primary, demotes, promotes, re-mirrors', async () => {
+    const old = { ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4 };
+    const neu = { ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1' };
+    old.active = true; old.customer_id = 'cust-1';
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+
+    const { applied, skipped } = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{
+        kind: 'primary_flip',
+        new_primary_property_id: 'prop-new',
+        old_primary_property_id: 'prop-old',
+        old_primary_occupancy: 'rental_investment',
+        old_primary_label: 'Rental',
+      }],
+    });
+    expect({ applied, skipped }).toEqual({ applied: 1, skipped: 0 });
+
+    const u = trx._updates;
+    // 1. visit pinning targets the old primary, only unstamped non-terminal rows
+    const pin = u.find((x) => x.table === 'scheduled_services');
+    expect(pin.patch).toMatchObject({ property_id: 'prop-old', service_address_line1: '8380 Sea Breeze Ct', service_address_zip: '34212' });
+    expect(pin.whereNulls).toEqual(expect.arrayContaining(['property_id', 'service_address_line1']));
+    expect(pin.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped']]);
+    // 2/3. demote before promote (one_primary partial unique)
+    const propUpdates = u.filter((x) => x.table === 'customer_properties');
+    expect(propUpdates[0].patch).toMatchObject({ is_primary: false, occupancy_type: 'rental_investment', label: 'Rental' });
+    expect(propUpdates[1].patch).toMatchObject({ is_primary: true, occupancy_type: 'owner_occupied', label: 'Primary' });
+    // 4. customers mirror follows the NEW primary
+    const mirror = u.find((x) => x.table === 'customers');
+    expect(mirror.patch).toMatchObject({ address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', latitude: 27.5 });
+    expect(mirror.patch.nearest_location_id).toBeTruthy();
+  });
+
+  test('re-click on an already-flipped card is idempotent (applied, no writes)', async () => {
+    const neu = { ...NEW_HOME, is_primary: true, active: true, customer_id: 'cust-1' };
+    const trx = makeTrx({ rows: { customer_properties: [neu] } });
+    const { applied, skipped } = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
+    });
+    expect({ applied, skipped }).toEqual({ applied: 1, skipped: 0 });
+    expect(trx._updates).toHaveLength(0);
+  });
+
+  test('a stale proposal (row gone or foreign) is skipped, never guessed', async () => {
+    const trx = makeTrx({ rows: { customer_properties: [] } });
+    const { applied, skipped } = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [
+        { kind: 'primary_flip', new_primary_property_id: 'prop-x' },
+        { kind: 'occupancy_change', property_id: 'prop-y', current_occupancy: 'unknown', proposed_occupancy: 'seasonal' },
+        { kind: 'something_else' },
+      ],
+    });
+    expect({ applied, skipped }).toEqual({ applied: 0, skipped: 3 });
+  });
+
+  test('occupancy_change validates the enum and fences on customer + active', async () => {
+    const row = { ...OLD_HOME, active: true, customer_id: 'cust-1' };
+    const trx = makeTrx({ rows: { customer_properties: [row] } });
+    const { applied } = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'occupancy_change', property_id: 'prop-old', current_occupancy: 'owner_occupied', proposed_occupancy: 'seasonal', proposed_label: 'Seasonal' }],
+    });
+    expect(applied).toBe(1);
+    expect(row.occupancy_type).toBe('seasonal');
+    const bogus = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'occupancy_change', property_id: 'prop-old', current_occupancy: 'seasonal', proposed_occupancy: 'penthouse' }],
+    });
+    expect(bogus).toEqual({ applied: 0, skipped: 1 });
+  });
+});
+
+describe('stale-state fences (codex r1)', () => {
+  const makeTrx = (rows) => {
+    const updates = [];
+    const trx = (table) => ({
+      _wheres: [], _whereNulls: [],
+      where(w) { this._wheres.push(w); return this; },
+      whereNull(c) { this._whereNulls.push(c); return this; },
+      whereNotIn() { return this; },
+      whereIn() { return this; },
+      async first() {
+        const preds = Object.assign({}, ...this._wheres);
+        return (rows[table] || []).find((r) => Object.entries(preds).every(([k, v]) => r[k] === v)) || null;
+      },
+      async update(patch) {
+        updates.push({ table, patch });
+        const preds = Object.assign({}, ...this._wheres.filter((w) => typeof w === 'object'));
+        const hits = (rows[table] || []).filter((r) => Object.entries(preds).every(([k, v]) => r[k] === v));
+        hits.forEach((r) => Object.assign(r, patch));
+        return hits.length;
+      },
+    });
+    trx._updates = updates;
+    return trx;
+  };
+
+  test('occupancy CAS: a newer admin edit wins over the parked proposal', async () => {
+    // Card proposed owner_occupied → rental, but an admin set 'seasonal' after parking.
+    const row = { id: 'prop-1', customer_id: 'cust-1', active: true, occupancy_type: 'seasonal' };
+    const trx = makeTrx({ customer_properties: [row] });
+    const out = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'occupancy_change', property_id: 'prop-1', current_occupancy: 'owner_occupied', proposed_occupancy: 'rental_investment' }],
+    });
+    expect(out).toEqual({ applied: 0, skipped: 1 });
+    expect(row.occupancy_type).toBe('seasonal');
+  });
+
+  test('primary flip skips when the CURRENT primary differs from the card', async () => {
+    // Portfolio re-arranged since the call: primary is now prop-3, card says prop-old.
+    const rows = [
+      { ...NEW_HOME, active: true, customer_id: 'cust-1' },
+      { id: 'prop-3', customer_id: 'cust-1', active: true, is_primary: true, address_line1: '1 Other St', city: 'Venice', zip: '34285' },
+    ];
+    const trx = makeTrx({ customer_properties: rows });
+    const out = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
+    });
+    expect(out).toEqual({ applied: 0, skipped: 1 });
+    expect(trx._updates).toHaveLength(0);
+  });
+});

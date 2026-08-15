@@ -5244,7 +5244,9 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "city": "string or null — the city as stated, even when outside Florida (out-of-area calls need the real city for triage)",
   "state": "FL",
   "zip": "string or null",
-  "additional_properties": [{"address_line1": "street address", "address_line2": "unit or null", "city": "string or null", "state": "FL", "zip": "string or null", "is_rental": true/false, "property_type": "condo/house/commercial/etc or null", "notes": "anything the caller said about this property, or null"}],
+  "additional_properties": [{"address_line1": "street address", "address_line2": "unit or null", "city": "string or null", "state": "FL", "zip": "string or null", "is_rental": true/false, "occupancy": "one of: owner_occupied, rental_investment, commercial, seasonal, vacant, unknown — or null when unstated", "is_primary_residence": true/false/null, "property_type": "condo/house/commercial/etc or null", "notes": "anything the caller said about this property, or null"}],
+  "service_address_occupancy": "occupancy of the MAIN address_line1 property, same enum as above — or null when unstated",
+  "service_address_is_primary_residence": true/false/null,
   "secondary_contact": {"first_name": "string or null", "last_name": "string or null", "phone": "string or null", "email": "string or null", "role": "one of: home_buyer, home_seller, tenant, landlord, lender, spouse_partner, family_member, real_estate_agent, property_manager, other, unknown", "wants_notifications": true/false, "is_billing_party": true/false (true ONLY when the caller clearly says THIS person pays — 'the owner pays by credit card', 'bill the management company'; merely being owner/landlord/manager is NOT enough), "notes": "string or null"} or null,
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
@@ -5272,6 +5274,7 @@ IMPORTANT — multiple properties (address_line1 vs additional_properties):
 - When the caller says a second property has the "same" city/ZIP/community as the first ("same zip and everything"), RESOLVE it: copy the stated city/ZIP onto that entry.
 - is_rental: true when the caller says the property is a rental, investment property, tenant-occupied, or Airbnb/short-term rental.
 - additional_properties is [] when only one property is discussed. Never invent a second property from a mailing address or a passing mention of a neighbor's home.
+- PROPERTY ROLES: classify occupancy for EVERY property discussed (the main address via service_address_occupancy, each extra via its occupancy) ONLY when stated or strongly implied — "we rent it out" / "the tenant lives there" = rental_investment, "our winter place" = seasonal, "we live here" = owner_occupied; else null. Mark which ONE property is the caller's PRIMARY RESIDENCE (the home they live in as their main one) via service_address_is_primary_residence / is_primary_residence: true only on clear evidence ("our new house", "we just moved in", "where we live"); false when the caller marks it as NOT their home; null when the call never says. A wrong true is worse than a null.
 
 IMPORTANT — secondary_contact (a SECOND person who is a party to the service):
 - Set secondary_contact when the caller names ANOTHER person as a party to the service being arranged AND gives at least their name or contact info — a realtor booking an inspection names the home buyer, a landlord names the tenant, a spouse names the account holder, an adult child books for a parent.
@@ -8220,6 +8223,45 @@ const CallRecordingProcessor = {
             source: 'call_pipeline',
           });
           enqueueLookup(recordedExtra);
+        }
+
+        // Property-role classification (gated separately): fill only-unknown
+        // occupancies from the call's explicit classification, and park a
+        // property_role_confirm Needs Review card for anything that CHANGES
+        // existing facts (occupancy contradictions, a primary-residence
+        // flip) — one office click applies it, nothing flips silently.
+        // Runs AFTER the recording writes above so classified addresses can
+        // match the rows this very call created. Env read at call time so a
+        // gate flip needs no redeploy.
+        if (require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')) {
+          try {
+            const { stagePropertyRoleReview } = require('./property-role-proposals');
+            const roleView = {
+              ...extracted,
+              address_line2: callUnit,
+              service_address_occupancy: extracted.service_address_occupancy
+                || v2CanonicalExtraction?.property?.service_address_occupancy || null,
+              service_address_is_primary_residence: typeof extracted.service_address_is_primary_residence === 'boolean'
+                ? extracted.service_address_is_primary_residence
+                : (typeof v2CanonicalExtraction?.property?.service_address_is_primary_residence === 'boolean'
+                  ? v2CanonicalExtraction.property.service_address_is_primary_residence
+                  : null),
+            };
+            const staged = await stagePropertyRoleReview({
+              db,
+              customerId,
+              callLogId: call.id,
+              extracted: roleView,
+              additionalProps: callAdditionalProps,
+              extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+              buildTriageItem,
+            });
+            if (staged.fills || staged.parked) {
+              logger.info(`[property-role] ${maskSid(callSid)}: ${staged.fills} occupancy fill(s)${staged.parked ? ' + review card parked' : ''}`);
+            }
+          } catch (roleErr) {
+            logger.warn(`[property-role] staging skipped for ${maskSid(callSid)}: ${roleErr.code || roleErr.name || 'db_error'}`);
+          }
         }
       } catch (e) {
         // Log the error CODE/NAME only — a DB error message can echo the failing

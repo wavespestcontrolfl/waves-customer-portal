@@ -40,6 +40,7 @@
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
+ *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -1524,6 +1525,20 @@ const gates = {
   // needs no redeploy. Kill switch: unset — hint requests answer gated:true
   // with no slots and every picker renders exactly as today.
   bestTimeHints: gateEnvValue('GATE_BEST_TIME_HINTS'),
+
+  // Call property-role classification (2026-08-15): the extraction classifies
+  // each property a call discusses (occupancy + which one is the caller's
+  // primary residence); the pipeline fills only-unknown occupancies directly
+  // and parks everything else as a 'property_role_confirm' Needs Review card
+  // the office applies with one click — never a silent primary flip or
+  // occupancy overwrite (a 2026-08-13 multi-property call left a
+  // portfolio inverted). OFF everywhere until Adam flips it; the processor
+  // reads the env at call time (gateEnvValue) so a flip needs no redeploy.
+  // Co-req: GATE_CUSTOMER_PROPERTIES (the staging block lives inside the
+  // multi-property persistence path — no property rows, nothing to label).
+  // While dark: extraction still captures the new fields (capture-only);
+  // nothing fills, parks, or renders. Kill switch: unset the var.
+  callPropertyRole: gateEnvValue('GATE_CALL_PROPERTY_ROLE'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

@@ -288,6 +288,80 @@ router.put('/:id/dismiss', async (req, res) => {
   }
 });
 
+// POST /api/admin/triage/:id/apply-property-roles   {}
+// One-click apply for a property_role_confirm card: executes the parked
+// property-role proposals (occupancy changes, a primary-residence flip with
+// visit pinning + mirror re-sync) inside one transaction and resolves the
+// card. Proposals are re-validated against CURRENT rows — anything stale is
+// skipped and reported, never guessed at. Gated with the staging side
+// (GATE_CALL_PROPERTY_ROLE); cards parked before a gate-off can still be
+// dismissed. No customer communications fire from these writes.
+router.post('/:id/apply-property-roles', async (req, res) => {
+  try {
+    const { gateEnvValue } = require('../config/feature-gates');
+    if (!gateEnvValue('GATE_CALL_PROPERTY_ROLE')) {
+      return res.status(403).json({ error: 'Property-role apply is gated off (GATE_CALL_PROPERTY_ROLE)' });
+    }
+    const { REASON_CODE, applyPropertyRoleProposals } = require('../services/property-role-proposals');
+    const item = await db('triage_items').where({ id: req.params.id }).first();
+    if (!item) return res.status(404).json({ error: 'Triage item not found' });
+    if (item.reason_code !== REASON_CODE) {
+      return res.status(400).json({ error: 'Not a property-role card' });
+    }
+    if (!OPEN_STATES.includes(item.status)) {
+      return res.status(409).json({ error: `Item already ${item.status}` });
+    }
+    const payload = typeof item.payload === 'string' ? JSON.parse(item.payload) : (item.payload || {});
+    const proposals = Array.isArray(payload.property_role_proposals) ? payload.property_role_proposals : [];
+    const customerId = payload.customer_id || null;
+    if (!customerId || !proposals.length) {
+      return res.status(400).json({ error: 'Card carries no applicable proposals' });
+    }
+
+    let outcome;
+    await db.transaction(async (trx) => {
+      // Same global lock order as every triage writer: advisory call lock first.
+      await lockTriageCall(trx, item.call_log_id);
+      outcome = await applyPropertyRoleProposals(trx, { customerId, proposals });
+      // Applied-count zero means every proposal went stale — still resolve
+      // (nothing left to confirm) but say so in the note.
+      const updated = await trx('triage_items')
+        .where({ id: item.id })
+        .whereIn('status', OPEN_STATES)
+        .update({
+          status: 'resolved',
+          resolution_note: `Property roles applied (${outcome.applied} applied, ${outcome.skipped} skipped)`,
+          assigned_to: req.technicianId,
+          resolved_at: new Date(),
+          updated_at: new Date(),
+        });
+      if (updated === 0) {
+        const lost = new Error('card resolved concurrently');
+        lost.conflict = true;
+        throw lost;
+      }
+      // Same call_log.review_status bookkeeping as transitionCore — inside
+      // the locked transaction so the remaining-open count can't race.
+      if (item.call_log_id) {
+        const stillOpen = await trx('triage_items')
+          .where({ call_log_id: item.call_log_id })
+          .whereIn('status', OPEN_STATES)
+          .count('* as n')
+          .first();
+        const remaining = parseInt(stillOpen?.n || 0, 10);
+        await trx('call_log')
+          .where({ id: item.call_log_id })
+          .update({ review_status: remaining > 0 ? 'open' : 'resolved', updated_at: new Date() });
+      }
+    });
+    return res.json({ ok: true, ...outcome });
+  } catch (err) {
+    if (err.conflict) return res.status(409).json({ error: 'Item already resolved' });
+    logger.error(`[admin-triage] apply-property-roles failed: ${err.message}`);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to apply property roles' });
+  }
+});
+
 // POST /api/admin/triage/:id/verdict  { verdict, wrong_fields?, note? }
 // Records the human verdict on a TRIAGED call. The verdict is CALL-level
 // ("accept = the AI got this call right"), so it resolves EVERY open triage row
@@ -316,6 +390,11 @@ router.post('/:id/verdict', async (req, res) => {
     // accept/deny on one would pollute route_feedback calibration.
     if (item.reason_code === 'email_bounce_reverify') {
       return res.status(400).json({ error: 'This card is a bounced-email follow-up, not a call verdict — use Resolve instead.' });
+    }
+    // Property-role cards are pending DATA changes, not call-routing
+    // judgments — they apply via /apply-property-roles or dismiss.
+    if (item.reason_code === 'property_role_confirm') {
+      return res.status(400).json({ error: 'This card is a pending property-role confirmation, not a call verdict — use Apply or Dismiss instead.' });
     }
 
     // Call-level compare-and-swap: resolve ALL open triage rows for this call in
@@ -367,7 +446,9 @@ router.post('/:id/verdict', async (req, res) => {
       }
       const resolvedRows = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
-        .whereNot('reason_code', 'email_bounce_reverify')
+        // Bounce follow-ups AND pending property-role confirmations survive a
+        // call verdict — both carry work of their own (see the guards above).
+        .whereNotIn('reason_code', ['email_bounce_reverify', 'property_role_confirm'])
         .whereIn('status', OPEN_STATES)
         .update({
           status: 'resolved',
