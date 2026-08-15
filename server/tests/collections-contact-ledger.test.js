@@ -96,3 +96,22 @@ test('a reused reservation refreshes occurred_at to the current attempt (codex r
   expect(entry).toMatchObject({ id: 'led-9', reused: true });
   expect(q.update).toHaveBeenCalledWith({ occurred_at: at });
 });
+
+// prb-r11: markSendFailed is an atomic jsonb MERGE, never a whole-object
+// replace built from the caller's (possibly stale) metadata snapshot — an
+// ambiguous dial failure racing a live call must not erase voicemail_left
+// or an outcome already stamped on the row.
+test('markSendFailed merges via jsonb, never replaces from the stale entry snapshot', async () => {
+  const { markSendFailed } = require('../services/collections/contact-ledger');
+  const q = insertChain();
+  db.mockImplementation(() => q);
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  const staleEntry = { id: 'led-1', metadata: { pre_dial: true } };
+  await expect(markSendFailed(staleEntry, { stage: 'calls_create', ambiguous_provider_failure: true })).resolves.toBe(true);
+  const patch = q.update.mock.calls[0][0];
+  expect(patch.metadata.sql).toContain("COALESCE(metadata, '{}'::jsonb) ||");
+  const merged = JSON.parse(patch.metadata.bindings[0]);
+  expect(merged).toEqual({ send_failed: true, stage: 'calls_create', ambiguous_provider_failure: true });
+  // The stale snapshot's keys are NOT in the payload — the DB's live value wins.
+  expect(merged).not.toHaveProperty('pre_dial');
+});

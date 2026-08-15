@@ -188,12 +188,33 @@ function attachVoiceRelay(httpServer) {
     // The burn is a DB round trip, so the upgrade completes asynchronously. The
     // socket is not handed to `ws` until it wins the claim; a loser (or an
     // error) is destroyed exactly as an unauthenticated one is.
-    burnCallToken(token, callSid).then((won) => {
+    (async () => {
+      // The authenticated call's SOURCE is resolved FIRST, before any frame
+      // exists (gh prb-r11) and BEFORE the burn (gh prb-r19): the burn is
+      // irreversible, so a transient read failure after it would consume the
+      // one-use credential and drop an otherwise valid call — read-then-burn
+      // lets Twilio's retry of the same URL succeed once the DB recovers.
+      // An unreadable source still rejects (fail closed, the burn's
+      // envelope); the read is idempotent so the ordering is safe.
+      let collectionsCall = false;
+      try {
+        const db = require('../../models/db');
+        const row = await db('call_log')
+          .where({ twilio_call_sid: callSid })
+          .first('source');
+        collectionsCall = Boolean(row && row.source === 'collections_voice');
+      } catch (e) {
+        logger.warn(`[voice-relay] rejected ws upgrade: source resolution failed callSid=${callSid}: ${e.message}`);
+        try { socket.destroy(); } catch { /* socket already gone */ }
+        return;
+      }
+      const won = await burnCallToken(token, callSid);
       if (!won) {
         logger.warn(`[voice-relay] rejected ws upgrade: token already used callSid=${callSid}`);
         try { socket.destroy(); } catch { /* socket already gone */ }
         return;
       }
+      req.authenticatedCollectionsCall = collectionsCall;
       // ⭐ THE AUTHENTICATED CallSid RIDES WITH THE SOCKET. The token was
       // verified against THIS CallSid, and the setup frame that follows is
       // unverified input: honouring the frame's own callSid would let a valid
@@ -214,7 +235,7 @@ function attachVoiceRelay(httpServer) {
       // deterministically on the nonce's lexicographic order.
       req.relaySessionGeneration = parseInt(String(req.relaySessionKey || '').slice(0, 12), 16) || null;
       wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
-    }).catch(() => {
+    })().catch(() => {
       try { socket.destroy(); } catch { /* socket already gone */ }
     });
   });
@@ -225,6 +246,9 @@ function attachVoiceRelay(httpServer) {
     // socket is allowed to be. Absent only if something bypassed the upgrade
     // path, which the setup handler treats as unauthenticated.
     const authenticatedCallSid = (req && req.authenticatedCallSid) || null;
+    // Resolved at UPGRADE time from the call_log row (gh prb-r11) — the
+    // routing truth for the setup frame, never the frame's own label.
+    const authenticatedCollectionsCall = Boolean(req && req.authenticatedCollectionsCall);
     const relaySessionKey = (req && req.relaySessionKey) || null;
     const relaySessionGeneration = (req && req.relaySessionGeneration) || null;
 
@@ -314,6 +338,35 @@ function attachVoiceRelay(httpServer) {
             teardown('setup_callsid_mismatch');
             return;
           }
+          // Collections session mode (PR B): the outbound late-payment leg's
+          // TwiML labels itself via a <Parameter>. The label is UNVERIFIED
+          // frame input, so CollectionsConversation re-proves it server-side
+          // against the call_log row for the AUTHENTICATED CallSid before
+          // acting on anything — a mislabeled or forged frame gets a fixed
+          // polite close, never a session. Without the label (every inbound
+          // call today) this branch is untouched, byte-identical.
+          // Routing = the frame label OR the upgrade-time source proof (gh
+          // prb-r11): a collections call with a stripped label still routes
+          // here; a forged label on a non-collections call routes here and
+          // dies on CollectionsConversation's own server-side re-proof.
+          if (p.session_mode === 'collections' || authenticatedCollectionsCall) {
+            try {
+              const { CollectionsConversation } = require('../collections/outbound-voice/collections-conversation');
+              convo = new CollectionsConversation({
+                callSid: authenticatedCallSid,
+                from: msg.from || p.from || null,
+                to: msg.to || p.to || null,
+                send,
+                endSession,
+              });
+            } catch (e) {
+              logger.error(`[voice-relay] collections session load failed — terminating: ${e.message}`);
+              teardown('collections_session_load_failed');
+              return;
+            }
+            logger.info(`[voice-relay] collections session setup callSid=${convo.callSid}`);
+            break;
+          }
           convo = new RelayConversation({
             // ALWAYS the authenticated one — never the frame's.
             callSid: authenticatedCallSid,
@@ -350,7 +403,16 @@ function attachVoiceRelay(httpServer) {
           logger.warn(`[voice-relay] relay error frame received (description withheld, ${len} chars)`);
           break;
         }
-        // 'dtmf' and others: ignored in Phase 0
+        case 'dtmf': {
+          // Only sessions that define handleDtmf act on digits (the
+          // collections escape hatch: press 0 = human). RelayConversation
+          // defines none, so the inbound path stays byte-identical.
+          if (convo && typeof convo.handleDtmf === 'function') {
+            convo.handleDtmf(msg.digit != null ? msg.digit : (msg.dtmf && msg.dtmf.digit));
+          }
+          break;
+        }
+        // others: ignored in Phase 0
         default:
           break;
       }

@@ -113,7 +113,9 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
     // Branded email sidecar — best-effort; the SMS re-nudge already succeeded, so a
     // missing email address or send failure must NOT downgrade the 'sent' outcome.
     // Independently policy-gated (email channel) and pre-ledgered like the SMS leg.
-    if (await collectionsChannelPermitted(customer.id, inv.id, 'email', now)) {
+    // The same-run SMS row is excluded from the consult (gh prb-r18) — the
+    // any-channel 24h window must not fence a sidecar with its own sibling.
+    if (await collectionsChannelPermitted(customer.id, inv.id, 'email', now, smsLedger ? [smsLedger.id] : [])) {
       let emailLedger = null;
       try {
         emailLedger = await ContactLedger.recordContact({
@@ -158,9 +160,9 @@ function templateKeyForOverdue(daysSince) {
 // byte-identical, per-channel verdicts, invoice-membership required.
 const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
 
-async function collectionsChannelPermitted(customerId, invoiceId, channel, now) {
+async function collectionsChannelPermitted(customerId, invoiceId, channel, now, excludeLedgerIds = []) {
   return railGuardPermitted({
-    customerId, invoiceId, channel, purpose: 'late_payment', now, logTag: 'late-payment',
+    customerId, invoiceId, channel, purpose: 'late_payment', now, excludeLedgerIds, logTag: 'late-payment',
   });
 }
 
@@ -368,7 +370,10 @@ const LatePaymentService = {
         // fallback ride a verdict about a different channel), and its own
         // pre-send ledger row.
         let emailResult = null;
-        if (await collectionsChannelPermitted(customer.id, inv.id, 'email', now)) {
+        // Same-run SMS row excluded (gh prb-r18): covers BOTH the delivered
+        // sidecar and the email fallback after a terminal SMS failure —
+        // the failed reservation is just as recent.
+        if (await collectionsChannelPermitted(customer.id, inv.id, 'email', now, smsLedger ? [smsLedger.id] : [])) {
           let emailLedger = null;
           try {
             emailLedger = await ContactLedger.recordContact({

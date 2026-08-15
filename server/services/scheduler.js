@@ -2695,6 +2695,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:37AM — Collections call retention sweep (PR B). Purges the
+  // conversational CONTENT (transcripts, recordings) of collections_voice
+  // calls older than COLLECTIONS_RETENTION_DAYS (default 90) — its own
+  // shorter policy, never the inbound pipeline's. Deliberately UNGATED:
+  // deletion is the conservative direction, and while the lane is dark there
+  // are zero collections_voice rows so this is a provable no-op (pinned).
+  // =========================================================================
+  cron.schedule('37 3 * * *', async () => {
+    try {
+      await runExclusive('collections-retention-sweep', async () => {
+        const Retention = require('./collections/outbound-voice/retention');
+        const result = await Retention.runCollectionsRetentionSweep();
+        if (result.considered) {
+          logger.info(`Collections retention sweep: ${result.purged} purged, ${result.failed} deferred`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Collections retention sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 10:05AM — Pre-visit late-balance reminders (owner directive
   // 2026-07-17). One text+email per RECURRING visit landing in 3 days when
   // the customer has a late RECURRING balance (unpaid dues / overdue

@@ -398,11 +398,18 @@ describe('rolling frequency windows', () => {
     }
   });
 
-  test('email: live-conversation window applies; a prior sms does not block email', async () => {
+  test('the 24h window is ANY-channel: a 2h-old sms blocks email (and sms) too; a 25h-old one does not', async () => {
+    // prb-r1: the window previously bound only the call channels, letting
+    // the wired SMS/email rails stack same-day touches.
     armAllowedBaseline({ ledger: [{ channel: 'sms', occurred_at: at(2 * HOUR) }] });
-    const result = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT });
-    expect(result.denialReasons).not.toContain('live_conversation_within_7d');
-    expect(result.allowed).toBe(true);
+    const blocked = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT });
+    expect(blocked.denialReasons).toContain('contact_within_24h');
+    expect(blocked.denialReasons).not.toContain('live_conversation_within_7d');
+
+    armAllowedBaseline({ ledger: [{ channel: 'sms', occurred_at: at(25 * HOUR) }] });
+    const clear = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT });
+    expect(clear.denialReasons).not.toContain('contact_within_24h');
+    expect(clear.allowed).toBe(true);
   });
 
   test('recent contacts are surfaced on the result', async () => {
@@ -743,7 +750,24 @@ describe('call_log live conversations', () => {
       call_log: callChain,
     });
     await evalVoice();
-    expect(callChain.whereRaw).toHaveBeenCalledWith("(call_outcome IS NULL OR call_outcome NOT IN ('voicemail', 'missed', 'spam'))");
+    // prb-r9: the collections lane's own NON-LIVE outcomes are excluded too
+    // — writeCallOutcome classifies them live=false, so a completed
+    // voicemail/vestibule-only/failed collections call must not suppress
+    // SMS/email as a "live conversation". vestibule_office deliberately
+    // still counts (a press-0 transfer can become a real conversation).
+    const outcomePredicate = callChain.whereRaw.mock.calls
+      .map((c) => c[0]).find((sql) => String(sql).includes('call_outcome'));
+    expect(outcomePredicate).toContain('call_outcome IS NULL OR call_outcome NOT IN');
+    for (const excluded of [
+      "'voicemail'", "'missed'", "'spam'", "'voicemail_left'",
+      "'machine_no_voicemail'", "'no_answer'", "'vestibule_declined'",
+      "'vestibule_no_input'", "'vestibule_consent_unrecorded'",
+      "'suppressed_at_answer'", "'completed_no_outcome'",
+      "'relay_failed'", "'dial_failed'",
+    ]) {
+      expect(outcomePredicate).toContain(excluded);
+    }
+    expect(outcomePredicate).not.toContain('vestibule_office');
     expect(callChain.whereRaw).toHaveBeenCalledWith("(answered_by IS NULL OR answered_by <> 'voicemail')");
     expect(callChain.whereRaw).toHaveBeenCalledWith('(duration_seconds IS NULL OR duration_seconds >= 30)');
   });
@@ -906,4 +930,96 @@ describe('stopped-sequence exclusion', () => {
     expect(result.allowed).toBe(true);
     expect(result.eligibleInvoiceIds).toEqual(['inv-1']);
   });
+});
+
+// gh prb-r2: the ACTIVE collections call's own ledger row must not veto its
+// in-call pay-link — but only THAT row; any other recent contact still counts.
+test('excludeCollectionCaseId exempts exactly the active call from the 24h window', async () => {
+  const activeCallRow = {
+    channel: 'voice', occurred_at: new Date(WED_11AM_EDT.getTime() - 10 * 60 * 1000).toISOString(),
+    metadata: JSON.stringify({ collectionCaseId: 'case-7' }),
+  };
+  armAllowedBaseline({ ledger: [activeCallRow] });
+  const exempted = await ContactPolicy.evaluate('cust-1', {
+    channel: 'sms', purpose: 'late_payment', excludeCollectionCaseId: 'case-7', now: WED_11AM_EDT,
+  });
+  expect(exempted.denialReasons).not.toContain('contact_within_24h');
+  expect(exempted.allowed).toBe(true);
+
+  // A DIFFERENT case's call still counts.
+  armAllowedBaseline({ ledger: [activeCallRow] });
+  const other = await ContactPolicy.evaluate('cust-1', {
+    channel: 'sms', purpose: 'late_payment', excludeCollectionCaseId: 'case-9', now: WED_11AM_EDT,
+  });
+  expect(other.denialReasons).toContain('contact_within_24h');
+});
+
+// prb-r12: only LIVE voice ledger rows supersede the sms/email cadence —
+// a finalized non-live attempt (voicemail, no-input, machine) is voice
+// spacing data, not a conversation.
+describe('ledger live-conversation filtering (prb-r12)', () => {
+  const TWO_DAYS_AGO = new Date(WED_11AM_EDT.getTime() - 2 * 24 * 3600 * 1000).toISOString();
+
+  async function evalSms() {
+    return ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'late_payment', now: WED_11AM_EDT });
+  }
+
+  test('a voice row finalized live_conversation:false does NOT suppress sms', async () => {
+    const nonLive = {
+      channel: 'voice',
+      occurred_at: TWO_DAYS_AGO,
+      metadata: JSON.stringify({ outcome: 'voicemail_left', live_conversation: false }),
+    };
+    armAllowedBaseline({ ledger: [nonLive] });
+    const sms = await evalSms();
+    expect(sms.denialReasons).not.toContain('live_conversation_within_7d');
+  });
+
+  test('the same non-live row still enforces VOICE spacing', async () => {
+    const nonLive = {
+      channel: 'voice',
+      occurred_at: TWO_DAYS_AGO,
+      metadata: JSON.stringify({ outcome: 'voicemail_left', live_conversation: false }),
+    };
+    armAllowedBaseline({ ledger: [nonLive] });
+    const voice = await evalVoice();
+    expect(voice.denialReasons).toContain('voice_contact_within_7d');
+  });
+
+  test('an IN-FLIGHT voice row (no outcome yet) conservatively suppresses sms', async () => {
+    const pending = {
+      channel: 'voice',
+      occurred_at: TWO_DAYS_AGO,
+      metadata: JSON.stringify({ collectionCaseId: 'case-9' }),
+    };
+    armAllowedBaseline({ ledger: [pending] });
+    const sms = await evalSms();
+    expect(sms.denialReasons).toContain('live_conversation_within_7d');
+  });
+
+  test('a finalized LIVE conversation suppresses sms', async () => {
+    const live = {
+      channel: 'voice',
+      occurred_at: TWO_DAYS_AGO,
+      metadata: JSON.stringify({ outcome: 'conversation_completed', live_conversation: true }),
+    };
+    armAllowedBaseline({ ledger: [live] });
+    const sms = await evalSms();
+    expect(sms.denialReasons).toContain('live_conversation_within_7d');
+  });
+});
+
+// prb-r18: a same-run companion leg is excluded from the frequency windows
+// by naming its sibling's ledger row — every OTHER contact still counts.
+test('excludeLedgerIds lifts only the named sibling row from the 24h fence', async () => {
+  const FIVE_SEC_AGO = new Date(WED_11AM_EDT.getTime() - 5000).toISOString();
+  const smsRow = { id: 'led-sms-1', channel: 'sms', occurred_at: FIVE_SEC_AGO, metadata: '{}' };
+  armAllowedBaseline({ ledger: [smsRow] });
+  const denied = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT });
+  expect(denied.denialReasons).toContain('contact_within_24h');
+  armAllowedBaseline({ ledger: [smsRow] });
+  const allowed = await ContactPolicy.evaluate('cust-1', {
+    channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT, excludeLedgerIds: ['led-sms-1'],
+  });
+  expect(allowed.denialReasons).not.toContain('contact_within_24h');
 });
