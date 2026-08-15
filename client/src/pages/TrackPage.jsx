@@ -530,7 +530,10 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
           rounds — precise coords mid-route would disclose another
           customer's address) + this property. Precise live tracking stays
           an en-route-only feature. */}
-      {vehicleApprox?.lat != null && property?.lat != null && (
+      {/* Both points need FINITE lat AND lng — partial geocodes exist and
+          a null lng would center the map at longitude 0 / throw in Maps. */}
+      {Number.isFinite(vehicleApprox?.lat) && Number.isFinite(vehicleApprox?.lng)
+        && Number.isFinite(property?.lat) && Number.isFinite(property?.lng) && (
         <div style={{ marginTop: 14 }}>
           <TrackerMap
             tech={{ lat: vehicleApprox.lat, lng: vehicleApprox.lng }}

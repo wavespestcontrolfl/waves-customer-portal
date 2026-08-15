@@ -542,10 +542,14 @@ router.get('/:token', async (req, res, next) => {
       routeProgress: stopsReady
         ? { yourStop: stopsReady.yourStop, totalStops: stopsReady.totalStops, currentStop: stopsReady.currentStop, atStop: stopsReady.atStop, headingToStop: stopsReady.headingToStop }
         : null,
-      // Truck coords only once the route has STARTED (currentStop ≥ 1) —
-      // before the first stop the truck sits at the tech's home/base,
-      // which is not route information.
-      vehicleApprox: stopsReady && stopsReady.currentStop >= 1 ? await buildApproxVehicle(row) : null,
+      // Truck coords only while the tech is MEASURABLY at or driving to a
+      // route stop (atStop/headingToStop). Between stops — lunch, office,
+      // home — the truck's position is the tech's personal location, not
+      // route information, and must not stream (even rounded); the same
+      // reasoning that withholds coords before the route starts.
+      vehicleApprox: stopsReady && (stopsReady.atStop || stopsReady.headingToStop)
+        ? await buildApproxVehicle(row)
+        : null,
       summary: customerState === 'complete' ? await buildSummary(row) : null,
       cancellation: customerState === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }

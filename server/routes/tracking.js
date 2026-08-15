@@ -398,14 +398,16 @@ router.get('/active', async (req, res, next) => {
           });
           if (diverges) formatted.customerLocation = null;
         }
-        // Approximate truck position — ONLY once the route has STARTED
-        // (currentStop ≥ 1): before the first stop the truck sits at the
-        // tech's home/base, which is not route information. Coordinates are
+        // Approximate truck position — ONLY while the tech is measurably
+        // at or driving to a route stop (atStop/headingToStop). Between
+        // stops — and before the route starts — the truck sits at the
+        // tech's home/office/lunch, which is personal location, not route
+        // information, and must not stream even rounded. Coordinates are
         // ROUNDED to ~1km (2 decimal places) on purpose: mid-route the
         // truck is parked at another customer's home, and precise coords
         // would disclose their address. The precise feed stays exclusive
         // to the en-route state.
-        if (canonical.technician_id && stops.currentStop >= 1) {
+        if (canonical.technician_id && (stops.atStop || stops.headingToStop)) {
           try {
             const pos = await resolveFreshTechPosition({
               techId: canonical.technician_id,
@@ -469,14 +471,16 @@ router.get('/today', async (req, res, next) => {
           });
           if (diverges) formatted.customerLocation = null;
         }
-        // Approximate truck position — ONLY once the route has STARTED
-        // (currentStop ≥ 1): before the first stop the truck sits at the
-        // tech's home/base, which is not route information. Coordinates are
+        // Approximate truck position — ONLY while the tech is measurably
+        // at or driving to a route stop (atStop/headingToStop). Between
+        // stops — and before the route starts — the truck sits at the
+        // tech's home/office/lunch, which is personal location, not route
+        // information, and must not stream even rounded. Coordinates are
         // ROUNDED to ~1km (2 decimal places) on purpose: mid-route the
         // truck is parked at another customer's home, and precise coords
         // would disclose their address. The precise feed stays exclusive
         // to the en-route state.
-        if (canonical.technician_id && stops.currentStop >= 1) {
+        if (canonical.technician_id && (stops.atStop || stops.headingToStop)) {
           try {
             const pos = await resolveFreshTechPosition({
               techId: canonical.technician_id,

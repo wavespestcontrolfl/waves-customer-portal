@@ -11263,7 +11263,10 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
           rounds — precise coords mid-route would disclose another
           customer's address) + this property. Precise live tracking stays
           an en-route-only feature. */}
-      {techApprox && customerLocation && (
+      {/* Both points need FINITE lat AND lng — partial geocodes exist and
+          a null lng would center the map at longitude 0 / throw in Maps. */}
+      {Number.isFinite(techApprox?.lat) && Number.isFinite(techApprox?.lng)
+        && Number.isFinite(customerLocation?.lat) && Number.isFinite(customerLocation?.lng) && (
         <div style={{ marginTop: 14 }}>
           <EnRouteLiveMap
             techPosition={techApprox}
