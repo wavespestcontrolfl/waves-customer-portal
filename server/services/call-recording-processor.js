@@ -8357,13 +8357,14 @@ const CallRecordingProcessor = {
     const v2ExtractionForAudit = v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)
       ? v2Result.extraction
       : null;
-    await stageCustomerFieldCandidates({
+    const candidateStaging = await stageCustomerFieldCandidates({
       callId: call.id,
       customerId: customerId || call.customer_id || null,
       extraction: extracted,
       v2Extraction: v2ExtractionForAudit,
     }).catch((err) => {
       logger.warn(`[call-proc] Customer field candidate staging skipped for ${maskSid(callSid)}: ${err.message}`);
+      return null;
     });
 
     // Auto-apply contact corrections the caller stated on this call
@@ -8379,6 +8380,11 @@ const CallRecordingProcessor = {
       // this token against call_log.processing_token (again inside its
       // apply transaction) and aborts when the claim is gone.
       procToken,
+      // Provenance fence (round-14): consume ONLY the candidate rows THIS
+      // pass staged (or matched via the value-keyed dedupe) — rows a stale
+      // worker inserted after losing its claim must not ride this pass's
+      // valid token into auto-apply.
+      candidateIds: candidateStaging?.stagedIds || null,
     }).catch((err) => {
       logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);
     });

@@ -132,6 +132,7 @@ function makeStubKnex(rowsByTable = {}) {
       },
       whereNotNull(col) { preds.push((r) => r[col] != null); return chain; },
       whereIn(col, list) { preds.push((r) => list.includes(r[col])); return chain; },
+      modify(cb) { cb(chain); return chain; },
       orderBy() { return chain; }, // fixtures are pre-sorted newest-first
       forUpdate() { forUpdates.push(table); return chain; },
       first(cols) {
@@ -248,7 +249,9 @@ describe('extractSmsContactCorrections', () => {
       ok: true,
       json: {
         corrections: [
-          { field: 'last_name', new_value: 'Rivers', quote: 'name is spelled Rivers', confidence: 'high' },
+          // Last-name-scoped quote — an UNQUALIFIED "name" quote with only
+          // one component would drop under the round-14 whole-name rule.
+          { field: 'last_name', new_value: 'Rivers', quote: 'last name is spelled Rivers', confidence: 'high' },
           { field: 'email', new_value: 'a@b.co', quote: 'email is a@b.co', confidence: 'medium' },
           { field: 'phone', new_value: '5551234567', quote: 'call me at', confidence: 'high' },
           // Fabricated evidence: the quote does not appear in the message.
@@ -256,8 +259,8 @@ describe('extractSmsContactCorrections', () => {
         ],
       },
     });
-    const out = await extractSmsContactCorrections({ body: 'My name is wrong — name is spelled Rivers, with an S' });
-    expect(out).toEqual([{ field: 'last_name', newValue: 'Rivers', quote: 'name is spelled Rivers' }]);
+    const out = await extractSmsContactCorrections({ body: 'My name is wrong — last name is spelled Rivers, with an S' });
+    expect(out).toEqual([{ field: 'last_name', newValue: 'Rivers', quote: 'last name is spelled Rivers' }]);
   });
 
   it('skips the LLM entirely when the prefilter does not match', async () => {
@@ -1678,6 +1681,126 @@ describe('round-13 hardening', () => {
     });
     const res = await extractSmsContactCorrections({ body });
     expect(res).toEqual([{ field: 'address_line2', newValue: '', quote: 'remove the apartment from my address' }]);
+  });
+});
+
+describe('round-14 hardening', () => {
+  const { reserveSmsCorrectionSlot } = require('../services/contact-correction');
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('call-name intent is clause-bound — an identity statement beside an email correction never renames', async () => {
+    const quote = 'my email is wrong, my name is Jane Smith';
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [
+        candidate({ id: 'n1', field_name: 'first_name', final_recommended_value: 'Jane', evidence_quote: quote }),
+        candidate({ id: 'n2', field_name: 'last_name', final_recommended_value: 'Smith', evidence_quote: quote }),
+      ],
+      notifications: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(knex._data.customers[0].first_name).toBe('Jordan');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+  });
+
+  it('a licensed address correction does not cover a second property in another sentence', async () => {
+    const body = 'My city is wrong, it should be Sarasota. Service at the rental is 99 Pine Ave, Sarasota 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'city', new_value: 'Sarasota', quote: 'my city is wrong, it should be Sarasota', confidence: 'high' },
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'Service at the rental is 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'Service at the rental is 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['city']);
+  });
+
+  it('scopes call consumption to the candidates this pass staged', async () => {
+    const stale = candidate({ id: 'stale-1', final_recommended_value: 'Rivera', evidence_quote: 'my last name is wrong, it is Rivera' });
+    const own = candidate({ id: 'own-1', final_recommended_value: 'Rivers', evidence_quote: 'my last name is wrong, it is Rivers' });
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({
+        transcription: [
+          'Caller: my last name is wrong, it is Rivera',
+          'Caller: my last name is wrong, it is Rivers',
+        ].join('\n'),
+      })],
+      // Stale worker's row listed first (newest-first fixtures) — without
+      // provenance scoping the newest-wins dedupe would pick it.
+      customer_field_candidates: [stale, own],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex, candidateIds: ['own-1'] });
+    expect(res.applied.map((a) => a.newValue)).toEqual(['Rivers']);
+    expect(knex._data.customers[0].last_name).toBe('Rivers');
+    expect(knex._data.customer_field_candidates.find((c) => c.id === 'stale-1').status).toBe('pending');
+
+    // An empty staging pass consumes nothing at all.
+    const empty = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow()],
+      customer_field_candidates: [candidate({ id: 'c1' })],
+    });
+    const resEmpty = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex: empty, candidateIds: [] });
+    expect(resEmpty.reason).toBe('no_candidates');
+    expect(empty._data.customers[0].last_name).toBe('Riverz');
+  });
+
+  it('an unqualified whole-name quote with only one extracted component never applies', async () => {
+    const body = 'You have my name wrong, it is Jane Smith';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'first_name', new_value: 'Jane', quote: 'you have my name wrong, it is Jane Smith', confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res).toEqual([]);
+  });
+
+  it('an unqualified whole-name quote with BOTH components still applies', async () => {
+    const body = 'You have my name wrong, it is Jane Smith';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'first_name', new_value: 'Jane', quote: 'you have my name wrong, it is Jane Smith', confidence: 'high' },
+          { field: 'last_name', new_value: 'Smith', quote: 'you have my name wrong, it is Jane Smith', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field).sort()).toEqual(['first_name', 'last_name']);
+  });
+
+  it('a slot that outlives its hold window still runs (appended, not discarded)', async () => {
+    jest.useFakeTimers();
+    const slot = reserveSmsCorrectionSlot('+15550001111');
+    jest.advanceTimersByTime(61_000); // hold expires — queue position released
+    jest.useRealTimers();
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
+    });
+    const res = await slot.run({ customer: { id: CUSTOMER_ID }, body: 'You spelled my last name wrong, it is Rivers', knex });
+    expect(res.applied.map((a) => a.field)).toEqual(['last_name']);
+    expect(knex._data.customers[0].last_name).toBe('Rivers');
   });
 });
 

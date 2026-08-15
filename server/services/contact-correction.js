@@ -56,7 +56,7 @@ const ADDRESS_FIELDS = Object.freeze(['address_line1', 'address_line2', 'city', 
 // correction language — ordinary calls state identity fields all the time
 // (a spouse booking, a different property) and none of that is a mandate
 // to rewrite the profile.
-const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
+const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
 
 // Ownership disclaimers are NOT name corrections: "the account is not in my
 // name — my name is Jane Smith" is a caller explaining the account belongs
@@ -94,15 +94,15 @@ const TOPIC_RES = [
 // "email" than "name", so the name candidate finds no correction word of
 // its own. (Splitting on commas instead would break real corrections like
 // "my last name is Rivers, not Riverz".)
-function clauseBindsCategory(clause, cat) {
+function clauseBindsCategory(clause, cat, cwRe = CW_RE) {
   const topics = [];
   for (const [tcat, re] of TOPIC_RES) {
     re.lastIndex = 0;
     for (const m of clause.matchAll(re)) topics.push({ pos: m.index, cat: tcat });
   }
   if (!topics.some((t) => t.cat === cat)) return false;
-  CW_RE.lastIndex = 0;
-  for (const m of clause.matchAll(CW_RE)) {
+  cwRe.lastIndex = 0;
+  for (const m of clause.matchAll(cwRe)) {
     let best = null;
     for (const t of topics) {
       const d = Math.abs(t.pos - m.index);
@@ -266,11 +266,36 @@ async function extractSmsContactCorrections({ body }) {
     // candidates that ALREADY passed confidence/allowlist/grounding
     // (round-9): a fabricated or low-confidence address entry in the raw
     // model output must not license the group it failed to join.
-    const addressGroupLicensed = MOVE_EVIDENCE_RE.test(text)
-      || base.some((c) => ADDRESS_FIELDS.includes(c.field) && quoteCarriesFieldIntent(c.field, c.quote));
+    // Statement scoping (round-14): a licensed address correction only
+    // covers fragments of ITS OWN sentence — "my city is wrong; it should
+    // be Sarasota" must not license a rental address mentioned in the next
+    // sentence. Message-level MOVE evidence still licenses the whole
+    // message (a stated move IS one statement about where the customer
+    // lives).
+    const moveLicensed = MOVE_EVIDENCE_RE.test(text);
+    const sentences = text.split(CLAUSE_SPLIT_RE)
+      .map((s) => s.replace(/\s+/g, ' ').trim().toLowerCase())
+      .filter(Boolean);
+    const sentenceIdxOf = (q) => {
+      const needle = normValue(q).replace(/\s+/g, ' ').toLowerCase();
+      return needle ? sentences.findIndex((s) => s.includes(needle)) : -1;
+    };
+    const licensedSentences = new Set();
+    for (const c of base) {
+      if (ADDRESS_FIELDS.includes(c.field) && quoteCarriesFieldIntent(c.field, c.quote)) {
+        const idx = sentenceIdxOf(c.quote);
+        if (idx >= 0) licensedSentences.add(idx);
+      }
+    }
+    const addressLicensed = (c) => {
+      if (moveLicensed) return true;
+      if (quoteCarriesFieldIntent(c.field, c.quote)) return true;
+      const idx = sentenceIdxOf(c.quote);
+      return idx >= 0 && licensedSentences.has(idx);
+    };
     return base
       .filter((c) => (ADDRESS_FIELDS.includes(c.field)
-        ? addressGroupLicensed
+        ? addressLicensed(c)
         : quoteCarriesFieldIntent(c.field, c.quote)))
       // Component binding for name fields, same rule as the call lane: a
       // grounded quote naming only the LAST name ("my last name is Rivers,
@@ -280,6 +305,18 @@ async function extractSmsContactCorrections({ body }) {
       .filter((c) => !(c.field === 'first_name' || c.field === 'last_name')
         || (quoteBindsNameField(c.field, c.quote)
           && !NAME_OWNERSHIP_DISCLAIMER_RE.test(String(c.quote || ''))))
+      // (round-14) An UNQUALIFIED whole-name quote ("you have my name
+      // wrong; it is Jane Smith") corrects BOTH components — a model that
+      // emits only first_name would graft Jane onto the record's old
+      // surname. Single-component candidates survive only under explicitly
+      // first-/last-scoped quotes.
+      .filter((c, _i, arr) => {
+        if (c.field !== 'first_name' && c.field !== 'last_name') return true;
+        const q = String(c.quote || '');
+        if (/\bfirst name\b/i.test(q) || /\b(?:last name|surname)\b/i.test(q)) return true;
+        const other = c.field === 'first_name' ? 'last_name' : 'first_name';
+        return arr.some((o) => o.field === other);
+      })
       .map((c) => ({ field: c.field, newValue: normValue(c.new_value), quote: normValue(c.quote) }));
   } catch (err) {
     logger.warn(`[contact-correction] sms extraction failed: ${errTag(err)}`);
@@ -705,30 +742,46 @@ function serializePerCustomer(customerId, fn) {
   return run;
 }
 
-// Queue-position reservation for webhook callers (round-13): the three
-// webhook branches invoke the runner after DIFFERENT awaited work, so
-// invoke-time chaining would not preserve Twilio arrival order — a newer
-// message on a fast branch could enter the queue before an older message on
-// a slow branch. Reserving the slot at webhook ENTRY (right after the
-// customer match) pins arrival order; the slot then waits for its runner
-// args. A reservation that is never run (the request died or took a branch
-// with no correction site) self-cancels after 60s so it can't wedge the
-// customer's queue.
-function reserveSmsCorrectionSlot(customerId) {
+// Queue-position reservation for webhook callers (round-13): the webhook
+// branches invoke the runner after DIFFERENT awaited work, so invoke-time
+// chaining would not preserve Twilio arrival order — a newer message on a
+// fast branch could enter the queue before an older message on a slow
+// branch. The route reserves at ENTRY, keyed on the SENDER phone (round-14
+// — available synchronously, BEFORE media upload and the customer lookup,
+// both variable-latency awaits that could reorder reservations).
+//
+// The 60-second hold only bounds how long the queue position is defended —
+// it never discards a live request (round-14): a slow branch (an intake
+// LLM call can take minutes) that run()s after the hold expires is APPENDED
+// to the queue and still executes; ordering degrades gracefully and the
+// CAS/sender fences still fail closed. cancel() is for paths that know the
+// message needs no correction run.
+const SLOT_HOLD_MS = 60_000;
+function reserveSmsCorrectionSlot(senderKey) {
+  const queueKey = `sms:${tail10(senderKey) || String(senderKey || 'unknown')}`;
   let release;
+  let settled = false;
+  let expired = false;
   const gate = new Promise((resolve) => { release = resolve; });
-  const slot = serializePerCustomer(customerId, () => gate.then((fn) => (fn ? fn() : { applied: [], skipped: [], reason: 'slot_cancelled' })));
-  const timer = setTimeout(() => release(null), 60_000);
+  const slot = serializePerCustomer(queueKey, () => gate.then((fn) => (fn ? fn() : { applied: [], skipped: [], reason: 'slot_cancelled' })));
+  const timer = setTimeout(() => {
+    if (!settled) { expired = true; release(null); }
+  }, SLOT_HOLD_MS);
   if (typeof timer?.unref === 'function') timer.unref();
   return {
     run(args) {
       clearTimeout(timer);
+      if (settled) return slot;
+      settled = true;
+      if (expired) {
+        return serializePerCustomer(queueKey, () => runSmsContactCorrectionInner(args));
+      }
       release(() => runSmsContactCorrectionInner(args));
       return slot;
     },
     cancel() {
       clearTimeout(timer);
-      release(null);
+      if (!settled) { settled = true; release(null); }
     },
   };
 }
@@ -818,7 +871,16 @@ const CALL_PROPOSE_FIELDS = Object.freeze(['email', 'address_line1', 'address_li
 // NOT in the set — "let me spell my name" is routine identity collection
 // (agents ask callers to spell names on ordinary calls), not a claim that
 // the stored name is wrong.
-const CALL_NAME_CORRECTION_RE = /\b(?:name|surname)\b[\s\S]{0,60}\b(?:wrong|incorrect|misspell\w*|typo|actually|correct\w*|not\b)|\b(?:wrong|incorrect|misspell\w*|typo|actually|correct\w*|not(?:\s+(?:my|the))?)\b[\s\S]{0,60}\b(?:name|surname)\b/i;
+// Clause-bound with nearest-topic pairing like the SMS lane (round-14) —
+// proximity alone let "my email is wrong, my name is Jane Smith" pass
+// ("wrong" within 60 chars of "name"). Call names keep the STRICTER
+// vocabulary: no bare spell/new/old ("let me spell my name" is routine
+// identity collection, round-7).
+const CALL_NAME_CW_RE = /wrong|incorrect|misspell\w*|typo|actually|correct\w*|not\b/gi;
+function callNameCorrectionIntent(quote) {
+  return normValue(quote).split(CLAUSE_SPLIT_RE)
+    .some((cl) => clauseBindsCategory(cl, 'name', CALL_NAME_CW_RE));
+}
 
 // Quote-component binding for shared name_full evidence: the staging writer
 // assigns one quote to BOTH name candidates, but "my last name is spelled
@@ -833,14 +895,22 @@ function quoteBindsNameField(field, quote) {
   return true;
 }
 
-async function runCallContactCorrection({ callId, customerId, knex = db, procToken = null }) {
+async function runCallContactCorrection({ callId, customerId, knex = db, procToken = null, candidateIds = null }) {
   try {
     if (!require('../config/feature-gates').isEnabled('contactCorrection')) return { applied: [], skipped: [], reason: 'gate_off' };
     if (!callId || !customerId) return { applied: [], skipped: [], reason: 'unlinked' };
     if (!(await knex.schema.hasTable('customer_field_candidates'))) {
       return { applied: [], skipped: [], reason: 'no_table' };
     }
+    // Provenance scope (round-14): when the caller passes the ids its own
+    // staging pass produced, consume ONLY those — the fence protects the
+    // runner and the final write, but pending rows carry no token, and a
+    // stale worker's late inserts must not ride this pass's valid token.
+    if (Array.isArray(candidateIds) && !candidateIds.length) {
+      return { applied: [], skipped: [], reason: 'no_candidates' };
+    }
     const rows = await knex('customer_field_candidates')
+      .modify((q) => { if (Array.isArray(candidateIds)) q.whereIn('id', candidateIds); })
       .where({ call_log_id: callId, status: 'pending', customer_id: customerId })
       .whereIn('field_name', [...Object.keys(CALL_AUTO_FIELDS), ...CALL_PROPOSE_FIELDS])
       .whereNotNull('evidence_quote')
@@ -930,7 +1000,7 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       // is jane@example.com" while booking is identity collection, and a
       // bell claiming corrected info was stated would be a false proposal.
       const intentOk = CALL_AUTO_FIELDS[c.field_name]
-        ? (CALL_NAME_CORRECTION_RE.test(String(c.evidence_quote || ''))
+        ? (callNameCorrectionIntent(c.evidence_quote)
           && !NAME_OWNERSHIP_DISCLAIMER_RE.test(String(c.evidence_quote || '')))
         : quoteCarriesFieldIntent(c.field_name, c.evidence_quote);
       if (!intentOk) return false;

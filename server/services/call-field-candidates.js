@@ -94,6 +94,11 @@ async function stageCustomerFieldCandidates(args = {}) {
   }
 
   let staged = 0;
+  // Ids of the rows carrying THIS pass's extracted values — newly inserted
+  // or already present via the value-keyed dedupe. The correction consumer
+  // scopes to these so a stale worker's rows (different values, no
+  // provenance) can never ride an owning pass's valid token (round-14).
+  const stagedIds = [];
   for (const row of rows) {
     try {
       const existing = await db('customer_field_candidates')
@@ -104,15 +109,17 @@ async function stageCustomerFieldCandidates(args = {}) {
         })
         .where('final_recommended_value', row.final_recommended_value)
         .first('id');
-      if (existing) continue;
-      await db('customer_field_candidates').insert(row);
+      if (existing) { stagedIds.push(existing.id); continue; }
+      const inserted = await db('customer_field_candidates').insert(row).returning('id');
+      const id = inserted?.[0]?.id ?? inserted?.[0];
+      if (id != null) stagedIds.push(id);
       staged += 1;
     } catch (err) {
       logger.warn(`[call-candidates] candidate skipped for call ${row.call_log_id}: ${err.message}`);
     }
   }
 
-  return { staged, skipped: rows.length - staged };
+  return { staged, skipped: rows.length - staged, stagedIds };
 }
 
 function __resetForTests() {

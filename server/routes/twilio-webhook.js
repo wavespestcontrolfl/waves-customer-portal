@@ -158,6 +158,16 @@ router.post('/sms', async (req, res) => {
 
     const { From, To, Body, MessageSid } = req.body;
     const smsReaction = isSmsReaction(Body);
+    // Contact-correction queue slot, reserved at TRUE entry (round-14):
+    // keyed on the sender's phone — available synchronously, BEFORE the
+    // media upload and customer lookup awaits whose variable latency could
+    // reorder reservations between rapid messages. Whether the sender maps
+    // to a linked customer is decided at fire time; unlinked/unused slots
+    // are cancelled (or self-expire without discarding a live run).
+    const contactCorrection = require('../services/contact-correction');
+    const correctionSlot = (Body && !smsReaction && contactCorrection.detectContactCorrectionIntent(Body))
+      ? contactCorrection.reserveSmsCorrectionSlot(From)
+      : null;
     const schedulingIntent = hasSchedulingIntent(Body);
     // NOT a subset of schedulingIntent (codex #3232 r10): away phrases
     // ("I won't be home") carry no scheduling keyword — the AI auto-reply
@@ -210,18 +220,11 @@ router.post('/sms', async (req, res) => {
         .catch(err => logger.debug(`[twilio-webhook] event rescore failed: ${err.message}`));
     };
 
-    // Contact-correction queue slot, reserved at webhook ENTRY (round-13):
-    // the three enqueue sites below run after different awaited work, so
-    // reserving here — right after the customer match — is what pins the
-    // per-customer correction order to Twilio arrival order. Unused slots
-    // (a branch with no correction site, or an error path) self-cancel.
-    const contactCorrection = require('../services/contact-correction');
-    const correctionSlot = (Body && !smsReaction && customer?.id
-      && contactCorrection.detectContactCorrectionIntent(Body))
-      ? contactCorrection.reserveSmsCorrectionSlot(customer.id)
-      : null;
+    // An intent-bearing message from a number with NO linked customer will
+    // never fire a correction — release its reserved queue position now.
+    if (correctionSlot && !customer?.id) correctionSlot.cancel();
     const fireContactCorrection = (smsLogId) => {
-      if (!correctionSlot) return;
+      if (!correctionSlot || !customer?.id) return;
       const correctionArgs = { customer, body: Body, smsLogId: smsLogId || null, senderPhone: From };
       // Deliberate fire-and-forget: the runner is fail-soft internally and
       // never rejects; the guard here only logs (id-only, no message
