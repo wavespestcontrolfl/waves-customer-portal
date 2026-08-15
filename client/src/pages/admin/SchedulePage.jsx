@@ -10932,6 +10932,10 @@ export function CompletionPanel({
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
+        // The station auto-count baseline restores with it — otherwise the
+        // registry's post-reload load re-derives the SAME counts against an
+        // empty baseline and clears a valid draft (codex r28).
+        stationAutoCounts: stationAutoCountsRef.current,
         nextVisitNote,
         showNextVisitNote,
         treeShrubCloseout,
@@ -11210,6 +11214,10 @@ export function CompletionPanel({
     generatedReportTextRef.current = typeof savedDraft.generatedReportText === "string" && savedDraft.generatedReportText
       ? savedDraft.generatedReportText
       : null;
+    stationAutoCountsRef.current = savedDraft.stationAutoCounts
+      && typeof savedDraft.stationAutoCounts === "object"
+      ? { ...savedDraft.stationAutoCounts }
+      : {};
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
     setTreeShrubCloseout(
@@ -11848,6 +11856,10 @@ export function CompletionPanel({
     // added now would land in the submitted structured data but not in the prose
     // the response is about to write (built from the pre-draft snapshot).
     if (generating) return;
+    // Products feed the generation grounding (and T&S derives its treatments
+    // from them), so a post-generation product change invalidates an
+    // untouched draft the same way a typed edit does (codex r28).
+    invalidateGeneratedReportOnTypedEdit();
     if (selectedProducts.find((p) => p.productId === product.id)) return;
     const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
     const areaRequirement = requiredApplicationArea(
@@ -12025,11 +12037,14 @@ export function CompletionPanel({
   }
   function removeProduct(productId) {
     if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.filter((p) => p.productId !== productId),
     );
   }
   function updateProduct(productId, field, value) {
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.map((p) => {
         if (p.productId !== productId) return p;

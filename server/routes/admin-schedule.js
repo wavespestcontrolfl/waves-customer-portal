@@ -12186,6 +12186,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       'hornet', 'hornets', 'bees', 'mice', 'rats', 'wildlife', 'station',
       'stations', 'trap', 'traps', 'perimeter', 'barrier', 'outdoor',
       'indoor', 'yard', 'granular', 'granules',
+      // functional product roles — "applied a wetting agent" is the CANONICAL
+      // customer copy for the matching lawn action; only distinctive brand
+      // tokens ("Dispatch") may reject (codex r28)
+      'wetting', 'agent', 'sprayable', 'spreader', 'sticker', 'adjuvant',
     ]);
     const guardedProducts = [
       ...(Array.isArray(products) ? products : []),
