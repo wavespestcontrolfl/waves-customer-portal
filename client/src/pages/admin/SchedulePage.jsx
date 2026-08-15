@@ -165,6 +165,27 @@ function rateUnitsMatch(a, b) {
   const right = normalizeRateUnit(b);
   return !!left && !!right && left === right;
 }
+// The unit dropdowns list the everyday units; catalog rows can carry a
+// label-native per-basis unit outside that list ("g/spot", "ml/inch dbh",
+// "oz/acre", "lb/100sf", "each/100sf"…). Render that unit as an extra
+// option so the prefill displays and survives a re-select instead of
+// snapping the <select> to a blank/wrong value.
+const STANDARD_RATE_UNIT_OPTIONS = ["oz", "fl_oz", "ml", "g", "lb", "gal", "oz/gal", "fl_oz/gal", "g/gal"];
+const STANDARD_AMOUNT_UNIT_OPTIONS = ["oz", "fl_oz", "ml", "g", "lb", "gal"];
+export function catalogUnitOption(unit, standardOptions) {
+  if (!unit || standardOptions.includes(unit)) return null;
+  return <option value={unit}>{unit.replace(/_/g, " ")}</option>;
+}
+// A "/"-suffixed display unit is a label rate in the label's own basis — mix
+// concentration ("fl_oz/gal", "fl_oz/100gal"), spot placement ("g/spot"),
+// trunk dose ("ml/inch dbh"), per-acre broadcast ("oz/acre"), bed rate
+// ("lb/100sf"), station density ("each/20ft") — everything except the
+// per-1,000 area units, whose rates live in default_rate_per_1000 instead.
+// Rate × sqft derivations and 1:1 amount units don't apply to these.
+export function isPerBasisUnit(unit) {
+  const u = String(unit || "");
+  return u.includes("/") && !u.endsWith("/1000sf");
+}
 const AREAS_BY_SERVICE = {
   pest: [
     "Perimeter",
@@ -11795,12 +11816,14 @@ export function CompletionPanel({
       !dryFormProduct &&
       applicationMethod === "perimeter_spray" &&
       serviceLineFromType(serviceTypeForArea) === "pest";
-    // Dilution products carry their verified label rate in the legacy display
-    // fields (default_rate "0.2-0.8" + default_unit "fl_oz/gal"). When there
-    // is no per-1k rate and the pest 4-oz house default doesn't apply, start
-    // the tech at the label band's LOW end in the label's own /gal unit —
-    // parseFloat reads the low bound out of an "X-Y" band.
-    const dilutionRate = defaultUnit.endsWith("/gal")
+    // Per-basis products carry their verified label rate in the legacy
+    // display fields (default_rate "0.2-0.8" + default_unit "fl_oz/gal" —
+    // see isPerBasisUnit for the unit families). When there is no per-1k
+    // rate and the pest 4-oz house default doesn't apply, start the tech at
+    // the label band's LOW end in the label's own unit — parseFloat reads
+    // the low bound out of an "X-Y" band.
+    const perBasisUnit = isPerBasisUnit(defaultUnit);
+    const labelDisplayRate = perBasisUnit
       ? parseFloat(String(product.default_rate ?? product.defaultRate ?? ""))
       : NaN;
     // DB numerics arrive as strings with trailing zeros ("0.5000") — show the
@@ -11809,8 +11832,8 @@ export function CompletionPanel({
       ? 4
       : catalogRate !== "" && Number.isFinite(Number(catalogRate))
         ? Number(catalogRate)
-        : Number.isFinite(dilutionRate)
-          ? dilutionRate
+        : Number.isFinite(labelDisplayRate)
+          ? labelDisplayRate
           : catalogRate;
     // Lawn broadcast/granular products treat the whole measured lawn: start
     // the Sq ft field at the turf profile's treatable area and derive Total =
@@ -11825,13 +11848,14 @@ export function CompletionPanel({
         : areaRequirement?.unit === "linear_ft" && Number(tracedLinearFt) > 0
           ? Number(tracedLinearFt)
           : "";
-    // A "/gal" rate is a mix concentration — rate × sqft would fabricate an
-    // applied amount that really depends on carrier volume, so leave Total
+    // A per-basis rate ("/gal" mix, "g/spot", "ml/inch dbh", "oz/acre",
+    // "lb/100sf"…) — rate × sqft would fabricate an applied amount that
+    // really depends on carrier volume / placement count, so leave Total
     // blank for the tech to enter. A linear-ft prefill derives nothing
     // either: the derived Total is a per-1,000-sqft calculation and has no
     // meaning against perimeter footage.
     const prefillTotal =
-      defaultUnit.endsWith("/gal") || areaRequirement?.unit === "linear_ft"
+      perBasisUnit || areaRequirement?.unit === "linear_ft"
         ? ""
         : derivedTotalAmount(prefillRate, prefillArea);
     setSelectedProducts((prev) => [
@@ -11862,14 +11886,14 @@ export function CompletionPanel({
         rate: prefillRate,
         rateUnit: usePestSprayDefault ? "oz" : defaultUnit,
         catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
-        // A "/gal" unit is a mix concentration — fine as the rate, but
-        // "Total used" records a real quantity (and inventory deduction
-        // can't convert a concentration), so default the amount unit to
-        // the base unit instead.
+        // A per-basis unit is a concentration/placement rate — fine as the
+        // rate, but "Total used" records a real quantity (and inventory
+        // deduction can't convert a concentration), so default the amount
+        // unit to the base unit before the "/" instead.
         amountUnit: usePestSprayDefault
           ? "oz"
-          : defaultUnit.endsWith("/gal")
-            ? defaultUnit.slice(0, -"/gal".length)
+          : perBasisUnit
+            ? defaultUnit.split("/")[0]
             : defaultUnit,
         maxLabelRatePer1000:
           product.maxLabelRatePer1000 ??
@@ -14655,6 +14679,7 @@ export function CompletionPanel({
                         <option value="oz/gal">oz/gal</option>{" "}
                         <option value="fl_oz/gal">fl oz/gal</option>{" "}
                         <option value="g/gal">g/gal</option>{" "}
+                        {catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)}{" "}
                       </select>{" "}
                       <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
                         Total used
@@ -14700,6 +14725,7 @@ export function CompletionPanel({
                         <option value="g">g</option>{" "}
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
+                        {catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)}{" "}
                       </select>{" "}
                       {areasServiced.length > 0 && (() => {
                         const selectedAreas = parseApplicationAreas(
@@ -16831,6 +16857,7 @@ export function CompletionPanel({
                     <option value="oz/gal">oz/gal</option>{" "}
                     <option value="fl_oz/gal">fl oz/gal</option>{" "}
                     <option value="g/gal">g/gal</option>{" "}
+                    {catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)}{" "}
                   </select>{" "}
                   <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
                     Total used
@@ -16857,6 +16884,7 @@ export function CompletionPanel({
                     <option value="ml">ml</option> <option value="g">g</option>{" "}
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
+                    {catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)}{" "}
                   </select>{" "}
                   {areasServiced.length > 0 && (() => {
                     const selectedAreas = parseApplicationAreas(

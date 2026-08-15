@@ -7017,7 +7017,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const insertedServiceProducts = [];
         if (products?.length) {
           const seenProductIds = new Set();
-          const validRateUnits = new Set(['oz', 'fl_oz', 'ml', 'g', 'lb', 'gal', 'oz/gal', 'fl_oz/gal', 'g/gal', 'oz/1000sf', 'lb/1000sf', 'g/1000sf']);
+          const validRateUnits = new Set([
+            'oz', 'fl_oz', 'ml', 'g', 'lb', 'gal', 'each',
+            'oz/gal', 'fl_oz/gal', 'g/gal', 'ml/gal', 'lb/gal', 'gal/gal',
+            'oz/1000sf', 'lb/1000sf', 'g/1000sf',
+            // Label-native per-basis units carried in products_catalog
+            // default_unit (rate-render backfill): gel spot placements,
+            // 100-gal dilutions, trunk-injection doses, per-acre broadcast,
+            // ornamental-bed rates, and station/placement densities.
+            'g/spot', 'fl_oz/100gal', 'oz/100gal',
+            'ml/inch dbh', 'g/inch dbh', 'ml/palm',
+            'oz/acre', 'fl_oz/acre', 'lb/acre', 'gal/acre',
+            'lb/100sf', 'each/100sf', 'each/acre', 'fl_oz/50ft',
+            'each/20ft', 'each/station', 'each/placement',
+          ]);
           for (const p of products) {
             if (!p.productId) continue;
             if (seenProductIds.has(p.productId)) continue;

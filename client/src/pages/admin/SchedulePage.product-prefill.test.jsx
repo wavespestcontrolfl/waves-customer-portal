@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   PRODUCT_DESCRIPTIONS,
   TRACK_SAFETY_RULES,
+  catalogUnitOption,
+  isPerBasisUnit,
   allowedTargetLinesForServiceType,
   allowedTargetLinesForVisit,
   ALL_TARGET_LINES,
@@ -621,5 +623,50 @@ describe("productTargetsNutrition", () => {
     expect(productTargetsNutrition({ category: "herbicide" })).toBe(false);
     expect(productTargetsNutrition({ category: "" })).toBe(false);
     expect(productTargetsNutrition(undefined)).toBe(false);
+  });
+});
+
+describe("isPerBasisUnit", () => {
+  it("recognizes label-native per-basis units", () => {
+    for (const unit of [
+      "fl_oz/gal", "g/gal", "ml/gal", "fl_oz/100gal", "oz/100gal", "g/spot",
+      "ml/inch dbh", "g/inch dbh", "ml/palm", "oz/acre", "fl_oz/acre",
+      "lb/acre", "gal/acre", "lb/100sf", "each/100sf", "each/acre",
+      "fl_oz/50ft", "each/20ft", "each/station", "each/placement",
+      "lb/gal", "gal/gal",
+    ]) {
+      expect(isPerBasisUnit(unit)).toBe(true);
+    }
+  });
+
+  it("keeps plain and per-1,000 area units on the derived-total path", () => {
+    for (const unit of ["oz", "fl_oz", "ml", "g", "lb", "gal", "each", "", null, undefined]) {
+      expect(isPerBasisUnit(unit)).toBe(false);
+    }
+    // Per-1,000 rates live in default_rate_per_1000 and keep the
+    // rate × sqft / 1,000 derived Total — never the per-basis path.
+    expect(isPerBasisUnit("oz/1000sf")).toBe(false);
+    expect(isPerBasisUnit("lb/1000sf")).toBe(false);
+    expect(isPerBasisUnit("g/1000sf")).toBe(false);
+  });
+});
+
+describe("catalogUnitOption", () => {
+  it("renders an extra option for a catalog unit outside the standard list", () => {
+    const option = catalogUnitOption("g/spot", ["oz", "fl_oz"]);
+    expect(option.props.value).toBe("g/spot");
+    expect(option.props.children).toBe("g/spot");
+  });
+
+  it("humanizes underscores in the label but keeps the raw value", () => {
+    const option = catalogUnitOption("fl_oz/100gal", ["oz", "fl_oz"]);
+    expect(option.props.value).toBe("fl_oz/100gal");
+    expect(option.props.children).toBe("fl oz/100gal");
+  });
+
+  it("returns null for a standard or missing unit", () => {
+    expect(catalogUnitOption("oz", ["oz", "fl_oz"])).toBeNull();
+    expect(catalogUnitOption("", ["oz", "fl_oz"])).toBeNull();
+    expect(catalogUnitOption(null, ["oz", "fl_oz"])).toBeNull();
   });
 });
