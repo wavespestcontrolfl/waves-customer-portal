@@ -420,6 +420,23 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(wild.observations.join(' ')).toContain('No activity at traps');
   });
 
+  test('negative answers on work fields are status, not completed work (r20)', () => {
+    const neg = typedFindingsPromptSections('rodent_bait_station', { bait_replaced: 'No' });
+    expect(neg.work).toHaveLength(0);
+    expect(neg.observations).toHaveLength(1);
+    const pos = typedFindingsPromptSections('rodent_bait_station', { bait_replaced: 'Yes' });
+    expect(pos.work).toHaveLength(1);
+  });
+
+  test('limited treatments stay completed work; cleanup-needed is advice (r20)', () => {
+    const flea = typedFindingsPromptSections('flea', { treatment_completed: 'Limited treatment' });
+    expect(flea.work.join(' ')).toContain('Limited treatment');
+    expect(flea.observations).toHaveLength(0);
+    const clean = typedFindingsPromptSections('rodent_trapping', { additional_cleanup_needed: 'Yes' });
+    expect(clean.advice).toHaveLength(1);
+    expect(clean.observations).toHaveLength(0);
+  });
+
   test('recommendation and limitation options split out of work chips (r19)', () => {
     const san = typedFindingsPromptSections('rodent_sanitation', {
       sanitation_work_completed: 'Removed droppings, Insulation removal recommended, Limited cleanup due to access',

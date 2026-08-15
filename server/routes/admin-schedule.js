@@ -11286,7 +11286,7 @@ const TYPED_PRODUCT_FIELD_RE = /product|epa|active_ingredient|concentration|gall
 // Recommendation/prep/follow-up fields are FUTURE ADVICE, never findings —
 // presenting a proposed treatment as an observation would let the copy claim
 // work or conditions the visit didn't establish (codex r3 P1).
-const TYPED_ADVICE_FIELD_RE = /recommend|_prep$|instruction|followup|follow_up/i;
+const TYPED_ADVICE_FIELD_RE = /recommend|_prep$|instruction|followup|follow_up|_needed$/i;
 // Customer-communication fields (mosquito_event customer_reported /
 // customer_discussed) are the homeowner's words, not technician findings —
 // they render in their own attributed group and never feed the deterministic
@@ -11379,7 +11379,9 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
       // removal recommended"), and limitations ("Limited cleanup due to
       // access") — only the actions keep work provenance; the rest split per
       // option into their real groups (codex r18/r19).
-      const statusOptionRe = /\bfound\b|\bno activity\b|\bobserved\b|\bnoted\b|\blimited\b|\bdue to\b|\bunable\b/i;
+      // 'Limited treatment' is completed work — only access-limitation
+      // phrases ('due to', 'unable', 'no access') read as status (codex r20).
+      const statusOptionRe = /\bfound\b|\bno activity\b|\bobserved\b|\bnoted\b|\bdue to\b|\bunable\b|\bno access\b/i;
       const adviceOptionRe = /\brecommended\b|\brecommend\b|\bneeded\b/i;
       if (multi && parts.some((part) => statusOptionRe.test(part) || adviceOptionRe.test(part))) {
         const adviceParts = parts.filter((part) => adviceOptionRe.test(part));
@@ -11394,6 +11396,11 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
         if (adviceParts.length) {
           sections.advice.push(`${label}: ${redactAccessCodes(adviceParts.join(', ').slice(0, 300))}`);
         }
+      } else if (!multi && /^(?:no|none|not applicable|n\/a)$/i.test(String(raw ?? '').trim())) {
+        // A negative answer on a work field ("Bait replaced: No") records
+        // that the action was NOT performed — a status fact, never
+        // "Completed work included …: No" (codex r20).
+        sections.observations.push(line);
       } else {
         sections.work.push(line);
       }
@@ -12030,8 +12037,16 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     // known: if companion facts were the ONLY thing that opened the gate and
     // none belong to a customer-facing (auto_send) companion, refuse instead
     // of generating an ungrounded generic report over the tech's notes.
-    const companionCustomerInput = companionEntries.some((entry) => entry?.type
-      && authorizedCompanionTypes.includes(entry.type) && companionEntryHasInput(entry));
+    // Same first-entry-per-type rule the prompt block applies — a duplicate
+    // type whose SECOND entry carries the facts must not open a gate the
+    // block will render empty (codex r20).
+    const gateSeenTypes = new Set();
+    const dedupedCompanionEntries = companionEntries.filter((entry) => {
+      if (!entry?.type || gateSeenTypes.has(entry.type)) return false;
+      gateSeenTypes.add(entry.type);
+      return true;
+    });
+    const companionCustomerInput = dedupedCompanionEntries.some((entry) => authorizedCompanionTypes.includes(entry.type) && companionEntryHasInput(entry));
     const baseHasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
