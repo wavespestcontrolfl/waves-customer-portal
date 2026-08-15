@@ -27,7 +27,16 @@
 // Write semantics (all fill-only-if-empty; admin edits always win):
 // - basis "display" → default_rate ("X" or "X-Y" band) + default_unit
 //   (label-native per-basis unit, e.g. "g/spot", "fl_oz/100gal",
-//   "ml/inch dbh", "oz/acre", "lb/100sf", "each/20ft").
+//   "ml/inch dbh", "oz/acre", "lb/100sf", "each/20ft"). The pair is atomic
+//   (codex P2 r3): both are written only when default_rate is empty — a
+//   unit-only placeholder from the inventory create form ("oz" with no
+//   rate) is replaced by the label unit rather than left to caption the
+//   new rate, and a row with a preexisting rate is left entirely alone
+//   (pairing an admin rate with our unit would mislabel it).
+// - entries may carry `method` → application_method, filled only where the
+//   column exists and the row has none (codex P1 r3: DBH-dosed injectables
+//   otherwise classify as foliar_spray, an internally contradictory record
+//   next to an ml/inch-DBH rate).
 // - basis "per_1000_sqft" → default_rate_per_1000 (label's named rate, else
 //   the label's LOW rate), min/max_label_rate_per_1000, rate_unit — the same
 //   convention as 20260712100000.
@@ -82,26 +91,28 @@ const DATA = [
     note: 'rate-render: 1.7-3.4 fl oz (50-100 mL) per 100 gal of water for ornamental foliar applications from the OHP Kontos specimen label (EPA 432-1471-59807).' },
   { name: 'Zylam Insecticide', basis: 'display', rate: '7.25-16', unit: 'fl_oz/100gal',
     note: 'rate-render: 7.25-16 fl oz/100 gal of water for foliar applications to landscape ornamentals from the PBI-Gordon Zylam Liquid specimen label (EPA 2217-937).' },
-  { name: 'ADORN Fungicide', basis: 'display', rate: '1-4', unit: 'fl_oz/100gal',
-    note: 'rate-render: 1-4 fl oz/100 gal on ornamental plants (foliar 2-4, drench 1-4; 100 gal treats ~20,000 sq ft) from the Adorn label (EPA 59639-141). Label lists ORNAMENTAL sites only — no turfgrass use directions.' },
+  // ADORN is deliberately NOT seeded (codex P1 r3): its current label has
+  // ORNAMENTAL sites only — no turfgrass directions — and a global catalog
+  // rate would prefill as a normal broadcast on lawn closeouts through the
+  // name-only picker. Needs a site/context gate (owner ruling) first.
   // ── Trunk injections: per inch DBH / per palm ───────────────────────
-  { name: 'Arborjet Ima-Jet 10', basis: 'display', rate: '1-6', unit: 'ml/inch dbh',
+  { name: 'Arborjet Ima-Jet 10', basis: 'display', method: 'trunk_injection', rate: '1-6', unit: 'ml/inch dbh',
     note: 'rate-render: 1.0-2.0 mL/inch DBH low rate up to 3.0-6.0 mL/inch for larger trees or heavier pressure from the IMA-jet 10 label (EPA 74578-6).' },
-  { name: 'Arborjet Ima-Jet Systemic Insecticide', basis: 'display', rate: '2-8', unit: 'ml/inch dbh',
+  { name: 'Arborjet Ima-Jet Systemic Insecticide', basis: 'display', method: 'trunk_injection', rate: '2-8', unit: 'ml/inch dbh',
     note: 'rate-render: 2.0-4.0 mL/inch DBH (aphids/scales) up to 4.0-8.0 mL/inch (borers/EAB) from the IMA-jet label (EPA 74578-1).' },
-  { name: 'Arborjet PHOSPHO-Jet Systemic Fungicide', basis: 'display', rate: '3.5-7', unit: 'ml/inch dbh',
+  { name: 'Arborjet PHOSPHO-Jet Systemic Fungicide', basis: 'display', method: 'trunk_injection', rate: '3.5-7', unit: 'ml/inch dbh',
     note: 'rate-render: 3.5-7.0 mL per inch DBH from the PHOSPHO-jet label (EPA 74578-3): 3.5 for trees <12" DBH, up to 7.0 for larger trees.' },
-  { name: 'Arborjet Propizol Injectable Fungicide', basis: 'display', rate: '10-20', unit: 'ml/inch dbh',
+  { name: 'Arborjet Propizol Injectable Fungicide', basis: 'display', method: 'trunk_injection', rate: '10-20', unit: 'ml/inch dbh',
     note: 'rate-render: 10 mL/inch DBH low rate to 20 mL/inch high rate from the Propizol micro-injection use rate table (EPA 74578-8).' },
-  { name: 'ArborJet Mn-Jet Fe Micros', basis: 'display', rate: '5-15', unit: 'ml/inch dbh',
+  { name: 'ArborJet Mn-Jet Fe Micros', basis: 'display', method: 'trunk_injection', rate: '5-15', unit: 'ml/inch dbh',
     note: 'rate-render: 5 mL/inch DBH low rate; 10-15 mL/inch high rate (late summer/fall) from the Arborjet Mn-jet Fe label insert.' },
-  { name: 'Arborjet Palm-Jet Palm Nutrition', basis: 'display', rate: '5-30', unit: 'ml/palm',
+  { name: 'Arborjet Palm-Jet Palm Nutrition', basis: 'display', method: 'trunk_injection', rate: '5-30', unit: 'ml/palm',
     note: 'rate-render: 5-10 mL small palms, 10-20 mL medium, 20-30 mL large from the PALM-jet Mg palm rates table (arborjet.com label).' },
-  { name: 'Arborjet Arbor OTC Fungicide 1 oz', basis: 'display', rate: '0.28', unit: 'g/inch dbh',
+  { name: 'Arborjet Arbor OTC Fungicide 1 oz', basis: 'display', method: 'trunk_injection', rate: '0.28', unit: 'g/inch dbh',
     note: 'rate-render: 0.28 g product per inch DBH — the label mixing table dissolves 2.8 g (0.1 oz) in 25 mL water to treat 10 DBH inches (Arbor-OTC label, EPA 74578-7).' },
-  { name: 'Arborjet Arbor OTC Fungicide 5 oz', basis: 'display', rate: '0.28', unit: 'g/inch dbh',
+  { name: 'Arborjet Arbor OTC Fungicide 5 oz', basis: 'display', method: 'trunk_injection', rate: '0.28', unit: 'g/inch dbh',
     note: 'rate-render: 0.28 g product per inch DBH — the label mixing table dissolves 2.8 g (0.1 oz) in 25 mL water to treat 10 DBH inches (Arbor-OTC label, EPA 74578-7).' },
-  { name: 'Shortstop 2SC Plant Growth Regulator for Trees & Shrubs', basis: 'display', rate: '0.75-4', unit: 'g/inch dbh',
+  { name: 'Shortstop 2SC Plant Growth Regulator for Trees & Shrubs', basis: 'display', method: 'soil_drench', rate: '0.75-4', unit: 'g/inch dbh',
     note: 'rate-render: 0.75-4 g a.i. per inch trunk DBH (species-dependent tier; applied as a 1:11 diluted basal drench/soil injection; do not treat trees under 1.5 in DBH) from the Shortstop 2SC label (EPA 62097-34).' },
 
   // ── Per-acre broadcast (fractional-ounce turf products) ─────────────
@@ -115,8 +126,10 @@ const DATA = [
     note: 'rate-render: 0.35-0.53 oz/acre (10-15 g, 2-3 packets) in 1-2 gal water per 1,000 sq ft from the Syngenta Monument 75WG label (EPA 100-1134).' },
   { name: 'Envu Specticle Flo Pre-Emergent Liquid Herbicide', basis: 'display', rate: '6', unit: 'fl_oz/acre',
     note: 'rate-render: 6 fl oz/acre maximum single application on St. Augustinegrass and centipedegrass (10 on bermuda/zoysia) from the Envu Specticle FLO label (EPA 101563-207).' },
-  { name: 'Tenacity Herbicide', basis: 'display', rate: '4-8', unit: 'fl_oz/acre',
-    note: 'rate-render: 4-8 fl oz/acre postemergence from the Syngenta label (EPA 100-1267). The prior note\'s caution stands: St. Augustinegrass is sod-farm use only on this label.' },
+  // Tenacity is deliberately NOT seeded (codex P1 r3): its label limits
+  // St. Augustinegrass to sod-farm use, and a global catalog rate would
+  // prefill on residential St. Augustine closeouts through the name-only
+  // picker. Needs a turf/site gate (owner ruling) first.
   // Fusilade II is deliberately NOT seeded (codex P1, PR #3419): the label
   // says "Not for use on home lawns", standalone use here is beds/non-crop,
   // and the sanctioned St. Augustine bermuda-suppression program runs it as
@@ -229,6 +242,7 @@ function ownedFields(labelSourceNote, note) {
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
+  const hasMethodCol = await knex.schema.hasColumn('products_catalog', 'application_method');
 
   for (const d of DATA) {
     const row = await knex('products_catalog')
@@ -237,8 +251,13 @@ exports.up = async function up(knex) {
     if (!row) continue;
     const updates = {};
     if (d.basis === 'display') {
-      if (emptyText(row.default_rate)) updates.default_rate = d.rate;
-      if (emptyText(row.default_unit)) updates.default_unit = d.unit;
+      // Atomic pair: write both only when the rate is empty; replace a
+      // unit-only placeholder with the label unit; never touch a row that
+      // already carries a rate (see header).
+      if (emptyText(row.default_rate)) {
+        updates.default_rate = d.rate;
+        if (row.default_unit !== d.unit) updates.default_unit = d.unit;
+      }
     } else if (d.basis === 'per_1000_sqft') {
       const rate = d.rate != null ? d.rate : d.min;
       const max = d.max != null ? d.max : (d.rate != null && d.min == null ? d.rate : null);
@@ -246,6 +265,9 @@ exports.up = async function up(knex) {
       if (d.min != null && row.min_label_rate_per_1000 == null) updates.min_label_rate_per_1000 = d.min;
       if (max != null && row.max_label_rate_per_1000 == null) updates.max_label_rate_per_1000 = max;
       if (d.unit && emptyText(row.rate_unit)) updates.rate_unit = d.unit;
+    }
+    if (d.method && hasMethodCol && emptyText(row.application_method)) {
+      updates.application_method = d.method;
     }
     const wroteFields = Object.keys(updates);
     if (wroteFields.length && d.note && !String(row.label_source_note || '').includes(d.note)) {
@@ -298,6 +320,7 @@ exports.down = async function down(knex) {
        
       if (field === 'max_label_rate_per_1000' && max != null && row.max_label_rate_per_1000 == max) reverts.max_label_rate_per_1000 = null;
       if (field === 'rate_unit' && row.rate_unit === d.unit) reverts.rate_unit = null;
+      if (field === 'application_method' && d.method && row.application_method === d.method) reverts.application_method = null;
     }
     const segment = appendedNote(d.note, owned);
     if (row.label_source_note === segment) {

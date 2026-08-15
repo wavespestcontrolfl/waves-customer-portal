@@ -37,7 +37,7 @@ function fakeKnex(rows) {
       },
     };
   };
-  knex.schema = { hasTable: async () => true };
+  knex.schema = { hasTable: async () => true, hasColumn: async () => true };
   return knex;
 }
 
@@ -53,6 +53,7 @@ function baseRow(overrides) {
     min_label_rate_per_1000: null,
     max_label_rate_per_1000: null,
     rate_unit: null,
+    application_method: null,
     label_source_note: null,
     label_verified_at: null,
     label_verified_by: null,
@@ -89,12 +90,34 @@ describe('up() fill-only + provenance', () => {
     expect(rows[0].label_verified_by).toBe('rate-render-backfill-2026-08-14');
   });
 
-  test('partially filled row: only the empty field is written and recorded', async () => {
+  test('row with a preexisting rate is left entirely alone (atomic pair)', async () => {
     const rows = [baseRow({ name: GEL.name, default_rate: '0.3' })];
     await migration.up(fakeKnex(rows));
     expect(rows[0].default_rate).toBe('0.3'); // admin value wins
+    // Pairing an admin rate with our unit would mislabel it — no write.
+    expect(rows[0].default_unit).toBeNull();
+    expect(rows[0].label_source_note).toBeNull();
+    expect(rows[0].label_verified_by).toBeNull();
+  });
+
+  test('unit-only placeholder ("oz" with no rate) is replaced by the label pair', async () => {
+    const rows = [baseRow({ name: GEL.name, default_unit: 'oz' })];
+    await migration.up(fakeKnex(rows));
+    expect(rows[0].default_rate).toBe(GEL.rate);
     expect(rows[0].default_unit).toBe(GEL.unit);
-    expect(ownedFields(rows[0].label_source_note, GEL.note)).toEqual(['default_unit']);
+    expect(ownedFields(rows[0].label_source_note, GEL.note)).toEqual([
+      'default_rate', 'default_unit',
+    ]);
+  });
+
+  test('injection entries fill application_method only where empty', async () => {
+    const INJ = DATA.find((d) => d.name === 'Arborjet Propizol Injectable Fungicide');
+    const empty = baseRow({ id: 'row-inj', name: INJ.name });
+    const preset = baseRow({ id: 'row-set', name: 'Arborjet Ima-Jet 10', application_method: 'soil_drench' });
+    const rows = [empty, preset];
+    await migration.up(fakeKnex(rows));
+    expect(empty.application_method).toBe('trunk_injection');
+    expect(preset.application_method).toBe('soil_drench'); // admin value wins
   });
 
   test('fully populated row is untouched — no note, no stamp', async () => {
