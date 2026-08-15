@@ -63,6 +63,11 @@ async function nextUpcomingVisit(customerId) {
  */
 async function flagInboundRescheduleIntent({ customer, phone, body, smsLogId, messageSid }) {
   try {
+    // Owner ruling 2026-08-15: lane silenced (bells fired on consent-shaped
+    // replies and tapbacks). Gate is opt-in; off = no flag row, no bell.
+    if (!require('../config/feature-gates').isEnabled('rescheduleIntentFlags')) {
+      return { flagged: false, reason: 'gate_off' };
+    }
     // Shared/ambiguous sender phone (codex #3232 r25): two active customer
     // records on one number means no customer object, but the request is
     // just as real — persist an UNLINKED flag keyed by the phone instead

@@ -634,6 +634,27 @@ router.post('/sms', async (req, res) => {
       }
     }
 
+    // Customer-stated contact correction ("name is Kats, you spelled with a
+    // Z") — auto-applied behind GATE_CONTACT_CORRECTION, LINKED customers
+    // only (a shared/unknown number could correct the wrong record). Cheap
+    // regex prefilter here; the LLM extraction and the writes run post-ack
+    // and fail-soft, so the webhook ack is never delayed and an error here
+    // can never affect inbound SMS handling.
+    if (Body && !smsReaction && customer?.id) {
+      const contactCorrection = require('../services/contact-correction');
+      if (contactCorrection.detectContactCorrectionIntent(Body)) {
+        const correctionArgs = { customer, body: Body, smsLogId: smsLogEntry?.id || null };
+        // Deliberate fire-and-forget: the runner is fail-soft internally and
+        // never rejects; the guard here only logs (id-only, no message
+        // content) if that contract is ever broken.
+        setImmediate(() => {
+          contactCorrection.runSmsContactCorrection(correctionArgs).catch((err) => {
+            logger.warn(`[contact-correction] post-ack run rejected for customer ${customer.id}, sms_log ${correctionArgs.smsLogId || 'n/a'}: ${err.message}`);
+          });
+        });
+      }
+    }
+
     // Event-driven health rescore for any matched customer (the opt-out branch
     // above already fired for cancellations). Not gated on messageType: an
     // existing customer texting a churn message to a domain/van tracking number

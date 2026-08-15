@@ -8356,6 +8356,18 @@ const CallRecordingProcessor = {
       logger.warn(`[call-proc] Customer field candidate staging skipped for ${maskSid(callSid)}: ${err.message}`);
     });
 
+    // Auto-apply contact corrections the caller stated on this call
+    // (GATE_CONTACT_CORRECTION, linked customers only) — consumes the
+    // candidates staged above; evidence-pinned high-confidence fields only,
+    // never phone. Fail-soft: a correction failure never affects the call
+    // pipeline.
+    await require('./contact-correction').runCallContactCorrection({
+      callId: call.id,
+      customerId: customerId || call.customer_id || null,
+    }).catch((err) => {
+      logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);
+    });
+
     // Step 4b: Create lead in leads table for pipeline tracking
     // Note: we create the lead DIRECTLY here instead of going through lead-attribution,
     // because Step 3 already created the customer — attribution would find the customer
