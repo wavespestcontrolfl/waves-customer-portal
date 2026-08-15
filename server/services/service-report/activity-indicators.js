@@ -3240,13 +3240,11 @@ function buildTodaysResult({
       .split(',').map((s) => s.trim()).filter(Boolean)
       .filter((c) => c !== 'No limitations');
     const level = String(values.contamination_level).split('—')[0].trim().toLowerCase();
-    const sentences = [
-      areas.length
-        ? `Completed rodent sanitation service in the ${joinPhrases(areas)}.`
-        : 'Completed your rodent sanitation service today.',
-      `Contamination level was ${level}.`,
-      evidence.length ? `We removed and treated ${joinPhrases(evidence)}.` : null,
-      whatWeDid,
+    // The tech's reviewed "Generate AI report" copy replaces the descriptive
+    // portion (owner 2026-08-11 rule, same as knockdown/mosquito/flea) — the
+    // limitation disclosure, the severe-contamination follow-up line, and
+    // the next step are mandated and carry in EVERY body (codex r23 #3420).
+    const mandated = [
       limitations.length
         ? `Some areas had limitations: ${joinPhrases(limitations.map((c) => c.toLowerCase()))}.`
         : 'No limitations were encountered during the cleanup.',
@@ -3255,10 +3253,21 @@ function buildTodaysResult({
         : null,
       nextStep,
     ].filter(Boolean);
+    const descriptive = technicianReportBody
+      ? [technicianReportBody]
+      : [
+        areas.length
+          ? `Completed rodent sanitation service in the ${joinPhrases(areas)}.`
+          : 'Completed your rodent sanitation service today.',
+        `Contamination level was ${level}.`,
+        evidence.length ? `We removed and treated ${joinPhrases(evidence)}.` : null,
+        whatWeDid,
+      ].filter(Boolean);
     return {
       headline: `${level.charAt(0).toUpperCase()}${level.slice(1)} rodent contamination was cleaned and sanitized today.`,
-      body: sentences.join(' ').replace(/\s+/g, ' ').trim(),
+      body: [...descriptive, ...mandated].join(' ').replace(/\s+/g, ' ').trim(),
       nextStep,
+      ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 

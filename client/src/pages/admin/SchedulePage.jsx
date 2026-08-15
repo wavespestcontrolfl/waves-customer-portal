@@ -9807,6 +9807,12 @@ export function CompletionPanel({
   // notes — persisted at completion as ai_draft_used (adoption telemetry,
   // specialty completion contract).
   const [aiReportUsed, setAiReportUsed] = useState(false);
+  // The exact text applyGeneratedReport installed — while the notes still
+  // equal it (untouched draft), a typed-findings edit clears the draft so
+  // stale AI prose can't publish beside contradicting structured findings
+  // (codex r23). An edited draft is the tech's reviewed copy and is theirs.
+  const generatedReportTextRef = useRef(null);
+  const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
   // AI photo analysis (optional, never blocks submit): summary is editable,
   // captions attach to the photo entries. Not draft-persisted — photos
   // themselves aren't, and a summary without its photos would be stale.
@@ -11523,6 +11529,8 @@ export function CompletionPanel({
     // A double-provider miss returns deterministic template copy, which is
     // NOT AI-assisted and must not inflate the metric (codex r19).
     if (!deterministic) setAiReportUsed(true);
+    generatedReportTextRef.current = String(reportText || "").trim();
+    setGeneratedReportCleared(false);
     if (!chipLinesDetached) {
       setSelectedProtocolActionLabels(
         labelsStillInNotes(selectedProtocolActionLabels),
@@ -13141,12 +13149,27 @@ export function CompletionPanel({
         new Date().toISOString();
     }
   }
+  // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
+  // the installed prose described the old facts, and completion would
+  // publish it beside contradicting structured findings (codex r23). Prose
+  // the tech already edited is their reviewed copy and stays.
+  function invalidateGeneratedReportOnTypedEdit() {
+    const installed = generatedReportTextRef.current;
+    if (!installed) return;
+    generatedReportTextRef.current = null;
+    if (String(notes || "").trim() === installed) {
+      setNotes("");
+      setAiReportUsed(false);
+      setGeneratedReportCleared(true);
+    }
+  }
   function handleTypedFindingChange(key, value) {
     // While a Generate request is in flight the snapshot must stay what the
     // model saw — the disabled fieldset stops taps, but a running per-field
     // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
     // so the WRITE is the freeze point.
     if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setFindingsValues((prev) => ({ ...prev, [key]: value }));
     // Derived prefill (contract §4): while the picker is untouched, the
@@ -13163,6 +13186,7 @@ export function CompletionPanel({
     // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
     // so the WRITE is the freeze point.
     if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     // First tap pins technician-set, even when the value doesn't change.
     setTypedActivityTouched(true);
@@ -13174,6 +13198,7 @@ export function CompletionPanel({
     // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
     // so the WRITE is the freeze point.
     if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setTypedNextStepChips((prev) => {
       if (prev.includes(chip)) return prev.filter((c) => c !== chip);
@@ -13187,6 +13212,7 @@ export function CompletionPanel({
     // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
     // so the WRITE is the freeze point.
     if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setTypedRecommendations(value);
     setTypedRecommendationsEdited(true);
@@ -13201,6 +13227,7 @@ export function CompletionPanel({
     // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
     // so the WRITE is the freeze point.
     if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setCompanionState((prev) => {
       const entry = prev[type] || EMPTY_COMPANION_ENTRY;
@@ -13219,6 +13246,7 @@ export function CompletionPanel({
     // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
     // so the WRITE is the freeze point.
     if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     // First tap pins technician-set, even when the value doesn't change.
     setCompanionState((prev) => ({
@@ -13236,6 +13264,7 @@ export function CompletionPanel({
     // SpeechRecognition still fires onresult -> onFieldChange (codex r12),
     // so the WRITE is the freeze point.
     if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
     markTypedFirstFieldTouch();
     setCompanionState((prev) => {
       const entry = prev[type] || EMPTY_COMPANION_ENTRY;
@@ -14262,6 +14291,12 @@ export function CompletionPanel({
               >
                 {generating ? "Generating…" : "Generate AI report"}
               </button>
+            )}
+            {!quickComplete && generatedReportCleared && (
+              <div style={{ fontSize: 13, color: "#B45309", marginTop: -12, marginBottom: 16 }}>
+                Findings changed after the AI report was generated — the draft
+                was cleared. Generate again to include the updated findings.
+              </div>
             )}
             {/* Service photos — pure lawn visits capture turf photos in the
                 Lawn Assessment block above, which flow into the report gallery,
@@ -16467,6 +16502,12 @@ export function CompletionPanel({
             >
               {generating ? "Generating Report..." : "Generate AI Service Report"}
             </button>
+          )}
+          {!quickComplete && generatedReportCleared && (
+            <div style={{ fontSize: 13, color: "#B45309", marginTop: -14, marginBottom: 18 }}>
+              Findings changed after the AI report was generated — the draft
+              was cleared. Generate again to include the updated findings.
+            </div>
           )}
           {/* Photo Upload — hidden in quick complete. Pure lawn visits capture
               turf photos in the Lawn Assessment block above (which flow into the
