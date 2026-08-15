@@ -73,7 +73,10 @@ function predictedOpeningScript({ firstName, amountDollars, invoiceTitle }) {
 // policy's evaluate() then applies the authoritative per-row rules).
 async function candidateCustomerIds() {
   const rows = await db('invoices')
-    .whereIn('status', ['sent', 'viewed', 'overdue'])
+    // 'unpaid' = legacy status the dunning rails serve (r4): the policy
+    // admits it, so the broad phase must too or those customers are never
+    // evaluated and their standing cases get wrongly lapsed.
+    .whereIn('status', ['sent', 'viewed', 'overdue', 'unpaid'])
     .whereNull('payer_id')
     .whereNull('payer_statement_id')
     .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
@@ -161,12 +164,18 @@ async function runShadowSweep({ now = new Date() } = {}) {
       const daysOverdue = daysOverdueOn(now, dueValue);
       const tier = dunningTierForOverdue(daysOverdue);
 
+      // Latest case across shadow AND lapsed (r4): a retired case that
+      // requalifies must advance its version monotonically — treating it
+      // as new would reuse the globally-unique version-1 idempotency key,
+      // fail the insert, and file no card.
       const existing = await db('collection_cases')
-        .where({ customer_id: customerId, current_state: 'shadow' })
+        .where({ customer_id: customerId })
+        .whereIn('current_state', ['shadow', 'lapsed'])
         .orderBy('case_version', 'desc')
         .first();
 
       const unchanged = existing
+        && existing.current_state === 'shadow'
         && Number(existing.eligible_balance_snapshot) === verdict.eligibleBalanceCents
         && JSON.stringify(normalizedIdSet(existing.eligible_invoice_ids)) === JSON.stringify(invoiceIds)
         // Tier is part of the proposal (codex r3): an unpaid invoice

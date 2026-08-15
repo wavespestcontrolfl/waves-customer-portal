@@ -303,7 +303,7 @@ describe('script text', () => {
 // card is missing re-files it (probe-notifications pattern).
 describe('card durability', () => {
   const EXISTING_CASE = {
-    id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800,
+    id: 'case-1', case_version: 1, current_state: 'shadow', eligible_balance_snapshot: 12800,
     eligible_invoice_ids: JSON.stringify(['inv-1']), idempotency_key: 'collections:cust-1:1:14',
   };
 
@@ -382,6 +382,39 @@ describe('retirement + tier rotation', () => {
     expect(caseUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       case_version: 2,
       idempotency_key: 'collections:cust-1:2:30',
+    }));
+    expect(result.cardsFiled).toBe(1);
+  });
+});
+
+// r4: the broad phase serves legacy 'unpaid' too, and a lapsed case
+// reactivates by advancing its version, never by colliding at version 1.
+describe('r4: unpaid candidates + lapsed reactivation', () => {
+  test('the candidate pool includes legacy unpaid invoices', async () => {
+    const candChain = chain({ result: [] });
+    setDbQueues({ invoices: [candChain], collection_cases: [chain({ result: 0 })] });
+    await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(candChain.whereIn).toHaveBeenCalledWith('status', ['sent', 'viewed', 'overdue', 'unpaid']);
+  });
+
+  test('a requalifying LAPSED case advances the version and returns to shadow with a fresh card', async () => {
+    const lapsed = {
+      id: 'case-1', case_version: 3, current_state: 'lapsed',
+      eligible_balance_snapshot: 12800, eligible_invoice_ids: JSON.stringify(['inv-1']),
+      idempotency_key: 'collections:cust-1:3:14',
+    };
+    const caseUpdate = chain({ returning: [{ id: 'case-1', case_version: 4, eligible_balance_snapshot: 12800 }] });
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      customers: [chain({ first: CUSTOMER })],
+      collection_cases: [chain({ first: lapsed }), caseUpdate, chain({ result: 0 })],
+      notifications: [chain({ first: null })],
+    });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(caseUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      case_version: 4,
+      current_state: 'shadow',
+      idempotency_key: 'collections:cust-1:4:14',
     }));
     expect(result.cardsFiled).toBe(1);
   });
