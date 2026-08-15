@@ -10406,10 +10406,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // would still be asserted at 8 AM with no recheck. The pay link
         // tolerates that staleness (its target renders live paid state); a
         // static sentence claiming money owed does not, so a deferred
-        // completion simply carries no balance line.
+        // completion simply carries no balance line. The precheck MIRRORS
+        // the authoritative validator's gating (codex r3 P2): with
+        // GATE_SMS_SEND_WINDOW off the validator never defers — nighttime
+        // completions send immediately, no frozen replay exists, and the
+        // line rides; only a window that can actually hold suppresses. The
+        // residual precheck→handoff race is closed by the
+        // stripBalanceLineFromBody pass at the QUIET_HOURS_HOLD below.
         const { isWithinSendWindowET } = require('../services/messaging/send-window');
+        const { isEnabled: gateEnabled } = require('../config/feature-gates');
         const { pastDueSmsLineForCustomer } = require('../services/open-balance');
-        const completionPastDueLine = (invoiceCreated && payUrl && allowCompletionInvoiceLink && isWithinSendWindowET())
+        const completionSmsCanDefer = gateEnabled('smsSendWindow') && !isWithinSendWindowET();
+        const completionPastDueLine = (invoiceCreated && payUrl && allowCompletionInvoiceLink && !completionSmsCanDefer)
           ? await pastDueSmsLineForCustomer(svc.customer_id, { excludeInvoiceId: invoice?.id || null })
           : '';
         const serviceReportV1SmsContext = serviceReportV1Delivery

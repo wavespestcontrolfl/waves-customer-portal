@@ -48,7 +48,7 @@ jest.mock('../models/db', () => {
   return dbFn;
 });
 
-const { pastDueSmsLineForCustomer, stripBalanceLineFromBody } = require('../services/open-balance');
+const { pastDueSmsLineForCustomer, stripBalanceLineFromBody, MAX_OPEN_INVOICES } = require('../services/open-balance');
 
 describe('pastDueSmsLineForCustomer', () => {
   beforeEach(() => {
@@ -133,6 +133,14 @@ describe('pastDueSmsLineForCustomer', () => {
       if (scheduledServiceId === 'svc-b') throw new Error('payer service down');
       return { payerId: null };
     });
+    expect(await pastDueSmsLineForCustomer('cust-1')).toBe('');
+  });
+
+  test('a FULL candidate page suppresses the line — rows may exist beyond the cap (codex r3 P2)', async () => {
+    mockIsEnabled.mockImplementation((k) => k === 'completionSmsBalance');
+    tableResults.rows = Array.from({ length: MAX_OPEN_INVOICES }, (_, i) => (
+      { id: `inv-${i}`, invoice_number: `INV-${i}`, total: '10.00', credit_applied: 0, scheduled_service_id: null }
+    ));
     expect(await pastDueSmsLineForCustomer('cust-1')).toBe('');
   });
 

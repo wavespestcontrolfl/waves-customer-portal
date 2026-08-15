@@ -94,11 +94,16 @@ async function rowIsSelfPayDue(customerId, row, { onResolveFailure = null } = {}
   return true;
 }
 
-async function openBalanceInvoices(customerId, { excludeInvoiceId = null, database = db, onResolveFailure = null } = {}) {
+async function openBalanceInvoices(customerId, { excludeInvoiceId = null, database = db, onResolveFailure = null, onTruncation = null } = {}) {
   if (!customerId) return [];
   const rows = await openInvoiceQuery(customerId, { excludeInvoiceId, database });
   if (rows.length >= MAX_OPEN_INVOICES) {
     logger.warn(`[open-balance] customer ${customerId} hit the ${MAX_OPEN_INVOICES}-invoice bound — balance surfaces may understate`);
+    // Same tell-"smaller"-from-"incomplete" contract as onResolveFailure
+    // (codex r3 P2): a full candidate page means self-pay rows can exist
+    // beyond the cap, so any total built from this read may understate —
+    // callers asserting the total as complete must be able to suppress.
+    if (typeof onTruncation === 'function') onTruncation(rows.length);
   }
 
   const selfPay = [];
@@ -229,13 +234,17 @@ async function pastDueSmsLineForCustomer(customerId, { excludeInvoiceId = null }
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!customerId || !isEnabled('completionSmsBalance')) return '';
-    let resolveFailed = false;
+    let incomplete = null;
     const prev = await openBalanceSummary(customerId, {
       excludeInvoiceId,
-      onResolveFailure: () => { resolveFailed = true; },
+      onResolveFailure: () => { incomplete = 'a payer resolve failed'; },
+      // A capped candidate page can hide further self-pay rows (codex r3
+      // P2) — same suppression as a resolve failure: never assert an
+      // amount the read cannot prove complete.
+      onTruncation: () => { incomplete = `the ${MAX_OPEN_INVOICES}-invoice candidate bound was hit`; },
     });
-    if (resolveFailed) {
-      logger.warn(`[open-balance] SMS balance line suppressed for ${customerId} — a payer resolve failed, so the total may understate`);
+    if (incomplete) {
+      logger.warn(`[open-balance] SMS balance line suppressed for ${customerId} — ${incomplete}, so the total may understate`);
       return '';
     }
     if (!(prev.total > 0)) return '';
