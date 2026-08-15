@@ -164,6 +164,7 @@ beforeEach(() => {
   flags.fileFlagCard.mockResolvedValue(true);
   ContactLedger.recordContact.mockResolvedValue({ id: 'ledger-sms-1', metadata: {} });
   ContactLedger.markSendFailed.mockResolvedValue(true);
+  require('../services/notification-service').notifyAdmin.mockResolvedValue({ id: 'n1' });
   InvoiceService.sendViaSMS.mockResolvedValue({ sent: true, ok: true });
   mockStreamCalls.length = 0;
   mockScriptedMessages.length = 0;
@@ -946,5 +947,104 @@ describe('prb-r14', () => {
   test('the relay-failure close promises nothing and names no billing vocabulary', () => {
     expect(script.RELAY_FAILURE_CLOSE).not.toMatch(/follow up/i);
     expect(script.RELAY_FAILURE_CLOSE).not.toMatch(/invoice|balance/i);
+  });
+});
+
+// prb-r15 pins.
+describe('prb-r15', () => {
+  test('"yes, that phone number is correct" is NOT SMS consent without a tracked offer', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    mockScriptedMessages.push(
+      toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it' }),
+      endTurn('Understood.'),
+    );
+    await turn(convo, 'yes, that phone number is correct');
+    expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+  });
+
+  test('"41 28" (multi-digit groups) never joins into a synthetic 4128; "4 1 2 8" (single digits) does', async () => {
+    setDb();
+    const { convo } = makeConvo();
+    mockScriptedMessages.push(
+      toolUse('confirm_right_party', { result: 'confirmed' }),
+      endTurn('Street number or ZIP?'),
+    );
+    await turn(convo, 'Speaking.');
+    mockScriptedMessages.push(
+      toolUse('verify_identity', { street_number: '4128' }),
+      endTurn('Just the digits please?'),
+    );
+    await turn(convo, '41 28');
+    expect(convo.verified).toBe(false);
+    expect(convo.verifyAttempts).toBe(0);
+    mockScriptedMessages.push(
+      toolUse('verify_identity', { street_number: '4128' }),
+      endTurn('Verified.'),
+    );
+    await turn(convo, '4 1 2 8');
+    expect(convo.verified).toBe(true);
+  });
+
+  test('a recorded date must agree with the month/day the caller said', async () => {
+    const { convo } = makeConvo();
+    await turn(convo, 'hello');
+    convo.state = 'RESOLUTION';
+    convo._turns.push({ role: 'caller', text: 'I can pay on August 20', at: Date.now() });
+    const bad = await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-28' });
+    expect(bad).toContain('does not match');
+    expect(convo._captures.customerIntendedPaymentDate).toBeUndefined();
+    const good = await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-20' });
+    expect(good).toContain('Recorded');
+  });
+
+  test('verified-but-undisclosed model text naming a balance is still deflected', async () => {
+    const { convo, spoken } = makeConvo();
+    await turn(convo, 'hello');
+    convo.verified = true;
+    convo.state = 'DISCLOSE';
+    mockScriptedMessages.push(endTurn('Your balance is $100.'));
+    await turn(convo, 'how much do I owe?');
+    expect(spoken.join(' ')).not.toContain('$100');
+    expect(spoken.join(' ')).toContain('pull up the exact details');
+  });
+
+  test('"don\'t contact me" is a deterministic BROAD opt-out', async () => {
+    const { convo } = makeConvo();
+    mockScriptedMessages.push(endTurn('Understood.'));
+    await turn(convo, "don't contact me");
+    expect(flags.revokeAutomatedVoiceConsent).toHaveBeenCalled();
+    expect(flags.writeFlag).toHaveBeenCalledWith(expect.objectContaining({ flag: 'do_not_call' }));
+  });
+
+  test('the spoken-language screen catches the bare word "debt"', async () => {
+    const { convo, spoken } = makeConvo();
+    await turn(convo, 'hello');
+    convo.verified = true;
+    convo.disclosed = true;
+    mockScriptedMessages.push(endTurn('This call is about your debt.'));
+    await turn(convo, 'why are you calling?');
+    expect(spoken.join(' ')).not.toMatch(/debt/i);
+  });
+
+  test('a timed-out write tool files a follow-up card before the model may promise one', async () => {
+    jest.useFakeTimers();
+    try {
+      const NotificationService = require('../services/notification-service');
+      const { convo } = makeConvo();
+      await turn(convo, 'hello');
+      flags.revokeAutomatedVoiceConsent.mockImplementation(() => new Promise(() => {})); // hangs
+      const resP = convo._executeToolBounded('record_do_not_call', { scope: 'automated_calls' });
+      await jest.advanceTimersByTimeAsync(8000);
+      const out = await resP;
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+        'billing', 'Follow-up needed after automated billing call', expect.stringContaining('timed out'), expect.anything(),
+      );
+      expect(out).toContain('office will follow up');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

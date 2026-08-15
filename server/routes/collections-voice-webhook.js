@@ -514,11 +514,20 @@ router.post('/collections-call-status', async (req, res) => {
     // conversation's own writer.
     if (twStatus === 'completed') {
       const duration = parseInt(req.body?.CallDuration, 10);
-      await db('call_log').where({ id: call.row.id }).update({
-        status: 'completed',
-        ...(Number.isFinite(duration) ? { duration_seconds: duration } : {}),
-        updated_at: new Date(),
-      }).catch((err) => logger.warn(`[collections-call-status] completed stamp failed: ${err.message}`));
+      try {
+        await db('call_log').where({ id: call.row.id }).update({
+          status: 'completed',
+          ...(Number.isFinite(duration) ? { duration_seconds: duration } : {}),
+          updated_at: new Date(),
+        });
+      } catch (err) {
+        // The status/duration stamp is not best-effort (gh prb-r15): a
+        // swallowed failure leaves the row 'initiated' forever, because
+        // this acknowledged callback never comes again. 500 = retry;
+        // idempotent under replay.
+        logger.error(`[collections-call-status] completed stamp failed (will be retried by Twilio): ${err.message}`);
+        return res.sendStatus(500);
+      }
       // A completed call with NO terminal outcome (gh prb-r13): the
       // vestibule/relay writer failed before landing anything (e.g. the
       // vestibule's outer catch returned a bare hangup on a transient DB

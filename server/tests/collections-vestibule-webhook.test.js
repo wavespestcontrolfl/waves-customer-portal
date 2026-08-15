@@ -555,3 +555,21 @@ test('completed reconciliation that fails twice returns 500 so Twilio retries', 
   await handlerFor('/collections-call-status')(req({ body: { CallStatus: 'completed' } }), res);
   expect(res.sendStatus).toHaveBeenCalledWith(500);
 });
+
+// prb-r15: the completed status/duration stamp is not best-effort — a
+// failed write returns 500 so Twilio retries the acknowledged-only-once
+// callback.
+test('a failed completed status stamp returns 500 (retryable), never a swallowing 204', async () => {
+  const failing = chain();
+  failing.update = jest.fn(() => { throw new Error('pg blip'); });
+  const queues = {
+    call_log: [chain({ first: CALL_ROW }), failing],
+    collection_cases: [chain({ first: LINKED_CASE })],
+    customers: [chain({ first: CUSTOMER })],
+  };
+  db.mockImplementation((t) => (queues[t] && queues[t].length ? queues[t].shift() : chain()));
+  const res = mockRes();
+  res.sendStatus = jest.fn(() => res);
+  await handlerFor('/collections-call-status')(req({ body: { CallStatus: 'completed' } }), res);
+  expect(res.sendStatus).toHaveBeenCalledWith(500);
+});

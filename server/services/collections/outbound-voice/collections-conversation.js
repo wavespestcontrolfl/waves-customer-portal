@@ -206,8 +206,8 @@ const HUMAN_REQUEST_RE = /\b(human|real person|actual person|representative|oper
 // "stop these automated calls" / "stop the robot calls" / "stop the calls"
 // ride the `stop … calls` arm (gh prb-r14) — the model must never be the
 // only thing standing between a stop request and the flag.
-const SPOKEN_OPT_OUT_RE = /\b(stop calling|stop(?: \w+){0,2} calls|don'?t call|do not call|no more calls|take me off|remove me from|never call|revoke (my )?consent|opt(-| )?out|quit calling|do not contact)\b/i;
-const BROAD_OPT_OUT_RE = /\b(?:all|any) calls?\b|\bdo not contact\b|\bnever call\b|\bno more calls\b|\btake me off\b|\bremove me from\b/i;
+const SPOKEN_OPT_OUT_RE = /\b(stop calling|stop(?: \w+){0,2} calls|don'?t call|do not call|no more calls|take me off|remove me from|never call|revoke (my )?consent|opt(-| )?out|quit calling|don'?t contact|do not contact)\b/i;
+const BROAD_OPT_OUT_RE = /\b(?:all|any) calls?\b|\bdon'?t contact\b|\bdo not contact\b|\bnever call\b|\bno more calls\b|\btake me off\b|\bremove me from\b/i;
 
 function buildSystemPrompt({ firstName, today }) {
   const who = firstName || 'the customer';
@@ -364,15 +364,18 @@ class CollectionsConversation {
 
   say(text) {
     if (this.ended || !text) return;
-    // Pre-verification, ANY balance/invoice vocabulary is withheld (gh
-    // prb-r4): the tool fence keeps figures unreadable, but raw model text
-    // must not confirm to an unverified answerer that a balance exists.
+    // Pre-DISCLOSURE, ANY balance/invoice vocabulary is withheld (gh
+    // prb-r4; tightened prb-r15): verification alone does not license a
+    // figure — until get_balance_details has SUCCEEDED (this.disclosed),
+    // any spoken amount would be model-invented, not the live authority's.
     let screened = text;
     // (The fixed SECURITY_INTERRUPT is exempt — it names "payment link"
     // without confirming any balance exists.)
-    if (!this.verified && screened !== script.SECURITY_INTERRUPT
+    if (!this.disclosed && screened !== script.SECURITY_INTERRUPT
         && script.PRE_VERIFY_FORBIDDEN_RE.test(screened)) {
-      screened = script.PRE_VERIFY_DEFLECTION;
+      screened = this.verified
+        ? 'Let me pull up the exact details first — one moment.'
+        : script.PRE_VERIFY_DEFLECTION;
     }
     // Belt-and-braces language screen on EVERYTHING spoken (model or fixed).
     const line = script.FORBIDDEN_SPOKEN_RE.test(screened)
@@ -432,11 +435,12 @@ class CollectionsConversation {
       const text = String(this._turns[i].text || '');
       const turnTokens = text.match(/\d+/g) || [];
       turnTokens.forEach((t) => tokens.add(t));
-      // The joined form is added ONLY for a genuinely spaced-digit answer
-      // (gh prb-r14: no letters in the turn at all) — "the street might be
-      // 41, and the unit is 28" must never synthesize a 4128 the caller
-      // did not say; a mixed answer just re-asks for bare digits.
-      if (turnTokens.length > 1 && !/[a-z]/i.test(text)) tokens.add(turnTokens.join(''));
+      // The joined form is added ONLY for a genuinely spaced-digit answer:
+      // individual digits separated by whitespace and nothing else (gh
+      // prb-r15 — "41, 28" is two separate values, not one spoken number;
+      // punctuation or multi-digit groups never join). A mixed answer just
+      // re-asks for bare digits.
+      if (turnTokens.length > 1 && /^\d(?:\s+\d)*$/.test(text.trim())) tokens.add(turnTokens.join(''));
     }
     return tokens;
   }
@@ -706,9 +710,29 @@ class CollectionsConversation {
       return await Promise.race([
         op,
         new Promise((resolve) => {
-          timer = setTimeout(() => resolve(
-            'That did not complete and the outcome is unknown. Do NOT retry it — tell the caller the office will follow up.',
-          ), ms);
+          timer = setTimeout(() => {
+            // The follow-up promise needs an artifact (gh prb-r15): the
+            // timed-out write may never settle successfully, so the card is
+            // filed BEFORE the model is told to promise anything; a failed
+            // card drops the promise for the office-number wording.
+            (async () => {
+              let timeoutCard = null;
+              try {
+                const NotificationService = require('../../notification-service');
+                timeoutCard = await NotificationService.notifyAdmin(
+                  'billing',
+                  'Follow-up needed after automated billing call',
+                  `A write action (${name}) timed out on an automated billing follow-up call and its outcome is unknown. Please verify and follow up with the customer.`,
+                  { link: `/admin/customers/${this._ctx?.customer?.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx?.callLogId, tool: name } },
+                );
+              } catch (cardErr) {
+                logger.error(`[collections-voice] tool-timeout follow-up card failed: ${cardErr.message}`);
+              }
+              resolve(timeoutCard
+                ? 'That did not complete and the outcome is unknown. Do NOT retry it — tell the caller the office will follow up.'
+                : 'That did not complete and the outcome is unknown. Do NOT retry it — give the caller the office number on our website; do not promise a follow-up.');
+            })();
+          }, ms);
           timer.unref?.();
         }),
       ]);
@@ -918,6 +942,25 @@ class CollectionsConversation {
     if (!TEMPORAL_RE.test(lastCallerTurn)) {
       return 'Refused: the customer has not stated a date. Only record a date they actually said — if they are unsure, record nothing and do not press.';
     }
+    // Cross-check the DATE against the phrase (gh prb-r15): when the caller
+    // named a month, a weekday, or a day-of-month, the recorded date must
+    // agree — "August 20" must never persist as the 28th. Each check fires
+    // only when the caller's turn carries that component.
+    const d = new Date(`${date}T12:00:00Z`);
+    const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+    const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const saidMonth = MONTHS.findIndex((m) => new RegExp(`\\b${m.slice(0, 3)}(?:${m.slice(3)})?\\b`, 'i').test(lastCallerTurn));
+    if (saidMonth >= 0 && d.getUTCMonth() !== saidMonth) {
+      return 'Refused: that date does not match the month the customer said. Record exactly what they said, or ask them to confirm the date.';
+    }
+    const saidWeekday = WEEKDAYS.findIndex((w) => new RegExp(`\\b${w}\\b`, 'i').test(lastCallerTurn));
+    if (saidWeekday >= 0 && d.getUTCDay() !== saidWeekday) {
+      return 'Refused: that date does not fall on the weekday the customer said. Convert their day using today\'s date, or ask them to confirm.';
+    }
+    const spokenNumbers = (lastCallerTurn.match(/\b([1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\b/g) || []).map((n) => parseInt(n, 10));
+    if (saidMonth >= 0 && spokenNumbers.length && !spokenNumbers.includes(d.getUTCDate())) {
+      return 'Refused: that day of the month does not match what the customer said. Record exactly what they said.';
+    }
     this._captures.customerIntendedPaymentDate = date;
     return `Recorded: the customer intends to pay on ${date}. Thank them — do not press further.`;
   }
@@ -1059,7 +1102,7 @@ class CollectionsConversation {
     // amount is correct" is not SMS consent. Either the caller's words
     // mention the text/link themselves, or the agent line they are
     // answering was the pay-link offer.
-    const SMS_CONTEXT_RE = /\b(text|txt|sms|message|link|send it|send that|phone)\b/i;
+    const SMS_CONTEXT_RE = /\b(text|txt|sms|message|link|send it|send that)\b/i;
     if (!SMS_CONTEXT_RE.test(lastCallerTurn)) {
       let lastCallerIdx = -1;
       for (let i = this._turns.length - 1; i >= 0; i--) {

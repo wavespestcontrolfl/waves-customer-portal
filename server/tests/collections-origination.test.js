@@ -156,7 +156,10 @@ test('policy denial at dial time ⇒ case CANCELLED, never dialed', async () => 
     eligibleBalanceCents: 0,
   });
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
-  setDb({ collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER })],
+  });
   const res = await originateCollectionCall('case-1', { now: NOW });
   expect(res.reason).toBe('policy_denied');
   expect(stateChain._updated.current_state).toBe('cancelled');
@@ -167,7 +170,10 @@ test('policy denial at dial time ⇒ case CANCELLED, never dialed', async () => 
 test('balance drift vs approved snapshot ⇒ cancelled, never dialed', async () => {
   ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 19900 });
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
-  setDb({ collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER })],
+  });
   const res = await originateCollectionCall('case-1', { now: NOW });
   expect(res.reason).toBe('snapshot_changed');
   expect(stateChain._updated.current_state).toBe('cancelled');
@@ -179,7 +185,7 @@ test('happy path: ledger → call_log insert → calls.create, in that order', a
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), stateChain],
-    customers: [chain('customers', { first: CUSTOMER })],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
     call_log: [
       chain('call_log', { first: undefined }), // idempotency probe: no prior
       insertChain,
@@ -212,7 +218,7 @@ test('happy path: ledger → call_log insert → calls.create, in that order', a
 test('idempotency: prior dial under the same key refuses', async () => {
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } })],
-    customers: [chain('customers', { first: CUSTOMER })],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
     call_log: [chain('call_log', { first: { id: 'cl-existing' } })],
   });
   const res = await originateCollectionCall('case-1', { now: NOW });
@@ -225,7 +231,7 @@ test('ledger insert failure ⇒ NO dial at all', async () => {
   ContactLedger.recordContact.mockRejectedValue(new Error('insert failed'));
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), chain('collection_cases', { result: 1 })],
-    customers: [chain('customers', { first: CUSTOMER })],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
     call_log: [chain('call_log', { first: undefined })],
   });
   await expect(originateCollectionCall('case-1', { now: NOW })).rejects.toThrow('insert failed');
@@ -237,7 +243,7 @@ test('calls.create failure ⇒ send_failed stamp + case back to review queue; AM
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), stateChain],
-    customers: [chain('customers', { first: CUSTOMER })],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
     call_log: [
       chain('call_log', { first: undefined }),
       chain('call_log', { returningRows: [{ id: 'cl-1' }] }),
@@ -276,7 +282,7 @@ test('missing Twilio config stamps never_contacted (no provider request ever sta
     const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
     setDb({
       collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), stateChain],
-      customers: [chain('customers', { first: CUSTOMER })],
+      customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
       call_log: [
         chain('call_log', { first: undefined }),
         chain('call_log', { returningRows: [{ id: 'cl-1' }] }),
@@ -302,7 +308,7 @@ test('a definitive 4xx rejection from calls.create stamps never_contacted', asyn
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), stateChain],
-    customers: [chain('customers', { first: CUSTOMER })],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
     call_log: [
       chain('call_log', { first: undefined }),
       chain('call_log', { returningRows: [{ id: 'cl-1' }] }),
@@ -323,7 +329,7 @@ test('a lost dial claim stands down: no ledger row, no call_log insert, no calls
   const claimChain = chain('collection_cases', { result: 0 }); // another worker won
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), claimChain],
-    customers: [chain('customers', { first: CUSTOMER })],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
     call_log: [chain('call_log', { first: undefined })],
   });
   const res = await originateCollectionCall('case-1', { now: NOW });
@@ -339,7 +345,7 @@ test('the idempotency probe excludes failed rows (query pin) and a fresh dial pr
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), stateChain],
-    customers: [chain('customers', { first: CUSTOMER })],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
     call_log: [probeChain, chain('call_log', { returningRows: [{ id: 'cl-2' }] }), chain('call_log')],
   });
   const res = await originateCollectionCall('case-1', { now: NOW });
@@ -354,7 +360,7 @@ test('ledger failure after the claim releases dialing back to approved', async (
   const releaseChain = chain('collection_cases', { result: 1 });
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), releaseChain],
-    customers: [chain('customers', { first: CUSTOMER })],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
     call_log: [chain('call_log', { first: undefined })],
   });
   await expect(originateCollectionCall('case-1', { now: NOW })).rejects.toThrow('insert failed');
@@ -381,4 +387,34 @@ test('next_eligible_at in the future refuses the dial', async () => {
   const res = await originateCollectionCall('case-1', { now: NOW });
   expect(res).toEqual({ dialed: false, reason: 'suppressed_until_next_eligible' });
   expect(mockCallsCreate).not.toHaveBeenCalled();
+});
+
+// prb-r15 pins.
+describe('prb-r15', () => {
+  test('a phone edited during the policy evaluation aborts the dial (verdict binds to the number)', async () => {
+    const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+    setDb({
+      collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain],
+      customers: [
+        chain('customers', { first: CUSTOMER }), // pre-eval snapshot
+        chain('customers', { first: { ...CUSTOMER, phone: '9415559999' } }), // changed mid-eval
+      ],
+    });
+    const res = await originateCollectionCall('case-1', { now: NOW });
+    expect(res).toEqual({ dialed: false, reason: 'phone_changed' });
+    expect(stateChain._updated.hold_reason).toBe('phone_changed_during_evaluation');
+    expect(mockCallsCreate).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+  });
+
+  test('the atomic dial claim itself enforces approval expiry', async () => {
+    const claimChain = chain('collection_cases', { result: 1 });
+    setDb({
+      collection_cases: [chain('collection_cases', { first: { ...CASE } }), claimChain, chain('collection_cases', { returningRows: [{ id: 'case-1' }] })],
+      customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+      call_log: [chain('call_log', { first: undefined }), chain('call_log', { returningRows: [{ id: 'cl-1' }] }), chain('call_log')],
+    });
+    await originateCollectionCall('case-1', { now: NOW });
+    expect(claimChain.where).toHaveBeenCalledWith('approval_expires_at', '>', NOW);
+  });
 });

@@ -134,7 +134,9 @@ const RELAY_FAILURE_CLOSE =
 // model output against these before emission (belt-and-braces on top of the
 // prompt rule). "Collections"/"debt"/"delinquent" are the external-language
 // rule; the negotiation verbs are the never-negotiate/never-threaten line.
-const FORBIDDEN_SPOKEN_RE = /\b(collections?|debtor?|delinquen\w*|settle(?:ment)?|write[- ]?off|legal action|attorney|lawsuit|credit (?:bureau|report)|promise to pay)\b/i;
+// ("debts?|debtors?", not "debtor?" — that regex required "debto" and
+// never matched the bare word "debt", gh prb-r15.)
+const FORBIDDEN_SPOKEN_RE = /\b(collections?|debts?|debtors?|delinquen\w*|settle(?:ment)?|write[- ]?off|legal action|attorney|lawsuit|credit (?:bureau|report)|promise to pay)\b/i;
 
 module.exports = {
   callbackNumber,

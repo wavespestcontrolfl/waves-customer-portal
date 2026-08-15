@@ -99,6 +99,20 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     return { dialed: false, reason: 'approval_expired' };
   }
 
+  // The number the policy is about to be evaluated AGAINST is snapshotted
+  // FIRST (gh prb-r15): the verdict's consent/line-type/suppression checks
+  // are phone-specific, so a phone edited mid-evaluation must abort — the
+  // post-verdict re-read below refuses on any mismatch rather than dialing
+  // a number those checks never saw.
+  const preEval = await db('customers')
+    .where({ id: caseRow.customer_id }).whereNull('deleted_at')
+    .first('id', 'phone');
+  const preEvalPhone = normalizeE164(preEval?.phone);
+  if (!preEval || !preEvalPhone) {
+    await setCaseState(caseRow, { current_state: 'cancelled', hold_reason: 'no_dialable_number' });
+    return { dialed: false, reason: 'no_dialable_number' };
+  }
+
   // ── FULL revalidation at dial time ─────────────────────────────────────
   const verdict = await ContactPolicy.evaluate(caseRow.customer_id, {
     channel: 'voice', purpose: 'late_payment', now,
@@ -130,6 +144,11 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     await setCaseState(caseRow, { current_state: 'cancelled', hold_reason: 'no_dialable_number' });
     return { dialed: false, reason: 'no_dialable_number' };
   }
+  // The verdict binds to the number it evaluated (gh prb-r15).
+  if (toPhone !== preEvalPhone) {
+    await setCaseState(caseRow, { current_state: 'cancelled', hold_reason: 'phone_changed_during_evaluation' });
+    return { dialed: false, reason: 'phone_changed' };
+  }
 
   // ── Idempotency: one dial per case version, restart-safe ───────────────
   const idempotencyKey = caseRow.idempotency_key;
@@ -153,6 +172,10 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
   // supervised pilot's operator to resolve — never a second dial.
   const claimed = await db('collection_cases')
     .where({ id: caseRow.id, current_state: 'approved', case_version: caseRow.case_version })
+    // The 24h authorization boundary holds INSIDE the atomic claim too (gh
+    // prb-r15): the policy revalidation above can cross the deadline, and
+    // the earlier expiry check is not the boundary — this WHERE is.
+    .where('approval_expires_at', '>', now)
     .update({ current_state: 'dialing', updated_at: db.fn.now() });
   if (!claimed) return { dialed: false, reason: 'dial_claim_lost' };
 
