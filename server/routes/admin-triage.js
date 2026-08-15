@@ -67,6 +67,12 @@ router.get('/', async (req, res) => {
       .leftJoin('customers', 'call_log.customer_id', 'customers.id')
       .leftJoin('route_feedback', 'triage_items.call_log_id', 'route_feedback.call_log_id')
       .where('triage_items.status', status)
+      // property_role_confirm payloads embed the customer's OTHER property
+      // addresses — the same data admin-customers gates behind requireAdmin —
+      // and only an admin can apply them; hide the cards from tech users.
+      .modify((q) => {
+        if (req.techRole !== 'admin') q.whereNot('triage_items.reason_code', 'property_role_confirm');
+      })
       .orderBy('triage_items.created_at', 'desc')
       .limit(limit)
       .select(
@@ -102,6 +108,9 @@ router.get('/', async (req, res) => {
     const countRows = await db('triage_items')
       .select('status')
       .count('* as n')
+      .modify((q) => {
+        if (req.techRole !== 'admin') q.whereNot('reason_code', 'property_role_confirm');
+      })
       .groupBy('status');
     const counts = { open: 0, in_progress: 0, resolved: 0, dismissed: 0 };
     for (const r of countRows) {
@@ -298,6 +307,11 @@ router.put('/:id/dismiss', async (req, res) => {
 // dismissed. No customer communications fire from these writes.
 router.post('/:id/apply-property-roles', async (req, res) => {
   try {
+    // Property writes are admin-territory (admin-customers property routes
+    // are requireAdmin) — the shared triage router is tech-or-admin.
+    if (req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
     const { gateEnvValue } = require('../config/feature-gates');
     if (!gateEnvValue('GATE_CALL_PROPERTY_ROLE')) {
       return res.status(403).json({ error: 'Property-role apply is gated off (GATE_CALL_PROPERTY_ROLE)' });

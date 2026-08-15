@@ -44,6 +44,11 @@ const FIELD_GROUPS = {
     'phone',
     'email',
     'city',
+    // Property-role classification (schema 1.9.0) — flat keys via
+    // extraction-compat.flatView; drives the property_role_confirm review
+    // card, so replay variance here is office-visible.
+    'service_address_occupancy',
+    'service_address_is_primary_residence',
   ],
   low: [
     'lead_quality',

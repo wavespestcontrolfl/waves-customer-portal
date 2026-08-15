@@ -185,16 +185,21 @@ async function stagePropertyRoleReview({
 
   let parked = false;
   if (proposals.length) {
+    const card = buildTriageItem({
+      callLogId,
+      flag: REASON_CODE,
+      extraction,
+      severity: 'advisory',
+      extraPayload: { customer_id: customerId, property_role_proposals: proposals },
+    });
+    // MERGE, not ignore, on the open-card unique (codex #3418 r1): a
+    // force-reprocessed call re-derives its classification, and the open
+    // card must present the NEWEST proposals — an ignored conflict would
+    // leave the office applying a superseded extraction.
     await db('triage_items')
-      .insert(buildTriageItem({
-        callLogId,
-        flag: REASON_CODE,
-        extraction,
-        severity: 'advisory',
-        extraPayload: { customer_id: customerId, property_role_proposals: proposals },
-      }))
+      .insert(card)
       .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-      .ignore();
+      .merge({ payload: card.payload, summary: card.summary, updated_at: new Date() });
     parked = true;
   }
   return { fills: fills.length, parked };

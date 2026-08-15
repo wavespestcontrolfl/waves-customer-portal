@@ -8236,15 +8236,19 @@ const CallRecordingProcessor = {
         if (require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')) {
           try {
             const { stagePropertyRoleReview } = require('./property-role-proposals');
+            // V2 canonical extraction is the AUTHORITY for the role fields
+            // (codex #3418 r1) — the legacy V1 result only fills in when V2
+            // did not run or carried nothing.
+            const v2RoleProp = v2CanonicalExtraction?.property || {};
             const roleView = {
               ...extracted,
               address_line2: callUnit,
-              service_address_occupancy: extracted.service_address_occupancy
-                || v2CanonicalExtraction?.property?.service_address_occupancy || null,
-              service_address_is_primary_residence: typeof extracted.service_address_is_primary_residence === 'boolean'
-                ? extracted.service_address_is_primary_residence
-                : (typeof v2CanonicalExtraction?.property?.service_address_is_primary_residence === 'boolean'
-                  ? v2CanonicalExtraction.property.service_address_is_primary_residence
+              service_address_occupancy: v2RoleProp.service_address_occupancy
+                || extracted.service_address_occupancy || null,
+              service_address_is_primary_residence: typeof v2RoleProp.service_address_is_primary_residence === 'boolean'
+                ? v2RoleProp.service_address_is_primary_residence
+                : (typeof extracted.service_address_is_primary_residence === 'boolean'
+                  ? extracted.service_address_is_primary_residence
                   : null),
             };
             const staged = await stagePropertyRoleReview({
