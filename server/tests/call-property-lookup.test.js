@@ -546,12 +546,15 @@ describe('sweepUnenrichedProperties', () => {
     // so the free scan must not hide behind the paid sweep's budget gate.
     expect(joined.join).toHaveBeenCalled();
     // A crash/deploy loses the call-time lane's in-memory retry ladder —
-    // the sweep is the durable retry, so it runs in RECOVERY mode:
-    // fenced to recently created rows (the population the call-time gate
-    // already authorized paid lookups for); the pre-existing backlog
-    // stays behind the backfill gate.
+    // the sweep is the durable retry, so it runs in RECOVERY mode, fenced
+    // BOTH ways: call provenance (source='call_pipeline' — a creation-date
+    // window alone would sweep admin/import/self-book rows into paid
+    // lookups) AND a recent-creation window (so recovery re-buys only what
+    // a recent crash could have dropped). The pre-existing backlog stays
+    // behind the backfill gate.
     expect(res.mode).toBe('call_time_recovery');
     expect(res.skipped).toBeUndefined();
+    expect(cp.where).toHaveBeenCalledWith('cp.source', 'call_pipeline');
     const fence = cp.whereRaw.mock.calls.find((c) => String(c[0]).includes('cp.created_at > NOW()'));
     expect(String(fence[0])).toContain("INTERVAL '7 days'");
     // Empty candidate page → no spend.

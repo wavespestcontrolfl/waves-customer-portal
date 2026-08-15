@@ -477,12 +477,15 @@ const SQL_LEADING_UNIT_RE = '^\\s*(unit|apt|apartment|ste|suite|#)\\s*#?\\s*[a-z
  * Paged (offset) so the sweep can walk past cooled-down rows — a fixed
  * overfetch let a head of perpetually-unresolvable rows starve the
  * backlog forever.
- * createdWithinDays fences the CALL-TIME RECOVERY mode (backfill gate off)
- * to recently created rows — the population the call-time lane was already
- * authorized to buy lookups for — keeping the pre-existing backlog behind
- * the backfill gate.
+ * callRecovery fences the CALL-TIME RECOVERY mode (backfill gate off) to
+ * rows the call-time lane was already authorized to buy lookups for:
+ * PROVENANCE (cp.source = 'call_pipeline' — a creation-date window alone
+ * would sweep admin/import/self-book rows into paid lookups) AND a recent
+ * creation window (so recovery re-buys only what a recent crash could
+ * have dropped, not months of call history). The pre-existing backlog
+ * stays behind the backfill gate.
  */
-async function fetchBackfillCandidates(limit, offset = 0, { createdWithinDays } = {}) {
+async function fetchBackfillCandidates(limit, offset = 0, { callRecovery } = {}) {
   const { etDateString } = require('../utils/datetime-et');
   const todayEt = etDateString(new Date());
   // Canonical live-customer predicate (customer-stages.whereLiveCustomer,
@@ -543,8 +546,9 @@ async function fetchBackfillCandidates(limit, offset = 0, { createdWithinDays } 
     ])
     .limit(limit)
     .offset(offset);
-  if (Number.isFinite(createdWithinDays) && createdWithinDays > 0) {
-    q.whereRaw(`cp.created_at > NOW() - INTERVAL '${Math.floor(createdWithinDays)} days'`);
+  if (callRecovery) {
+    q.where('cp.source', 'call_pipeline')
+      .whereRaw(`cp.created_at > NOW() - INTERVAL '${CALL_TIME_RECOVERY_WINDOW_DAYS} days'`);
   }
   return q;
 }
@@ -925,11 +929,14 @@ async function reconcileCustomerMirrors() {
 // deploy or crash mid-lookup loses the in-memory retry ladder (unref'd
 // timers, no durable work record), and the committed property would stay
 // unenriched forever — the nightly sweep is the only durable retry. It
-// therefore still runs in that configuration, fenced to rows CREATED
-// inside this window: those are the rows the call-time lane was already
+// therefore still runs in that configuration, fenced to CALL-PROVENANCE
+// rows (cp.source = 'call_pipeline'; the call pipeline stamps it on every
+// row it creates, including the ensured primary) CREATED inside this
+// window: those are exactly the rows the call-time lane was already
 // authorized to spend a lookup on, so recovery re-buys at most what a
-// crash dropped and the pre-existing backlog stays behind the backfill
-// gate. Wide enough to straddle a weekend outage plus the 14-day attempt
+// crash dropped and everything else — admin/import/self-book rows and the
+// pre-existing backlog — stays behind the backfill gate. The window is
+// wide enough to straddle a weekend outage, with the 14-day attempt
 // cooldown shielding anything already attempted.
 const CALL_TIME_RECOVERY_WINDOW_DAYS = 7;
 
@@ -946,9 +953,10 @@ async function sweepUnenrichedProperties({ limit } = {}) {
   const customerMirrorsReconciled = reconcileOn ? await reconcileCustomerMirrors() : 0;
   if (!backfillOn && !callTimeOn) return { skipped: 'gated', visitCoordsReconciled, customerMirrorsReconciled };
   // Backfill off + call-time on = RECOVERY mode: same loop, same budget
-  // cap, candidates fenced to the recovery window (see constant above).
+  // cap, candidates fenced to call-provenance rows in the recovery window
+  // (see constant above).
   const recoveryOnly = !backfillOn;
-  const candidateOpts = recoveryOnly ? { createdWithinDays: CALL_TIME_RECOVERY_WINDOW_DAYS } : {};
+  const candidateOpts = recoveryOnly ? { callRecovery: true } : {};
   const batch = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : backfillBatchSize();
   const t0 = Date.now();
   let processed = 0;

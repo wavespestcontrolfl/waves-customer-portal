@@ -116,7 +116,7 @@ async function listProperties(customerId) {
  * created after the migration). Idempotent — the partial-unique index makes a
  * concurrent double-create safe. Returns { created, propertyId }.
  */
-async function ensurePrimaryProperty(customerOrId, { occupancyType } = {}) {
+async function ensurePrimaryProperty(customerOrId, { occupancyType, source } = {}) {
   const customer = typeof customerOrId === 'string'
     ? await db('customers').where({ id: customerOrId }).first()
     : customerOrId;
@@ -152,7 +152,10 @@ async function ensurePrimaryProperty(customerOrId, { occupancyType } = {}) {
       palm_count: customer.palm_count ?? null,
       canopy_type: customer.canopy_type ?? null,
       address_key: addressKey({ address_line1: customer.address_line1, address_line2: customer.address_line2, city: customer.city, zip: customer.zip }),
-      source: 'backfill',
+      // Provenance: default lazy backfill, but a caller in a specific flow
+      // (the call pipeline) stamps its own source — downstream lanes fence
+      // paid work on it (call-property-lookup's recovery sweep).
+      source: source || 'backfill',
       active: true,
     }).returning('id');
     return { created: true, propertyId: row && (row.id || row) };

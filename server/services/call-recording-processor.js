@@ -8143,6 +8143,11 @@ const CallRecordingProcessor = {
         // ensurePrimaryProperty has nothing to backfill from).
         const ensured = await customerProperties.ensurePrimaryProperty(customerId, {
           occupancyType: (isRental && callIsPrimaryAddress) ? 'rental_investment' : undefined,
+          // Created in the call pipeline → carries call provenance, so the
+          // enrichment lane's crash-recovery sweep can find it (a bare
+          // 'backfill' label would hide exactly the rows this block
+          // enqueues lookups for).
+          source: 'call_pipeline',
         });
         const isFirstAddress = !ensured.propertyId;
         // A SECONDARY write needs a complete-enough address (city + ZIP) so its
