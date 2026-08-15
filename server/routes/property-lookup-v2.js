@@ -3533,6 +3533,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // Direct pest-cadence override (beats the risk-type bucket for pest visits).
   // Admin-set; same options/profile ride-along → replays on re-price.
   const commercialPestCadence = commercialProfile ? (o.commercialPestCadence || p.commercialPestCadence || null) : null;
+  // Direct lawn-cadence override (apps/year for the commercial turf program).
+  // Admin-set; same options/profile ride-along → replays on re-price.
+  const commercialLawnCadence = commercialProfile ? (o.commercialLawnCadence || p.commercialLawnCadence || null) : null;
   // Rep-set commercial multipliers (T&S plant density, mosquito pressure). Admin-
   // set; ride the raw engineRequest options/profile → replay on re-price.
   const treeShrubDensity = commercialProfile ? (o.treeShrubDensity || p.treeShrubDensity || null) : null;
@@ -4095,6 +4098,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     commercialSubtype,
     commercialRiskType,
     commercialPestCadence,
+    commercialLawnCadence,
     treeShrubDensity,
     mosquitoPressure,
     measuredTurfSf: p.measuredTurfSf,

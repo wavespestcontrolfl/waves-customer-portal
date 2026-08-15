@@ -102,7 +102,7 @@ const {
   isCommercialProperty,
   buildCommercialManualQuoteResult,
 } = require('./commercial-helpers');
-const { resolveCommercialCadence, resolveCommercialPestCadenceOverride } = require('./commercial-risk-type');
+const { resolveCommercialCadence, resolveCommercialPestCadenceOverride, resolveCommercialLawnCadenceOverride } = require('./commercial-risk-type');
 
 function serviceSelected(value) {
   if (value === true) return true;
@@ -506,6 +506,10 @@ function generateEstimate(input) {
   // wins over the risk-type bucket for PEST visits only; rodent stays on the
   // bucket. Unset → bucket cadence → pricer program default.
   const commercialPestVisits = resolveCommercialPestCadenceOverride(input.commercialPestCadence) ?? riskTypePestVisits;
+  // Direct lawn-cadence override (input.commercialLawnCadence, admin estimator):
+  // apps/year for the commercial turf program. Not risk-typed — lawn cadence is
+  // agronomic, not business-type-driven. Unset → the pricer's programVisits (8).
+  const commercialLawnVisits = resolveCommercialLawnCadenceOverride(input.commercialLawnCadence);
   const hasExplicitCommercialFlag = hasCommercialFlagInput(input.isCommercial);
   const inputIsCommercial = normalizeCommercialFlag(input.isCommercial);
   const commercialContext = {
@@ -769,7 +773,11 @@ function generateEstimate(input) {
       // turf is auto-priced via the cost-buildup pricer and shown to the lead
       // instantly with an "estimated, confirmed on site" disclaimer. No size
       // cap, no manual-quote fallback for lawn.
-      const result = priceCommercialLawn(property, { commercialSubtype });
+      const result = priceCommercialLawn(property, {
+        commercialSubtype,
+        // Admin apps/year override (null → program default 8).
+        lawnVisits: commercialLawnVisits,
+      });
       if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);
         activeServiceKeys.push('commercial_lawn');
