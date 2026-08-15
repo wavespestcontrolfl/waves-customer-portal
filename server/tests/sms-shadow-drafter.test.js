@@ -777,4 +777,23 @@ describe('sealed-lane dispatch budget (08-15 tuning)', () => {
     expect(dispatched[0].policy.name).toMatch(/^smsShadow:[a-z]+:sealed$/);
     expect(dispatched[0].policy.fallback).toBeUndefined();
   });
+
+  test('live drafts keep the 600 cap — it is the composer card\'s last length guard (codex #3423 r2)', async () => {
+    jest.resetModules();
+    const dispatched = [];
+    jest.doMock('../services/llm/call', () => ({
+      dispatchWithFallback: async (policy, payload) => {
+        dispatched.push({ policy, payload });
+        return { ok: false, reason: 'test-stub' };
+      },
+    }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const MODELS = require('../config/models');
+    await drafter.generateDraftOnce({}, 'sys', 'user', MODELS.ROUTES.smsDraftDefault, { pinned: false });
+    jest.dontMock('../services/llm/call');
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0].payload.maxTokens).toBe(600);
+    expect(dispatched[0].policy.name).toMatch(/^smsShadow:[a-z]+$/);
+    expect(dispatched[0].policy.fallback).toBeTruthy();
+  });
 });

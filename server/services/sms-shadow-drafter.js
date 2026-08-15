@@ -720,7 +720,9 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
       // 600 truncated a few sealed-exam drafts per day mid-response
       // ("unparseable (response truncated at max_tokens=600)", prod
       // 08-14/15) — the leg then read as a provider failure in the digest.
-      { system, text: userContent, jsonMode: false, maxTokens: 1000, anthropicClient: client },
+      // Sealed legs ONLY (codex #3423 r2): the live cap is the last length
+      // guard for the composer card, and live truncations weren't observed.
+      { system, text: userContent, jsonMode: false, maxTokens: pinned ? 1000 : 600, anthropicClient: client },
       { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
     );
     if (routed.ok) return { parsed: parseShadowResponse(routed.text), model: routed.model };

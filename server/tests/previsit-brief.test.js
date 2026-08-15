@@ -498,7 +498,7 @@ describe('grounded allowlist validation of LLM output', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = {
       catalogVocabulary: { names: [], targets: [] },
-      llmFacts: { membership: { tier: 'Bronze' } },
+      llmFacts: { membership: { tier: 'Bronze' }, serviceType: 'Quarterly Pest Control Service' },
     };
     const verdict = validateBriefJson(
       {
@@ -510,6 +510,28 @@ describe('grounded allowlist validation of LLM output', () => {
       grounding,
     );
     expect(verdict.body).toBeTruthy();
+  });
+
+  test('product-shaped common phrases park as products in instructions (codex #3423 r2)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Apply Structural Control along the slab'] },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+    expect(verdict.reason).toMatch(/structural|control/i);
+  });
+
+  test('condition-bearing target phrases stay grounded (codex #3423 r2)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], watch_items: ['Watch for severe regrowth'] },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+    expect(verdict.reason).toMatch(/severe|regrowth/i);
   });
 
   test('an UNGROUNDED tier claim is an invented account fact — rejected (codex #3423 r1)', () => {
@@ -1117,7 +1139,10 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
     await PrevisitBrief.generateVisitBrief('svc-1');
     // Token budget pinned: 1000 truncated real briefs mid-JSON in prod
     // (empty_json legs, 08-14/15) — a silent revert would re-break the lane.
+    // reasoningEffort pinned with it: 2000 crosses the OpenAI reasoning
+    // floor, and the raise must never silently enable fallback reasoning.
     expect(global.__dispatch.mock.calls[0][1].maxTokens).toBe(2000);
+    expect(global.__dispatch.mock.calls[0][1].reasoningEffort).toBe('none');
     const opts = global.__dispatch.mock.calls[0][2];
     expect(typeof opts.validate).toBe('function');
     expect(opts.validate({ json: {} })).toBe('priorities_not_array');

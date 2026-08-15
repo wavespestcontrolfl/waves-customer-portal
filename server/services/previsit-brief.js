@@ -937,24 +937,29 @@ const COMMON_PROSE_WORDS = new Set([
   // "availability"). Deliberately NO organisms, product names, or
   // direction/scope words (interior/attic-class) — those must still ground,
   // and the preference-conflict scan enforces opted-out scopes regardless.
-  // NOT here (codex #3423 r1): tier names (bronze/silver/gold/platinum) —
-  // an ungrounded tier claim is an invented business fact, handled by the
-  // grounded-tier skip in the product pass instead; rooms/credentials —
-  // actionable instruction objects that must keep grounding (rooms? also
-  // joins the interior opt-out conflict regex). The action verbs below
-  // (perform/provide/retrieve/vacuum/document/discuss) are additionally in
-  // the directive-verb capture so their OBJECTS still ground strictly.
+  // NOT here (codex #3423 r1+r2): tier names (bronze/silver/gold/platinum)
+  // — an ungrounded tier claim is an invented business fact, handled by
+  // the grounded-tier skip in the product pass instead; rooms/credentials
+  // — actionable instruction objects that must keep grounding (rooms?
+  // also joins the interior opt-out conflict regex); product-shaped words
+  // (structural/control — "Apply Structural Control" must park as a
+  // product) and condition-bearing descriptors (severe/regrowth/raised/
+  // missing/recovery/occupancy/presence — "Watch for severe regrowth" is
+  // an invented field condition unless the facts state it). The action
+  // verbs below (perform/provide/retrieve/vacuum/document/discuss) are
+  // additionally in the directive-verb capture so their OBJECTS still
+  // ground strictly.
   'perform', 'performs', 'performed', 'performing', 'provide', 'provides', 'provided', 'providing',
   'context', 'account', 'accounts', 'recurring', 'initial', 'initially', 'availability', 'available',
   'information', 'irrigation', 'scheduling', 'camera', 'cameras',
   'accepted', 'accepting', 'waves', 'retrieve',
   'transition', 'transitions', 'standing', 'minute', 'minutes', 'resident', 'residents',
-  'list', 'lists', 'missing', 'site', 'sites', 'raised', 'raises', 'occupancy', 'occupied',
+  'list', 'lists', 'site', 'sites',
   'communication', 'communications', 'application', 'applications',
   'included', 'includes', 'including', 'state', 'stated', 'states', 'show', 'shows', 'shown',
   'past', 'introduction', 'discuss', 'discussing', 'baseline', 'relevant', 'mindful',
-  'missed', 'someone', 'presence', 'documented', 'structural', 'quiet', 'runtime', 'severe',
-  'recovery', 'regrowth', 'vacuum', 'vacuuming', 'control', 'follow-up', 'walk-through',
+  'missed', 'someone', 'documented', 'quiet', 'runtime',
+  'vacuum', 'vacuuming', 'follow-up', 'walk-through',
 ]);
 
 // WaveGuard tier names: real business vocabulary, never common prose — an
@@ -1443,6 +1448,11 @@ async function generateBriefBody(grounding, deps = {}) {
       // legs + "not_an_object (response truncated at max_tokens=1000)") —
       // the body plus mentioned_terms self-report doesn't reliably fit.
       maxTokens: 2000,
+      // 2000 crosses OPENAI_REASONING_FLOOR_TOKENS, which would silently
+      // flip the GPT fallback from 'none' to default 'low' reasoning on
+      // this high-volume summarization lane (codex #3423 r2) — the raise
+      // is JSON headroom only, never a reasoning upgrade.
+      reasoningEffort: 'none',
       ...payload,
     }, opts));
   try {
