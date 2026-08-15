@@ -519,7 +519,9 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     // Quick Move keeps the visit on its own tech's route.
     technicianId: service.technicianId || service.technician_id || undefined,
     excludeServiceIds: [service.id],
-    enabled: !!landingDate,
+    // Quick Move can't reassign, so an unassigned visit's all-tech
+    // detours would be unactionable — no tech, no hint.
+    enabled: !!landingDate && !!(service.technicianId || service.technician_id),
   });
 
   // Two lists, one scope toggle (codex #3375 P2 ×2):

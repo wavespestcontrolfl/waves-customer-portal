@@ -217,7 +217,17 @@ router.post('/', async (req, res) => {
       } catch (guardErr) {
         logger.warn('[find-time] hint occupancy guard failed (fail-open):', guardErr.message);
       }
-      result.slots = result.slots.slice(0, requestedTopN);
+      // Unscoped searches rank technician/time PAIRS, so the top of the
+      // list can be one hour three times over — dedupe by day+start (list
+      // is already rank-sorted, first wins) BEFORE slicing, or the chips
+      // row collapses below the requested count.
+      const seenStarts = new Set();
+      result.slots = result.slots.filter((s) => {
+        const key = `${s.date}|${s.start_time}`;
+        if (seenStarts.has(key)) return false;
+        seenStarts.add(key);
+        return true;
+      }).slice(0, requestedTopN);
     }
 
     res.json({

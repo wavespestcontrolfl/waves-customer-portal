@@ -194,6 +194,24 @@ test('a vetoed earliest start slides within its gap instead of discarding it', a
   expect(body.slots.map((s) => [s.start_time, s.end_time, s.detour_minutes])).toEqual([['10:00', '11:00', 4]]);
 });
 
+test('technician/time pairs sharing an hour dedupe BEFORE the topN slice', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  // Unscoped search: two techs rank the same 09:00, then a distinct 10:00.
+  findAvailableSlots.mockResolvedValue({
+    slots: [
+      { rank: 1, date: '2026-09-01', start_time: '09:00', end_time: '10:00', detour_minutes: 2, technician: { id: 't1', name: 'A' } },
+      { rank: 2, date: '2026-09-01', start_time: '09:00', end_time: '10:00', detour_minutes: 5, technician: { id: 't2', name: 'B' } },
+      { rank: 3, date: '2026-09-01', start_time: '10:00', end_time: '11:00', detour_minutes: 6, technician: { id: 't1', name: 'A' } },
+    ],
+    evaluated: 3,
+  });
+  const res = await post({ ...BASE, hint: true, topN: 2 });
+  const body = await res.json();
+  // Without pre-slice dedupe this would answer 09:00 twice and starve the
+  // second chip; the best-ranked pair wins each hour.
+  expect(body.slots.map((s) => [s.start_time, s.technician.id])).toEqual([['09:00', 't1'], ['10:00', 't1']]);
+});
+
 test('the guard fails OPEN — a snapshot error keeps the engine answer', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   loadOccupancy.mockRejectedValue(new Error('snapshot down'));

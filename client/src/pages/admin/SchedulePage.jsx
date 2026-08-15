@@ -3391,10 +3391,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 bestTimes={bestTimes}
                 currentStart={form.windowStart}
                 onPick={(slot) =>
+                  // An unassigned visit searched all techs, so the detour
+                  // is slot.technicianId's — adopt that tech with the
+                  // window (visible in the Technician select before save),
+                  // mirroring the create modal. An assigned visit's search
+                  // was already scoped; its tech never changes here.
                   setForm((f) => ({
                     ...f,
                     windowStart: slot.start,
                     windowEnd: slot.end,
+                    technicianId: !f.technicianId && slot.technicianId
+                      ? slot.technicianId
+                      : f.technicianId,
                   }))
                 }
                 style={{ marginTop: -2, marginBottom: 14 }}
@@ -5775,7 +5783,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     durationMinutes,
     technicianId: service.technicianId || service.technician_id || undefined,
     excludeServiceIds: [service.id],
-    enabled: showManual && !!manualDate,
+    // The reschedule submit can't change assignment, so an unassigned
+    // visit's all-tech detours would be unactionable — no tech, no hint.
+    enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
   });
 
   const handleReschedule = async (opt) => {
