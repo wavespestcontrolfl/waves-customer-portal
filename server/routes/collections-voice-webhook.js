@@ -138,6 +138,26 @@ function appendVestibuleGather(twiml, { firstName, callLogId }) {
   twiml.redirect({ method: 'POST' }, `${VESTIBULE_NOINPUT_ACTION}?callLogId=${encodeURIComponent(callLogId)}`);
 }
 
+/**
+ * Terminal outcome write with ONE retry and a LOUD failure log (gh
+ * prb-r12): writeCallOutcome resolves { ok:false } on a transient DB
+ * failure rather than rejecting, so an unchecked call acknowledges the
+ * webhook with the case still in 'dialing' — and the completed-status
+ * callback only stamps call_log.status, it cannot repair the case. These
+ * branches must still return valid TwiML to a live call, so the fallback
+ * is retry-then-log, never a webhook 5xx mid-call.
+ */
+async function writeOutcomeResilient(callLogId, args) {
+  let res = await writeCallOutcome(callLogId, args).catch(() => ({ ok: false }));
+  if (!res || res.ok === false) {
+    res = await writeCallOutcome(callLogId, args).catch(() => ({ ok: false }));
+  }
+  if (!res || res.ok === false) {
+    logger.error(`[collections-voice-webhook] OUTCOME WRITE FAILED TWICE for callLog ${callLogId} (outcome=${args?.outcome}) — case may be stuck in 'dialing'`);
+  }
+  return res;
+}
+
 /** Speak the generic callback voicemail if the 30-day cap allows, else silence. */
 async function appendCappedVoicemail(twiml, { customerId, ledgerId, callLogId, outcome, now = new Date() }) {
   const permitted = await voicemailPermitted(customerId, { now });
@@ -188,6 +208,31 @@ router.post('/collections-vestibule', async (req, res) => {
     await stampCallMeta(call.row.id, replay ? { vestibule_replayed: true } : { amd_result: answeredBy || 'absent' });
 
     const twiml = new VoiceResponse();
+    // FULL policy revalidation at ANSWER time (gh prb-r12): the pre-dial
+    // verdict ages through the ring — a STOP texted while the phone rang,
+    // a fresh hold, or a payment landing must end the call before ANY
+    // outreach (voicemail included). The call's own reserved ledger row is
+    // excluded; a denial hangs up with zero words and returns the case to
+    // the queue via the fenced outcome write. Policy-read failure = deny
+    // (fail closed — same direction as the dial-time gate).
+    if (!replay) {
+      let answerVerdict = null;
+      try {
+        const ContactPolicy = require('../services/collections/contact-policy');
+        answerVerdict = await ContactPolicy.evaluate(call.customer.id, {
+          channel: 'voice',
+          purpose: 'late_payment',
+          excludeCollectionCaseId: call.meta.collectionCaseId,
+        });
+      } catch (policyErr) {
+        logger.error(`[collections-vestibule] answer-time policy read failed for call_log ${call.row.id}: ${policyErr.message} — hanging up (fail closed)`);
+      }
+      if (!answerVerdict || !answerVerdict.allowed) {
+        twiml.hangup();
+        await writeOutcomeResilient(call.row.id, { outcome: 'suppressed_at_answer' });
+        return sendTwiml(res, twiml);
+      }
+    }
     if (!replay && isMachineEnd(answeredBy)) {
       // Answering machine finished its greeting → the generic callback
       // voicemail, at most 1/30d, zero balance mention.
@@ -205,7 +250,7 @@ router.post('/collections-vestibule', async (req, res) => {
       // An answering machine mislabeled through here would otherwise gather
       // into the no-input voicemail path and burn the 30-day cap.
       twiml.hangup();
-      await writeCallOutcome(call.row.id, { outcome: 'machine_no_voicemail' }).catch(() => {});
+      await writeOutcomeResilient(call.row.id, { outcome: 'machine_no_voicemail' });
       return sendTwiml(res, twiml);
     }
 
@@ -240,7 +285,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
       if (!consentStamped) {
         twiml.say(script.callbackNumberOnly());
         twiml.hangup();
-        await writeCallOutcome(call.row.id, { outcome: 'vestibule_consent_unrecorded' }).catch(() => {});
+        await writeOutcomeResilient(call.row.id, { outcome: 'vestibule_consent_unrecorded' });
         return sendTwiml(res, twiml);
       }
       const { buildRelayTwiML, RELAY_WS_PATH } = require('../services/voice-agent/relay-protocol');
@@ -287,10 +332,10 @@ router.post('/collections-vestibule-key', async (req, res) => {
           : script.callbackNumberOnly());
       }
       twiml.hangup();
-      await writeCallOutcome(call.row.id, {
+      await writeOutcomeResilient(call.row.id, {
         outcome: 'vestibule_declined',
         captures: { consentRevoked: result.ok },
-      }).catch(() => {});
+      });
       return sendTwiml(res, twiml);
     }
 
@@ -302,7 +347,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
           { action: `${TRANSFER_COMPLETE_ACTION}?callLogId=${encodeURIComponent(call.row.id)}`, method: 'POST', timeout: 20 },
           adminPhone,
         );
-        await writeCallOutcome(call.row.id, { outcome: 'vestibule_office' }).catch(() => {});
+        await writeOutcomeResilient(call.row.id, { outcome: 'vestibule_office' });
         return sendTwiml(res, twiml);
       }
       let officeCard = null;
@@ -320,7 +365,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
       // Promise the callback only if the card persisted (gh prb-r3).
       twiml.say(officeCard ? script.callbackPromise() : script.callbackNumberOnly());
       twiml.hangup();
-      await writeCallOutcome(call.row.id, { outcome: 'vestibule_office' }).catch(() => {});
+      await writeOutcomeResilient(call.row.id, { outcome: 'vestibule_office' });
       return sendTwiml(res, twiml);
     }
 
@@ -397,7 +442,7 @@ router.post('/collections-relay-complete', async (req, res) => {
       logger.warn(`[collections-relay-complete] relay session failed (${errorCode || sessionStatus || 'unknown'}) for call_log ${call.row.id}`);
       // Fenced (gh prb-r6): never clobber a meaningful outcome the
       // conversation writer already landed on this call.
-      await writeCallOutcome(call.row.id, { outcome: 'relay_failed', onlyIfNoOutcome: true }).catch(() => {});
+      await writeOutcomeResilient(call.row.id, { outcome: 'relay_failed', onlyIfNoOutcome: true });
     }
     twiml.hangup();
     return sendTwiml(res, twiml);

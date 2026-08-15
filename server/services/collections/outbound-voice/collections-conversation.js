@@ -401,13 +401,34 @@ class CollectionsConversation {
 
   interrupt() { /* barge-in: nothing buffered server-side to cancel */ }
 
+  // Grounding sources (gh prb-r12): what the CALLER actually said, for
+  // code-level checks that must never trust a model-authored paraphrase.
+  _lastCallerText() {
+    for (let i = this._turns.length - 1; i >= 0; i--) {
+      if (this._turns[i].role === 'caller') return String(this._turns[i].text || '');
+    }
+    return '';
+  }
+
+  _recentCallerDigits(turnsBack = 2) {
+    const digits = [];
+    for (let i = this._turns.length - 1; i >= 0 && digits.length < turnsBack; i--) {
+      if (this._turns[i].role === 'caller') digits.push(String(this._turns[i].text || '').replace(/\D/g, ''));
+    }
+    return digits.join(' ');
+  }
+
   // Spoken opt-out recorded in CODE — shared by the combo human-escape
   // branch and the turn-cap failsafe (gh prb-r11). Broad phrasing carries
   // the FULL scope: do_not_call is written too, independently, and the
   // fallback card names every flag that failed.
   async _recordSpokenOptOut(rawText) {
     if (!SPOKEN_OPT_OUT_RE.test(rawText)) return;
-    const broad = BROAD_OPT_OUT_RE.test(rawText);
+    // An explicit automated-only qualifier ("remove me from the automated
+    // call list") narrows the scope (gh prb-r12): do_not_call would block
+    // permitted manual calls contrary to the caller's stated ask.
+    const automatedOnly = /\b(automated|automatic|robo\w*|recorded|these (?:automated )?calls)\b/i.test(rawText);
+    const broad = !automatedOnly && BROAD_OPT_OUT_RE.test(rawText);
     const rev = await flags.revokeAutomatedVoiceConsent(this._ctx.customer.id, {
       reason: 'spoken opt-out during a billing follow-up call (recorded in code)',
     }).catch(() => ({ ok: false }));
@@ -482,6 +503,13 @@ class CollectionsConversation {
     // Security interrupt: fixed copy, and the model sees only scrubbed text.
     let callerText = String(rawText || '');
     if (utteranceHasSensitiveDetails(callerText)) {
+      // An opt-out RIDING a sensitive utterance ("stop calling me, my SSN
+      // is …") must still be recorded (gh prb-r12): this branch withholds
+      // the utterance and returns before the model ever sees it, so the
+      // code is the only place the stop request can land. The recorder
+      // writes only FIXED reason strings — nothing sensitive persists.
+      const optedOut = SPOKEN_OPT_OUT_RE.test(callerText);
+      if (optedOut) await this._recordSpokenOptOut(callerText);
       try {
         const { scrubPans } = require('../../../utils/pan-scrub');
         // The WHOLE utterance is withheld on any sensitive match (gh
@@ -495,7 +523,7 @@ class CollectionsConversation {
       }
       this._turns.push({ role: 'caller', text: callerText, at: Date.now() });
       this.say(script.SECURITY_INTERRUPT);
-      this.messages.push({ role: 'user', content: `${callerText}\n[system note: the caller tried to share payment details; you already told them you cannot take payment information on this call.]` });
+      this.messages.push({ role: 'user', content: `${callerText}\n[system note: the caller tried to share payment details; you already told them you cannot take payment information on this call.${this._captures.consentRevoked ? ' They also asked to stop these calls — that has been recorded; acknowledge it.' : ''}]` });
       return;
     }
 
@@ -738,6 +766,16 @@ class CollectionsConversation {
     if (!gaveStreet && !gaveZip) {
       return 'No factor was provided — ask for the street number or the billing ZIP. This did not count as an attempt.';
     }
+    // The factor must be GROUNDED in what the caller actually said (gh
+    // prb-r12): a model-miscopied digit sequence that happens to match the
+    // account must not authenticate. Digits are matched against the last
+    // caller turns; a spelled-out number ("three four two…") fails
+    // grounding and simply re-asks for digits — never consuming an attempt.
+    const heard = this._recentCallerDigits();
+    const grounded = (v) => Boolean(v && heard.includes(v));
+    if ((gaveStreet && !grounded(gaveStreet)) || (gaveZip && !grounded(gaveZip))) {
+      return 'That number did not come through clearly. Ask the customer to say just the digits again. This did not count as an attempt.';
+    }
     const streetOk = Boolean(expectStreet && gaveStreet && gaveStreet === expectStreet);
     const zipOk = Boolean(expectZip && gaveZip && gaveZip === expectZip);
     if (streetOk || zipOk) {
@@ -943,11 +981,21 @@ class CollectionsConversation {
     if (agreement.length < 2 || !AFFIRM_RE.test(agreement) || NEGATE_RE.test(agreement)) {
       return 'Refused: the customer has not clearly agreed. Ask plainly if they would like the link texted, and pass their agreeing words verbatim.';
     }
+    // The consent must be GROUNDED in the caller's own latest utterance
+    // (gh prb-r12): the tool input is model-authored, so a fabricated
+    // "yes, text it" must not pass. The bar is the caller's actual last
+    // turn reading affirmative and non-negating — and THAT turn (already
+    // scrubbed in _turns) is what persists as evidence, never the model's
+    // paraphrase.
+    const lastCallerTurn = this._lastCallerText();
+    if (!AFFIRM_RE.test(lastCallerTurn) || NEGATE_RE.test(lastCallerTurn)) {
+      return 'Refused: the customer\'s own last words do not clearly agree. Ask plainly if they would like the link texted, and call this tool right after they say yes.';
+    }
     // Consent evidence persists on EVERY path past the fence (gh prb-r6):
     // stashed before the branches so the send path records it too.
     try {
       const { scrubPans } = require('../../../utils/pan-scrub');
-      this._captures.payLinkAgreementVerbatim = scrubPans(agreement).slice(0, 200);
+      this._captures.payLinkAgreementVerbatim = scrubPans(lastCallerTurn).slice(0, 200);
     } catch { this._captures.payLinkAgreementVerbatim = null; }
     if (!isPayLinkEnabled()) {
       return 'The pay-link text is not available. Offer the office number for payment instead.';

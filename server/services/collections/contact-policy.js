@@ -332,7 +332,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       // for a week. 'vestibule_office' deliberately still counts — a press-0
       // transfer can become a real office conversation on the same leg
       // (over-suppression is the safe direction there).
-      .whereRaw("(call_outcome IS NULL OR call_outcome NOT IN ('voicemail', 'missed', 'spam', 'voicemail_left', 'machine_no_voicemail', 'no_answer', 'vestibule_declined', 'vestibule_no_input', 'vestibule_consent_unrecorded', 'relay_failed', 'dial_failed'))")
+      .whereRaw("(call_outcome IS NULL OR call_outcome NOT IN ('voicemail', 'missed', 'spam', 'voicemail_left', 'machine_no_voicemail', 'no_answer', 'vestibule_declined', 'vestibule_no_input', 'vestibule_consent_unrecorded', 'suppressed_at_answer', 'relay_failed', 'dial_failed'))")
       .whereRaw("(answered_by IS NULL OR answered_by <> 'voicemail')")
       .whereRaw('(duration_seconds IS NULL OR duration_seconds >= 30)')
       .orderBy('created_at', 'desc')
@@ -381,8 +381,20 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       }
     } else if (channel === 'sms' || channel === 'email') {
       // A live conversation (either direction of a real call) supersedes the
-      // automated text/email cadence for a week.
-      const live = recent.find((r) => isVoiceLike(r.channel));
+      // automated text/email cadence for a week. Only LIVE ones (gh
+      // prb-r12): a ledger voice row finalized live_conversation:false
+      // (voicemail, no-input, machine, failed dial) is spacing data for the
+      // VOICE channel, not a conversation — it must not silence texts for a
+      // week. A row with NO outcome yet (in-flight call) conservatively
+      // counts; the call_log synthetic row is already live-filtered.
+      const live = recent.find((r) => {
+        if (!isVoiceLike(r.channel)) return false;
+        if (r.source === 'call_log') return true;
+        let meta = r.metadata;
+        if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+        if (meta && meta.outcome !== undefined) return meta.live_conversation === true;
+        return true;
+      });
       if (live) {
         deny('live_conversation_within_7d');
         proposeNextEligible(new Date(new Date(live.occurred_at).getTime() + 7 * DAY_MS));

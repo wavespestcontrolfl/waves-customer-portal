@@ -731,3 +731,75 @@ describe('prb-r11', () => {
     expect(system).toContain("Today's date is Wednesday, 2026-08-12");
   });
 });
+
+// prb-r12 pins.
+describe('prb-r12', () => {
+  test('an opt-out riding a sensitive utterance is still recorded (and nothing sensitive persists)', async () => {
+    const { convo, spoken } = makeConvo();
+    await turn(convo, 'stop calling me, my social is 123-45-6789');
+    expect(flags.revokeAutomatedVoiceConsent).toHaveBeenCalled();
+    expect(convo._captures.consentRevoked).toBe(true);
+    expect(spoken).toContain(script.SECURITY_INTERRUPT);
+    const everything = JSON.stringify(convo._turns) + JSON.stringify(convo.messages)
+      + JSON.stringify(flags.revokeAutomatedVoiceConsent.mock.calls);
+    expect(everything).not.toContain('123-45-6789');
+  });
+
+  test('an explicit automated-only qualifier narrows the spoken opt-out scope', async () => {
+    const { convo } = makeConvo({ now: STAFFED_NOW });
+    await turn(convo, 'remove me from the automated call list and get me a representative');
+    expect(flags.revokeAutomatedVoiceConsent).toHaveBeenCalled();
+    expect(flags.writeFlag).not.toHaveBeenCalledWith(expect.objectContaining({ flag: 'do_not_call' }));
+  });
+
+  test('a fabricated affirmative in the pay-link tool input is refused when the caller declined', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    mockScriptedMessages.push(
+      toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it to me' }), // model fabrication
+      endTurn('Understood.'),
+    );
+    await turn(convo, 'No, I do not want any texts.');
+    expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+  });
+
+  test('the persisted pay-link consent evidence is the CALLER\'s words, not the model\'s paraphrase', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    mockScriptedMessages.push(
+      toolUse('send_pay_link', { customer_agreement_verbatim: 'yes send the text' }),
+      endTurn('Sent.'),
+    );
+    await turn(convo, 'Sure, go ahead and text it over.');
+    expect(convo._captures.payLinkAgreementVerbatim).toBe('Sure, go ahead and text it over.');
+  });
+
+  test('a verification factor the caller never said does not authenticate (and costs no attempt)', async () => {
+    const { convo } = makeConvo();
+    mockScriptedMessages.push(
+      toolUse('confirm_right_party', { result: 'confirmed' }),
+      endTurn('Could you tell me your street number or billing ZIP?'),
+    );
+    await turn(convo, 'Speaking.');
+    // Model passes the CORRECT street number, but the caller never said it.
+    mockScriptedMessages.push(
+      toolUse('verify_identity', { street_number: '4128' }),
+      endTurn('Could you say just the digits?'),
+    );
+    await turn(convo, 'my address is on shellcracker drive');
+    expect(convo.verified).toBe(false);
+    expect(convo.verifyAttempts).toBe(0); // grounding failure ≠ attempt
+    // Grounded digits verify normally.
+    mockScriptedMessages.push(
+      toolUse('verify_identity', { billing_zip: '34208' }),
+      endTurn('Verified, thank you.'),
+    );
+    await turn(convo, '3 4 2 0 8');
+    expect(convo.verified).toBe(true);
+  });
+});

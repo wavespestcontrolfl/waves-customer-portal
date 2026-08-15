@@ -952,3 +952,58 @@ test('excludeCollectionCaseId exempts exactly the active call from the 24h windo
   });
   expect(other.denialReasons).toContain('contact_within_24h');
 });
+
+// prb-r12: only LIVE voice ledger rows supersede the sms/email cadence —
+// a finalized non-live attempt (voicemail, no-input, machine) is voice
+// spacing data, not a conversation.
+describe('ledger live-conversation filtering (prb-r12)', () => {
+  const TWO_DAYS_AGO = new Date(WED_11AM_EDT.getTime() - 2 * 24 * 3600 * 1000).toISOString();
+
+  async function evalSms() {
+    return ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'late_payment', now: WED_11AM_EDT });
+  }
+
+  test('a voice row finalized live_conversation:false does NOT suppress sms', async () => {
+    const nonLive = {
+      channel: 'voice',
+      occurred_at: TWO_DAYS_AGO,
+      metadata: JSON.stringify({ outcome: 'voicemail_left', live_conversation: false }),
+    };
+    armAllowedBaseline({ ledger: [nonLive] });
+    const sms = await evalSms();
+    expect(sms.denialReasons).not.toContain('live_conversation_within_7d');
+  });
+
+  test('the same non-live row still enforces VOICE spacing', async () => {
+    const nonLive = {
+      channel: 'voice',
+      occurred_at: TWO_DAYS_AGO,
+      metadata: JSON.stringify({ outcome: 'voicemail_left', live_conversation: false }),
+    };
+    armAllowedBaseline({ ledger: [nonLive] });
+    const voice = await evalVoice();
+    expect(voice.denialReasons).toContain('voice_contact_within_7d');
+  });
+
+  test('an IN-FLIGHT voice row (no outcome yet) conservatively suppresses sms', async () => {
+    const pending = {
+      channel: 'voice',
+      occurred_at: TWO_DAYS_AGO,
+      metadata: JSON.stringify({ collectionCaseId: 'case-9' }),
+    };
+    armAllowedBaseline({ ledger: [pending] });
+    const sms = await evalSms();
+    expect(sms.denialReasons).toContain('live_conversation_within_7d');
+  });
+
+  test('a finalized LIVE conversation suppresses sms', async () => {
+    const live = {
+      channel: 'voice',
+      occurred_at: TWO_DAYS_AGO,
+      metadata: JSON.stringify({ outcome: 'conversation_completed', live_conversation: true }),
+    };
+    armAllowedBaseline({ ledger: [live] });
+    const sms = await evalSms();
+    expect(sms.denialReasons).toContain('live_conversation_within_7d');
+  });
+});

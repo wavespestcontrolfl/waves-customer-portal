@@ -31,6 +31,10 @@ jest.mock('../services/collections/outbound-voice/voicemail', () => {
     stampVoicemailLeft: jest.fn(async () => true),
   };
 });
+// Answer-time revalidation (gh prb-r12) — allowed by default; tests flip it.
+jest.mock('../services/collections/contact-policy', () => ({
+  evaluate: jest.fn(async () => ({ allowed: true, denialReasons: [] })),
+}));
 jest.mock('../services/collections/outbound-voice/outcomes', () => ({
   writeCallOutcome: jest.fn(async () => ({ ok: true })),
 }));
@@ -118,6 +122,9 @@ beforeEach(() => {
   });
   voicemailPermitted.mockResolvedValue(true);
   stampVoicemailLeft.mockResolvedValue(true);
+  require('../services/collections/contact-policy').evaluate
+    .mockResolvedValue({ allowed: true, denialReasons: [] });
+  writeCallOutcome.mockResolvedValue({ ok: true });
   flags.revokeAutomatedVoiceConsent.mockResolvedValue({ ok: true, created: true });
   isStaffedHours.mockReturnValue(true);
   process.env.GATE_VOICE_LATE_PAYMENT = 'true';
@@ -462,5 +469,54 @@ describe('prb-r7', () => {
     await handlerFor('/collections-vestibule')(req({ body: { AnsweredBy: 'human' } }), res);
     expect(res.body).toContain('<Hangup/>');
     expect(res.body).not.toContain('<Gather');
+  });
+});
+
+// prb-r12 pins.
+describe('prb-r12', () => {
+  const ContactPolicy = require('../services/collections/contact-policy');
+
+  test('answer-time policy denial ⇒ silent hangup, suppressed_at_answer outcome, own case excluded from the read', async () => {
+    setDb();
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['suppression_manual_dnc'] });
+    const res = mockRes();
+    await handlerFor('/collections-vestibule')(req({ body: { AnsweredBy: 'human' } }), res);
+    expect(res.body).not.toContain('<Gather');
+    expect(res.body).not.toContain('<Say>');
+    expect(res.body).toContain('<Hangup/>');
+    expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({ outcome: 'suppressed_at_answer' }));
+    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({
+      channel: 'voice', purpose: 'late_payment', excludeCollectionCaseId: 'case-1',
+    }));
+  });
+
+  test('an answer-time policy READ failure fails closed (hangup, no vestibule)', async () => {
+    setDb();
+    ContactPolicy.evaluate.mockRejectedValue(new Error('policy db down'));
+    const res = mockRes();
+    await handlerFor('/collections-vestibule')(req({ body: { AnsweredBy: 'human' } }), res);
+    expect(res.body).not.toContain('<Gather');
+    expect(res.body).toContain('<Hangup/>');
+    expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({ outcome: 'suppressed_at_answer' }));
+  });
+
+  test('a replay never re-runs the answer-time policy (mid-call re-gather stays put)', async () => {
+    setDb();
+    const res = mockRes();
+    await handlerFor('/collections-vestibule')(req({ query: { replay: '1' }, body: { AnsweredBy: '' } }), res);
+    expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
+    expect(res.body).toContain('<Gather');
+  });
+
+  test('terminal outcome writes RETRY a resolved {ok:false} and log loudly on a double failure', async () => {
+    setDb();
+    const logger = require('../services/logger');
+    writeCallOutcome.mockResolvedValue({ ok: false });
+    const res = mockRes();
+    await handlerFor('/collections-vestibule')(req({ body: { AnsweredBy: 'unknown' } }), res);
+    // machine_no_voicemail branch: one write + one retry, then the loud log.
+    const machineWrites = writeCallOutcome.mock.calls.filter((c) => c[1]?.outcome === 'machine_no_voicemail');
+    expect(machineWrites).toHaveLength(2);
+    expect(logger.error.mock.calls.flat().join(' ')).toContain('OUTCOME WRITE FAILED TWICE');
   });
 });
