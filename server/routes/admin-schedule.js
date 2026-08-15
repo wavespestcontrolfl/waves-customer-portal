@@ -12154,11 +12154,32 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       ...fallbackProductNames.map((name) => ({ name })),
       ...typedProductNameGuards.map((name) => ({ name })),
     ];
+    // Active ingredients are PERMITTED report wording (constraint #4) even
+    // when the trade name IS the active ("Prodiamine 65 WDG") — derive the
+    // exemption from the visit's own catalog rows, not a fixed noun list
+    // (codex r22). Lookup failure keeps the guard strict.
+    const guardGenericTokens = new Set(PEST_TARGET_TOKENS);
+    try {
+      const guardIds = (Array.isArray(products) ? products : [])
+        .map((p) => p?.productId).filter(Boolean);
+      if (guardIds.length) {
+        const rows = await db('products_catalog')
+          .whereIn('id', guardIds)
+          .select('active_ingredient', 'formulation')
+          .catch(() => []);
+        for (const row of rows || []) {
+          `${row.active_ingredient || ''} ${row.formulation || ''}`
+            .toLowerCase().split(/[^a-z0-9]+/)
+            .filter((tok) => tok.length >= 4)
+            .forEach((tok) => guardGenericTokens.add(tok));
+        }
+      }
+    } catch { /* strict guard on failure */ }
     const generated = await generateReportCopyWithFallback({
       systemPrompt,
       userMessage: fullUserMessage,
       extraRejection: (text) => (
-        CompletionRecap.containsProductName(text, guardedProducts, { extraGenericTokens: PEST_TARGET_TOKENS }) ? 'trade_name' : null
+        CompletionRecap.containsProductName(text, guardedProducts, { extraGenericTokens: guardGenericTokens }) ? 'trade_name' : null
       ),
     });
     if (!generated.ok) {
@@ -12190,7 +12211,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      const fallbackReport = report && CompletionRecap.containsProductName(report, guardedProducts, { extraGenericTokens: PEST_TARGET_TOKENS })
+      const fallbackReport = report && CompletionRecap.containsProductName(report, guardedProducts, { extraGenericTokens: guardGenericTokens })
         ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
