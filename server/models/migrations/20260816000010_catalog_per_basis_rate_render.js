@@ -35,11 +35,14 @@
 //   earlier batch's note exists, so the new values carry provenance without
 //   erasing it. label_verified_at/by stamped only where NULL.
 //
-// down() clears only values this migration wrote, identified by exact-value
-// match plus our appended note suffix. Unlike 20260712100000's down() it
-// cannot gate on the label_verified_by stamp — most target rows were already
-// stamped by that earlier batch, so up() writes their display fields WITHOUT
-// restamping; the exact value + note suffix is the ownership signal instead.
+// down() clears only values this migration wrote. Unlike 20260712100000's
+// down() it cannot gate on the label_verified_by stamp — most target rows
+// were already stamped by that earlier batch, so up() writes their display
+// fields WITHOUT restamping. Ownership is recorded instead in the appended
+// provenance segment ("... [wrote: default_rate, default_unit]"): down()
+// reverts only the fields named there, and only while their value is still
+// exactly what up() wrote — preexisting equal values and later admin edits
+// both survive rollback.
 
 const VERIFIED_BY = 'rate-render-backfill-2026-08-14';
 
@@ -194,6 +197,28 @@ const DATA = [
 
 function emptyText(v) { return v == null || String(v).trim() === '' || String(v).trim().toUpperCase() === 'N/A'; }
 
+// The appended provenance segment records EXACTLY which fields this
+// migration filled on that row — "note text [wrote: default_rate,
+// default_unit]" — so down() reverts only migration-owned fields. Without
+// the marker, a preexisting value that merely equals the backfill value
+// (up() skipped it as fill-only) would be deleted on rollback.
+function appendedNote(note, wroteFields) {
+  return `${note} [wrote: ${wroteFields.join(', ')}]`;
+}
+
+// Returns the field list from OUR provenance segment on this row, or null
+// when the row carries no segment for this entry (up() wrote nothing here).
+// The segment is only recognized in the positions up() leaves it: as the
+// whole note, or as the final " | "-appended segment.
+function ownedFields(labelSourceNote, note) {
+  const s = String(labelSourceNote || '');
+  const m = s.match(/ \[wrote: ([^\]]*)\]$/);
+  if (!m) return null;
+  const segment = `${note} [wrote: ${m[1]}]`;
+  if (s !== segment && !s.endsWith(` | ${segment}`)) return null;
+  return m[1].split(',').map((f) => f.trim()).filter(Boolean);
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
 
@@ -214,17 +239,18 @@ exports.up = async function up(knex) {
       if (max != null && row.max_label_rate_per_1000 == null) updates.max_label_rate_per_1000 = max;
       if (d.unit && emptyText(row.rate_unit)) updates.rate_unit = d.unit;
     }
-    if (Object.keys(updates).length && d.note) {
+    const wroteFields = Object.keys(updates);
+    if (wroteFields.length && d.note && !String(row.label_source_note || '').includes(d.note)) {
       if (emptyText(row.label_source_note)) {
-        updates.label_source_note = d.note;
-      } else if (!row.label_source_note.endsWith(d.note)) {
+        updates.label_source_note = appendedNote(d.note, wroteFields);
+      } else {
         // The earlier batch's note (with its verbatim label quote) stays;
         // the values written above get their own appended provenance.
-        updates.label_source_note = `${row.label_source_note} | ${d.note}`;
+        updates.label_source_note = `${row.label_source_note} | ${appendedNote(d.note, wroteFields)}`;
       }
     }
     // Stamp only rows this migration actually wrote to.
-    if (Object.keys(updates).length && row.label_verified_at == null) {
+    if (wroteFields.length && row.label_verified_at == null) {
       updates.label_verified_at = new Date();
       updates.label_verified_by = VERIFIED_BY;
     }
@@ -244,25 +270,32 @@ exports.down = async function down(knex) {
       .whereRaw('LOWER(name) = LOWER(?)', [d.name])
       .first();
     if (!row) continue;
+    // Only fields named in OUR provenance segment are candidates — a
+    // preexisting value that merely equals the backfill value was never
+    // written by up() and must survive rollback.
+    const owned = ownedFields(row.label_source_note, d.note);
+    if (!owned) continue;
     const reverts = {};
-    if (d.basis === 'display') {
-      if (row.default_rate === d.rate) reverts.default_rate = null;
-      if (row.default_unit === d.unit) reverts.default_unit = null;
-    } else if (d.basis === 'per_1000_sqft') {
-      const rate = d.rate != null ? d.rate : d.min;
-      const max = d.max != null ? d.max : (d.rate != null && d.min == null ? d.rate : null);
+    const rate = d.rate != null ? d.rate : d.min;
+    const max = d.max != null ? d.max : (d.rate != null && d.min == null ? d.rate : null);
+    for (const field of owned) {
+      // Revert only if the value is still exactly what we wrote — an admin
+      // edit since up() wins and stays.
+      if (field === 'default_rate' && row.default_rate === d.rate) reverts.default_rate = null;
+      if (field === 'default_unit' && row.default_unit === d.unit) reverts.default_unit = null;
        
-      if (rate != null && row.default_rate_per_1000 == rate) reverts.default_rate_per_1000 = null;
+      if (field === 'default_rate_per_1000' && rate != null && row.default_rate_per_1000 == rate) reverts.default_rate_per_1000 = null;
        
-      if (d.min != null && row.min_label_rate_per_1000 == d.min) reverts.min_label_rate_per_1000 = null;
+      if (field === 'min_label_rate_per_1000' && d.min != null && row.min_label_rate_per_1000 == d.min) reverts.min_label_rate_per_1000 = null;
        
-      if (max != null && row.max_label_rate_per_1000 == max) reverts.max_label_rate_per_1000 = null;
-      if (d.unit && row.rate_unit === d.unit) reverts.rate_unit = null;
+      if (field === 'max_label_rate_per_1000' && max != null && row.max_label_rate_per_1000 == max) reverts.max_label_rate_per_1000 = null;
+      if (field === 'rate_unit' && row.rate_unit === d.unit) reverts.rate_unit = null;
     }
-    if (d.note && row.label_source_note === d.note) {
+    const segment = appendedNote(d.note, owned);
+    if (row.label_source_note === segment) {
       reverts.label_source_note = null;
-    } else if (d.note && row.label_source_note && row.label_source_note.endsWith(` | ${d.note}`)) {
-      reverts.label_source_note = row.label_source_note.slice(0, -(` | ${d.note}`.length));
+    } else if (String(row.label_source_note || '').endsWith(` | ${segment}`)) {
+      reverts.label_source_note = row.label_source_note.slice(0, -(` | ${segment}`.length));
     }
     if (row.label_verified_by === VERIFIED_BY) {
       reverts.label_verified_at = null;
@@ -275,3 +308,6 @@ exports.down = async function down(knex) {
     }
   }
 };
+
+// Test-only exports (knex reads only up/down).
+exports._test = { DATA, VERIFIED_BY, appendedNote, ownedFields, emptyText };
