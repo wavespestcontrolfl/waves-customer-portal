@@ -178,6 +178,7 @@ function makeStubKnex(rowsByTable = {}) {
       throw err;
     }
   };
+  builder.raw = jest.fn().mockResolvedValue({ rows: [] }); // advisory locks are no-ops in the stub
   builder.schema = { hasTable: () => Promise.resolve(true) };
   Object.defineProperty(builder, '_data', { get: () => data });
   builder._inserts = inserts;
@@ -225,7 +226,7 @@ describe('detectContactCorrectionIntent', () => {
 });
 
 describe('extractSmsContactCorrections', () => {
-  it('keeps only high-confidence corrections on applyable fields', async () => {
+  it('keeps only high-confidence, transcript-backed corrections on applyable fields', async () => {
     mockCallAnthropic.mockResolvedValue({
       ok: true,
       json: {
@@ -233,10 +234,12 @@ describe('extractSmsContactCorrections', () => {
           { field: 'last_name', new_value: 'Rivers', quote: 'name is spelled Rivers', confidence: 'high' },
           { field: 'email', new_value: 'a@b.co', quote: 'email is a@b.co', confidence: 'medium' },
           { field: 'phone', new_value: '5551234567', quote: 'call me at', confidence: 'high' },
+          // Fabricated evidence: the quote does not appear in the message.
+          { field: 'city', new_value: 'Elsewhere', quote: 'we are in Elsewhere now', confidence: 'high' },
         ],
       },
     });
-    const out = await extractSmsContactCorrections({ body: 'name is wrong, it is spelled Rivers' });
+    const out = await extractSmsContactCorrections({ body: 'My name is wrong — name is spelled Rivers, with an S' });
     expect(out).toEqual([{ field: 'last_name', newValue: 'Rivers', quote: 'name is spelled Rivers' }]);
   });
 
@@ -729,6 +732,12 @@ describe('round-4 hardening', () => {
   it('prefilter matches standalone new-detail statements', () => {
     expect(detectContactCorrectionIntent('My new email is jane@example.com')).toBe(true);
     expect(detectContactCorrectionIntent('new address: 99 Pine Ave, Sarasota 34231')).toBe(true);
+  });
+
+  it('prefilter matches should-be and update-to forms', () => {
+    expect(detectContactCorrectionIntent('My email should be jane@example.com, not jan@example.com')).toBe(true);
+    expect(detectContactCorrectionIntent('Please update my email to jane@example.com')).toBe(true);
+    expect(detectContactCorrectionIntent('Can you change the address to 99 Pine Ave')).toBe(true);
   });
 });
 

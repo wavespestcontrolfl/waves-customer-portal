@@ -56,7 +56,7 @@ const ADDRESS_FIELDS = Object.freeze(['address_line1', 'address_line2', 'city', 
 // correction language — ordinary calls state identity fields all the time
 // (a spouse booking, a different property) and none of that is a mandate
 // to rewrite the profile.
-const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)/i;
+const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|email|e-?mail|address)\b[\s\S]{0,10}\bto\b/i;
 
 // Post-extraction format guards — the model proposes, these dispose.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -105,17 +105,14 @@ function errTag(err) {
   return (err && (err.code || err.name)) || 'error';
 }
 
-// Canonical normalization (same utilities the Customer-360 path uses) so an
-// extracted "fl" / "RIVERS" / double-spaced street stores in house shape.
-// properCase preserves deliberate mixed casing (McDonald, O'Brien), so this
-// composes with the case-sensitive compare rather than fighting it.
-const { normalizeEmail, properCaseName, collapseWhitespace } = require('../utils/contact-normalize');
+// Canonical per-field normalization — the SAME normalizer every intake path
+// uses (utils/intake-normalize CONTACT_FIELD_NORMALIZERS): proper-cased
+// names/cities (Mc/O' preserved, so case-only corrections still register),
+// canonical street shapes, uppercase state, lowercased email, zip cleanup.
+const { normalizeContactRecord } = require('../utils/intake-normalize');
 function canonicalizeValue(field, value) {
-  const v = collapseWhitespace(value);
-  if (field === 'email') return normalizeEmail(v);
-  if (field === 'first_name' || field === 'last_name' || field === 'city') return properCaseName(v);
-  if (field === 'state') return String(v).toUpperCase();
-  return v;
+  const out = normalizeContactRecord({ [field]: value });
+  return out[field] !== undefined && out[field] !== null ? String(out[field]) : String(value);
 }
 
 // Field-aware equality: email is case-insensitive (case never matters for
@@ -148,9 +145,18 @@ async function extractSmsContactCorrections({ body }) {
       maxTokens: 500,
     });
     const list = res?.ok && Array.isArray(res.json?.corrections) ? res.json.corrections : [];
+    // Evidence check: the quote must actually appear in the customer's
+    // message (whitespace/case-normalized). A model output with an omitted
+    // or fabricated quote is not transcript-backed and never applies —
+    // hallucinated "corrections" die here, not in prod data.
+    const haystack = text.replace(/\s+/g, ' ').toLowerCase();
+    const quoteInBody = (q) => {
+      const needle = normValue(q).replace(/\s+/g, ' ').toLowerCase();
+      return needle.length >= 4 && haystack.includes(needle);
+    };
     return list
-      .filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field))
-      .map((c) => ({ field: c.field, newValue: normValue(c.new_value), quote: normValue(c.quote) || null }));
+      .filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field) && quoteInBody(c.quote))
+      .map((c) => ({ field: c.field, newValue: normValue(c.new_value), quote: normValue(c.quote) }));
   } catch (err) {
     logger.warn(`[contact-correction] sms extraction failed: ${errTag(err)}`);
     return [];
@@ -233,6 +239,13 @@ async function applyContactCorrections({ customerId, corrections, source, source
         // canonical Customer-360 path blocks with its cross-account conflict
         // check. Same semantics here (email only; phone is never applied).
         if (field === 'email') {
+          // Shared email claim lock (same key customer-dedupe's merge-undo
+          // and the email-fanout claim guard take) — serializes this write
+          // against a concurrent merge/undo re-claiming the same address.
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
+            [`customer-email:${newValue.toLowerCase().trim()}`],
+          );
           // ALL matches, not .first() — with the email on both a sibling
           // profile and an unrelated account, an unordered first() could
           // return the sibling and mask the real conflict.
