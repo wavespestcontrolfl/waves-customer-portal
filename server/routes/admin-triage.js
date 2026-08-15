@@ -348,6 +348,11 @@ router.post('/:id/apply-property-roles', async (req, res) => {
       const prePayload = typeof item.payload === 'string' ? JSON.parse(item.payload) : (item.payload || {});
       const preCustomerId = prePayload.customer_id || null;
       if (preCustomerId) {
+        // Comms lock BEFORE the customers row (its documented order —
+        // codex #3418 r11): every scheduled_services INSERT holds it, so
+        // the flip's visit pin serializes with appointment creators and
+        // the recurring auto-extension.
+        await require('../utils/customer-comms-lock').lockCustomerComms(trx, preCustomerId);
         await trx('customers').where({ id: preCustomerId }).forUpdate().first();
       }
       await lockTriageCall(trx, item.call_log_id);

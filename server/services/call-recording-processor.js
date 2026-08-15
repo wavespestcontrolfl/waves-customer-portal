@@ -6555,6 +6555,15 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // A previously classified call reprocessed into spam/non-workable
+      // must not leave its property_role_confirm card actionable — the
+      // office could still one-click property mutations from the
+      // superseded extraction (codex #3418 r11). Fail-soft, under the
+      // shared per-call triage lock inside the helper.
+      await require('./property-role-proposals').resolveSupersededCard(
+        db, call.id,
+        `Superseded — the call was reclassified ${extracted.is_spam ? 'spam' : 'non-workable voicemail'} on reprocess.`,
+      );
       // SECOND invalidation pass, after the terminal status committed
       // (codex P1, PR #3304 GH r8g): the pre-write pass stamps the durable
       // call-side block first, so a composer that had already locked the
@@ -7552,6 +7561,13 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // Retire any open property_role_confirm card from a prior pass — the
+      // veto blocks every canonical write, so its parked mutations are
+      // superseded and must not stay one-click applicable (codex #3418
+      // r11). Fail-soft, locked inside the helper.
+      await require('./property-role-proposals').resolveSupersededCard(
+        db, call.id, 'Superseded — the reprocessed extraction was hard-vetoed before canonical writes.',
+      );
       await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
       logger.info(`[call-proc] V2 hard veto for ${callSid}; skipped canonical writes (customer/lead/appointment)`);
       return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };
@@ -8193,7 +8209,16 @@ const CallRecordingProcessor = {
           }
         };
         enqueueLookup(ensured);
-        if (isFirstAddress || (bridgeNeedsConfirmation.includes('second_service_address') && hasFullAddress)) {
+        // ONE canonical persistence set per call (codex #3418 r11): when
+        // the role lane is on and valid V2 exists, the V2 loop below is
+        // the SOLE property persister — running the V1-preferred writes
+        // too would let extractor disagreement silently create phantom
+        // duplicate properties. Role lane off (or no valid V2) keeps the
+        // V1 writes exactly as before.
+        const v2SoleAddressAuthority = require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')
+          && !!v2CanonicalExtraction?.property;
+        if (!v2SoleAddressAuthority
+          && (isFirstAddress || (bridgeNeedsConfirmation.includes('second_service_address') && hasFullAddress))) {
           const recorded = await customerProperties.recordCallProperty({
             customerId,
             address_line1: extracted.address_line1,
@@ -8214,7 +8239,7 @@ const CallRecordingProcessor = {
         // an incomplete one still surfaces via the advisory triage flag above.
         // recordCallProperty dedups on the full address key, so reprocessing a
         // call (or a repeat caller) never duplicates a property.
-        for (const extra of callAdditionalProps) {
+        for (const extra of (v2SoleAddressAuthority ? [] : callAdditionalProps)) {
           const extraCity = String(extra.city || '').trim();
           const extraZip = String(extra.zip || '').trim();
           if (!extraCity || !extraZip) continue;

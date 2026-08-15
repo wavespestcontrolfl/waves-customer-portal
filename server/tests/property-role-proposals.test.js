@@ -482,6 +482,7 @@ describe('stale-state fences (codex r1)', () => {
         return hits.length;
       },
     });
+    trx.raw = (sql, bindings) => ({ __raw: sql, bindings });
     trx._updates = updates;
     return trx;
   };
@@ -533,6 +534,7 @@ describe('promote occupancy fence (codex r3 → r9)', () => {
       },
       async update(patch) { updates.push({ table, patch }); return 1; },
     });
+    trx.raw = (sql, bindings) => ({ __raw: sql, bindings });
     const out = await applyPropertyRoleProposals(trx, {
       customerId: 'cust-1',
       proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: null }],

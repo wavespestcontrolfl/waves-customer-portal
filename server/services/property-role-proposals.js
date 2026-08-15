@@ -289,13 +289,13 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
 // Resolving our own advisory card is the same self-cleanup shape as the
 // transcript-rejection path's stale-card dismissal; single row by the
 // open-unique index, under the shared per-call triage lock.
-async function resolveSupersededInTrx(trx, callLogId) {
+async function resolveSupersededInTrx(trx, callLogId, note) {
   const resolved = await trx('triage_items')
     .where({ call_log_id: callLogId, reason_code: REASON_CODE })
     .whereIn('status', ['open', 'in_progress'])
     .update({
       status: 'resolved',
-      resolution_note: 'Superseded — the reprocessed extraction proposes no property-role changes.',
+      resolution_note: note || 'Superseded — the reprocessed extraction proposes no property-role changes.',
       resolved_at: new Date(),
       updated_at: new Date(),
     });
@@ -315,12 +315,12 @@ async function resolveSupersededInTrx(trx, callLogId) {
   }
 }
 
-async function resolveSupersededCard(db, callLogId) {
+async function resolveSupersededCard(db, callLogId, note) {
   try {
     const { lockTriageCall } = require('../utils/triage-locks');
     await db.transaction(async (trx) => {
       await lockTriageCall(trx, callLogId);
-      await resolveSupersededInTrx(trx, callLogId);
+      await resolveSupersededInTrx(trx, callLogId, note);
     });
   } catch (e) {
     logger.warn(`[property-role] superseded-card cleanup skipped: ${e.code || e.name || 'db_error'}`);
@@ -420,10 +420,15 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
   let applied = 0;
   let skipped = 0;
 
-  // LOCK ORDER: the customers row FIRST, then customer_properties — the
-  // same order admin-customers' address save uses (customer → primary
-  // property). Locking properties first here could deadlock against a
-  // concurrent Customer 360 save (codex #3418 r5).
+  // LOCK ORDER: the shared customer-comms lock FIRST (its contract: take
+  // it before this customer's row lock, as early as the id is known —
+  // codex #3418 r11: every scheduled_services INSERT holds it, so the
+  // flip's pin-and-mirror serializes with appointment creators and the
+  // recurring auto-extension instead of racing them), THEN the customers
+  // row, then customer_properties — the same order admin-customers'
+  // address save uses (customer → primary property; codex #3418 r5).
+  // Reentrant: the route pre-acquires both in this same transaction.
+  await require('../utils/customer-comms-lock').lockCustomerComms(trx, customerId);
   await trx('customers').where({ id: customerId }).forUpdate().first();
 
   for (const p of proposals) {
