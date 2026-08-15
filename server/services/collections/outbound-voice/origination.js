@@ -236,8 +236,19 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     // Twilio touch, so the row must not consume the frequency windows — a
     // retry after the claim release would otherwise see its own unsent
     // voice row inside the 7-day spacing and cancel the approved case.
-    await ContactLedger.markSendFailed(ledgerEntry, { stage: 'call_log_insert', never_contacted: true });
-    await releaseClaim();
+    // The stamp result is CHECKED with one retry (gh prb-r16); if the row
+    // cannot be marked, the claim is deliberately NOT released — the case
+    // stays visibly stuck in 'dialing' for the pilot operator instead of
+    // silently un-dialable behind a phantom window.
+    let stamped = await ContactLedger.markSendFailed(ledgerEntry, { stage: 'call_log_insert', never_contacted: true });
+    if (!stamped) {
+      stamped = await ContactLedger.markSendFailed(ledgerEntry, { stage: 'call_log_insert', never_contacted: true });
+    }
+    if (stamped) {
+      await releaseClaim();
+    } else {
+      logger.error(`[collections-voice] never_contacted stamp FAILED TWICE for ledger ${ledgerEntry.id} — case ${caseRow.id} left in 'dialing' for operator repair`);
+    }
     throw err;
   }
   const callLogId = callLogRow?.id;

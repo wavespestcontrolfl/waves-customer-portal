@@ -277,6 +277,27 @@ router.post('/collections-vestibule-key', async (req, res) => {
     const twiml = new VoiceResponse();
 
     if (digit === '1') {
+      // The policy is re-proven ONE more time at press-1 (gh prb-r16): a
+      // hold or canonical suppression landing while the vestibule script
+      // played — or across an invalid-digit replay — must stop the relay
+      // before any account session exists. Own ledger row excluded;
+      // read failure = deny (fail closed).
+      let consentVerdict = null;
+      try {
+        const ContactPolicy = require('../services/collections/contact-policy');
+        consentVerdict = await ContactPolicy.evaluate(call.customer.id, {
+          channel: 'voice',
+          purpose: 'late_payment',
+          excludeCollectionCaseId: call.meta.collectionCaseId,
+        });
+      } catch (policyErr) {
+        logger.error(`[collections-vestibule] press-1 policy read failed for call_log ${call.row.id}: ${policyErr.message} — hanging up (fail closed)`);
+      }
+      if (!consentVerdict || !consentVerdict.allowed) {
+        twiml.hangup();
+        await writeOutcomeResilient(call.row.id, { outcome: 'suppressed_at_answer' });
+        return sendTwiml(res, twiml);
+      }
       // Consent given → the relay leg — but ONLY once the consent stamp
       // provably persisted (gh prb-r5): opening ConversationRelay without
       // durable evidence of the press-1 defeats the vestibule's purpose.

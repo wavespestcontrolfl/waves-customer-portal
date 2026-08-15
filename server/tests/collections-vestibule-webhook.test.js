@@ -573,3 +573,16 @@ test('a failed completed status stamp returns 500 (retryable), never a swallowin
   await handlerFor('/collections-call-status')(req({ body: { CallStatus: 'completed' } }), res);
   expect(res.sendStatus).toHaveBeenCalledWith(500);
 });
+
+// prb-r16: a suppression landing while the vestibule played must stop the
+// relay AT press-1 — the last gate before any account session exists.
+test('press-1 with a newly active suppression hangs up before any ConversationRelay', async () => {
+  setDb();
+  require('../services/collections/contact-policy').evaluate
+    .mockResolvedValue({ allowed: false, denialReasons: ['suppression_manual_dnc'] });
+  const res = mockRes();
+  await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '1' } }), res);
+  expect(res.body).not.toContain('ConversationRelay');
+  expect(res.body).toContain('<Hangup/>');
+  expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({ outcome: 'suppressed_at_answer' }));
+});

@@ -185,6 +185,10 @@ const SENSITIVE_UTTERANCE_RE = new RegExp(
     '\\baccount number\\b[^.]{0,20}\\d{4,}',
     '\\bcvv\\b|\\bsecurity code\\b|\\bcard number\\b',
     '\\b(?:one[- ]time|verification) (?:code|password|pin)\\b',
+    // Unqualified "my PIN is 1234" / "the code is 123456" (gh prb-r16) —
+    // too short for the PAN scrubber. ZIP/area/postal codes are carved out
+    // (verification turns legitimately say "my zip code is 34208").
+    '(?<!zip )(?<!area )(?<!postal )\\b(?:pin|passcode|password|code)\\b[^.]{0,15}\\d{3,}',
   ].join('|'),
   'i',
 );
@@ -341,6 +345,10 @@ class CollectionsConversation {
         caseVersion: caseRow.case_version,
         customer,
         balance,
+        // The number this call was DIALED to (gh prb-r16): verification and
+        // SMS consent happened on this number — a send must never follow a
+        // mid-call phone edit to a number that did neither.
+        dialedPhone: row.to_phone || null,
         // The pay-link target is the LIVE eligible set's oldest invoice (gh
         // prb-r5): the balance disclosed in-call is computed from it, and a
         // link to a snapshot invoice paid since dialing would contradict the
@@ -412,6 +420,24 @@ class CollectionsConversation {
 
   interrupt() { /* barge-in: nothing buffered server-side to cancel */ }
 
+  // The follow-up promise needs an artifact, EVERYWHERE (gh prb-r15/r16):
+  // shared by the tool-timeout, tool-error, and round-exhaustion paths.
+  // Returns the card (truthy = the promise may be spoken) or null.
+  async _fileFollowUpCard(detail) {
+    try {
+      const NotificationService = require('../../notification-service');
+      return await NotificationService.notifyAdmin(
+        'billing',
+        'Follow-up needed after automated billing call',
+        detail,
+        { link: `/admin/customers/${this._ctx?.customer?.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx?.callLogId } },
+      );
+    } catch (cardErr) {
+      logger.error(`[collections-voice] follow-up card failed: ${cardErr.message}`);
+      return null;
+    }
+  }
+
   // Grounding sources (gh prb-r12): what the CALLER actually said, for
   // code-level checks that must never trust a model-authored paraphrase.
   _lastCallerText() {
@@ -470,6 +496,10 @@ class CollectionsConversation {
     if ((rev && rev.ok) || (broad && dnc && dnc.ok)) this._captures.consentRevoked = true;
     const revFailed = !(rev && rev.ok);
     const dncFailed = broad && !(dnc && dnc.ok);
+    // Full-scope completion is tracked SEPARATELY (gh prb-r16): a broad
+    // request whose do_not_call half failed must not be confirmed as done —
+    // manual calls remain permitted until the fallback card is worked.
+    this._optOutFullyRecorded = !revFailed && !dncFailed;
     if (revFailed || dncFailed) {
       const flagsNeeded = [
         ...(revFailed ? ['automated_voice_consent_revoked'] : []),
@@ -563,7 +593,11 @@ class CollectionsConversation {
     if (SPOKEN_OPT_OUT_RE.test(callerText)) {
       await this._recordSpokenOptOut(callerText);
       if (this._captures.consentRevoked) {
-        modelContent = `${callerText}\n[system note: the caller's stop-calling request has already been recorded in code — confirm it is done; do not call record_do_not_call again unless they ask for a different scope.]`;
+        // Partial persistence gets partial copy (gh prb-r16): the model
+        // must not confirm a broad stop whose do_not_call half failed.
+        modelContent = this._optOutFullyRecorded
+          ? `${callerText}\n[system note: the caller's stop-calling request has already been recorded in code — confirm it is done; do not call record_do_not_call again unless they ask for a different scope.]`
+          : `${callerText}\n[system note: part of the caller's stop request was recorded, but part could not be — tell them a person will make sure the full request is honored; do not say it is fully done.]`;
       }
     }
     this._turns.push({ role: 'caller', text: callerText, at: Date.now() });
@@ -716,18 +750,9 @@ class CollectionsConversation {
             // filed BEFORE the model is told to promise anything; a failed
             // card drops the promise for the office-number wording.
             (async () => {
-              let timeoutCard = null;
-              try {
-                const NotificationService = require('../../notification-service');
-                timeoutCard = await NotificationService.notifyAdmin(
-                  'billing',
-                  'Follow-up needed after automated billing call',
-                  `A write action (${name}) timed out on an automated billing follow-up call and its outcome is unknown. Please verify and follow up with the customer.`,
-                  { link: `/admin/customers/${this._ctx?.customer?.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx?.callLogId, tool: name } },
-                );
-              } catch (cardErr) {
-                logger.error(`[collections-voice] tool-timeout follow-up card failed: ${cardErr.message}`);
-              }
+              const timeoutCard = await this._fileFollowUpCard(
+                `A write action (${name}) timed out on an automated billing follow-up call and its outcome is unknown. Please verify and follow up with the customer.`,
+              );
               resolve(timeoutCard
                 ? 'That did not complete and the outcome is unknown. Do NOT retry it — tell the caller the office will follow up.'
                 : 'That did not complete and the outcome is unknown. Do NOT retry it — give the caller the office number on our website; do not promise a follow-up.');
@@ -738,7 +763,14 @@ class CollectionsConversation {
       ]);
     } catch (err) {
       logger.error(`[collections-voice] tool ${name} failed callSid=${this.callSid}: ${err.message}`);
-      return 'That did not work. Tell the caller the office will follow up — do not guess.';
+      // Same artifact bar as the timeout path (gh prb-r16): the failed
+      // action may never be retried, and the queue is not a follow-up.
+      const errorCard = await this._fileFollowUpCard(
+        `A write action (${name}) failed on an automated billing follow-up call. Please verify and follow up with the customer.`,
+      );
+      return errorCard
+        ? 'That did not work. Tell the caller the office will follow up — do not guess.'
+        : 'That did not work. Give the caller the office number on our website — do not guess, and do not promise a follow-up.';
     } finally {
       clearTimeout(timer);
     }
@@ -941,6 +973,13 @@ class CollectionsConversation {
     const TEMPORAL_RE = /\d|\b(today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weekend|month|payday|pay ?day|next|first|fifteenth|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
     if (!TEMPORAL_RE.test(lastCallerTurn)) {
       return 'Refused: the customer has not stated a date. Only record a date they actually said — if they are unsure, record nothing and do not press.';
+    }
+    // Negated or uncertain statements record NOTHING (gh prb-r16):
+    // "October 30 won't work; I don't know when I can pay" carries a
+    // temporal token but no commitment — an invented next_eligible_at
+    // would suppress follow-up on a date the caller rejected.
+    if (/\b(won'?t|can'?t|cannot|will not|not able|doesn'?t work|does not work|don'?t know|not sure|unsure|no idea|maybe|might)\b/i.test(lastCallerTurn)) {
+      return 'Refused: the customer sounds uncertain or said that date does not work. Only record a date they clearly committed to — if they are unsure, record nothing and do not press.';
     }
     // Cross-check the DATE against the phrase (gh prb-r15): when the caller
     // named a month, a weekday, or a day-of-month, the recorded date must
@@ -1145,6 +1184,25 @@ class CollectionsConversation {
     });
     if (!permitted) return 'A text cannot be sent to this customer. Offer the office number for payment instead.';
 
+    // The delivery target must BE the verified number (gh prb-r16):
+    // sendViaSMS reloads customers.phone at send time, so a phone edited
+    // or merged mid-call would receive the link on a number that neither
+    // verified nor consented. Fail closed on an unreadable phone.
+    try {
+      const { normalizeE164 } = require('../consent-provenance');
+      const liveCustomer = await db('customers')
+        .where({ id: this._ctx.customer.id }).whereNull('deleted_at').first('phone');
+      const livePhone = normalizeE164(liveCustomer?.phone);
+      const dialedPhone = normalizeE164(this._ctx.dialedPhone);
+      if (!livePhone || !dialedPhone || livePhone !== dialedPhone) {
+        logger.warn(`[collections-voice] pay-link refused: customer phone changed mid-call callLog=${this._ctx.callLogId}`);
+        return 'The number on file changed during this call, so a text cannot be sent. Offer the office number for payment instead.';
+      }
+    } catch (err) {
+      logger.error(`[collections-voice] pay-link phone re-check failed: ${err.message}`);
+      return 'The text could not be sent. Offer the office number for payment instead.';
+    }
+
     // RECORD-THEN-SEND through the contact ledger (throws ⇒ no send).
     const ContactLedger = require('../contact-ledger');
     let entry;
@@ -1179,9 +1237,21 @@ class CollectionsConversation {
       await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms', code: result?.code || null });
       return 'The text did not go through. Offer the office number for payment instead.';
     } catch (err) {
-      logger.error(`[collections-voice] pay-link send failed: ${err.message}`);
-      await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms_error' });
-      return 'The text did not go through. Offer the office number for payment instead.';
+      // A THROW is ambiguous (gh prb-r16): sendViaSMS can fail in its
+      // post-send bookkeeping AFTER Twilio accepted the SMS. Never assert
+      // failure, never permit an in-call retry (a duplicate link is worse
+      // than a missing one), and stamp the ledger delivery-unknown — not
+      // send_failed, which would falsely release the frequency window's
+      // claim on a text that may have arrived.
+      logger.error(`[collections-voice] pay-link send threw (delivery UNKNOWN): ${err.message}`);
+      this.payLinkSent = true;
+      await db('collections_contact_ledger').where({ id: entry.id }).update({
+        metadata: db.raw(
+          "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ delivery_unknown: true, stage: 'send_via_sms_exception' })],
+        ),
+      }).catch((stampErr) => logger.error(`[collections-voice] delivery-unknown stamp failed for ledger ${entry.id}: ${stampErr.message}`));
+      return 'The text may or may not have gone through — do NOT try again. Ask the caller to check their messages, and offer the office number if nothing arrives.';
     }
   }
 

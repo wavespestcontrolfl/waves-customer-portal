@@ -93,6 +93,7 @@ const CALL_ROW = {
   source: 'collections_voice',
   twilio_call_sid: 'CA1',
   customer_id: 'cust-1',
+  to_phone: '+19415551234',
   metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1' }),
 };
 const CASE_ROW = {
@@ -118,9 +119,11 @@ function setDb({ callRow = CALL_ROW, caseRow = CASE_ROW, customer = CUSTOMER } =
   const queues = {
     call_log: [chain({ first: callRow }), chain(), chain(), chain()],
     collection_cases: [chain({ first: caseRow })],
-    customers: [chain({ first: customer })],
   };
   db.mockImplementation((table) => {
+    // customers is read at init AND at the pay-link phone re-check (prb-r16)
+    // — always serve the same row rather than a finite queue.
+    if (table === 'customers') return chain({ first: customer });
     const queue = queues[table];
     if (!queue || !queue.length) return chain();
     return queue.shift();
@@ -393,10 +396,10 @@ test('send_pay_link: rail-guard denial ⇒ no ledger row, no send', async () => 
   expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
 });
 
-test('send failure ⇒ send_failed stamp on the pre-recorded ledger row', async () => {
+test('a REPORTED send failure ⇒ send_failed stamp, retry allowed', async () => {
   process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
   process.env.GATE_COLLECTIONS_POLICY = 'true'; // prb-r3: pay-link hard-requires the policy gate
-  InvoiceService.sendViaSMS.mockRejectedValue(new Error('carrier down'));
+  InvoiceService.sendViaSMS.mockResolvedValue({ sent: false, code: 'undeliverable' });
   const { convo } = makeConvo();
   await verifyAndDisclose(convo);
   mockScriptedMessages.push(toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it to me' }), endTurn('That did not go through.'));
@@ -405,6 +408,25 @@ test('send failure ⇒ send_failed stamp on the pre-recorded ledger row', async 
     expect.objectContaining({ id: 'ledger-sms-1' }), expect.anything(),
   );
   expect(convo.payLinkSent).toBe(false);
+});
+
+// prb-r16: a THROW is ambiguous — sendViaSMS can fail in post-send
+// bookkeeping after Twilio accepted the SMS. Never assert failure, never
+// permit an in-call retry, stamp delivery-unknown (not send_failed).
+test('a send EXCEPTION ⇒ delivery-unknown stamp, no in-call retry, no failure claim', async () => {
+  process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+  process.env.GATE_COLLECTIONS_POLICY = 'true';
+  InvoiceService.sendViaSMS.mockRejectedValue(new Error('post-send bookkeeping failed'));
+  const { convo } = makeConvo();
+  await verifyAndDisclose(convo);
+  mockScriptedMessages.push(toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it to me' }), endTurn('Please check your messages.'));
+  await turn(convo, 'Text me.');
+  expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  expect(convo.payLinkSent).toBe(true); // the in-call retry door is closed
+  const toolResults = convo.messages
+    .filter((m) => Array.isArray(m.content) && m.content[0]?.type === 'tool_result')
+    .map((m) => m.content[0].content).join(' ');
+  expect(toolResults).toContain('may or may not have gone through');
 });
 
 test('record_do_not_call writes the flag and the outcome captures it', async () => {
@@ -1046,5 +1068,80 @@ describe('prb-r15', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+// prb-r16 pins.
+describe('prb-r16', () => {
+  test('"my PIN is 1234" / "the code is 123456" are withheld; "my zip code is 34208" is NOT', async () => {
+    const { convo, spoken } = makeConvo();
+    await turn(convo, 'my PIN is 1234');
+    expect(spoken).toContain(script.SECURITY_INTERRUPT);
+    expect(JSON.stringify(convo._turns)).not.toContain('1234');
+
+    setDb();
+    const second = makeConvo();
+    mockScriptedMessages.push(
+      toolUse('confirm_right_party', { result: 'confirmed' }),
+      endTurn('Street number or ZIP?'),
+    );
+    await turn(second.convo, 'Speaking.');
+    mockScriptedMessages.push(
+      toolUse('verify_identity', { billing_zip: '34208' }),
+      endTurn('Verified.'),
+    );
+    await turn(second.convo, 'my zip code is 34208');
+    expect(second.convo.verified).toBe(true); // ZIP phrasing never withheld
+  });
+
+  test('a negated/uncertain payment statement records nothing even with a temporal token', async () => {
+    const { convo } = makeConvo();
+    await turn(convo, 'hello');
+    convo.state = 'RESOLUTION';
+    convo._turns.push({ role: 'caller', text: "October 30 won't work; I don't know when I can pay", at: Date.now() });
+    const out = await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-10-30' });
+    expect(out).toContain('uncertain');
+    expect(convo._captures.customerIntendedPaymentDate).toBeUndefined();
+  });
+
+  test('a failing (rejecting) tool files the follow-up card before the model may promise one', async () => {
+    const NotificationService = require('../services/notification-service');
+    const { convo } = makeConvo();
+    await turn(convo, 'hello');
+    flags.revokeAutomatedVoiceConsent.mockRejectedValue(new Error('db down'));
+    const out = await convo._executeToolBounded('record_do_not_call', { scope: 'automated_calls' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'billing', 'Follow-up needed after automated billing call', expect.any(String), expect.anything(),
+    );
+    expect(out).toContain('office will follow up');
+  });
+
+  test('a broad opt-out with a failed do_not_call half is NOT confirmed as fully done', async () => {
+    flags.writeFlag.mockResolvedValue({ ok: false });
+    const { convo } = makeConvo();
+    mockScriptedMessages.push(endTurn('A person will make sure that is honored.'));
+    await turn(convo, 'never call me again');
+    expect(convo._captures.consentRevoked).toBe(true); // the automated half landed
+    expect(convo._optOutFullyRecorded).toBe(false);
+    const userMsg = convo.messages.find((m) => typeof m.content === 'string' && m.content.includes('never call me again'));
+    expect(userMsg.content).toContain('do not say it is fully done');
+  });
+
+  test('a mid-call phone change refuses the pay-link send', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    // The live customer row now carries a DIFFERENT number.
+    db.mockImplementation((table) => (table === 'customers'
+      ? chain({ first: { ...CUSTOMER, phone: '+19415559999' } })
+      : chain()));
+    mockScriptedMessages.push(
+      toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it to me' }),
+      endTurn('I cannot text that number.'),
+    );
+    await turn(convo, 'yes text it to me');
+    expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
   });
 });
