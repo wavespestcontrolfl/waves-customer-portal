@@ -56,7 +56,7 @@ const ADDRESS_FIELDS = Object.freeze(['address_line1', 'address_line2', 'city', 
 // correction language — ordinary calls state identity fields all the time
 // (a spouse booking, a different property) and none of that is a mandate
 // to rewrite the profile.
-const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|moved|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)/i;
+const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b/i;
 
 // Post-extraction format guards — the model proposes, these dispose.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -160,7 +160,7 @@ function addressGroupComplete(byField) {
  * @param {string|null} [args.sourceId]  sms_log id or call_log id
  * @param {object} [args.knex]           injectable (tests)
  */
-async function applyContactCorrections({ customerId, corrections, source, sourceId = null, knex = db }) {
+async function applyContactCorrections({ customerId, corrections, source, sourceId = null, knex = db, postApply = null }) {
   const applied = [];
   const skipped = [];
   try {
@@ -189,6 +189,8 @@ async function applyContactCorrections({ customerId, corrections, source, source
     if (!byField.size) return { applied, skipped, reason: 'nothing_valid' };
 
     let customerName = null;
+    let emailSync = null;
+    let addressApplied = false;
     await knex.transaction(async (trx) => {
       // Row lock makes read → update → fan-out atomic against a concurrent
       // admin edit — the later writer waits and then sees committed state.
@@ -203,6 +205,23 @@ async function applyContactCorrections({ customerId, corrections, source, source
       const updates = {};
       for (const { field, newValue, quote } of byField.values()) {
         if (sameValue(field, before[field], newValue)) { skipped.push({ field, reason: 'unchanged' }); continue; }
+        // A corrected email that already belongs to ANOTHER account is not a
+        // correction we may auto-apply — fanning queued sends out to a
+        // mailbox owned by a different customer is the failure mode the
+        // canonical Customer-360 path blocks with its cross-account conflict
+        // check. Same semantics here (email only; phone is never applied).
+        if (field === 'email') {
+          const conflict = await trx('customers')
+            .whereNull('deleted_at')
+            .whereNot({ id: customerId })
+            .whereRaw('LOWER(email) = ?', [newValue.toLowerCase()])
+            .first('id', 'account_id');
+          const ownAccount = before.account_id ? String(before.account_id) : String(before.id);
+          if (conflict && String(conflict.account_id || conflict.id) !== ownAccount) {
+            skipped.push({ field, reason: 'email_in_use' });
+            continue;
+          }
+        }
         updates[field] = newValue === '' ? null : newValue;
         applied.push({ field, oldValue: normValue(before[field]) || null, newValue: newValue || null, quote: quote || null });
       }
@@ -248,18 +267,49 @@ async function applyContactCorrections({ customerId, corrections, source, source
       // the fan-out keeps sending the wrong values from the copies.
       const addressChanged = ADDRESS_FIELDS.some((f) => updates[f] !== undefined);
       if (addressChanged) {
+        // Stale coords must not survive an address change — clear them in
+        // the same statement window; the canonical admin path then
+        // re-geocodes post-commit (mirrored below).
+        await trx('customers').where({ id: customerId }).update({ latitude: null, longitude: null });
         await require('./customer-properties').syncPrimaryAddress(after, trx);
         await require('./customer-address-fanout').propagateCustomerAddressChange({ before, after }, trx);
+        addressApplied = true;
       }
       if (updates.email !== undefined) {
-        await require('./customer-email-fanout').propagateCustomerEmailChange(
+        emailSync = await require('./customer-email-fanout').propagateCustomerEmailChange(
           { before, after, source: `contact-correction (${source})` }, trx,
         );
       }
       if (updates.first_name !== undefined || updates.last_name !== undefined) {
         await require('./customer-contact-fanout').propagateCustomerNameChange({ before, after }, trx);
       }
+      // Caller-supplied same-transaction follow-through (e.g. the call lane
+      // stamping consumed candidate rows) — commits or rolls back WITH the
+      // correction, so an applied field can never leave its bookkeeping
+      // behind.
+      if (postApply && applied.length) await postApply(trx, applied);
     });
+
+    // Post-commit continuations, mirroring the canonical Customer-360 edit
+    // path — all fire-and-forget, never failing the applied correction:
+    //   - re-geocode the corrected address and mirror fresh coords onto the
+    //     primary property (syncPrimaryAddress cleared them in-transaction);
+    //   - deferred email fan-out actions (double-opt-in re-confirmation to
+    //     the corrected address, held newsletter resume) that must only run
+    //     once the new email is committed.
+    if (addressApplied) {
+      require('./geocoder').ensureCustomerGeocoded(customerId)
+        .then((coords) => coords && require('./customer-properties').syncPrimaryCoordsFromCustomer(customerId))
+        .catch(() => {});
+    }
+    if (emailSync?.heldNewsletterResume) {
+      require('./lead-first-touch-resume').resumeHeldNewsletterPostCommit(emailSync.heldNewsletterResume)
+        .catch((err) => logger.warn(`[contact-correction] held newsletter resume failed for ${customerId}: ${err.message}`));
+    }
+    if (emailSync?.pendingConfirmation) {
+      require('./customer-email-fanout').resendPendingConfirmation(emailSync.pendingConfirmation)
+        .catch((err) => logger.warn(`[contact-correction] pending confirmation resend failed for ${customerId}: ${err.message}`));
+    }
 
     if (applied.length) {
       const lines = applied
@@ -316,20 +366,31 @@ async function runSmsContactCorrection({ customer, body, smsLogId = null }) {
  * pass), on LINKED customers only, and ONLY when the caller's quoted words
  * carry correction intent: the staging writer records ordinary extracted
  * identity fields from every call, and a routine mention is not a mandate
- * to rewrite the profile. Stamps exactly the candidate rows whose value
- * was applied.
+ * to rewrite the profile.
+ *
+ * Trust model — SPOKEN values pass through transcription, so per-field
+ * fidelity differs:
+ *   - NAMES auto-apply (the evidence paths for name candidates are
+ *     name-scoped, and a name typo has no delivery/routing blast radius).
+ *   - EMAIL and ADDRESS candidates are NEVER auto-applied from a call: a
+ *     transcribed email must not resolve read-back review cards or release
+ *     held sends as operator-asserted truth, and a transcribed address has
+ *     no address-validation verdict attached here. Instead they surface as
+ *     ONE owner FYI "proposed corrections" bell and stay `pending` in
+ *     customer_field_candidates for review. (SMS corrections — typed by
+ *     the customer — keep full auto-apply.)
+ *
+ * Candidates are scoped to the LINKED customer id — a relinked call whose
+ * staged rows still carry the old/null linkage must not write to the newly
+ * linked record. Applied candidates are stamped in the SAME transaction as
+ * the correction.
  */
 const CALL_CONFIDENCE_FLOOR = 0.85;
-const CALL_FIELD_MAP = Object.freeze({
+const CALL_AUTO_FIELDS = Object.freeze({
   first_name: 'first_name',
   last_name: 'last_name',
-  email: 'email',
-  address_line1: 'address_line1',
-  city: 'city',
-  state: 'state',
-  zip: 'zip',
-  // phone deliberately absent — never applied.
 });
+const CALL_PROPOSE_FIELDS = Object.freeze(['email', 'address_line1', 'city', 'state', 'zip']);
 
 async function runCallContactCorrection({ callId, customerId, knex = db }) {
   try {
@@ -339,49 +400,63 @@ async function runCallContactCorrection({ callId, customerId, knex = db }) {
       return { applied: [], skipped: [], reason: 'no_table' };
     }
     const rows = await knex('customer_field_candidates')
-      .where({ call_log_id: callId, status: 'pending' })
-      .whereIn('field_name', Object.keys(CALL_FIELD_MAP))
+      .where({ call_log_id: callId, status: 'pending', customer_id: customerId })
+      .whereIn('field_name', [...Object.keys(CALL_AUTO_FIELDS), ...CALL_PROPOSE_FIELDS])
       .whereNotNull('evidence_quote')
-      .where(function confidenceFloor() {
-        // The staging writer's confidence map never scores email (it only
-        // scores caller_identity / service_address / service category), so
-        // email candidates carry NULL confidence by construction — for
-        // email the evidence-quote intent check below is the bar.
-        this.where('confidence', '>=', CALL_CONFIDENCE_FLOOR)
-          .orWhere(function emailNullConfidence() {
-            this.where('field_name', 'email').whereNull('confidence');
-          });
-      })
+      .where('confidence', '>=', CALL_CONFIDENCE_FLOOR)
       .select('id', 'field_name', 'final_recommended_value', 'evidence_quote');
     const candidates = rows.filter((c) => detectContactCorrectionIntent(c.evidence_quote));
     if (!candidates.length) return { applied: [], skipped: [], reason: 'no_candidates' };
 
-    const corrections = candidates.map((c) => ({
-      field: CALL_FIELD_MAP[c.field_name],
+    // Email/address: propose, never write. One bell for the batch; the
+    // candidate rows stay pending for review on the customer page.
+    const proposals = candidates.filter((c) => CALL_PROPOSE_FIELDS.includes(c.field_name));
+    if (proposals.length) {
+      const lines = proposals.map((p) => `${p.field_name}: ${normValue(p.final_recommended_value)}`).join('; ');
+      await require('./notification-service').notifyAdmin(
+        'customer',
+        'Contact corrections proposed from a call',
+        `The caller stated corrected contact info on a recorded call — ${lines}. `
+          + 'Spoken email/address values are not auto-applied; review and apply from the customer page.',
+        {
+          link: `/admin/customers?customerId=${customerId}`,
+          bell: true,
+          metadata: { customerId, source: 'call', sourceId: callId, proposed: proposals.map((p) => p.field_name) },
+        },
+      ).catch((err) => logger.warn(`[contact-correction] proposal bell failed for call ${callId}: ${err.message}`));
+    }
+
+    const nameCandidates = candidates.filter((c) => CALL_AUTO_FIELDS[c.field_name]);
+    if (!nameCandidates.length) {
+      return { applied: [], skipped: [], reason: proposals.length ? 'proposed_only' : 'no_candidates' };
+    }
+    const corrections = nameCandidates.map((c) => ({
+      field: CALL_AUTO_FIELDS[c.field_name],
       newValue: c.final_recommended_value,
       quote: c.evidence_quote,
     }));
-    const result = await applyContactCorrections({
+    return await applyContactCorrections({
       customerId,
       corrections,
       source: 'call',
       sourceId: callId,
       knex,
+      // Same-transaction stamp of exactly the candidate rows whose VALUE was
+      // applied — two pending candidates for one field with different values
+      // must not both read as auto_applied, and an applied field can never
+      // commit without its stamp.
+      postApply: async (trx, applied) => {
+        const appliedIds = nameCandidates
+          .filter((c) => applied.some((a) => a.field === CALL_AUTO_FIELDS[c.field_name]
+            && sameValue(a.field, a.newValue, c.final_recommended_value)))
+          .map((c) => c.id);
+        if (appliedIds.length) {
+          await trx('customer_field_candidates')
+            .whereIn('id', appliedIds)
+            .update({ status: 'auto_applied', reviewed_at: new Date(), updated_at: new Date() });
+        }
+      },
     });
-    // Stamp only the candidate whose VALUE was applied — two pending
-    // candidates for one field with different values must not both read as
-    // auto_applied.
-    const appliedIds = candidates
-      .filter((c) => result.applied.some((a) => a.field === CALL_FIELD_MAP[c.field_name]
-        && sameValue(a.field, a.newValue, c.final_recommended_value)))
-      .map((c) => c.id);
-    if (appliedIds.length) {
-      await knex('customer_field_candidates')
-        .whereIn('id', appliedIds)
-        .update({ status: 'auto_applied', reviewed_at: new Date(), updated_at: new Date() })
-        .catch((err) => logger.warn(`[contact-correction] candidate stamp failed for call ${callId}: ${err.message}`));
-    }
-    return result;
   } catch (err) {
     logger.warn(`[contact-correction] call run failed for ${callId}: ${err.message}`);
     return { applied: [], skipped: [], reason: 'error' };
@@ -395,5 +470,5 @@ module.exports = {
   runSmsContactCorrection,
   runCallContactCorrection,
   APPLYABLE_FIELDS,
-  _private: { FIELD_VALIDATORS, CORRECTION_HINT_RE, CALL_CONFIDENCE_FLOOR, CALL_FIELD_MAP, sameValue, addressGroupComplete },
+  _private: { FIELD_VALIDATORS, CORRECTION_HINT_RE, CALL_CONFIDENCE_FLOOR, CALL_AUTO_FIELDS, CALL_PROPOSE_FIELDS, sameValue, addressGroupComplete },
 };

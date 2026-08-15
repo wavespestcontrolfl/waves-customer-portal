@@ -30,20 +30,32 @@ jest.mock('../services/llm/call', () => ({
 }));
 
 const mockSyncPrimaryAddress = jest.fn().mockResolvedValue(null);
+const mockSyncPrimaryCoords = jest.fn().mockResolvedValue(null);
 jest.mock('../services/customer-properties', () => ({
   syncPrimaryAddress: (...args) => mockSyncPrimaryAddress(...args),
+  syncPrimaryCoordsFromCustomer: (...args) => mockSyncPrimaryCoords(...args),
 }));
 const mockAddressFanout = jest.fn().mockResolvedValue(null);
 jest.mock('../services/customer-address-fanout', () => ({
   propagateCustomerAddressChange: (...args) => mockAddressFanout(...args),
 }));
 const mockEmailFanout = jest.fn().mockResolvedValue(null);
+const mockResendPendingConfirmation = jest.fn().mockResolvedValue(null);
 jest.mock('../services/customer-email-fanout', () => ({
   propagateCustomerEmailChange: (...args) => mockEmailFanout(...args),
+  resendPendingConfirmation: (...args) => mockResendPendingConfirmation(...args),
 }));
 const mockNameFanout = jest.fn().mockResolvedValue(null);
 jest.mock('../services/customer-contact-fanout', () => ({
   propagateCustomerNameChange: (...args) => mockNameFanout(...args),
+}));
+const mockGeocode = jest.fn().mockResolvedValue(null);
+jest.mock('../services/geocoder', () => ({
+  ensureCustomerGeocoded: (...args) => mockGeocode(...args),
+}));
+const mockNewsletterResume = jest.fn().mockResolvedValue(null);
+jest.mock('../services/lead-first-touch-resume', () => ({
+  resumeHeldNewsletterPostCommit: (...args) => mockNewsletterResume(...args),
 }));
 
 const {
@@ -102,6 +114,14 @@ function makeStubKnex(rowsByTable = {}) {
         return chain;
       },
       whereNull(col) { preds.push((r) => r[col] == null); return chain; },
+      whereNot(obj) { preds.push((r) => !Object.entries(obj).every(([k, v]) => r[k] === v)); return chain; },
+      whereRaw(sql, params) {
+        if (/LOWER\(email\)/.test(sql)) {
+          preds.push((r) => String(r.email || '').toLowerCase() === String(params[0]).toLowerCase());
+          return chain;
+        }
+        throw new Error(`stub knex: unsupported whereRaw ${sql}`);
+      },
       whereNotNull(col) { preds.push((r) => r[col] != null); return chain; },
       whereIn(col, list) { preds.push((r) => list.includes(r[col])); return chain; },
       forUpdate() { return chain; },
@@ -383,15 +403,16 @@ describe('runCallContactCorrection', () => {
   const candidate = (over = {}) => ({
     id: `cand-${Math.random().toString(36).slice(2, 8)}`,
     call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
     status: 'pending',
-    field_name: 'email',
-    final_recommended_value: 'jordan.rivers@example.com',
-    evidence_quote: 'you have the wrong email, it is jordan dot rivers at example dot com',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
     confidence: 0.95,
     ...over,
   });
 
-  it('applies evidence-pinned candidates whose quote carries correction intent, and stamps them', async () => {
+  it('auto-applies NAME candidates with correction-intent quotes and stamps them in the same transaction', async () => {
     const knex = makeStubKnex({
       customers: [baseCustomer()],
       customer_field_candidates: [candidate({ id: 'cand-1' })],
@@ -399,18 +420,51 @@ describe('runCallContactCorrection', () => {
     });
     const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
     expect(res.applied).toEqual([
-      { field: 'email', oldValue: 'jordan.riverz@example.com', newValue: 'jordan.rivers@example.com', quote: 'you have the wrong email, it is jordan dot rivers at example dot com' },
+      { field: 'last_name', oldValue: 'Riverz', newValue: 'Rivers', quote: 'you spelled my name wrong, it is Rivers with an S' },
     ]);
-    expect(knex._data.customers[0].email).toBe('jordan.rivers@example.com');
+    expect(knex._data.customers[0].last_name).toBe('Rivers');
     expect(knex._data.customer_field_candidates[0].status).toBe('auto_applied');
     expect(knex._data.customer_field_candidates[0].reviewed_at).toBeInstanceOf(Date);
+  });
+
+  it('rolls the candidate stamp back with the correction (same transaction)', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      customer_field_candidates: [candidate({ id: 'cand-1' })],
+      agent_decisions: [],
+    });
+    knex._failInsertOn.table = 'agent_decisions';
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied).toEqual([]);
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+    expect(knex._data.customer_field_candidates[0].status).toBe('pending');
+  });
+
+  it('PROPOSES email/address candidates via FYI bell without writing (spoken values are not auto-applied)', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      customer_field_candidates: [
+        candidate({ id: 'em', field_name: 'email', final_recommended_value: 'jordan.rivers@example.com', evidence_quote: 'you have the wrong email, it is jordan dot rivers at example dot com' }),
+        candidate({ id: 'ad', field_name: 'address_line1', final_recommended_value: '99 Pine Ave', evidence_quote: 'the address is wrong, we are at 99 Pine Ave' }),
+      ],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('proposed_only');
+    expect(res.applied).toEqual([]);
+    expect(knex._data.customers[0].email).toBe('jordan.riverz@example.com');
+    expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
+    expect(knex._data.customer_field_candidates.every((c) => c.status === 'pending')).toBe(true);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const [, title, body] = mockNotifyAdmin.mock.calls[0];
+    expect(title).toContain('proposed from a call');
+    expect(body).toContain('jordan.rivers@example.com');
   });
 
   it('ignores routine mentions — an evidence quote without correction intent is not a mandate', async () => {
     const knex = makeStubKnex({
       customers: [baseCustomer()],
       customer_field_candidates: [
-        candidate({ id: 'routine', field_name: 'last_name', final_recommended_value: 'Rivers', evidence_quote: 'this is Jordan Rivers calling about my lawn' }),
+        candidate({ id: 'routine', evidence_quote: 'this is Jordan Rivers calling about my lawn' }),
       ],
     });
     const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
@@ -418,14 +472,17 @@ describe('runCallContactCorrection', () => {
     expect(knex._data.customers[0].last_name).toBe('Riverz');
   });
 
-  it('accepts NULL-confidence email candidates (the staging writer never scores email)', async () => {
+  it('ignores candidates not linked to this customer (relinked-call safety)', async () => {
     const knex = makeStubKnex({
       customers: [baseCustomer()],
-      customer_field_candidates: [candidate({ id: 'nullconf', confidence: null })],
-      agent_decisions: [],
+      customer_field_candidates: [
+        candidate({ id: 'other', customer_id: '00000000-0000-4000-8000-0000000000ff' }),
+        candidate({ id: 'nullc', customer_id: null }),
+      ],
     });
     const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
-    expect(res.applied.map((a) => a.field)).toEqual(['email']);
+    expect(res.reason).toBe('no_candidates');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
   });
 
   it('stamps only the candidate whose value was actually applied', async () => {
@@ -433,7 +490,7 @@ describe('runCallContactCorrection', () => {
       customers: [baseCustomer()],
       customer_field_candidates: [
         candidate({ id: 'winner' }),
-        candidate({ id: 'loser', final_recommended_value: 'other.value@example.com' }),
+        candidate({ id: 'loser', final_recommended_value: 'Riverssen' }),
       ],
       agent_decisions: [],
     });
@@ -447,7 +504,7 @@ describe('runCallContactCorrection', () => {
     const knex = makeStubKnex({
       customers: [baseCustomer()],
       customer_field_candidates: [
-        candidate({ id: 'lo', field_name: 'last_name', confidence: 0.5 }),
+        candidate({ id: 'lo', confidence: 0.5 }),
         candidate({ id: 'nq', evidence_quote: null }),
         candidate({ id: 'ph', field_name: 'phone', final_recommended_value: '+15551234567' }),
         candidate({ id: 'done', status: 'rejected' }),
@@ -455,7 +512,7 @@ describe('runCallContactCorrection', () => {
     });
     const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
     expect(res.reason).toBe('no_candidates');
-    expect(knex._data.customers[0].email).toBe('jordan.riverz@example.com');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
   });
 
   it('does nothing for unlinked calls or with the gate off', async () => {
@@ -463,7 +520,69 @@ describe('runCallContactCorrection', () => {
     expect((await runCallContactCorrection({ callId: CALL_ID, customerId: null, knex })).reason).toBe('unlinked');
     mockIsEnabled.mockReturnValue(false);
     expect((await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex })).reason).toBe('gate_off');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+  });
+});
+
+describe('SMS safety rails (round-2)', () => {
+  it('detects bare move statements', () => {
+    expect(detectContactCorrectionIntent('We moved to 99 Pine Ave, Sarasota 34231')).toBe(true);
+    expect(detectContactCorrectionIntent("I've moved recently")).toBe(true);
+  });
+
+  it('rejects a corrected email already owned by another account', async () => {
+    const knex = makeStubKnex({
+      customers: [
+        baseCustomer(),
+        { id: '00000000-0000-4000-8000-0000000000ee', account_id: null, deleted_at: null, email: 'taken@example.com', first_name: 'Other', last_name: 'Person' },
+      ],
+    });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [{ field: 'email', newValue: 'taken@example.com' }],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'email', reason: 'email_in_use' });
     expect(knex._data.customers[0].email).toBe('jordan.riverz@example.com');
+  });
+
+  it('clears coords and re-geocodes after an applied address change', async () => {
+    const knex = makeStubKnex({ customers: [{ ...baseCustomer(), latitude: 27.1, longitude: -82.4 }], agent_decisions: [] });
+    mockGeocode.mockResolvedValue({ lat: 27.2, lng: -82.5 });
+    await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '99 Pine Ave' },
+        { field: 'city', newValue: 'Sampleton' },
+        { field: 'zip', newValue: '34299' },
+      ],
+      source: 'sms',
+      knex,
+    });
+    expect(knex._data.customers[0].latitude).toBeNull();
+    expect(knex._data.customers[0].longitude).toBeNull();
+    await new Promise((r) => setImmediate(r));
+    expect(mockGeocode).toHaveBeenCalledWith(CUSTOMER_ID);
+    expect(mockSyncPrimaryCoords).toHaveBeenCalledWith(CUSTOMER_ID);
+  });
+
+  it('runs deferred email fan-out actions after commit', async () => {
+    mockEmailFanout.mockResolvedValueOnce({
+      pendingConfirmation: { token: 'pc-1' },
+      heldNewsletterResume: { id: 'hn-1' },
+    });
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [{ field: 'email', newValue: 'jordan.rivers@example.com' }],
+      source: 'sms',
+      knex,
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(mockResendPendingConfirmation).toHaveBeenCalledWith({ token: 'pc-1' });
+    expect(mockNewsletterResume).toHaveBeenCalledWith({ id: 'hn-1' });
   });
 });
 

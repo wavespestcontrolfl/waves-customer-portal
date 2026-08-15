@@ -634,8 +634,8 @@ router.post('/sms', async (req, res) => {
       }
     }
 
-    // Customer-stated contact correction ("name is Kats, you spelled with a
-    // Z") — auto-applied behind GATE_CONTACT_CORRECTION, LINKED customers
+    // Customer-stated contact correction ("you spelled my name wrong, it's
+    // …") — auto-applied behind GATE_CONTACT_CORRECTION, LINKED customers
     // only (a shared/unknown number could correct the wrong record). Cheap
     // regex prefilter here; the LLM extraction and the writes run post-ack
     // and fail-soft, so the webhook ack is never delayed and an error here

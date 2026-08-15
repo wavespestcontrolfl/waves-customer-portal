@@ -1479,7 +1479,7 @@ const gates = {
   rescheduleIntentFlags: process.env.GATE_RESCHEDULE_INTENT_FLAGS === 'true',
 
   // Auto-apply customer-stated contact corrections (owner ruling
-  // 2026-08-15, the Stephen Kats incident): name/email/address ONLY, never
+  // 2026-08-15, the 08-13 SMS-correction incident): name/email/address ONLY, never
   // phone; linked customers only; compare-and-set writes with an
   // agent_decisions audit row per field and one owner FYI bell per batch.
   // Sources: inbound SMS (FAST-tier extraction behind a regex prefilter)
