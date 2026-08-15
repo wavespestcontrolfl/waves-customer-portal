@@ -7,17 +7,41 @@
 // rows, then add the partial unique index as the permanent backstop for the
 // now-serialized webhook writers.
 //
-// Nothing is discarded: scalar linkage (customer link, terminal status,
-// duration, outcome) and metadata keys are folded into the kept row first,
-// and FK references are moved, not orphaned. The only unresolvable shape —
-// two rows for one SID BOTH carrying recording/transcript/extraction
-// artifacts — throws, deliberately failing the migration for manual
-// resolution rather than guessing which call history to keep.
+// Nothing is discarded silently: EVERY column is folded into the kept row
+// (adopt where the winner is blank; equal values are redundant; terminal
+// status outranks a transient snapshot; counters take the max; metadata
+// unions keys), and FK references are moved, not orphaned. Any genuine
+// conflict — differing non-null values, two terminal statuses, or two rows
+// both carrying recording/transcript/extraction artifacts — throws,
+// deliberately failing the migration for manual resolution rather than
+// guessing which call history to keep.
 
 const TERMINAL_CALL_STATUSES = ['completed', 'no-answer', 'busy', 'failed', 'canceled'];
 
 function hasArtifacts(row) {
   return Boolean(row.recording_sid || row.transcription || row.ai_extraction || row.ai_extraction_enriched);
+}
+
+// Columns that never participate in the generic merge.
+const MERGE_IGNORED_COLUMNS = new Set(['id', 'twilio_call_sid', 'created_at', 'updated_at']);
+// Monotonic counters: differing values merge as the max, not a conflict.
+const MERGE_MAX_COLUMNS = new Set(['duration_seconds', 'extraction_attempts', 'retranscribe_attempts', 'processing_generation']);
+// Columns with bespoke merge rules handled before the generic pass.
+const MERGE_SPECIAL_COLUMNS = new Set(['status', 'metadata']);
+
+function isBlank(value) {
+  return value === null || value === undefined;
+}
+
+// Loose equality across the pg driver's return shapes: Dates by timestamp,
+// jsonb objects/arrays by canonical JSON, everything else strictly.
+function sameValue(a, b) {
+  if (a === b) return true;
+  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  if (typeof a === 'object' && typeof b === 'object' && a !== null && b !== null) {
+    try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+  }
+  return false;
 }
 
 function asMetaObject(value) {
@@ -70,32 +94,72 @@ exports.up = async function up(knex) {
       const winner = withArtifacts[0] || rows[0];
       const losers = rows.filter((r) => r.id !== winner.id);
 
-      // Fold every non-redundant scalar into the winner. Terminal status wins
-      // over a transient one ('ringing'/'in-progress' from the /voice leg);
-      // duration takes the largest observed value; metadata keeps the
-      // winner's values on shared keys and adopts keys only a loser wrote.
-      const loserTerminal = losers.map((r) => r.status).find((s) => TERMINAL_CALL_STATUSES.includes(s));
-      const mergedStatus = TERMINAL_CALL_STATUSES.includes(winner.status)
-        ? winner.status
-        : (loserTerminal || winner.status);
-      const durations = rows.map((r) => r.duration_seconds).filter((d) => d !== null && d !== undefined);
-      const mergedDuration = durations.length > 0 ? Math.max(...durations) : null;
+      // Fold EVERY column into the winner, not a hand-picked subset — a
+      // loser value is either adopted (winner blank), redundant (equal),
+      // covered by a bespoke rule (status/metadata/counters), or a genuine
+      // conflict that throws for manual resolution. Nothing is discarded
+      // silently.
+      const update = {};
+
+      // status: a terminal status wins over a transient one ('ringing'/
+      // 'in-progress' from the /voice leg); two DIFFERENT terminal statuses
+      // conflict.
+      const loserTerminals = [...new Set(losers.map((r) => r.status).filter((s) => TERMINAL_CALL_STATUSES.includes(s)))];
+      if (TERMINAL_CALL_STATUSES.includes(winner.status)) {
+        const disagreeing = loserTerminals.filter((s) => s !== winner.status);
+        if (disagreeing.length > 0) {
+          throw new Error(
+            `[migration call_log_twilio_sid_unique] twilio_call_sid ${group.twilio_call_sid}: conflicting terminal statuses (${winner.status} vs ${disagreeing.join(',')}) — resolve by hand.`
+          );
+        }
+      } else if (loserTerminals.length === 1) {
+        update.status = loserTerminals[0];
+      } else if (loserTerminals.length > 1) {
+        throw new Error(
+          `[migration call_log_twilio_sid_unique] twilio_call_sid ${group.twilio_call_sid}: conflicting terminal statuses (${loserTerminals.join(',')}) — resolve by hand.`
+        );
+      }
+
+      // metadata: winner's values on shared keys; adopt keys only a loser wrote.
       const mergedMeta = Object.assign(
         {},
         ...losers.map((r) => asMetaObject(r.metadata)),
         asMetaObject(winner.metadata)
       );
-      const firstLoserValue = (col) => losers.map((r) => r[col]).find((v) => v !== null && v !== undefined);
+      if (!sameValue(mergedMeta, asMetaObject(winner.metadata))) {
+        update.metadata = JSON.stringify(mergedMeta);
+      }
 
-      await knex('call_log').where({ id: winner.id }).update({
-        customer_id: winner.customer_id || firstLoserValue('customer_id') || null,
-        status: mergedStatus,
-        duration_seconds: mergedDuration,
-        answered_by: winner.answered_by || firstLoserValue('answered_by') || null,
-        call_outcome: winner.call_outcome || firstLoserValue('call_outcome') || null,
-        metadata: JSON.stringify(mergedMeta),
-        updated_at: knex.fn.now(),
-      });
+      for (const col of Object.keys(winner)) {
+        if (MERGE_IGNORED_COLUMNS.has(col) || MERGE_SPECIAL_COLUMNS.has(col)) continue;
+        if (MERGE_MAX_COLUMNS.has(col)) {
+          const values = rows.map((r) => r[col]).filter((v) => !isBlank(v));
+          if (values.length > 0) {
+            const max = Math.max(...values.map(Number));
+            if (isBlank(winner[col]) || Number(winner[col]) < max) update[col] = max;
+          }
+          continue;
+        }
+        for (const loser of losers) {
+          if (isBlank(loser[col]) || sameValue(winner[col], loser[col]) || sameValue(update[col], loser[col])) continue;
+          if (isBlank(winner[col]) && isBlank(update[col])) {
+            // jsonb/date values round-trip through knex.update as-is; objects
+            // must be re-serialized for the driver.
+            update[col] = (typeof loser[col] === 'object' && !(loser[col] instanceof Date))
+              ? JSON.stringify(loser[col])
+              : loser[col];
+            continue;
+          }
+          throw new Error(
+            `[migration call_log_twilio_sid_unique] twilio_call_sid ${group.twilio_call_sid}: column "${col}" holds different non-null values across duplicate rows — resolve by hand.`
+          );
+        }
+      }
+
+      if (Object.keys(update).length > 0) {
+        update.updated_at = knex.fn.now();
+        await knex('call_log').where({ id: winner.id }).update(update);
+      }
 
       const loserIds = losers.map((r) => r.id);
       for (const fk of fks) {
