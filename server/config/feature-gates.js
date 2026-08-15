@@ -1231,6 +1231,17 @@ const gates = {
   // Double-gated behind cronJobs. Kill switch: unset GATE_ROUTE_REORDER.
   routeReorder: gateEnvValue('GATE_ROUTE_REORDER'),
 
+  // WINDOW-FIT FALLBACK inside the nightly reorder pass: when Google's
+  // distance-optimal order fails the window chronology/feasibility guards,
+  // compute the best LEGAL order in-process (backbone of promised windows +
+  // exhaustive/greedy interleaving, same 805 m floor, same fenced write)
+  // instead of skipping the day. Nested inside GATE_ROUTE_REORDER — it only
+  // ever runs from that pass. Explicit opt-in in every environment; OFF =
+  // the pre-fallback skip, byte for byte. Read at CALL time via
+  // gateEnvValue (flip needs no redeploy). Kill switch: unset
+  // GATE_ROUTE_REORDER_WINDOW_FIT.
+  routeReorderWindowFit: gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT'),
+
   // Drive-Time Calibration — swaps the straight-line drive-time approximation
   // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
   // real trips: a fixed per-leg overhead plus a per-mile rate. Purely an
@@ -1258,6 +1269,22 @@ const gates = {
   // moment) — registered with the SAME parser so this registry entry,
   // logGateStatus, and the sweep can never disagree.
   visionDelta: gateEnvValue('GATE_VISION_DELTA'),
+
+  // Auto property-lookup on call-pipeline property creation — each NEWLY
+  // created customer_properties row from a call fires one full property
+  // lookup (county + LLM trio + satellite vision: real per-call spend) and
+  // fill-only patches lat/lng/property_type. Off → enqueue is a no-op and
+  // the run returns {skipped:'gated'} (CALL-time gateEnvValue, same
+  // contract as visionDelta). Kill switch: unset.
+  callPropertyLookup: gateEnvValue('GATE_CALL_PROPERTY_LOOKUP'),
+
+  // Nightly property-enrichment backfill — up to PROPERTY_BACKFILL_BATCH
+  // (default 20) existing NULL customer_properties rows of real customers
+  // get the same lookup + fill-only patch per night (~1,000 rows are NULL
+  // today, so ~2 months at the default cap). Independent of the per-call
+  // gate above so the two lanes flip separately. Real nightly LLM spend —
+  // explicit opt-in in EVERY environment. Kill switch: unset.
+  propertyEnrichBackfill: gateEnvValue('GATE_PROPERTY_ENRICH_BACKFILL'),
 
   // Weekly Manatee pool-permit sync (ACA "Pool Permits (CSV)" report →
   // pool_permit_records). Closes the closed-permit blind window between the
@@ -1478,6 +1505,14 @@ const gates = {
   // redeploy. Kill switch: unset — the endpoint answers gated:true with no
   // conflict data and every picker renders exactly as today.
   slotConflictHints: gateEnvValue('GATE_SLOT_CONFLICT_HINTS'),
+
+  // Stops-away tracker count (2026-08-14): "N stops away" on the portal
+  // ServiceTracker + public /track page. Read-only, fires no comms; count
+  // is bare (never other customers' info), capped at 3, clamped monotonic
+  // per display date (owner rulings in PR). OFF everywhere until Adam
+  // flips GATE_STOPS_AWAY — read at call time via gateEnvValue so the
+  // flip needs no redeploy. Kill switch: unset the var.
+  stopsAway: gateEnvValue('GATE_STOPS_AWAY'),
 
   // Best-time hints (2026-08-14): advisory "Best times this day" chips on
   // the admin date/time pickers (edit, reschedule, create), ranked by the

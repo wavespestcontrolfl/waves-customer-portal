@@ -2,7 +2,7 @@ import Icon from '../components/Icon';
 import BrandFooter from '../components/BrandFooter';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
@@ -412,6 +412,142 @@ function PrepLink({ data }) {
   );
 }
 
+// "N stops before yours" hero + route-dots strip (GATE_STOPS_AWAY) —
+// mirrors the portal ServiceTracker treatment. stopsAhead is null unless
+// the gate is on and the clamped count is within the display cap, so
+// gate-off render is byte-for-byte unchanged. Bare counts only: positions
+// and totals, never any other customer's information.
+function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, property }) {
+  if (stopsAhead == null) return null;
+  const yourStop = routeProgress?.yourStop;
+  const totalStops = routeProgress?.totalStops;
+  // The truck's MEASURED position from the server — never derived from the
+  // clamped count. The strip renders only when the measured position AGREES
+  // with the clamped numeral: after a reorder the clamp can hold the numeral
+  // at a smaller value, and a strip built from disagreeing figures would
+  // fabricate "Now at stop X". The hero numeral still shows on its own.
+  const truckStop = routeProgress?.currentStop;
+  // While the tech is actively AT a stop, that stop is counted in BOTH
+  // stopsAhead (it isn't serviced yet) and currentStop — so the expected
+  // gap between yourStop and truckStop is stopsAhead exactly; between
+  // stops it's stopsAhead + 1.
+  const expectedGap = (routeProgress?.atStop || routeProgress?.headingToStop) ? 0 : 1;
+  // One truthful phrase for BOTH the visible caption and the truck dot's
+  // accessible label — a screen reader must never hear "Now at" while the
+  // caption says "Heading to"/"Finished".
+  const truckPhrase = routeProgress?.atStop ? 'Now at' : routeProgress?.headingToStop ? 'Heading to' : 'Finished';
+  const stripConsistent = yourStop != null && totalStops != null
+    && Number.isFinite(truckStop)
+    && (yourStop - truckStop - expectedGap) === stopsAhead;
+  const started = stripConsistent && truckStop >= 1;
+
+  const dot = (bg, fg, iconName, size, label) => (
+    <div style={{
+      width: size, height: size, borderRadius: '50%', background: bg,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+    }} aria-label={label}>
+      <Icon name={iconName} size={Math.round(size * 0.55)} style={{ color: fg }} />
+    </div>
+  );
+  const seg = (color) => (
+    <div style={{ flex: 1, height: 2, background: color, minWidth: 8 }} />
+  );
+  const betweenStops = [];
+  if (stripConsistent) {
+    for (let s = truckStop + 1; s < yourStop; s += 1) betweenStops.push(s);
+  }
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      {stopsAhead > 0 ? (
+        <>
+          <div style={{ fontSize: 15, color: TRACK_SURFACE.body }}>
+            {started ? `${techFirst} is out on the route —` : `${techFirst}'s route today —`}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 2 }}>
+            <span style={{
+              fontFamily: FONTS.display, fontSize: 50, lineHeight: 1,
+              color: COLORS.glassNavy, letterSpacing: '0.02em',
+            }}>
+              {stopsAhead}
+            </span>
+            <span style={{ fontSize: 18, fontWeight: 600, color: COLORS.glassNavy }}>
+              {stopsAhead === 1 ? 'stop before yours' : 'stops before yours'}
+            </span>
+          </div>
+        </>
+      ) : (
+        <div style={{
+          fontFamily: FONTS.display, fontSize: 30, lineHeight: 1.1,
+          color: COLORS.glassNavy, letterSpacing: '0.02em',
+        }}>
+          You&apos;re next
+        </div>
+      )}
+
+      {stripConsistent && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {started && (
+              <>
+                {dot(COLORS.wavesBlue, COLORS.white, 'check', 22, 'Completed stops')}
+                {seg(COLORS.wavesBlue)}
+              </>
+            )}
+            {dot(COLORS.glassNavy, COLORS.white, 'truck', 28, started ? `${truckPhrase} stop ${truckStop}` : 'Route starting soon')}
+            {betweenStops.map((s) => (
+              <Fragment key={s}>
+                {seg(COLORS.grayLight)}
+                <div style={{
+                  width: 20, height: 20, borderRadius: '50%', flexShrink: 0,
+                  border: `1.5px solid ${COLORS.grayLight}`, color: TRACK_SURFACE.muted,
+                  fontSize: 12, fontWeight: 700, display: 'flex',
+                  alignItems: 'center', justifyContent: 'center',
+                }}>
+                  {s}
+                </div>
+              </Fragment>
+            ))}
+            {seg(COLORS.grayLight)}
+            {dot(COLORS.yellow, COLORS.glassNavy, 'home', 28, `Your stop: ${yourStop}`)}
+          </div>
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', marginTop: 8,
+            fontSize: 14, color: TRACK_SURFACE.muted,
+          }}>
+            {/* Three truthful labels: "Now at" only while physically AT a
+                stop, "Heading to" while merely driving to it, "Finished"
+                between stops. */}
+            <span>{started
+              ? <>{truckPhrase} <strong style={{ color: COLORS.glassNavy }}>stop {truckStop} of {totalStops}</strong></>
+              : 'Route starts soon'}</span>
+            <span style={{ fontWeight: 700, color: COLORS.glassNavy }}>You&apos;re stop {yourStop}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Approximate route map: the truck's ~1km-rounded position (server
+          rounds — precise coords mid-route would disclose another
+          customer's address) + this property. Precise live tracking stays
+          an en-route-only feature. */}
+      {/* Both points need FINITE lat AND lng — partial geocodes exist and
+          a null lng would center the map at longitude 0 / throw in Maps. */}
+      {Number.isFinite(vehicleApprox?.lat) && Number.isFinite(vehicleApprox?.lng)
+        && Number.isFinite(property?.lat) && Number.isFinite(property?.lng) && (
+        <div style={{ marginTop: 14 }}>
+          <TrackerMap
+            tech={{ lat: vehicleApprox.lat, lng: vehicleApprox.lng }}
+            property={{ lat: property.lat, lng: property.lng }}
+          />
+          <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginTop: 6 }}>
+            Approximate location — updates as {techFirst} works the route.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── State cards ──────────────────────────────────────────────────
 function ScheduledCard({ data }) {
   const techFirst = data.tech?.firstName || 'your tech';
@@ -425,6 +561,13 @@ function ScheduledCard({ data }) {
         {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}
         your {data.service?.type?.toLowerCase() || 'service'} is booked{window ? ` for ${window}` : ''}.
       </div>
+      <StopsAheadHero
+        stopsAhead={data.stopsAhead}
+        routeProgress={data.routeProgress}
+        techFirst={techFirst}
+        vehicleApprox={data.vehicleApprox}
+        property={data.property}
+      />
       <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
         You'll get a text as soon as {techFirst} is on the way.
       </div>
@@ -751,7 +894,29 @@ export default function TrackPage() {
       if (!r.ok) return;
       const body = await r.json();
       if (stale()) return;
-      if (body?.state) setData(body);
+      if (body?.state) {
+        setData(body);
+        // The GET is read-only by contract: stopsAheadPending means the
+        // clamp floor isn't durable yet. Ack through the explicit POST
+        // write path and render from ITS response — a number never shows
+        // before it is persisted. (The approximate map fills in on the
+        // next poll, once the floor is durable.)
+        if (body.stopsAheadPending) {
+          try {
+            const ackRes = await fetch(`${API_BASE}/public/track/${token}/stops-ahead`, { method: 'POST' });
+            if (stale() || !ackRes.ok) return;
+            const ack = await ackRes.json();
+            if (stale()) return;
+            if (ack && ack.stopsAhead != null) {
+              setData((cur) => (cur
+                ? { ...cur, stopsAhead: ack.stopsAhead, routeProgress: ack.routeProgress, stopsAheadPending: false }
+                : cur));
+            }
+          } catch {
+            // Stay in the generic state; the next poll retries the ack.
+          }
+        }
+      }
     } catch {
       // Don't clobber an existing render on a transient network blip;
       // the next broadcast (or page refresh) will recover.

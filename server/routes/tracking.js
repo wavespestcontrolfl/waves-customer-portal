@@ -10,6 +10,7 @@ const {
   finiteNumber,
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
+const { computeStopsAhead } = require('../services/stops-ahead');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 router.use(authenticate);
@@ -190,6 +191,9 @@ function formatScheduledTracker(service, tech, customer) {
     ],
     etaMinutes: null,
     etaSource: null,
+    stopsAhead: null,
+    routeProgress: null,
+    techApprox: null,
     liveNotes: [],
     serviceSummary: null,
     service: {
@@ -365,6 +369,60 @@ router.get('/active', async (req, res, next) => {
       await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
       await attachRainChance(formatted, canonical, req.customer);
+      // "N stops before yours" (GATE_STOPS_AWAY) — bare counts only,
+      // fail-soft null. routeProgress feeds the route-dots strip.
+      const stops = await computeStopsAhead(db, canonical.id);
+      formatted.stopsAhead = stops ? stops.stopsAhead : null;
+      formatted.routeProgress = stops
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop, atStop: stops.atStop, headingToStop: stops.headingToStop }
+        : null;
+      if (stops) {
+        // Map pin: the visit's STAMPED property first (rental / secondary
+        // bookings geocode at booking) — the customer's primary geocode only
+        // when the stamped address does not diverge from it (same precedence
+        // as the rain chip). A diverging stamp with no geocode of its own
+        // shows NO pin rather than the wrong house.
+        const svcLat = finiteNumber(canonical.lat);
+        const svcLng = finiteNumber(canonical.lng);
+        if (svcLat != null && svcLng != null) {
+          formatted.customerLocation = { lat: svcLat, lng: svcLng };
+        } else {
+          const { stampedAddressDiverges } = require('../services/stamped-address');
+          const diverges = stampedAddressDiverges({
+            service_address_line1: canonical.service_address_line1,
+            service_address_zip: canonical.service_address_zip,
+            service_address_city: canonical.service_address_city,
+            customer_address_line1: req.customer?.address_line1,
+            customer_zip: req.customer?.zip,
+            customer_city: req.customer?.city,
+          });
+          if (diverges) formatted.customerLocation = null;
+        }
+        // Approximate truck position — ONLY while the tech is measurably
+        // at or driving to a route stop (atStop/headingToStop). Between
+        // stops — and before the route starts — the truck sits at the
+        // tech's home/office/lunch, which is personal location, not route
+        // information, and must not stream even rounded. Coordinates are
+        // ROUNDED to ~1km (2 decimal places) on purpose: mid-route the
+        // truck is parked at another customer's home, and precise coords
+        // would disclose their address. The precise feed stays exclusive
+        // to the en-route state.
+        if (canonical.technician_id && (stops.atStop || stops.headingToStop)) {
+          try {
+            const pos = await resolveFreshTechPosition({
+              techId: canonical.technician_id,
+              logPrefix: 'tracking-stops-approx',
+            });
+            if (pos) {
+              formatted.techApprox = {
+                lat: Math.round(pos.lat * 100) / 100,
+                lng: Math.round(pos.lng * 100) / 100,
+                lastReportedAt: pos.lastReportedAt || null,
+              };
+            }
+          } catch { /* map is best-effort; the count renders without it */ }
+        }
+      }
       return res.json({ tracker: formatted });
     }
 
@@ -384,6 +442,60 @@ router.get('/today', async (req, res, next) => {
       await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
       await attachRainChance(formatted, canonical, req.customer);
+      // "N stops before yours" (GATE_STOPS_AWAY) — bare counts only,
+      // fail-soft null. routeProgress feeds the route-dots strip.
+      const stops = await computeStopsAhead(db, canonical.id);
+      formatted.stopsAhead = stops ? stops.stopsAhead : null;
+      formatted.routeProgress = stops
+        ? { yourStop: stops.yourStop, totalStops: stops.totalStops, currentStop: stops.currentStop, atStop: stops.atStop, headingToStop: stops.headingToStop }
+        : null;
+      if (stops) {
+        // Map pin: the visit's STAMPED property first (rental / secondary
+        // bookings geocode at booking) — the customer's primary geocode only
+        // when the stamped address does not diverge from it (same precedence
+        // as the rain chip). A diverging stamp with no geocode of its own
+        // shows NO pin rather than the wrong house.
+        const svcLat = finiteNumber(canonical.lat);
+        const svcLng = finiteNumber(canonical.lng);
+        if (svcLat != null && svcLng != null) {
+          formatted.customerLocation = { lat: svcLat, lng: svcLng };
+        } else {
+          const { stampedAddressDiverges } = require('../services/stamped-address');
+          const diverges = stampedAddressDiverges({
+            service_address_line1: canonical.service_address_line1,
+            service_address_zip: canonical.service_address_zip,
+            service_address_city: canonical.service_address_city,
+            customer_address_line1: req.customer?.address_line1,
+            customer_zip: req.customer?.zip,
+            customer_city: req.customer?.city,
+          });
+          if (diverges) formatted.customerLocation = null;
+        }
+        // Approximate truck position — ONLY while the tech is measurably
+        // at or driving to a route stop (atStop/headingToStop). Between
+        // stops — and before the route starts — the truck sits at the
+        // tech's home/office/lunch, which is personal location, not route
+        // information, and must not stream even rounded. Coordinates are
+        // ROUNDED to ~1km (2 decimal places) on purpose: mid-route the
+        // truck is parked at another customer's home, and precise coords
+        // would disclose their address. The precise feed stays exclusive
+        // to the en-route state.
+        if (canonical.technician_id && (stops.atStop || stops.headingToStop)) {
+          try {
+            const pos = await resolveFreshTechPosition({
+              techId: canonical.technician_id,
+              logPrefix: 'tracking-stops-approx',
+            });
+            if (pos) {
+              formatted.techApprox = {
+                lat: Math.round(pos.lat * 100) / 100,
+                lng: Math.round(pos.lng * 100) / 100,
+                lastReportedAt: pos.lastReportedAt || null,
+              };
+            }
+          } catch { /* map is best-effort; the count renders without it */ }
+        }
+      }
       return res.json({ tracker: formatted });
     }
 
