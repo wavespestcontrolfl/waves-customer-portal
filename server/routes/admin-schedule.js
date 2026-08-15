@@ -11374,18 +11374,26 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
     } else if (target === 'advice') sections.advice.push(line);
     else if (target === 'customer') sections.customer.push(line);
     else if (target === 'work') {
-      // Work-classified CHIP fields can carry status-only options
-      // ("Damaged or missing traps found", "No activity at traps") — those
-      // are observed conditions, not service performed, and must not ride
-      // the field-wide work provenance (codex r18). Split per option.
-      const statusOptionRe = /\bfound\b|\bno activity\b|\bobserved\b|\bnoted\b/i;
-      if (multi && parts.some((part) => statusOptionRe.test(part))) {
-        const workParts = parts.filter((part) => !statusOptionRe.test(part));
-        const statusParts = parts.filter((part) => statusOptionRe.test(part));
+      // Work-classified CHIP fields can mix actions with observed status
+      // ("Damaged or missing traps found"), recommendations ("Insulation
+      // removal recommended"), and limitations ("Limited cleanup due to
+      // access") — only the actions keep work provenance; the rest split per
+      // option into their real groups (codex r18/r19).
+      const statusOptionRe = /\bfound\b|\bno activity\b|\bobserved\b|\bnoted\b|\blimited\b|\bdue to\b|\bunable\b/i;
+      const adviceOptionRe = /\brecommended\b|\brecommend\b|\bneeded\b/i;
+      if (multi && parts.some((part) => statusOptionRe.test(part) || adviceOptionRe.test(part))) {
+        const adviceParts = parts.filter((part) => adviceOptionRe.test(part));
+        const statusParts = parts.filter((part) => !adviceOptionRe.test(part) && statusOptionRe.test(part));
+        const workParts = parts.filter((part) => !adviceOptionRe.test(part) && !statusOptionRe.test(part));
         if (workParts.length) {
           sections.work.push(`${label}: ${redactAccessCodes(workParts.join(', ').slice(0, 300))}`);
         }
-        sections.observations.push(`${label}: ${redactAccessCodes(statusParts.join(', ').slice(0, 300))}`);
+        if (statusParts.length) {
+          sections.observations.push(`${label}: ${redactAccessCodes(statusParts.join(', ').slice(0, 300))}`);
+        }
+        if (adviceParts.length) {
+          sections.advice.push(`${label}: ${redactAccessCodes(adviceParts.join(', ').slice(0, 300))}`);
+        }
       } else {
         sections.work.push(line);
       }
@@ -12152,7 +12160,13 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
         recommendations: [...recs, ...typedFallbackNextSteps],
         ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
       });
-      if (!report) {
+      // Same request-specific trade-name guard as the AI path (codex r19):
+      // typed free text ("Reapply Termidor HE next visit") can carry names
+      // into the fallback's recommendations. Degrade to no-report -> 503
+      // rather than publish them.
+      const fallbackReport = report && CompletionRecap.containsProductName(report, guardedProducts)
+        ? null : report;
+      if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,
         });
@@ -12168,7 +12182,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       logger.warn('[generate-report] both AI providers missed; returned deterministic report copy', {
         failures: generated.failures,
       });
-      return res.json({ report, fallback: true, deterministic: true });
+      return res.json({ report: fallbackReport, fallback: true, deterministic: true });
     }
 
     const { report } = generated;

@@ -11517,10 +11517,12 @@ export function CompletionPanel({
   // record (and interior-treatment safety scopes) survive drafting, and the
   // pills UI takes over as the deselect handle. (notes still holds the
   // pre-draft text here; setNotes(report) hasn't applied yet.)
-  function applyGeneratedReport(reportText) {
+  function applyGeneratedReport(reportText, { deterministic = false } = {}) {
     // Telemetry (specialty completion contract): an installed AI report is
     // an AI-assisted completion — persisted as ai_draft_used (codex r14).
-    setAiReportUsed(true);
+    // A double-provider miss returns deterministic template copy, which is
+    // NOT AI-assisted and must not inflate the metric (codex r19).
+    if (!deterministic) setAiReportUsed(true);
     if (!chipLinesDetached) {
       setSelectedProtocolActionLabels(
         labelsStillInNotes(selectedProtocolActionLabels),
@@ -14238,7 +14240,7 @@ export function CompletionPanel({
                   setGenerating(true);
                   try {
                     const r = await generateAiReport(payload);
-                    if (r.report) applyGeneratedReport(r.report);
+                    if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true });
                   } catch (e) {
                     alert("AI report failed: " + e.message);
                   }
@@ -16433,7 +16435,7 @@ export function CompletionPanel({
                 setGenerating(true);
                 try {
                   const r = await generateAiReport(payload);
-                  if (r.report) applyGeneratedReport(r.report);
+                  if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true });
                 } catch (e) {
                   alert("AI report failed: " + e.message);
                 }

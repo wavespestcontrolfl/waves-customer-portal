@@ -420,6 +420,17 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(wild.observations.join(' ')).toContain('No activity at traps');
   });
 
+  test('recommendation and limitation options split out of work chips (r19)', () => {
+    const san = typedFindingsPromptSections('rodent_sanitation', {
+      sanitation_work_completed: 'Removed droppings, Insulation removal recommended, Limited cleanup due to access',
+    });
+    expect(san.work.join(' ')).toContain('Removed droppings');
+    expect(san.advice.join(' ')).toContain('Insulation removal recommended');
+    expect(san.observations.join(' ')).toContain('Limited cleanup due to access');
+    expect(san.work.join(' ')).not.toContain('recommended');
+    expect(san.work.join(' ')).not.toContain('Limited');
+  });
+
   test('wildlife suspected species stays an observation (r15)', () => {
     const wild = typedFindingsPromptSections('wildlife_trapping', { target_animal: 'Raccoon' });
     expect(wild.observations.join(' ')).toContain('Raccoon');
