@@ -187,4 +187,41 @@ async function openBalanceSummary(customerId, { displayLimit = 5, ...opts } = {}
   };
 }
 
-module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, rowIsSelfPayDue, MAX_OPEN_INVOICES };
+/**
+ * The {past_due_line} value for the with-invoice completion texts
+ * (service_complete_with_invoice / service_report_v1_with_invoice) — the
+ * SMS-rail counterpart of the balanceVisibility email note (customers on the
+ * completion-SMS delivery rail get no invoice email, so the email-only note
+ * never reaches them — owner directive 2026-08-15).
+ *
+ * Same shape contract as reservice-link.reserviceLineForCustomer: a
+ * self-contained clause ending in '\n\n' so an inserted bare token renders
+ * clean copy, and '' whenever there is nothing to say — gate off, no open
+ * balance, or any lookup failure. Best-effort: NEVER throws (a balance-line
+ * failure must not cost the customer their completion text), and an
+ * unsupplied-key suppression can't occur because every render site of the
+ * completion family supplies this key (expand half; the token lands in the
+ * two with-invoice bodies via a separate data-only migration once this is
+ * deployed — same rollout discipline as {reservice_line}).
+ *
+ * `excludeInvoiceId` is the visit's OWN invoice — it is today's bill, not a
+ * past-due balance. Selection (self-pay only, live payer re-resolution,
+ * remainders not face values) is openBalanceSummary's — payer-billed debt is
+ * never presented to the homeowner.
+ */
+async function pastDueSmsLineForCustomer(customerId, { excludeInvoiceId = null } = {}) {
+  try {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!customerId || !isEnabled('completionSmsBalance')) return '';
+    const prev = await openBalanceSummary(customerId, { excludeInvoiceId });
+    if (!(prev.total > 0)) return '';
+    const amount = `$${prev.total.toFixed(2)}`;
+    const source = prev.count === 1 ? 'an earlier invoice' : `${prev.count} earlier invoices`;
+    return `Reminder: your account also has a past-due balance of ${amount} from ${source}, separate from today's invoice.\n\n`;
+  } catch (err) {
+    logger.warn(`[open-balance] past-due SMS line failed for ${customerId}: ${err.message}`);
+    return '';
+  }
+}
+
+module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, rowIsSelfPayDue, pastDueSmsLineForCustomer, MAX_OPEN_INVOICES };

@@ -10390,6 +10390,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // today's renders are byte-identical. Never throws.
         const { reserviceLineForCustomer } = require('../services/reservice-link');
         const completionReserviceLine = await reserviceLineForCustomer(svc.customer_id);
+        // {past_due_line} for the with-invoice completion texts (EXPAND half —
+        // same rollout discipline as {reservice_line} above: supplied at every
+        // completion-family render site BEFORE any body carries the token, so
+        // neither deploy ordering can suppress a send). Computed only when the
+        // text will carry a pay link — a paid/prepaid or report-only
+        // completion supplies '' — and excluding the visit's own invoice
+        // (today's bill is not a past-due balance). '' unless
+        // GATE_COMPLETION_SMS_BALANCE is on AND the customer has an older
+        // open self-pay balance; never throws.
+        const { pastDueSmsLineForCustomer } = require('../services/open-balance');
+        const completionPastDueLine = (invoiceCreated && payUrl && allowCompletionInvoiceLink)
+          ? await pastDueSmsLineForCustomer(svc.customer_id, { excludeInvoiceId: invoice?.id || null })
+          : '';
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
             record,
@@ -10398,6 +10411,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             smsReportUrl: reportSmsUrl,
             payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
             reserviceLine: completionReserviceLine,
+            pastDueLine: completionPastDueLine,
           })
           : null;
         // A billed report-v1 visit may take the report lane only when the
@@ -10455,6 +10469,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               portal_url: reportSmsUrl || reportUrl,
               pay_url: payUrl,
               reservice_line: completionReserviceLine,
+              past_due_line: completionPastDueLine,
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
@@ -10471,6 +10486,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             portal_url: reportSmsUrl || reportUrl,
             pay_url: payUrl,
             reservice_line: completionReserviceLine,
+            past_due_line: completionPastDueLine,
           }, {
             workflow: 'dispatch_service_complete',
             entity_type: 'service_record',
@@ -10493,6 +10509,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
               reservice_line: completionReserviceLine,
+              past_due_line: completionPastDueLine,
             };
             const paidTemplateContext = {
               workflow: 'dispatch_service_complete',
@@ -10547,6 +10564,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
               reservice_line: completionReserviceLine,
+              past_due_line: completionPastDueLine,
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',

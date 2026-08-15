@@ -126,6 +126,20 @@ const gates = {
   // byte-identical to today.
   balanceVisibility: process.env.GATE_BALANCE_VISIBILITY === 'true',
 
+  // Past-due balance line on the completion SMS (owner directive
+  // 2026-08-15): customers whose invoices deliver via the completion-SMS
+  // rail never see the balanceVisibility email note — the with-invoice
+  // completion texts get a one-sentence past-due reminder instead. The line
+  // is code-built (open-balance.pastDueSmsLineForCustomer) from the SAME
+  // self-pay open-invoice authority as the email note, excluding the visit's
+  // own invoice, and renders '' while this gate is off — the {past_due_line}
+  // token ships expand/contract like {reservice_line}, so sends stay
+  // byte-identical until Adam approves the copy and flips. Display-only; no
+  // money moves and no sibling data ever rides the public /pay surface.
+  // Customer-facing copy change, so fail-closed ==='true' in EVERY
+  // environment. Kill switch: unset or any non-'true' value.
+  completionSmsBalance: process.env.GATE_COMPLETION_SMS_BALANCE === 'true',
+
   // Completion full-balance Auto Pay pull (owner ruling 2026-08-08: "when
   // autopay runs after a visit and the customer also has an old unpaid
   // balance, take everything they owe"). After a completion auto-charge
