@@ -9989,8 +9989,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // service_id may be an admin repoint and is NEVER overwritten,
           // and an unresolved lookup stamps nothing rather than clearing.
           if (!adoptedTierStamp) {
+            // The no-overwrite guard reads the row loaded FOR UPDATE above,
+            // never the stale preflight snapshot — a service_id assigned by
+            // an admin between the preflight read and this lock must win
+            // (pre-push codex P1 on this change).
             const adoptedCatalogStamp = await adoptedAppointmentCatalogStamp(trx, {
-              existingAppointmentRow,
+              existingAppointmentRow: lockedAdoptRow,
               estimate: acceptedEstimateForScheduling,
               serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
               selectedFrequency: acceptedSchedulingFrequencyKey,

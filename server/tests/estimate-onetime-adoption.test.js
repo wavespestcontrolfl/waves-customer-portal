@@ -167,8 +167,11 @@ describe('accept-path wiring (source pins)', () => {
     expect(src).toMatch(/const lockedFamilyKeys = estimateFamilyKeysForAdoption\(estimate, estData, \{\s*\n\s*serviceModes: adoptionServiceModesForContract\(estimate, estData\),/);
   });
 
-  test('the adopted row is stamped with the accept-path triple', () => {
-    expect(src).toMatch(/adoptedAppointmentCatalogStamp\(trx, \{\s*\n\s*existingAppointmentRow,\s*\n\s*estimate: acceptedEstimateForScheduling,\s*\n\s*serviceMode: treatAsOneTime \? 'one_time' : serviceMode,\s*\n\s*selectedFrequency: acceptedSchedulingFrequencyKey,/);
+  test('the adopted row is stamped with the accept-path triple, reading the row loaded UNDER LOCK', () => {
+    // `lockedAdoptRow`, not the stale preflight `existingAppointmentRow`: a
+    // service_id assigned by an admin between the preflight read and the
+    // FOR UPDATE reload must win the no-overwrite guard (pre-push codex P1).
+    expect(src).toMatch(/adoptedAppointmentCatalogStamp\(trx, \{\s*\n\s*existingAppointmentRow: lockedAdoptRow,\s*\n\s*estimate: acceptedEstimateForScheduling,\s*\n\s*serviceMode: treatAsOneTime \? 'one_time' : serviceMode,\s*\n\s*selectedFrequency: acceptedSchedulingFrequencyKey,/);
   });
 });
 
@@ -204,6 +207,21 @@ describe('adoptedAppointmentCatalogStamp', () => {
     const conn = makeCatalogConn(() => { throw new Error('must not query'); });
     const stamp = await adoptedAppointmentCatalogStamp(conn, {
       existingAppointmentRow: { ...WASP_ROW, service_id: 'svc-admin' },
+      estimate: oneTimeEstimate(),
+      serviceMode: 'one_time',
+    });
+    expect(stamp).toBeNull();
+  });
+
+  test('REGRESSION (pre-push codex P1): a service_id assigned BETWEEN preflight and lock wins — the locked row is authoritative and no stamp is computed', async () => {
+    // Preflight saw service_id null; an admin repointed the visit before the
+    // FOR UPDATE reload. The stamp call receives the LOCKED row (see the
+    // wiring pin above), so the guard must see the new id and stand down.
+    const preflightRow = { ...WASP_ROW, service_id: null };
+    const lockedRow = { ...preflightRow, service_id: 'svc-admin-race' };
+    const conn = makeCatalogConn(() => { throw new Error('must not query'); });
+    const stamp = await adoptedAppointmentCatalogStamp(conn, {
+      existingAppointmentRow: lockedRow,
       estimate: oneTimeEstimate(),
       serviceMode: 'one_time',
     });
