@@ -754,3 +754,27 @@ describe('sms shadow drafter — structural unsendability', () => {
     expect(INTENDED_ACTION_TYPES).toContain('none');
   });
 });
+
+describe('sealed-lane dispatch budget (08-15 tuning)', () => {
+  test('pinned sealed drafts dispatch with maxTokens 1000, the :sealed suffix, and no fallback', async () => {
+    // 600 truncated 2-4 sealed-exam legs/day in prod ("unparseable
+    // (response truncated at max_tokens=600)") — pin the raised budget so
+    // a silent revert can't reintroduce false provider failures.
+    jest.resetModules();
+    const dispatched = [];
+    jest.doMock('../services/llm/call', () => ({
+      dispatchWithFallback: async (policy, payload) => {
+        dispatched.push({ policy, payload });
+        return { ok: false, reason: 'test-stub' };
+      },
+    }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const MODELS = require('../config/models');
+    await drafter.generateDraftOnce({}, 'sys', 'user', MODELS.ROUTES.smsDraftDefault, { pinned: true });
+    jest.dontMock('../services/llm/call');
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0].payload.maxTokens).toBe(1000);
+    expect(dispatched[0].policy.name).toMatch(/^smsShadow:[a-z]+:sealed$/);
+    expect(dispatched[0].policy.fallback).toBeUndefined();
+  });
+});

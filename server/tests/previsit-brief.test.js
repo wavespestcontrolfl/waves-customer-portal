@@ -494,7 +494,25 @@ describe('grounded allowlist validation of LLM output', () => {
     expect(verdict.body).toBeTruthy();
   });
 
-  test('tier names in descriptive prose are not product-shaped (08-15 tuning)', () => {
+  test('a GROUNDED tier name in descriptive prose is not product-shaped (08-15 tuning)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { membership: { tier: 'Bronze' } },
+    };
+    const verdict = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: [],
+        priorities: [],
+        customer_context: 'Accepted Bronze pest control after the visit.',
+      },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('an UNGROUNDED tier claim is an invented account fact — rejected (codex #3423 r1)', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
     const verdict = validateBriefJson(
@@ -506,7 +524,50 @@ describe('grounded allowlist validation of LLM output', () => {
       },
       grounding,
     );
-    expect(verdict.body).toBeTruthy();
+    expect(verdict.reason).toBeTruthy();
+    expect(verdict.reason).toMatch(/bronze/i);
+  });
+
+  test('a tier-named verb object still parks as a product even when the tier is grounded (codex #3423 r1)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { membership: { tier: 'Silver' } },
+    };
+    const verdict = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: [],
+        priorities: ['Apply Silver Control along the fence'],
+      },
+      grounding,
+    );
+    expect(verdict.reason).toMatch(/^ungrounded_novel_product:/);
+  });
+
+  test('allowlisted action verbs still ground their objects in instructions (codex #3423 r1)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const instruction of ['Retrieve credentials from the lockbox', 'Vacuum rooms before treating']) {
+      const verdict = validateBriefJson(
+        { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [instruction] },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('room instructions violate an interior opt-out like "interior" does (codex #3423 r1)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { servicePreferences: { interiorSpray: false }, notes: 'vacuum rooms weekly' },
+    };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Vacuum rooms before treating'] },
+      grounding,
+    );
+    expect(verdict.reason).toBe('ungrounded_preference_conflict:interior');
   });
 
   test('an ungrounded organism still rejects even inside common prose (08-15 tuning)', () => {
@@ -1054,6 +1115,9 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
   test('the validator is handed to dispatchWithFallback so a bad primary fails over pre-template', async () => {
     useDb(baseResponses());
     await PrevisitBrief.generateVisitBrief('svc-1');
+    // Token budget pinned: 1000 truncated real briefs mid-JSON in prod
+    // (empty_json legs, 08-14/15) — a silent revert would re-break the lane.
+    expect(global.__dispatch.mock.calls[0][1].maxTokens).toBe(2000);
     const opts = global.__dispatch.mock.calls[0][2];
     expect(typeof opts.validate).toBe('function');
     expect(opts.validate({ json: {} })).toBe('priorities_not_array');

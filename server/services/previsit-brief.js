@@ -937,18 +937,32 @@ const COMMON_PROSE_WORDS = new Set([
   // "availability"). Deliberately NO organisms, product names, or
   // direction/scope words (interior/attic-class) — those must still ground,
   // and the preference-conflict scan enforces opted-out scopes regardless.
+  // NOT here (codex #3423 r1): tier names (bronze/silver/gold/platinum) —
+  // an ungrounded tier claim is an invented business fact, handled by the
+  // grounded-tier skip in the product pass instead; rooms/credentials —
+  // actionable instruction objects that must keep grounding (rooms? also
+  // joins the interior opt-out conflict regex). The action verbs below
+  // (perform/provide/retrieve/vacuum/document/discuss) are additionally in
+  // the directive-verb capture so their OBJECTS still ground strictly.
   'perform', 'performs', 'performed', 'performing', 'provide', 'provides', 'provided', 'providing',
   'context', 'account', 'accounts', 'recurring', 'initial', 'initially', 'availability', 'available',
-  'information', 'irrigation', 'scheduling', 'camera', 'cameras', 'room', 'rooms',
-  'bronze', 'silver', 'gold', 'platinum', 'accepted', 'accepting', 'waves', 'retrieve',
+  'information', 'irrigation', 'scheduling', 'camera', 'cameras',
+  'accepted', 'accepting', 'waves', 'retrieve',
   'transition', 'transitions', 'standing', 'minute', 'minutes', 'resident', 'residents',
   'list', 'lists', 'missing', 'site', 'sites', 'raised', 'raises', 'occupancy', 'occupied',
-  'communication', 'communications', 'application', 'applications', 'credentials',
+  'communication', 'communications', 'application', 'applications',
   'included', 'includes', 'including', 'state', 'stated', 'states', 'show', 'shows', 'shown',
   'past', 'introduction', 'discuss', 'discussing', 'baseline', 'relevant', 'mindful',
   'missed', 'someone', 'presence', 'documented', 'structural', 'quiet', 'runtime', 'severe',
   'recovery', 'regrowth', 'vacuum', 'vacuuming', 'control', 'follow-up', 'walk-through',
 ]);
+
+// WaveGuard tier names: real business vocabulary, never common prose — an
+// ungrounded tier mention is an invented account fact (codex #3423 r1).
+// A tier word in the output must be word-boundary grounded; when it is,
+// a tier-carrying capitalized capture ("Accepted Bronze") is prose, not a
+// product reference.
+const TIER_WORDS = new Set(['bronze', 'silver', 'gold', 'platinum']);
 
 // Short/common organism names — too short (or too domain-loaded) for the
 // rare-word scan and unsound to substring-ground ('rat' matches inside
@@ -1030,7 +1044,7 @@ function extractOutputReferences(text) {
   // apply/spray/use/treat, and an ungrounded "Inspect interior" on an
   // exterior-only visit is exactly as contradictory as "Treat interior".
   // Same connector skip and follower-stop as the treatment capture.
-  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(directives, m[1]);
+  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?|[Pp]erform(?:ed|ing|s)?|[Pp]rovid(?:e|es|ed|ing)|[Rr]etriev(?:e|es|ed|ing)|[Vv]acuum(?:ed|ing|s)?|[Dd]ocument(?:ed|ing|s)?|[Dd]iscuss(?:ed|ing|es)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(directives, m[1]);
   for (const m of text.matchAll(/\b(?:for|targeting|against)\s+((?:[a-z][a-z'-]*\s+){0,3}[a-z][a-z'-]*)/g)) push(targets, m[1]);
   // Organism references that never pass a preposition: "<X> activity/
   // damage/infestation" and "signs/evidence of <X>" ("Emerald ash borer
@@ -1092,6 +1106,17 @@ function findUngroundedClaim(body, grounding) {
   // product reference — the rare-word pass still owns single novel words.
   const allWordsCommon = (term) => String(term).toLowerCase().split(/\s+/).every((w) => (
     w.length < 4 || REFERENCE_STOP_WORDS.has(w) || COMMON_PROSE_WORDS.has(w)
+  ));
+  // Capitalized-run tier prose ("Accepted Bronze"): a tier word makes the
+  // capture product-shaped, but a GROUNDED tier plus common prose is a
+  // sentence about the account, not a product name. Ungrounded tier words
+  // never pass (and the rare-word pass rejects them in any field). Used by
+  // the capitalized-run product path ONLY — application-verb objects keep
+  // the strict skip so "Apply Silver Control" still parks as a product.
+  const boundaryGroundedWord = (w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedText);
+  const commonOrGroundedTier = (term) => String(term).toLowerCase().split(/\s+/).every((w) => (
+    w.length < 4 || REFERENCE_STOP_WORDS.has(w) || COMMON_PROSE_WORDS.has(w)
+    || (TIER_WORDS.has(w) && boundaryGroundedWord(w))
   ));
   // Instruction fields (priorities, watch_items) direct the technician —
   // an application-verb product reference there must name a product on
@@ -1175,7 +1200,8 @@ function findUngroundedClaim(body, grounding) {
   const prefConflicts = [];
   const svcPrefFlags = grounding.llmFacts?.servicePreferences || null;
   if (svcPrefFlags?.interiorSpray === false) {
-    prefConflicts.push({ re: /\b(?:interior|inside|indoors?)\b/, term: 'interior' });
+    // rooms? included (codex #3423 r1): a room instruction IS interior scope.
+    prefConflicts.push({ re: /\b(?:interior|inside|indoors?|rooms?)\b/, term: 'interior' });
   }
   if (svcPrefFlags?.exteriorSweep === false) {
     prefConflicts.push({ re: /\b(?:eaves?|cobwebs?)\b/, term: 'eave sweep' });
@@ -1201,7 +1227,7 @@ function findUngroundedClaim(body, grounding) {
     }
     const refs = extractOutputReferences(String(field.text));
     for (const term of refs.products) {
-      if (allWordsCommon(term)) continue;
+      if (commonOrGroundedTier(term)) continue;
       // A sentence-case application verb rides into the capitalized-run
       // capture ("Applied Prodiamine") — the verb is not part of the
       // product name; ground the remainder.
