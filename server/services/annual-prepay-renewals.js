@@ -4341,6 +4341,53 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       return { sent: false, reason: 'missing_sms_template' };
     }
 
+    // Collections policy consult (codex gh-r1): this reminder is a
+    // balance-outreach rail like the dunning engines — a do_not_text /
+    // collection_hold / bankruptcy customer must not receive it once the
+    // gate is on. Gate off ⇒ permitted without consulting, byte-identical.
+    // A denial is an expected hold, not a failure: release the claim so a
+    // later day retries once the hold clears.
+    const { collectionsChannelPermitted } = require('./collections/rail-guard');
+    // invoiceId stays null (codex r7): the plan selector persists this
+    // invoice as 'draft', which the eligibility loader never admits — the
+    // membership check would kill every prepay reminder under the gate.
+    // The validated plan amount rides the off-ledger carve-out instead;
+    // flags, suppression, and frequency windows all still apply.
+    const policyPermitted = await collectionsChannelPermitted({
+      customerId: customer.id,
+      invoiceId: null,
+      channel: 'sms',
+      purpose: 'balance_reminder',
+      offLedgerBalanceCents: Math.round(amountDue * 100),
+      logTag: 'annual-prepay',
+    });
+    if (!policyPermitted) {
+      await reverseReminderCredit();
+      await releaseClaim();
+      return { sent: false, reason: 'collections_policy_denied' };
+    }
+
+    // RECORD-THEN-SEND (always-on ledger discipline): the row precedes the
+    // delivery attempt; an insert failure skips the send and releases the
+    // claim for a later retry — no unledgered customer contact.
+    const ContactLedger = require('./collections/contact-ledger');
+    let prepayLedger;
+    try {
+      prepayLedger = await ContactLedger.recordContact({
+        customerId: customer.id,
+        channel: 'sms',
+        purpose: 'balance_reminder',
+        invoiceIds: [invoice.id],
+        source: 'annual_prepay_payment_reminder',
+        metadata: { annual_prepay_term_id: claimedTerm.id, days_out: daysOut },
+      });
+    } catch (ledgerErr) {
+      logger.warn(`[annual-prepay] payment reminder skipped for term ${claimedTerm.id} — contact ledger unavailable: ${ledgerErr.message}`);
+      await reverseReminderCredit();
+      await releaseClaim();
+      return { sent: false, reason: 'ledger_unavailable' };
+    }
+
     const smsResult = await sendCustomerMessage({
       to: customer.phone,
       body,
@@ -4359,6 +4406,7 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       },
     });
     if (!smsResult.sent) {
+      await ContactLedger.markSendFailed(prepayLedger, { code: smsResult.code || smsResult.reason || 'send_failed' });
       logger.warn(`[annual-prepay] payment reminder SMS blocked/failed for term ${claimedTerm.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
       await reverseReminderCredit();
       await releaseClaim();

@@ -645,6 +645,31 @@ async function repointRowwiseDropCollisions(trx, table, column, winnerId, loserI
   return `moved ${moved}, dropped ${dropped} duplicate row(s) (winner already has them)`;
 }
 
+// collections_flags: at most one ACTIVE row per (customer, flag) — both
+// duplicate profiles carrying the same active hold is the same instruction,
+// not divergent data. The winner's copy stays live; the loser's colliding
+// copy comes across RELEASED so the history (who flagged, when) survives
+// (codex r6: absent this, a shared do_not_text/collection_hold aborted the
+// whole merge).
+async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loserId) {
+  const rows = await trx(table).where(column, loserId).select('id');
+  let moved = 0;
+  let released = 0;
+  for (const { id } of rows) {
+    try {
+      await trx.transaction(async (sp) => {
+        await sp(table).where({ id }).update({ [column]: winnerId });
+      });
+      moved += 1;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+      await trx(table).where({ id }).update({ [column]: winnerId, released_at: trx.fn.now() });
+      released += 1;
+    }
+  }
+  return `moved ${moved}, released ${released} (winner already carried the active flag)`;
+}
+
 const UNIQUE_COLLISION_HANDLERS = {
   notification_prefs: mergeSingletonPrefRow,
   property_preferences: mergeSingletonPrefRow,
@@ -669,6 +694,7 @@ const UNIQUE_COLLISION_HANDLERS = {
   // same property) — keep the winner's ledger row, drop the loser's copy
   // (codex #3390: absent here, a shared alert aborted the whole merge).
   customer_alerts: repointRowwiseDropCollisions,
+  collections_flags: repointFlagsReleaseCollisions,
 };
 
 // Customer ids also hide behind polymorphic recipient columns the
@@ -3820,6 +3846,7 @@ module.exports = {
     isEmptyValue,
     mergeSingletonPrefRow,
     repointRowwiseDropCollisions,
+  repointFlagsReleaseCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,
     resetFkCache: () => { fkColumnsCache = null; },

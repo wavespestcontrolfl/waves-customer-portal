@@ -22,12 +22,26 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'billing@example.com', name: 'Taylor', role: 'primary' }]),
 }));
+// The always-on contact ledger records-then-sends; the bare db mock here
+// can't serve its insert, and an unavailable ledger correctly SKIPS the
+// send — so the ledger is mocked healthy for these delivery-path tests.
+jest.mock('../services/collections/contact-ledger', () => ({
+  recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
+  markSendFailed: jest.fn(async () => true),
+  markDelivered: jest.fn(async () => true),
+}));
+// Consulted by the real rail-guard only when GATE_COLLECTIONS_POLICY==='true'.
+jest.mock('../services/collections/contact-policy', () => ({
+  evaluate: jest.fn(async () => ({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] })),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const EmailTemplates = require('../services/email-template-library');
 const BalanceReminder = require('../services/workflows/balance-reminder');
+const ContactLedger = require('../services/collections/contact-ledger');
+const ContactPolicy = require('../services/collections/contact-policy');
 
 function chain({ result = [], first, returning } = {}) {
   const q = {};
@@ -322,5 +336,99 @@ describe('late-payment email sidecar', () => {
     expect(smsInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({
       interaction_type: 'sms_outbound',
     }));
+  });
+});
+
+// Collections policy on the workflow's own late-payment legs (rail-guard is
+// REAL here; the mocked contact-policy stands in for the verdict). Gate-off
+// byte-identical behavior is what every test above runs under — these pin
+// the gate-ON consult, the per-channel independence of the email sidecar,
+// and the record-then-send ledger discipline.
+describe('collections policy + ledger on latePaymentCheck', () => {
+  function armHappyPath() {
+    setDbQueues({
+      customers: [chain({ result: [customer()] })],
+      payments: [chain({ result: [overduePayment(8)] })],
+      invoices: [
+        chain({ result: [] }),
+        chain({ first: { id: 'inv-1', token: 'token-1' } }),
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+      ],
+      sms_log: [
+        chain({ first: { count: '0' } }),
+        chain({ first: null }),
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain()],
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockImplementation(async () => ({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] }));
+  });
+  afterEach(() => {
+    delete process.env.GATE_COLLECTIONS_POLICY;
+  });
+
+  test('a policy-denied SMS channel skips the customer entirely — no SMS, no email sidecar, no ledger row', async () => {
+    armHappyPath();
+    ContactPolicy.evaluate.mockImplementation(async (customerId, { channel }) => ({
+      allowed: channel !== 'sms', eligibleInvoiceIds: ['inv-1'], denialReasons: channel === 'sms' ? ['contact_within_24h'] : [],
+    }));
+    await BalanceReminder.latePaymentCheck();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+  });
+
+  test('the email sidecar gets its OWN consult — email denied still sends the SMS, never the email', async () => {
+    armHappyPath();
+    ContactPolicy.evaluate.mockImplementation(async (customerId, { channel }) => ({
+      allowed: channel !== 'email', eligibleInvoiceIds: ['inv-1'], denialReasons: channel === 'email' ? ['flag_do_not_email'] : [],
+    }));
+    await BalanceReminder.latePaymentCheck();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    // The SMS leg still recorded before sending; no email row was minted.
+    const channels = ContactLedger.recordContact.mock.calls.map(([args]) => args.channel);
+    expect(channels).toEqual(['sms']);
+  });
+
+  test('allowed path records BEFORE each send and both channels get their own ledger rows', async () => {
+    armHappyPath();
+    await BalanceReminder.latePaymentCheck();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    const smsRecordAt = ContactLedger.recordContact.mock.invocationCallOrder[0];
+    const smsSendAt = sendCustomerMessage.mock.invocationCallOrder[0];
+    expect(smsRecordAt).toBeLessThan(smsSendAt);
+    const channels = ContactLedger.recordContact.mock.calls.map(([args]) => args.channel);
+    expect(channels).toEqual(['sms', 'email']);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    // gh-r2: both delivered legs get the positive delivered stamp — the
+    // dunning-touch floor counts only confirmed deliveries.
+    expect(ContactLedger.markDelivered).toHaveBeenCalledTimes(2);
+  });
+
+  test('a blocked SMS stamps its ledger row send_failed and skips the email sidecar', async () => {
+    armHappyPath();
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'quiet_hours' });
+    await BalanceReminder.latePaymentCheck();
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'led-1' }),
+      expect.objectContaining({ code: 'quiet_hours' }),
+    );
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('an unavailable ledger SKIPS the send — no unledgered customer contact, ever (gate state irrelevant)', async () => {
+    delete process.env.GATE_COLLECTIONS_POLICY;
+    armHappyPath();
+    ContactLedger.recordContact.mockRejectedValueOnce(new Error('ledger down'));
+    await BalanceReminder.latePaymentCheck();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 });

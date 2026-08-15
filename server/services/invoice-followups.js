@@ -92,6 +92,17 @@ function isSchedulableInvoice(invoice) {
   return !NON_SCHEDULABLE_INVOICE_STATUSES.includes(normalizedStatus(invoice));
 }
 
+// Collections policy consult lives in the SHARED rail guard (codex
+// 2026-08-14: one implementation, not three that drift) — gate-off
+// byte-identical, per-channel verdicts, invoice-membership required.
+const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
+
+async function collectionsChannelPermitted(customerId, invoiceId, channel) {
+  return railGuardPermitted({
+    customerId, invoiceId, channel, purpose: 'late_payment', logTag: 'invoice-followups',
+  });
+}
+
 /**
  * Load the SMS body from the editable sms_templates table. Returns null if the
  * template row is missing or disabled — caller pauses the sequence in that case.
@@ -657,6 +668,20 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     logger.info(`[invoice-followups] paused sequence ${row.id} — customer ${row.customer_id} is soft-deleted`);
     return;
   }
+  // Collections policy — BOTH legs' permissions resolved here, ahead of the
+  // account-credit draw (a fully-denied touch must not draw down credit and
+  // then need a reversal). Each channel decides independently (codex
+  // 2026-08-14: the email leg must not ride the SMS verdict). Gate off ⇒
+  // both true without consulting, byte-identical (pinned by test). A policy
+  // denial is a TRANSIENT state (frequency window, releasable hold) — a
+  // both-denied touch returns with the sequence still active and due, so
+  // the next tick re-decides; it is never paused terminally for policy.
+  const smsPermitted = await collectionsChannelPermitted(row.customer_id, row.invoice_id, 'sms');
+  const emailPermitted = await collectionsChannelPermitted(row.customer_id, row.invoice_id, 'email');
+  if (!smsPermitted && !emailPermitted) {
+    logger.info(`[invoice-followups] collections policy denied both channels for sequence ${row.id} — touch deferred to a later run`);
+    return;
+  }
   // Apply any available account credit before dunning so the reminder bills amount
   // due, not the gross balance — credit issued AFTER the invoice was sent isn't drawn
   // down until a payment-ask seam runs, and this dunning touch is one of them. Gated +
@@ -725,13 +750,42 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       stripe_payment_intent_id: row.invoice_stripe_pi,
     });
 
-  const emailResult = mdPending
-    ? await sendMicrodepositVerificationEmail({
-        invoice: { id: row.invoice_id, title: row.title, total: row.total, credit_applied: row.credit_applied },
-        customer,
-        touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
-      })
-    : await sendFollowupEmail({ row, customer, step, ctx });
+  // Email leg — policy-permitted only, with RECORD-THEN-SEND ledger
+  // discipline: the collections_contact_ledger row precedes the delivery
+  // attempt; an insert failure skips the leg (no unledgered contact, ever),
+  // a failed delivery stamps the standing row send_failed.
+  const ContactLedger = require('./collections/contact-ledger');
+  let emailResult = { ok: false, skipped: true, reason: 'collections_policy_denied' };
+  if (emailPermitted) {
+    let emailLedger = null;
+    try {
+      emailLedger = await ContactLedger.recordContact({
+        customerId: customer.id,
+        channel: 'email',
+        purpose: mdPending ? 'payment_verification' : 'invoice_followup',
+        invoiceIds: [row.invoice_id],
+        source: 'invoice_followups',
+        metadata: { step_id: step.id },
+      });
+    } catch (ledgerErr) {
+      emailResult = { ok: false, skipped: true, reason: 'ledger_unavailable' };
+      logger.warn(`[invoice-followups] email leg skipped for sequence ${row.id} — contact ledger unavailable: ${ledgerErr.message}`);
+    }
+    if (emailLedger) {
+      emailResult = mdPending
+        ? await sendMicrodepositVerificationEmail({
+            invoice: { id: row.invoice_id, title: row.title, total: row.total, credit_applied: row.credit_applied },
+            customer,
+            touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
+          })
+        : await sendFollowupEmail({ row, customer, step, ctx });
+      if (emailResult?.ok !== true) {
+        await ContactLedger.markSendFailed(emailLedger, {
+          reason: emailResult?.reason || emailResult?.error || 'email_not_sent',
+        });
+      }
+    }
+  }
 
   let smsSent = false;
   let smsSkipReason = null;
@@ -739,7 +793,11 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // The held SMS leg failed to reach the scheduled rail: nothing durable
   // owns it, so this touch must stay retryable (codex r21).
   let smsHoldUnowned = false;
-  if (customer?.phone) {
+  if (!smsPermitted) {
+    // Collections policy denial — transient; the no-channel branch below
+    // leaves the sequence armed instead of pausing it.
+    smsSkipReason = 'collections_policy_denied';
+  } else if (customer?.phone) {
     const body = mdPending
       ? await renderSmsTemplate('bank_verification_incomplete', {
           first_name: ctx.name,
@@ -750,7 +808,23 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       smsSkipReason = 'missing_template';
       logger.warn(`[invoice-followups] template ${step.template_key} missing/disabled for sequence ${row.id}`);
     } else {
-      const sendResult = await sendCustomerMessage({
+      // RECORD-THEN-SEND: the ledger row precedes the SMS attempt; an
+      // insert failure skips the send (no unledgered contact, ever).
+      let smsLedger = null;
+      try {
+        smsLedger = await ContactLedger.recordContact({
+          customerId: customer.id,
+          channel: 'sms',
+          purpose: mdPending ? 'payment_verification' : 'invoice_followup',
+          invoiceIds: [row.invoice_id],
+          source: 'invoice_followups',
+          metadata: { step_id: step.id },
+        });
+      } catch (ledgerErr) {
+        smsSkipReason = 'ledger_unavailable';
+        logger.warn(`[invoice-followups] SMS leg skipped for sequence ${row.id} — contact ledger unavailable: ${ledgerErr.message}`);
+      }
+      const sendResult = smsLedger ? await sendCustomerMessage({
         to: customer.phone,
         body,
         channel: 'sms',
@@ -764,8 +838,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         // cron path stays fenced.
         ...(operatorInitiated ? { operatorInitiated: true } : {}),
         metadata: { original_message_type: 'invoice_followup' },
-      });
-      if (sendResult.blocked || sendResult.sent === false) {
+      }) : null;
+      if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
+        await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'sms_blocked' });
         smsSkipReason = sendResult.code || 'sms_blocked';
         // Send-window block (this cron runs hourly, incl. nights): not a
         // delivery failure — remember the window open so the no-channel
@@ -796,6 +871,11 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                 metadata: JSON.stringify({
                   entry_point: 'invoice_followup_deferred',
                   invoice_id: row.invoice_id,
+                  customer_id: customer.id,
+                  // Minted ONCE at enqueue: the replay's delivery-time
+                  // ledger reservation is keyed to it, so executor retries
+                  // of this same queued row can never double-count.
+                  ledger_reservation_key: require('crypto').randomUUID(),
                   followup_sequence_id: row.id,
                   original_block_code: sendResult.code,
                   replay_purpose: 'payment_link',
@@ -816,7 +896,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
           }
         }
         logger.warn(`[invoice-followups] SMS blocked for sequence ${row.id}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
-      } else {
+      } else if (sendResult) {
         smsSent = true;
       }
     }
@@ -836,6 +916,15 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         updated_at: db.fn.now(),
         next_touch_at: smsDeferUntil,
       });
+    } else if (
+      ['collections_policy_denied', 'ledger_unavailable'].includes(smsSkipReason)
+      || ['collections_policy_denied', 'ledger_unavailable'].includes(emailResult.reason)
+    ) {
+      // Transient collections-policy denial / ledger outage — NOT a
+      // delivery failure. Leave the sequence armed and due (no status
+      // write) so a later tick re-decides; pausing terminally here would
+      // turn a 24h frequency window into a permanently silenced sequence.
+      logger.info(`[invoice-followups] touch for sequence ${row.id} held by collections policy/ledger — retrying on a later run`);
     } else {
       await db('invoice_followup_sequences').where({ id: row.id }).update({
         updated_at: db.fn.now(),
@@ -890,6 +979,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     next_touch_at: nextAt,
     status: nextAt ? 'active' : 'completed',
   });
+
+  // (Contact-ledger rows were written BEFORE each leg's delivery attempt —
+  // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
 
   // Log to customer_interactions for the 360 view
   try {

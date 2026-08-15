@@ -358,6 +358,30 @@ const MAX_TRANSCRIPT_CHARS_PER_SECOND = Number(process.env.CALL_MAX_TRANSCRIPT_C
 const MIN_TRANSCRIPT_CHARS_FOR_GUARD = 120;
 const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an implausible transcription was rejected.]';
 
+// The full terminal column-set for a rejected implausible transcription.
+// transcription_status must land on the terminal 'rejected' here — leaving it
+// at 'pending' misreports the row as still awaiting transcription to every
+// status consumer forever (the hourly sweep skips it only because the
+// sentinel occupies `transcription`, not because the status is truthful).
+function transcriptRejectionUpdate(rejectionMeta) {
+  return {
+    processing_status: 'voicemail',
+    answered_by: 'voicemail',
+    call_outcome: 'voicemail',
+    transcription: TRANSCRIPTION_REJECTED_SENTINEL,
+    transcription_status: 'rejected',
+    transcription_metadata: rejectionMeta,
+    ai_extraction: null,
+    ai_extraction_enriched: null,
+    v2_extraction_status: null,
+    disposition: null,
+    review_status: null,
+    customer_id: null,
+    processing_token: null,
+    updated_at: new Date(),
+  };
+}
+
 // PAN redaction guard (card-on-file spec Phase 0). One transcription pass
 // yields up to three artifacts carrying the same audio — the labeled
 // transcript string, the diarized segment array, and the dictation-focused
@@ -6137,21 +6161,7 @@ const CallRecordingProcessor = {
         const rejected = await trx('call_log')
           .where({ id: call.id })
           .where('processing_token', procToken)
-          .update({
-            processing_status: 'voicemail',
-            answered_by: 'voicemail',
-            call_outcome: 'voicemail',
-            transcription: TRANSCRIPTION_REJECTED_SENTINEL,
-            transcription_metadata: rejectionMeta,
-            ai_extraction: null,
-            ai_extraction_enriched: null,
-            v2_extraction_status: null,
-            disposition: null,
-            review_status: null,
-            customer_id: null,
-            processing_token: null,
-            updated_at: new Date(),
-          });
+          .update(transcriptRejectionUpdate(rejectionMeta));
         if (rejected === 0) {
           const lost = new Error('rejection fence lost');
           lost.fenceLost = true;
@@ -14052,6 +14062,7 @@ CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
 
 CallRecordingProcessor._test = {
   isImplausibleTranscript,
+  transcriptRejectionUpdate,
   reconcileFormerLeadLinkage,
   recheckCallBookingConflicts,
   scrubTranscriptArtifacts,

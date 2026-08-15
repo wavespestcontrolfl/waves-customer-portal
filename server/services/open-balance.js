@@ -187,4 +187,4 @@ async function openBalanceSummary(customerId, { displayLimit = 5, ...opts } = {}
   };
 }
 
-module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, MAX_OPEN_INVOICES };
+module.exports = { openBalanceInvoices, openBalanceSummary, openBalanceExists, rowIsSelfPayDue, MAX_OPEN_INVOICES };

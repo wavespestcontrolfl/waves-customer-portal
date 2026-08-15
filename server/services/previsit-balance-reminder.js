@@ -32,6 +32,8 @@ const { resolveBillingLane, monthlyDuesCollected } = require('./billing-lane');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
+const { collectionsChannelVerdict } = require('./collections/rail-guard');
+const ContactLedger = require('./collections/contact-ledger');
 
 const TEMPLATE_KEY = 'previsit_balance_reminder';
 const EMAIL_TEMPLATE_KEY = 'billing.previsit_balance';
@@ -263,10 +265,44 @@ async function runSweep({ now = new Date() } = {}) {
       } catch (activityErr) {
         logger.warn(`[previsit-balance] activity_log read failed for customer ${visit.customer_id}: ${activityErr.message}`);
       }
-      const fresh = overdue.filter((inv) => !legacyDunnedIds.has(inv.id)
+      const freshAll = overdue.filter((inv) => !legacyDunnedIds.has(inv.id)
         && [inv.last_reminder_at, inv.followup_last_touch_at]
           .filter(Boolean)
           .every((touch) => new Date(touch) < cutoff));
+
+      // Collections policy, per channel, BEFORE the claim (gate off ⇒ both
+      // permitted without consulting, eligible set null = no filtering —
+      // byte-identical, pinned). Dues are computed here (independent of the
+      // invoice set) so the off-ledger carve-out covers a dues-only
+      // reminder: late monthly dues aren't invoiced.
+      const duesLate = lane.mode === 'monthly_membership'
+        && duesCollected === false
+        && String(todayEt) >= String(obligation.graceDateEt);
+      const duesCents = duesLate
+        ? Math.round((Number(visit.monthly_rate) || 0) * 100)
+        : 0;
+      const consult = {
+        customerId: visit.customer_id,
+        purpose: 'balance_reminder',
+        offLedgerBalanceCents: duesCents,
+        logTag: 'previsit-balance',
+      };
+      const smsVerdict = await collectionsChannelVerdict({ ...consult, channel: 'sms' });
+      const emailVerdict = await collectionsChannelVerdict({ ...consult, channel: 'email' });
+      const smsPolicyPermitted = smsVerdict.permitted;
+      const emailPolicyPermitted = emailVerdict.permitted;
+      if (!smsPolicyPermitted && !emailPolicyPermitted) { skipped++; continue; }
+
+      // Gate-on: the reminder may only QUOTE debt the policy holds eligible
+      // (codex r8 — an invoice the policy excludes, e.g. re-resolved as
+      // payer-billed or dunning-stopped, must not ride an allowed
+      // aggregate). Gate-off (null) = no filtering.
+      const eligibleIds = smsPolicyPermitted && smsVerdict.eligibleInvoiceIds !== null
+        ? smsVerdict.eligibleInvoiceIds
+        : emailVerdict.eligibleInvoiceIds;
+      const fresh = eligibleIds === null || eligibleIds === undefined
+        ? freshAll
+        : freshAll.filter((inv) => eligibleIds.map(String).includes(String(inv.id)));
       const overdueRecurringDue = fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
 
       const verdict = previsitBalanceReminderEligible({
@@ -305,7 +341,7 @@ async function runSweep({ now = new Date() } = {}) {
       } catch { emailLegAvailable = false; }
 
       let smsDelivered = false;
-      try {
+      if (smsPolicyPermitted) try {
         const body = await renderSmsTemplate(TEMPLATE_KEY, {
           first_name: visit.first_name || 'there',
           amount: amount.toFixed(2),
@@ -314,6 +350,17 @@ async function runSweep({ now = new Date() } = {}) {
           billing_url: BILLING_PORTAL_URL,
         });
         if (!body) throw new Error('template rendered empty (inactive or missing)');
+        // RECORD-THEN-SEND: the collections ledger row precedes the
+        // delivery attempt; an insert failure throws into this catch and
+        // the send is skipped (no unledgered customer contact, ever).
+        const smsLedger = await ContactLedger.recordContact({
+          customerId: visit.customer_id,
+          channel: 'sms',
+          purpose: 'balance_reminder',
+          invoiceIds: fresh.map((inv) => inv.id),
+          source: 'previsit_balance_reminder',
+          metadata: { scheduled_service_id: visit.id, amount },
+        });
         const result = await sendCustomerMessage({
           to: visit.phone,
           body,
@@ -325,11 +372,15 @@ async function runSweep({ now = new Date() } = {}) {
           // This flow HAS an email sidecar (below), so the billing-channel
           // preference gate applies: an email-preferring customer gets the
           // email only, never both (Codex r4) — but only when the email leg
-          // is genuinely available under the billing prefs (Codex r10).
-          hasEmailLeg: emailLegAvailable,
+          // is genuinely available under the billing prefs (Codex r10) AND
+          // the collections policy permits the email channel.
+          hasEmailLeg: emailLegAvailable && emailPolicyPermitted,
           metadata: { scheduled_service_id: visit.id, amount },
         });
         smsDelivered = !result.blocked && result.sent !== false;
+        if (!smsDelivered) {
+          await ContactLedger.markSendFailed(smsLedger, { code: result.code || 'blocked' });
+        }
       } catch (smsErr) {
         logger.warn(`[previsit-balance] SMS failed for visit ${visit.id}: ${smsErr.message}`);
       }
@@ -339,7 +390,17 @@ async function runSweep({ now = new Date() } = {}) {
       // reminder. Skipped silently when the billing prefs/recipient
       // resolution said no (the sender re-checks internally too).
       let emailDelivered = false;
-      if (emailLegAvailable) try {
+      if (emailLegAvailable && emailPolicyPermitted) try {
+        // RECORD-THEN-SEND, same discipline as the SMS leg: ledger insert
+        // failure throws into this catch and the email is skipped.
+        const emailLedger = await ContactLedger.recordContact({
+          customerId: visit.customer_id,
+          channel: 'email',
+          purpose: 'balance_reminder',
+          invoiceIds: fresh.map((inv) => inv.id),
+          source: 'previsit_balance_reminder',
+          metadata: { scheduled_service_id: visit.id, amount },
+        });
         const AccountMembershipEmail = require('./account-membership-email');
         const emailResult = await AccountMembershipEmail.sendPrevisitBalanceReminder({
           customerId: visit.customer_id,
@@ -350,6 +411,9 @@ async function runSweep({ now = new Date() } = {}) {
           idempotencyKey: `${EMAIL_TEMPLATE_KEY}:${visit.id}`,
         });
         emailDelivered = emailResult?.ok === true;
+        if (!emailDelivered) {
+          await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
+        }
       } catch (emailErr) {
         logger.warn(`[previsit-balance] email failed for visit ${visit.id}: ${emailErr.message}`);
       }

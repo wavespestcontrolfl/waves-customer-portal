@@ -217,6 +217,22 @@ async function rememberForwardAccept({ parentCallSid, dialCallSid, answeredByNum
     });
 }
 
+// Merge the /voice webhook's rich metadata onto a call_log row the
+// /call-status inbound fallback inserted first (see the per-SID advisory
+// lock in the /voice handler). Fresh fields win on shared keys — the routing
+// values are identical either way — while keys only the fallback wrote
+// (e.g. source: 'status_callback') survive as provenance of which endpoint
+// created the row. Metadata may arrive as a jsonb object or a legacy string.
+function foldVoiceMetadata(existingMetadata, freshMetadata) {
+  let prior = {};
+  if (existingMetadata && typeof existingMetadata === 'object') {
+    prior = existingMetadata;
+  } else if (typeof existingMetadata === 'string' && existingMetadata) {
+    try { prior = JSON.parse(existingMetadata) || {}; } catch { prior = {}; }
+  }
+  return { ...prior, ...freshMetadata };
+}
+
 // Compact, parse-safe capture of Twilio's Marketplace `AddOns` webhook param
 // for the call_log metadata audit trail. Parsed object when valid JSON,
 // truncated string when not (still evidence of WHAT arrived), null when the
@@ -538,8 +554,8 @@ function appendAgentHandoff(twiml, config, opts = {}) {
 router.post('/voice', async (req, res) => {
   // Whether THIS delivery took the dedupe ledger row (see /sms for rationale).
   let claimOwned = false;
-  // Flipped true once the call_log row (non-idempotent; twilio_call_sid not
-  // unique) has committed, after which we must not release the claim on error.
+  // Flipped true once the call_log row (insert-or-enrich under the per-SID
+  // lock below) has committed, after which we must not release the claim on error.
   let callLogged = false;
   try {
     const { isEnabled } = require('../config/feature-gates');
@@ -632,16 +648,16 @@ router.post('/voice', async (req, res) => {
       }
     }
 
-    // Log the inbound call (first delivery only — see claim above)
+    // Log the inbound call (first delivery only — see claim above).
+    // Serialized per-CallSid with /call-status and /recording-status: an
+    // instantly-terminal call (no-answer/busy) can deliver its status
+    // callback before this handler commits, and that endpoint's inbound
+    // fallback insert then double-logs the SID (14 sub-second race pairs in
+    // prod before the unique index). If the fallback won the race, fold in
+    // the fields only this webhook knows instead of inserting — and never
+    // touch the terminal status/duration it already recorded.
     if (firstDelivery) {
-    await db('call_log').insert({
-      customer_id: customer?.id || null,
-      direction: 'inbound',
-      from_phone: toE164(From),
-      to_phone: toE164(To),
-      twilio_call_sid: CallSid,
-      status: CallStatus || 'ringing',
-      metadata: JSON.stringify({
+    const freshCallMetadata = ({
         location: numberConfig?.label || 'unknown',
         numberType: numberConfig?.type || 'unknown',
         domain: numberConfig?.domain || null,
@@ -663,7 +679,30 @@ router.post('/voice', async (req, res) => {
         ...(screenDecision !== 'none'
           ? { preconnect_screen: screenDecision === 'gate' ? 'gated' : 'would_gate' }
           : {}),
-      }),
+      });
+    await db.transaction(async (trx) => {
+      // Same per-SID advisory lock as /call-status and /recording-status.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CallSid]);
+      const existing = await trx('call_log')
+        .where('twilio_call_sid', CallSid)
+        .first('id', 'customer_id', 'metadata');
+      if (existing) {
+        await trx('call_log').where({ id: existing.id }).update({
+          customer_id: existing.customer_id || customer?.id || null,
+          metadata: JSON.stringify(foldVoiceMetadata(existing.metadata, freshCallMetadata)),
+          updated_at: new Date(),
+        });
+      } else {
+        await trx('call_log').insert({
+          customer_id: customer?.id || null,
+          direction: 'inbound',
+          from_phone: toE164(From),
+          to_phone: toE164(To),
+          twilio_call_sid: CallSid,
+          status: CallStatus || 'ringing',
+          metadata: JSON.stringify(freshCallMetadata),
+        });
+      }
     });
     // call_log now committed — don't release the claim on a later error.
     callLogged = true;
@@ -1754,6 +1793,7 @@ router._test = {
   connectingAnnouncement,
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
+  foldVoiceMetadata,
   maskPhone,
   maskSid,
   metadataHasForwardAcceptance,
