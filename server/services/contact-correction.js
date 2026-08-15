@@ -71,15 +71,30 @@ const NAME_OWNERSHIP_DISCLAIMER_RE = /\b(?:not|isn'?t|no longer|never|won'?t be)
 // a FAST-model over-extraction of the routine field must not auto-apply.
 // Each candidate's OWN grounded quote must carry correction language AND
 // name the field category it would mutate.
-const NAME_TOPIC_RE = /\b(?:name|surname|spell\w*)\b/i;
-const EMAIL_TOPIC_RE = /\be-?mail\b/i;
-const ADDRESS_TOPIC_RE = /\b(?:address|street|city|zip|unit|apt|apartment|suite|lot|mov(?:ed|ing))\b|\b(?:st|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|cir|circle|way|ter|terrace|pl|place|pkwy|hwy|highway|trail|trl)\.?\b|\b\d{5}(?:-\d{4})?\b/i;
+// Clause-bound (round-9): correction vocabulary and the field topic must
+// co-occur in the SAME clause, at proximity — a quote spanning "my email is
+// wrong; use x@example.com. My name is Jane Smith" has correction language
+// in the email clause and only an ordinary identity statement in the name
+// clause, and must not license a rename. The loose prefilter's bare
+// "<field> … is" branch deliberately does NOT count here: "my email is
+// jane@x.com" beside an address correction is identification, not a
+// mandate. Clauses split on sentence boundaries (dot only when followed by
+// whitespace, so emails and street abbreviations survive).
+const CW_SRC = '(?:wrong|incorrect|misspell\\w*|spell\\w*|typo|actually|correct\\w*|fix\\w*|updat\\w*|chang\\w*|should\\s+be|not\\b|new\\b|old\\b)';
+const NAME_CLAUSE_RE = new RegExp(`\\b(?:name|surname)\\b[\\s\\S]{0,60}${CW_SRC}|${CW_SRC}[\\s\\S]{0,60}\\b(?:name|surname)\\b`, 'i');
+const EMAIL_CLAUSE_RE = new RegExp(`\\be-?mail\\b[\\s\\S]{0,60}${CW_SRC}|${CW_SRC}[\\s\\S]{0,60}\\be-?mail\\b`, 'i');
+const ADDR_TOPIC_SRC = '(?:address|street|city|zip|unit|apt|apartment|suite|lot)';
+const ADDRESS_CLAUSE_RE = new RegExp(`\\b${ADDR_TOPIC_SRC}\\b[\\s\\S]{0,60}${CW_SRC}|${CW_SRC}[\\s\\S]{0,60}\\b${ADDR_TOPIC_SRC}\\b`, 'i');
+const CLAUSE_SPLIT_RE = /[;!?\n]+|\.(?=\s|$)/;
 function quoteCarriesFieldIntent(field, quote) {
-  const q = normValue(quote);
-  if (!CORRECTION_HINT_RE.test(q)) return false;
-  if (field === 'email') return EMAIL_TOPIC_RE.test(q);
-  if (ADDRESS_FIELDS.includes(field)) return ADDRESS_TOPIC_RE.test(q);
-  return NAME_TOPIC_RE.test(q);
+  const clauses = normValue(quote).split(CLAUSE_SPLIT_RE);
+  if (field === 'email') return clauses.some((cl) => EMAIL_CLAUSE_RE.test(cl));
+  if (ADDRESS_FIELDS.includes(field)) {
+    // A stated move IS address-correction language even without the word
+    // "address" ("we just moved to 99 Pine Ave").
+    return clauses.some((cl) => MOVE_EVIDENCE_RE.test(cl) || ADDRESS_CLAUSE_RE.test(cl));
+  }
+  return clauses.some((cl) => NAME_CLAUSE_RE.test(cl));
 }
 
 // Post-extraction format guards — the model proposes, these dispose.
@@ -178,21 +193,24 @@ async function extractSmsContactCorrections({ body }) {
       const needle = normValue(q).replace(/\s+/g, ' ').toLowerCase();
       return needle.length >= 4 && haystack.includes(needle);
     };
-    return list
-      .filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field) && quoteInBody(c.quote))
-      // Each candidate's own quote must carry correction intent bound to its
-      // field category — the message-level prefilter is not per-field
-      // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
-      // statement spread across fragments ("we moved to 99 Pine Ave" +
-      // "zip is 34231"), so the group is licensed as a unit: stated move
-      // evidence or ANY address-bound correction quote licenses all address
-      // candidates — a routine address mention beside an email correction
-      // has neither and every address candidate drops.
-      .filter((c) => {
-        if (!ADDRESS_FIELDS.includes(c.field)) return quoteCarriesFieldIntent(c.field, c.quote);
-        return MOVE_EVIDENCE_RE.test(text)
-          || list.some((g) => g && ADDRESS_FIELDS.includes(g.field) && quoteCarriesFieldIntent(g.field, g.quote));
-      })
+    const base = list.filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field) && quoteInBody(c.quote));
+    // Each candidate's own quote must carry correction intent bound to its
+    // field category — the message-level prefilter is not per-field
+    // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
+    // statement spread across fragments ("we moved to 99 Pine Ave" +
+    // "zip is 34231"), so the group is licensed as a unit: stated move
+    // evidence or ANY address-bound correction quote licenses all address
+    // candidates — a routine address mention beside an email correction
+    // has neither and every address candidate drops. The license scans only
+    // candidates that ALREADY passed confidence/allowlist/grounding
+    // (round-9): a fabricated or low-confidence address entry in the raw
+    // model output must not license the group it failed to join.
+    const addressGroupLicensed = MOVE_EVIDENCE_RE.test(text)
+      || base.some((c) => ADDRESS_FIELDS.includes(c.field) && quoteCarriesFieldIntent(c.field, c.quote));
+    return base
+      .filter((c) => (ADDRESS_FIELDS.includes(c.field)
+        ? addressGroupLicensed
+        : quoteCarriesFieldIntent(c.field, c.quote)))
       // Component binding for name fields, same rule as the call lane: a
       // grounded quote naming only the LAST name ("my last name is Rivers,
       // not Riverz") is not evidence for a first_name entry the model
@@ -374,6 +392,21 @@ async function applyContactCorrections({ customerId, corrections, source, source
       if (!before) { skipped.push({ field: null, reason: 'no_customer' }); return; }
       customerName = [before.first_name, before.last_name].filter(Boolean).join(' ') || 'Customer';
 
+      // (round-9) A concurrent change to ANY address component stales a
+      // staged address group AS A WHOLE: skipping just the changed field and
+      // applying the survivors would graft them onto the concurrently
+      // changed component — the same hybrid-address fabrication the group
+      // completeness checks exist to prevent.
+      if (expectedValues && ADDRESS_FIELDS.some((f) => byField.has(f))) {
+        const addressCasMiss = ADDRESS_FIELDS.some((f) => Object.prototype.hasOwnProperty.call(expectedValues, f)
+          && !sameValue(f, before[f], expectedValues[f]));
+        if (addressCasMiss) {
+          for (const f of ADDRESS_FIELDS) {
+            if (byField.has(f)) { skipped.push({ field: f, reason: 'concurrent_change' }); byField.delete(f); }
+          }
+        }
+      }
+
       const updates = {};
       for (const { field, newValue, quote } of byField.values()) {
         // Compare-and-set (round-8): the caller snapshots the row BEFORE its
@@ -463,7 +496,12 @@ async function applyContactCorrections({ customerId, corrections, source, source
         // the same statement window; the canonical admin path then
         // re-geocodes post-commit (mirrored below).
         await trx('customers').where({ id: customerId }).update({ latitude: null, longitude: null });
-        await require('./customer-properties').syncPrimaryAddress(after, trx);
+        // explicitLine2: this lane's line2 writes are deliberate (explicit
+        // unit clear, whole-street move auto-clear, promoted inline unit) —
+        // a null must CLEAR the primary property's unit, not fall back to it.
+        await require('./customer-properties').syncPrimaryAddress(after, trx, {
+          explicitLine2: updates.address_line2 !== undefined,
+        });
         await require('./customer-address-fanout').propagateCustomerAddressChange({ before, after }, trx);
         addressApplied = true;
       }
@@ -729,17 +767,32 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     // One proposal bell per call, ever — force-reprocessing a call (or a
     // pipeline retry) leaves the candidates pending by design and must not
     // re-ring. The bell row itself is the dedupe anchor.
-    let proposalAlreadyRung = false;
     if (proposals.length) {
       const dedupeKey = `contact-correction-proposal:${callId}`;
-      try {
-        proposalAlreadyRung = Boolean(await knex('notifications')
-          .where({ recipient_type: 'admin' })
-          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-          .first('id'));
-      } catch { proposalAlreadyRung = false; }
-      if (!proposalAlreadyRung) {
-        const lines = proposals.map((p) => `${p.field_name}: ${normValue(p.final_recommended_value)}`).join('; ');
+      const lines = proposals.map((p) => `${p.field_name}: ${normValue(p.final_recommended_value)}`).join('; ');
+      const ringProposalBell = async (runner) => {
+        // (round-9) The fence pre-check above is unlocked, so a pass that
+        // crosses the reclaim threshold here could ring from its OLDER
+        // extraction and the per-call dedupe would then suppress the owning
+        // pass's newer values. With a procToken, hold the token-conditioned
+        // call_log row FOR UPDATE across the dedupe check + emission so a
+        // reclaim serializes with the bell; a pass that already lost the
+        // fence rings nothing.
+        if (procToken) {
+          const owned = await runner('call_log')
+            .where({ id: callId, processing_token: procToken })
+            .forUpdate()
+            .first('id');
+          if (!owned) return;
+        }
+        let alreadyRung = false;
+        try {
+          alreadyRung = Boolean(await runner('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+            .first('id'));
+        } catch { alreadyRung = false; }
+        if (alreadyRung) return;
         await require('./notification-service').notifyAdmin(
           'customer',
           'Contact corrections proposed from a call',
@@ -750,7 +803,13 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
             bell: true,
             metadata: { customerId, source: 'call', sourceId: callId, dedupeKey, proposed: proposals.map((p) => p.field_name) },
           },
-        ).catch((err) => logger.warn(`[contact-correction] proposal bell failed for call ${callId}: ${errTag(err)}`));
+        );
+      };
+      try {
+        if (procToken) await knex.transaction((trx) => ringProposalBell(trx));
+        else await ringProposalBell(knex);
+      } catch (err) {
+        logger.warn(`[contact-correction] proposal bell failed for call ${callId}: ${errTag(err)}`);
       }
     }
 

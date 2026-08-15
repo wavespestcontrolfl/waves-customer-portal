@@ -1168,6 +1168,154 @@ describe('round-8 hardening', () => {
   });
 });
 
+describe('round-9 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('a CAS miss on one address component rejects the whole staged group', async () => {
+    // Admin changed the CITY while extraction was in flight; the staged
+    // street+zip must not commit against it.
+    const knex = makeStubKnex({ customers: [{ ...baseCustomer(), city: 'Freshville' }], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '99 Pine Ave' },
+        { field: 'city', newValue: 'Sarasota' },
+        { field: 'zip', newValue: '34231' },
+      ],
+      source: 'sms',
+      knex,
+      expectedValues: { ...baseCustomer() }, // snapshot still says Testville
+    });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'address_line1', reason: 'concurrent_change' });
+    expect(res.skipped).toContainEqual({ field: 'zip', reason: 'concurrent_change' });
+    expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
+    expect(mockAddressFanout).not.toHaveBeenCalled();
+  });
+
+  it('correction language in one clause never licenses a field mentioned in another', async () => {
+    const body = 'My email is wrong, use jordan.rivers@example.com. My name is Jane Smith';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'email', new_value: 'jordan.rivers@example.com', quote: 'my email is wrong, use jordan.rivers@example.com', confidence: 'high' },
+          { field: 'first_name', new_value: 'Jane', quote: 'My email is wrong, use jordan.rivers@example.com. My name is Jane Smith', confidence: 'high' },
+          { field: 'last_name', new_value: 'Smith', quote: 'My email is wrong, use jordan.rivers@example.com. My name is Jane Smith', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['email']);
+  });
+
+  it('a routine email statement beside an address correction never applies (bare "email is")', async () => {
+    const body = 'Fix my address: 99 Pine Ave, Sarasota 34231. My email is jordan.riverz@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'fix my address: 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'fix my address: 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'fix my address: 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'email', new_value: 'jordan.riverz@example.com', quote: 'my email is jordan.riverz@example.com', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['address_line1', 'city', 'zip']);
+  });
+
+  it('an ungrounded address candidate cannot license the group', async () => {
+    // The fabricated "my new address" quote is absent from the SMS; the
+    // grounded candidates carry only routine language — nothing licenses
+    // the group.
+    const body = 'My email is wrong, use jordan.rivers@example.com. Service is at 99 Pine Ave, Sarasota 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'email', new_value: 'jordan.rivers@example.com', quote: 'my email is wrong, use jordan.rivers@example.com', confidence: 'high' },
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'my new address is 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'Service is at 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'Service is at 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['email']);
+  });
+
+  it('a stale processing pass never rings the proposal bell (fence held through emission)', async () => {
+    const quote = 'the email is wrong, it is jordan dot rivers at example dot com';
+    const stale = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ processing_token: 'tok-live', transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [candidate({ id: 'e1', field_name: 'email', final_recommended_value: 'jordan.rivers@example.com', evidence_quote: quote, confidence: null })],
+      notifications: [],
+    });
+    // Peer reclaims between the pre-check read and the bell: simulate by
+    // running with a token the row no longer carries.
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex: stale, procToken: 'tok-stale' });
+    expect(res.reason).toBe('fence_lost');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+
+    const owning = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ processing_token: 'tok-live', transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [candidate({ id: 'e1', field_name: 'email', final_recommended_value: 'jordan.rivers@example.com', evidence_quote: quote, confidence: null })],
+      notifications: [],
+    });
+    const resOwn = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex: owning, procToken: 'tok-live' });
+    expect(resOwn.reason).toBe('proposed_only');
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    // The bell emission itself held the token-conditioned row lock.
+    expect(owning._forUpdates).toContain('call_log');
+  });
+
+  it('an explicit unit clear propagates to the primary-property mirror', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [{ field: 'address_line2', newValue: '' }],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied.map((a) => a.field)).toEqual(['address_line2']);
+    expect(mockSyncPrimaryAddress).toHaveBeenCalledWith(
+      expect.objectContaining({ address_line2: null }),
+      expect.anything(),
+      { explicitLine2: true },
+    );
+  });
+
+  it('a locality-only typo fix leaves the primary line2 fallback intact', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [{ field: 'city', newValue: 'Sarasota' }],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied.map((a) => a.field)).toEqual(['city']);
+    expect(mockSyncPrimaryAddress).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      { explicitLine2: false },
+    );
+  });
+});
+
 describe('field allowlist', () => {
   it('never includes phone', () => {
     expect(APPLYABLE_FIELDS).not.toContain('phone');
