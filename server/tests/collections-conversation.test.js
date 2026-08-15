@@ -108,7 +108,7 @@ const CUSTOMER = {
 
 function chain({ first } = {}) {
   const q = {};
-  ['where', 'whereNull', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereNull', 'whereRaw', 'orderBy', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => first);
   q.update = jest.fn(async () => 1);
   return q;
@@ -486,4 +486,33 @@ test('opt-out + human combo revokes consent before transferring', async () => {
   await turn(convo, 'stop calling me and let me talk to a real person');
   expect(flags.revokeAutomatedVoiceConsent).toHaveBeenCalled();
   expect(convo._captures.consentRevoked).toBe(true);
+});
+
+// prb-r8 pins.
+describe('prb-r8', () => {
+  test('a second session on the same call refuses (one-session-ever claim)', async () => {
+    setDb();
+    // The claim UPDATE lands 0 rows — another socket already holds it.
+    const queues = {
+      call_log: [
+        chain({ first: CALL_ROW }),
+        (() => { const q = chain(); q.update = jest.fn(async () => 0); return q; })(),
+      ],
+      collection_cases: [chain({ first: CASE_ROW })],
+      customers: [chain({ first: CUSTOMER })],
+    };
+    db.mockImplementation((t) => (queues[t] && queues[t].length ? queues[t].shift() : chain()));
+    const { convo } = makeConvo();
+    const ok = await convo._contextReady;
+    expect(ok).toBe(false);
+    expect(convo._refused).toBe('session_already_claimed');
+  });
+
+  test('a case belonging to another customer refuses the session', async () => {
+    setDb({ caseRow: { ...CASE_ROW, customer_id: 'SOMEONE-ELSE' } });
+    const { convo } = makeConvo();
+    const ok = await convo._contextReady;
+    expect(ok).toBe(false);
+    expect(convo._refused).toBe('case_customer_mismatch');
+  });
 });

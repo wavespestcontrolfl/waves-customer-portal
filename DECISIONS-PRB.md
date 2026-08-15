@@ -84,3 +84,5 @@ review.
     `send_failed` and the model is told to offer the office number instead.
 
 13. **AMD retained (prb-gh3 challenge).** machineDetection=DetectMessageEnd is Twilio carrier-side call-progress classification — no audio reaches our systems or ConversationRelay before press-1, and nothing records. The vestibule blocker (counsel review item) was consent before CR audio processing, which still holds. Counsel should confirm this reading in the pre-flip pass; the alternative (no AMD) plays the voicemail message into answering machines mid-greeting.
+
+14. **One-session-ever claim instead of the inbound generation ladder (prb-gh6 challenge).** A collections call's relay session takes an atomic claim on its call_log row; a reconnect (fresh token, burn check passed) refuses rather than superseding. Losing a genuinely dropped call is the safe direction for a supervised outbound pilot — the case reconciles through the close/status paths — versus two live sessions double-writing. Revisit with the full #3373 generation ladder if reconnect losses show up in pilot transcripts.

@@ -2158,6 +2158,7 @@ router.post('/contact-compliance-checks', async (req, res, next) => {
 // collections contact ledger (masked; no PII beyond what the admin bell
 // already shows). Safe with the lane dark — every count is simply zero.
 router.get('/collections-voice-status', async (req, res, next) => {
+    let queryFailed = null;
   try {
     const { isVoiceLatePaymentEnabled, isPayLinkEnabled } = require('../services/collections/outbound-voice/gates');
     const { retentionDays } = require('../services/collections/outbound-voice/retention');
@@ -2166,7 +2167,7 @@ router.get('/collections-voice-status', async (req, res, next) => {
       .select('current_state')
       .count('* as count')
       .groupBy('current_state')
-      .catch(() => []);
+      .catch((err) => { queryFailed = err.message; return []; });
     const caseCounts = {};
     for (const row of caseRows) caseCounts[row.current_state] = parseInt(row.count, 10);
 
@@ -2175,7 +2176,7 @@ router.get('/collections-voice-status', async (req, res, next) => {
       .orderBy('occurred_at', 'desc')
       .limit(10)
       .select('id', 'customer_id', 'occurred_at', 'metadata')
-      .catch(() => []);
+      .catch((err) => { queryFailed = err.message; return []; });
     const lastOutcomes = recent.map((r) => {
       const meta = typeof r.metadata === 'string'
         ? (() => { try { return JSON.parse(r.metadata); } catch { return {}; } })()
@@ -2191,6 +2192,11 @@ router.get('/collections-voice-status', async (req, res, next) => {
       };
     });
 
+    if (queryFailed) {
+      // A dashboard read failure must SURFACE (gh prb-r8), never render as
+      // an empty-but-healthy lane.
+      return res.status(503).json({ error: 'collections_status_unavailable', detail: queryFailed });
+    }
     res.json({
       gates: {
         GATE_VOICE_LATE_PAYMENT: isVoiceLatePaymentEnabled(),

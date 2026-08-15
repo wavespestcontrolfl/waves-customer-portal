@@ -306,7 +306,10 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
 
     // ── Rolling frequency windows (collections ledger) ──────────────────
     const windowStart = new Date(now.getTime() - 7 * DAY_MS);
+    // Rows stamped never_contacted (a dial rejected before Twilio touched
+    // the customer, gh prb-r8) don't consume the frequency windows.
     let recent = await db('collections_contact_ledger')
+      .whereRaw("COALESCE(metadata->>'never_contacted', '') <> 'true'")
       .where({ customer_id: customerId })
       .where('occurred_at', '>', windowStart)
       .orderBy('occurred_at', 'desc')

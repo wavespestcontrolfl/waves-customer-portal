@@ -153,6 +153,13 @@ async function writeCallOutcome(callLogId, { outcome, captures = {}, now = new D
         });
         if (onlyIfNoOutcome && !updated) { skipped = true; return; }
       }
+      // The terminal outcome stamps the call row too (gh prb-r8): nothing
+      // else writes call_log.call_outcome for answered collections calls —
+      // the completed-status webhook deliberately delegates here.
+      await trx('call_log').where({ id: callLogId }).update({
+        call_outcome: outcome,
+        updated_at: new Date(),
+      });
       if (caseId && Number.isFinite(caseVersion)) {
         await trx('collection_cases')
           .where({ id: caseId, case_version: caseVersion })

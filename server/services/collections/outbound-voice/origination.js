@@ -254,7 +254,10 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     return { dialed: true, reason: 'dialed', callSid: call.sid, callLogId };
   } catch (err) {
     logger.error(`[collections-voice] dial failed for case ${caseRow.id}: ${err.message}`);
-    await ContactLedger.markSendFailed(ledgerEntry, { stage: 'calls_create' });
+    // calls.create threw BEFORE Twilio touched the customer (gh prb-r8):
+    // the row stands for audit but must not consume the frequency windows —
+    // the customer was never contacted.
+    await ContactLedger.markSendFailed(ledgerEntry, { stage: 'calls_create', never_contacted: true });
     if (callLogId) {
       await db('call_log').where({ id: callLogId })
         .update({ status: 'failed', updated_at: new Date() })

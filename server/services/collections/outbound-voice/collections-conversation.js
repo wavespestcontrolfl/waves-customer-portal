@@ -270,6 +270,30 @@ class CollectionsConversation {
         .first('id', 'first_name', 'last_name', 'phone', 'address_line1', 'zip')
       : null;
     if (!caseRow || !customer) return this._refuse('case_or_customer_missing');
+    // The case must belong to the authenticated call row's customer (gh
+    // prb-r8): a repointed/merged case id in metadata must never hand this
+    // session another customer's balance.
+    if (String(caseRow.customer_id) !== String(row.customer_id)) {
+      return this._refuse('case_customer_mismatch');
+    }
+
+    // ONE session EVER per collections call (gh prb-r8): a reconnect's
+    // fresh token passes the burn check, so the atomic claim on the call
+    // row is the boundary — the conditional UPDATE lands once; a duplicate
+    // socket refuses. Deliberately simpler than the inbound lane's
+    // generation ladder (DECISIONS-PRB #14): losing a genuinely dropped
+    // call is the safe direction for a supervised outbound pilot, never
+    // two live sessions double-writing.
+    const claimed = await db('call_log')
+      .where({ id: row.id })
+      .whereRaw("COALESCE(metadata->>'collections_session_claimed_at', '') = ''")
+      .update({
+        metadata: db.raw(
+          "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ collections_session_claimed_at: new Date().toISOString() })],
+        ),
+      });
+    if (!claimed) return this._refuse('session_already_claimed');
 
     // Balance from the SAME eligible-invoice authority the policy used at
     // dial time (codex prb-r1: openBalanceSummary omits legacy 'unpaid'
@@ -371,7 +395,10 @@ class CollectionsConversation {
       // "Stop calling me and let me speak to a person" (gh prb-r7): the
       // opt-out half must be RECORDED before the escape ends the session —
       // the model never sees this utterance.
-      if (/\b(stop calling|don'?t call|do not call|no more calls|take me off|never call)\b/i.test(rawText)) {
+      // Widened (gh prb-r8) — and EVERY escape utterance also rides the
+      // callback/transfer card verbatim (scrubbed), so a phrasing this
+      // regex misses still reaches a human's eyes with the request.
+      if (/\b(stop calling|don'?t call|do not call|no more calls|take me off|remove me from|never call|revoke (my )?consent|opt(-| )?out|quit calling|do not contact)\b/i.test(rawText)) {
         const rev = await flags.revokeAutomatedVoiceConsent(this._ctx.customer.id, {
           reason: 'combined opt-out + human request during a billing follow-up call',
         }).catch(() => ({ ok: false }));
@@ -390,6 +417,10 @@ class CollectionsConversation {
           }
         }
       }
+      try {
+        const { scrubPans } = require('../../../utils/pan-scrub');
+        this._captures.humanEscapeUtterance = scrubPans(String(rawText)).slice(0, 200);
+      } catch { this._captures.humanEscapeUtterance = null; }
       return this._humanEscape();
     }
 
@@ -871,7 +902,7 @@ class CollectionsConversation {
       callbackCard = await NotificationService.notifyAdmin(
         'billing',
         'Callback requested on billing follow-up call',
-        `A customer on an automated billing follow-up call asked for a person outside office hours. Please call them back.`,
+        `A customer on an automated billing follow-up call asked for a person outside office hours. Please call them back.${this._captures.humanEscapeUtterance ? ` They said: "${this._captures.humanEscapeUtterance}"` : ''}`,
         {
           link: this._ctx ? `/admin/customers/${this._ctx.customer.id}` : undefined,
           metadata: { source: 'collections_voice', callLogId: this._ctx?.callLogId },
