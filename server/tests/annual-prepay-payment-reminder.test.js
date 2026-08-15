@@ -20,6 +20,17 @@ jest.mock('../services/short-url', () => ({
 jest.mock('../utils/portal-url', () => ({
   publicPortalUrl: jest.fn(() => 'https://portal.wavespestcontrol.com'),
 }));
+// The reminder now consults the collections rail-guard (gate-on only) and
+// records-then-sends through the always-on contact ledger — mocked healthy
+// so the delivery-path tests exercise the send.
+jest.mock('../services/collections/rail-guard', () => ({
+  collectionsChannelPermitted: jest.fn(async () => true),
+}));
+jest.mock('../services/collections/contact-ledger', () => ({
+  recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
+  markSendFailed: jest.fn(async () => true),
+  markDelivered: jest.fn(async () => true),
+}));
 jest.mock('../services/customer-credit', () => ({
   autoApplyAccountCreditIfEnabled: jest.fn().mockResolvedValue(null),
   reverseAppliedCredit: jest.fn().mockResolvedValue(0),
@@ -468,5 +479,91 @@ describe('annual prepay pre-visit payment reminders', () => {
     expect(result).toEqual({ sent: 0 });
     expect(candidateQ3.where).toHaveBeenCalledWith('term_start', '2026-07-11');
     expect(candidateQ1.where).toHaveBeenCalledWith('term_start', '2026-07-09');
+  });
+});
+
+// gh-r1 (2026-08-14): the reminder is a balance-outreach rail — policy
+// consult + record-then-send ledger discipline bind it like the dunning
+// engines. Denials and ledger outages release the claim for a later retry.
+describe('collections policy + ledger on the payment reminder', () => {
+  const { collectionsChannelPermitted } = require('../services/collections/rail-guard');
+  const ContactLedger = require('../services/collections/contact-ledger');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    _private.resetCachesForTests();
+    collectionsChannelPermitted.mockResolvedValue(true);
+    ContactLedger.recordContact.mockResolvedValue({ id: 'led-1', metadata: {} });
+  });
+
+  function armThroughSend({ releaseExpected = false } = {}) {
+    const claimQ = query({ returning: [{ ...BASE_TERM }] });
+    const tailQ = query(); // markSent OR releaseClaim — both update annual_prepay_terms
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: REMINDER_COLS }),
+        claimQ,
+        tailQ,
+      ],
+      invoices: [
+        query({ first: { ...UNPAID_INVOICE } }),
+        query({ first: { ...UNPAID_INVOICE } }),
+      ],
+      invoice_followup_sequences: [query({ first: undefined })],
+      customers: [query({ first: { ...CUSTOMER } })],
+      ...(releaseExpected ? {} : { customer_interactions: [query()] }),
+    });
+    renderSmsTemplate.mockResolvedValue('pay reminder body');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    return { tailQ };
+  }
+
+  test('a policy denial releases the claim, reverses the credit, and sends NOTHING', async () => {
+    armThroughSend({ releaseExpected: true });
+    collectionsChannelPermitted.mockResolvedValueOnce(false);
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+    expect(result).toEqual({ sent: false, reason: 'collections_policy_denied' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+    // r7: the plan invoice is 'draft' (never in the eligible set) — the
+    // consult is aggregate (invoiceId null) with the validated plan amount
+    // riding the off-ledger carve-out.
+    expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder',
+      invoiceId: null, offLedgerBalanceCents: 39204,
+    }));
+  });
+
+  test('an unavailable ledger skips the send and releases the claim (record-then-send)', async () => {
+    armThroughSend({ releaseExpected: true });
+    ContactLedger.recordContact.mockRejectedValueOnce(new Error('ledger down'));
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+    expect(result).toEqual({ sent: false, reason: 'ledger_unavailable' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the delivered path records BEFORE the send; a blocked send stamps send_failed', async () => {
+    armThroughSend();
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+    expect(result).toEqual({ sent: true, termId: 'term-1' });
+    expect(ContactLedger.recordContact.mock.invocationCallOrder[0])
+      .toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'annual_prepay_payment_reminder', invoiceIds: ['inv-1'],
+    }));
+
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    _private.resetCachesForTests();
+    collectionsChannelPermitted.mockResolvedValue(true);
+    ContactLedger.recordContact.mockResolvedValue({ id: 'led-1', metadata: {} });
+    armThroughSend({ releaseExpected: true });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'QUIET_HOURS_HOLD' });
+    await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'led-1' }),
+      expect.objectContaining({ code: 'QUIET_HOURS_HOLD' }),
+    );
   });
 });

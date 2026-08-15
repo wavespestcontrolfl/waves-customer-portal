@@ -1,4 +1,14 @@
 jest.mock('../models/db', () => jest.fn());
+// Collections contact ledger (record-then-send, codex 2026-08-14): the rails
+// now insert a ledger row BEFORE each delivery attempt and SKIP the send if
+// the insert fails. Mock it as always-succeeding so this suite keeps testing
+// its own concern; the ledger discipline itself is pinned in
+// collections-rails-policy.test.js.
+jest.mock('../services/collections/contact-ledger', () => ({
+  recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
+  markSendFailed: jest.fn(async () => true),
+}));
+
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),

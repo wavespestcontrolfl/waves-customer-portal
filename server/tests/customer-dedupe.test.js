@@ -1524,3 +1524,34 @@ describe('runAutoMergeSweep', () => {
     expect(notifyAdmin.mock.calls[0][3].link).toBe(`/admin/customers?customerId=${winnerRow.id}`);
   });
 });
+
+describe('collections_flags merge (codex 2026-08-15 r6)', () => {
+  it('registers collections_flags with the release-collisions handler (shared active flags fold, never abort)', () => {
+    const { UNIQUE_COLLISION_HANDLERS, repointFlagsReleaseCollisions } = dedupe._test;
+    expect(UNIQUE_COLLISION_HANDLERS.collections_flags).toBe(repointFlagsReleaseCollisions);
+  });
+
+  it('repointFlagsReleaseCollisions: moves the winner-lacking flag, RELEASES the colliding one (history kept, never dropped)', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const state = { updated: [] };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (q.called('select')) return [{ id: 'f1' }, { id: 'f2' }];
+      if (q.called('update')) {
+        const rowId = q.args('where')[0].id;
+        const patch = q.args('update')[0];
+        if (rowId === 'f2' && !patch.released_at) { const e = new Error('duplicate key'); e.code = '23505'; throw e; }
+        state.updated.push({ rowId, patch });
+        return 1;
+      }
+      return [];
+    }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
+    const result = await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    expect(state.updated).toEqual([
+      { rowId: 'f1', patch: { customer_id: 'W' } },
+      { rowId: 'f2', patch: { customer_id: 'W', released_at: 'CURRENT_TIMESTAMP' } },
+    ]);
+    expect(result).toMatch(/moved 1, released 1/);
+  });
+});

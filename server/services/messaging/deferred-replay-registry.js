@@ -46,6 +46,15 @@ const CANCELLATION_REPLY_END_STATES = new Set(['converted', 'escalated', 'cancel
 
 const CONTRACT_TERMINAL_STATUSES = new Set(['signed', 'cancelled', 'voided', 'expired']);
 
+// New enqueues stamp customer_id in the metadata; legacy scheduled rows
+// predate the stamp, so fall back to the invoice's own customer.
+async function resolveFollowupCustomerId(meta) {
+  if (meta.customer_id) return meta.customer_id;
+  if (!meta.invoice_id) return null;
+  const inv = await db('invoices').where({ id: meta.invoice_id }).first('customer_id');
+  return inv?.customer_id || null;
+}
+
 const failClosed = (label, id, err) => {
   logger.warn(`[deferred-replay] ${label} recheck failed for ${id} (holding for retry): ${err.message}`);
   return { eligible: false, reason: 'recheck-failed', retryable: true };
@@ -106,8 +115,95 @@ const REGISTRY = {
 
   invoice_followup_deferred: {
     async recheck(meta) {
-      return invoiceStillCollectible(meta);
+      const collectible = await invoiceStillCollectible(meta);
+      if (collectible?.eligible === false) return collectible;
+      // Collections policy re-consult at ACTUAL delivery time (codex
+      // 2026-08-14 P1): a do_not_text/collection_hold flag or a live
+      // conversation landing during the quiet-hours hold must suppress the
+      // replay — the enqueue-time verdict is stale by morning. Gate off ⇒
+      // the guard permits without consulting (byte-identical). A denial is
+      // a terminal suppress, not a retry hold: the sequence's next touch
+      // re-evaluates fresh (same shape as the rendered_amount suppress).
+      const gateOn = process.env.GATE_COLLECTIONS_POLICY === 'true';
+      // Legacy scheduled rows predate both the policy wiring and the
+      // reservation key; gate off + keyless = zero extra reads,
+      // byte-identical replay.
+      if (!gateOn && !meta.ledger_reservation_key) return { eligible: true };
+      try {
+        const customerId = await resolveFollowupCustomerId(meta);
+        if (!customerId) return { eligible: false, reason: 'customer-unresolved' };
+        if (gateOn) {
+          const { collectionsChannelPermitted } = require('../collections/rail-guard');
+          const permitted = await collectionsChannelPermitted({
+            customerId,
+            invoiceId: meta.invoice_id,
+            channel: 'sms',
+            purpose: 'late_payment',
+            logTag: 'invoice-followup-replay',
+          });
+          if (!permitted) return { eligible: false, reason: 'collections-policy-denied' };
+        }
+        // RESERVE-THEN-SEND (codex 2026-08-14 P1 ×2): the delivery-time
+        // ledger row is written BEFORE dispatch — a ledger outage holds the
+        // replay exactly like every other record-then-send rail — and it is
+        // KEYED to the enqueue-minted reservation key, so a recheck retry
+        // reuses the standing row instead of double-counting the frequency
+        // window. Reservation runs gate-independent: the ledger is
+        // always-on by design. The row's occurred_at is reservation time
+        // (immediately before dispatch), which is what the 24h window must
+        // key off — the original blocked-attempt row keeps its send_failed
+        // stamp and blocked timestamp.
+        if (meta.ledger_reservation_key) {
+          const ContactLedger = require('../collections/contact-ledger');
+          await ContactLedger.recordContact({
+            customerId,
+            channel: 'sms',
+            purpose: 'late_payment',
+            invoiceIds: meta.invoice_id ? [meta.invoice_id] : [],
+            source: 'invoice_followup_replay',
+            idempotencyKey: `followup-replay:${meta.ledger_reservation_key}`,
+            metadata: {
+              followup_sequence_id: meta.followup_sequence_id || null,
+              original_block_code: meta.original_block_code || null,
+              replay: true,
+            },
+          });
+        }
+      } catch (err) {
+        return failClosed('invoice-followup-policy', meta.invoice_id, err);
+      }
+      return { eligible: true };
     },
+    async finalize(meta) {
+      const ContactLedger = require('../collections/contact-ledger');
+      if (meta.ledger_reservation_key) {
+        // The reservation already stands from recheck — stamp it delivered
+        // (best-effort; an unstamped reserved row only over-suppresses).
+        await ContactLedger.markDelivered(`followup-replay:${meta.ledger_reservation_key}`);
+        return;
+      }
+      // Legacy keyless rows never reserved — record at delivery so the 24h
+      // window keys off the real send, not the enqueue-time blocked
+      // attempt. durableFinalize retries a failed insert until it lands.
+      const customerId = await resolveFollowupCustomerId(meta);
+      if (!customerId) {
+        logger.warn(`[deferred-replay] invoice-followup replay delivered but customer unresolved for invoice ${meta.invoice_id} — ledger row skipped`);
+        return;
+      }
+      await ContactLedger.recordContact({
+        customerId,
+        channel: 'sms',
+        purpose: 'late_payment',
+        invoiceIds: meta.invoice_id ? [meta.invoice_id] : [],
+        source: 'invoice_followup_replay',
+        metadata: {
+          followup_sequence_id: meta.followup_sequence_id || null,
+          original_block_code: meta.original_block_code || null,
+          replay: true,
+        },
+      });
+    },
+    durableFinalize: true,
   },
 
   dispatch_completion_deferred: {
