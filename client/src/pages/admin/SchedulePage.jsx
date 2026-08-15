@@ -11638,12 +11638,16 @@ export function CompletionPanel({
     // Schema-internal fields (compliance/calibration) never reach the prompt,
     // so they can't open the generation gate either — mirrors the server's
     // sections-based check (codex r4).
+    // Only CURRENT-schema, non-internal keys count — a restored draft can
+    // carry a value for a field removed from the schema, which the server's
+    // sections builder (schema-driven) would drop, 400ing a request that
+    // value alone opened (codex r26; mirrors the chip membership rule).
     const nonInternalValuesNonEmpty = (schema, obj) => {
-      const internalKeys = new Set(
-        (schema?.fields || []).filter((f) => f.internal).map((f) => f.key),
+      const countableKeys = new Set(
+        (schema?.fields || []).filter((f) => !f.internal).map((f) => f.key),
       );
       return Object.entries(obj || {}).some(
-        ([key, v]) => !internalKeys.has(key)
+        ([key, v]) => countableKeys.has(key)
           && (Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== ""),
       );
     };

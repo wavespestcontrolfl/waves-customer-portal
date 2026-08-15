@@ -4260,8 +4260,27 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             captures: visibleTrapSnapshot.values?.captures,
           }).length === 0)
       );
+    // When a typed story GOVERNS the visit — the primary snapshot, or on
+    // companion-only profiles any customer-visible companion snapshot — the
+    // body may only drive the summary if that story ACCEPTED it (bodySource
+    // stamped). Zero-state branches deliberately refuse the drafted body in
+    // favor of fixed wording, and the summary must not resurrect what
+    // Today's Result refused (codex r26 on #3420).
+    const governingSnapshots = [
+      typedSnapshot,
+      ...(typedSnapshot ? [] : companionSnapshots.filter(
+        (snap) => staffViewer || snap.delivery === 'auto_send',
+      )),
+    ].filter((snap) => snap?.todaysResult);
+    const typedStoryAcceptedBody = !governingSnapshots.length
+      || governingSnapshots.some(
+        (snap) => snap.todaysResult?.bodySource === 'technician_report'
+          // A frozen reconcile confirmation is a PERSON accepting the body
+          // over the matcher — honored here like trapSetupScreened above.
+          || snap.todaysResult?.reconcileConfirmed === true,
+      );
     const drivesSummary = technicianReport?.body && trapSetupScreened
-      && (!typedSnapshot || typedSnapshot.todaysResult?.bodySource === 'technician_report');
+      && typedStoryAcceptedBody;
     if (drivesSummary) {
       visitSummary = technicianReport.body;
       visitSummarySource = 'technician_report';
