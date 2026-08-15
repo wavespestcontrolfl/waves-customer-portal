@@ -1726,6 +1726,33 @@ describe('grounded-only words require WORD-BOUNDARY grounding (codex #3423 r5)',
     }
   });
 
+  test('stem variants of grounded-only words never downgrade to substring (codex #3423 r6)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    // wordVariants('accepted') -> 'accept', which is not itself in the
+    // grounded-only set — the strictness must follow the BASE word.
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { note: 'unaccepted offer, acceptable balance' },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment accepted' },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+
+  test('fabricated preference and account-state prose rejects (codex #3423 r6)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer requests quiet arrival', 'Account in good standing']) {
+      const verdict = validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
   test('a boundary-grounded tier word still passes', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = {

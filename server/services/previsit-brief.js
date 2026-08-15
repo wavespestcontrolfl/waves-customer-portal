@@ -957,12 +957,12 @@ const COMMON_PROSE_WORDS = new Set([
   'context', 'account', 'accounts',
   'information', 'scheduling',
   'waves', 'retrieve',
-  'transition', 'transitions', 'standing', 'minute', 'minutes', 'resident', 'residents',
+  'transition', 'transitions', 'minute', 'minutes', 'resident', 'residents',
   'list', 'lists', 'site', 'sites',
   'communication', 'communications',
   'included', 'includes', 'including', 'state', 'stated', 'states', 'show', 'shows', 'shown',
   'past', 'introduction', 'discuss', 'discussing', 'baseline', 'relevant', 'mindful',
-  'someone', 'documented', 'quiet',
+  'someone', 'documented',
   'vacuum', 'vacuuming', 'follow-up', 'walk-through',
 ]);
 
@@ -979,15 +979,20 @@ const GROUNDED_ONLY_WORDS = new Set([
   'available', 'availability',
 ]);
 
-// Grounding match for a single candidate word: grounded-only vocabulary
-// must match on a WORD BOUNDARY — substring grounding let 'silver' ground
-// on "silverfish" and 'gold' on "marigold" (codex #3423 r5). Ordinary
-// words keep substring matching (the light-stem tiers rely on it).
-function groundedWordMatch(v, groundedText) {
-  if (GROUNDED_ONLY_WORDS.has(v)) {
-    return new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedText);
-  }
-  return groundedText.includes(v);
+// Word-level grounding for one candidate word ACROSS its stem variants.
+// Grounded-only vocabulary must match on a WORD BOUNDARY — substring
+// grounding let 'silver' ground on "silverfish" and 'gold' on "marigold"
+// (codex #3423 r5) — and strictness is decided by the BASE word, not the
+// variant: wordVariants('accepted') yields 'accept', which is not in the
+// set, so a per-variant check fell back to substring and "unaccepted
+// offer" grounded "Payment accepted" (r6). Every variant of a
+// grounded-only word boundary-matches; ordinary words keep substring
+// matching (the light-stem tiers rely on it).
+function groundedWordOk(word, groundedText) {
+  const strict = wordVariants(word).some((v) => GROUNDED_ONLY_WORDS.has(v));
+  return wordVariants(word).some((v) => (strict
+    ? new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedText)
+    : groundedText.includes(v)));
 }
 
 // Short/common organism names — too short (or too domain-loaded) for the
@@ -1031,7 +1036,7 @@ function isGroundedReference(candidate, groundedText) {
     .filter((w) => /^[a-z][a-z'-]{3,}$/.test(w))
     .filter((w) => !wordVariants(w).some((v) => REFERENCE_STOP_WORDS.has(v) || COMMON_PROSE_WORDS.has(v)));
   if (!words.length) return true;
-  return words.every((w) => wordVariants(w).some((v) => groundedWordMatch(v, groundedText)));
+  return words.every((w) => groundedWordOk(w, groundedText));
 }
 
 // Allowlist-extraction of product-ish / target-ish references from brief
@@ -1206,7 +1211,7 @@ function findUngroundedClaim(body, grounding) {
     // prose words asserts nothing beyond its verb.
     const significant = words.filter((w) => !COMMON_PROSE_WORDS.has(w));
     if (!significant.length) return true;
-    return significant.every((w) => wordVariants(w).some((v) => groundedWordMatch(v, groundedText)));
+    return significant.every((w) => groundedWordOk(w, groundedText));
   };
   const labeledFields = [
     ...(body.priorities || []).map((text) => ({ text, instructional: true })),
@@ -1344,8 +1349,7 @@ function findUngroundedClaim(body, grounding) {
     REFERENCE_STOP_WORDS.has(v)
     || COMMON_PROSE_WORDS.has(v)
     || selfReported.has(v)
-    || groundedWordMatch(v, groundedText)
-  ));
+  )) || groundedWordOk(word, groundedText);
   for (const field of outputFields) {
     // 4+ characters: 'mice'/'rats'/'tick'/'flea'-length organisms must
     // not slip under the scan (3-letter singulars are covered in practice
