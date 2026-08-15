@@ -12017,17 +12017,17 @@ export function CompletionPanel({
               next.totalAmount = "";
             }
           } else if (field === "rate" || field === "areaValue") {
-            next.totalAmount = String(next.rateUnit || "").endsWith("/gal")
+            next.totalAmount = isPerBasisUnit(next.rateUnit)
               ? ""
               : derivedTotalAmount(next.rate, next.areaValue);
           } else if (field === "rateUnit") {
-            // Concentration rate units keep Total in the base quantity unit,
-            // and can't derive a total at all (it depends on carrier volume).
-            const isConcentration = String(value).endsWith("/gal");
-            next.amountUnit = isConcentration
-              ? value.slice(0, -"/gal".length)
-              : value;
-            if (isConcentration) next.totalAmount = "";
+            // Per-basis rate units (mix concentrations, spot placements,
+            // per-acre…) keep Total in the base quantity unit, and can't
+            // derive a total at all (it depends on carrier volume /
+            // placement count).
+            const perBasis = isPerBasisUnit(value);
+            next.amountUnit = perBasis ? String(value).split("/")[0] : value;
+            if (perBasis) next.totalAmount = "";
           }
         }
         return next;

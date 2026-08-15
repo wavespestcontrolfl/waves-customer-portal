@@ -117,8 +117,13 @@ const DATA = [
     note: 'rate-render: 6 fl oz/acre maximum single application on St. Augustinegrass and centipedegrass (10 on bermuda/zoysia) from the Envu Specticle FLO label (EPA 101563-207).' },
   { name: 'Tenacity Herbicide', basis: 'display', rate: '4-8', unit: 'fl_oz/acre',
     note: 'rate-render: 4-8 fl oz/acre postemergence from the Syngenta label (EPA 100-1267). The prior note\'s caution stands: St. Augustinegrass is sod-farm use only on this label.' },
-  { name: 'Fusilade II Post Emergent Liquid Herbicide', basis: 'display', rate: '16-24', unit: 'fl_oz/acre',
-    note: 'rate-render: 16-24 fl oz/acre is the LANDSCAPE/ORNAMENTAL-BED rate from the Syngenta label (EPA 100-1084); over-the-top turf use is Zoysia/fescue only at 3-6 fl oz/acre per the prior note.' },
+  // Fusilade II is deliberately NOT seeded (codex P1, PR #3419): the label
+  // says "Not for use on home lawns", standalone use here is beds/non-crop,
+  // and the sanctioned St. Augustine bermuda-suppression program runs it as
+  // a Recognition tank mix at a different rate
+  // (20260808000001_fix_bermuda_protocol_kb_seed_product.js). A global
+  // catalog rate would prefill on residential lawn closeouts. Needs a
+  // site/context gate (owner ruling) before it can carry a default rate.
   { name: 'Talus 70 DF IGR', basis: 'display', rate: '6-14', unit: 'oz/acre',
     note: 'rate-render: 6-14 oz/acre foliar on ornamentals, max 18 oz/acre per growing cycle, from the Talus 70DF specimen label (EPA 71711-21-67690).' },
   { name: 'BRANDT Agra Sol Micro Mix', basis: 'display', rate: '3-9', unit: 'lb/acre',
@@ -163,8 +168,8 @@ const DATA = [
     note: 'rate-render: stations installed so the maximum interval between any two does not exceed 20 ft per the Trelona ATBS label (EPA 499-557, EPA PPLS 000499-00557-20190909.pdf).' },
   { name: 'Trelona Compressed Termite Bait Cartridges', basis: 'display', rate: '1-2', unit: 'each/station',
     note: 'rate-render: 1 cartridge per station for 90/120-day service intervals; 2 cartridges (two 124 g, required in Florida for annual service) per the Trelona label (EPA 499-557).' },
-  { name: 'Contrac Blox', basis: 'display', rate: '3-16', unit: 'each/placement',
-    note: 'rate-render: rats 3-16 blox per placement spaced 15-30 ft apart (mice 1 per placement, 8-12 ft) from the Contrac Blox label (EPA 12455-79, EPA PPLS 012455-00079-20200213.pdf).' },
+  { name: 'Contrac Blox', basis: 'display', rate: '1-16', unit: 'each/placement',
+    note: 'rate-render: mice 1 blox per placement (8-12 ft apart); rats 3-16 blox per placement (15-30 ft apart) from the Contrac Blox label (EPA 12455-79, EPA PPLS 012455-00079-20200213.pdf). Band low end is the mouse rate so the prefill is safe for either species; adjust up for rat placements.' },
 
   // ── Bed bug barrier ─────────────────────────────────────────────────
   { name: 'Aprehend', basis: 'display', rate: '0.5', unit: 'fl_oz/50ft',
@@ -185,8 +190,11 @@ const DATA = [
     note: 'rate-render: initial application 4-8 oz/1,000 sq ft; monthly maintenance 1-4 oz/1,000 sq ft, from the LESCO-Wet Plus label (SiteOne, Exacto #113575).' },
   { name: 'LESCO T-Storm 2G Fungicide', basis: 'per_1000_sqft', rate: null, min: 1.5, max: 3, unit: 'lb',
     note: 'rate-render: 1.5-6 lb/1,000 sq ft disease band, with the residential/public per-treatment cap at 131 lb/A (3 lb/1,000 sq ft), from the LESCO T-Storm 2G label (EPA 228-631-10404 / distributor 79676-18-10404).' },
-  { name: 'LESCO Manicure 6FL Contact Fungicide', basis: 'per_1000_sqft', rate: null, min: 2, max: 5.5, unit: 'fl_oz',
-    note: 'rate-render: turf broadcast 5.5-9.75 pints/A (2-3.6 fl oz/1,000 sq ft) for dollar spot/brown patch/leaf spot, up to 15 pints/A (5.5 fl oz/1,000 sq ft) for red thread/anthracnose, from the Manicure 6FL turf label (EPA 60063-7-10404). The prior note\'s home-lawn prohibition stands — commercial/permitted turf sites only.' },
+  // LESCO Manicure 6FL is deliberately NOT seeded (codex P1, PR #3419): its
+  // label prohibits home lawns, and a global per-1,000 catalog rate would
+  // prefill as a normal broadcast application on residential lawn
+  // closeouts. Needs a site restriction (owner ruling) before it can carry
+  // a default rate.
   { name: 'Gravex 20 EW', basis: 'per_1000_sqft', rate: 1.2, min: 1.2, max: 1.2, unit: 'fl_oz',
     note: 'rate-render: residential turfgrass is a flat 1.2 fl oz/1,000 sq ft for all listed diseases (max 1.2/application, 13.8/year; non-residential turf allows 0.5-2.4) from the Atticus Gravex 20 EW specimen label (EPA 91234-283).' },
   { name: 'Quali-Pro T-Nex Plant Growth Regulator', basis: 'per_1000_sqft', rate: null, min: 0.1, max: 0.25, unit: 'fl_oz',
