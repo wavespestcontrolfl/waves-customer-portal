@@ -298,6 +298,61 @@ describe('setup frame — bound to the authenticated CallSid', () => {
     expect(RelayConversation).not.toHaveBeenCalled();
     expect(ws.terminate).toHaveBeenCalled();
   });
+
+  // gh prb-r10: the session_mode label is frame input in BOTH directions —
+  // the generic branch verifies the AUTHENTICATED call row is not a
+  // collections call, so a stripped/altered label can never run the
+  // anonymous lead flow (and its missing opt-out/outcome handling) on a
+  // collections callee.
+  describe('collections-source guard on the generic branch', () => {
+    const db = require('../models/db');
+    const BURN_SHAPE = {
+      insert: (row) => ({
+        onConflict: () => ({
+          ignore: () => ({
+            returning: () => {
+              if (mockBurned.has(row.token_hash)) return Promise.resolve([]);
+              mockBurned.add(row.token_hash);
+              return Promise.resolve([{ token_hash: row.token_hash }]);
+            },
+          }),
+        }),
+      }),
+      where: () => ({ del: () => Promise.resolve(0) }),
+    };
+    function armCallLog(firstImpl) {
+      db.mockImplementation((table) => (
+        table === 'call_log' ? { where: () => ({ first: firstImpl }) } : BURN_SHAPE
+      ));
+    }
+    afterEach(() => { db.mockImplementation(() => BURN_SHAPE); });
+
+    test('a collections-source call whose label was stripped is torn down', async () => {
+      RelayConversation.mockImplementation(() => ({ end: jest.fn(async () => {}) }));
+      armCallLog(async () => ({ source: 'collections_voice' }));
+      const { ws, setup } = connect('CA-collections-1');
+      setup({ callSid: 'CA-collections-1', from: '+19415550142' }); // NO session_mode
+      await new Promise((r) => setImmediate(r));
+      expect(ws.terminate).toHaveBeenCalled();
+    });
+
+    test('a non-collections call is untouched, and a guard read failure fails OPEN (inbound availability)', async () => {
+      RelayConversation.mockImplementation(() => ({ end: jest.fn(async () => {}) }));
+      armCallLog(async () => ({ source: 'inbound_call' }));
+      const { ws, setup } = connect('CA-inbound-1');
+      setup({ callSid: 'CA-inbound-1', from: '+19415550142' });
+      await new Promise((r) => setImmediate(r));
+      expect(RelayConversation).toHaveBeenCalledTimes(1);
+      expect(ws.terminate).not.toHaveBeenCalled();
+
+      armCallLog(async () => { throw new Error('db down'); });
+      const second = connect('CA-inbound-2');
+      second.setup({ callSid: 'CA-inbound-2', from: '+19415550142' });
+      await new Promise((r) => setImmediate(r));
+      expect(RelayConversation).toHaveBeenCalledTimes(2);
+      expect(second.ws.terminate).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('ws upgrade — fail-closed attach', () => {

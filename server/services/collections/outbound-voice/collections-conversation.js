@@ -655,12 +655,19 @@ class CollectionsConversation {
           // The card is the only review artifact before the case returns
           // to the queue (gh prb-r4) — when it fails, the DURABLE fallback
           // is a collection_hold flag: absolute, blocks every channel
-          // until a human reviews and releases it.
-          await flags.writeFlag({
+          // until a human reviews and releases it. The hold result is
+          // CHECKED too (gh prb-r10 — writeFlag resolves { ok:false }
+          // rather than rejecting): a doubly-failed artifact logs LOUDLY,
+          // because the case would otherwise return to 'proposed' with no
+          // review trace at all.
+          const hold = await flags.writeFlag({
             customerId: this._ctx.customer.id,
             flag: 'collection_hold',
             reason: 'wrong-party answer on billing follow-up call; review card failed to file',
-          }).catch((err) => logger.error(`[collections-voice] wrong-party fallback hold failed: ${err.message}`));
+          }).catch(() => ({ ok: false }));
+          if (!hold || hold.ok === false) {
+            logger.error(`[collections-voice] WRONG-PARTY REVIEW UNPERSISTED for customer ${this._ctx.customer.id} callLog=${this._ctx.callLogId} — review card AND collection_hold both failed; case returns to queue with no artifact`);
+          }
         }
       }
       this.say(script.WRONG_PARTY_CLOSE);
@@ -782,11 +789,14 @@ class CollectionsConversation {
     const res = await flags.revokeAutomatedVoiceConsent(this._ctx.customer.id, { reason: verbatim || undefined });
     let allCallsRecorded = true;
     let allCallsCard = null;
-    if (input.scope === 'all_calls' && res.ok) {
-      // gh prb-r2: the second write's failure was silently discarded —
-      // reporting success while manual calls stay permitted loses half the
-      // customer's instruction.
-      const second = await flags.writeFlag({ customerId: this._ctx.customer.id, flag: 'do_not_call', reason: verbatim || 'customer asked for no calls' });
+    if (input.scope === 'all_calls') {
+      // gh prb-r2: the second write's failure was silently discarded.
+      // gh prb-r10: the write is INDEPENDENT of the first flag's result —
+      // an all-calls request whose automated-voice write failed used to
+      // skip do_not_call entirely, losing the broader half of the
+      // customer's instruction. The two flags stand alone.
+      const second = await flags.writeFlag({ customerId: this._ctx.customer.id, flag: 'do_not_call', reason: verbatim || 'customer asked for no calls' })
+        .catch(() => ({ ok: false }));
       allCallsRecorded = Boolean(second && second.ok);
       if (!allCallsRecorded) {
         try {
@@ -794,7 +804,9 @@ class CollectionsConversation {
           allCallsCard = await NotificationService.notifyAdmin(
             'billing',
             'Do-not-call request needs manual action',
-            'A customer asked for NO calls of any kind during a billing follow-up call. The automated-voice stop recorded, but the all-calls flag write failed — please set it by hand.',
+            res.ok
+              ? 'A customer asked for NO calls of any kind during a billing follow-up call. The automated-voice stop recorded, but the all-calls flag write failed — please set it by hand.'
+              : 'A customer asked for NO calls of any kind during a billing follow-up call, and BOTH the automated-voice stop and the all-calls flag failed to write. Please set automated_voice_consent_revoked AND do_not_call by hand.',
             { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
           );
         } catch (cardErr) {
@@ -802,33 +814,47 @@ class CollectionsConversation {
         }
       }
     }
+    // The do_not_call flag alone honors the full request (it blocks every
+    // call channel, automated included) — a recorded all-calls stop is an
+    // opt-out even when the automated-voice write failed (gh prb-r10).
+    if (res.ok || (input.scope === 'all_calls' && allCallsRecorded)) {
+      this._captures.consentRevoked = true;
+    }
     if (!res.ok) {
+      if (input.scope === 'all_calls' && allCallsRecorded) {
+        return 'Recorded — no calls of any kind will be made. Confirm that to the caller.';
+      }
       // The promise needs an artifact (gh prb-r5): file the fallback card;
-      // if that fails too, the copy drops the promise.
-      let optOutCard = null;
-      try {
-        const NotificationService = require('../../notification-service');
-        optOutCard = await NotificationService.notifyAdmin(
-          'billing',
-          'Opt-out needs manual action',
-          'A customer asked to stop automated billing calls during a call, but the durable flag write failed. Please set automated_voice_consent_revoked by hand.',
-          { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
-        );
-      } catch (cardErr) {
-        logger.error(`[collections-voice] spoken opt-out fallback card failed: ${cardErr.message}`);
+      // if that fails too, the copy drops the promise. For an all-calls
+      // request the all-calls card above already carries the FULL scope —
+      // never a second card asking for only the automated half (gh prb-r10).
+      let optOutCard = allCallsCard;
+      if (input.scope !== 'all_calls') {
+        try {
+          const NotificationService = require('../../notification-service');
+          optOutCard = await NotificationService.notifyAdmin(
+            'billing',
+            'Opt-out needs manual action',
+            'A customer asked to stop automated billing calls during a call, but the durable flag write failed. Please set automated_voice_consent_revoked by hand.',
+            { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+          );
+        } catch (cardErr) {
+          logger.error(`[collections-voice] spoken opt-out fallback card failed: ${cardErr.message}`);
+        }
       }
       return optOutCard
         ? 'Could not record that automatically, but the office has been asked to stop the calls — tell the caller a person will make sure it is honored, and end politely.'
         : 'Could not record that. Apologize, give the office number so they can confirm it directly, and end politely.';
     }
-    this._captures.consentRevoked = true;
     if (input.scope === 'all_calls' && !allCallsRecorded) {
       // The promise stands only on a persisted card (gh prb-r6).
       return allCallsCard
         ? 'Automated calls are stopped, but the full no-calls request could not be completely recorded — tell the caller a person will make sure no calls of any kind happen.'
         : 'Automated calls are stopped, but the full no-calls request could not be recorded — apologize and give the office number so they can confirm the full stop directly.';
     }
-    return 'Recorded — automated calls are stopped. Confirm that to the caller.';
+    return input.scope === 'all_calls'
+      ? 'Recorded — no calls of any kind will be made. Confirm that to the caller.'
+      : 'Recorded — automated calls are stopped. Confirm that to the caller.';
   }
 
   async _toolSendPayLink(input) {

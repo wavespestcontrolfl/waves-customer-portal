@@ -253,7 +253,10 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     logger.info(`[collections-voice] originated call for case ${caseRow.id} v${caseRow.case_version} (callLogId=${callLogId})`);
     return { dialed: true, reason: 'dialed', callSid: call.sid, callLogId };
   } catch (err) {
-    logger.error(`[collections-voice] dial failed for case ${caseRow.id}: ${err.message}`);
+    // ID-only logging (gh prb-r10): a Twilio rejection message can embed the
+    // full destination number — provider status/code carry the diagnosis
+    // without writing customer phone PII to the logs.
+    logger.error(`[collections-voice] dial failed for case ${caseRow.id}: status=${err?.status ?? 'n/a'} code=${err?.code ?? 'n/a'}`);
     // never_contacted is reserved for DEFINITIVE pre-send rejections (gh
     // prb-r9): a 4xx from Twilio proves the request was refused before any
     // call existed. An ambiguous failure (timeout, connection loss) can

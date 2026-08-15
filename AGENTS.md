@@ -599,8 +599,14 @@ violations at the severity noted.
   itself originated (direction 'outbound', source 'collections_voice', a linked
   collection case) whose CallSid matches the request. The vestibule is a FIXED
   DTMF consent stage: deterministic script, `<Gather input="dtmf">` only, no
-  ConversationRelay/recording/audio processing before press-1, metadata-only
-  logging before consent. Press-1 renders `<Connect><ConversationRelay>` to the
+  ConversationRelay/recording before press-1 — no call audio ever reaches
+  Waves systems pre-consent — and metadata-only logging before consent. The
+  ONE documented exception: Twilio's carrier-side AMD classification
+  (`machineDetection: DetectMessageEnd`) runs before the vestibule and
+  returns only a label (human/machine), never audio — a deliberate,
+  counsel-review-before-flip item (DECISIONS-PRB #13), required so machine
+  answers route to the capped generic-callback voicemail instead of playing
+  the consent script to an answering machine. Press-1 renders `<Connect><ConversationRelay>` to the
   existing `/ws/voice-agent` endpoint with a per-call minted token and a
   `session_mode=collections` Parameter — which the ws server treats as an
   UNVERIFIED hint and re-proves against the same call_log row before any

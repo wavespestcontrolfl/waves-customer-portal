@@ -339,6 +339,31 @@ function attachVoiceRelay(httpServer) {
             logger.info(`[voice-relay] collections session setup callSid=${convo.callSid}`);
             break;
           }
+          // The label is UNVERIFIED frame input in BOTH directions (gh
+          // prb-r10): a collections call whose session_mode Parameter was
+          // stripped or altered must not run the anonymous lead/capture flow
+          // — that would bypass the collections state machine, its opt-out
+          // handling, and its outcome writes. The authenticated CallSid's
+          // call_log row is the truth; a positive collections match tears the
+          // generic session down. A failed read logs loudly and lets the
+          // generic session stand (fail-open here protects LIVE inbound
+          // availability; a mislabeled collections call's context reads
+          // would be failing on the same DB anyway, and its vestibule action
+          // route still reconciles the case).
+          void (async () => {
+            try {
+              const db = require('../../models/db');
+              const row = await db('call_log')
+                .where({ twilio_call_sid: authenticatedCallSid })
+                .first('source');
+              if (row && row.source === 'collections_voice') {
+                logger.warn(`[voice-relay] collections call reached the GENERIC relay branch (label missing/altered) callSid=${authenticatedCallSid} — terminating`);
+                teardown('collections_call_on_generic_relay');
+              }
+            } catch (e) {
+              logger.error(`[voice-relay] collections-source guard read failed callSid=${authenticatedCallSid}: ${e.message} — generic session continues`);
+            }
+          })();
           convo = new RelayConversation({
             // ALWAYS the authenticated one — never the frame's.
             callSid: authenticatedCallSid,

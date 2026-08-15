@@ -257,6 +257,12 @@ test('calls.create failure ⇒ send_failed stamp + case back to review queue; AM
   expect(ContactLedger.markSendFailed.mock.calls[0][1]).not.toHaveProperty('never_contacted');
   expect(stateChain._updated.current_state).toBe('proposed');
   expect(stateChain._updated.approval_expires_at).toBeNull();
+  // prb-r10: a Twilio rejection message can embed the full destination
+  // number — the dial-failure log carries only case id + status/code.
+  const logger = require('../services/logger');
+  const dialErrLog = logger.error.mock.calls.flat().find((l) => String(l).includes('dial failed'));
+  expect(dialErrLog).toContain('status=');
+  expect(dialErrLog).not.toContain('twilio down'); // raw err.message never logged
 });
 
 // prb-r9: never_contacted is reserved for DEFINITIVE pre-send rejections —

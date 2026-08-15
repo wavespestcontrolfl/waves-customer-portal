@@ -573,6 +573,43 @@ describe('prb-r9', () => {
     );
   });
 
+  test('all-calls scope survives a failed automated-voice write: do_not_call still attempted, honest copy', async () => {
+    flags.revokeAutomatedVoiceConsent.mockResolvedValue({ ok: false });
+    flags.writeFlag.mockResolvedValue({ ok: true, created: true });
+    const { convo } = makeConvo();
+    await turn(convo, 'hi');
+    const out = await convo._toolRecordDoNotCall({ scope: 'all_calls', verbatim_request: 'never call me again' });
+    expect(flags.writeFlag).toHaveBeenCalledWith(expect.objectContaining({ flag: 'do_not_call' }));
+    // do_not_call blocks every call channel — the full request IS honored.
+    expect(out).toContain('no calls of any kind');
+    expect(convo._captures.consentRevoked).toBe(true);
+  });
+
+  test('all-calls with BOTH writes failed files ONE card carrying the FULL scope', async () => {
+    const NotificationService = require('../services/notification-service');
+    flags.revokeAutomatedVoiceConsent.mockResolvedValue({ ok: false });
+    flags.writeFlag.mockResolvedValue({ ok: false });
+    const { convo } = makeConvo();
+    await turn(convo, 'hi');
+    const out = await convo._toolRecordDoNotCall({ scope: 'all_calls', verbatim_request: 'stop calling entirely' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const [, , body] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(body).toContain('do_not_call by hand'); // never only the automated half
+    expect(out).toContain('a person will make sure it is honored');
+    expect(convo._captures.consentRevoked).toBeUndefined();
+  });
+
+  test('wrong-party review card AND fallback hold both failing logs the UNPERSISTED state loudly', async () => {
+    const logger = require('../services/logger');
+    flags.fileFlagCard.mockResolvedValue(false);
+    flags.writeFlag.mockResolvedValue({ ok: false });
+    const { convo } = makeConvo();
+    mockScriptedMessages.push(toolUse('confirm_right_party', { result: 'wrong_party' }));
+    await turn(convo, 'No, wrong number... I mean, Pat is not here.');
+    expect(flags.writeFlag).toHaveBeenCalledWith(expect.objectContaining({ flag: 'collection_hold' }));
+    expect(logger.error.mock.calls.flat().join(' ')).toContain('WRONG-PARTY REVIEW UNPERSISTED');
+  });
+
   test('a write that outlives the close drain re-persists the outcome when it finally settles', async () => {
     jest.useFakeTimers();
     try {
