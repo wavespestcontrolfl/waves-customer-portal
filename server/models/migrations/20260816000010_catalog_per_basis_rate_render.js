@@ -49,9 +49,11 @@
 // were already stamped by that earlier batch, so up() writes their display
 // fields WITHOUT restamping. Ownership is recorded instead in the appended
 // provenance segment ("... [wrote: default_rate, default_unit]"): down()
-// reverts only the fields named there, and only while their value is still
-// exactly what up() wrote — preexisting equal values and later admin edits
-// both survive rollback.
+// reverts the fields named there as one all-or-nothing group — only while
+// EVERY member still holds exactly what up() wrote. Preexisting equal
+// values survive (no marker), and an admin edit to any member makes the
+// whole group admin-owned (reverting just the untouched member would
+// orphan the edited one, e.g. an edited gel rate losing its g/spot unit).
 
 const VERIFIED_BY = 'rate-render-backfill-2026-08-14';
 
@@ -137,8 +139,10 @@ const DATA = [
   // (20260808000001_fix_bermuda_protocol_kb_seed_product.js). A global
   // catalog rate would prefill on residential lawn closeouts. Needs a
   // site/context gate (owner ruling) before it can carry a default rate.
-  { name: 'Talus 70 DF IGR', basis: 'display', rate: '6-14', unit: 'oz/acre',
-    note: 'rate-render: 6-14 oz/acre foliar on ornamentals, max 18 oz/acre per growing cycle, from the Talus 70DF specimen label (EPA 71711-21-67690).' },
+  // Talus 70 DF is deliberately NOT seeded (codex P1 r4): its label covers
+  // ornamental/nursery/landscape sites, and a global per-acre rate would
+  // prefill as a normal turf application on lawn closeouts through the
+  // name-only picker. Needs a service/site gate (owner ruling) first.
   { name: 'BRANDT Agra Sol Micro Mix', basis: 'display', rate: '3-9', unit: 'lb/acre',
     note: 'rate-render: 3-9 lb/acre turf maintenance in minimum 88 gal water/acre (or watered in) from the BRANDT Agra Sol Micro Mix specimen label.' },
   { name: 'LESCO 6-0-0 Liquid', basis: 'display', rate: '1', unit: 'gal/acre',
@@ -265,6 +269,14 @@ exports.up = async function up(knex) {
       if (d.min != null && row.min_label_rate_per_1000 == null) updates.min_label_rate_per_1000 = d.min;
       if (max != null && row.max_label_rate_per_1000 == null) updates.max_label_rate_per_1000 = max;
       if (d.unit && emptyText(row.rate_unit)) updates.rate_unit = d.unit;
+      // A unit-only placeholder ('oz' from the inventory create form)
+      // would caption the new per-1,000 rate in the wrong unit — the
+      // completion prefill reads default_unit before rate_unit — so
+      // replace it with the verified unit (codex P1 r4). Rows with a
+      // preexisting default_rate keep their display pair untouched.
+      if (d.unit && emptyText(row.default_rate) && !emptyText(row.default_unit) && row.default_unit !== d.unit) {
+        updates.default_unit = d.unit;
+      }
     }
     if (d.method && hasMethodCol && emptyText(row.application_method)) {
       updates.application_method = d.method;
@@ -305,23 +317,27 @@ exports.down = async function down(knex) {
     // written by up() and must survive rollback.
     const owned = ownedFields(row.label_source_note, d.note);
     if (!owned) continue;
-    const reverts = {};
     const rate = d.rate != null ? d.rate : d.min;
     const max = d.max != null ? d.max : (d.rate != null && d.min == null ? d.rate : null);
-    for (const field of owned) {
-      // Revert only if the value is still exactly what we wrote — an admin
-      // edit since up() wins and stays.
-      if (field === 'default_rate' && row.default_rate === d.rate) reverts.default_rate = null;
-      if (field === 'default_unit' && row.default_unit === d.unit) reverts.default_unit = null;
-       
-      if (field === 'default_rate_per_1000' && rate != null && row.default_rate_per_1000 == rate) reverts.default_rate_per_1000 = null;
-       
-      if (field === 'min_label_rate_per_1000' && d.min != null && row.min_label_rate_per_1000 == d.min) reverts.min_label_rate_per_1000 = null;
-       
-      if (field === 'max_label_rate_per_1000' && max != null && row.max_label_rate_per_1000 == max) reverts.max_label_rate_per_1000 = null;
-      if (field === 'rate_unit' && row.rate_unit === d.unit) reverts.rate_unit = null;
-      if (field === 'application_method' && d.method && row.application_method === d.method) reverts.application_method = null;
-    }
+    const valueUnchanged = (field) => {
+      if (field === 'default_rate') return row.default_rate === d.rate;
+      if (field === 'default_unit') return row.default_unit === d.unit;
+      if (field === 'default_rate_per_1000') return rate != null && Number(row.default_rate_per_1000) === Number(rate);
+      if (field === 'min_label_rate_per_1000') return d.min != null && Number(row.min_label_rate_per_1000) === Number(d.min);
+      if (field === 'max_label_rate_per_1000') return max != null && Number(row.max_label_rate_per_1000) === Number(max);
+      if (field === 'rate_unit') return row.rate_unit === d.unit;
+      if (field === 'application_method') return d.method != null && row.application_method === d.method;
+      return false;
+    };
+    // The written fields are one label-verified group: a rate is only
+    // meaningful in its unit and vice versa, so once an admin edits ANY
+    // member the whole group becomes admin-owned and rollback leaves it
+    // (and its provenance) standing — reverting just the untouched member
+    // would orphan the edited one (codex P2 r4: an edited gel rate must
+    // not lose its g/spot unit on rollback).
+    if (!owned.every(valueUnchanged)) continue;
+    const reverts = {};
+    for (const field of owned) reverts[field] = null;
     const segment = appendedNote(d.note, owned);
     if (row.label_source_note === segment) {
       reverts.label_source_note = null;
@@ -332,11 +348,9 @@ exports.down = async function down(knex) {
       reverts.label_verified_at = null;
       reverts.label_verified_by = null;
     }
-    if (Object.keys(reverts).length) {
-      await knex('products_catalog')
-        .where({ id: row.id })
-        .update({ ...reverts, updated_at: new Date() });
-    }
+    await knex('products_catalog')
+      .where({ id: row.id })
+      .update({ ...reverts, updated_at: new Date() });
   }
 };
 

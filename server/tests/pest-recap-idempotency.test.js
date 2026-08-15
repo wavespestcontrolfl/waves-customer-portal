@@ -62,6 +62,7 @@ function makeKnex(store) {
     const q = {
       _table: table,
       where: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
       leftJoin: jest.fn().mockReturnThis(),
       select: jest.fn().mockReturnThis(),
@@ -74,6 +75,9 @@ function makeKnex(store) {
 
     q.first = jest.fn(async () => {
       if (table === 'scheduled_services') return { id: SERVICE_ID, status: store.serviceStatus };
+      // The recap rate fill looks catalog rows up by name; a test opts in
+      // by seeding store.catalogRow (name-insensitive single-row store).
+      if (table === 'products_catalog') return store.catalogRow;
       if (table === 'service_records') {
         const latest = store.records[store.records.length - 1];
         return latest
@@ -93,7 +97,10 @@ function makeKnex(store) {
         store.records.push({ id, recap_sms_sent_at: row.recap_sms_sent_at || null });
         return { returning: jest.fn().mockResolvedValue([{ id }]) };
       }
-      if (table === 'service_products') store.productInserts = (store.productInserts || 0) + 1;
+      if (table === 'service_products') {
+        store.productInserts = (store.productInserts || 0) + 1;
+        store.productRows = (store.productRows || []).concat(row);
+      }
       return { returning: jest.fn().mockResolvedValue([]) };
     });
 
@@ -428,5 +435,74 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(result.ok).toBe(true);
     const updates = store.recordUpdates || [];
     expect(updates.some((patch) => patch && Object.prototype.hasOwnProperty.call(patch, 'pdf_storage_key'))).toBe(false);
+  });
+
+  // Recap-completed visits used to store a null rate and render "—" on the
+  // customer report (codex P1, PR #3419) — the commit now carries the
+  // catalog's label default onto each service_products row.
+  test('recap products carry the catalog per-basis label rate (gel: 0.1 g/spot)', async () => {
+    const store = {
+      serviceStatus: 'scheduled',
+      records: [],
+      catalogRow: { default_rate: '0.1-1', default_unit: 'g/spot', rate_unit: null, default_rate_per_1000: null },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Baited kitchen and bath.',
+      products: [{ product_name: 'Advion Ant Bait Gel' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productRows).toHaveLength(1);
+    expect(store.productRows[0].application_rate).toBe(0.1);
+    expect(store.productRows[0].rate_unit).toBe('g/spot');
+  });
+
+  test('recap products prefer the per-1,000 rate in its verified unit', async () => {
+    const store = {
+      serviceStatus: 'scheduled',
+      records: [],
+      catalogRow: { default_rate: null, default_unit: 'oz', rate_unit: 'lb', default_rate_per_1000: '2.3' },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Granular broadcast.',
+      products: [{ product_name: 'Talstar XTRA Granular Insecticide (Verge)' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productRows[0].application_rate).toBe(2.3);
+    expect(store.productRows[0].rate_unit).toBe('lb');
+  });
+
+  test('products with no resolvable catalog default keep a null rate', async () => {
+    const store = { serviceStatus: 'scheduled', records: [], catalogRow: undefined };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Foam application.',
+      products: [{ product_name: 'Termidor Foam' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productRows[0].application_rate).toBeUndefined();
+    expect(store.productRows[0].rate_unit).toBeUndefined();
   });
 });

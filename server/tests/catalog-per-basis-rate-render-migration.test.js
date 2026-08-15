@@ -170,15 +170,32 @@ describe('down() reverts only migration-owned fields', () => {
     expect(rows[0].label_source_note).toBeNull();
   });
 
-  test('admin edit AFTER up() survives rollback; the note segment still lifts', async () => {
+  test('admin edit AFTER up() makes the whole pair admin-owned on rollback', async () => {
     const rows = [baseRow({ name: GEL.name })];
     const knex = fakeKnex(rows);
     await migration.up(knex);
     rows[0].default_rate = '0.75'; // admin changed the prefill afterwards
     await migration.down(knex);
     expect(rows[0].default_rate).toBe('0.75');
-    expect(rows[0].default_unit).toBeNull(); // unchanged field still reverts
-    expect(rows[0].label_source_note).toBeNull();
+    // Reverting the untouched unit would orphan the edited rate — the
+    // group (and its provenance) stays standing.
+    expect(rows[0].default_unit).toBe(GEL.unit);
+    expect(rows[0].label_source_note).toContain('[wrote:');
+  });
+
+  test('per-1,000 backfill replaces a unit-only placeholder default_unit', async () => {
+    const rows = [baseRow({ name: PER1K.name, default_unit: 'oz' })];
+    const knex = fakeKnex(rows);
+    await migration.up(knex);
+    // 'oz' would caption the new per-1,000 lb/fl_oz rate in the wrong unit
+    // (the completion prefill reads default_unit before rate_unit).
+    expect(rows[0].default_unit).toBe(PER1K.unit);
+    expect(rows[0].rate_unit).toBe(PER1K.unit);
+    expect(ownedFields(rows[0].label_source_note, PER1K.note)).toContain('default_unit');
+    await migration.down(knex);
+    expect(rows[0].default_unit).toBeNull();
+    expect(rows[0].rate_unit).toBeNull();
+    expect(rows[0].default_rate_per_1000).toBeNull();
   });
 
   test('per-1000 entry: up()/down() symmetric, earlier batch note preserved', async () => {

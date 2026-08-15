@@ -463,6 +463,31 @@ async function submitRecap({
         notes: p.notes || null,
       }))
       .filter((r) => r.product_name);
+    // The recap modal has no rate inputs, so recap-completed visits used to
+    // store a null rate and render "—" on the customer report. Carry the
+    // catalog's verified label default onto each row — the same value
+    // CompletionPanel prefills: the per-1,000 rate in its verified unit
+    // first, else a per-basis display rate (default_rate's LOW bound in
+    // default_unit, e.g. "0.1 g/spot"). Products without a resolvable
+    // default keep a null rate, as before.
+    for (const productRow of productRows) {
+      const catalog = await trx('products_catalog')
+        .whereRaw('LOWER(name) = LOWER(?)', [productRow.product_name])
+        .first('default_rate', 'default_unit', 'rate_unit', 'default_rate_per_1000')
+        .catch(() => null);
+      if (!catalog) continue;
+      if (catalog.default_rate_per_1000 != null) {
+        productRow.application_rate = Number(catalog.default_rate_per_1000);
+        productRow.rate_unit = catalog.rate_unit || catalog.default_unit || null;
+        continue;
+      }
+      const unit = String(catalog.default_unit || '');
+      const lowBound = parseFloat(String(catalog.default_rate ?? ''));
+      if (unit.includes('/') && !unit.endsWith('/1000sf') && Number.isFinite(lowBound)) {
+        productRow.application_rate = lowBound;
+        productRow.rate_unit = unit;
+      }
+    }
     // Replace product rows only when this submit specifies a set, so an
     // explicit re-selection isn't additive. An EMPTY submission must not
     // wipe the recorded applications: reopening a completed recap to
