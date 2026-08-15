@@ -177,15 +177,19 @@ async function appendCappedVoicemail(twiml, { customerId, ledgerId, callLogId, o
     // writeCallOutcome resolves { ok:false } on a failed transaction (gh
     // prb-r5) — retry once, then log LOUDLY: the case would otherwise sit
     // in 'dialing' silently. The supervised pilot's operator owns the rest.
-    let outcomeRes = await writeCallOutcome(callLogId, {
+    // The no-voicemail fallback is FENCED (gh prb-r18): on a Twilio replay
+    // after the first response was lost, the row is already stamped
+    // voicemail_left, so speak=false here — an unfenced write would
+    // overwrite the real voicemail outcome with machine_no_voicemail. The
+    // spoken (first-pass) write stays unfenced: it is the primary writer.
+    const outcomeArgs = {
       outcome: speak ? outcome : 'machine_no_voicemail',
       now,
-    }).catch(() => ({ ok: false }));
+      ...(speak ? {} : { onlyIfNoOutcome: true }),
+    };
+    let outcomeRes = await writeCallOutcome(callLogId, outcomeArgs).catch(() => ({ ok: false }));
     if (!outcomeRes || outcomeRes.ok === false) {
-      outcomeRes = await writeCallOutcome(callLogId, {
-        outcome: speak ? outcome : 'machine_no_voicemail',
-        now,
-      }).catch(() => ({ ok: false }));
+      outcomeRes = await writeCallOutcome(callLogId, outcomeArgs).catch(() => ({ ok: false }));
     }
     if (!outcomeRes || outcomeRes.ok === false) {
       logger.error(`[collections-vestibule] OUTCOME WRITE FAILED TWICE for callLog ${callLogId} — case may be stuck in 'dialing'`);

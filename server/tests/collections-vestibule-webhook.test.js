@@ -605,3 +605,16 @@ test('an unanswered dial finalizes the ledger row with a non-live outcome', asyn
   const payload = JSON.parse(ledgerChain.update.mock.calls[0][0].metadata.bindings[0]);
   expect(payload).toMatchObject({ send_failed: true, outcome: 'missed', live_conversation: false });
 });
+
+// prb-r18: a Twilio replay of the machine callback (row already stamped)
+// must never overwrite the real voicemail_left outcome.
+test('a replayed machine callback with the cap already stamped writes the fallback FENCED', async () => {
+  setDb();
+  stampVoicemailLeft.mockResolvedValue(false); // this row already carries the stamp
+  const res = mockRes();
+  await handlerFor('/collections-vestibule')(req({ body: { AnsweredBy: 'machine_end_beep' } }), res);
+  expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({
+    outcome: 'machine_no_voicemail',
+    onlyIfNoOutcome: true,
+  }));
+});

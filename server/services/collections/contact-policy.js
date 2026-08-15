@@ -179,7 +179,7 @@ async function loadEligibleInvoices(customerId) {
   return eligible;
 }
 
-async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null } = {}) {
+async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [] } = {}) {
   const result = {
     allowed: false,
     denialReasons: [],
@@ -356,6 +356,16 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
         if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
         return String(meta?.collectionCaseId || '') !== String(excludeCollectionCaseId);
       });
+    }
+    // A SAME-RUN companion leg must not be fenced by its own sibling's row
+    // (gh prb-r18): the documented email sidecars record the SMS leg first
+    // and then evaluate email — the any-channel 24h window would otherwise
+    // deny every sidecar (and the email fallback after a terminal SMS
+    // failure) the moment the gate flips. The caller names the specific
+    // sibling row ids; every OTHER contact still counts.
+    if (excludeLedgerIds && excludeLedgerIds.length) {
+      const excluded = new Set(excludeLedgerIds.map(String));
+      recent = recent.filter((row) => !excluded.has(String(row.id)));
     }
     result.recentContacts = recent;
     const within = (row, ms) => now.getTime() - new Date(row.occurred_at).getTime() < ms;

@@ -477,3 +477,18 @@ describe('invoice-followups rail', () => {
     );
   });
 });
+
+// prb-r18: the email sidecar's consult EXCLUDES the same-run SMS row — the
+// any-channel 24h window must not fence a sidecar with its own sibling.
+test('the late-payment email sidecar consult carries excludeLedgerIds with the same-run SMS row', async () => {
+  process.env.GATE_COLLECTIONS_POLICY = 'true';
+  try {
+    armLatePaymentHappyPath();
+    await LatePaymentChecker.checkAndNotify();
+    const emailEval = ContactPolicy.evaluate.mock.calls.find((c) => c[1]?.channel === 'email');
+    expect(emailEval).toBeTruthy();
+    expect(emailEval[1].excludeLedgerIds).toEqual(['led-1']);
+  } finally {
+    delete process.env.GATE_COLLECTIONS_POLICY;
+  }
+});

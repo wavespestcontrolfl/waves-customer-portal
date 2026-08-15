@@ -37,6 +37,7 @@ async function collectionsChannelVerdict({
   now = new Date(),
   offLedgerBalanceCents = 0,
   excludeCollectionCaseId = null,
+  excludeLedgerIds = [],
   logTag = 'collections',
 }) {
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') {
@@ -45,7 +46,7 @@ async function collectionsChannelVerdict({
   let verdict;
   try {
     const ContactPolicy = require('./contact-policy');
-    verdict = await ContactPolicy.evaluate(customerId, { channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId });
+    verdict = await ContactPolicy.evaluate(customerId, { channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds });
   } catch (err) {
     logger.warn(`[${logTag}] collections policy consult failed for customer ${customerId}: ${err.message} — denying`);
     return { permitted: false, eligibleInvoiceIds: [] };
@@ -65,13 +66,14 @@ async function collectionsChannelPermitted({
   now = new Date(),
   offLedgerBalanceCents = 0,
   excludeCollectionCaseId = null,
+  excludeLedgerIds = [],
   logTag = 'collections',
 }) {
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return true;
   let verdict;
   try {
     const ContactPolicy = require('./contact-policy');
-    verdict = await ContactPolicy.evaluate(customerId, { channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId });
+    verdict = await ContactPolicy.evaluate(customerId, { channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds });
   } catch (err) {
     // evaluate() is documented never to throw (it denies internally), but a
     // guard-level surprise must read as a denial, not abort a sweep loop.

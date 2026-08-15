@@ -559,6 +559,48 @@ class CollectionsConversation {
 
     // Security interrupt: fixed copy, and the model sees only scrubbed text.
     let callerText = String(rawText || '');
+    // Cross-TURN screen (gh prb-r18): a PAN read in pauses ("4242 4242" …
+    // "4242 4242") arrives as fragments no single-turn check can see — the
+    // same split-turn shape the transcript writer already handles with
+    // scrubSegments. When the joined window trips, the current turn is
+    // withheld AND the prior fragments are sanitized out of the model
+    // history, so the next request cannot carry a reconstructable number.
+    let crossTurnSensitive = false;
+    if (!utteranceHasSensitiveDetails(callerText)) {
+      try {
+        const { scrubSegments } = require('../../../utils/pan-scrub');
+        const priorTexts = [];
+        for (let i = this._turns.length - 1; i >= 0 && priorTexts.length < 2; i--) {
+          if (this._turns[i].role === 'caller') priorTexts.unshift(String(this._turns[i].text || ''));
+        }
+        if (priorTexts.length) {
+          crossTurnSensitive = scrubSegments(
+            [...priorTexts, callerText].map((t) => ({ text: t })),
+          ).count > 0;
+        }
+      } catch { /* best-effort; the single-turn screens still ran */ }
+    }
+    if (crossTurnSensitive) {
+      const WITHHELD = '[utterance withheld — sensitive detail]';
+      let sanitized = 0;
+      for (let i = this.messages.length - 1; i >= 0 && sanitized < 2; i--) {
+        const m = this.messages[i];
+        if (m.role === 'user' && typeof m.content === 'string' && /\d/.test(m.content)) {
+          m.content = WITHHELD;
+          sanitized++;
+        }
+      }
+      for (let i = this._turns.length - 1, s = 0; i >= 0 && s < 2; i--) {
+        if (this._turns[i].role === 'caller' && /\d/.test(String(this._turns[i].text || ''))) {
+          this._turns[i].text = WITHHELD;
+          s++;
+        }
+      }
+      this._turns.push({ role: 'caller', text: WITHHELD, at: Date.now() });
+      this.say(script.SECURITY_INTERRUPT);
+      this.messages.push({ role: 'user', content: `${WITHHELD}\n[system note: the caller tried to share payment details; you already told them you cannot take payment information on this call.]` });
+      return;
+    }
     if (utteranceHasSensitiveDetails(callerText)) {
       // An opt-out RIDING a sensitive utterance ("stop calling me, my SSN
       // is …") must still be recorded (gh prb-r12): this branch withholds
@@ -804,7 +846,14 @@ class CollectionsConversation {
     }
     if (result === 'wrong_party' || result === 'customer_unavailable') {
       this._captures.wrongParty = result === 'wrong_party';
-      if (input.number_unknown === true) {
+      // The all-channel wrong_number flag must be GROUNDED in the caller's
+      // words (gh prb-r18): a model misread of "they aren't available"
+      // would otherwise suppress every channel until manual review. An
+      // ungrounded number_unknown degrades to the ordinary wrong-party
+      // review path (card / hold), never the flag.
+      const saysUnknownHere = /\b(wrong number|never heard of|no (?:one|body) (?:named|called|by that name|here)|no \w+ (?:at|on) this (?:number|phone)|don'?t know (?:a |any )?(?:him|her|them|that (?:person|name)|who that is)|no such person|doesn'?t live here|not (?:his|her|their) (?:number|phone)|(?:just )?(?:got|took over) this (?:number|phone))\b/i
+        .test(this._lastCallerText());
+      if (input.number_unknown === true && saysUnknownHere) {
         const wn = await flags.flagWrongNumber(this._ctx.customer.id, {
           detail: 'answerer said the customer is not known at this number',
         }).catch(() => ({ ok: false }));
@@ -1023,6 +1072,25 @@ class CollectionsConversation {
         : etCalendarDayOf(now);
       if (date !== expected) {
         return 'Refused: that date does not match today/tomorrow. Convert using today\'s date from your instructions.';
+      }
+    }
+    // Week-relative phrases bound the window (gh prb-r18): loose ranges,
+    // because "next week" is fuzzy — but a date far outside them is
+    // model-invented, not the caller's.
+    {
+      const { etCalendarDayOf } = require('../../../utils/datetime-et');
+      const DAY = 24 * 60 * 60 * 1000;
+      const todayNoon = new Date(`${etCalendarDayOf(this._now())}T12:00:00Z`).getTime();
+      const daysOut = Math.round((d.getTime() - todayNoon) / DAY);
+      const windows = [
+        [/\bthis week(?:end)?\b/i, 0, 8],
+        [/\bnext week\b/i, 2, 14],
+        [/\bin (?:a couple(?: of)?|two|2) weeks\b/i, 9, 21],
+      ];
+      for (const [re, lo, hi] of windows) {
+        if (re.test(lastCallerTurn) && (daysOut < lo || daysOut > hi)) {
+          return 'Refused: that date does not fit the timeframe the customer said. Ask them for the specific day, or record nothing.';
+        }
       }
     }
     this._captures.customerIntendedPaymentDate = date;
@@ -1245,7 +1313,15 @@ class CollectionsConversation {
         purpose: 'late_payment',
         invoiceIds: [invoiceId],
         source: 'collections_voice_paylink',
-        metadata: { callLogId: this._ctx.callLogId, collectionCaseId: this._ctx.caseId },
+        metadata: {
+          callLogId: this._ctx.callLogId,
+          collectionCaseId: this._ctx.caseId,
+          // Durable BEFORE the provider is touched (gh prb-r18): if the
+          // process dies after Twilio accepts, the delivered text must not
+          // survive without its consent evidence (the in-memory captures
+          // and the expiring transcript are not that).
+          pay_link_agreement_verbatim: this._captures.payLinkAgreementVerbatim || null,
+        },
         occurredAt: this._now(),
       });
     } catch (err) {
@@ -1254,18 +1330,22 @@ class CollectionsConversation {
     }
     try {
       const InvoiceService = require('../../invoice');
+      // The latch closes BEFORE the provider await (gh prb-r18): a send
+      // that outlives the 8s tool timeout keeps running, and a second tool
+      // call in that window must not double-send. Only a PROVIDER-REPORTED
+      // failure re-opens it; ambiguous outcomes (throw, timeout) keep it.
+      this.payLinkSent = true;
       const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
       if (result && result.covered_by_credit) {
         // Account credit fully covered the invoice — nothing was texted and
         // nothing is owed on it. The truth, not a false "link sent".
-        this.payLinkSent = true;
         return 'No text was needed: account credit covered that invoice in full. Tell the customer it is settled.';
       }
       if (result && (result.sent || result.ok)) {
-        this.payLinkSent = true;
         this._captures.payLinkSent = true;
         return 'The payment link was texted to the customer. Let them know it is from Waves Pest Control and goes to our secure payment page.';
       }
+      this.payLinkSent = false; // provider REPORTED non-delivery — retry is safe
       await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms', code: result?.code || null });
       return 'The text did not go through. Offer the office number for payment instead.';
     } catch (err) {

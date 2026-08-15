@@ -1178,3 +1178,66 @@ describe('prb-r17', () => {
     expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-13' })).toContain('Recorded');
   });
 });
+
+// prb-r18 pins.
+describe('prb-r18', () => {
+  test('a PAN read across turns is caught, and the prior fragments are sanitized out of the model history', async () => {
+    const { convo, spoken } = makeConvo();
+    mockScriptedMessages.push(endTurn('Go on.'));
+    await turn(convo, 'the card is 4242 4242'); // 8 digits — no single-turn hit
+    mockScriptedMessages.length = 0;
+    await turn(convo, '4242 4242');
+    expect(spoken).toContain(script.SECURITY_INTERRUPT);
+    const everything = JSON.stringify(convo.messages) + JSON.stringify(convo._turns);
+    expect(everything).not.toContain('4242');
+  });
+
+  test('the pre-send pay-link ledger row carries the consent verbatim', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    mockScriptedMessages.push(
+      toolUse('send_pay_link', { customer_agreement_verbatim: 'yes text it' }),
+      endTurn('Sent.'),
+    );
+    await turn(convo, 'yes please text it over');
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({ pay_link_agreement_verbatim: 'yes please text it over' }),
+    }));
+  });
+
+  test('the pay-link latch closes BEFORE the provider await — a concurrent attempt cannot double-send', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    convo._turns.push({ role: 'caller', text: 'yes please text it', at: Date.now() });
+    let resolveSend;
+    InvoiceService.sendViaSMS.mockImplementation(() => new Promise((r) => { resolveSend = r; }));
+    const first = convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    await new Promise((r) => { setImmediate(r); });
+    const second = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(second).toContain('Already sent');
+    resolveSend({ sent: true, ok: true });
+    await first;
+    expect(InvoiceService.sendViaSMS).toHaveBeenCalledTimes(1);
+  });
+
+  test('an ungrounded number_unknown degrades to the wrong-party review path, never the all-channel flag', async () => {
+    const { convo } = makeConvo();
+    mockScriptedMessages.push(toolUse('confirm_right_party', { result: 'wrong_party', number_unknown: true }));
+    await turn(convo, 'Pat is not available right now.');
+    expect(flags.flagWrongNumber).not.toHaveBeenCalled();
+    expect(flags.fileFlagCard).toHaveBeenCalledWith(expect.objectContaining({ flag: 'wrong_party_review' }));
+  });
+
+  test('a week-relative phrase bounds the recordable window', async () => {
+    const { convo } = makeConvo(); // Wed 2026-08-12 ET
+    await turn(convo, 'hello');
+    convo.state = 'RESOLUTION';
+    convo._turns.push({ role: 'caller', text: 'sometime next week', at: Date.now() });
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-10-01' })).toContain('does not fit the timeframe');
+    expect(await convo._toolRecordPaymentIntent({ intended_payment_date: '2026-08-18' })).toContain('Recorded');
+  });
+});

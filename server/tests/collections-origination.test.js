@@ -418,3 +418,24 @@ describe('prb-r15', () => {
     expect(claimChain.where).toHaveBeenCalledWith('approval_expires_at', '>', NOW);
   });
 });
+
+// prb-r18: an unmarkable never_contacted row must not silently strand the
+// case behind a phantom frequency window — it stays visibly in 'dialing'.
+test('a doubly-failed never_contacted stamp on a definitive rejection keeps the case in dialing', async () => {
+  mockCallsCreate.mockRejectedValue(Object.assign(new Error('invalid to'), { status: 400 }));
+  ContactLedger.markSendFailed.mockResolvedValue(false);
+  const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [
+      chain('call_log', { first: undefined }),
+      chain('call_log', { returningRows: [{ id: 'cl-1' }] }),
+      chain('call_log'),
+    ],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res).toEqual({ dialed: false, reason: 'dial_failed' });
+  expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(2); // one retry
+  expect(stateChain.update).not.toHaveBeenCalled(); // never reset to proposed
+});

@@ -313,14 +313,24 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     // restoring credentials and re-approving should be able to dial.
     const definitiveReject = !providerRequestStarted
       || (Number(err?.status) >= 400 && Number(err?.status) < 500);
-    await ContactLedger.markSendFailed(ledgerEntry, {
-      stage: 'calls_create',
-      ...(definitiveReject ? { never_contacted: true } : { ambiguous_provider_failure: true }),
-    });
+    const stampExtra = definitiveReject ? { never_contacted: true } : { ambiguous_provider_failure: true };
+    // Stamp checked with one retry (gh prb-r18): an unstamped
+    // never_contacted row would block reapproval through the 7-day window
+    // for a call that never existed. Ambiguous rows counting on stamp
+    // failure is the safe direction (over-suppression) and needs no hold.
+    let stamped = await ContactLedger.markSendFailed(ledgerEntry, { stage: 'calls_create', ...stampExtra });
+    if (!stamped) stamped = await ContactLedger.markSendFailed(ledgerEntry, { stage: 'calls_create', ...stampExtra });
     if (callLogId) {
       await db('call_log').where({ id: callLogId })
         .update({ status: 'failed', updated_at: new Date() })
         .catch(() => {});
+    }
+    if (definitiveReject && !stamped) {
+      // Never-contacted but unmarkable: leave the case visibly in 'dialing'
+      // for the operator instead of returning it to a queue it cannot
+      // actually be re-dialed from behind the phantom window.
+      logger.error(`[collections-voice] never_contacted stamp FAILED TWICE for ledger ${ledgerEntry.id} — case ${caseRow.id} left in 'dialing' for operator repair`);
+      return { dialed: false, reason: 'dial_failed' };
     }
     // Back to the review queue — a dial failure is never silently retried.
     await setCaseState(caseRow, {

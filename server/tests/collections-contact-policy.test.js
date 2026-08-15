@@ -1008,3 +1008,18 @@ describe('ledger live-conversation filtering (prb-r12)', () => {
     expect(sms.denialReasons).toContain('live_conversation_within_7d');
   });
 });
+
+// prb-r18: a same-run companion leg is excluded from the frequency windows
+// by naming its sibling's ledger row — every OTHER contact still counts.
+test('excludeLedgerIds lifts only the named sibling row from the 24h fence', async () => {
+  const FIVE_SEC_AGO = new Date(WED_11AM_EDT.getTime() - 5000).toISOString();
+  const smsRow = { id: 'led-sms-1', channel: 'sms', occurred_at: FIVE_SEC_AGO, metadata: '{}' };
+  armAllowedBaseline({ ledger: [smsRow] });
+  const denied = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT });
+  expect(denied.denialReasons).toContain('contact_within_24h');
+  armAllowedBaseline({ ledger: [smsRow] });
+  const allowed = await ContactPolicy.evaluate('cust-1', {
+    channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT, excludeLedgerIds: ['led-sms-1'],
+  });
+  expect(allowed.denialReasons).not.toContain('contact_within_24h');
+});
