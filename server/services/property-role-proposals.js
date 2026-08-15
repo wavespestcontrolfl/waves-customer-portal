@@ -602,15 +602,24 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         await trx('customer_properties')
           .where({ id: oldPrimary.id })
           .update({ is_primary: false, updated_at: new Date() });
-        if (p.old_primary_label) {
+        // The demoted row's label is derived from its CURRENT occupancy
+        // (this locked read happened AFTER the sibling occupancy CAS ran),
+        // not the staged old_primary_label (codex #3418 r12): if an admin
+        // re-typed the row after parking, the CAS correctly skipped and
+        // the staged suggestion is stale — e.g. a now-seasonal property
+        // must not be labeled 'Rental'. Fences unchanged: only the
+        // vacated literal 'Primary' or an empty label ever accepts a
+        // suggestion, so bespoke admin names always survive.
+        const demoteLabel = LABEL_BY_OCCUPANCY[knownOccupancy(oldPrimary.occupancy_type)] || null;
+        if (demoteLabel) {
           const relabeled = await trx('customer_properties')
             .where({ id: oldPrimary.id, label: 'Primary' })
-            .update({ label: p.old_primary_label, updated_at: new Date() });
+            .update({ label: demoteLabel, updated_at: new Date() });
           if (relabeled === 0) {
             await trx('customer_properties')
               .where({ id: oldPrimary.id })
               .whereNull('label')
-              .update({ label: p.old_primary_label, updated_at: new Date() });
+              .update({ label: demoteLabel, updated_at: new Date() });
           }
         } else {
           // No rental/seasonal suggestion — still clear the literal
@@ -696,6 +705,7 @@ module.exports = {
   buildPropertyRoleProposals,
   stagePropertyRoleReview,
   applyPropertyRoleProposals,
+  resolveSupersededCard,
   _test: {
     knownOccupancy,
     classifiedPropertiesFromExtraction,

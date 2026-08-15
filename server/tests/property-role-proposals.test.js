@@ -230,15 +230,21 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
 
     const { applied, skipped } = await applyPropertyRoleProposals(trx, {
       customerId: 'cust-1',
-      proposals: [{
-        kind: 'primary_flip',
-        new_primary_property_id: 'prop-new',
-        old_primary_property_id: 'prop-old',
-        old_primary_occupancy: 'rental_investment',
-        old_primary_label: 'Rental',
-      }],
+      proposals: [
+        // The staged card carries the old primary's reclassification as its
+        // own CAS-fenced proposal; the demote label derives from the row's
+        // post-CAS occupancy (r12), so the pair is the realistic shape.
+        { kind: 'occupancy_change', property_id: 'prop-old', current_occupancy: 'owner_occupied', proposed_occupancy: 'rental_investment' },
+        {
+          kind: 'primary_flip',
+          new_primary_property_id: 'prop-new',
+          old_primary_property_id: 'prop-old',
+          old_primary_occupancy: 'rental_investment',
+          old_primary_label: 'Rental',
+        },
+      ],
     });
-    expect({ applied, skipped }).toEqual({ applied: 1, skipped: 0 });
+    expect({ applied, skipped }).toEqual({ applied: 2, skipped: 0 });
 
     const u = trx._updates;
     // 1. visit pinning targets the old primary, only unstamped non-terminal rows
@@ -252,8 +258,8 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     // rides the sibling occupancy_change proposal's compare-and-swap — and
     // every label/occupancy suggestion lands via its own predicate-fenced
     // update (r4 TOCTOU hardening).
-    expect(propUpdates[0].patch).toMatchObject({ is_primary: false });
-    expect(propUpdates[0].patch.occupancy_type).toBeUndefined();
+    const demote = propUpdates.find((x) => x.patch.is_primary === false);
+    expect(demote.patch.occupancy_type).toBeUndefined();
     expect(propUpdates.some((x) => x.patch.label === 'Rental')).toBe(true);
     expect(propUpdates.some((x) => x.patch.is_primary === true)).toBe(true);
     expect(propUpdates.some((x) => x.patch.occupancy_type === 'owner_occupied'
@@ -384,6 +390,29 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     expect({ applied, skipped }).toEqual({ applied: 2, skipped: 0 });
     expect(neu.occupancy_type).toBe('owner_occupied');
     expect(neu.label).toBe('Primary');
+  });
+
+  test('demote label follows the old primary CURRENT occupancy when its staged CAS went stale (codex r12)', async () => {
+    // Admin re-typed the old primary 'seasonal' after the card (which
+    // proposed rental) was parked: the CAS skips, and the demote must
+    // label from the live occupancy — never the stale staged 'Rental'.
+    const old = {
+      ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1',
+      occupancy_type: 'seasonal',
+    };
+    const neu = { ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1' };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    const out = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [
+        { kind: 'occupancy_change', property_id: 'prop-old', current_occupancy: 'owner_occupied', proposed_occupancy: 'rental_investment' },
+        { kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old', old_primary_label: 'Rental' },
+      ],
+    });
+    expect(out).toEqual({ applied: 1, skipped: 1 }); // CAS skipped, flip applied
+    expect(old.occupancy_type).toBe('seasonal');
+    expect(old.label).toBe('Seasonal');
+    expect(old.is_primary).toBe(false);
   });
 
   test('a flip whose companion occupancy CAS went stale is skipped, not promoted (codex r9)', async () => {
