@@ -42,7 +42,11 @@ function makeTrx() {
   const trx = (table) => {
     const q = { _table: table };
     q.where = jest.fn((w) => { q._where = w; return q; });
-    q.update = jest.fn(async (patch) => { trxCalls.push({ table, where: q._where, patch }); return 1; });
+    q.whereRaw = jest.fn((sql) => { q._whereRaw = sql; return q; });
+    q.update = jest.fn(async (patch) => {
+      trxCalls.push({ table, where: q._where, whereRaw: q._whereRaw, patch });
+      return trx._updateResult !== undefined ? trx._updateResult : 1;
+    });
     return q;
   };
   trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -131,4 +135,27 @@ test('transaction failure reports not-ok (caller treats as unpersisted)', async 
   db.transaction.mockRejectedValue(new Error('trx failed'));
   const res = await writeCallOutcome('cl-1', { outcome: 'conversation_completed', now: NOW });
   expect(res.ok).toBe(false);
+});
+
+// prb-r6: the failure-path writer never clobbers a landed outcome — the
+// fence lives IN the ledger UPDATE's WHERE.
+describe('onlyIfNoOutcome fence', () => {
+  test('a landed outcome makes the fenced write a no-op (case untouched)', async () => {
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = makeTrx();
+      trx._updateResult = 0; // ledger row already carries an outcome
+      return fn(trx);
+    });
+    const res = await writeCallOutcome('cl-1', { outcome: 'relay_failed', onlyIfNoOutcome: true, now: NOW });
+    expect(res).toEqual({ ok: true, skipped: true });
+    expect(trxCalls.filter((c) => c.table === 'collection_cases')).toHaveLength(0);
+    expect(trxCalls[0].whereRaw).toContain("metadata->>'outcome'");
+  });
+
+  test('with no landed outcome the fenced write proceeds normally', async () => {
+    const res = await writeCallOutcome('cl-1', { outcome: 'relay_failed', onlyIfNoOutcome: true, now: NOW });
+    expect(res.ok).toBe(true);
+    expect(res.skipped).toBeUndefined();
+    expect(trxCalls.some((c) => c.table === 'collection_cases')).toBe(true);
+  });
 });

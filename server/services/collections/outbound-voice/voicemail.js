@@ -66,6 +66,10 @@ async function stampVoicemailLeft(ledgerId, { now = new Date() } = {}) {
   try {
     const updated = await db('collections_contact_ledger')
       .where({ id: ledgerId })
+      // Atomic reservation (gh prb-r6): two overlapping callbacks both pass
+      // the 30-day read — only the one whose conditional UPDATE lands may
+      // speak; the loser sees zero rows and stays silent.
+      .whereRaw("COALESCE(metadata->>'voicemail_left', '') <> 'true'")
       .update({
         metadata: db.raw(
           "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",

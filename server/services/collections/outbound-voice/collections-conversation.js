@@ -334,6 +334,10 @@ class CollectionsConversation {
 
   handleDtmf(digit) {
     if (String(digit) === '0') {
+      // Preempt the RUNNING model turn too (gh prb-r6): the loop checks
+      // this flag between steps and short-circuits to the escape instead
+      // of speaking or executing writes first.
+      this._escapeRequested = true;
       this._chain = this._chain
         // Session proof first (gh prb-r3): a 0 pressed immediately after
         // relay setup must not run the escape before _ctx carries the
@@ -439,6 +443,8 @@ class CollectionsConversation {
       // The socket may have closed while finalMessage was pending (gh
       // prb-r4): a late model response must neither speak nor run writes.
       if (this.ended) return;
+      // A pressed-0 escape outranks the in-flight turn (gh prb-r6).
+      if (this._escapeRequested) return;
 
       const text = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
       const hasPendingWrite = msg.stop_reason === 'tool_use'
@@ -516,9 +522,18 @@ class CollectionsConversation {
     if (result === 'wrong_party' || result === 'customer_unavailable') {
       this._captures.wrongParty = result === 'wrong_party';
       if (input.number_unknown === true) {
-        await flags.flagWrongNumber(this._ctx.customer.id, {
+        const wn = await flags.flagWrongNumber(this._ctx.customer.id, {
           detail: 'answerer said the customer is not known at this number',
-        });
+        }).catch(() => ({ ok: false }));
+        if (!wn || wn.ok === false) {
+          // The wrong-number report must survive (gh prb-r6): the durable
+          // fallback is a collection_hold — absolute until a human reviews.
+          await flags.writeFlag({
+            customerId: this._ctx.customer.id,
+            flag: 'collection_hold',
+            reason: 'wrong-number report on billing follow-up call; wrong_number flag write failed',
+          }).catch((err) => logger.error(`[collections-voice] wrong-number fallback hold failed: ${err.message}`));
+        }
       } else {
         const carded = await flags.fileFlagCard({
           customerId: this._ctx.customer.id,
@@ -606,7 +621,27 @@ class CollectionsConversation {
       summary = '[summary withheld — scrub failed]';
     }
     const res = await flags.placeDisputeHold(this._ctx.customer.id, { summary });
-    if (!res.ok) return 'Could not record the dispute. Tell the customer the office will review the bill, and end politely.';
+    if (!res.ok) {
+      // The review promise needs an artifact (gh prb-r6).
+      let disputeCard = null;
+      try {
+        const NotificationService = require('../../notification-service');
+        disputeCard = await NotificationService.notifyAdmin(
+          'billing',
+          'Dispute needs manual action',
+          `A customer disputed a bill on a billing follow-up call, but the durable hold write failed. Summary: ${summary || 'dispute raised'}. Please place the hold by hand.`,
+          { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+        );
+      } catch (cardErr) {
+        logger.error(`[collections-voice] dispute fallback card failed: ${cardErr.message}`);
+      }
+      // Either way the CAPTURE records the dispute so the outcome writer
+      // holds the case instead of returning it to the queue.
+      this._captures.disputeSummary = summary || 'dispute raised (hold write failed)';
+      return disputeCard
+        ? 'The dispute has been passed to the office for review — assure the customer, and end politely.'
+        : 'Could not record the dispute automatically. Apologize, give the office number so they can raise it directly, and end politely.';
+    }
     this._captures.disputeSummary = summary || 'dispute raised';
     return 'Dispute recorded and all billing follow-up is on hold. Assure the customer the office will review before any further notices.';
   }
@@ -617,6 +652,7 @@ class CollectionsConversation {
     try { verbatim = input.verbatim_request ? scrubPans(String(input.verbatim_request)).slice(0, 300) : null; } catch { verbatim = null; }
     const res = await flags.revokeAutomatedVoiceConsent(this._ctx.customer.id, { reason: verbatim || undefined });
     let allCallsRecorded = true;
+    let allCallsCard = null;
     if (input.scope === 'all_calls' && res.ok) {
       // gh prb-r2: the second write's failure was silently discarded —
       // reporting success while manual calls stay permitted loses half the
@@ -626,7 +662,7 @@ class CollectionsConversation {
       if (!allCallsRecorded) {
         try {
           const NotificationService = require('../../notification-service');
-          await NotificationService.notifyAdmin(
+          allCallsCard = await NotificationService.notifyAdmin(
             'billing',
             'Do-not-call request needs manual action',
             'A customer asked for NO calls of any kind during a billing follow-up call. The automated-voice stop recorded, but the all-calls flag write failed — please set it by hand.',
@@ -658,7 +694,10 @@ class CollectionsConversation {
     }
     this._captures.consentRevoked = true;
     if (input.scope === 'all_calls' && !allCallsRecorded) {
-      return 'Automated calls are stopped, but the full no-calls request could not be completely recorded — tell the caller a person will make sure no calls of any kind happen.';
+      // The promise stands only on a persisted card (gh prb-r6).
+      return allCallsCard
+        ? 'Automated calls are stopped, but the full no-calls request could not be completely recorded — tell the caller a person will make sure no calls of any kind happen.'
+        : 'Automated calls are stopped, but the full no-calls request could not be recorded — apologize and give the office number so they can confirm the full stop directly.';
     }
     return 'Recorded — automated calls are stopped. Confirm that to the caller.';
   }
@@ -677,6 +716,12 @@ class CollectionsConversation {
     if (agreement.length < 2 || !AFFIRM_RE.test(agreement) || NEGATE_RE.test(agreement)) {
       return 'Refused: the customer has not clearly agreed. Ask plainly if they would like the link texted, and pass their agreeing words verbatim.';
     }
+    // Consent evidence persists on EVERY path past the fence (gh prb-r6):
+    // stashed before the branches so the send path records it too.
+    try {
+      const { scrubPans } = require('../../../utils/pan-scrub');
+      this._captures.payLinkAgreementVerbatim = scrubPans(agreement).slice(0, 200);
+    } catch { this._captures.payLinkAgreementVerbatim = null; }
     if (!isPayLinkEnabled()) {
       return 'The pay-link text is not available. Offer the office number for payment instead.';
     }
@@ -722,8 +767,7 @@ class CollectionsConversation {
       if (result && result.covered_by_credit) {
         // Account credit fully covered the invoice — nothing was texted and
         // nothing is owed on it. The truth, not a false "link sent".
-        this._captures.payLinkAgreementVerbatim = (() => { try { const { scrubPans } = require('../../../utils/pan-scrub'); return scrubPans(agreement).slice(0, 200); } catch { return null; } })();
-    this.payLinkSent = true;
+        this.payLinkSent = true;
         return 'No text was needed: account credit covered that invoice in full. Tell the customer it is settled.';
       }
       if (result && (result.sent || result.ok)) {
@@ -765,6 +809,7 @@ class CollectionsConversation {
       });
       return;
     }
+    this._escapeRequested = false;
     let callbackCard = null;
     try {
       const NotificationService = require('../../notification-service');
@@ -863,6 +908,15 @@ class CollectionsConversation {
       return;
     }
     await this._finish(this._defaultOutcome(), { endSession: false });
+    // The socket close is the LAST event this session will ever see (gh
+    // prb-r6): a resolved-failed outcome write gets one bounded retry here,
+    // then a loud log — nothing else will re-trigger persistence.
+    if (!this._persisted) {
+      await this._persist(this._outcome || this._defaultOutcome()).catch(() => {});
+      if (!this._persisted) {
+        logger.error(`[collections-voice] OUTCOME PERSISTENCE FAILED at close callSid=${this.callSid} callLog=${this._ctx?.callLogId} — case may be stuck in 'dialing'`);
+      }
+    }
     logger.info(`[collections-voice] session ended callSid=${this.callSid} reason=${reason || 'ws_close'} outcome=${this._outcome}`);
   }
 }

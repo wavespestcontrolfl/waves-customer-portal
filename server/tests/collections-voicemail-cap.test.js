@@ -66,3 +66,18 @@ test('isMachineEnd admits only machine_end_*', () => {
   expect(isMachineEnd('')).toBe(false);
   expect(isMachineEnd(undefined)).toBe(false);
 });
+
+// prb-r6: the stamp is an atomic reservation — the conditional WHERE makes
+// the overlap loser see zero rows and stay silent.
+test('the voicemail stamp is conditional on not-already-stamped', async () => {
+  const { stampVoicemailLeft } = require('../services/collections/outbound-voice/voicemail');
+  const q = {
+    where: jest.fn(() => q),
+    whereRaw: jest.fn(() => q),
+    update: jest.fn(async () => 1),
+  };
+  db.mockImplementation(() => q);
+  db.raw = jest.fn((sql, b) => ({ sql, b }));
+  await stampVoicemailLeft('led-1', { now: new Date() });
+  expect(q.whereRaw).toHaveBeenCalledWith("COALESCE(metadata->>'voicemail_left', '') <> 'true'");
+});

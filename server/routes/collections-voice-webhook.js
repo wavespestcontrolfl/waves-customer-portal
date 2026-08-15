@@ -78,9 +78,21 @@ async function loadCollectionsCall(req) {
   if (!row || row.direction !== 'outbound' || row.source !== CALL_SOURCE) return null;
   if (row.twilio_call_sid && row.twilio_call_sid !== callSid) return null;
   if (!row.twilio_call_sid) {
-    await db('call_log').where({ id: row.id })
-      .update({ twilio_call_sid: callSid, updated_at: new Date() })
-      .catch(() => {});
+    // The backfill is the BINDING (gh prb-r6): conditional on the column
+    // still being NULL, and it must succeed — two signed callbacks with
+    // different CallSids must not both proceed on the unbound row.
+    let bound = 0;
+    try {
+      bound = await db('call_log').where({ id: row.id })
+        .whereNull('twilio_call_sid')
+        .update({ twilio_call_sid: callSid, updated_at: new Date() });
+    } catch (err) {
+      logger.warn(`[collections-vestibule] CallSid bind failed for ${row.id}: ${err.message}`);
+    }
+    if (!bound) {
+      const fresh = await db('call_log').where({ id: row.id }).first('twilio_call_sid').catch(() => null);
+      if (!fresh || fresh.twilio_call_sid !== callSid) return null;
+    }
   }
   const meta = parseMeta(row);
   if (!meta.collectionCaseId) return null;
@@ -370,7 +382,9 @@ router.post('/collections-relay-complete', async (req, res) => {
     }
     if (failed) {
       logger.warn(`[collections-relay-complete] relay session failed (${errorCode || sessionStatus || 'unknown'}) for call_log ${call.row.id}`);
-      await writeCallOutcome(call.row.id, { outcome: 'relay_failed' }).catch(() => {});
+      // Fenced (gh prb-r6): never clobber a meaningful outcome the
+      // conversation writer already landed on this call.
+      await writeCallOutcome(call.row.id, { outcome: 'relay_failed', onlyIfNoOutcome: true }).catch(() => {});
     }
     twiml.hangup();
     return sendTwiml(res, twiml);

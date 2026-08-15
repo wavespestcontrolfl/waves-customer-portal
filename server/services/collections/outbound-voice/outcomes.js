@@ -79,7 +79,7 @@ function normalizeIntendedPaymentDate(value, now) {
  * @param captures   { customerIntendedPaymentDate, disputeSummary,
  *                     consentRevoked, wrongParty, payLinkSent, summary }
  */
-async function writeCallOutcome(callLogId, { outcome, captures = {}, now = new Date() } = {}) {
+async function writeCallOutcome(callLogId, { outcome, captures = {}, now = new Date(), onlyIfNoOutcome = false } = {}) {
   if (!callLogId || !outcome) return { ok: false, reason: 'missing_args' };
   const callRow = await db('call_log').where({ id: callLogId }).first();
   if (!callRow) return { ok: false, reason: 'call_log_not_found' };
@@ -136,16 +136,22 @@ async function writeCallOutcome(callLogId, { outcome, captures = {}, now = new D
   };
 
   try {
+    let skipped = false;
     await db.transaction(async (trx) => {
       if (ledgerId) {
-        await trx('collections_contact_ledger')
-          .where({ id: ledgerId })
-          .update({
-            metadata: trx.raw(
-              "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
-              [JSON.stringify(ledgerMetaPatch)],
-            ),
-          });
+        let q = trx('collections_contact_ledger').where({ id: ledgerId });
+        // onlyIfNoOutcome (gh prb-r6): a failure-path writer (relay_failed)
+        // must never clobber a meaningful outcome the conversation writer
+        // already landed — the fence lives IN the UPDATE's WHERE (atomic,
+        // the #3373 voicemail-guard pattern).
+        if (onlyIfNoOutcome) q = q.whereRaw("COALESCE(metadata->>'outcome', '') = ''");
+        const updated = await q.update({
+          metadata: trx.raw(
+            "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify(ledgerMetaPatch)],
+          ),
+        });
+        if (onlyIfNoOutcome && !updated) { skipped = true; return; }
       }
       if (caseId && Number.isFinite(caseVersion)) {
         await trx('collection_cases')
@@ -153,7 +159,7 @@ async function writeCallOutcome(callLogId, { outcome, captures = {}, now = new D
           .update({ ...casePatch, updated_at: trx.fn.now() });
       }
     });
-    return { ok: true, nextEligibleAt, live };
+    return skipped ? { ok: true, skipped: true } : { ok: true, nextEligibleAt, live };
   } catch (err) {
     logger.error(`[collections-outcomes] outcome write failed for call_log ${callLogId}: ${err.message}`);
     return { ok: false, reason: 'write_failed' };
