@@ -128,7 +128,7 @@ describe('case + card creation', () => {
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: undefined }), caseInsert, chain({ result: [] })],
-      notifications: [chain({ first: null })],
+      notifications: [chain({ result: 1 }), chain({ first: null })],
     });
 
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
@@ -158,7 +158,7 @@ describe('case + card creation', () => {
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800 }, chain({ result: [] })] })],
-      notifications: [chain({ first: null })],
+      notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     await ShadowSweep.runShadowSweep({ now: NOW });
 
@@ -223,7 +223,7 @@ describe('idempotency + versioning', () => {
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), caseUpdate, chain({ result: [] })],
-      notifications: [chain({ first: null })],
+      notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
 
@@ -279,7 +279,7 @@ describe('resilience', () => {
       ],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1 }, chain({ result: [] })] })],
-      notifications: [chain({ first: null })],
+      notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(result).toEqual({ skipped: false, considered: 2, casesCreated: 1, casesUpdated: 0, cardsFiled: 1, casesLapsed: 0 });
@@ -314,7 +314,7 @@ describe('card durability', () => {
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800 }, chain({ result: [] })] })],
-      notifications: [chain({ first: null })],
+      notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(result.cardsFiled).toBe(0);
@@ -383,7 +383,7 @@ describe('retirement + tier rotation', () => {
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: { ...INVOICE, due_date: '2026-07-08' } })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: existing }), caseUpdate, chain({ result: [] })],
-      notifications: [chain({ first: null })],
+      notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(caseUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -415,7 +415,7 @@ describe('r4: unpaid candidates + lapsed reactivation', () => {
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: lapsed }), caseUpdate, chain({ result: [] })],
-      notifications: [chain({ first: null })],
+      notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(caseUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -470,4 +470,30 @@ describe('r6: evaluation errors preserve, duplicate live cases self-heal', () =>
     // The surviving case reads unchanged with a standing card ⇒ pure no-op.
     expect(result.cardsFiled).toBe(0);
   });
+});
+
+// r8: a version rotation retires the SUPERSEDED card — the old copy shows
+// stale amount/tier and points at mutated case data.
+test('rotating the case version retires the previous version card', async () => {
+  const existing = {
+    id: 'case-1', case_version: 1, current_state: 'shadow',
+    eligible_balance_snapshot: 9999, // balance changed ⇒ rotation
+    eligible_invoice_ids: JSON.stringify(['inv-1']), idempotency_key: 'collections:cust-1:1:14',
+  };
+  const retireOld = chain({ result: 1 });
+  setDbQueues({
+    invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+    customers: [chain({ first: CUSTOMER })],
+    collection_cases: [
+      chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14' }] }), // self-heal read (single row)
+      chain({ first: existing }),
+      chain({ returning: [{ id: 'case-1', case_version: 2, eligible_balance_snapshot: 12800 }] }),
+      chain({ result: [] }),
+    ],
+    notifications: [retireOld, chain({ first: null })],
+  });
+  const result = await ShadowSweep.runShadowSweep({ now: NOW });
+  expect(retireOld.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['collections:cust-1:1:14']);
+  expect(retireOld.update).toHaveBeenCalledWith(expect.objectContaining({ read_at: expect.anything() }));
+  expect(result.cardsFiled).toBe(1);
 });

@@ -22,6 +22,40 @@
 
 const logger = require('../logger');
 
+/**
+ * Verdict-returning consult (codex r8): aggregate rails that quote a SET of
+ * invoices must restrict that set to the policy's eligible ids — a boolean
+ * alone lets an excluded invoice (payer re-resolved, dunning-stopped) ride
+ * along inside an allowed aggregate. Gate off ⇒ { permitted: true,
+ * eligibleInvoiceIds: null } WITHOUT consulting (null = "no filtering",
+ * byte-identical dark). A consult failure is a denial with an empty set.
+ */
+async function collectionsChannelVerdict({
+  customerId,
+  channel,
+  purpose,
+  now = new Date(),
+  offLedgerBalanceCents = 0,
+  logTag = 'collections',
+}) {
+  if (process.env.GATE_COLLECTIONS_POLICY !== 'true') {
+    return { permitted: true, eligibleInvoiceIds: null };
+  }
+  let verdict;
+  try {
+    const ContactPolicy = require('./contact-policy');
+    verdict = await ContactPolicy.evaluate(customerId, { channel, purpose, now, offLedgerBalanceCents });
+  } catch (err) {
+    logger.warn(`[${logTag}] collections policy consult failed for customer ${customerId}: ${err.message} — denying`);
+    return { permitted: false, eligibleInvoiceIds: [] };
+  }
+  if (!verdict.allowed) {
+    logger.info(`[${logTag}] collections policy denied ${channel} for customer ${customerId}: ${verdict.denialReasons.join(', ')}`);
+    return { permitted: false, eligibleInvoiceIds: verdict.eligibleInvoiceIds || [] };
+  }
+  return { permitted: true, eligibleInvoiceIds: verdict.eligibleInvoiceIds || [] };
+}
+
 async function collectionsChannelPermitted({
   customerId,
   invoiceId = null,
@@ -53,4 +87,4 @@ async function collectionsChannelPermitted({
   return true;
 }
 
-module.exports = { collectionsChannelPermitted };
+module.exports = { collectionsChannelPermitted, collectionsChannelVerdict };

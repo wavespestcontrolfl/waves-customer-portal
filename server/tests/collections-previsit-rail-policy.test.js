@@ -35,7 +35,7 @@ jest.mock('../services/account-membership-email', () => ({
   sendPrevisitBalanceReminder: jest.fn(async () => ({ ok: true })),
 }));
 jest.mock('../services/collections/rail-guard', () => ({
-  collectionsChannelPermitted: jest.fn(async () => true),
+  collectionsChannelVerdict: jest.fn(async () => ({ permitted: true, eligibleInvoiceIds: null })),
 }));
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
@@ -46,7 +46,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AccountMembershipEmail = require('../services/account-membership-email');
-const { collectionsChannelPermitted } = require('../services/collections/rail-guard');
+const { collectionsChannelVerdict } = require('../services/collections/rail-guard');
 const ContactLedger = require('../services/collections/contact-ledger');
 const { runSweep } = require('../services/previsit-balance-reminder');
 
@@ -106,13 +106,16 @@ function armOneVisit() {
 }
 
 function permitChannels(permitted) {
-  collectionsChannelPermitted.mockImplementation(async ({ channel }) => !!permitted[channel]);
+  collectionsChannelVerdict.mockImplementation(async ({ channel }) => ({
+    permitted: !!permitted[channel],
+    eligibleInvoiceIds: null,
+  }));
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.PREVISIT_BALANCE_REMINDER = 'true';
-  collectionsChannelPermitted.mockResolvedValue(true);
+  collectionsChannelVerdict.mockResolvedValue({ permitted: true, eligibleInvoiceIds: null });
   AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient.mockResolvedValue({ recipient: { email: 'taylor@example.com' } });
   AccountMembershipEmail.sendPrevisitBalanceReminder.mockResolvedValue({ ok: true });
 });
@@ -194,10 +197,39 @@ test('dues-only visit (monthly membership, no overdue invoices) supplies offLedg
   });
   const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
   expect(result).toMatchObject({ sent: 1 });
-  expect(collectionsChannelPermitted).toHaveBeenCalledWith(
+  expect(collectionsChannelVerdict).toHaveBeenCalledWith(
     expect.objectContaining({ channel: 'sms', offLedgerBalanceCents: 12800 }),
   );
-  expect(collectionsChannelPermitted).toHaveBeenCalledWith(
+  expect(collectionsChannelVerdict).toHaveBeenCalledWith(
     expect.objectContaining({ channel: 'email', offLedgerBalanceCents: 12800 }),
   );
+});
+
+// r8: gate-on, the reminder quotes ONLY policy-eligible debt — an invoice
+// the policy excluded must not ride an allowed aggregate.
+test('a policy-excluded invoice is filtered out of the quoted amount and the ledger row', async () => {
+  collectionsChannelVerdict.mockImplementation(async () => ({
+    permitted: true,
+    eligibleInvoiceIds: ['inv-9'], // the policy admits inv-9 only
+  }));
+  const claimChain = chain({ result: 1 });
+  setDbQueues({
+    sms_templates: [chain({ first: { is_active: true } })],
+    scheduled_services: [chain({ result: [VISIT] }), claimChain],
+    // Two overdue invoices; inv-77 is excluded by the policy (e.g. it
+    // re-resolved as payer-billed or its sequence was stopped).
+    invoices: [chain({
+      result: [
+        OVERDUE_INVOICE,
+        { id: 'inv-77', total: '500.00', due_date: '2026-07-01', last_reminder_at: null, followup_last_touch_at: null },
+      ],
+    })],
+    activity_log: [chain({ result: [] })],
+  });
+  const { renderSmsTemplate } = require('../services/sms-template-renderer');
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(result).toMatchObject({ sent: 1 });
+  // The quoted amount is inv-9's $96.60 alone — never inv-77's $500.
+  expect(renderSmsTemplate).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ amount: '96.60' }), );
+  expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-9'] }));
 });

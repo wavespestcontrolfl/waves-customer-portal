@@ -32,7 +32,7 @@ const { resolveBillingLane, monthlyDuesCollected } = require('./billing-lane');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { collectionsChannelPermitted } = require('./collections/rail-guard');
+const { collectionsChannelVerdict } = require('./collections/rail-guard');
 const ContactLedger = require('./collections/contact-ledger');
 
 const TEMPLATE_KEY = 'previsit_balance_reminder';
@@ -265,10 +265,44 @@ async function runSweep({ now = new Date() } = {}) {
       } catch (activityErr) {
         logger.warn(`[previsit-balance] activity_log read failed for customer ${visit.customer_id}: ${activityErr.message}`);
       }
-      const fresh = overdue.filter((inv) => !legacyDunnedIds.has(inv.id)
+      const freshAll = overdue.filter((inv) => !legacyDunnedIds.has(inv.id)
         && [inv.last_reminder_at, inv.followup_last_touch_at]
           .filter(Boolean)
           .every((touch) => new Date(touch) < cutoff));
+
+      // Collections policy, per channel, BEFORE the claim (gate off ⇒ both
+      // permitted without consulting, eligible set null = no filtering —
+      // byte-identical, pinned). Dues are computed here (independent of the
+      // invoice set) so the off-ledger carve-out covers a dues-only
+      // reminder: late monthly dues aren't invoiced.
+      const duesLate = lane.mode === 'monthly_membership'
+        && duesCollected === false
+        && String(todayEt) >= String(obligation.graceDateEt);
+      const duesCents = duesLate
+        ? Math.round((Number(visit.monthly_rate) || 0) * 100)
+        : 0;
+      const consult = {
+        customerId: visit.customer_id,
+        purpose: 'balance_reminder',
+        offLedgerBalanceCents: duesCents,
+        logTag: 'previsit-balance',
+      };
+      const smsVerdict = await collectionsChannelVerdict({ ...consult, channel: 'sms' });
+      const emailVerdict = await collectionsChannelVerdict({ ...consult, channel: 'email' });
+      const smsPolicyPermitted = smsVerdict.permitted;
+      const emailPolicyPermitted = emailVerdict.permitted;
+      if (!smsPolicyPermitted && !emailPolicyPermitted) { skipped++; continue; }
+
+      // Gate-on: the reminder may only QUOTE debt the policy holds eligible
+      // (codex r8 — an invoice the policy excludes, e.g. re-resolved as
+      // payer-billed or dunning-stopped, must not ride an allowed
+      // aggregate). Gate-off (null) = no filtering.
+      const eligibleIds = smsPolicyPermitted && smsVerdict.eligibleInvoiceIds !== null
+        ? smsVerdict.eligibleInvoiceIds
+        : emailVerdict.eligibleInvoiceIds;
+      const fresh = eligibleIds === null || eligibleIds === undefined
+        ? freshAll
+        : freshAll.filter((inv) => eligibleIds.map(String).includes(String(inv.id)));
       const overdueRecurringDue = fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
 
       const verdict = previsitBalanceReminderEligible({
@@ -287,37 +321,6 @@ async function runSweep({ now = new Date() } = {}) {
         ? (Number(visit.monthly_rate) || 0) + verdict.overdueDue
         : verdict.overdueDue;
       if (!(amount > 0)) { skipped++; continue; }
-
-      // Collections policy, per channel, BEFORE the claim (gate off ⇒ both
-      // permitted without consulting — byte-identical, pinned; this rail is
-      // dark but wired now so the gate flip can't reopen the hole). No
-      // single target invoice exists here (the reminder can cover dues plus
-      // several overdue invoices), so invoiceId stays null and no
-      // membership check applies. Both channels denied ⇒ skip before
-      // claiming, so a policy hold never churns the one-per-appointment
-      // claim.
-      // Late monthly dues aren't invoiced, so a dues-only reminder has no
-      // open invoice for the policy's balance-existence check — pass the
-      // validated dues amount so the carve-out (not a bypass: flags and
-      // frequency still apply) covers it.
-      const duesCents = verdict.duesLate
-        ? Math.round((Number(visit.monthly_rate) || 0) * 100)
-        : 0;
-      const smsPolicyPermitted = await collectionsChannelPermitted({
-        customerId: visit.customer_id,
-        channel: 'sms',
-        purpose: 'balance_reminder',
-        offLedgerBalanceCents: duesCents,
-        logTag: 'previsit-balance',
-      });
-      const emailPolicyPermitted = await collectionsChannelPermitted({
-        customerId: visit.customer_id,
-        channel: 'email',
-        purpose: 'balance_reminder',
-        offLedgerBalanceCents: duesCents,
-        logTag: 'previsit-balance',
-      });
-      if (!smsPolicyPermitted && !emailPolicyPermitted) { skipped++; continue; }
 
       // Atomic one-per-appointment claim.
       const claimed = await db('scheduled_services')

@@ -78,3 +78,31 @@ describe('gate on', () => {
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(false);
   });
 });
+
+// r8: the verdict-returning consult for aggregate rails.
+describe('collectionsChannelVerdict', () => {
+  const { collectionsChannelVerdict } = require('../services/collections/rail-guard');
+
+  test('gate off: permitted with a NULL eligible set (no filtering) and no consult', async () => {
+    const v = await collectionsChannelVerdict({ customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder' });
+    expect(v).toEqual({ permitted: true, eligibleInvoiceIds: null });
+    expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
+  });
+
+  test('gate on: allowed and denied verdicts both surface the eligible set', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] });
+    expect(await collectionsChannelVerdict({ customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder' }))
+      .toEqual({ permitted: true, eligibleInvoiceIds: ['inv-1'] });
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, eligibleInvoiceIds: ['inv-1'], denialReasons: ['contact_within_24h'] });
+    expect(await collectionsChannelVerdict({ customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder' }))
+      .toEqual({ permitted: false, eligibleInvoiceIds: ['inv-1'] });
+  });
+
+  test('gate on: a consult failure denies with an EMPTY set (nothing quotable)', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockRejectedValueOnce(new Error('db down'));
+    expect(await collectionsChannelVerdict({ customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder' }))
+      .toEqual({ permitted: false, eligibleInvoiceIds: [] });
+  });
+});

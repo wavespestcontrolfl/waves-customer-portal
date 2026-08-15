@@ -202,11 +202,21 @@ async function runShadowSweep({ now = new Date() } = {}) {
         }
       }
 
-      const existing = await db('collection_cases')
-        .where({ customer_id: customerId })
-        .whereIn('current_state', ['shadow', 'lapsed'])
-        .orderBy('case_version', 'desc')
-        .first();
+      // The retained LIVE row is authoritative (codex r8): the shadow+lapsed
+      // version-ordered lookup could select a just-lapsed merge loser with a
+      // higher independent version and flip it straight back to shadow —
+      // two live cases again. Lapsed history is consulted only when no live
+      // shadow row exists (the reactivation path).
+      let existing;
+      if (liveShadow.length) {
+        existing = await db('collection_cases').where({ id: liveShadow[0].id }).first();
+      } else {
+        existing = await db('collection_cases')
+          .where({ customer_id: customerId })
+          .whereIn('current_state', ['shadow', 'lapsed'])
+          .orderBy('case_version', 'desc')
+          .first();
+      }
 
       const unchanged = existing
         && existing.current_state === 'shadow'
@@ -265,6 +275,18 @@ async function runShadowSweep({ now = new Date() } = {}) {
           .update({ ...patch, updated_at: db.fn.now() })
           .returning('*');
         if (!updated) continue;
+        // The SUPERSEDED version's card retires with the rotation (codex
+        // r8): its copy shows the old amount/tier and its collectionCaseId
+        // points at mutated data — an admin must never see it beside the
+        // replacement. Same read_at mechanism, best-effort.
+        if (existing.idempotency_key && existing.idempotency_key !== idempotencyKey) {
+          await db('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereNull('read_at')
+            .whereRaw("metadata->>'dedupeKey' = ?", [existing.idempotency_key])
+            .update({ read_at: db.fn.now() })
+            .catch((err) => logger.warn(`[collections-shadow] superseded-card retirement failed: ${err.message}`));
+        }
         caseRow = updated;
         casesUpdated++;
       } else {
