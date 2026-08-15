@@ -320,6 +320,30 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(insp.observations).toHaveLength(0);
   });
 
+  test('initial-setup trap counts prompt as "Traps set" (r7)', () => {
+    const setup = typedFindingsPromptSections('rodent_trapping', {
+      trap_visit_type: 'Initial setup',
+      traps_checked: '6',
+    });
+    expect(setup.work.concat(setup.observations).join(' ')).toContain('Traps set: 6');
+    expect(setup.work.concat(setup.observations).join(' ')).not.toContain('Traps checked');
+    const check = typedFindingsPromptSections('rodent_trapping', {
+      trap_visit_type: 'Check / service',
+      traps_checked: '6',
+    });
+    expect(check.work.concat(check.observations).join(' ')).toContain('Traps checked: 6');
+  });
+
+  test('only name-bearing product fields feed the trade-name guard (r7)', () => {
+    const sections = typedFindingsPromptSections('termite_treatment', {
+      products_used: 'Termidor HE',
+      linear_feet_or_stations: '120 linear ft',
+      percent_solution: '0.06',
+    });
+    expect(sections.productValues).toEqual(['Termidor HE']);
+    expect(sections.products.length).toBe(3);
+  });
+
   test('only auto_send companions are customer-facing; internal_only stay staff-only', () => {
     expect(customerFacingCompanionTypes([
       { type: 'tree_shrub', delivery: 'auto_send' },

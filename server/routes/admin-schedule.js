@@ -11320,13 +11320,25 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
     if (!text) continue;
     total += 1;
     const target = typedFieldProvenance(field);
-    // Free-text typed fields can carry entry secrets ("rear gate code 1234")
-    // — redact BEFORE the model call, using the same helper the report
-    // grounding path uses (AGENTS.md report/track egress; codex r4).
-    const line = `${field.label}: ${redactAccessCodes(text.slice(0, 300))}`;
+    // A declared trap SETUP relabels traps_checked to "Traps set" — the same
+    // rule buildTypedReportSnapshot freezes into the report; prompting
+    // "Traps checked" for newly placed traps would draft prose the setup
+    // contradiction guard then rejects at completion (codex r7). The
+    // internal trap_visit_type field itself still never renders.
+    const label = findingsType === 'rodent_trapping'
+      && field.key === 'traps_checked'
+      && String(values?.trap_visit_type || '').trim() === 'Initial setup'
+      ? 'Traps set'
+      : field.label;
+    const line = `${label}: ${redactAccessCodes(text.slice(0, 300))}`;
     if (target === 'product') {
       sections.products.push(line);
-      sections.productValues.push(text.slice(0, 300));
+      // Only NAME-bearing fields feed the trade-name output guard —
+      // quantities ("120 linear ft", "20 gallons") would substring-match
+      // legitimate copy and force the information-poor fallback (codex r7).
+      // Actives are deliberately excluded too: constraint #4 tells the model
+      // to use active-ingredient names in the output.
+      if (/product|pesticide/i.test(field.key)) sections.productValues.push(text.slice(0, 300));
     } else if (target === 'advice') sections.advice.push(line);
     else if (target === 'customer') sections.customer.push(line);
     else if (target === 'work') sections.work.push(line);
@@ -11803,7 +11815,19 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
           // the completion path's oneTimePressureExcluded rule: their real
           // report hides one-time pressure, so the draft prompt must not be
           // grounded in the customer's unrelated recurring trend (codex P2 r1).
-          const completionProfile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
+          let profileResolutionFailed = false;
+          const completionProfile = await resolveCompletionProfileForScheduledService(svc)
+            .catch(() => { profileResolutionFailed = true; return null; });
+          // A transient profile-resolution failure must not silently drop
+          // the typed/companion facts (empty allowlist -> prose from the
+          // primary lane alone) or 409 a legitimate typed request — fail
+          // retryably instead (codex r7).
+          if (profileResolutionFailed && (typedValuesRaw || companionEntries.length)) {
+            return res.status(503).json({
+              error: 'Service profile lookup is unavailable right now — try again in a moment.',
+              retryable: true,
+            });
+          }
           groundingSuppressPressure = Boolean(completionProfile && (
             completionProfile.findingsType
             || (String(completionProfile.billingType || '').toLowerCase() === 'one_time'
