@@ -120,6 +120,10 @@ function makeStubKnex(rowsByTable = {}) {
           preds.push((r) => String(r.email || '').toLowerCase() === String(params[0]).toLowerCase());
           return chain;
         }
+        if (/dedupeKey/.test(sql)) {
+          preds.push((r) => (r.metadata && r.metadata.dedupeKey) === params[0]);
+          return chain;
+        }
         throw new Error(`stub knex: unsupported whereRaw ${sql}`);
       },
       whereNotNull(col) { preds.push((r) => r[col] != null); return chain; },
@@ -675,6 +679,56 @@ describe('round-3 hardening', () => {
     });
     expect(res.skipped).toContainEqual({ field: 'email', reason: 'email_in_use' });
     expect(knex._data.customers[0].email).toBe('jordan.riverz@example.com');
+  });
+});
+
+describe('round-4 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('a last-name-only quote never touches the first name (shared name_full evidence)', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()], call_log: [callLogRow()],
+      customer_field_candidates: [
+        candidate({ id: 'ln', field_name: 'last_name', final_recommended_value: 'Rivers', evidence_quote: 'my last name is spelled wrong, it is Rivers' }),
+        candidate({ id: 'fn', field_name: 'first_name', final_recommended_value: 'Jordon', evidence_quote: 'my last name is spelled wrong, it is Rivers' }),
+      ],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied.map((a) => a.field)).toEqual(['last_name']);
+    expect(knex._data.customers[0].first_name).toBe('Jordan'); // untouched
+    const byId = Object.fromEntries(knex._data.customer_field_candidates.map((c) => [c.id, c.status]));
+    expect(byId.fn).toBe('pending');
+  });
+
+  it('rings the proposal bell once per call, ever (reprocess dedupe)', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()], call_log: [callLogRow()],
+      customer_field_candidates: [
+        candidate({ id: 'em', field_name: 'email', final_recommended_value: 'jordan.rivers@example.com', evidence_quote: 'the email is wrong, it is jordan dot rivers at example dot com' }),
+      ],
+      notifications: [
+        { id: 'n1', recipient_type: 'admin', metadata: { dedupeKey: `contact-correction-proposal:${CALL_ID}` } },
+      ],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('proposed_only');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('prefilter matches standalone new-detail statements', () => {
+    expect(detectContactCorrectionIntent('My new email is jane@example.com')).toBe(true);
+    expect(detectContactCorrectionIntent('new address: 99 Pine Ave, Sarasota 34231')).toBe(true);
   });
 });
 

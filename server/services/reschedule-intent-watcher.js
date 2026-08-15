@@ -119,6 +119,10 @@ async function resolveActionedFlags() {
 // after 10 minutes get their urgent notification here.
 async function replayPendingBells() {
   try {
+    // Owner ruling 2026-08-15: the flagger lane gated off silences its
+    // bells — leftover bell_pending flags from before the flip must not
+    // keep replaying them here.
+    if (!require('../config/feature-gates').isEnabled('rescheduleIntentFlags')) return;
     const stale = await db('agent_decisions as ad')
       .leftJoin('customers as cu', 'ad.customer_id', 'cu.id')
       .where('ad.workflow', 'comms_guards')

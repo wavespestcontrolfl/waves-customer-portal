@@ -8,6 +8,10 @@ const FIELD_PATHS = {
   email: ['/caller/email'],
   phone: ['/caller/phone_e164', '/caller/phone_raw_spoken'],
   address_line1: ['/property/service_address', '/property/service_address/street_line_1'],
+  // Unit/suite corrections ("it's unit 4B, not 4") surface via flatView as
+  // address_line2 — staged so the contact-correction proposal lane can see
+  // them (codex #3413 r4).
+  address_line2: ['/property/service_address', '/property/service_address/street_line_2', '/property/service_address/unit'],
   city: ['/property/service_address', '/property/service_address/city'],
   state: ['/property/service_address', '/property/service_address/state'],
   zip: ['/property/service_address', '/property/service_address/postal_code'],
@@ -42,7 +46,7 @@ function confidence(v2Extraction, key, fallback = null) {
 
 function confidenceForField(v2Extraction, field) {
   if (!isV2Extraction(v2Extraction)) return null;
-  if (field === 'address_line1' || field === 'city' || field === 'state' || field === 'zip') {
+  if (field === 'address_line1' || field === 'address_line2' || field === 'city' || field === 'state' || field === 'zip') {
     return confidence(v2Extraction, 'service_address');
   }
   if (field === 'matched_service' || field === 'requested_service') {

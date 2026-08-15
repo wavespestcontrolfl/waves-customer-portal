@@ -56,7 +56,7 @@ const ADDRESS_FIELDS = Object.freeze(['address_line1', 'address_line2', 'city', 
 // correction language — ordinary calls state identity fields all the time
 // (a spouse booking, a different property) and none of that is a mandate
 // to rewrite the profile.
-const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b/i;
+const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)/i;
 
 // Post-extraction format guards — the model proposes, these dispose.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -415,7 +415,20 @@ const CALL_AUTO_FIELDS = Object.freeze({
   first_name: 'first_name',
   last_name: 'last_name',
 });
-const CALL_PROPOSE_FIELDS = Object.freeze(['email', 'address_line1', 'city', 'state', 'zip']);
+const CALL_PROPOSE_FIELDS = Object.freeze(['email', 'address_line1', 'address_line2', 'city', 'state', 'zip']);
+
+// Quote-component binding for shared name_full evidence: the staging writer
+// assigns one quote to BOTH name candidates, but "my last name is spelled
+// Rivers" is not a mandate to touch the first name (and vice versa). A quote
+// naming neither component is a whole-name correction and binds to both.
+function quoteBindsNameField(field, quote) {
+  const q = String(quote || '');
+  const saysFirst = /\bfirst name\b/i.test(q);
+  const saysLast = /\b(last name|surname)\b/i.test(q);
+  if (field === 'first_name' && saysLast && !saysFirst) return false;
+  if (field === 'last_name' && saysFirst && !saysLast) return false;
+  return true;
+}
 
 async function runCallContactCorrection({ callId, customerId, knex = db }) {
   try {
@@ -471,23 +484,37 @@ async function runCallContactCorrection({ callId, customerId, knex = db }) {
     // Email/address: propose, never write. One bell for the batch; the
     // candidate rows stay pending for review on the customer page.
     const proposals = candidates.filter((c) => CALL_PROPOSE_FIELDS.includes(c.field_name));
+    // One proposal bell per call, ever — force-reprocessing a call (or a
+    // pipeline retry) leaves the candidates pending by design and must not
+    // re-ring. The bell row itself is the dedupe anchor.
+    let proposalAlreadyRung = false;
     if (proposals.length) {
-      const lines = proposals.map((p) => `${p.field_name}: ${normValue(p.final_recommended_value)}`).join('; ');
-      await require('./notification-service').notifyAdmin(
-        'customer',
-        'Contact corrections proposed from a call',
-        `The caller stated corrected contact info on a recorded call — ${lines}. `
-          + 'Spoken email/address values are not auto-applied; review and apply from the customer page.',
-        {
-          link: `/admin/customers?customerId=${customerId}`,
-          bell: true,
-          metadata: { customerId, source: 'call', sourceId: callId, proposed: proposals.map((p) => p.field_name) },
-        },
-      ).catch((err) => logger.warn(`[contact-correction] proposal bell failed for call ${callId}: ${errTag(err)}`));
+      const dedupeKey = `contact-correction-proposal:${callId}`;
+      try {
+        proposalAlreadyRung = Boolean(await knex('notifications')
+          .where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+          .first('id'));
+      } catch { proposalAlreadyRung = false; }
+      if (!proposalAlreadyRung) {
+        const lines = proposals.map((p) => `${p.field_name}: ${normValue(p.final_recommended_value)}`).join('; ');
+        await require('./notification-service').notifyAdmin(
+          'customer',
+          'Contact corrections proposed from a call',
+          `The caller stated corrected contact info on a recorded call — ${lines}. `
+            + 'Spoken email/address values are not auto-applied; review and apply from the customer page.',
+          {
+            link: `/admin/customers?customerId=${customerId}`,
+            bell: true,
+            metadata: { customerId, source: 'call', sourceId: callId, dedupeKey, proposed: proposals.map((p) => p.field_name) },
+          },
+        ).catch((err) => logger.warn(`[contact-correction] proposal bell failed for call ${callId}: ${errTag(err)}`));
+      }
     }
 
     const nameCandidates = callerIsPrimary
-      ? candidates.filter((c) => CALL_AUTO_FIELDS[c.field_name])
+      ? candidates.filter((c) => CALL_AUTO_FIELDS[c.field_name]
+        && quoteBindsNameField(c.field_name, c.evidence_quote))
       : [];
     if (!nameCandidates.length) {
       if (!callerIsPrimary && candidates.some((c) => CALL_AUTO_FIELDS[c.field_name])) {
