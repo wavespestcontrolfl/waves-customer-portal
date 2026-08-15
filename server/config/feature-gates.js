@@ -1270,6 +1270,22 @@ const gates = {
   // logGateStatus, and the sweep can never disagree.
   visionDelta: gateEnvValue('GATE_VISION_DELTA'),
 
+  // Auto property-lookup on call-pipeline property creation — each NEWLY
+  // created customer_properties row from a call fires one full property
+  // lookup (county + LLM trio + satellite vision: real per-call spend) and
+  // fill-only patches lat/lng/property_type. Off → enqueue is a no-op and
+  // the run returns {skipped:'gated'} (CALL-time gateEnvValue, same
+  // contract as visionDelta). Kill switch: unset.
+  callPropertyLookup: gateEnvValue('GATE_CALL_PROPERTY_LOOKUP'),
+
+  // Nightly property-enrichment backfill — up to PROPERTY_BACKFILL_BATCH
+  // (default 20) existing NULL customer_properties rows of real customers
+  // get the same lookup + fill-only patch per night (~1,000 rows are NULL
+  // today, so ~2 months at the default cap). Independent of the per-call
+  // gate above so the two lanes flip separately. Real nightly LLM spend —
+  // explicit opt-in in EVERY environment. Kill switch: unset.
+  propertyEnrichBackfill: gateEnvValue('GATE_PROPERTY_ENRICH_BACKFILL'),
+
   // Weekly Manatee pool-permit sync (ACA "Pool Permits (CSV)" report →
   // pool_permit_records). Closes the closed-permit blind window between the
   // open-permits GIS layer and the annual assessment roll. Off → the sync
