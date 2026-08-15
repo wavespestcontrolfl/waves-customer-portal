@@ -10,7 +10,8 @@
 // Nothing is discarded silently: EVERY column is folded into the kept row
 // (adopt where the winner is blank; equal values are redundant; terminal
 // status outranks a transient snapshot; counters take the max; metadata
-// unions keys), and FK references are moved, not orphaned. Any genuine
+// unions keys with conflicting values preserved under `dedupe_conflicts`),
+// and FK references are moved, not orphaned. Any genuine
 // conflict — differing non-null values, two terminal statuses, or two rows
 // both carrying recording/transcript/extraction artifacts — throws,
 // deliberately failing the migration for manual resolution rather than
@@ -120,13 +121,29 @@ exports.up = async function up(knex) {
         );
       }
 
-      // metadata: winner's values on shared keys; adopt keys only a loser wrote.
-      const mergedMeta = Object.assign(
-        {},
-        ...losers.map((r) => asMetaObject(r.metadata)),
-        asMetaObject(winner.metadata)
-      );
-      if (!sameValue(mergedMeta, asMetaObject(winner.metadata))) {
+      // metadata: adopt keys only a loser wrote; where a shared key holds a
+      // DIFFERENT value (the two webhook snapshots legitimately disagree on
+      // e.g. resolved location), the winner's value stays live and the
+      // loser's is preserved verbatim under `dedupe_conflicts` — nothing is
+      // silently overwritten and nothing blocks the migration on ephemeral
+      // snapshot drift.
+      const winnerMeta = asMetaObject(winner.metadata);
+      const mergedMeta = { ...winnerMeta };
+      const metaConflicts = {};
+      for (const loser of losers) {
+        for (const [key, value] of Object.entries(asMetaObject(loser.metadata))) {
+          if (isBlank(value)) continue;
+          if (!(key in mergedMeta) || isBlank(mergedMeta[key])) {
+            mergedMeta[key] = value;
+            continue;
+          }
+          if (sameValue(mergedMeta[key], value)) continue;
+          if (!metaConflicts[key]) metaConflicts[key] = [];
+          metaConflicts[key].push(value);
+        }
+      }
+      if (Object.keys(metaConflicts).length > 0) mergedMeta.dedupe_conflicts = metaConflicts;
+      if (!sameValue(mergedMeta, winnerMeta)) {
         update.metadata = JSON.stringify(mergedMeta);
       }
 
