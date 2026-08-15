@@ -72,6 +72,12 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
   if (caseRow.current_state !== 'approved') {
     return { dialed: false, reason: `case_not_approved:${caseRow.current_state}` };
   }
+  // A stated payment date (or live-conversation suppression) stamps
+  // next_eligible_at on the case (gh prb-r7): dialing before it would break
+  // the promise the last call made. Refuse; the queue re-proposes after.
+  if (caseRow.next_eligible_at && new Date(caseRow.next_eligible_at).getTime() > now.getTime()) {
+    return { dialed: false, reason: 'suppressed_until_next_eligible' };
+  }
 
   // The relay leg must be LIVE before anything dials (gh prb-r5): with the
   // collections gate on but the relay unattached (VOICE_RELAY_ENABLED off,

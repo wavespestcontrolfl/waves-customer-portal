@@ -86,9 +86,13 @@ function chain({ first } = {}) {
   return q;
 }
 
+const LINKED_CASE = { id: 'case-1', customer_id: 'cust-1' };
+
 function setDb({ callRow = CALL_ROW, customer = CUSTOMER, extraCallRows = [] } = {}) {
   const queues = {
     call_log: [chain({ first: callRow }), ...extraCallRows.map((r) => chain({ first: r })), chain(), chain(), chain()],
+    // loadCollectionsCall verifies the linked case exists + matches (prb-r7).
+    collection_cases: [chain({ first: LINKED_CASE }), chain({ first: LINKED_CASE }), chain({ first: LINKED_CASE })],
     customers: [chain({ first: customer })],
   };
   db.mockImplementation((table) => {
@@ -325,7 +329,7 @@ describe('prb-r2', () => {
     const queues = {
       call_log: [callChain, callUpdate],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [caseChain],
+      collection_cases: [chain({ first: LINKED_CASE }), caseChain],
       collections_contact_ledger: [ledgerChain],
     };
     db.mockImplementation((t) => (queues[t] && queues[t].length ? queues[t].shift() : chain()));
@@ -394,6 +398,7 @@ describe('prb-r4', () => {
     const callUpdate = chain();
     const queues = {
       call_log: [chain({ first: CALL_ROW }), callUpdate],
+      collection_cases: [chain({ first: LINKED_CASE })],
       customers: [chain({ first: CUSTOMER })],
     };
     db.mockImplementation((t) => (queues[t] && queues[t].length ? queues[t].shift() : chain()));
@@ -419,5 +424,30 @@ describe('prb-r4', () => {
     await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '9' } }), res);
     expect(res.body).not.toContain('team will make sure');
     expect(res.body).toContain('the team will help right away');
+  });
+});
+
+// prb-r7 pins.
+describe('prb-r7', () => {
+  test('ABSENT AnsweredBy is uncertain: silent hangup, no gather, no voicemail', async () => {
+    setDb();
+    const res = mockRes();
+    await handlerFor('/collections-vestibule')(req({ body: {} }), res);
+    expect(res.body).not.toContain('<Gather');
+    expect(res.body).not.toContain('<Say');
+    expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({ outcome: 'machine_no_voicemail' }));
+  });
+
+  test('a dangling or foreign collection case fails the webhook closed', async () => {
+    const queues = {
+      call_log: [chain({ first: CALL_ROW })],
+      collection_cases: [chain({ first: { id: 'case-1', customer_id: 'SOMEONE-ELSE' } })],
+      customers: [chain({ first: CUSTOMER })],
+    };
+    db.mockImplementation((t) => (queues[t] && queues[t].length ? queues[t].shift() : chain()));
+    const res = mockRes();
+    await handlerFor('/collections-vestibule')(req({ body: { AnsweredBy: 'human' } }), res);
+    expect(res.body).toContain('<Hangup/>');
+    expect(res.body).not.toContain('<Gather');
   });
 });

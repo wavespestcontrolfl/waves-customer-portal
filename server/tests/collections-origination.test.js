@@ -311,3 +311,11 @@ test('relay unavailable refuses before any claim, ledger, or Twilio touch', asyn
   expect(ContactLedger.recordContact).not.toHaveBeenCalled();
   expect(mockCallsCreate).not.toHaveBeenCalled();
 });
+
+// prb-r7: a stated payment date's suppression horizon binds the dial.
+test('next_eligible_at in the future refuses the dial', async () => {
+  setDb({ collection_cases: [chain('collection_cases', { first: { ...CASE, next_eligible_at: new Date(NOW.getTime() + 3 * 86400000).toISOString() } })] });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res).toEqual({ dialed: false, reason: 'suppressed_until_next_eligible' });
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+});

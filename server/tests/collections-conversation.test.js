@@ -478,3 +478,12 @@ describe('prb-r4', () => {
     expect(out).toContain('agreeing words verbatim');
   });
 });
+
+// prb-r7: the combined "stop calling me and get me a person" records the
+// opt-out in CODE before the escape ends the session.
+test('opt-out + human combo revokes consent before transferring', async () => {
+  const { convo } = makeConvo({ now: STAFFED_NOW });
+  await turn(convo, 'stop calling me and let me talk to a real person');
+  expect(flags.revokeAutomatedVoiceConsent).toHaveBeenCalled();
+  expect(convo._captures.consentRevoked).toBe(true);
+});

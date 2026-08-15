@@ -343,7 +343,10 @@ class CollectionsConversation {
         // relay setup must not run the escape before _ctx carries the
         // call-log linkage — the outcome would persist nowhere.
         .then(() => this._contextReady)
-        .then(() => this._humanEscape())
+        // Session proof FAILED (gate off / no valid linkage) ⇒ no action
+        // (gh prb-r7): a press-0 must not run the escape ladder for a
+        // session the door refused.
+        .then((ok) => (ok === false || this._refused ? undefined : this._humanEscape()))
         .catch((err) => logger.error(`[collections-voice] dtmf escape failed: ${err.message}`));
     }
   }
@@ -364,7 +367,31 @@ class CollectionsConversation {
     }
 
     // Human escape by phrase — any state, checked in CODE before the model.
-    if (HUMAN_REQUEST_RE.test(rawText)) return this._humanEscape();
+    if (HUMAN_REQUEST_RE.test(rawText)) {
+      // "Stop calling me and let me speak to a person" (gh prb-r7): the
+      // opt-out half must be RECORDED before the escape ends the session —
+      // the model never sees this utterance.
+      if (/\b(stop calling|don'?t call|do not call|no more calls|take me off|never call)\b/i.test(rawText)) {
+        const rev = await flags.revokeAutomatedVoiceConsent(this._ctx.customer.id, {
+          reason: 'combined opt-out + human request during a billing follow-up call',
+        }).catch(() => ({ ok: false }));
+        if (rev && rev.ok) this._captures.consentRevoked = true;
+        else {
+          try {
+            const NotificationService = require('../../notification-service');
+            await NotificationService.notifyAdmin(
+              'billing',
+              'Opt-out needs manual action',
+              'A customer asked to stop calls while requesting a human on a billing follow-up call, and the durable flag write failed. Please set automated_voice_consent_revoked by hand.',
+              { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+            );
+          } catch (cardErr) {
+            logger.error(`[collections-voice] combo opt-out fallback card failed: ${cardErr.message}`);
+          }
+        }
+      }
+      return this._humanEscape();
+    }
 
     // Security interrupt: fixed copy, and the model sees only scrubbed text.
     let callerText = String(rawText || '');
@@ -475,9 +502,19 @@ class CollectionsConversation {
   async _executeToolBounded(name, input) {
     const ms = WRITE_TOOLS.has(name) ? WRITE_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
     let timer;
+    // A timed-out WRITE keeps running (gh prb-r7): track it so close-time
+    // finalization can drain it before persisting the terminal outcome —
+    // otherwise a late-settling write lands after the outcome and is
+    // invisible to it.
+    const op = this._executeTool(name, input);
+    if (WRITE_TOOLS.has(name)) {
+      this._pendingWrites = this._pendingWrites || new Set();
+      this._pendingWrites.add(op);
+      op.finally(() => this._pendingWrites.delete(op)).catch(() => {});
+    }
     try {
       return await Promise.race([
-        this._executeTool(name, input),
+        op,
         new Promise((resolve) => {
           timer = setTimeout(() => resolve(
             'That did not complete and the outcome is unknown. Do NOT retry it — tell the caller the office will follow up.',
@@ -588,6 +625,24 @@ class CollectionsConversation {
 
   async _toolGetBalance() {
     if (!this.verified) return 'Refused: the customer is not verified.';
+    // Re-read at DISCLOSURE time (gh prb-r7): the init-time snapshot ages
+    // through the vestibule + right-party + verify states — a payment,
+    // credit, or payer reassignment landing meanwhile must not be
+    // contradicted. Fail closed: an unreadable balance discloses nothing.
+    try {
+      const { loadEligibleInvoices } = require('../contact-policy');
+      const { invoiceAmountDue } = require('../../invoice-helpers');
+      const fresh = await loadEligibleInvoices(this._ctx.customer.id);
+      this._ctx.balance = {
+        total: fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
+        count: fresh.length,
+        invoices: fresh,
+      };
+      this._ctx.invoiceId = fresh[0]?.id || null;
+    } catch (err) {
+      logger.error(`[collections-voice] disclosure-time balance read failed callSid=${this.callSid}: ${err.message}`);
+      return 'The balance could not be checked right now. Apologize, give the office number, and end politely — do NOT state any figure.';
+    }
     const b = this._ctx.balance || { total: 0, count: 0 };
     if (!b.count || !(b.total > 0)) {
       // The balance cleared between dial and now — say so and wrap up.
@@ -898,6 +953,14 @@ class CollectionsConversation {
   /** Socket closed (hangup or teardown). Idempotent with _finish. */
   async end(reason) {
     if (this._finished && this._persisted) return;
+    // Drain any timed-out writes still in flight (gh prb-r7), bounded —
+    // their settlements belong IN the terminal outcome, not after it.
+    if (this._pendingWrites && this._pendingWrites.size) {
+      await Promise.race([
+        Promise.allSettled([...this._pendingWrites]),
+        new Promise((r) => { const t = setTimeout(r, 5000); t.unref?.(); }),
+      ]);
+    }
     // A close racing _init() must WAIT for it (gh prb-r5): finalizing
     // before _ctx carries the call-log linkage would strand the case in
     // 'dialing' with no outcome, and the latch would block every retry.

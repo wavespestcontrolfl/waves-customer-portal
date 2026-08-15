@@ -96,6 +96,14 @@ async function loadCollectionsCall(req) {
   }
   const meta = parseMeta(row);
   if (!meta.collectionCaseId) return null;
+  // The linkage must be REAL (gh prb-r7): the referenced case must exist
+  // and belong to this row's customer — a dangling or repointed id fails
+  // closed.
+  const linkedCase = await db('collection_cases')
+    .where({ id: meta.collectionCaseId })
+    .first('id', 'customer_id')
+    .catch(() => null);
+  if (!linkedCase || String(linkedCase.customer_id) !== String(row.customer_id)) return null;
   const customer = await db('customers')
     .where({ id: row.customer_id })
     .first('id', 'first_name');
@@ -189,14 +197,17 @@ router.post('/collections-vestibule', async (req, res) => {
       });
       return sendTwiml(res, twiml);
     }
-    if (!replay && (answeredBy === 'unknown' || answeredBy === 'fax')) {
-      // Uncertain AMD result: NO voicemail, ever (ruled). Quiet hangup.
+    if (!replay && answeredBy !== 'human') {
+      // ANY non-human, non-machine_end verdict — including ABSENT — is
+      // uncertain (gh prb-r7): NO voicemail, ever (ruled); quiet hangup.
+      // An answering machine mislabeled through here would otherwise gather
+      // into the no-input voicemail path and burn the 30-day cap.
       twiml.hangup();
       await writeCallOutcome(call.row.id, { outcome: 'machine_no_voicemail' }).catch(() => {});
       return sendTwiml(res, twiml);
     }
 
-    // Human (or AMD absent, or an invalid-digit replay): the fixed vestibule.
+    // Confirmed human (or an invalid-digit replay of one): the fixed vestibule.
     appendVestibuleGather(twiml, { firstName: call.customer.first_name, callLogId: call.row.id });
     return sendTwiml(res, twiml);
   } catch (err) {
