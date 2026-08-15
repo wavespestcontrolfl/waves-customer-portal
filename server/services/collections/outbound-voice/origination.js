@@ -118,6 +118,17 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     .first('id');
   if (prior) return { dialed: false, reason: 'already_dialed', callLogId: prior.id };
 
+  // ── ATOMIC dial claim (codex prb-r1): the probe above is observability,
+  // not the boundary — two workers could both read no prior row. The case
+  // row itself is the claim: a guarded approved→dialing UPDATE lets exactly
+  // one worker proceed; the loser sees zero rows and stands down. A crash
+  // after the claim leaves the case visibly stuck in 'dialing' for the
+  // supervised pilot's operator to resolve — never a second dial.
+  const claimed = await db('collection_cases')
+    .where({ id: caseRow.id, current_state: 'approved', case_version: caseRow.case_version })
+    .update({ current_state: 'dialing', updated_at: db.fn.now() });
+  if (!claimed) return { dialed: false, reason: 'dial_claim_lost' };
+
   // ── RECORD-THEN-DIAL: ledger row before any Twilio touch ───────────────
   // recordContact THROWS on failure; the throw propagates and no dial happens
   // (no unledgered customer contact, ever).
@@ -182,7 +193,7 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
         updated_at: new Date(),
       }).catch(() => {});
     }
-    await setCaseState(caseRow, { current_state: 'dialing' });
+    // (state already 'dialing' via the atomic claim above)
     logger.info(`[collections-voice] originated call for case ${caseRow.id} v${caseRow.case_version} (callLogId=${callLogId})`);
     return { dialed: true, reason: 'dialed', callSid: call.sid, callLogId };
   } catch (err) {

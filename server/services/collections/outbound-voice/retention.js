@@ -55,7 +55,7 @@ async function runCollectionsRetentionSweep({ now = new Date() } = {}) {
   const rows = await db('call_log')
     .where({ source: 'collections_voice' })
     .where('created_at', '<', horizon)
-    .whereNot('transcription_status', 'purged')
+    .whereRaw("(transcription_status IS NULL OR transcription_status <> 'purged')")
     .select('id', 'recording_sid')
     .limit(200);
 

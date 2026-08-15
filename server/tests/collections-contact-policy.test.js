@@ -398,11 +398,18 @@ describe('rolling frequency windows', () => {
     }
   });
 
-  test('email: live-conversation window applies; a prior sms does not block email', async () => {
+  test('the 24h window is ANY-channel: a 2h-old sms blocks email (and sms) too; a 25h-old one does not', async () => {
+    // prb-r1: the window previously bound only the call channels, letting
+    // the wired SMS/email rails stack same-day touches.
     armAllowedBaseline({ ledger: [{ channel: 'sms', occurred_at: at(2 * HOUR) }] });
-    const result = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT });
-    expect(result.denialReasons).not.toContain('live_conversation_within_7d');
-    expect(result.allowed).toBe(true);
+    const blocked = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT });
+    expect(blocked.denialReasons).toContain('contact_within_24h');
+    expect(blocked.denialReasons).not.toContain('live_conversation_within_7d');
+
+    armAllowedBaseline({ ledger: [{ channel: 'sms', occurred_at: at(25 * HOUR) }] });
+    const clear = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT });
+    expect(clear.denialReasons).not.toContain('contact_within_24h');
+    expect(clear.allowed).toBe(true);
   });
 
   test('recent contacts are surfaced on the result', async () => {

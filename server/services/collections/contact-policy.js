@@ -142,6 +142,43 @@ async function deliveredDunningTouches(invoice) {
   return touches;
 }
 
+
+// Eligible-invoice authority — shared by evaluate() AND dial-time
+// disclosure (codex prb-r1: the relay told a legacy-unpaid customer their
+// account was settled because it read a different loader). Open-balance
+// rows + legacy 'unpaid' (same predicates, same self-pay authority) minus
+// admin-stopped sequences (fail closed on a check error).
+async function loadEligibleInvoices(customerId) {
+  const eligible = await openBalanceInvoices(customerId);
+  const legacyUnpaid = await db('invoices')
+    .where({ customer_id: customerId, status: 'unpaid' })
+    .whereNull('payer_id')
+    .whereNull('payer_statement_id')
+    .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
+    .orderBy('created_at', 'asc')
+    .select('*');
+  if (legacyUnpaid.length) {
+    const { rowIsSelfPayDue } = require('../open-balance');
+    const seenIds = new Set(eligible.map((inv) => String(inv.id)));
+    for (const row of legacyUnpaid) {
+      if (seenIds.has(String(row.id))) continue;
+      if (await rowIsSelfPayDue(customerId, row)) eligible.push(row);
+    }
+  }
+  if (eligible.length) {
+    const { isDunningStopped } = require('../invoice-followups');
+    const kept = [];
+    for (const inv of eligible) {
+      try {
+        if (!(await isDunningStopped(inv.id))) kept.push(inv);
+      } catch { /* excluded — fail closed */ }
+    }
+    eligible.length = 0;
+    eligible.push(...kept);
+  }
+  return eligible;
+}
+
 async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0 } = {}) {
   const result = {
     allowed: false,
@@ -199,44 +236,11 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // 'processing', which the loader above already excludes (it admits only
     // sent/viewed/overdue), same as paid/void/draft; credit-covered rows
     // fall to its cents test.
-    const eligible = await openBalanceInvoices(customerId);
-    // Legacy 'unpaid' status (codex r-gh2): the dunning rails
-    // (latePaymentCheck/getCustomerBalance) explicitly serve it, but the
-    // open-balance loader admits only sent/viewed/overdue — without this
-    // arm, a customer whose only debt is a legacy-unpaid invoice is denied
-    // no_eligible_balance and loses reminders the moment the gate flips.
-    // Same predicates as openInvoiceQuery, same self-pay authority
-    // (rowIsSelfPayDue — live payer re-resolution), merged and deduped.
-    const legacyUnpaid = await db('invoices')
-      .where({ customer_id: customerId, status: 'unpaid' })
-      .whereNull('payer_id')
-      .whereNull('payer_statement_id')
-      .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
-      .orderBy('created_at', 'asc')
-      .select('*');
-    if (legacyUnpaid.length) {
-      const { rowIsSelfPayDue } = require('../open-balance');
-      const seenIds = new Set(eligible.map((inv) => String(inv.id)));
-      for (const row of legacyUnpaid) {
-        if (seenIds.has(String(row.id))) continue;
-        if (await rowIsSelfPayDue(customerId, row)) eligible.push(row);
-      }
-    }
-    // Admin-stopped dunning sequences (codex r7): 'stopped' is documented
-    // as "stop ALL automated dunning for this invoice" — such an invoice
-    // can neither back a voice case nor count as dunning-eligible balance.
-    // A check error EXCLUDES the invoice (fail closed).
-    if (eligible.length) {
-      const { isDunningStopped } = require('../invoice-followups');
-      const kept = [];
-      for (const inv of eligible) {
-        try {
-          if (!(await isDunningStopped(inv.id))) kept.push(inv);
-        } catch { /* excluded — fail closed */ }
-      }
-      eligible.length = 0;
-      eligible.push(...kept);
-    }
+    const eligible = await loadEligibleInvoices(customerId);
+    // (loader: open-balance + legacy 'unpaid' + stopped-sequence filter —
+    // extracted so dial-time disclosure shares the SAME authority, codex
+    // prb-r1.) Historical rationale for the arms lives on the loader.
+    // Legacy 'unpaid' status (codex r-gh2)
     result.eligibleInvoiceIds = eligible.map((inv) => inv.id);
     result.eligibleBalanceCents = eligible.reduce(
       (sum, inv) => sum + Math.round(invoiceAmountDue(inv) * 100),
@@ -333,16 +337,20 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     }
     result.recentContacts = recent;
     const within = (row, ms) => now.getTime() - new Date(row.occurred_at).getTime() < ms;
+    // The 24-hour window is ANY-channel for EVERY requested channel (scope:
+    // "rolling suppression — 24h after any dunning SMS"; codex prb-r1 — it
+    // previously bound only the call channels, so the newly wired SMS/email
+    // rails could stack same-day touches the policy documents as denied).
+    const any24h = recent.find((r) => within(r, DAY_MS));
+    if (any24h) {
+      deny('contact_within_24h');
+      proposeNextEligible(new Date(new Date(any24h.occurred_at).getTime() + DAY_MS));
+    }
     // Voice frequency spacing applies to BOTH voice and manual_call (codex
     // 2026-08-14 P1): manual calls COUNT as voice contacts in the ledger, so
     // a dial-sheet consumer evaluating manual_call must not be authorized
     // into a back-to-back call the automated channel would be denied.
     if (isVoiceLike(channel)) {
-      const any24h = recent.find((r) => within(r, DAY_MS));
-      if (any24h) {
-        deny('contact_within_24h');
-        proposeNextEligible(new Date(new Date(any24h.occurred_at).getTime() + DAY_MS));
-      }
       // A manual call IS a voice contact for spacing purposes.
       const voice7d = recent.find((r) => isVoiceLike(r.channel));
       if (voice7d) {
@@ -460,6 +468,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
 
 module.exports = {
   evaluate,
+  loadEligibleInvoices,
   // Exported for tests / PR B reuse.
   PILOT_MIN_BALANCE_CENTS,
   PILOT_MAX_BALANCE_CENTS,

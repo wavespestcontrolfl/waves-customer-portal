@@ -30,6 +30,7 @@ function selectChain(rows) {
   const q = { _wheres: [] };
   q.where = jest.fn((w) => { q._wheres.push(w); return q; });
   q.whereNot = jest.fn((...a) => { q._wheres.push(a); return q; });
+  q.whereRaw = jest.fn((...a) => { q._wheres.push(a); return q; });
   q.select = jest.fn(() => q);
   q.limit = jest.fn(async () => rows);
   return q;
@@ -114,4 +115,13 @@ test('rows without a recording purge transcript columns without touching Twilio'
   const res = await runCollectionsRetentionSweep({ now: NOW });
   expect(res.purged).toBe(1);
   expect(twilio).not.toHaveBeenCalled();
+});
+
+// prb-r1: bare whereNot skips NULL (SQL three-valued logic) — ordinary rows
+// with NULL transcription_status must still be swept.
+test('the age query keeps its NULL leg explicit', async () => {
+  const q = selectChain([]);
+  db.mockImplementation(() => q);
+  await runCollectionsRetentionSweep({ now: NOW });
+  expect(q.whereRaw).toHaveBeenCalledWith("(transcription_status IS NULL OR transcription_status <> 'purged')");
 });

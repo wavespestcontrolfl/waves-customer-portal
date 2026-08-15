@@ -262,10 +262,19 @@ class CollectionsConversation {
       : null;
     if (!caseRow || !customer) return this._refuse('case_or_customer_missing');
 
-    // Balance from the canonical open-balance read (read-only — the policy
-    // engine decided collectibility at dial time; this only supplies data).
-    const { openBalanceSummary } = require('../../open-balance');
-    const balance = await openBalanceSummary(customer.id);
+    // Balance from the SAME eligible-invoice authority the policy used at
+    // dial time (codex prb-r1: openBalanceSummary omits legacy 'unpaid'
+    // rows the policy admits — a customer approved solely for one was told
+    // their account was settled). Read-only; the policy decided
+    // collectibility at dial, this only supplies data.
+    const { loadEligibleInvoices } = require('../contact-policy');
+    const { invoiceAmountDue } = require('../../invoice-helpers');
+    const eligibleInvoices = await loadEligibleInvoices(customer.id);
+    const balance = {
+      total: eligibleInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
+      count: eligibleInvoices.length,
+      invoices: eligibleInvoices,
+    };
 
     this._ctx = {
       callLogId: row.id,

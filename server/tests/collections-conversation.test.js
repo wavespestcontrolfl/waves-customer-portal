@@ -35,13 +35,15 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn(() => ({
   },
 })));
 
-jest.mock('../services/open-balance', () => ({
-  openBalanceSummary: jest.fn(async () => ({
-    total: 258.0,
-    count: 1,
-    moreCount: 0,
-    invoices: [{ id: 'inv-1', invoice_number: 'WPC-0001', due_date: '2026-07-20' }],
-  })),
+// Disclosure reads the SAME eligible-invoice authority the policy used at
+// dial time (prb-r1) — mocked as one $258 eligible invoice.
+jest.mock('../services/collections/contact-policy', () => ({
+  loadEligibleInvoices: jest.fn(async () => ([
+    { id: 'inv-1', invoice_number: 'WPC-0001', due_date: '2026-07-20', total: '258.00', credit_applied: 0 },
+  ])),
+  // staffed-hours imports the real window constants from this module.
+  CALL_WINDOW_START_HOUR: 9,
+  CALL_WINDOW_END_HOUR: 18,
 }));
 jest.mock('../services/collections/outbound-voice/flags', () => ({
   revokeAutomatedVoiceConsent: jest.fn(async () => ({ ok: true, created: true })),

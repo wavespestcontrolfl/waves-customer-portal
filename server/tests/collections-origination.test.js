@@ -60,7 +60,7 @@ const ALLOWED_VERDICT = {
 };
 
 const calls = [];
-function chain(table, { first, returningRows } = {}) {
+function chain(table, { first, returningRows, result } = {}) {
   const q = {};
   ['where', 'whereIn', 'whereNull', 'whereRaw', 'orderBy', 'select'].forEach((m) => {
     q[m] = jest.fn(() => q);
@@ -72,7 +72,7 @@ function chain(table, { first, returningRows } = {}) {
   q.insert = jest.fn((row) => { calls.push(`${table}.insert`); q._inserted = row; return q; });
   q.update = jest.fn((patch) => { calls.push(`${table}.update`); q._updated = patch; return q; });
   q.returning = jest.fn(async () => returningRows || [{ id: 'row-1' }]);
-  q.then = (resolve, reject) => Promise.resolve(undefined).then(resolve, reject);
+  q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   q.catch = () => Promise.resolve();
   return q;
 }
@@ -173,7 +173,7 @@ test('happy path: ledger → call_log insert → calls.create, in that order', a
   const insertChain = chain('call_log', { returningRows: [{ id: 'cl-1' }] });
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
   setDb({
-    collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain],
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), stateChain],
     customers: [chain('customers', { first: CUSTOMER })],
     call_log: [
       chain('call_log', { first: undefined }), // idempotency probe: no prior
@@ -195,8 +195,9 @@ test('happy path: ledger → call_log insert → calls.create, in that order', a
   expect(args.machineDetection).toBe('DetectMessageEnd');
   expect(args.url).toContain('/api/webhooks/twilio/collections-vestibule?');
   expect(args.to).toBe('+19415551234');
-  // Case moves to dialing.
-  expect(stateChain._updated.current_state).toBe('dialing');
+  // The atomic claim moved the case to dialing pre-create; no later state
+  // write repeats it.
+  expect(stateChain._updated).toBeUndefined();
   // call_log row carries the case linkage + idempotency key.
   const meta = JSON.parse(insertChain._inserted.metadata);
   expect(meta.collectionsIdempotencyKey).toBe(CASE.idempotency_key);
@@ -218,7 +219,7 @@ test('idempotency: prior dial under the same key refuses', async () => {
 test('ledger insert failure ⇒ NO dial at all', async () => {
   ContactLedger.recordContact.mockRejectedValue(new Error('insert failed'));
   setDb({
-    collection_cases: [chain('collection_cases', { first: { ...CASE } })],
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 })],
     customers: [chain('customers', { first: CUSTOMER })],
     call_log: [chain('call_log', { first: undefined })],
   });
@@ -230,7 +231,7 @@ test('calls.create failure ⇒ send_failed stamp + case back to review queue', a
   mockCallsCreate.mockRejectedValue(new Error('twilio down'));
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
   setDb({
-    collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain],
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 }), stateChain],
     customers: [chain('customers', { first: CUSTOMER })],
     call_log: [
       chain('call_log', { first: undefined }),
@@ -246,4 +247,20 @@ test('calls.create failure ⇒ send_failed stamp + case back to review queue', a
   );
   expect(stateChain._updated.current_state).toBe('proposed');
   expect(stateChain._updated.approval_expires_at).toBeNull();
+});
+
+// prb-r1: the dial boundary is the ATOMIC approved→dialing claim — a
+// worker that loses it stands down before any Twilio touch.
+test('a lost dial claim stands down: no ledger row, no call_log insert, no calls.create', async () => {
+  const claimChain = chain('collection_cases', { result: 0 }); // another worker won
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), claimChain],
+    customers: [chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res).toEqual({ dialed: false, reason: 'dial_claim_lost' });
+  expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+  expect(claimChain._updated).toEqual(expect.objectContaining({ current_state: 'dialing' }));
 });
