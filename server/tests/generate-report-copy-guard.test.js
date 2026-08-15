@@ -325,7 +325,10 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
       trap_visit_type: 'Initial setup',
       traps_checked: '6',
     });
-    expect(setup.work.concat(setup.observations).join(' ')).toContain('Traps set: 6');
+    // placing traps is work performed — the setup count lives in the work
+    // group, not observations (codex r13)
+    expect(setup.work.join(' ')).toContain('Traps set: 6');
+    expect(setup.observations.join(' ')).not.toContain('Traps set');
     expect(setup.work.concat(setup.observations).join(' ')).not.toContain('Traps checked');
     const check = typedFindingsPromptSections('rodent_trapping', {
       trap_visit_type: 'Check / service',

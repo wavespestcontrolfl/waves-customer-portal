@@ -11332,17 +11332,18 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
       : (String(raw ?? '').trim() ? toLabel(raw) : '');
     if (!text) continue;
     total += 1;
-    const target = typedFieldProvenance(field);
     // A declared trap SETUP relabels traps_checked to "Traps set" — the same
     // rule buildTypedReportSnapshot freezes into the report; prompting
     // "Traps checked" for newly placed traps would draft prose the setup
-    // contradiction guard then rejects at completion (codex r7). The
-    // internal trap_visit_type field itself still never renders.
-    const label = findingsType === 'rodent_trapping'
+    // contradiction guard then rejects at completion (codex r7). Placing
+    // traps is WORK PERFORMED, so the setup count also moves to the
+    // completed-work group (codex r13) — a check count stays an observation.
+    // The internal trap_visit_type field itself still never renders.
+    const trapSetupCount = findingsType === 'rodent_trapping'
       && field.key === 'traps_checked'
-      && String(values?.trap_visit_type || '').trim() === 'Initial setup'
-      ? 'Traps set'
-      : field.label;
+      && String(values?.trap_visit_type || '').trim() === 'Initial setup';
+    const target = trapSetupCount ? 'work' : typedFieldProvenance(field);
+    const label = trapSetupCount ? 'Traps set' : field.label;
     const line = `${label}: ${redactAccessCodes(text.slice(0, 300))}`;
     if (target === 'product') {
       sections.products.push(line);
