@@ -446,6 +446,14 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(excl.observations).toHaveLength(1);
   });
 
+  test('negative advice answers are status, not recommendations (r27)', () => {
+    const g = typedFindingsPromptSections('german_roach_knockdown', { followup_required: 'No' });
+    expect(g.advice).toHaveLength(0);
+    expect(g.observations).toHaveLength(1);
+    const yes = typedFindingsPromptSections('german_roach_knockdown', { followup_required: 'Yes' });
+    expect(yes.advice).toHaveLength(1);
+  });
+
   test('negative answers on work fields are status, not completed work (r20)', () => {
     const neg = typedFindingsPromptSections('rodent_bait_station', { bait_replaced: 'No' });
     expect(neg.work).toHaveLength(0);

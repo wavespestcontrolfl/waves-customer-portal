@@ -2468,7 +2468,14 @@ router.get('/:date?', async (req, res, next) => {
         // completion must never block on a registry fetch.
         companionSchemas: completionProfile
           ? (completionProfile.companions || [])
-            .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey, companion: true }))
+            .map((c) => {
+              const schema = ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey, companion: true });
+              // delivery rides along (same contract as the schedule feed) so
+              // the client's generation gate can skip internal_only
+              // companions instead of arming a request the server 400s
+              // (codex r27 #3420).
+              return schema ? { ...schema, delivery: c.delivery || 'auto_send' } : null;
+            })
             .filter(Boolean)
           : null,
         linkedProject: linkedProject ? {

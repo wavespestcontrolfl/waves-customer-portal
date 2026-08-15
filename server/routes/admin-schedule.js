@@ -11292,6 +11292,10 @@ const TYPED_ADVICE_FIELD_RE = /recommend|_prep$|instruction|followup|follow_up|_
 // they render in their own attributed group and never feed the deterministic
 // fallback's "The technician noted" line (codex r5 P1).
 const TYPED_CUSTOMER_FIELD_RE = /^customer_(?:reported|discussed)$/;
+// Negative single answers record status regardless of the field's class —
+// neither "Completed work included …: No" nor "Recommended next steps
+// include …: No" may publish (codex r20/r27).
+const TYPED_NEGATIVE_ANSWER_RE = /^(?:no|none|none present|not applicable|n\/a)$/i;
 const TYPED_CUSTOMER_SECTION_RE = /customer communication/i;
 // Work sections/keys beyond the suffix families (r4): named completed-action
 // keys surfaced by the full-schema sweep — zones treated, source reduction,
@@ -11372,11 +11376,12 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
       // to use active-ingredient names in the output.
       if (/product|pesticide/i.test(field.key)) sections.productValues.push(text.slice(0, 300));
     } else if (target === 'advice') {
-      // A historical-status option in a recommendation field ("Completed
-      // previously") records the past, not advice — the fallback must not
-      // say "Recommended next steps include … Completed previously"
-      // (codex r24).
-      if (/^completed(?:\s+previously)?$/i.test(String(raw ?? '').trim())) {
+      // A historical-status option ("Completed previously") or a NEGATIVE
+      // answer ("Follow-up required: No") in a recommendation field records
+      // status, not advice — the fallback must never say "Recommended next
+      // steps include …: No" (codex r24/r27).
+      if (/^completed(?:\s+previously)?$/i.test(String(raw ?? '').trim())
+        || (!multi && TYPED_NEGATIVE_ANSWER_RE.test(String(raw ?? '').trim()))) {
         sections.observations.push(line);
       } else {
         sections.advice.push(line);
@@ -11405,7 +11410,7 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
         if (adviceParts.length) {
           sections.advice.push(`${label}: ${redactAccessCodes(adviceParts.join(', ').slice(0, 300))}`);
         }
-      } else if (!multi && /^(?:no|none|none present|not applicable|n\/a)$/i.test(String(raw ?? '').trim())) {
+      } else if (!multi && TYPED_NEGATIVE_ANSWER_RE.test(String(raw ?? '').trim())) {
         // A negative answer on a work field ("Bait replaced: No") records
         // that the action was NOT performed — a status fact, never
         // "Completed work included …: No" (codex r20).
@@ -11642,12 +11647,16 @@ router.post('/generate-report', async (req, res) => {
       // wording, so score-0-only generation would hand the tech copy the
       // report never publishes (codex r25).
       || (Number.isInteger(entry?.activityScore) && entry.activityScore >= 1 && entry.activityScore <= 5);
-    const primaryTypedInput = !!typedValuesRaw && (
-      (ActivityIndicators.isTypedFindingsType(structuredFindings.type)
-        && sectionsHaveFacts(typedFindingsPromptSections(structuredFindings.type, typedValuesRaw)))
-      || validatedChipCount(nextStepChips, structuredFindings.type, typedValuesRaw) > 0
-      || typedActivityScoreNum !== null
-    );
+    // Every primary term requires a VALID claimed type — a score or chip on
+    // a type-less container would open generation with nothing appended to
+    // the prompt (codex r27).
+    const primaryTypedInput = !!typedValuesRaw
+      && ActivityIndicators.isTypedFindingsType(structuredFindings.type)
+      && (
+        sectionsHaveFacts(typedFindingsPromptSections(structuredFindings.type, typedValuesRaw))
+        || validatedChipCount(nextStepChips, structuredFindings.type, typedValuesRaw) > 0
+        || typedActivityScoreNum !== null
+      );
     // Provisional gate: companion input counts here so the request survives
     // to profile resolution, but only PROFILE-AUTHORIZED customer-facing
     // companions may ultimately open generation — re-checked after the
