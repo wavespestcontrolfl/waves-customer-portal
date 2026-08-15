@@ -307,6 +307,19 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(sections.observations).toHaveLength(0);
   });
 
+  test('termite compliance fields keep application/work provenance (r6)', () => {
+    const treat = typedFindingsPromptSections('termite_treatment', {
+      linear_feet_or_stations: '120 linear ft',
+      posted_notice: 'Yes',
+    });
+    expect(treat.products.join(' ')).toContain('120 linear ft');
+    expect(treat.work.join(' ')).toContain('Yes');
+    expect(treat.observations).toHaveLength(0);
+    const insp = typedFindingsPromptSections('termite_inspection', { inspection_notice_affixed: 'Yes' });
+    expect(insp.work).toHaveLength(1);
+    expect(insp.observations).toHaveLength(0);
+  });
+
   test('only auto_send companions are customer-facing; internal_only stay staff-only', () => {
     expect(customerFacingCompanionTypes([
       { type: 'tree_shrub', delivery: 'auto_send' },

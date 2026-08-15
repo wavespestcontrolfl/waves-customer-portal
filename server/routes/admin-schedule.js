@@ -11257,8 +11257,8 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
 // a different prompt provenance group — and only observations/work may feed
 // the deterministic fallback (product fields would put trade names in
 // customer copy).
-const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas)$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|^treated_/;
-const TYPED_PRODUCT_FIELD_RE = /product|epa|active_ingredient|concentration|gallon|dilution|_rate$|application|pesticide|^percent_|_solution$/i;
+const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas)$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|^treated_|notice/;
+const TYPED_PRODUCT_FIELD_RE = /product|epa|active_ingredient|concentration|gallon|dilution|_rate$|application|pesticide|^percent_|_solution$|linear_feet|square_footage|trench_depth/i;
 // Recommendation/prep/follow-up fields are FUTURE ADVICE, never findings —
 // presenting a proposed treatment as an observation would let the copy claim
 // work or conditions the visit didn't establish (codex r3 P1).
@@ -11831,10 +11831,30 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
           authorizedCompanionTypes = allowedCompanionTypes;
           const confirmedPrimaryType = typedValuesRaw && structuredFindings.type
             ? structuredFindings.type : null;
+          // Primary tree_shrub derives treatments_completed from the
+          // authoritative catalog rows (autoFilled field the client hides) —
+          // the retired findings draft ran this same derivation before
+          // prompting, and without it the generated WHAT WE DID lacks the
+          // treatment categories the final typed snapshot records (codex r6).
+          // PRIMARY path only: a shared products list can't be attributed
+          // per line on combined visits. Best-effort, never blocks.
+          let effectiveTypedValues = typedValuesRaw;
+          if (confirmedPrimaryType === 'tree_shrub' && Array.isArray(products) && products.length) {
+            try {
+              const { deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
+              const ids = products.map((prod) => prod?.productId).filter(Boolean);
+              const rows = ids.length ? await db('products_catalog').whereIn('id', ids) : [];
+              const derived = deriveTreeShrubTreatments({
+                products: products.filter((prod) => prod?.productId),
+                productRows: rows,
+              });
+              if (derived) effectiveTypedValues = { ...typedValuesRaw, treatments_completed: derived };
+            } catch { /* derivation is polish — never block generation */ }
+          }
           if (confirmedPrimaryType || companionEntries.length) {
             typedFindingsBlock = buildTypedFindingsPromptBlock({
               findingsType: confirmedPrimaryType,
-              values: typedValuesRaw,
+              values: effectiveTypedValues,
               nextStepChips,
               companionFindings: companionEntries,
               allowedCompanionTypes,
@@ -11848,7 +11868,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
             // application fields are DROPPED (trade names must not surface in
             // the deterministic copy — codex r2).
             if (confirmedPrimaryType) {
-              const sections = typedFindingsPromptSections(confirmedPrimaryType, typedValuesRaw);
+              const sections = typedFindingsPromptSections(confirmedPrimaryType, effectiveTypedValues);
               typedFallbackActions.push(...sections.work.slice(0, 6));
               typedFallbackObservations.push(...sections.observations.slice(0, 8));
               typedFallbackNextSteps.push(...sections.advice.slice(0, 6));
@@ -11856,7 +11876,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
               const scoreLine = typedActivityLine(confirmedPrimaryType, typedActivityScoreNum, { words: true });
               if (scoreLine) typedFallbackObservations.push(scoreLine);
               const typedChipsValidation = ActivityIndicators.validateNextStepChips(
-                nextStepChips, confirmedPrimaryType, typedValuesRaw,
+                nextStepChips, confirmedPrimaryType, effectiveTypedValues,
               );
               if (typedChipsValidation.ok) typedFallbackNextSteps.push(...typedChipsValidation.chips);
             }

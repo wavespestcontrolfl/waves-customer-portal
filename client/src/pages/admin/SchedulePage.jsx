@@ -14170,7 +14170,13 @@ export function CompletionPanel({
                   }
                   setGenerating(false);
                 }}
-                disabled={generating || (isLawn && lawnAssessmentReady === false)}
+                disabled={generating
+                  || (isLawn && lawnAssessmentReady === false)
+                  // A mid-load station registry would land counts AFTER the
+                  // model saw the snapshot (the paused autofill re-runs when
+                  // generating settles) — hold generation until it resolves
+                  // (codex r6).
+                  || (stationFeatureOn && stationRegistryState === "loading")}
                 style={{
                   ...secondaryPill,
                   marginTop: 4,
@@ -16359,7 +16365,10 @@ export function CompletionPanel({
                 }
                 setGenerating(false);
               }}
-              disabled={generating || (isLawn && lawnAssessmentReady === false)}
+              disabled={generating
+                || (isLawn && lawnAssessmentReady === false)
+                // Same station-registry hold as the mobile Generate button.
+                || (stationFeatureOn && stationRegistryState === "loading")}
               style={{
                 width: "100%",
                 padding: "10px 16px",
