@@ -38,8 +38,13 @@ function mockRowDb(row, updateBuilder, extra = {}) {
     if (table === 'customer_properties') {
       cpCalls += 1;
       // 1st customer_properties call = the row fetch; the 2nd is the
-      // fill-only UPDATE.
-      return cpCalls === 1 ? builder(row) : (updateBuilder || builder(1));
+      // fill-only UPDATE (or the parked-verdict touch); the 3rd is the
+      // LIVE role re-read before the customers mirror (a primary flip can
+      // commit while the external lookup runs — the mirror decision reads
+      // current state, not the pre-lookup snapshot).
+      if (cpCalls === 1) return builder(row);
+      if (cpCalls === 2) return updateBuilder || builder(1);
+      return builder({ is_primary: row.is_primary, address_key: row.address_key, customer_id: row.customer_id });
     }
     if (table === 'scheduled_services') {
       // The visit mirror now SELECTS candidates (canonical-key fence in

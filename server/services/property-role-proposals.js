@@ -200,7 +200,15 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
     logger.warn(`[property-role] ${claimedPrimaryTotal} properties classified as primary residence on one call — skipping flip proposal (contradiction)`);
   } else if (primaryClaims.length === 1) {
     const { entry, row } = primaryClaims[0];
-    if (!row.is_primary) {
+    if (String(row.property_type || '').trim().toLowerCase() === 'commercial') {
+      // A primary-RESIDENCE claim on a commercial-typed row is contradictory,
+      // and the flip's mirror would copy that classification onto
+      // customers.property_type, which feeds service_taxability — the
+      // enrichment lane already refuses exactly this mirror (codex #3418
+      // r8). A property-type/tax change is its own review, never a silent
+      // rider on a role card.
+      logger.warn('[property-role] primary-residence claim targets a commercial-typed property — flip suppressed');
+    } else if (!row.is_primary) {
       // The demoted row's suggested role: the call's classification of it if
       // given, else what's already stored, else no change.
       const oldRow = currentPrimary;
@@ -314,10 +322,16 @@ async function stagePropertyRoleReview({
   let fillCount = 0;
   let parked = false;
   await db.transaction(async (trx) => {
+    // Lock ORDER: customers row FIRST, then the call advisory lock (codex
+    // #3418 r8) — the Customer 360 save holds the customer + primary-
+    // property locks before its email fanout takes lockTriageCall, so
+    // taking the call lock first here and then writing customer_properties
+    // (the fills) was the staging-side AB-BA half. Same order as Apply.
+    await trx('customers').where({ id: customerId }).forUpdate().first();
     await lockTriageCall(trx, callLogId);
     const properties = await trx('customer_properties')
       .where({ customer_id: customerId, active: true })
-      .select('id', 'address_line1', 'address_line2', 'city', 'zip', 'occupancy_type', 'is_primary', 'label');
+      .select('id', 'address_line1', 'address_line2', 'city', 'zip', 'occupancy_type', 'is_primary', 'label', 'property_type');
     const { fills, proposals } = buildPropertyRoleProposals({ classified, properties });
 
     for (const fill of fills) {
@@ -422,6 +436,12 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         .first();
       if (!newPrimary) { skipped += 1; continue; }
       if (newPrimary.is_primary) { applied += 1; continue; } // already done — idempotent re-click
+      // Commercial-typed rows never become the residence mirror (codex
+      // #3418 r8): customers.property_type feeds service_taxability, and
+      // the card never showed the reviewer a property-type/tax change.
+      // Staging suppresses these flips; this catches a row RE-TYPED
+      // commercial between parking and the click.
+      if (String(newPrimary.property_type || '').trim().toLowerCase() === 'commercial') { skipped += 1; continue; }
 
       const oldPrimary = await trx('customer_properties')
         .where({ customer_id: customerId, is_primary: true, active: true })
@@ -542,9 +562,14 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         .where({ id: newPrimary.id })
         .whereNull('label')
         .update({ label: 'Primary', updated_at: new Date() });
-      if (primaryLabeled === 0 && LABEL_BY_OCCUPANCY[knownOccupancy(newPrimary.occupancy_type)]) {
+      if (primaryLabeled === 0) {
         // A stale suggestion label ('Rental'/'Seasonal') on the row now
-        // becoming primary is corrected; a bespoke admin name is kept.
+        // becoming primary is corrected; a bespoke admin name is not in
+        // the suggestion set and is kept. Eligibility is judged from the
+        // LABEL itself, not the row's occupancy (codex #3418 r8) — the
+        // companion occupancy_change runs BEFORE the flip, so an
+        // occupancy-derived condition missed exactly the just-corrected
+        // rental/seasonal row it existed for.
         await trx('customer_properties')
           .where({ id: newPrimary.id })
           .whereIn('label', Object.values(LABEL_BY_OCCUPANCY))

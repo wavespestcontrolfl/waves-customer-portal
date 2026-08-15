@@ -165,6 +165,15 @@ describe('buildPropertyRoleProposals', () => {
     expect(companion).toEqual([expect.objectContaining({ current_occupancy: 'rental_investment', proposed_occupancy: 'owner_occupied' })]);
   });
 
+  test('a primary claim on a COMMERCIAL-typed row proposes no flip (taxability rider — codex r8)', () => {
+    const commercialNew = { ...NEW_HOME, property_type: 'commercial' };
+    const { proposals } = buildPropertyRoleProposals({
+      classified: [{ address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true }],
+      properties: [OLD_HOME, commercialNew],
+    });
+    expect(proposals).toHaveLength(0);
+  });
+
   test('matching stored occupancy produces neither fill nor proposal', () => {
     const { fills, proposals } = buildPropertyRoleProposals({
       classified: [{ address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: 'owner_occupied', is_primary_residence: null }],
@@ -186,7 +195,7 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
         whereNull(c) { this._whereNulls.push(c); return this; },
         forUpdate() { return this; },
         whereNotIn(c, v) { this._whereNotIn = [c, v]; return this; },
-        whereIn() { return this; },
+        whereIn(c, v) { this._whereIns = (this._whereIns || []).concat([[c, v]]); return this; },
         async first() {
           const preds = Object.assign({}, ...this._wheres);
           return (rows[table] || []).find((r) => Object.entries(preds).every(([k, v]) => r[k] === v)) || null;
@@ -194,7 +203,12 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
         async update(patch) {
           updates.push({ table, wheres: this._wheres, whereNulls: this._whereNulls, whereNotIn: this._whereNotIn, patch });
           const preds = Object.assign({}, ...this._wheres.filter((w) => typeof w === 'object'));
-          const hits = (rows[table] || []).filter((r) => Object.entries(preds).every(([k, v]) => r[k] === v));
+          // Honor whereNull/whereIn like the real builder — the label
+          // fences (whereNull('label'), whereIn('label', suggestions))
+          // are load-bearing in the promote/relabel assertions.
+          const hits = (rows[table] || []).filter((r) => Object.entries(preds).every(([k, v]) => r[k] === v)
+            && this._whereNulls.every((c) => r[c] == null)
+            && (this._whereIns || []).every(([c, v]) => v.includes(r[c])));
           hits.forEach((r) => Object.assign(r, patch));
           return hits.length;
         },
@@ -317,6 +331,41 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     });
     // Only the pin update — never a backfill stamping NULL over NULL.
     expect(trx._updates.filter((x) => x.table === 'scheduled_services')).toHaveLength(1);
+  });
+
+  test('companion occupancy_change before the flip still relabels the Rental-labeled promoted row (codex r8)', async () => {
+    const old = { ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1' };
+    const neu = {
+      ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1',
+      occupancy_type: 'rental_investment', label: 'Rental',
+    };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    const { applied, skipped } = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [
+        // Card order mirrors staging: the companion change lands first and
+        // sets occupancy owner_occupied — relabel eligibility must come
+        // from the LABEL, not the already-updated occupancy.
+        { kind: 'occupancy_change', property_id: 'prop-new', current_occupancy: 'rental_investment', proposed_occupancy: 'owner_occupied' },
+        { kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old', old_primary_label: null },
+      ],
+    });
+    expect({ applied, skipped }).toEqual({ applied: 2, skipped: 0 });
+    expect(neu.occupancy_type).toBe('owner_occupied');
+    expect(neu.label).toBe('Primary');
+  });
+
+  test('a flip whose new primary was re-typed COMMERCIAL after parking is skipped (codex r8)', async () => {
+    const old = { ...OLD_HOME, state: 'FL', active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, state: 'FL', active: true, customer_id: 'cust-1', property_type: 'commercial' };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    const { applied, skipped } = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
+    });
+    expect({ applied, skipped }).toEqual({ applied: 0, skipped: 1 });
+    // Never mirrors a commercial classification onto customers (taxability).
+    expect(trx._updates.filter((x) => x.table === 'customers')).toHaveLength(0);
   });
 
   test('re-click on an already-flipped card is idempotent (applied, no writes)', async () => {
