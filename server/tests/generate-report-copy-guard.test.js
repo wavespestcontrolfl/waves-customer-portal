@@ -352,6 +352,16 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(ts.work).toHaveLength(1);
   });
 
+  test('inspected scope is completed work; NOT-inspected scope stays an observation (r9)', () => {
+    const insp = typedFindingsPromptSections('termite_inspection', {
+      areas_inspected: 'Attic, garage, exterior perimeter',
+      areas_not_inspected: 'Crawlspace (no access)',
+    });
+    expect(insp.work.join(' ')).toContain('Attic');
+    expect(insp.observations.join(' ')).toContain('Crawlspace');
+    expect(insp.observations.join(' ')).not.toContain('Attic');
+  });
+
   test('only auto_send companions are customer-facing; internal_only stay staff-only', () => {
     expect(customerFacingCompanionTypes([
       { type: 'tree_shrub', delivery: 'auto_send' },
