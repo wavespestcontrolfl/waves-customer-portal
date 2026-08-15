@@ -42,7 +42,7 @@ const NOW = new Date('2026-08-12T15:00:00Z'); // Wed Aug 12, 11:00 ET
 
 function chain({ result = [], first, returning } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNull', 'whereRaw', 'orderBy', 'distinct', 'select', 'limit']
+  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orderBy', 'distinct', 'select', 'limit']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.insert = jest.fn(() => q);
   q.update = jest.fn(() => q);
@@ -126,7 +126,7 @@ describe('case + card creation', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ first: undefined }), caseInsert],
+      collection_cases: [chain({ first: undefined }), caseInsert, chain({ result: 0 })],
       notifications: [chain({ first: null })],
     });
 
@@ -149,14 +149,14 @@ describe('case + card creation', () => {
       }),
     }));
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 1, casesUpdated: 0, cardsFiled: 1 });
+    expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 1, casesUpdated: 0, cardsFiled: 1, casesLapsed: 0 });
   });
 
   test('the card masks the phone, names the invoice/balance/age/consent, and speaks open-balance language', async () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800 }] })],
+      collection_cases: [chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800 }, chain({ result: 0 })] })],
       notifications: [chain({ first: null })],
     });
     await ShadowSweep.runShadowSweep({ now: NOW });
@@ -189,7 +189,7 @@ describe('case + card creation', () => {
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-    expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 0, cardsFiled: 0 });
+    expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 0, cardsFiled: 0, casesLapsed: 0 });
   });
 });
 
@@ -208,11 +208,11 @@ describe('idempotency + versioning', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ first: EXISTING_CASE })],
+      collection_cases: [chain({ first: EXISTING_CASE }), chain({ result: 0 })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-    expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 0, cardsFiled: 0 });
+    expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 0, cardsFiled: 0, casesLapsed: 0 });
   });
 
   test('a balance change bumps case_version, rotates the idempotency key, and files a fresh card', async () => {
@@ -221,7 +221,7 @@ describe('idempotency + versioning', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ first: EXISTING_CASE }), caseUpdate],
+      collection_cases: [chain({ first: EXISTING_CASE }), caseUpdate, chain({ result: 0 })],
       notifications: [chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
@@ -234,7 +234,7 @@ describe('idempotency + versioning', () => {
     }));
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.dedupeKey).toBe('collections:cust-1:2:14');
-    expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 1, cardsFiled: 1 });
+    expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 1, cardsFiled: 1, casesLapsed: 0 });
   });
 
   test('an already-filed card (same dedupe key) is not re-filed even when the case row is rewritten', async () => {
@@ -244,7 +244,7 @@ describe('idempotency + versioning', () => {
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [
         chain({ first: EXISTING_CASE }),
-        chain({ returning: [{ id: 'case-1', case_version: 2, eligible_balance_snapshot: 15300 }] }),
+        chain({ returning: [{ id: 'case-1', case_version: 2, eligible_balance_snapshot: 15300 }, chain({ result: 0 })] }),
       ],
       notifications: [chain({ first: { id: 'notif-existing' } })],
     });
@@ -258,11 +258,11 @@ describe('idempotency + versioning', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ first: EXISTING_CASE }), chain({ returning: [] })],
+      collection_cases: [chain({ first: EXISTING_CASE }), chain({ returning: [, chain({ result: 0 })] })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-    expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 0, cardsFiled: 0 });
+    expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 0, cardsFiled: 0, casesLapsed: 0 });
   });
 });
 
@@ -277,11 +277,11 @@ describe('resilience', () => {
         chain({ first: INVOICE }),
       ],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1 }] })],
+      collection_cases: [chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1 }, chain({ result: 0 })] })],
       notifications: [chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
-    expect(result).toEqual({ skipped: false, considered: 2, casesCreated: 1, casesUpdated: 0, cardsFiled: 1 });
+    expect(result).toEqual({ skipped: false, considered: 2, casesCreated: 1, casesUpdated: 0, cardsFiled: 1, casesLapsed: 0 });
   });
 });
 
@@ -312,7 +312,7 @@ describe('card durability', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800 }] })],
+      collection_cases: [chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800 }, chain({ result: 0 })] })],
       notifications: [chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
@@ -325,12 +325,12 @@ describe('card durability', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ first: EXISTING_CASE })],
+      collection_cases: [chain({ first: EXISTING_CASE }), chain({ result: 0 })],
       notifications: [chain({ first: null }), chain({ first: null })],
     });
     const refiled = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    expect(refiled).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 0, cardsFiled: 1 });
+    expect(refiled).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 0, cardsFiled: 1, casesLapsed: 0 });
 
     // Standing card ⇒ untouched no-op.
     jest.clearAllMocks();
@@ -339,11 +339,50 @@ describe('card durability', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ first: EXISTING_CASE })],
+      collection_cases: [chain({ first: EXISTING_CASE }), chain({ result: 0 })],
       notifications: [chain({ first: { id: 'notif-1' } })],
     });
     const noop = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     expect(noop.cardsFiled).toBe(0);
+  });
+});
+
+// r3: shadow cases retire when eligibility disappears, and a tier crossing
+// is a CHANGED proposal (new version/key/card).
+describe('retirement + tier rotation', () => {
+  test('a customer denied this sweep has their standing shadow case lapsed', async () => {
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['flag_collection_hold'] });
+    const retireChain = chain({ result: 1 });
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] })],
+      collection_cases: [retireChain],
+    });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result.casesLapsed).toBe(1);
+    expect(retireChain.update).toHaveBeenCalledWith(expect.objectContaining({ current_state: 'lapsed' }));
+    expect(retireChain.whereNotIn).toHaveBeenCalledWith('customer_id', []);
+  });
+
+  test('an unchanged balance that crossed a dunning tier rotates the version and files a fresh card', async () => {
+    // Same invoice set + balance, but the standing key is the 14-day tier
+    // while the invoice is now 35 days overdue (tier 30) ⇒ NOT unchanged.
+    const existing = {
+      id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800,
+      eligible_invoice_ids: JSON.stringify(['inv-1']), idempotency_key: 'collections:cust-1:1:14',
+    };
+    const caseUpdate = chain({ returning: [{ id: 'case-1', case_version: 2, eligible_balance_snapshot: 12800 }] });
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: { ...INVOICE, due_date: '2026-07-08' } })],
+      customers: [chain({ first: CUSTOMER })],
+      collection_cases: [chain({ first: existing }), caseUpdate, chain({ result: 0 })],
+      notifications: [chain({ first: null })],
+    });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(caseUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      case_version: 2,
+      idempotency_key: 'collections:cust-1:2:30',
+    }));
+    expect(result.cardsFiled).toBe(1);
   });
 });

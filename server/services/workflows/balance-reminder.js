@@ -159,8 +159,9 @@ class BalanceReminder {
         else if (daysUntil <= 1) tier = "urgent";
         else continue;
 
-        await this.sendReminder(service, balance, tier, daysUntil);
-        sent++;
+        // A policy hold or ledger outage returns false — a skip, not a
+        // send (codex r-gh2: the counter claimed sends that never left).
+        if ((await this.sendReminder(service, balance, tier, daysUntil)) !== false) sent++;
       } catch (err) {
         logger.error(
           `Balance check failed for ${service.cust_id}: ${err.message}`,
@@ -251,7 +252,7 @@ class BalanceReminder {
       purpose: "balance_reminder",
       logTag: "balance-reminder",
     }))) {
-      return;
+      return false;
     }
     // scheduled_date arrives as a JS Date (pg `date` column), not a string —
     // string concatenation here rendered "Invalid Date" into customer SMS.
@@ -299,7 +300,7 @@ class BalanceReminder {
       });
     } catch (ledgerErr) {
       logger.warn(`[balance-reminder] reminder skipped for customer ${service.cust_id} — contact ledger unavailable: ${ledgerErr.message}`);
-      return;
+      return false;
     }
     const sendResult = await sendCustomerMessage({
       to: service.phone,

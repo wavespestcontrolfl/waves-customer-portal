@@ -137,6 +137,7 @@ async function runShadowSweep({ now = new Date() } = {}) {
   let casesUpdated = 0;
   let cardsFiled = 0;
 
+  const stillEligible = new Set();
   for (const customerId of candidates) {
     considered++;
     try {
@@ -144,6 +145,7 @@ async function runShadowSweep({ now = new Date() } = {}) {
         channel: 'voice', purpose: 'late_payment', now,
       });
       if (!verdict.allowed) continue;
+      stillEligible.add(customerId);
 
       const customer = await db('customers').where({ id: customerId }).first();
       if (!customer) continue;
@@ -166,7 +168,10 @@ async function runShadowSweep({ now = new Date() } = {}) {
 
       const unchanged = existing
         && Number(existing.eligible_balance_snapshot) === verdict.eligibleBalanceCents
-        && JSON.stringify(normalizedIdSet(existing.eligible_invoice_ids)) === JSON.stringify(invoiceIds);
+        && JSON.stringify(normalizedIdSet(existing.eligible_invoice_ids)) === JSON.stringify(invoiceIds)
+        // Tier is part of the proposal (codex r3): an unpaid invoice
+        // crossing 14→30→60 must rotate the version/key and re-file.
+        && String(existing.idempotency_key || '').endsWith(`:${tier}`);
       if (unchanged) {
         // The card is the case's ONLY surface (codex gh-r1): if last
         // sweep's notifyAdmin insert failed after the case row persisted,
@@ -242,8 +247,23 @@ async function runShadowSweep({ now = new Date() } = {}) {
     }
   }
 
-  logger.info(`[collections-shadow] sweep done: ${considered} considered, ${casesCreated} created, ${casesUpdated} updated, ${cardsFiled} cards`);
-  return { skipped: false, considered, casesCreated, casesUpdated, cardsFiled };
+  // Retire stale shadow cases (codex r3): a customer who paid off, went
+  // payer-billed, or gained a hold must not keep a standing shadow
+  // proposal. 'lapsed' is terminal-but-auditable; a re-qualifying customer
+  // mints a fresh version later. whereNotIn with an empty set retires
+  // every shadow case — correct: nobody is eligible.
+  let casesLapsed = 0;
+  try {
+    casesLapsed = await db('collection_cases')
+      .where({ current_state: 'shadow' })
+      .whereNotIn('customer_id', [...stillEligible])
+      .update({ current_state: 'lapsed', updated_at: db.fn.now() });
+  } catch (err) {
+    logger.error(`[collections-shadow] stale-case retirement failed: ${err.message}`);
+  }
+
+  logger.info(`[collections-shadow] sweep done: ${considered} considered, ${casesCreated} created, ${casesUpdated} updated, ${cardsFiled} cards, ${casesLapsed} lapsed`);
+  return { skipped: false, considered, casesCreated, casesUpdated, cardsFiled, casesLapsed };
 }
 
 module.exports = { runShadowSweep, dunningTierForOverdue, predictedOpeningScript };

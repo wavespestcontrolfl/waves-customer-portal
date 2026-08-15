@@ -199,6 +199,28 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), aggreg
     // sent/viewed/overdue), same as paid/void/draft; credit-covered rows
     // fall to its cents test.
     const eligible = await openBalanceInvoices(customerId);
+    // Legacy 'unpaid' status (codex r-gh2): the dunning rails
+    // (latePaymentCheck/getCustomerBalance) explicitly serve it, but the
+    // open-balance loader admits only sent/viewed/overdue — without this
+    // arm, a customer whose only debt is a legacy-unpaid invoice is denied
+    // no_eligible_balance and loses reminders the moment the gate flips.
+    // Same predicates as openInvoiceQuery, same self-pay authority
+    // (rowIsSelfPayDue — live payer re-resolution), merged and deduped.
+    const legacyUnpaid = await db('invoices')
+      .where({ customer_id: customerId, status: 'unpaid' })
+      .whereNull('payer_id')
+      .whereNull('payer_statement_id')
+      .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
+      .orderBy('created_at', 'asc')
+      .select('*');
+    if (legacyUnpaid.length) {
+      const { rowIsSelfPayDue } = require('../open-balance');
+      const seenIds = new Set(eligible.map((inv) => String(inv.id)));
+      for (const row of legacyUnpaid) {
+        if (seenIds.has(String(row.id))) continue;
+        if (await rowIsSelfPayDue(customerId, row)) eligible.push(row);
+      }
+    }
     result.eligibleInvoiceIds = eligible.map((inv) => inv.id);
     result.eligibleBalanceCents = eligible.reduce(
       (sum, inv) => sum + Math.round(invoiceAmountDue(inv) * 100),
@@ -247,14 +269,12 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), aggreg
         .where({ phone: e164, active: true })
         .first('reason');
       if (sup) {
+        // The canonical semantics are HARD across every channel (the
+        // suppression module's own doc; codex r3 — do not reinterpret
+        // them here). The single carve-out is non_mobile: a carrier
+        // deliverability fact about SMS, not a consent withdrawal.
         const reason = sup.reason || 'unknown';
-        const PHONE_CHANNELS = ['sms', 'voice', 'manual_call'];
-        let deniedChannels;
-        if (reason === 'manual_dnc') deniedChannels = ALL_CHANNELS;
-        else if (reason === 'non_mobile') deniedChannels = ['sms'];
-        else if (['opt_out_keyword', 'opt_out_natural_language', 'wrong_number'].includes(reason)) {
-          deniedChannels = PHONE_CHANNELS;
-        } else deniedChannels = ALL_CHANNELS; // unknown reason = fail closed
+        const deniedChannels = reason === 'non_mobile' ? ['sms'] : ALL_CHANNELS;
         if (deniedChannels.includes(channel)) deny(`suppression_${reason}`);
       }
     }

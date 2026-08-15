@@ -16,6 +16,7 @@ jest.mock('../services/logger', () => ({
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/open-balance', () => ({
   openBalanceInvoices: jest.fn(async () => []),
+  rowIsSelfPayDue: jest.fn(async () => true),
 }));
 jest.mock('../services/collections/consent-provenance', () => ({
   resolve: jest.fn(async () => null),
@@ -106,6 +107,7 @@ function armAllowedBaseline({
     activity_log: chain({ result: [{ count: String(activityCount) }] }),
     messaging_suppression: chain({ first: undefined }),
     call_log: chain({ first: undefined }),
+    invoices: chain({ result: [] }),
   });
   openBalanceInvoices.mockResolvedValue(invoices);
   readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'mobile' });
@@ -178,6 +180,7 @@ describe('structural denials', () => {
     const activityChain = chain({ result: [{ count: '2' }] });
     setDbTables({
       customers: chain({ first: customerRow() }),
+      invoices: chain({ result: [] }),
       collections_flags: chain({ result: [] }),
       // queue: frequency-window read, then the touch-count read
       collections_contact_ledger: [chain({ result: [] }), chain({ result: [{ count: '0' }] })],
@@ -366,6 +369,7 @@ describe('rolling frequency windows', () => {
     armAllowedBaseline();
     setDbTables({
       customers: chain({ first: customerRow() }),
+      invoices: chain({ result: [] }),
       collections_flags: chain({ result: [] }),
       collections_contact_ledger: ledgerChain,
       invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
@@ -492,6 +496,7 @@ describe('voice pilot caps (purpose late_payment)', () => {
   test('no follow-up sequence at all → only activity rows count', async () => {
     setDbTables({
       customers: chain({ first: customerRow() }),
+      invoices: chain({ result: [] }),
       collections_flags: chain({ result: [] }),
       collections_contact_ledger: chain({ result: [] }),
       invoice_followup_sequences: chain({ first: undefined }),
@@ -642,6 +647,7 @@ describe('canonical suppression list', () => {
     armAllowedBaseline();
     setDbTables({
       customers: chain({ first: customerRow() }),
+      invoices: chain({ result: [] }),
       collections_flags: chain({ result: [] }),
       collections_contact_ledger: chain({ result: [] }),
       invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
@@ -661,16 +667,13 @@ describe('canonical suppression list', () => {
     }
   });
 
-  test('STOP-style opt-outs and wrong_number deny the phone channels but not email', async () => {
+  test('STOP-style opt-outs and wrong_number deny EVERY channel (canonical HARD semantics, codex r3)', async () => {
     for (const reason of ['opt_out_keyword', 'opt_out_natural_language', 'wrong_number']) {
-      for (const ch of ['voice', 'manual_call', 'sms']) {
+      for (const ch of ['voice', 'manual_call', 'sms', 'email']) {
         armWithSuppression(reason);
         const result = await ContactPolicy.evaluate('cust-1', { channel: ch, purpose: 'late_payment', now: WED_11AM_EDT });
         expect(result.denialReasons).toContain(`suppression_${reason}`);
       }
-      armWithSuppression(reason);
-      const email = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose: 'late_payment', now: WED_11AM_EDT });
-      expect(email.denialReasons).not.toContain(`suppression_${reason}`);
     }
   });
 
@@ -695,6 +698,7 @@ describe('call_log live conversations', () => {
     armAllowedBaseline();
     setDbTables({
       customers: chain({ first: customerRow() }),
+      invoices: chain({ result: [] }),
       collections_flags: chain({ result: [] }),
       collections_contact_ledger: chain({ result: [] }),
       invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
@@ -724,6 +728,7 @@ describe('call_log live conversations', () => {
     armAllowedBaseline();
     setDbTables({
       customers: chain({ first: customerRow() }),
+      invoices: chain({ result: [] }),
       collections_flags: chain({ result: [] }),
       collections_contact_ledger: chain({ result: [] }),
       invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
@@ -743,6 +748,7 @@ describe('ledger-based dunning touches (balance-reminder workflow)', () => {
     armAllowedBaseline();
     setDbTables({
       customers: chain({ first: customerRow() }),
+      invoices: chain({ result: [] }),
       collections_flags: chain({ result: [] }),
       // queue: frequency read, then the touch-count read
       collections_contact_ledger: [chain({ result: [] }), chain({ result: [{ count: '2' }] })],
@@ -761,6 +767,7 @@ describe('ledger-based dunning touches (balance-reminder workflow)', () => {
     armAllowedBaseline();
     setDbTables({
       customers: chain({ first: customerRow() }),
+      invoices: chain({ result: [] }),
       collections_flags: chain({ result: [] }),
       collections_contact_ledger: [chain({ result: [] }), countChain],
       invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
@@ -789,6 +796,7 @@ test('a newer call_log conversation sets nextEligibleAt from ITS 7-day boundary,
   armAllowedBaseline();
   setDbTables({
     customers: chain({ first: customerRow() }),
+    invoices: chain({ result: [] }),
     collections_flags: chain({ result: [] }),
     collections_contact_ledger: chain({ result: [olderLedgerVoice] }),
     invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
@@ -802,4 +810,25 @@ test('a newer call_log conversation sets nextEligibleAt from ITS 7-day boundary,
   // 7 days after the NEWER call, not the older ledger contact.
   expect(new Date(result.nextEligibleAt).getTime())
     .toBeGreaterThanOrEqual(newerCallAt.getTime() + 7 * 24 * HOUR);
+});
+
+// r-gh2: legacy 'unpaid' invoices are served by the dunning rails but not
+// by the open-balance loader — the supplemental arm admits them with the
+// same self-pay authority, so gate-on doesn't strand those customers.
+test('a customer whose only debt is a legacy-unpaid invoice still has an eligible balance', async () => {
+  const { rowIsSelfPayDue } = require('../services/open-balance');
+  armAllowedBaseline({ invoices: [] }); // open-balance loader returns nothing
+  setDbTables({
+    customers: chain({ first: customerRow() }),
+    invoices: chain({ result: [invoiceRow({ status: 'unpaid' })] }),
+    collections_flags: chain({ result: [] }),
+    collections_contact_ledger: chain({ result: [] }),
+    invoice_followup_sequences: chain({ first: { touches_sent: 2 } }),
+    activity_log: chain({ result: [{ count: '0' }] }),
+    messaging_suppression: chain({ first: undefined }),
+    call_log: chain({ first: undefined }),
+  });
+  const result = await ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'late_payment', now: WED_11AM_EDT });
+  expect(result.denialReasons).not.toContain('no_eligible_balance');
+  expect(result.eligibleInvoiceIds).toEqual(['inv-1']);
 });
