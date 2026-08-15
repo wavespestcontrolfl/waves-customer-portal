@@ -3328,10 +3328,25 @@ function buildTodaysResult({
     const intro = areas.length
       ? `Completed your flea service with attention to the ${joinPhrases(areas)}.`
       : 'Completed your flea service today.';
+    // The tech's reviewed "Generate AI report" copy replaces only the
+    // intro/what-we-did portion (same owner 2026-08-11 rule the knockdown
+    // and mosquito branches follow) — the owner-mandated cooperation line
+    // carries in EVERY body. A cleared state keeps the template, and a
+    // draft contradicting the FINAL level family is refused (reconcile
+    // override honored) — codex r21 on #3420.
+    const fleaBand = score != null
+      ? levelBandForScore(score)
+      : (LEVEL_CLAIM_BANDS[select.toLowerCase()] || null);
+    const fleaReportBody = !cleared
+      && (reconcileConfirmed
+        || !activityLevelContradictions(technicianReportBody, fleaBand).length)
+      ? technicianReportBody
+      : null;
     return {
       headline,
-      body: `${intro} ${whatWeDid} Flea control works best when treatment and home care happen together — the aftercare steps below make the biggest difference.${nextStep ? ` ${nextStep}` : ''}`.replace(/\s+/g, ' ').trim(),
+      body: `${fleaReportBody || `${intro} ${whatWeDid}`} Flea control works best when treatment and home care happen together — the aftercare steps below make the biggest difference.${nextStep ? ` ${nextStep}` : ''}`.replace(/\s+/g, ' ').trim(),
       nextStep,
+      ...(fleaReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 

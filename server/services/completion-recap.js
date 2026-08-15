@@ -221,13 +221,18 @@ async function aiRecap(input = {}) {
 // True when the generated copy mentions any recorded product by name —
 // matches on each name token of 4+ letters ("Talstar", "Suspend") so partial
 // echoes ("we applied Talstar around...") are caught too.
-function containsProductName(text, products) {
+function containsProductName(text, products, { extraGenericTokens = null } = {}) {
   const hay = String(text || '').toLowerCase();
   if (!hay) return false;
   return safeProducts(products).some((p) => String(p.name || '')
     .toLowerCase()
     .split(/[^a-z0-9]+/)
-    .filter((token) => token.length >= 4 && !GENERIC_NAME_TOKENS.has(token))
+    .filter((token) => token.length >= 4
+      && !GENERIC_NAME_TOKENS.has(token)
+      // Callers may widen the generic set (e.g. the generate-report guard
+      // ignores pest-target nouns like "cockroach" that appear in catalog
+      // names but legitimately belong in report copy — codex r21 on #3420).
+      && !(extraGenericTokens && extraGenericTokens.has(token)))
     .some((token) => hay.includes(token)));
 }
 const GENERIC_NAME_TOKENS = new Set([

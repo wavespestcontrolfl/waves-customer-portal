@@ -11381,7 +11381,7 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
       // option into their real groups (codex r18/r19).
       // 'Limited treatment' is completed work — only access-limitation
       // phrases ('due to', 'unable', 'no access') read as status (codex r20).
-      const statusOptionRe = /\bfound\b|\bno activity\b|\bobserved\b|\bnoted\b|\bdue to\b|\bunable\b|\bno access\b/i;
+      const statusOptionRe = /\bfound\b|\bno activity\b|\bnone present\b|\bobserved\b|\bnoted\b|\bdue to\b|\bunable\b|\bno access\b/i;
       const adviceOptionRe = /\brecommended\b|\brecommend\b|\bneeded\b/i;
       if (multi && parts.some((part) => statusOptionRe.test(part) || adviceOptionRe.test(part))) {
         const adviceParts = parts.filter((part) => adviceOptionRe.test(part));
@@ -11396,7 +11396,7 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
         if (adviceParts.length) {
           sections.advice.push(`${label}: ${redactAccessCodes(adviceParts.join(', ').slice(0, 300))}`);
         }
-      } else if (!multi && /^(?:no|none|not applicable|n\/a)$/i.test(String(raw ?? '').trim())) {
+      } else if (!multi && /^(?:no|none|none present|not applicable|n\/a)$/i.test(String(raw ?? '').trim())) {
         // A negative answer on a work field ("Bait replaced: No") records
         // that the action was NOT performed — a status fact, never
         // "Completed work included …: No" (codex r20).
@@ -12138,6 +12138,17 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     // selected products, the free-text productsApplied names, and any typed
     // product-record values (codex r4; same contract the retired recap draft
     // enforced via containsProductName).
+    // Pest-target/formulation nouns appear in catalog names ("Advion
+    // Cockroach Gel Bait") but legitimately belong in report copy — only
+    // distinctive brand tokens may reject output (codex r21).
+    const PEST_TARGET_TOKENS = new Set([
+      'cockroach', 'cockroaches', 'roach', 'roaches', 'termite', 'termites',
+      'rodent', 'rodents', 'mosquito', 'mosquitos', 'mosquitoes', 'ants',
+      'flea', 'fleas', 'tick', 'ticks', 'spider', 'spiders', 'wasp', 'wasps',
+      'hornet', 'hornets', 'bees', 'mice', 'rats', 'wildlife', 'station',
+      'stations', 'trap', 'traps', 'perimeter', 'barrier', 'outdoor',
+      'indoor', 'yard', 'granular', 'granules',
+    ]);
     const guardedProducts = [
       ...(Array.isArray(products) ? products : []),
       ...fallbackProductNames.map((name) => ({ name })),
@@ -12147,7 +12158,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       systemPrompt,
       userMessage: fullUserMessage,
       extraRejection: (text) => (
-        CompletionRecap.containsProductName(text, guardedProducts) ? 'trade_name' : null
+        CompletionRecap.containsProductName(text, guardedProducts, { extraGenericTokens: PEST_TARGET_TOKENS }) ? 'trade_name' : null
       ),
     });
     if (!generated.ok) {
@@ -12179,7 +12190,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      const fallbackReport = report && CompletionRecap.containsProductName(report, guardedProducts)
+      const fallbackReport = report && CompletionRecap.containsProductName(report, guardedProducts, { extraGenericTokens: PEST_TARGET_TOKENS })
         ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {

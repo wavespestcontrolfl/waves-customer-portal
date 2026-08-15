@@ -262,3 +262,42 @@ describe('zero-score primary trapping reports never prompt', () => {
     }).length).toBeGreaterThan(0);
   });
 });
+
+// r21 (#3420): flea joins the technician-report consumers — the reviewed
+// Generate AI report copy replaces the intro/what-we-did portion while the
+// owner-mandated cooperation line carries in EVERY body; a cleared state
+// keeps the template and a contradicting draft is refused.
+describe('flea technician report body (codex r21 #3420)', () => {
+  const { buildTodaysResult } = require('../services/service-report/activity-indicators');
+  const base = {
+    projectType: 'flea',
+    values: { evidence_level: 'Light' },
+    activity: { score: 2 },
+    visitSequence: 1,
+    whatWeDid: 'Treated interior.',
+    nextStep: 'We will recheck at the next visit.',
+  };
+
+  test('a non-contradicting draft becomes the body, cooperation line intact', () => {
+    const r = buildTodaysResult({
+      ...base,
+      technicianReportBody: 'We treated the carpeted rooms and pet resting areas today.',
+    });
+    expect(r.bodySource).toBe('technician_report');
+    expect(r.body).toContain('carpeted rooms');
+    expect(r.body).toContain('Flea control works best when treatment and home care happen together');
+  });
+
+  test('a cleared state keeps the template', () => {
+    const r = buildTodaysResult({
+      ...base,
+      activity: { score: 0 },
+      values: { evidence_level: 'None observed' },
+      technicianReportBody: 'We treated the carpeted rooms today.',
+    });
+    expect(r.bodySource).toBeUndefined();
+    // template body, not the draft
+    expect(r.body).not.toContain('carpeted rooms');
+    expect(r.body).toContain('Flea control works best');
+  });
+});
