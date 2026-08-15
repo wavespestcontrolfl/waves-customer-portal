@@ -790,7 +790,12 @@ describe('typed snapshot — technician report body in the generic tail composit
     expect(mosquito).not.toHaveProperty('bodySource');
   });
 
-  test('owner-story branches ignore the technician report (rodent exclusion keeps its approved story)', () => {
+  test('owner-story branches consume the technician report while keeping their approved framing (r24 #3420)', () => {
+    // Superseded pin: pre-unified-AI, rodent exclusion ignored the report
+    // body (it was only generated for pest/mosquito/knockdown lanes). The
+    // unified Generate action reaches every typed panel, so the reviewed
+    // draft now replaces the repair-story narrative — while the OWNER-
+    // approved headline and the remaining-concerns disclosure still carry.
     const result = buildTodaysResult({
       projectType: 'rodent_exclusion',
       reportTypeLabel: 'Rodent Exclusion Summary',
@@ -803,7 +808,8 @@ describe('typed snapshot — technician report body in the generic tail composit
       technicianReportBody: AI_BODY,
     });
     expect(result.headline).toBe('Exclusion repairs were completed to reduce rodent access and help prevent re-entry.');
-    expect(result.body).not.toContain('non-repellent residual');
-    expect(result).not.toHaveProperty('bodySource');
+    expect(result.body).toContain(AI_BODY);
+    expect(result.body).toContain('No remaining concerns were observed today.');
+    expect(result.bodySource).toBe('technician_report');
   });
 });
