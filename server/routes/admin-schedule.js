@@ -11933,6 +11933,12 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
             retryable: true,
           });
         }
+      } else if (!svc && substantiveTypedFacts) {
+        // The row is GONE (deleted concurrently — admins pass the ownership
+        // check without an existence check). Typed facts can't be
+        // profile-confirmed against a missing row, so generation would
+        // proceed with none of the findings that opened it (codex r32).
+        return res.status(404).json({ error: 'Scheduled service not found' });
       } else if (svc && svc.customer_id) {
         const isAdmin = req.techRole === 'admin';
         const isAssignedTech = req.technicianId != null && String(svc.technician_id) === String(req.technicianId);
@@ -12198,6 +12204,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // customer copy for the matching lawn action; only distinctive brand
       // tokens ("Dispatch") may reject (codex r28)
       'wetting', 'agent', 'sprayable', 'spreader', 'sticker', 'adjuvant',
+      // common English words inside brand names ("Bora-Care") — only the
+      // distinctive half rejects (codex r32)
+      'care', 'guard', 'shield', 'defense', 'complete', 'advance', 'advanced',
     ]);
     const guardedProducts = [
       ...(Array.isArray(products) ? products : []),
