@@ -520,3 +520,27 @@ describe('prb-r12', () => {
     expect(logger.error.mock.calls.flat().join(' ')).toContain('OUTCOME WRITE FAILED TWICE');
   });
 });
+
+// prb-r13: a completed call with NO terminal outcome is reconciled by the
+// status callback — the last signal Twilio sends — via a FENCED write.
+describe('prb-r13', () => {
+  test('completed + call_outcome NULL ⇒ fenced completed_no_outcome reconciliation', async () => {
+    setDb();
+    const res = mockRes();
+    res.sendStatus = jest.fn(() => res);
+    await handlerFor('/collections-call-status')(req({ body: { CallStatus: 'completed' } }), res);
+    expect(res.sendStatus).toHaveBeenCalledWith(204);
+    expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({
+      outcome: 'completed_no_outcome',
+      onlyIfNoOutcome: true,
+    }));
+  });
+
+  test('completed with a landed outcome is left alone', async () => {
+    setDb({ callRow: { ...CALL_ROW, call_outcome: 'conversation_completed' } });
+    const res = mockRes();
+    res.sendStatus = jest.fn(() => res);
+    await handlerFor('/collections-call-status')(req({ body: { CallStatus: 'completed' } }), res);
+    expect(writeCallOutcome).not.toHaveBeenCalled();
+  });
+});

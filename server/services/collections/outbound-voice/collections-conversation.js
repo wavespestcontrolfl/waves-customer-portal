@@ -410,12 +410,23 @@ class CollectionsConversation {
     return '';
   }
 
-  _recentCallerDigits(turnsBack = 2) {
-    const digits = [];
-    for (let i = this._turns.length - 1; i >= 0 && digits.length < turnsBack; i--) {
-      if (this._turns[i].role === 'caller') digits.push(String(this._turns[i].text || '').replace(/\D/g, ''));
+  // Complete digit TOKENS the caller spoke (gh prb-r13): substring matching
+  // authenticated values the caller never supplied as that factor (street
+  // "12" inside a mis-said ZIP "34212"). A candidate grounds only as an
+  // exact spoken token, or as the whole turn's digits run together (the
+  // "3 4 2 0 8" transcription shape).
+  _recentCallerDigitTokens(turnsBack = 2) {
+    const tokens = new Set();
+    let seen = 0;
+    for (let i = this._turns.length - 1; i >= 0 && seen < turnsBack; i--) {
+      if (this._turns[i].role !== 'caller') continue;
+      seen++;
+      const text = String(this._turns[i].text || '');
+      const turnTokens = text.match(/\d+/g) || [];
+      turnTokens.forEach((t) => tokens.add(t));
+      if (turnTokens.length > 1) tokens.add(turnTokens.join(''));
     }
-    return digits.join(' ');
+    return tokens;
   }
 
   // Spoken opt-out recorded in CODE — shared by the combo human-escape
@@ -527,8 +538,20 @@ class CollectionsConversation {
       return;
     }
 
+    // An ORDINARY spoken opt-out persists deterministically BEFORE the
+    // model sees it (gh prb-r13): the model may answer with plain text or
+    // end the call without ever emitting record_do_not_call, and the
+    // suppression must not depend on it. The model is told it is done so
+    // it confirms instead of re-recording.
+    let modelContent = callerText;
+    if (SPOKEN_OPT_OUT_RE.test(callerText)) {
+      await this._recordSpokenOptOut(callerText);
+      if (this._captures.consentRevoked) {
+        modelContent = `${callerText}\n[system note: the caller's stop-calling request has already been recorded in code — confirm it is done; do not call record_do_not_call again unless they ask for a different scope.]`;
+      }
+    }
     this._turns.push({ role: 'caller', text: callerText, at: Date.now() });
-    this.messages.push({ role: 'user', content: callerText });
+    this.messages.push({ role: 'user', content: modelContent });
     await this._modelTurn();
   }
 
@@ -631,7 +654,25 @@ class CollectionsConversation {
       }
       return;
     }
-    this.say('Sorry — that is taking me longer than it should. Our office will follow up. Is there anything else?');
+    // The follow-up promise needs an artifact (gh prb-r13): exhausting the
+    // tool rounds returns the case to the queue only at session end, and a
+    // queue state is not an assigned follow-up. Card first; a failed card
+    // drops the promise for the office-number copy.
+    let exhaustionCard = null;
+    try {
+      const NotificationService = require('../../notification-service');
+      exhaustionCard = await NotificationService.notifyAdmin(
+        'billing',
+        'Follow-up needed after automated billing call',
+        'An automated billing follow-up call could not complete its last action (tool rounds exhausted). Please follow up with the customer.',
+        { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+      );
+    } catch (cardErr) {
+      logger.error(`[collections-voice] tool-exhaustion follow-up card failed: ${cardErr.message}`);
+    }
+    this.say(exhaustionCard
+      ? 'Sorry — that is taking me longer than it should. Our office will follow up. Is there anything else?'
+      : 'Sorry — that is taking me longer than it should. You can reach our office at the number on your invoice. Is there anything else?');
   }
 
   async _executeToolBounded(name, input) {
@@ -767,12 +808,12 @@ class CollectionsConversation {
       return 'No factor was provided — ask for the street number or the billing ZIP. This did not count as an attempt.';
     }
     // The factor must be GROUNDED in what the caller actually said (gh
-    // prb-r12): a model-miscopied digit sequence that happens to match the
-    // account must not authenticate. Digits are matched against the last
-    // caller turns; a spelled-out number ("three four two…") fails
-    // grounding and simply re-asks for digits — never consuming an attempt.
-    const heard = this._recentCallerDigits();
-    const grounded = (v) => Boolean(v && heard.includes(v));
+    // prb-r12), as a COMPLETE spoken token (gh prb-r13) — never a
+    // substring of some other number they said. A spelled-out number
+    // ("three four two…") fails grounding and simply re-asks for digits —
+    // never consuming an attempt.
+    const heard = this._recentCallerDigitTokens();
+    const grounded = (v) => Boolean(v && heard.has(v));
     if ((gaveStreet && !grounded(gaveStreet)) || (gaveZip && !grounded(gaveZip))) {
       return 'That number did not come through clearly. Ask the customer to say just the digits again. This did not count as an attempt.';
     }

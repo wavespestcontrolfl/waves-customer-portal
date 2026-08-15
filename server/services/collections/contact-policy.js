@@ -332,7 +332,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       // for a week. 'vestibule_office' deliberately still counts — a press-0
       // transfer can become a real office conversation on the same leg
       // (over-suppression is the safe direction there).
-      .whereRaw("(call_outcome IS NULL OR call_outcome NOT IN ('voicemail', 'missed', 'spam', 'voicemail_left', 'machine_no_voicemail', 'no_answer', 'vestibule_declined', 'vestibule_no_input', 'vestibule_consent_unrecorded', 'suppressed_at_answer', 'relay_failed', 'dial_failed'))")
+      .whereRaw("(call_outcome IS NULL OR call_outcome NOT IN ('voicemail', 'missed', 'spam', 'voicemail_left', 'machine_no_voicemail', 'no_answer', 'vestibule_declined', 'vestibule_no_input', 'vestibule_consent_unrecorded', 'suppressed_at_answer', 'completed_no_outcome', 'relay_failed', 'dial_failed'))")
       .whereRaw("(answered_by IS NULL OR answered_by <> 'voicemail')")
       .whereRaw('(duration_seconds IS NULL OR duration_seconds >= 30)')
       .orderBy('created_at', 'desc')

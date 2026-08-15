@@ -762,6 +762,7 @@ describe('call_log live conversations', () => {
       "'voicemail'", "'missed'", "'spam'", "'voicemail_left'",
       "'machine_no_voicemail'", "'no_answer'", "'vestibule_declined'",
       "'vestibule_no_input'", "'vestibule_consent_unrecorded'",
+      "'suppressed_at_answer'", "'completed_no_outcome'",
       "'relay_failed'", "'dial_failed'",
     ]) {
       expect(outcomePredicate).toContain(excluded);

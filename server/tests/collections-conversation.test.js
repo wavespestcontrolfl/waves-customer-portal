@@ -803,3 +803,60 @@ describe('prb-r12', () => {
     expect(convo.verified).toBe(true);
   });
 });
+
+// prb-r13 pins.
+describe('prb-r13', () => {
+  test('grounding is exact-token: a factor embedded in some OTHER spoken number does not authenticate', async () => {
+    setDb({ customer: { ...CUSTOMER, address_line1: '12 Palm Ct', zip: '34210' } });
+    const { convo } = makeConvo();
+    mockScriptedMessages.push(
+      toolUse('confirm_right_party', { result: 'confirmed' }),
+      endTurn('Could you tell me your street number or billing ZIP?'),
+    );
+    await turn(convo, 'Speaking.');
+    // Caller mis-says a ZIP; "12" is a substring of it AND the real street.
+    mockScriptedMessages.push(
+      toolUse('verify_identity', { street_number: '12' }),
+      endTurn('Could you say just the digits?'),
+    );
+    await turn(convo, 'my zip is 34212');
+    expect(convo.verified).toBe(false);
+    expect(convo.verifyAttempts).toBe(0);
+  });
+
+  test('an ordinary spoken opt-out is recorded in CODE before the model turn', async () => {
+    const { convo } = makeConvo();
+    mockScriptedMessages.push(endTurn('Understood — the calls are stopped. Goodbye.'));
+    await turn(convo, 'please stop calling me');
+    expect(flags.revokeAutomatedVoiceConsent).toHaveBeenCalled();
+    expect(convo._captures.consentRevoked).toBe(true);
+    // The model was told it is already done.
+    const lastUser = convo.messages.find((m) => typeof m.content === 'string' && m.content.includes('stop calling'));
+    expect(lastUser.content).toContain('already been recorded in code');
+  });
+
+  test('tool-round exhaustion files a follow-up card before promising one (and drops the promise without it)', async () => {
+    const NotificationService = require('../services/notification-service');
+    const { convo, spoken } = makeConvo();
+    await turn(convo, 'hello');
+    convo.verified = true;
+    convo.state = 'DISCLOSE';
+    for (let i = 0; i < 4; i++) mockScriptedMessages.push(toolUse('get_balance_details'));
+    await turn(convo, 'how much?');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'billing', 'Follow-up needed after automated billing call', expect.any(String), expect.anything(),
+    );
+    expect(spoken.join(' ')).toContain('Our office will follow up');
+
+    NotificationService.notifyAdmin.mockResolvedValue(null);
+    setDb(); // fresh table queues — the first convo consumed them
+    const second = makeConvo();
+    await turn(second.convo, 'hello');
+    second.convo.verified = true;
+    second.convo.state = 'DISCLOSE';
+    for (let i = 0; i < 4; i++) mockScriptedMessages.push(toolUse('get_balance_details'));
+    await turn(second.convo, 'how much?');
+    expect(second.spoken.join(' ')).toContain('number on your invoice');
+    expect(second.spoken.join(' ')).not.toContain('Our office will follow up');
+  });
+});

@@ -519,6 +519,20 @@ router.post('/collections-call-status', async (req, res) => {
         ...(Number.isFinite(duration) ? { duration_seconds: duration } : {}),
         updated_at: new Date(),
       }).catch((err) => logger.warn(`[collections-call-status] completed stamp failed: ${err.message}`));
+      // A completed call with NO terminal outcome (gh prb-r13): the
+      // vestibule/relay writer failed before landing anything (e.g. the
+      // vestibule's outer catch returned a bare hangup on a transient DB
+      // error), and nothing else can ever return the case from 'dialing'.
+      // This callback is the last signal Twilio sends — reconcile with a
+      // FENCED write (onlyIfNoOutcome: a real outcome landing concurrently
+      // wins; this only fills the void). Non-live; excluded from the
+      // live-call predicate.
+      if (!call.row.call_outcome) {
+        await writeOutcomeResilient(call.row.id, {
+          outcome: 'completed_no_outcome',
+          onlyIfNoOutcome: true,
+        });
+      }
       return res.sendStatus(204);
     }
     if (!UNANSWERED_STATUSES.has(twStatus)) return res.sendStatus(204);
