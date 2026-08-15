@@ -56,7 +56,31 @@ const ADDRESS_FIELDS = Object.freeze(['address_line1', 'address_line2', 'city', 
 // correction language — ordinary calls state identity fields all the time
 // (a spouse booking, a different property) and none of that is a mandate
 // to rewrite the profile.
-const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|email|e-?mail|address)\b[\s\S]{0,10}\bto\b/i;
+const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b/i;
+
+// Ownership disclaimers are NOT name corrections: "the account is not in my
+// name — my name is Jane Smith" is a caller explaining the account belongs
+// to someone else, not a mandate to rename its owner. Bare negation near
+// "name" satisfies the correction regexes, so this rejects the disclaimer
+// shape explicitly — checked on name candidates in BOTH lanes.
+const NAME_OWNERSHIP_DISCLAIMER_RE = /\b(?:not|isn'?t|no longer|never|won'?t be)\s+(?:in|under)\s+(?:my|his|her|their|our)\s+name\b|\b(?:account|bill(?:ing)?|policy|service|property|house)\b[^.?!\n]{0,50}\b(?:not|isn'?t)\s+(?:mine\b|my\b)/i;
+
+// Per-candidate intent binding (round-8): the message-level prefilter
+// licenses the extraction CALL, not every candidate it returns — one SMS
+// can carry a real email correction plus a routinely mentioned address, and
+// a FAST-model over-extraction of the routine field must not auto-apply.
+// Each candidate's OWN grounded quote must carry correction language AND
+// name the field category it would mutate.
+const NAME_TOPIC_RE = /\b(?:name|surname|spell\w*)\b/i;
+const EMAIL_TOPIC_RE = /\be-?mail\b/i;
+const ADDRESS_TOPIC_RE = /\b(?:address|street|city|zip|unit|apt|apartment|suite|lot|mov(?:ed|ing))\b|\b(?:st|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|ct|court|cir|circle|way|ter|terrace|pl|place|pkwy|hwy|highway|trail|trl)\.?\b|\b\d{5}(?:-\d{4})?\b/i;
+function quoteCarriesFieldIntent(field, quote) {
+  const q = normValue(quote);
+  if (!CORRECTION_HINT_RE.test(q)) return false;
+  if (field === 'email') return EMAIL_TOPIC_RE.test(q);
+  if (ADDRESS_FIELDS.includes(field)) return ADDRESS_TOPIC_RE.test(q);
+  return NAME_TOPIC_RE.test(q);
+}
 
 // Post-extraction format guards — the model proposes, these dispose.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -156,13 +180,27 @@ async function extractSmsContactCorrections({ body }) {
     };
     return list
       .filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field) && quoteInBody(c.quote))
+      // Each candidate's own quote must carry correction intent bound to its
+      // field category — the message-level prefilter is not per-field
+      // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
+      // statement spread across fragments ("we moved to 99 Pine Ave" +
+      // "zip is 34231"), so the group is licensed as a unit: stated move
+      // evidence or ANY address-bound correction quote licenses all address
+      // candidates — a routine address mention beside an email correction
+      // has neither and every address candidate drops.
+      .filter((c) => {
+        if (!ADDRESS_FIELDS.includes(c.field)) return quoteCarriesFieldIntent(c.field, c.quote);
+        return MOVE_EVIDENCE_RE.test(text)
+          || list.some((g) => g && ADDRESS_FIELDS.includes(g.field) && quoteCarriesFieldIntent(g.field, g.quote));
+      })
       // Component binding for name fields, same rule as the call lane: a
       // grounded quote naming only the LAST name ("my last name is Rivers,
       // not Riverz") is not evidence for a first_name entry the model
       // returned alongside it — the quote must bind to the component it
-      // would mutate.
+      // would mutate. Ownership disclaimers never count as name evidence.
       .filter((c) => !(c.field === 'first_name' || c.field === 'last_name')
-        || quoteBindsNameField(c.field, c.quote))
+        || (quoteBindsNameField(c.field, c.quote)
+          && !NAME_OWNERSHIP_DISCLAIMER_RE.test(String(c.quote || ''))))
       .map((c) => ({ field: c.field, newValue: normValue(c.new_value), quote: normValue(c.quote) }));
   } catch (err) {
     logger.warn(`[contact-correction] sms extraction failed: ${errTag(err)}`);
@@ -201,7 +239,7 @@ const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?mov
  * @param {string|null} [args.sourceId]  sms_log id or call_log id
  * @param {object} [args.knex]           injectable (tests)
  */
-async function applyContactCorrections({ customerId, corrections, source, sourceId = null, knex = db, postApply = null, moveContext = false }) {
+async function applyContactCorrections({ customerId, corrections, source, sourceId = null, knex = db, postApply = null, moveContext = false, expectedValues = null }) {
   const applied = [];
   const skipped = [];
   try {
@@ -221,6 +259,11 @@ async function applyContactCorrections({ customerId, corrections, source, source
       if (byField.has(field)) { skipped.push({ field, reason: 'duplicate_field' }); continue; }
       byField.set(field, { field, newValue: normValue(correction?.newValue), quote: correction?.quote || null });
     }
+    const rejectAddressGroup = (reason) => {
+      for (const f of ADDRESS_FIELDS) {
+        if (byField.has(f)) { skipped.push({ field: f, reason }); byField.delete(f); }
+      }
+    };
     // A stated MOVE must carry the full street+city+zip group: "we moved to
     // Tampa, 33602" extracting as city+zip alone would put the new locality
     // under the OLD street — the same hybrid-address fabrication a new
@@ -228,15 +271,13 @@ async function applyContactCorrections({ customerId, corrections, source, source
     // below can't see, since no street was staged).
     if (moveContext && ADDRESS_FIELDS.some((f) => byField.has(f))
       && !(byField.has('address_line1') && byField.has('city') && byField.has('zip'))) {
-      for (const f of ADDRESS_FIELDS) {
-        if (byField.has(f)) { skipped.push({ field: f, reason: 'incomplete_address' }); byField.delete(f); }
-      }
+      rejectAddressGroup('incomplete_address');
     }
-    if (!addressGroupComplete(byField)) {
-      for (const f of ADDRESS_FIELDS) {
-        if (byField.has(f)) { skipped.push({ field: f, reason: 'incomplete_address' }); byField.delete(f); }
-      }
-    }
+    if (!addressGroupComplete(byField)) rejectAddressGroup('incomplete_address');
+    // Whether the surviving group stages a NEW street — if it does and any
+    // of street/city/zip is dropped by canonicalization/validation below,
+    // the whole group must go with it (re-checked after the validators).
+    const hadNewStreet = byField.has('address_line1');
     // Canonicalize. Address fields parse as ONE address through the same
     // normalizeAdminAddressInput the Customer-360 admin edit uses (unit
     // canonicalization "4b" → "Unit 4B", inline-unit vs line2 conflict
@@ -255,11 +296,31 @@ async function applyContactCorrections({ customerId, corrections, source, source
         state: byField.get('state')?.newValue,
         zip: byField.get('zip')?.newValue,
       });
-      if (parsed.unitConflict) {
-        // Street line embeds one unit, line2 states another — no
-        // deterministic winner; reject the group rather than guess.
+      // Lone inline unit (round-8): extraction can return
+      // "99 Pine Ave Apt 4" as address_line1 with no separate line2, and
+      // normalizeLeadAddress only peels the inline copy when a dedicated
+      // line2 is also present — promote it here so line1 stays street-only
+      // and the unit lands in address_line2 (otherwise the group would clear
+      // the old line2 AND strand the new unit inside line1, breaking
+      // exact-unit matching). An explicit unit CLEAR alongside a street that
+      // embeds a unit is a contradiction — reject like a unit conflict.
+      const { splitStreetLineUnit, normalizeUnitLine } = require('../utils/address-normalizer');
+      const inlineSplit = !parsed.unitConflict && byField.has('address_line1') && (!line2Entry || explicitUnitClear)
+        ? splitStreetLineUnit(normValue(parsed.addressLine1))
+        : { street: null, unit: null };
+      if (parsed.unitConflict || (inlineSplit.unit && explicitUnitClear)) {
+        // Street line embeds one unit, line2 (or an explicit clear) states
+        // another — no deterministic winner; reject the group, don't guess.
         for (const f of stagedAddressFields) { skipped.push({ field: f, reason: 'unit_conflict' }); byField.delete(f); }
       } else {
+        if (inlineSplit.unit) {
+          parsed.addressLine1 = inlineSplit.street;
+          byField.set('address_line2', {
+            field: 'address_line2',
+            newValue: normValue(normalizeUnitLine(inlineSplit.unit)),
+            quote: byField.get('address_line1')?.quote || null,
+          });
+        }
         const PARSED_KEY = { address_line1: 'addressLine1', address_line2: 'addressLine2', city: 'city', state: 'state', zip: 'zip' };
         for (const f of stagedAddressFields) {
           if (f === 'address_line2' && explicitUnitClear) continue; // '' = explicit clear, preserved
@@ -288,6 +349,15 @@ async function applyContactCorrections({ customerId, corrections, source, source
         byField.delete(entry.field);
       }
     }
+    // Post-normalization group re-check (round-8): a component that passed
+    // the raw completeness check can still die in canonicalization or
+    // validation ("3423O" → ∅), and the survivors of a new-street or move
+    // group would then commit against the OLD locality — the exact hybrid
+    // address the pre-check exists to prevent.
+    if ((hadNewStreet || moveContext) && ADDRESS_FIELDS.some((f) => byField.has(f))
+      && !(byField.has('address_line1') && byField.has('city') && byField.has('zip'))) {
+      rejectAddressGroup('incomplete_address');
+    }
     if (!byField.size) return { applied, skipped, reason: 'nothing_valid' };
 
     let customerName = null;
@@ -306,6 +376,16 @@ async function applyContactCorrections({ customerId, corrections, source, source
 
       const updates = {};
       for (const { field, newValue, quote } of byField.values()) {
+        // Compare-and-set (round-8): the caller snapshots the row BEFORE its
+        // extraction runs; if an admin edit or a newer correction committed
+        // a different value while extraction was in flight, this pass is
+        // stale for that field — skip it rather than overwrite the fresher
+        // write (the row lock serializes writers, it does not order them).
+        if (expectedValues && Object.prototype.hasOwnProperty.call(expectedValues, field)
+          && !sameValue(field, before[field], expectedValues[field])) {
+          skipped.push({ field, reason: 'concurrent_change' });
+          continue;
+        }
         if (sameValue(field, before[field], newValue)) { skipped.push({ field, reason: 'unchanged' }); continue; }
         // A corrected email that already belongs to ANOTHER account is not a
         // correction we may auto-apply — fanning queued sends out to a
@@ -461,6 +541,14 @@ async function runSmsContactCorrection({ customer, body, smsLogId = null, knex =
   try {
     if (!require('../config/feature-gates').isEnabled('contactCorrection')) return { applied: [], skipped: [], reason: 'gate_off' };
     if (!customer?.id) return { applied: [], skipped: [], reason: 'unlinked' };
+    // Pre-extraction snapshot for the compare-and-set inside the apply
+    // transaction: extraction is an in-flight LLM call, and a field an admin
+    // (or a newer message) changed underneath it must not be overwritten by
+    // this pass's stale proposal.
+    const expectedValues = await knex('customers')
+      .where({ id: customer.id })
+      .whereNull('deleted_at')
+      .first([...APPLYABLE_FIELDS]);
     const corrections = await extractSmsContactCorrections({ body });
     if (!corrections.length) return { applied: [], skipped: [], reason: 'none_detected' };
     return await applyContactCorrections({
@@ -469,6 +557,7 @@ async function runSmsContactCorrection({ customer, body, smsLogId = null, knex =
       source: 'sms',
       sourceId: smsLogId,
       knex,
+      expectedValues: expectedValues || null,
       // Message-level move evidence tightens the address-group requirement:
       // a stated move must carry street+city+zip, not locality alone.
       moveContext: MOVE_EVIDENCE_RE.test(String(body || '')),
@@ -573,14 +662,19 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     const tail10 = (p) => String(p || '').replace(/[^0-9]/g, '').slice(-10);
     let callerIsPrimary = false;
     let call = null;
+    let expectedValues = null;
     try {
       let owner = null;
       [call, owner] = await Promise.all([
         knex('call_log').where({ id: callId }).first('from_phone', 'transcription', 'processing_token'),
-        knex('customers').where({ id: customerId }).first('phone'),
+        knex('customers').where({ id: customerId }).first('phone', 'first_name', 'last_name'),
       ]);
       const callerTail = tail10(call?.from_phone);
       callerIsPrimary = Boolean(callerTail) && callerTail === tail10(owner?.phone);
+      // Snapshot for the compare-and-set in the apply transaction — a name
+      // an admin corrected between this read and the commit must not be
+      // overwritten by this pass's staged (older) extraction.
+      if (owner) expectedValues = { first_name: owner.first_name, last_name: owner.last_name };
     } catch { callerIsPrimary = false; call = null; }
 
     // Processing-pass fence: the call processor lets a peer reclaim a stuck
@@ -618,7 +712,8 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       // calls state names constantly; email/address keep the shared intent
       // check (they only ever feed the proposal bell).
       const intentOk = CALL_AUTO_FIELDS[c.field_name]
-        ? CALL_NAME_CORRECTION_RE.test(String(c.evidence_quote || ''))
+        ? (CALL_NAME_CORRECTION_RE.test(String(c.evidence_quote || ''))
+          && !NAME_OWNERSHIP_DISCLAIMER_RE.test(String(c.evidence_quote || '')))
         : detectContactCorrectionIntent(c.evidence_quote);
       if (!intentOk) return false;
       if (!quoteGrounded(c.evidence_quote)) return false;
@@ -680,6 +775,7 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       source: 'call',
       sourceId: callId,
       knex,
+      expectedValues,
       // Same-transaction stamp of exactly the candidate rows whose VALUE was
       // applied — two pending candidates for one field with different values
       // must not both read as auto_applied, and an applied field can never
@@ -689,8 +785,16 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
         // peer's reclaim; this one commits or rolls back WITH the customer
         // write, so losing the fence mid-apply aborts the whole correction.
         if (procToken) {
+          // Row-locked (round-8): a plain SELECT leaves the reclaim window
+          // open between this check and commit — a peer crossing the
+          // 10-minute threshold could still replace processing_token and
+          // the stale pass would commit anyway. .forUpdate() holds the
+          // call_log row through the correction commit so a reclaim
+          // serializes with the customer write, mirroring the fenced
+          // writers in call-recording-processor.
           const owned = await trx('call_log')
             .where({ id: callId, processing_token: procToken })
+            .forUpdate()
             .first('id');
           if (!owned) throw new Error('processing_fence_lost');
         }

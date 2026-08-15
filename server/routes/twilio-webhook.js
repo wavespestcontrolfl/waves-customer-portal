@@ -648,7 +648,7 @@ router.post('/sms', async (req, res) => {
         // never rejects; the guard here only logs (id-only, no message
         // content) if that contract is ever broken.
         setImmediate(() => {
-          contactCorrection.runSmsContactCorrection(correctionArgs).catch((err) => {
+          void contactCorrection.runSmsContactCorrection(correctionArgs).catch((err) => {
             logger.warn(`[contact-correction] post-ack run rejected for customer ${customer.id}, sms_log ${correctionArgs.smsLogId || 'n/a'}: ${err.message}`);
           });
         });

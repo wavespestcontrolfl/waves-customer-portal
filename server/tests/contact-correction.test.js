@@ -77,6 +77,7 @@ function makeStubKnex(rowsByTable = {}) {
   let data = {};
   for (const [table, rows] of Object.entries(rowsByTable)) data[table] = rows.map((r) => ({ ...r }));
   const inserts = [];
+  const forUpdates = [];
   const failInsertOn = { table: null };
 
   function builder(table) {
@@ -132,7 +133,7 @@ function makeStubKnex(rowsByTable = {}) {
       whereNotNull(col) { preds.push((r) => r[col] != null); return chain; },
       whereIn(col, list) { preds.push((r) => list.includes(r[col])); return chain; },
       orderBy() { return chain; }, // fixtures are pre-sorted newest-first
-      forUpdate() { return chain; },
+      forUpdate() { forUpdates.push(table); return chain; },
       first(cols) {
         const row = data[table].find((r) => preds.every((p) => p(r)));
         if (!row) return Promise.resolve(undefined);
@@ -185,6 +186,7 @@ function makeStubKnex(rowsByTable = {}) {
   builder.schema = { hasTable: () => Promise.resolve(true) };
   Object.defineProperty(builder, '_data', { get: () => data });
   builder._inserts = inserts;
+  builder._forUpdates = forUpdates;
   builder._failInsertOn = failInsertOn;
   return builder;
 }
@@ -994,6 +996,175 @@ describe('round-7 hardening', () => {
       .toEqual(['address_line1', 'address_line2', 'city', 'zip']);
     expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
     expect(mockAddressFanout).not.toHaveBeenCalled();
+  });
+});
+
+describe('round-8 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('holds the processing fence with a row lock through the correction commit', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ processing_token: 'tok-live' })],
+      customer_field_candidates: [candidate({ id: 'c1' })],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex, procToken: 'tok-live' });
+    expect(res.applied.map((a) => a.field)).toEqual(['last_name']);
+    // The in-transaction re-check must take a FOR UPDATE lock on call_log so
+    // a peer reclaim serializes with the customer write.
+    expect(knex._forUpdates).toContain('call_log');
+  });
+
+  it('rejects the whole group when a required component dies in normalization', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '99 Pine Ave' },
+        { field: 'city', newValue: 'Sarasota' },
+        { field: 'zip', newValue: '3423O' }, // letter O — invalid after normalization
+      ],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'address_line1', reason: 'incomplete_address' });
+    expect(res.skipped).toContainEqual({ field: 'city', reason: 'incomplete_address' });
+    expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
+    expect(knex._data.customers[0].city).toBe('Testville');
+    expect(mockAddressFanout).not.toHaveBeenCalled();
+  });
+
+  it('promotes a lone inline unit into address_line2', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '99 Pine Ave Apt 4' },
+        { field: 'city', newValue: 'Sarasota' },
+        { field: 'zip', newValue: '34231' },
+      ],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied.map((a) => a.field)).toEqual(expect.arrayContaining(['address_line1', 'address_line2']));
+    expect(knex._data.customers[0].address_line1).toBe('99 Pine Ave');
+    expect(knex._data.customers[0].address_line2).toBe('Apt 4');
+  });
+
+  it('rejects an explicit unit clear whose new street embeds a unit (contradiction)', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '99 Pine Ave Apt 4' },
+        { field: 'address_line2', newValue: '' },
+        { field: 'city', newValue: 'Sarasota' },
+        { field: 'zip', newValue: '34231' },
+      ],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'address_line1', reason: 'unit_conflict' });
+    expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
+  });
+
+  it('skips a field an admin changed while extraction was in flight (compare-and-set)', async () => {
+    const body = 'You spelled my last name wrong, it is Rivers';
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockImplementation(async () => {
+      // Admin edit lands DURING the in-flight LLM extraction.
+      knex._data.customers[0].last_name = 'Rivera';
+      return {
+        ok: true,
+        json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
+      };
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'last_name', reason: 'concurrent_change' });
+    expect(knex._data.customers[0].last_name).toBe('Rivera'); // the fresher write survives
+  });
+
+  it('drops a routinely mentioned address riding along with a real email correction', async () => {
+    const body = 'My email is wrong, it is jordan.rivers@example.com. Service is at 99 Pine Ave, Sarasota 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'email', new_value: 'jordan.rivers@example.com', quote: 'my email is wrong, it is jordan.rivers@example.com', confidence: 'high' },
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'Service is at 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'Service is at 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'Service is at 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['email']);
+  });
+
+  it('a stated move still licenses fragment-quoted address candidates as one group', async () => {
+    const body = 'We just moved to 99 Pine Ave, Sarasota. Zip is 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we just moved to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'we just moved to 99 Pine Ave, Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['address_line1', 'city', 'zip']);
+  });
+
+  it('never renames the owner from an account-ownership disclaimer (call lane)', async () => {
+    const quote = 'the account is not in my name, my name is Jane Smith';
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [
+        candidate({ id: 'd1', field_name: 'first_name', final_recommended_value: 'Jane', evidence_quote: quote }),
+        candidate({ id: 'd2', field_name: 'last_name', final_recommended_value: 'Smith', evidence_quote: quote }),
+      ],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('no_candidates');
+    expect(knex._data.customers[0].first_name).toBe('Jordan');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+  });
+
+  it('never renames from an ownership disclaimer over SMS either', async () => {
+    const body = 'The account is not in my name, my name is Jane Smith';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'first_name', new_value: 'Jane', quote: 'the account is not in my name, my name is Jane Smith', confidence: 'high' },
+          { field: 'last_name', new_value: 'Smith', quote: 'the account is not in my name, my name is Jane Smith', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res).toEqual([]);
+  });
+
+  it('prefilter recognizes explicit old-contact corrections', () => {
+    expect(detectContactCorrectionIntent('You have my old address — we are at 12 Oak St now')).toBe(true);
+    expect(detectContactCorrectionIntent('You have my old email — use jane@example.com')).toBe(true);
   });
 });
 
