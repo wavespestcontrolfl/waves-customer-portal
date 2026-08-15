@@ -50,8 +50,10 @@ jest.mock('../services/customer-contact-fanout', () => ({
   propagateCustomerNameChange: (...args) => mockNameFanout(...args),
 }));
 const mockGeocode = jest.fn().mockResolvedValue(null);
+const mockRegeocodeGuarded = jest.fn().mockResolvedValue(null);
 jest.mock('../services/geocoder', () => ({
   ensureCustomerGeocoded: (...args) => mockGeocode(...args),
+  regeocodeCustomerAddressGuarded: (...args) => mockRegeocodeGuarded(...args),
 }));
 const mockNewsletterResume = jest.fn().mockResolvedValue(null);
 jest.mock('../services/lead-first-touch-resume', () => ({
@@ -62,6 +64,7 @@ const {
   detectContactCorrectionIntent,
   extractSmsContactCorrections,
   applyContactCorrections,
+  runSmsContactCorrection,
   runCallContactCorrection,
   APPLYABLE_FIELDS,
 } = require('../services/contact-correction');
@@ -587,8 +590,10 @@ describe('SMS safety rails (round-2)', () => {
     expect(knex._data.customers[0].latitude).toBeNull();
     expect(knex._data.customers[0].longitude).toBeNull();
     await new Promise((r) => setImmediate(r));
-    expect(mockGeocode).toHaveBeenCalledWith(CUSTOMER_ID);
-    expect(mockSyncPrimaryCoords).toHaveBeenCalledWith(CUSTOMER_ID);
+    // Address-guarded variant: the coord write + primary-property mirror
+    // happen inside the geocoder helper, guarded on the address it read.
+    expect(mockRegeocodeGuarded).toHaveBeenCalledWith(CUSTOMER_ID);
+    expect(mockGeocode).not.toHaveBeenCalled();
   });
 
   it('runs deferred email fan-out actions after commit', async () => {
@@ -854,6 +859,141 @@ describe('round-6 hardening', () => {
     expect(res.applied).toContainEqual(expect.objectContaining({ field: 'last_name', newValue: 'McGowan' }));
     expect(knex._data.customers[0].last_name).toBe('McGowan');
     expect(knex._data.customer_field_candidates[0].status).toBe('auto_applied');
+  });
+});
+
+describe('round-7 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('spelling language alone never auto-applies a call name (routine identity collection)', async () => {
+    const quote = 'let me spell my name, it is Jane Rivers';
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [candidate({ id: 'spell', evidence_quote: quote })],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('no_candidates');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+    expect(knex._data.customer_field_candidates[0].status).toBe('pending');
+  });
+
+  it('fails closed on the unlabeled Speaker-diarization fallback (no Caller lines)', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({
+        transcription: [
+          'Speaker 1: thanks for calling, how can I help?',
+          'Speaker 2: you spelled my name wrong, it is Rivers with an S',
+        ].join('\n'),
+      })],
+      customer_field_candidates: [candidate({ id: 'sp' })],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('no_candidates');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('a stale processing pass never applies its extraction (token fence)', async () => {
+    const stale = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ processing_token: 'tok-live' })],
+      customer_field_candidates: [candidate({ id: 'c1' })],
+      agent_decisions: [],
+    });
+    const resStale = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex: stale, procToken: 'tok-stale' });
+    expect(resStale.reason).toBe('fence_lost');
+    expect(stale._data.customers[0].last_name).toBe('Riverz');
+    expect(stale._data.customer_field_candidates[0].status).toBe('pending');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+
+    const owning = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ processing_token: 'tok-live' })],
+      customer_field_candidates: [candidate({ id: 'c1' })],
+      agent_decisions: [],
+    });
+    const resOwn = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex: owning, procToken: 'tok-live' });
+    expect(resOwn.applied.map((a) => a.field)).toEqual(['last_name']);
+    expect(owning._data.customers[0].last_name).toBe('Rivers');
+  });
+
+  it('binds each SMS name correction to its own component (shared-quote leak)', async () => {
+    const body = 'My last name is spelled Rivers, not Riverz';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'last_name', new_value: 'Rivers', quote: 'my last name is spelled Rivers, not Riverz', confidence: 'high' },
+          { field: 'first_name', new_value: 'Jordon', quote: 'my last name is spelled Rivers, not Riverz', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['last_name']);
+  });
+
+  it('rejects a stated move that extracts locality fields without a street', async () => {
+    const body = 'Hi, we moved to Tampa, zip is 33602';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'city', new_value: 'Tampa', quote: 'we moved to Tampa', confidence: 'high' },
+          { field: 'zip', new_value: '33602', quote: 'zip is 33602', confidence: 'high' },
+        ],
+      },
+    });
+    const knex = makeStubKnex({ customers: [baseCustomer()] });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'city', reason: 'incomplete_address' });
+    expect(res.skipped).toContainEqual({ field: 'zip', reason: 'incomplete_address' });
+    expect(knex._data.customers[0].city).toBe('Testville');
+    expect(mockAddressFanout).not.toHaveBeenCalled();
+  });
+
+  it('canonicalizes a typo-level unit fix through the whole-address parser', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [{ field: 'address_line2', newValue: '4b' }],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied).toContainEqual(expect.objectContaining({ field: 'address_line2', newValue: 'Unit 4B' }));
+    expect(knex._data.customers[0].address_line2).toBe('Unit 4B');
+  });
+
+  it('rejects the whole group on an inline-unit vs line2 conflict', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '99 Pine Ave Apt 4' },
+        { field: 'address_line2', newValue: 'Unit 7' },
+        { field: 'city', newValue: 'Sampleton' },
+        { field: 'zip', newValue: '34299' },
+      ],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped.filter((s) => s.reason === 'unit_conflict').map((s) => s.field).sort())
+      .toEqual(['address_line1', 'address_line2', 'city', 'zip']);
+    expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
+    expect(mockAddressFanout).not.toHaveBeenCalled();
   });
 });
 

@@ -8374,6 +8374,11 @@ const CallRecordingProcessor = {
     await require('./contact-correction').runCallContactCorrection({
       callId: call.id,
       customerId: customerId || call.customer_id || null,
+      // Processing-pass fence: a stale worker whose claim was reclaimed by
+      // a peer must not apply its older extraction — the correction verifies
+      // this token against call_log.processing_token (again inside its
+      // apply transaction) and aborts when the claim is gone.
+      procToken,
     }).catch((err) => {
       logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);
     });

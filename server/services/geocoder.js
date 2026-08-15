@@ -96,6 +96,45 @@ async function ensureCustomerGeocoded(customerId) {
 }
 
 /**
+ * Address-guarded re-geocode for correction/edit paths that changed the
+ * address and cleared coords in-transaction. Reads the customer's CURRENT
+ * address, geocodes it, then writes coordinates ONLY if the address and the
+ * coordinate pair it read are still unchanged — the same guard the sweep
+ * below uses. Without it, two corrections geocoding concurrently can
+ * interleave (B's coords commit, then A's slow provider response overwrites
+ * them with coordinates for the obsolete address). A raced write is a no-op;
+ * the sweep re-geocodes the survivor address later. The customer write and
+ * the primary-property coord mirror share one transaction (repo convention
+ * for every re-geocode path).
+ */
+async function regeocodeCustomerAddressGuarded(customerId) {
+  const c = await db('customers').where({ id: customerId }).first();
+  if (!c) return null;
+  const address = buildAddress(c);
+  const result = await geocodeAddress(address);
+  if (!result) return null;
+  const written = await db.transaction(async (trx) => {
+    let guarded = trx('customers').where({ id: customerId });
+    for (const [col, val] of [['latitude', c.latitude], ['longitude', c.longitude]]) {
+      guarded = val == null ? guarded.whereNull(col) : guarded.where(col, val);
+    }
+    for (const col of ['address_line1', 'city', 'state', 'zip']) {
+      guarded = c[col] == null ? guarded.whereNull(col) : guarded.where(col, c[col]);
+    }
+    const count = await guarded.update({
+      latitude: result.lat,
+      longitude: result.lng,
+      updated_at: new Date(),
+    });
+    if (count) {
+      await require('./customer-properties').syncPrimaryCoordsFromCustomer(customerId, trx);
+    }
+    return count;
+  });
+  return written ? result : null;
+}
+
+/**
  * Backstop sweep: geocode customers whose create path left latitude/longitude
  * NULL. Several booking/webhook create paths never call ensureCustomerGeocoded,
  * and the paths that do fire-and-forget it, so a transient Google failure
@@ -223,6 +262,7 @@ module.exports = {
   geocodeAddress,
   geocodeAddressWithStatus,
   ensureCustomerGeocoded,
+  regeocodeCustomerAddressGuarded,
   buildAddress,
   sweepUngeocodedCustomers,
 };

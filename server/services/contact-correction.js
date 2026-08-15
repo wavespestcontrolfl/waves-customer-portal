@@ -156,6 +156,13 @@ async function extractSmsContactCorrections({ body }) {
     };
     return list
       .filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field) && quoteInBody(c.quote))
+      // Component binding for name fields, same rule as the call lane: a
+      // grounded quote naming only the LAST name ("my last name is Rivers,
+      // not Riverz") is not evidence for a first_name entry the model
+      // returned alongside it — the quote must bind to the component it
+      // would mutate.
+      .filter((c) => !(c.field === 'first_name' || c.field === 'last_name')
+        || quoteBindsNameField(c.field, c.quote))
       .map((c) => ({ field: c.field, newValue: normValue(c.new_value), quote: normValue(c.quote) }));
   } catch (err) {
     logger.warn(`[contact-correction] sms extraction failed: ${errTag(err)}`);
@@ -169,6 +176,14 @@ function addressGroupComplete(byField) {
   if (!byField.has('address_line1')) return true;
   return byField.has('city') && byField.has('zip');
 }
+
+// Move evidence in the MESSAGE (not just the extracted fields): "we moved to
+// Tampa, ZIP 33602" can extract as city+zip alone, which the street-anchored
+// group check above would wave through — replacing the locality under the
+// OLD street fabricates a hybrid address exactly like a street without its
+// locality would. When the message says the customer MOVED, the whole
+// street+city+zip group is required or every address field is rejected.
+const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?moved\b|\bnew address\b|\bmoving\s+to\b/i;
 
 /**
  * Apply validated corrections to a linked customer record.
@@ -186,7 +201,7 @@ function addressGroupComplete(byField) {
  * @param {string|null} [args.sourceId]  sms_log id or call_log id
  * @param {object} [args.knex]           injectable (tests)
  */
-async function applyContactCorrections({ customerId, corrections, source, sourceId = null, knex = db, postApply = null }) {
+async function applyContactCorrections({ customerId, corrections, source, sourceId = null, knex = db, postApply = null, moveContext = false }) {
   const applied = [];
   const skipped = [];
   try {
@@ -198,22 +213,79 @@ async function applyContactCorrections({ customerId, corrections, source, source
     }
 
     // Dedupe to one proposal per field (first wins — callers order newest
-    // first), validate shape, then canonicalize into house form.
+    // first); canonicalization + validation run on the surviving set below.
     const byField = new Map();
     for (const correction of corrections) {
       const { field } = correction || {};
+      if (!FIELD_VALIDATORS[field]) { skipped.push({ field: field || null, reason: 'invalid' }); continue; }
       if (byField.has(field)) { skipped.push({ field, reason: 'duplicate_field' }); continue; }
-      const rawValue = normValue(correction?.newValue);
-      // Canonicalize FIRST, validate the canonical form — "Georgia" must
-      // become GA before STATE_RE sees it, not be discarded raw.
-      const newValue = rawValue === '' ? '' : normValue(canonicalizeValue(field, rawValue));
-      const validator = FIELD_VALIDATORS[field];
-      if (!validator || !validator(newValue)) { skipped.push({ field, reason: 'invalid' }); continue; }
-      byField.set(field, { field, newValue, quote: correction?.quote || null });
+      byField.set(field, { field, newValue: normValue(correction?.newValue), quote: correction?.quote || null });
+    }
+    // A stated MOVE must carry the full street+city+zip group: "we moved to
+    // Tampa, 33602" extracting as city+zip alone would put the new locality
+    // under the OLD street — the same hybrid-address fabrication a new
+    // street without its locality would be (which the street-anchored check
+    // below can't see, since no street was staged).
+    if (moveContext && ADDRESS_FIELDS.some((f) => byField.has(f))
+      && !(byField.has('address_line1') && byField.has('city') && byField.has('zip'))) {
+      for (const f of ADDRESS_FIELDS) {
+        if (byField.has(f)) { skipped.push({ field: f, reason: 'incomplete_address' }); byField.delete(f); }
+      }
     }
     if (!addressGroupComplete(byField)) {
       for (const f of ADDRESS_FIELDS) {
         if (byField.has(f)) { skipped.push({ field: f, reason: 'incomplete_address' }); byField.delete(f); }
+      }
+    }
+    // Canonicalize. Address fields parse as ONE address through the same
+    // normalizeAdminAddressInput the Customer-360 admin edit uses (unit
+    // canonicalization "4b" → "Unit 4B", inline-unit vs line2 conflict
+    // detection) — never independently per field. Only fields the message
+    // STAGED are adopted from the parser (it defaults state to FL for its
+    // admin-form callers, and this lane must not invent unstaged fields).
+    const stagedAddressFields = ADDRESS_FIELDS.filter((f) => byField.has(f));
+    if (stagedAddressFields.length) {
+      const { normalizeAdminAddressInput } = require('../utils/intake-normalize');
+      const line2Entry = byField.get('address_line2');
+      const explicitUnitClear = Boolean(line2Entry) && line2Entry.newValue === '';
+      const parsed = normalizeAdminAddressInput({
+        addressLine1: byField.get('address_line1')?.newValue,
+        addressLine2: explicitUnitClear ? undefined : line2Entry?.newValue,
+        city: byField.get('city')?.newValue,
+        state: byField.get('state')?.newValue,
+        zip: byField.get('zip')?.newValue,
+      });
+      if (parsed.unitConflict) {
+        // Street line embeds one unit, line2 states another — no
+        // deterministic winner; reject the group rather than guess.
+        for (const f of stagedAddressFields) { skipped.push({ field: f, reason: 'unit_conflict' }); byField.delete(f); }
+      } else {
+        const PARSED_KEY = { address_line1: 'addressLine1', address_line2: 'addressLine2', city: 'city', state: 'state', zip: 'zip' };
+        for (const f of stagedAddressFields) {
+          if (f === 'address_line2' && explicitUnitClear) continue; // '' = explicit clear, preserved
+          const canonical = normValue(parsed[PARSED_KEY[f]]);
+          if (!canonical && byField.get(f).newValue !== '') {
+            // Parser produced nothing for a non-empty staged value — an
+            // empty write would CLEAR a field the customer didn't ask to
+            // clear; fail the field closed instead.
+            skipped.push({ field: f, reason: 'invalid' });
+            byField.delete(f);
+            continue;
+          }
+          byField.get(f).newValue = canonical;
+        }
+      }
+    }
+    // Per-field canonicalization for the rest, then validate every
+    // CANONICAL value — "Georgia" must become GA before STATE_RE sees it,
+    // not be discarded raw.
+    for (const entry of Array.from(byField.values())) {
+      if (!ADDRESS_FIELDS.includes(entry.field)) {
+        entry.newValue = entry.newValue === '' ? '' : normValue(canonicalizeValue(entry.field, entry.newValue));
+      }
+      if (!FIELD_VALIDATORS[entry.field](entry.newValue)) {
+        skipped.push({ field: entry.field, reason: 'invalid' });
+        byField.delete(entry.field);
       }
     }
     if (!byField.size) return { applied, skipped, reason: 'nothing_valid' };
@@ -338,9 +410,12 @@ async function applyContactCorrections({ customerId, corrections, source, source
     //     the corrected address, held newsletter resume) that must only run
     //     once the new email is committed.
     if (addressApplied) {
-      require('./geocoder').ensureCustomerGeocoded(customerId)
-        .then((coords) => coords && require('./customer-properties').syncPrimaryCoordsFromCustomer(customerId))
-        .catch(() => {});
+      // Address-guarded re-geocode (writes coords + the primary-property
+      // mirror only if the address is still the one it geocoded) — a slow
+      // provider response for THIS correction can never overwrite the
+      // coordinates of a later correction that committed while it was in
+      // flight.
+      require('./geocoder').regeocodeCustomerAddressGuarded(customerId).catch(() => {});
     }
     if (emailSync?.heldNewsletterResume) {
       require('./lead-first-touch-resume').resumeHeldNewsletterPostCommit(emailSync.heldNewsletterResume)
@@ -382,7 +457,7 @@ async function applyContactCorrections({ customerId, corrections, source, source
 /**
  * SMS entry point — webhook post-ack, fire-and-forget, linked customer only.
  */
-async function runSmsContactCorrection({ customer, body, smsLogId = null }) {
+async function runSmsContactCorrection({ customer, body, smsLogId = null, knex = db }) {
   try {
     if (!require('../config/feature-gates').isEnabled('contactCorrection')) return { applied: [], skipped: [], reason: 'gate_off' };
     if (!customer?.id) return { applied: [], skipped: [], reason: 'unlinked' };
@@ -393,6 +468,10 @@ async function runSmsContactCorrection({ customer, body, smsLogId = null }) {
       corrections,
       source: 'sms',
       sourceId: smsLogId,
+      knex,
+      // Message-level move evidence tightens the address-group requirement:
+      // a stated move must carry street+city+zip, not locality alone.
+      moveContext: MOVE_EVIDENCE_RE.test(String(body || '')),
     });
   } catch (err) {
     logger.warn(`[contact-correction] sms run failed: ${errTag(err)}`);
@@ -436,9 +515,13 @@ const CALL_PROPOSE_FIELDS = Object.freeze(['email', 'address_line1', 'address_li
 // a weak "name … is" branch (a customer-initiated correction text has that
 // shape), but callers state their names on practically every call — "my name
 // is Jane" while booking is identification, not a mandate to rewrite the
-// record. A name candidate only counts when the quote carries explicit
-// correction language NEAR the word "name" (either order).
-const CALL_NAME_CORRECTION_RE = /\b(?:name|surname)\b[\s\S]{0,60}\b(?:wrong|incorrect|misspell\w*|spell\w*|typo|actually|not\b)|\b(?:wrong|incorrect|misspell\w*|spell\w*|typo|actually|not(?:\s+(?:my|the))?)\b[\s\S]{0,60}\b(?:name|surname)\b/i;
+// record. A name candidate only counts when the quote carries an ERROR/
+// correction claim NEAR the word "name" (either order): wrong, incorrect,
+// misspelled, typo, actually, not, correct(ion). Bare spelling language is
+// NOT in the set — "let me spell my name" is routine identity collection
+// (agents ask callers to spell names on ordinary calls), not a claim that
+// the stored name is wrong.
+const CALL_NAME_CORRECTION_RE = /\b(?:name|surname)\b[\s\S]{0,60}\b(?:wrong|incorrect|misspell\w*|typo|actually|correct\w*|not\b)|\b(?:wrong|incorrect|misspell\w*|typo|actually|correct\w*|not(?:\s+(?:my|the))?)\b[\s\S]{0,60}\b(?:name|surname)\b/i;
 
 // Quote-component binding for shared name_full evidence: the staging writer
 // assigns one quote to BOTH name candidates, but "my last name is spelled
@@ -453,7 +536,7 @@ function quoteBindsNameField(field, quote) {
   return true;
 }
 
-async function runCallContactCorrection({ callId, customerId, knex = db }) {
+async function runCallContactCorrection({ callId, customerId, knex = db, procToken = null }) {
   try {
     if (!require('../config/feature-gates').isEnabled('contactCorrection')) return { applied: [], skipped: [], reason: 'gate_off' };
     if (!callId || !customerId) return { applied: [], skipped: [], reason: 'unlinked' };
@@ -493,23 +576,35 @@ async function runCallContactCorrection({ callId, customerId, knex = db }) {
     try {
       let owner = null;
       [call, owner] = await Promise.all([
-        knex('call_log').where({ id: callId }).first('from_phone', 'transcription'),
+        knex('call_log').where({ id: callId }).first('from_phone', 'transcription', 'processing_token'),
         knex('customers').where({ id: customerId }).first('phone'),
       ]);
       const callerTail = tail10(call?.from_phone);
       callerIsPrimary = Boolean(callerTail) && callerTail === tail10(owner?.phone);
     } catch { callerIsPrimary = false; call = null; }
 
+    // Processing-pass fence: the call processor lets a peer reclaim a stuck
+    // `processing` row after its timeout by replacing processing_token. A
+    // stale worker that lost that claim must not apply its (older)
+    // extraction — when the caller supplied its token, verify the row still
+    // carries it (re-checked inside the apply transaction below; this
+    // pre-check also fences the proposal bell). Unverifiable = fail closed.
+    if (procToken && (!call || call.processing_token !== procToken)) {
+      return { applied: [], skipped: [], reason: 'fence_lost' };
+    }
+
     // Transcript grounding — the diarized transcript ("Agent:"/"Caller:"
-    // turns) is the source of record, and only the CALLER's own lines can
-    // evidence a correction: an agent reading back the OLD (wrong) value, or
-    // misciting one, must not ground a rewrite of the record. A candidate
-    // quote must substring-match (whitespace/case-normalized) a non-agent
-    // line; a call with no stored transcript grounds nothing (fail closed).
-    // Applies to BOTH lanes — name auto-apply and the proposal bell.
+    // turns) is the source of record, and only lines EXPLICITLY labeled
+    // "Caller:" can evidence a correction: an agent reading back the OLD
+    // (wrong) value must not ground a rewrite, and the transcription
+    // pipeline's supported unlabeled fallback ("Speaker 1:"/"Speaker 2:",
+    // call-recording-processor openai_unlabeled_fallback) never attributes
+    // speech to the caller — a transcript without Caller labels (or with no
+    // transcript at all) grounds nothing (fail closed). Applies to BOTH
+    // lanes — name auto-apply and the proposal bell.
     const callerLines = String(call?.transcription || '')
       .split(/\r?\n/)
-      .filter((line) => !/^\s*agent\s*:/i.test(line))
+      .filter((line) => /^\s*caller\s*:/i.test(line))
       .map((line) => line.replace(/\s+/g, ' ').trim().toLowerCase())
       .filter(Boolean);
     const quoteGrounded = (q) => {
@@ -590,6 +685,15 @@ async function runCallContactCorrection({ callId, customerId, knex = db }) {
       // must not both read as auto_applied, and an applied field can never
       // commit without its stamp.
       postApply: async (trx, applied) => {
+        // In-transaction fence re-check: the pre-check above races the
+        // peer's reclaim; this one commits or rolls back WITH the customer
+        // write, so losing the fence mid-apply aborts the whole correction.
+        if (procToken) {
+          const owned = await trx('call_log')
+            .where({ id: callId, processing_token: procToken })
+            .first('id');
+          if (!owned) throw new Error('processing_fence_lost');
+        }
         // Compare against the CANONICALIZED candidate value — applyContact-
         // Corrections canonicalizes before writing (raw "MCGOWAN" is stored
         // as "McGowan"), so a raw-value compare would leave the very
