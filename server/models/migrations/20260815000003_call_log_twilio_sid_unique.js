@@ -79,6 +79,30 @@ exports.up = async function up(knex) {
       WHERE c.confrelid = 'call_log'::regclass AND c.contype = 'f'
     `);
 
+    // Child tables can carry their OWN uniqueness on the FK column
+    // (call_spam_verdicts (call_log_id, classifier_version), route_feedback
+    // (call_log_id), triage_items' partial open-unique, …) — a blind repoint
+    // of loser-referencing rows onto the winner collides with the winner's
+    // sibling row and aborts the whole migration (prod 2026-08-15). Discover
+    // every unique index on each referencing table that includes the FK
+    // column, partial predicates included, so the collision handling below
+    // covers referencing tables added after this migration was written.
+    const uniqueIdxByTable = {};
+    for (const fk of fks) {
+      if (uniqueIdxByTable[fk.tbl]) continue;
+      const { rows } = await knex.raw(`
+        SELECT pg_get_expr(i.indpred, i.indrelid) AS pred,
+               -- ::text[] — attname is the "name" type, and the pg driver
+               -- returns name[] as an unparsed string, not a JS array.
+               (SELECT array_agg(a.attname::text ORDER BY k.ord)
+                FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum) AS cols
+        FROM pg_index i
+        WHERE i.indrelid = ?::regclass AND i.indisunique
+      `, [fk.tbl]);
+      uniqueIdxByTable[fk.tbl] = rows.filter((r) => Array.isArray(r.cols));
+    }
+
     for (const group of dupGroups) {
       const rows = await knex('call_log')
         .where('twilio_call_sid', group.twilio_call_sid)
@@ -179,7 +203,61 @@ exports.up = async function up(knex) {
       }
 
       const loserIds = losers.map((r) => r.id);
+      const groupIds = [winner.id, ...loserIds];
       for (const fk of fks) {
+        // Merge collision families under each unique index BEFORE the blind
+        // repoint. Same doctrine as the call_log fold above: a colliding row
+        // is deleted only when it is provably redundant (every column except
+        // identity/timestamps/the FK equal to the kept row); a genuine
+        // difference throws for manual resolution rather than guessing.
+        for (const uniq of uniqueIdxByTable[fk.tbl] || []) {
+          if (!uniq.cols.includes(fk.col)) continue;
+          const keyCols = uniq.cols.filter((c) => c !== fk.col);
+          const predSql = uniq.pred ? ` AND (${uniq.pred})` : '';
+          const { rows: family } = await knex.raw(
+            `SELECT t.ctid::text AS __ctid, t.* FROM "${fk.tbl}" t
+             WHERE t."${fk.col}" = ANY(?::uuid[])${predSql}`,
+            [groupIds]
+          );
+          // Default unique semantics: a NULL key column never collides.
+          const collidable = family.filter((r) => keyCols.every((c) => !isBlank(r[c])));
+          const buckets = new Map();
+          for (const row of collidable) {
+            const key = JSON.stringify(keyCols.map((c) => {
+              const v = row[c];
+              return v instanceof Date ? v.getTime() : v;
+            }));
+            if (!buckets.has(key)) buckets.set(key, []);
+            buckets.get(key).push(row);
+          }
+          for (const bucket of buckets.values()) {
+            if (bucket.length < 2) continue;
+            // Keep the winner-pointing row when one exists (it survives the
+            // repoint untouched), else the first-created.
+            bucket.sort((a, b) => {
+              const aw = a[fk.col] === winner.id ? 0 : 1;
+              const bw = b[fk.col] === winner.id ? 0 : 1;
+              if (aw !== bw) return aw - bw;
+              const at = a.created_at instanceof Date ? a.created_at.getTime() : 0;
+              const bt = b.created_at instanceof Date ? b.created_at.getTime() : 0;
+              return at - bt || String(a.__ctid).localeCompare(String(b.__ctid));
+            });
+            const keeper = bucket[0];
+            for (const extra of bucket.slice(1)) {
+              for (const col of Object.keys(keeper)) {
+                if (col === '__ctid' || col === 'id' || col === fk.col
+                  || col === 'created_at' || col === 'updated_at') continue;
+                if (!sameValue(keeper[col], extra[col])) {
+                  throw new Error(
+                    `[migration call_log_twilio_sid_unique] twilio_call_sid ${group.twilio_call_sid}: `
+                    + `"${fk.tbl}" rows collide on (${uniq.cols.join(', ')}) with differing "${col}" — resolve by hand.`
+                  );
+                }
+              }
+              await knex.raw(`DELETE FROM "${fk.tbl}" WHERE ctid = ?::tid`, [extra.__ctid]);
+            }
+          }
+        }
         await knex.raw(
           `UPDATE "${fk.tbl}" SET "${fk.col}" = ? WHERE "${fk.col}" = ANY(?::uuid[])`,
           [winner.id, loserIds]
