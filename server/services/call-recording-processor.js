@@ -8114,7 +8114,18 @@ const CallRecordingProcessor = {
     // no primary yet (an addressless customer's first address — captured here even
     // when no second_service_address was raised), and otherwise stores a second
     // property. Never overwrites an existing primary mirror.
-    if (process.env.GATE_CUSTOMER_PROPERTIES === 'true' && customerId && extracted.address_line1) {
+    // Entry ALSO on a V2-only canonical address (codex #3418 r7): when V2 is
+    // valid but V1 left address_line1 null, the role staging (and its V2
+    // persistence loop) live inside this block — gating on the V1 field
+    // alone silently dropped the V2 classification. Every V1-shaped step
+    // inside no-ops on a null street (completePrimaryFromCall and
+    // recordCallProperty both guard), so the relaxed guard changes nothing
+    // for the V1 path.
+    const v2HasServiceAddress = !!String(
+      v2CanonicalExtraction?.property?.service_address?.street_line_1 || '',
+    ).trim();
+    if (process.env.GATE_CUSTOMER_PROPERTIES === 'true' && customerId
+      && (extracted.address_line1 || v2HasServiceAddress)) {
       try {
         const customerProperties = require('./customer-properties');
         // Unit/line2 from the V2 service_address (legacy extraction + flatView drop it).

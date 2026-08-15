@@ -338,7 +338,18 @@ router.post('/:id/apply-property-roles', async (req, res) => {
 
     let outcome;
     await db.transaction(async (trx) => {
-      // Same global lock order as every triage writer: advisory call lock first.
+      // Lock ORDER: customers row FIRST, then the call advisory lock (codex
+      // #3418 r7). The Customer 360 PATCH holds the customer row lock while
+      // its email fanout takes lockTriageCall for the customer's calls —
+      // taking the call lock first here is the AB-BA half of that deadlock.
+      // The card's customer never changes across refreshes (staging always
+      // derives it from the same call), so the pre-lock read's customer_id
+      // is safe to lock on; the post-lock re-read verifies it anyway.
+      const prePayload = typeof item.payload === 'string' ? JSON.parse(item.payload) : (item.payload || {});
+      const preCustomerId = prePayload.customer_id || null;
+      if (preCustomerId) {
+        await trx('customers').where({ id: preCustomerId }).forUpdate().first();
+      }
       await lockTriageCall(trx, item.call_log_id);
       // Re-read the card UNDER the lock (codex #3418 r2): a force-reprocess
       // merges refreshed proposals into the open card, and the pre-lock read
@@ -353,6 +364,13 @@ router.post('/:id/apply-property-roles', async (req, res) => {
       const payload = typeof live.payload === 'string' ? JSON.parse(live.payload) : (live.payload || {});
       const proposals = Array.isArray(payload.property_role_proposals) ? payload.property_role_proposals : [];
       const customerId = payload.customer_id || null;
+      if (customerId !== preCustomerId) {
+        // Never proceed holding the WRONG customer's lock — surface as a
+        // concurrent-refresh conflict and let the reviewer re-click.
+        const lost = new Error('card customer changed concurrently');
+        lost.conflict = true;
+        throw lost;
+      }
       if (!customerId || !proposals.length) {
         const empty = new Error('no applicable proposals');
         empty.noProposals = true;

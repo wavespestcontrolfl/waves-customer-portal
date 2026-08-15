@@ -152,6 +152,19 @@ describe('buildPropertyRoleProposals', () => {
     expect(agreeing.proposals.filter((p) => p.kind === 'primary_flip')).toHaveLength(1);
   });
 
+  test('a flip onto a row STORED as rental adds a companion occupancy_change to owner_occupied (codex r7)', () => {
+    const rentalStoredNew = { ...NEW_HOME, occupancy_type: 'rental_investment' };
+    const { proposals } = buildPropertyRoleProposals({
+      classified: [{ address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true }],
+      properties: [OLD_HOME, rentalStoredNew],
+    });
+    expect(proposals.filter((p) => p.kind === 'primary_flip')).toHaveLength(1);
+    // The promote's occupancy fence only fills 'unknown' — the stored
+    // conflict must ride the same card as an explicit reviewed change.
+    const companion = proposals.filter((p) => p.kind === 'occupancy_change' && p.property_id === 'prop-new');
+    expect(companion).toEqual([expect.objectContaining({ current_occupancy: 'rental_investment', proposed_occupancy: 'owner_occupied' })]);
+  });
+
   test('matching stored occupancy produces neither fill nor proposal', () => {
     const { fills, proposals } = buildPropertyRoleProposals({
       classified: [{ address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: 'owner_occupied', is_primary_residence: null }],
@@ -188,6 +201,7 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
       };
       return q;
     };
+    trx.raw = (sql, bindings) => ({ __raw: sql, bindings });
     trx._updates = updates;
     return trx;
   }
@@ -215,7 +229,7 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     const pin = u.find((x) => x.table === 'scheduled_services');
     expect(pin.patch).toMatchObject({ property_id: 'prop-old', service_address_line1: '8380 Sea Breeze Ct', service_address_zip: '34212' });
     expect(pin.whereNulls).toEqual(expect.arrayContaining(['property_id', 'service_address_line1']));
-    expect(pin.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped']]);
+    expect(pin.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped', 'rescheduled']]);
     // 2/3. demote before promote (one_primary partial unique)
     const propUpdates = u.filter((x) => x.table === 'customer_properties');
     // The demote deliberately does NOT write occupancy — the reclassification
@@ -255,7 +269,42 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     const backfill = ssUpdates[1];
     expect(backfill.patch).toMatchObject({ lat: 27.4, lng: -82.4 });
     expect(backfill.whereNulls).toEqual(expect.arrayContaining(['lat', 'lng']));
-    expect(backfill.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped']]);
+    expect(backfill.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped', 'rescheduled']]);
+  });
+
+  test('pin coords are FILL-ONLY (COALESCE) — existing visit coords survive a coordless old primary (codex r7)', async () => {
+    const old = { ...OLD_HOME, state: 'FL', latitude: null, longitude: null, active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1' };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
+    });
+    const pin = trx._updates.find((x) => x.table === 'scheduled_services');
+    // A visit already carrying mirror-copied coords must keep them — the
+    // stamp assignment goes through COALESCE(col, old value), never a bare
+    // overwrite that could stamp NULL over valid coordinates.
+    expect(pin.patch.lat).toMatchObject({ __raw: expect.stringContaining('COALESCE(lat') });
+    expect(pin.patch.lng).toMatchObject({ __raw: expect.stringContaining('COALESCE(lng') });
+  });
+
+  test('demote clears the literal Primary label even with no rental/seasonal suggestion (codex r7)', async () => {
+    const old = { ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1' };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{
+        kind: 'primary_flip',
+        new_primary_property_id: 'prop-new',
+        old_primary_property_id: 'prop-old',
+        old_primary_label: null,
+      }],
+    });
+    // The vacated literal 'Primary' must not survive on the demoted row —
+    // otherwise the list shows two "Primary" properties post-flip.
+    expect(old.label).toBeNull();
+    expect(neu.label).toBe('Primary');
   });
 
   test('coord backfill is skipped entirely when the old primary has no coordinates', async () => {

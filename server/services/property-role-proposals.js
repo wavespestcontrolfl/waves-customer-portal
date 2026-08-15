@@ -32,8 +32,11 @@ const {
 const { resolveLocation } = require('../config/locations');
 
 const REASON_CODE = 'property_role_confirm';
-// Visit statuses that are already settled — never re-pin those.
-const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped'];
+// Visit statuses that are already settled — never re-pin those. Includes
+// 'rescheduled' (codex #3418 r7): a rescheduled row is a superseded
+// historical appointment — the scheduling/conflict/reminder predicates all
+// exclude it alongside cancelled; only its live replacement should be pinned.
+const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'rescheduled'];
 // Occupancies that earn a human-readable label suggestion on a flip/change.
 const LABEL_BY_OCCUPANCY = { rental_investment: 'Rental', seasonal: 'Seasonal' };
 
@@ -205,6 +208,26 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
         ? classified.find((c) => addressKey(c) === addressKey(oldRow)) || null
         : null;
       const oldOccupancy = oldClassified?.occupancy || (oldRow ? knownOccupancy(oldRow.occupancy_type) : null);
+      // The claimed new primary may be STORED as rental/seasonal/commercial/
+      // vacant while the claim carried no occupancy of its own (codex #3418
+      // r7): the promote's occupancy fence only fills 'unknown', so the flip
+      // alone would leave the primary residence classified as a rental.
+      // Surface the stored conflict as an explicit reviewed occupancy_change
+      // riding the same card — unless the entry's own occupancy already
+      // produced one above.
+      const storedNewPrimary = knownOccupancy(row.occupancy_type);
+      if (storedNewPrimary && storedNewPrimary !== 'owner_occupied'
+        && !proposals.some((p) => p.kind === 'occupancy_change' && p.property_id === row.id)) {
+        proposals.push({
+          kind: 'occupancy_change',
+          property_id: row.id,
+          address: shortAddress(row),
+          current_occupancy: storedNewPrimary,
+          proposed_occupancy: 'owner_occupied',
+          proposed_label: null,
+          evidence: entry.evidence || null,
+        });
+      }
       proposals.push({
         kind: 'primary_flip',
         new_primary_property_id: row.id,
@@ -234,34 +257,38 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
 // Resolving our own advisory card is the same self-cleanup shape as the
 // transcript-rejection path's stale-card dismissal; single row by the
 // open-unique index, under the shared per-call triage lock.
+async function resolveSupersededInTrx(trx, callLogId) {
+  const resolved = await trx('triage_items')
+    .where({ call_log_id: callLogId, reason_code: REASON_CODE })
+    .whereIn('status', ['open', 'in_progress'])
+    .update({
+      status: 'resolved',
+      resolution_note: 'Superseded — the reprocessed extraction proposes no property-role changes.',
+      resolved_at: new Date(),
+      updated_at: new Date(),
+    });
+  // Same call_log.review_status aggregation as the triage transitions
+  // (codex #3418 r4): resolving the call's last live card must move the
+  // aggregate off 'open'.
+  if (resolved > 0) {
+    const stillOpen = await trx('triage_items')
+      .where({ call_log_id: callLogId })
+      .whereIn('status', ['open', 'in_progress'])
+      .count('* as n')
+      .first();
+    const remaining = parseInt(stillOpen?.n || 0, 10);
+    await trx('call_log')
+      .where({ id: callLogId })
+      .update({ review_status: remaining > 0 ? 'open' : 'resolved', updated_at: new Date() });
+  }
+}
+
 async function resolveSupersededCard(db, callLogId) {
   try {
     const { lockTriageCall } = require('../utils/triage-locks');
     await db.transaction(async (trx) => {
       await lockTriageCall(trx, callLogId);
-      const resolved = await trx('triage_items')
-        .where({ call_log_id: callLogId, reason_code: REASON_CODE })
-        .whereIn('status', ['open', 'in_progress'])
-        .update({
-          status: 'resolved',
-          resolution_note: 'Superseded — the reprocessed extraction proposes no property-role changes.',
-          resolved_at: new Date(),
-          updated_at: new Date(),
-        });
-      // Same call_log.review_status aggregation as the triage transitions
-      // (codex #3418 r4): resolving the call's last live card must move the
-      // aggregate off 'open'.
-      if (resolved > 0) {
-        const stillOpen = await trx('triage_items')
-          .where({ call_log_id: callLogId })
-          .whereIn('status', ['open', 'in_progress'])
-          .count('* as n')
-          .first();
-        const remaining = parseInt(stillOpen?.n || 0, 10);
-        await trx('call_log')
-          .where({ id: callLogId })
-          .update({ review_status: remaining > 0 ? 'open' : 'resolved', updated_at: new Date() });
-      }
+      await resolveSupersededInTrx(trx, callLogId);
     });
   } catch (e) {
     logger.warn(`[property-role] superseded-card cleanup skipped: ${e.code || e.name || 'db_error'}`);
@@ -277,24 +304,36 @@ async function stagePropertyRoleReview({
     return { fills: 0, parked: false };
   }
 
-  const properties = await db('customer_properties')
-    .where({ customer_id: customerId, active: true })
-    .select('id', 'address_line1', 'address_line2', 'city', 'zip', 'occupancy_type', 'is_primary', 'label');
-  const { fills, proposals } = buildPropertyRoleProposals({ classified, properties });
-
-  for (const fill of fills) {
-    // Fill-only fence: the row must still be unlabeled — a concurrent admin
-    // edit wins over the call's classification.
-    await db('customer_properties')
-      .where({ id: fill.property_id, customer_id: customerId, active: true })
-      .whereIn('occupancy_type', ['unknown'])
-      .update({ occupancy_type: fill.occupancy, updated_at: new Date() });
-  }
-
+  // The WHOLE derive-and-write sequence runs under the shared per-call
+  // triage lock (codex #3418 r5+r7): snapshotting rows / building proposals
+  // outside it let a force-reprocess race Apply — the reviewer could apply
+  // and resolve the old card, then this refresh (derived from PRE-apply
+  // rows) would insert a fresh card whose displayed current values were
+  // already stale. Lock first, then read, then write.
+  const { lockTriageCall } = require('../utils/triage-locks');
+  let fillCount = 0;
   let parked = false;
-  if (!proposals.length) {
-    await resolveSupersededCard(db, callLogId);
-  } else {
+  await db.transaction(async (trx) => {
+    await lockTriageCall(trx, callLogId);
+    const properties = await trx('customer_properties')
+      .where({ customer_id: customerId, active: true })
+      .select('id', 'address_line1', 'address_line2', 'city', 'zip', 'occupancy_type', 'is_primary', 'label');
+    const { fills, proposals } = buildPropertyRoleProposals({ classified, properties });
+
+    for (const fill of fills) {
+      // Fill-only fence: the row must still be unlabeled — a concurrent admin
+      // edit wins over the call's classification.
+      await trx('customer_properties')
+        .where({ id: fill.property_id, customer_id: customerId, active: true })
+        .whereIn('occupancy_type', ['unknown'])
+        .update({ occupancy_type: fill.occupancy, updated_at: new Date() });
+    }
+    fillCount = fills.length;
+
+    if (!proposals.length) {
+      await resolveSupersededInTrx(trx, callLogId);
+      return;
+    }
     const card = buildTriageItem({
       callLogId,
       flag: REASON_CODE,
@@ -304,21 +343,22 @@ async function stagePropertyRoleReview({
     });
     // MERGE, not ignore, on the open-card unique (codex #3418 r1): a
     // force-reprocessed call re-derives its classification, and the open
-    // card must present the NEWEST proposals. The write runs under the
-    // shared per-call triage lock (codex #3418 r5) so it serializes with
-    // Apply's locked read-then-resolve — a refresh can no longer land
-    // between Apply's payload read and its resolve.
-    const { lockTriageCall } = require('../utils/triage-locks');
-    await db.transaction(async (trx) => {
-      await lockTriageCall(trx, callLogId);
-      await trx('triage_items')
-        .insert(card)
-        .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-        .merge({ payload: card.payload, summary: card.summary, updated_at: new Date() });
-    });
+    // card must present the NEWEST proposals.
+    await trx('triage_items')
+      .insert(card)
+      .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+      .merge({ payload: card.payload, summary: card.summary, updated_at: new Date() });
+    // Aggregate-mirror contract (codex #3418 r7): an open triage row means
+    // the call is under review — reopen call_log.review_status here, in the
+    // same locked transaction. The processor's finalizer only ever SETS
+    // 'open' (it never writes a resolved/null review_status), so this
+    // cannot be clobbered later in the same pass.
+    await trx('call_log')
+      .where({ id: callLogId })
+      .update({ review_status: 'open', updated_at: new Date() });
     parked = true;
-  }
-  return { fills: fills.length, parked };
+  });
+  return { fills: fillCount, parked };
 }
 
 /**
@@ -418,8 +458,12 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
             // customer mirror flips, stampedDivergesSql disables the
             // customer-coord fallback for these rows — without their own
             // lat/lng, dispatch and route optimization would go blind.
-            lat: oldPrimary.latitude ?? null,
-            lng: oldPrimary.longitude ?? null,
+            // FILL-ONLY via COALESCE (codex #3418 r7): a visit that
+            // already carries valid coords (e.g. copied from the customer
+            // mirror) keeps them — stamping NULL over them when the old
+            // primary is coordless would blind the stop instead.
+            lat: trx.raw('COALESCE(lat, ?)', [oldPrimary.latitude ?? null]),
+            lng: trx.raw('COALESCE(lng, ?)', [oldPrimary.longitude ?? null]),
             updated_at: new Date(),
           });
 
@@ -470,6 +514,15 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
               .whereNull('label')
               .update({ label: p.old_primary_label, updated_at: new Date() });
           }
+        } else {
+          // No rental/seasonal suggestion — still clear the literal
+          // 'Primary' label the demote vacates (codex #3418 r7), or the
+          // list shows the demoted address as "Primary" (possibly two of
+          // them once the promote labels the new row). Bespoke admin
+          // names don't match the literal and are kept.
+          await trx('customer_properties')
+            .where({ id: oldPrimary.id, label: 'Primary' })
+            .update({ label: null, updated_at: new Date() });
         }
       }
 
