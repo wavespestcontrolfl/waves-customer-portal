@@ -55,6 +55,12 @@ function transferMissedCallback() {
   );
 }
 
+// Card persistence failed — give the number WITHOUT promising a callback
+// nobody recorded (gh prb-r3).
+function callbackNumberOnly() {
+  return `Please reach us at ${callbackNumber()} and the team will help right away. Goodbye.`;
+}
+
 function callbackPromise() {
   return (
     'Our office is closed right now, so I have asked the team to give you a call back. '
@@ -123,6 +129,7 @@ module.exports = {
   vestibuleScript,
   CONSENT_REVOKED_CONFIRMATION,
   callbackPromise,
+  callbackNumberOnly,
   transferMissedCallback,
   TRANSFER_ANNOUNCEMENT,
   genericCallbackVoicemail,

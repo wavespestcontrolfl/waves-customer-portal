@@ -241,9 +241,10 @@ router.post('/collections-vestibule-key', async (req, res) => {
         await writeCallOutcome(call.row.id, { outcome: 'vestibule_office' }).catch(() => {});
         return sendTwiml(res, twiml);
       }
+      let officeCard = null;
       try {
         const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyAdmin(
+        officeCard = await NotificationService.notifyAdmin(
           'billing',
           'Callback requested on billing follow-up call',
           'A customer pressed 0 on an automated billing follow-up call outside office hours. Please call them back.',
@@ -252,7 +253,8 @@ router.post('/collections-vestibule-key', async (req, res) => {
       } catch (err) {
         logger.error(`[collections-vestibule] callback card failed: ${err.message}`);
       }
-      twiml.say(script.callbackPromise());
+      // Promise the callback only if the card persisted (gh prb-r3).
+      twiml.say(officeCard ? script.callbackPromise() : script.callbackNumberOnly());
       twiml.hangup();
       await writeCallOutcome(call.row.id, { outcome: 'vestibule_office' }).catch(() => {});
       return sendTwiml(res, twiml);
@@ -347,9 +349,10 @@ router.post('/collections-transfer-complete', async (req, res) => {
     const dialStatus = String(req.body?.DialCallStatus || '').toLowerCase();
     if (dialStatus !== 'completed') {
       // Office did not pick up — promise the callback, file the card.
+      let missCard = null;
       try {
         const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyAdmin(
+        missCard = await NotificationService.notifyAdmin(
           'billing',
           'Missed transfer on billing follow-up call',
           'A customer asked to be connected during a billing follow-up call but the office line did not answer. Please call them back.',
@@ -359,8 +362,9 @@ router.post('/collections-transfer-complete', async (req, res) => {
         logger.error(`[collections-transfer-complete] callback card failed: ${err.message}`);
       }
       // gh prb-r2: the office was OPEN — a busy/unanswered line must not
-      // announce a false closure.
-      twiml.say(script.transferMissedCallback());
+      // announce a false closure. And the callback half of that copy is
+      // only spoken when its card persisted (gh prb-r3).
+      twiml.say(missCard ? script.transferMissedCallback() : script.callbackNumberOnly());
     }
     twiml.hangup();
     return sendTwiml(res, twiml);
@@ -379,48 +383,56 @@ const UNANSWERED_STATUSES = new Set(['busy', 'no-answer', 'canceled', 'failed'])
 
 router.post('/collections-call-status', async (req, res) => {
   try {
+    // Master kill switch first, like every route in this router (gh
+    // prb-r3): gate off = no reads, no writes. A case mid-dial then stays
+    // visibly stuck in 'dialing' — the kill switch means FULL stop.
+    if (!isVoiceLatePaymentEnabled()) return res.sendStatus(204);
     const twStatus = String(req.body?.CallStatus || '').toLowerCase();
     if (!UNANSWERED_STATUSES.has(twStatus)) return res.sendStatus(204);
     const call = await loadCollectionsCall(req);
     if (!call) return res.sendStatus(204);
     const meta = call.meta || {};
 
-    await db('call_log').where({ id: call.row.id }).update({
-      status: twStatus,
-      call_outcome: 'missed',
-      updated_at: new Date(),
-    }).catch((err) => logger.warn(`[collections-call-status] call_log update failed: ${err.message}`));
-
-    // Back to the review queue for a fresh human approval — never an
-    // automatic redial. Guarded on 'dialing' so an answered call's later
-    // race can't regress a live case.
-    if (meta.collectionCaseId) {
-      await db('collection_cases')
-        .where({ id: meta.collectionCaseId, current_state: 'dialing' })
-        .update({
-          current_state: 'proposed',
-          approved_by: null,
-          approved_at: null,
-          approval_expires_at: null,
-          hold_reason: `dial_${twStatus}`,
-          updated_at: db.fn.now(),
-        })
-        .catch((err) => logger.warn(`[collections-call-status] case reset failed: ${err.message}`));
-    }
-    // Ledger attempt stands (frequency window: an attempt IS a contact
-    // attempt — over-suppression is the safe direction) but is stamped
-    // undelivered via jsonb merge — never a wholesale metadata replace.
-    if (meta.ledgerId) {
-      await db('collections_contact_ledger').where({ id: meta.ledgerId }).update({
-        metadata: db.raw(
-          "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
-          [JSON.stringify({ send_failed: true, dial_status: twStatus })],
-        ),
-      }).catch((err) => logger.warn(`[collections-call-status] ledger stamp failed: ${err.message}`));
-    }
+    // ONE transaction (gh prb-r3): the missed outcome, the case reset, and
+    // the ledger stamp land together or not at all — a partial write must
+    // never put the case back in review while its compliance records still
+    // read 'initiated'. Failure logs loudly and leaves everything intact
+    // for the next callback attempt / the pilot operator.
+    await db.transaction(async (trx) => {
+      await trx('call_log').where({ id: call.row.id }).update({
+        status: twStatus,
+        call_outcome: 'missed',
+        updated_at: new Date(),
+      });
+      // Guarded on 'dialing' so an answered call's later race can't
+      // regress a live case; never an automatic redial.
+      if (meta.collectionCaseId) {
+        await trx('collection_cases')
+          .where({ id: meta.collectionCaseId, current_state: 'dialing' })
+          .update({
+            current_state: 'proposed',
+            approved_by: null,
+            approved_at: null,
+            approval_expires_at: null,
+            hold_reason: `dial_${twStatus}`,
+            updated_at: trx.fn.now(),
+          });
+      }
+      // The attempt stands in the frequency window (over-suppression is the
+      // safe direction) but is stamped undelivered via jsonb merge — never
+      // a wholesale metadata replace.
+      if (meta.ledgerId) {
+        await trx('collections_contact_ledger').where({ id: meta.ledgerId }).update({
+          metadata: trx.raw(
+            "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({ send_failed: true, dial_status: twStatus })],
+          ),
+        });
+      }
+    });
     return res.sendStatus(204);
   } catch (err) {
-    logger.error(`[collections-call-status] failed: ${err.message}`);
+    logger.error(`[collections-call-status] reconcile failed (state left intact): ${err.message}`);
     return res.sendStatus(204);
   }
 });

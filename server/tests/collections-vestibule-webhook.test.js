@@ -104,6 +104,14 @@ function req({ query = {}, body = {} } = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // The status route wraps its writes in one transaction (prb-r3): serve a
+  // trx that dispatches through the same table-queue mock.
+  db.transaction = jest.fn(async (fn) => {
+    const trx = (t) => db(t);
+    trx.fn = db.fn;
+    trx.raw = db.raw;
+    return fn(trx);
+  });
   voicemailPermitted.mockResolvedValue(true);
   stampVoicemailLeft.mockResolvedValue(true);
   flags.revokeAutomatedVoiceConsent.mockResolvedValue({ ok: true, created: true });
@@ -356,5 +364,26 @@ describe('prb-r2', () => {
     await handlerFor('/collections-transfer-complete')(req({ body: { DialCallStatus: 'no-answer' } }), res);
     expect(res.body).toContain('not able to reach our office');
     expect(res.body).not.toContain('closed right now');
+  });
+});
+
+// prb-r3 pins.
+describe('prb-r3', () => {
+  test('the status route is master-gated like every sibling: gate off = no reads, no writes', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT = 'false';
+    const res = mockRes();
+    res.sendStatus = jest.fn(() => res);
+    db.mockImplementation(() => { throw new Error('no reads with the gate off'); });
+    await handlerFor('/collections-call-status')(req({ body: { CallStatus: 'no-answer' } }), res);
+    expect(res.sendStatus).toHaveBeenCalledWith(204);
+  });
+
+  test('a failed callback card means the closing copy gives the number WITHOUT the promise', async () => {
+    setDb();
+    NotificationService.notifyAdmin.mockResolvedValue(null);
+    const res = mockRes();
+    await handlerFor('/collections-transfer-complete')(req({ body: { DialCallStatus: 'busy' } }), res);
+    expect(res.body).toContain('the team will help right away');
+    expect(res.body).not.toContain('give you a call back');
   });
 });

@@ -164,6 +164,7 @@ beforeEach(() => {
   mockScriptedMessages.length = 0;
   process.env.GATE_VOICE_LATE_PAYMENT = 'true';
   delete process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK;
+  delete process.env.GATE_COLLECTIONS_POLICY;
   process.env.ANTHROPIC_API_KEY = 'test-key';
   setDb();
 });
@@ -171,6 +172,7 @@ beforeEach(() => {
 afterAll(() => {
   delete process.env.GATE_VOICE_LATE_PAYMENT;
   delete process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK;
+  delete process.env.GATE_COLLECTIONS_POLICY;
 });
 
 test('gate off ⇒ fixed failure close, model never consulted, no outcome case write beyond guard', async () => {
@@ -353,6 +355,7 @@ test('send_pay_link with sub-gate OFF ⇒ refused, zero sends', async () => {
 
 test('send_pay_link: rail-guard consulted first, RECORD-THEN-SEND ordering, once per call', async () => {
   process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+  process.env.GATE_COLLECTIONS_POLICY = 'true'; // prb-r3: pay-link hard-requires the policy gate
   const order = [];
   collectionsChannelPermitted.mockImplementation(async () => { order.push('guard'); return true; });
   ContactLedger.recordContact.mockImplementation(async () => { order.push('ledger'); return { id: 'ledger-sms-1', metadata: {} }; });
@@ -374,6 +377,7 @@ test('send_pay_link: rail-guard consulted first, RECORD-THEN-SEND ordering, once
 
 test('send_pay_link: rail-guard denial ⇒ no ledger row, no send', async () => {
   process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+  process.env.GATE_COLLECTIONS_POLICY = 'true'; // prb-r3: pay-link hard-requires the policy gate
   collectionsChannelPermitted.mockResolvedValue(false);
   const { convo } = makeConvo();
   await verifyAndDisclose(convo);
@@ -385,6 +389,7 @@ test('send_pay_link: rail-guard denial ⇒ no ledger row, no send', async () => 
 
 test('send failure ⇒ send_failed stamp on the pre-recorded ledger row', async () => {
   process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+  process.env.GATE_COLLECTIONS_POLICY = 'true'; // prb-r3: pay-link hard-requires the policy gate
   InvoiceService.sendViaSMS.mockRejectedValue(new Error('carrier down'));
   const { convo } = makeConvo();
   await verifyAndDisclose(convo);
@@ -430,4 +435,25 @@ test('hangup with no confirmation ⇒ conversation_abandoned outcome + transcrip
   await turn(convo, 'Hello?');
   await convo.end('ws_close');
   expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({ outcome: 'conversation_abandoned' }));
+});
+
+// prb-r3 pins.
+describe('prb-r3', () => {
+  test('an EMPTY verify_identity call never consumes an attempt', async () => {
+    const { convo } = makeConvo();
+    await turn(convo, 'hello');
+    const before = convo.verifyAttempts;
+    const out = await convo._toolVerifyIdentity({});
+    expect(out).toContain('did not count');
+    expect(convo.verifyAttempts).toBe(before);
+  });
+
+  test('a sensitive utterance is withheld WHOLE — no trailing digits survive', async () => {
+    const { convo } = makeConvo();
+    await turn(convo, 'my routing number is 123456789 and my social is 123-45-6789');
+    const stored = convo._turns.map((t) => t.text).join(' ');
+    expect(stored).not.toContain('123456789');
+    expect(stored).not.toContain('123-45-6789');
+    expect(stored).toContain('[utterance withheld');
+  });
 });

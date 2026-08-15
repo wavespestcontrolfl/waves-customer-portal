@@ -276,5 +276,5 @@ test('the idempotency probe excludes failed rows (query pin) and a fresh dial pr
   });
   const res = await originateCollectionCall('case-1', { now: NOW });
   expect(res.dialed).toBe(true);
-  expect(probeChain.whereRaw).toHaveBeenCalledWith("COALESCE(status, '') <> 'failed'");
+  expect(probeChain.whereRaw).toHaveBeenCalledWith("COALESCE(status, '') NOT IN ('failed', 'busy', 'no-answer', 'canceled')");
 });

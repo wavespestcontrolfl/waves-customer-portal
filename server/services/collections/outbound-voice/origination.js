@@ -118,7 +118,9 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     // A FAILED dial's row must not block the human's re-approval (gh
     // prb-r2) — the failure path resets the case to 'proposed' precisely so
     // it can be retried. COALESCE keeps the NULL leg explicit.
-    .whereRaw("COALESCE(status, '') <> 'failed'")
+    // Every status the callback route can write for an unanswered attempt
+    // (gh prb-r3) — a reapproved retry must not be blocked by any of them.
+    .whereRaw("COALESCE(status, '') NOT IN ('failed', 'busy', 'no-answer', 'canceled')")
     .first('id');
   if (prior) return { dialed: false, reason: 'already_dialed', callLogId: prior.id };
 
@@ -190,7 +192,9 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
       // gh prb-r2: busy/no-answer/canceled/failed calls never reach the
       // vestibule — the collections status route is the ONLY thing that can
       // return the case from 'dialing' and record the missed outcome.
-      statusCallback: `https://${domain}/api/webhooks/twilio/collections-call-status`,
+      // callLogId rides the query string — loadCollectionsCall requires it
+      // (gh prb-r3: without it every real unanswered callback 204'd away).
+      statusCallback: `https://${domain}/api/webhooks/twilio/collections-call-status?${params.toString()}`,
       statusCallbackEvent: ['completed'],
     });
 

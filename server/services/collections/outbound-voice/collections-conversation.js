@@ -319,6 +319,10 @@ class CollectionsConversation {
   handleDtmf(digit) {
     if (String(digit) === '0') {
       this._chain = this._chain
+        // Session proof first (gh prb-r3): a 0 pressed immediately after
+        // relay setup must not run the escape before _ctx carries the
+        // call-log linkage — the outcome would persist nowhere.
+        .then(() => this._contextReady)
         .then(() => this._humanEscape())
         .catch((err) => logger.error(`[collections-voice] dtmf escape failed: ${err.message}`));
     }
@@ -347,7 +351,12 @@ class CollectionsConversation {
     if (utteranceHasSensitiveDetails(callerText)) {
       try {
         const { scrubPans } = require('../../../utils/pan-scrub');
-        callerText = scrubPans(callerText).replace(SENSITIVE_UTTERANCE_RE, '[detail withheld]');
+        // The WHOLE utterance is withheld on any sensitive match (gh
+        // prb-r3): a partial, label-anchored replace left trailing digits
+        // and second values (routing number + SSN) in the transcript.
+        callerText = SENSITIVE_UTTERANCE_RE.test(callerText)
+          ? '[utterance withheld — sensitive detail]'
+          : scrubPans(callerText);
       } catch {
         callerText = '[caller shared sensitive payment details — withheld]';
       }
@@ -510,6 +519,11 @@ class CollectionsConversation {
     const expectZip = String(customer.zip || '').trim().match(/^(\d{5})/)?.[1] || null;
     const gaveStreet = String(input.street_number || '').replace(/\D/g, '');
     const gaveZip = String(input.billing_zip || '').replace(/\D/g, '');
+    // An EMPTY call (customer still deciding which factor to give) is not
+    // an attempt (gh prb-r3): two of them must never end a legitimate call.
+    if (!gaveStreet && !gaveZip) {
+      return 'No factor was provided — ask for the street number or the billing ZIP. This did not count as an attempt.';
+    }
     const streetOk = Boolean(expectStreet && gaveStreet && gaveStreet === expectStreet);
     const zipOk = Boolean(expectZip && gaveZip && gaveZip === expectZip);
     if (streetOk || zipOk) {
@@ -689,9 +703,10 @@ class CollectionsConversation {
       });
       return;
     }
+    let callbackCard = null;
     try {
       const NotificationService = require('../../notification-service');
-      await NotificationService.notifyAdmin(
+      callbackCard = await NotificationService.notifyAdmin(
         'billing',
         'Callback requested on billing follow-up call',
         `A customer on an automated billing follow-up call asked for a person outside office hours. Please call them back.`,
@@ -703,7 +718,10 @@ class CollectionsConversation {
     } catch (err) {
       logger.error(`[collections-voice] callback card failed: ${err.message}`);
     }
-    this.say(script.callbackPromise());
+    // A callback is only PROMISED when its card actually persisted (gh
+    // prb-r3: notifyAdmin resolves null on a failed insert) — otherwise
+    // the honest copy gives the number without the promise.
+    this.say(callbackCard ? script.callbackPromise() : script.callbackNumberOnly());
     await this._finish('conversation_transferred', { endSession: true, handoff: { next: 'callback' } });
   }
 
