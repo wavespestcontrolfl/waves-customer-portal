@@ -11641,6 +11641,11 @@ export function CompletionPanel({
       || typedActivityScore != null
     ))
       || companionSchemas.some((schema) => {
+        // internal_only shadow companions render and submit but never open
+        // Generate — the server's strict gate filters them, so counting one
+        // here would enable a button that 400s (codex r11). Absent delivery
+        // (older feeds) defaults customer-facing, matching the server.
+        if (schema.delivery === "internal_only") return false;
         const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
         // A manually tapped companion activity gauge is substantive on its
         // own — same rule as the primary score (codex r3).

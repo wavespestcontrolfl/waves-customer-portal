@@ -1785,7 +1785,14 @@ async function loadProjectCompletionContextByServiceId(services) {
       // combo must not expose exclusion/sanitation module fields (Codex P2).
       companionSchemas: completionProfile
         ? (completionProfile.companions || [])
-          .map((c) => ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey, companion: true }))
+          .map((c) => {
+            const schema = ActivityIndicators.findingsSchemaForType(c.type, { serviceKey: completionProfile.serviceKey, companion: true });
+            // delivery rides along so the client's generation gate can
+            // mirror the server's customer-facing filter — an internal_only
+            // companion renders and submits but never opens Generate
+            // (codex r11).
+            return schema ? { ...schema, delivery: c.delivery || 'auto_send' } : null;
+          })
           .filter(Boolean)
         : null,
       linkedProject: linkedProjectsByServiceId.get(service.id) || null,
@@ -11418,8 +11425,17 @@ function buildTypedFindingsPromptBlock({
   }
   const primaryParts = renderTypedGroupLines(primarySections);
   const allowed = new Set(allowedCompanionTypes);
+  // The profile's declared companion set bounds the work — every AUTHORIZED
+  // companion renders (no arbitrary numeric cap; a >4-companion profile must
+  // not silently lose sections the gate counted — codex r11). First entry
+  // per type wins so a crafted payload can't multiply sections.
+  const seenCompanionTypes = new Set();
   const companionSections = (Array.isArray(companionFindings) ? companionFindings : [])
-    .slice(0, 4)
+    .filter((entry) => {
+      if (!entry?.type || seenCompanionTypes.has(entry.type)) return false;
+      seenCompanionTypes.add(entry.type);
+      return true;
+    })
     .map((entry) => {
       if (!ActivityIndicators.isTypedFindingsType(entry?.type) || !allowed.has(entry.type)) return null;
       const companionValues = entry?.values && typeof entry.values === 'object' && !Array.isArray(entry.values)
@@ -11528,6 +11544,15 @@ router.post('/generate-report', async (req, res) => {
       || sections.advice.length > 0 || sections.products.length > 0
       || sections.customer.length > 0
     );
+    // Chips count toward the gate only when they VALIDATE for the claimed
+    // type — a stale/off-type chip is dropped by the block builder, and a
+    // gate it alone opened would generate with no structured facts
+    // (codex r11).
+    const validatedChipCount = (chips, type, values) => {
+      if (!Array.isArray(chips) || !chips.length || !ActivityIndicators.isTypedFindingsType(type)) return 0;
+      const validation = ActivityIndicators.validateNextStepChips(chips, type, values || {});
+      return validation.ok ? validation.chips.length : 0;
+    };
     const companionEntryHasInput = (entry) => (
       ActivityIndicators.isTypedFindingsType(entry?.type)
       && sectionsHaveFacts(typedFindingsPromptSections(
@@ -11536,12 +11561,13 @@ router.post('/generate-report', async (req, res) => {
         { companion: true },
       ))
     )
-      || (Array.isArray(entry?.nextStepChips) && entry.nextStepChips.length > 0)
+      || validatedChipCount(entry?.nextStepChips, entry?.type,
+        entry?.values && typeof entry?.values === 'object' && !Array.isArray(entry?.values) ? entry.values : {}) > 0
       || (Number.isInteger(entry?.activityScore) && entry.activityScore >= 0 && entry.activityScore <= 5);
     const primaryTypedInput = !!typedValuesRaw && (
       (ActivityIndicators.isTypedFindingsType(structuredFindings.type)
         && sectionsHaveFacts(typedFindingsPromptSections(structuredFindings.type, typedValuesRaw)))
-      || (Array.isArray(nextStepChips) && nextStepChips.length > 0)
+      || validatedChipCount(nextStepChips, structuredFindings.type, typedValuesRaw) > 0
       || typedActivityScoreNum !== null
     );
     // Provisional gate: companion input counts here so the request survives
@@ -11922,9 +11948,12 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
               );
               if (typedChipsValidation.ok) typedFallbackNextSteps.push(...typedChipsValidation.chips);
             }
-            for (const entry of companionEntries.slice(0, 4)) {
+            const fallbackSeenTypes = new Set();
+            for (const entry of companionEntries) {
               if (!ActivityIndicators.isTypedFindingsType(entry?.type)
-                || !allowedCompanionTypes.includes(entry.type)) continue;
+                || !allowedCompanionTypes.includes(entry.type)
+                || fallbackSeenTypes.has(entry.type)) continue;
+              fallbackSeenTypes.add(entry.type);
               const companionValues = entry?.values && typeof entry.values === 'object' && !Array.isArray(entry.values)
                 ? entry.values : {};
               const sections = typedFindingsPromptSections(entry.type, companionValues, { companion: true });

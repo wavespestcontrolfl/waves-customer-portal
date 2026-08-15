@@ -274,7 +274,7 @@ const STATION_PIN_STYLES = `
   .station-pin-pop { animation: station-pop 0.45s cubic-bezier(0.2, 1.4, 0.4, 1) backwards; animation-delay: calc(var(--pin-i, 0) * 0.1s); }
   @keyframes station-pop { from { transform: scale(0); } to { transform: scale(1); } }
   .station-pulse { animation: station-pulse 2.8s ease-out infinite; animation-delay: calc(var(--pin-i, 0) * 0.1s + 0.45s); }
-  @keyframes station-pulse { 0% { r: 12; opacity: 0.7; } 70% { r: 24; opacity: 0; } 100% { r: 24; opacity: 0; } }
+  @keyframes station-pulse { 0% { r: 12px; opacity: 0.7; } 70% { r: 24px; opacity: 0; } 100% { r: 24px; opacity: 0; } }
   @media (prefers-reduced-motion: reduce) {
     .station-pin-pop, .station-pulse { animation: none; }
     .station-pulse { display: none; }
