@@ -344,6 +344,14 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(sections.products.length).toBe(3);
   });
 
+  test('serviced-scope fields classify as completed work (r8)', () => {
+    const palm = typedFindingsPromptSections('palm_injection', { palms_serviced: '4' });
+    expect(palm.work).toHaveLength(1);
+    expect(palm.observations).toHaveLength(0);
+    const ts = typedFindingsPromptSections('tree_shrub', { plant_groups: 'Palms, Shrubs' });
+    expect(ts.work).toHaveLength(1);
+  });
+
   test('only auto_send companions are customer-facing; internal_only stay staff-only', () => {
     expect(customerFacingCompanionTypes([
       { type: 'tree_shrub', delivery: 'auto_send' },

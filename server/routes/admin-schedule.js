@@ -11257,7 +11257,7 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
 // a different prompt provenance group — and only observations/work may feed
 // the deterministic fallback (product fields would put trade names in
 // customer copy).
-const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas)$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|^treated_|notice/;
+const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas|plant_groups)$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|_serviced$|^treated_|notice/;
 const TYPED_PRODUCT_FIELD_RE = /product|epa|active_ingredient|concentration|gallon|dilution|_rate$|application|pesticide|^percent_|_solution$|linear_feet|square_footage|trench_depth/i;
 // Recommendation/prep/follow-up fields are FUTURE ADVICE, never findings —
 // presenting a proposed treatment as an observation would let the copy claim
@@ -11791,8 +11791,20 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
         // one-time keys would ground differently than /complete scores them
         // (codex P2 r2).
         .first('id', 'service_id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
-        .catch(() => null);
-      if (svc && svc.customer_id) {
+        .catch(() => 'lookup_failed');
+      // A transient service-row lookup failure on a typed request would leave
+      // typedFindingsBlock empty while primaryTypedInput still opens the
+      // gate — the model would return prose with none of the findings that
+      // authorized generation. Fail retryably instead (codex r8, twin of the
+      // profile-resolution rule).
+      if (svc === 'lookup_failed') {
+        if (typedValuesRaw || companionEntries.length) {
+          return res.status(503).json({
+            error: 'Service lookup is unavailable right now — try again in a moment.',
+            retryable: true,
+          });
+        }
+      } else if (svc && svc.customer_id) {
         const isAdmin = req.techRole === 'admin';
         const isAssignedTech = req.technicianId != null && String(svc.technician_id) === String(req.technicianId);
         if (isAdmin || isAssignedTech) {
