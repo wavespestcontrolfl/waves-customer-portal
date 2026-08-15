@@ -798,6 +798,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // NIGHTLY 3:55AM ET — Property-enrichment backfill: up to
+  // PROPERTY_BACKFILL_BATCH (default 20) existing NULL customer_properties
+  // rows of real customers get the full property lookup + COALESCE
+  // fill-only patch (lat/lng/property_type), upcoming-visit rows first.
+  // Inert unless GATE_PROPERTY_ENRICH_BACKFILL is set (checked inside the
+  // sweep — single source of truth; independent of the per-call
+  // GATE_CALL_PROPERTY_LOOKUP lane). Real nightly LLM spend — the batch
+  // cap is the budget. runExclusive: a deploy overlap must not double-buy
+  // the same batch.
+  // =========================================================================
+  cron.schedule('55 3 * * *', async () => {
+    try {
+      const res = await runExclusive('property-enrich-backfill', () =>
+        require('./call-property-lookup').sweepUnenrichedProperties());
+      if (res && !res.skipped) {
+        logger.info(`Property-enrich ${res.mode === 'call_time_recovery' ? 'call-time recovery' : 'backfill'}: ${res.enriched}/${res.processed} enriched (${res.cooledDown} cooled, ${res.parked} parked, ${res.failed} failed)`);
+      }
+    } catch (err) {
+      logger.error(`Property-enrich backfill failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY MON 4:05AM ET — Manatee permit sync (public ACA CSV reports →
   // pool_permit_records + construction_permit_records). Pool report =
   // closed-permit backstop for the pool-facts lookup (the live GIS layer

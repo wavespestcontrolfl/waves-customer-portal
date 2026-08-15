@@ -18,6 +18,8 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import psl from 'psl';
 import { TIMEZONE } from '../../lib/timezone';
+import { useBestTimes } from './useBestTimes';
+import BestTimeHint from './BestTimeHint';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -502,6 +504,33 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
   }, [selectedDate, selectedStart, selectedEnd, service.id]);
+  // Advisory best-times chips for the landing day in play — the custom
+  // picker's date when it's active, otherwise the highlighted preset's day.
+  // On a rest-of-route move the hint advises the tapped visit only; that's
+  // fine, it's advisory (commit still shifts siblings by the window delta).
+  const landingDate = isCustom ? customDate : (selected?.date || null);
+  const { bestTimes } = useBestTimes({
+    date: landingDate,
+    serviceId: service.id,
+    customerId: service.customerId || service.customer_id,
+    // The sheet always books a fixed one-hour block (hourWindow / the
+    // preset options' server windows) — mirror THAT, not the service's own
+    // duration, so a recommended gap is one the move actually fits.
+    durationMinutes: 60,
+    // Quick Move keeps the visit on its own tech's route.
+    technicianId: service.technicianId || service.technician_id || undefined,
+    excludeServiceIds: [service.id],
+    // Quick Move can't reassign, so an unassigned visit's all-tech
+    // detours would be unactionable — no tech, no hint.
+    enabled: !!landingDate && !!(service.technicianId || service.technician_id),
+  });
+  // A same-day landing is floored at the next top-of-hour — raised further
+  // by running_late (server enforces target_not_later). Never advertise an
+  // hour that goes customElapsed the moment it's tapped.
+  const floorBestTimes = landingDate === todayStr
+    ? bestTimes.filter((s) => (hhmmToMin(s.start) ?? 0) >= minTodayStartMin)
+    : bestTimes;
+
   // Two lists, one scope toggle (codex #3375 P2 ×2):
   //   conflicts      — what the ANCHOR's window hits. A route-scope push
   //                    shifts the remaining stops by the same delta
@@ -781,6 +810,17 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 </div>
               </div>
             )}
+
+            {/* Best-times chips: tappable only while the custom picker is
+                active (they set the custom start); a preset target is fixed,
+                so the chips go display-only. */}
+            <BestTimeHint
+              bestTimes={floorBestTimes}
+              currentStart={isCustom ? customStart : selected?.window?.start}
+              currentTechnicianId={service.technicianId || service.technician_id}
+              onPick={isCustom ? (slot) => setCustomStart(slot.start) : undefined}
+              style={{ marginTop: -8, marginBottom: 18 }}
+            />
 
             {customElapsed && (
               <div style={{ fontSize: 12, color: '#B91C1C', marginTop: -8, marginBottom: 18 }}>

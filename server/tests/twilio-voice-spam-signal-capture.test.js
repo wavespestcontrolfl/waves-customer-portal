@@ -55,3 +55,27 @@ describe('parseAddOnsForAudit', () => {
     expect(out.startsWith('{not json')).toBe(true);
   });
 });
+
+describe('foldVoiceMetadata (fallback-row enrichment after the /call-status race)', () => {
+  const { foldVoiceMetadata } = voiceRouter._test;
+  const fresh = {
+    location: 'Bradenton', numberType: 'gbp', domain: 'example.com',
+    screen_caller_name: null, stir_verstat: 'TN-Validation-Passed-A', addons: null,
+  };
+
+  test('fresh /voice fields win; the fallback row keeps its provenance keys', () => {
+    const prior = { location: 'Bradenton', numberType: 'gbp', domain: 'example.com', source: 'status_callback' };
+    const merged = foldVoiceMetadata(prior, fresh);
+    expect(merged.source).toBe('status_callback');
+    expect(merged.stir_verstat).toBe('TN-Validation-Passed-A');
+    expect(merged).toHaveProperty('screen_caller_name', null);
+  });
+
+  test('accepts jsonb-object, JSON-string, and malformed/absent prior metadata', () => {
+    expect(foldVoiceMetadata({ source: 's' }, fresh).source).toBe('s');
+    expect(foldVoiceMetadata(JSON.stringify({ source: 's' }), fresh).source).toBe('s');
+    expect(foldVoiceMetadata('{not json', fresh)).toEqual(fresh);
+    expect(foldVoiceMetadata(null, fresh)).toEqual(fresh);
+    expect(foldVoiceMetadata(undefined, fresh)).toEqual(fresh);
+  });
+});

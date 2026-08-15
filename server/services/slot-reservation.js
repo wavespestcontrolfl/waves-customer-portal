@@ -1258,6 +1258,11 @@ module.exports = {
   // estimate-backed label recovery compares stored fall-through values
   // against this exact transform, so it must reuse it, never re-implement.
   cappedServiceType,
+  // Catalog-identity authority for accepted-estimate stamps. The adopted-
+  // appointment path (estimate-public adoptedAppointmentCatalogStamp) reuses
+  // it so identity has exactly one resolver — never re-implement the
+  // engine-key containment lookup.
+  catalogServiceIdForProfile,
   _internals: {
     parseSlotId,
     addMinutesToTime,

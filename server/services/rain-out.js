@@ -960,6 +960,66 @@ async function checkTarget({ serviceId, target, caller = null }) {
   return { ok: true, conflicts, routeConflicts };
 }
 
+// Batch advisory probe for the generic date/time pickers (edit, reschedule,
+// create, bulk move) — the picker-agnostic sibling of checkTarget. No route
+// simulation: each target is just a date + window checked against the same
+// tech-blind occupancy snapshot commit enforces, minus the caller-supplied
+// excludeServiceIds (the visit being edited, or a whole bulk selection so
+// intra-selection overlap isn't reported). Warn-only everywhere it renders:
+// none of these surfaces block saving on this data. Gated behind
+// GATE_SLOT_CONFLICT_HINTS (read at call time — a flip needs no redeploy);
+// while off the response says gated:true and the clients render nothing.
+const SLOT_CHECK_TARGET_CAP = 25;
+const SLOT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+async function checkSlots({ targets, caller = null } = {}) {
+  const { gateEnvValue } = require('../config/feature-gates');
+  if (!gateEnvValue('GATE_SLOT_CONFLICT_HINTS')) {
+    return { ok: true, gated: true, results: [] };
+  }
+  if (!Array.isArray(targets) || targets.length === 0) return { ok: false, reason: 'bad_target' };
+  if (targets.length > SLOT_CHECK_TARGET_CAP) return { ok: false, reason: 'too_many_targets' };
+  const parsed = [];
+  for (const t of targets) {
+    const date = t?.date != null ? String(t.date).split('T')[0] : null;
+    if (!date || !SLOT_DATE_RE.test(date)) return { ok: false, reason: 'bad_target' };
+    // Same window requirement as checkTarget: both bounds, parseable HH:MM.
+    if (hhmmToMinutes(t?.window?.start) == null || hhmmToMinutes(t?.window?.end) == null) {
+      return { ok: false, reason: 'bad_target' };
+    }
+    parsed.push({
+      date,
+      window: { start: t.window.start, end: t.window.end },
+      excludeServiceIds: Array.isArray(t?.excludeServiceIds) ? t.excludeServiceIds.map(String) : [],
+    });
+  }
+  // No service in hand, so nameScopeFor degrades to admin-or-nobody: admins
+  // see full names, everyone else (including techs) gets window-only rows.
+  const nameScope = nameScopeFor(caller, null);
+  // One snapshot per DISTINCT date, shared across every target on that day.
+  const occupancyByDate = new Map();
+  await Promise.all([...new Set(parsed.map((p) => p.date))].map(async (date) => {
+    // Fail-open exactly like checkTarget: a snapshot failure hides the
+    // hints for that date, it never fails the request.
+    let occupancy = EMPTY_OCCUPANCY;
+    try {
+      occupancy = await loadOccupancy({ dateFrom: date, dateTo: date, nameScope });
+    } catch (err) {
+      logger.info(`[slot-check] occupancy snapshot failed for ${date}: ${err.message}`);
+    }
+    occupancyByDate.set(date, occupancy);
+  }));
+  // results[i] answers targets[i] — the bulk bars rely on the alignment.
+  const results = parsed.map((p) => ({
+    conflicts: conflictsForTarget(occupancyByDate.get(p.date), null, p.date, p.window, {
+      // Always an array (possibly empty) so conflictsForTarget never falls
+      // back to its [serviceId] default — there is no serviceId here.
+      excludeServiceIds: p.excludeServiceIds,
+    }),
+  }));
+  return { ok: true, results };
+}
+
 /**
  * Everything the tech sheet needs in one fetch: same-day windows,
  * route-scored day options with rain badges, the remaining-route count
@@ -1844,6 +1904,12 @@ module.exports = {
   commit,
   previewCustomSms,
   checkTarget,
+  checkSlots,
+  // Tech-blind occupancy guard, consumed by the find-time hint path —
+  // the slot engine walks per-technician routes, so technician-null rows
+  // are invisible to it and only this predicate can veto those hours.
+  loadOccupancy,
+  conflictsForTarget,
   _test: {
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,

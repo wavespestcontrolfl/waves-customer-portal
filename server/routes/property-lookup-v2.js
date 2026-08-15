@@ -30,6 +30,7 @@ const {
   saveLookup,
   markLookupAttempt,
   saveVerifiedOverride,
+  addressKey: cacheAddressKey,
 } = require('../services/property-lookup/lookup-cache');
 const {
   unitScopeGuardrailsEnabled,
@@ -176,20 +177,65 @@ async function stampLookupAttempt(address, status, reason = null) {
   } catch { /* fail-open */ }
 }
 
+// In-flight coalescing: the paid county/LLM/vision fan-out for ONE address
+// must run once per process even when independent lanes fire concurrently —
+// a quote call triggers BOTH the call-time property lookup and the
+// estimator's direct performPropertyLookup, and the pending-ledger check in
+// call-property-lookup only defends one ordering. Coalescing lives HERE, in
+// the shared mechanism, so every caller pairing is covered. Scope is
+// deliberately default-mode only: refresh must go live, cacheOnly must not
+// block on a live pipeline, and persist:false is a documented
+// write-nothing mode that must not adopt a persisting run's behavior (nor
+// donate its result to one). Joiners get a structuredClone so one caller's
+// mutations never alias into another's result; a failure propagates to
+// every joiner — the same outcome each would have bought separately.
+// Fail-open: several suites mock lookup-cache without the addressKey
+// export, and a keying failure just means "no coalescing".
+const inFlightLookups = new Map();
+
+function lookupCoalesceKey(address, options) {
+  if (options.refresh || options.cacheOnly === true || options.persist === false) return null;
+  if (typeof cacheAddressKey !== 'function') return null;
+  try {
+    return cacheAddressKey(address)?.hash || null;
+  } catch {
+    return null;
+  }
+}
+
 // Thin wrapper: an uncaught throw anywhere after the 'pending' attempt
 // stamp would otherwise leave the row pending forever — indistinguishable
 // from a running lookup, silently undercounting the failure segments
 // (codex r9 P2). The wrapper stamps a terminal 'error' outcome and
 // rethrows; behavior toward callers is unchanged.
 async function performPropertyLookup(address, options = {}) {
-  try {
-    return await performPropertyLookupCore(address, options);
-  } catch (err) {
-    if (options.persist !== false) {
-      await stampLookupAttempt(address, 'error', String(err?.message || err).slice(0, 200));
+  const key = lookupCoalesceKey(address, options);
+  const existing = key ? inFlightLookups.get(key) : null;
+  if (existing) {
+    const shared = await existing;
+    try {
+      return structuredClone(shared);
+    } catch {
+      return shared;
     }
-    throw err;
   }
+  const run = (async () => {
+    try {
+      return await performPropertyLookupCore(address, options);
+    } catch (err) {
+      if (options.persist !== false) {
+        await stampLookupAttempt(address, 'error', String(err?.message || err).slice(0, 200));
+      }
+      throw err;
+    }
+  })();
+  if (key) {
+    inFlightLookups.set(key, run);
+    // Clear the slot on settle; the guard .catch keeps THIS chain from
+    // surfacing an unhandled rejection (callers still see the original).
+    run.finally(() => inFlightLookups.delete(key)).catch(() => {});
+  }
+  return run;
 }
 
 async function performPropertyLookupCore(address, options = {}) {
@@ -4567,6 +4613,8 @@ module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
 module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
+  inFlightLookups,
+  lookupCoalesceKey,
   applyParcelTurfBound,
   typedNumberDisagreesWithRecord,
   applySatelliteAttachmentType,

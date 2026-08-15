@@ -38,6 +38,7 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
 const { toDateStr } = require('./auto-dispatch/dates');
 const { loadReminderFreeze, FREEZE_HOURS, TIER2_MIN_DAYS_OUT } = require('./auto-dispatch/route-tiers');
+const { computeWindowFitOrder } = require('./route-reorder-window-fit');
 
 const GOOGLE_WAYPOINT_CAP = 25;
 // The reorder pass models future days, where en_route/on_site can't occur;
@@ -428,28 +429,89 @@ async function runRouteReorder(opts = {}) {
             saved_meters: savedMeters,
             source: result.source,
           };
-          if (savedMeters < config.minSavingsMeters) {
+          // Window chronology guard: the optimizer sees only coordinates, so a
+          // pure-distance order could put a later fixed window before an
+          // earlier one — an infeasible running order. Feasibility guard:
+          // chronology alone lets untimed stops wedge between fixed windows;
+          // if the simulated day provably cannot make every promised window,
+          // the sequence is undriveable. Either violation rejects Google's
+          // order — and, when GATE_ROUTE_REORDER_WINDOW_FIT is on, hands the
+          // day to the in-process window-fit fallback instead of skipping it
+          // outright (gate off = byte-for-byte the pre-fallback skip).
+          let finalOrdered = result.orderedStops;
+          let appliedMetrics = metrics;
+          const windowFitEnabled = gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT');
+          const chronoConflict = violatesWindowChronology(result.orderedStops, techStops);
+          const fitConflict = !chronoConflict
+            && violatesWindowFeasibility(RouteOptimizer, result.orderedStops, techStops, result.legs);
+          // Savings floor for GOOGLE's order. Fallback ON + a guard conflict
+          // defers the floor to the fallback's own check: Google optimizes
+          // ROUTED distance, so its (illegal) permutation can score below the
+          // 805 m model floor while a legal permutation clears it — exiting
+          // here would record BELOW_MIN_SAVINGS and never consult the
+          // fallback (pre-push audit r3 P1). Fallback OFF keeps the legacy
+          // sequencing byte for byte.
+          if (savedMeters < config.minSavingsMeters
+              && (!windowFitEnabled || (!chronoConflict && !fitConflict))) {
             summary.skipped.push({ ...entryBase, reason: 'BELOW_MIN_SAVINGS', ...metrics });
             continue;
           }
-
-          // Window chronology guard: the optimizer sees only coordinates, so a
-          // pure-distance order could put a later fixed window before an
-          // earlier one — an infeasible running order. If the optimized
-          // sequence would violate the stops' window_start chronology, skip
-          // the tech-day rather than write an order the tech cannot drive.
-          if (violatesWindowChronology(result.orderedStops, techStops)) {
-            summary.skipped.push({ ...entryBase, reason: 'WINDOW_ORDER_CONFLICT', ...metrics });
-            continue;
-          }
-
-          // Feasibility guard: chronology alone lets untimed stops wedge
-          // between fixed windows; if the simulated day provably cannot make
-          // every promised window, skip the tech-day rather than write an
-          // undriveable sequence.
-          if (violatesWindowFeasibility(RouteOptimizer, result.orderedStops, techStops, result.legs)) {
-            summary.skipped.push({ ...entryBase, reason: 'WINDOW_FIT_CONFLICT', ...metrics });
-            continue;
+          if (chronoConflict || fitConflict) {
+            const reason = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : 'WINDOW_FIT_CONFLICT';
+            if (!windowFitEnabled) {
+              summary.skipped.push({ ...entryBase, reason, ...metrics });
+              continue;
+            }
+            // HARD DEPENDENCY (pre-push audit P1): the fallback's whole
+            // safety case rests on the CALIBRATED drive-time model (owner
+            // ruling accepted model-authored orders on its MAE, not the
+            // legacy 30 mph constant the guard documents as
+            // underestimating). If calibration is killed or drifts off,
+            // model-authored orders must not be written — the day skips
+            // as before, tagged so the ledger says why the fallback
+            // stood down.
+            if (!gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
+              summary.skipped.push({ ...entryBase, reason, ...metrics, fallback: 'CALIBRATION_OFF' });
+              continue;
+            }
+            // Pass the CURRENT RUNNING order (not raw query order — the day
+            // load has no ORDER BY): equal-window backbone ties then default
+            // to the sequence the operator actually sees on the board.
+            const fallback = computeWindowFitOrder(RouteOptimizer, ordered, {
+              effectiveWindowStart,
+              effectiveWindowRange,
+              violatesWindowChronology,
+              violatesWindowFeasibility,
+              modelDistanceMeters,
+            });
+            const fallbackSaved = fallback ? Math.max(0, beforeMeters - fallback.afterMeters) : 0;
+            if (!fallback || fallbackSaved < config.minSavingsMeters) {
+              // The day stays skipped under its ORIGINAL reason — the
+              // fallback tag records that the legal-order search ran and
+              // found nothing worth writing (same 805 m floor, owner-ruled).
+              summary.skipped.push({
+                ...entryBase,
+                reason,
+                ...metrics,
+                fallback: 'NO_FEASIBLE_IMPROVEMENT',
+                ...(fallback ? { fallback_saved_meters: fallbackSaved } : {}),
+              });
+              continue;
+            }
+            // Legal order clears the same floor: apply it through the exact
+            // fenced write below (zero new writers). unconstrained_saved_meters
+            // records what Google's illegal order would have saved — the gap
+            // the promises cost us, for the ledger/observability.
+            finalOrdered = fallback.orderedStops;
+            appliedMetrics = {
+              before_distance_meters: beforeMeters,
+              after_distance_meters: fallback.afterMeters,
+              optimizer_distance_meters: result.totalDistanceMeters || 0,
+              after_duration_seconds: fallback.afterSeconds,
+              saved_meters: fallbackSaved,
+              source: 'window_constrained',
+              unconstrained_saved_meters: savedMeters,
+            };
           }
 
           // Same write as the trusted /optimize path (route_order = position),
@@ -566,14 +628,14 @@ async function runRouteReorder(opts = {}) {
               if (techStops.some((s) => withinFreezeClock(dateStr, s.window_start, commitNow))) {
                 throw stale('day entered the 72h freeze window during the run');
               }
-              for (let i = 0; i < result.orderedStops.length; i++) {
+              for (let i = 0; i < finalOrdered.length; i++) {
                 const updated = await trx('scheduled_services')
-                  .where({ id: result.orderedStops[i].id })
+                  .where({ id: finalOrdered[i].id })
                   .where('scheduled_date', dateStr)
                   .where('technician_id', techId)
                   .whereNotIn('status', EXCLUDE_STATUSES)
                   .update({ route_order: i + 1 });
-                if (updated !== 1) throw stale(`stop ${result.orderedStops[i].id} changed during the run`);
+                if (updated !== 1) throw stale(`stop ${finalOrdered[i].id} changed during the run`);
               }
             }, { isolationLevel: 'serializable' });
           } catch (writeErr) {
@@ -600,8 +662,8 @@ async function runRouteReorder(opts = {}) {
             }
             throw writeErr;
           }
-          summary.applied.push({ ...entryBase, ...metrics });
-          logger.info(`[route-reorder] ${dateStr} tech ${techId}: reordered ${withCoords.length} stops, saved ~${Math.round(savedMeters)} m (${metrics.source})`);
+          summary.applied.push({ ...entryBase, ...appliedMetrics });
+          logger.info(`[route-reorder] ${dateStr} tech ${techId}: reordered ${withCoords.length} stops, saved ~${Math.round(appliedMetrics.saved_meters)} m (${appliedMetrics.source})`);
         } catch (techErr) {
           status = 'completed_with_errors';
           summary.failed.push({ ...entryBase, reason: 'ERROR', error: techErr.message });
@@ -682,6 +744,7 @@ async function writeLedgerRow({ status, today, bandStart, bandEnd, techIds, conf
         service_types: JSON.stringify([]),
         constraints: JSON.stringify({
           gate: 'GATE_ROUTE_REORDER',
+          window_fit: gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT'),
           min_savings_meters: config.minSavingsMeters,
           max_applies_per_run: config.maxAppliesPerRun,
           waypoint_cap: GOOGLE_WAYPOINT_CAP,
