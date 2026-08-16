@@ -3015,11 +3015,33 @@ const LEVEL_CLAIM_CONDITIONAL_OPEN_RE = /^\s*(?:if|unless|in\s+case|should|when)
 // observed" are truthful zero-findings and must not read as heavy claims.
 const LEVEL_CLAIM_NEGATED_BEFORE_RE = /\b(?:no|not|never|without|zero)\s+$/i;
 const LEVEL_CLAIM_NEGATED_AFTER_RE = /^\s+(?:was|were|is|are|has\s+been|had\s+been)\s+(?:not|never)\b/i;
+// A zero/absence claim beside a clearly nonzero gauge contradicts even
+// though it carries no level word (codex r51): "No flea activity was
+// observed" never enters the banded claims above. Bound to the same noun
+// set; "new/additional" absences stay legal ("no new activity" can sit
+// truthfully beside persisting pressure). Treated as a band-0 claim under
+// the same ±1-band tolerance, so only moderate-and-up gauges refuse it.
+const LEVEL_ABSENCE_CLAIM_RE = new RegExp(
+  `\\bno\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
+  + `|\\b${LEVEL_NOUN_SRC}\\s+(?:was|were|is|are)\\s+not\\s+(?:observed|found|noted|seen|detected|present)\\b`
+  + `|\\bno\\s+signs?\\s+of\\s+${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`,
+  'gi',
+);
 function activityLevelContradictions(text, finalBand) {
   if (!finalBand) return [];
   const found = [];
   for (const clause of clauses(String(text || ''))) {
     if (LEVEL_CLAIM_CONDITIONAL_OPEN_RE.test(clause)) continue;
+    if (finalBand >= 2) {
+      for (const match of clause.matchAll(new RegExp(LEVEL_ABSENCE_CLAIM_RE.source, 'gi'))) {
+        const before = clause.slice(0, match.index);
+        const afterClause = clause.slice(match.index + match[0].length);
+        const after = afterClause.slice(0, LEVEL_CLAIM_PRIOR_VISIT_WINDOW);
+        if (intentGovernsLevelClaim(before) || intentGovernsLevelClaimFromAfter(afterClause)) continue;
+        if (LEVEL_CLAIM_PRIOR_VISIT_RE.test(before) || LEVEL_CLAIM_PRIOR_VISIT_RE.test(after)) continue;
+        found.push('level_claim_mismatch:none');
+      }
+    }
     // Both bindings collect into one claim list; the exemption machinery
     // then runs per claim against its own before/after spans.
     const claims = [];
@@ -3230,15 +3252,33 @@ function buildTodaysResult({
         .flatMap((re) => [...tsBodyText.matchAll(re)])
         .map((m) => TS_CLAIM_BANDS[String(m[1] || '').toLowerCase().replace(/[\s-]+/g, '-')])
         .filter(Boolean);
+      // Negated claims deny the named family — "the plants are not
+      // healthy" contradicts a recorded Good/Excellent even though it
+      // names no opposing word. The positive shapes cannot cross "not",
+      // so these never double-extract (codex r51).
+      const TS_NEGATED_CLAIM_RE = new RegExp(
+        `\\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\\s+condition)\\b[^.!?]{0,30}\\b(?:(?:is|are|was|were|looks?|looked|remains?|remained|appears?|appeared|seems?|seemed)\\s+(?:not|no\\s+longer)|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|(?:do|does|did)\\s+not\\s+(?:look|seem|appear))\\s+(?:very\\s+|quite\\s+|overall\\s+)*(?:in\\s+(?:very\\s+|quite\\s+)*)?${TS_CONDITION_WORD_SRC}\\b`,
+        'gi',
+      );
+      const tsNegatedBands = [...tsBodyText.matchAll(TS_NEGATED_CLAIM_RE)]
+        .map((m) => TS_CLAIM_BANDS[String(m[1] || '').toLowerCase().replace(/[\s-]+/g, '-')])
+        .filter(Boolean);
       const tsContradiction = Boolean(tsRecordedBand)
-        && tsClaimedBands.some((band) => band !== tsRecordedBand);
+        && (tsClaimedBands.some((band) => band !== tsRecordedBand)
+          // a negated word contradicts exactly when its family IS the
+          // recorded one ("not healthy" beside Good; "not declining"
+          // beside Declining)
+          || tsNegatedBands.some((band) => band === tsRecordedBand));
       // The body must also agree with the recorded Ganoderma answer — the
       // mandated palm sentence is appended either way, so a body claiming
       // "no Ganoderma conks were observed" beside a recorded Yes (or the
       // reverse) would contradict its own report one sentence later
       // (codex r50).
       const GANODERMA_ABSENT_RE = /\bno\s+(?:visible\s+|possible\s+|suspected\s+)*(?:ganoderma\s*)?conks?\b|\bno\s+ganoderma\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were)\s+not\s+(?:observed|found|seen|noted)\b|\b(?:did\s+not|didn['’]t)\s+(?:observe|find|see|note)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b/i;
-      const GANODERMA_PRESENT_RE = /\b(?:observed|found|noted|saw|spotted|possible|suspected)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were)\s+(?:observed|found|noted|seen)\b/i;
+      // presence-state phrasing ("was present", "the palm had a conk",
+      // "is showing a conk") claims presence like observed/found do
+      // (codex r51)
+      const GANODERMA_PRESENT_RE = /\b(?:observed|found|noted|saw|spotted|possible|suspected)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were|is|are)\s+(?:observed|found|noted|seen|present|visible|evident|developing|growing|forming)\b|\b(?:has|have|had|showing|shows?|showed|developed|revealed)\b[^.!?]{0,30}\b(?:ganoderma|conks?)\b/i;
       const gRecorded = String(values.ganoderma_conk_observed || '');
       const gAbsentClaim = GANODERMA_ABSENT_RE.test(tsBodyText);
       // strip absence phrasing first so "no conks were observed" never
@@ -3396,7 +3436,7 @@ function buildTodaysResult({
     // activity" carries the claim without any passive shape (codex r47);
     // species nouns with optional articles claim it too — "saw a rat",
     // "spotted mice" (codex r50)
-    const ACTIVITY_FOUND_CLAIM_RE = new RegExp(`\\b(?:${RODENT_NOUN_SRC}\\s+)?activity\\s+(?:was|were|is)\\s+(?:found|observed|confirmed|noted|present)\\b|\\bactive\\s+${RODENT_NOUN_SRC}\\b|\\bevidence\\s+of\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|noted)\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:a\\s+|an\\s+|the\\s+|some\\s+|several\\s+|multiple\\s+|two\\s+|three\\s+|a\\s+few\\s+)?(?:fresh\\s+|new\\s+|active\\s+|visible\\s+|recent\\s+|significant\\s+|clear\\s+|live\\s+|dead\\s+)*${RODENT_NOUN_SRC}\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:signs?|evidence|droppings)\\s+of\\s+${RODENT_NOUN_SRC}\\b`, 'i');
+    const ACTIVITY_FOUND_CLAIM_RE = new RegExp(`\\b(?:${RODENT_NOUN_SRC}\\s+)?activity\\s+(?:was|were|is)\\s+(?:found|observed|confirmed|noted|present)\\b|\\bactive\\s+${RODENT_NOUN_SRC}\\b|\\bevidence\\s+of\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|noted)\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:a\\s+|an\\s+|the\\s+|some\\s+|several\\s+|multiple\\s+|two\\s+|three\\s+|a\\s+few\\s+)?(?:fresh\\s+|new\\s+|active\\s+|visible\\s+|recent\\s+|significant\\s+|clear\\s+|live\\s+|dead\\s+)*${RODENT_NOUN_SRC}\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:signs?|evidence|droppings)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b${RODENT_NOUN_SRC}\\s+(?:droppings?|evidence|signs?|tracks?|gnawing|nesting)\\b[^.!?]{0,30}\\b(?:was|were|is|are)\\s+(?:present|found|observed|visible|noted|seen|evident|discovered)\\b`, 'i');
     const inspectionBodyText = String(technicianReportBody || '');
     const inspectionContradiction = found
       ? NO_ACTIVITY_CLAIM_RE.test(inspectionBodyText)
@@ -3984,8 +4024,11 @@ const BANNED_CUSTOMER_COPY = [
   // "return"/"go back"/"come back" state the same re-entry timing without
   // the re-entry word (codex r50): "Return to the treated area after
   // thirty minutes"
-  new RegExp(`\\b(?:re-?ent(?:er|ry)|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|dry(?:ing|s)?|dried)\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}\\s*(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
-  new RegExp(`\\b${TIME_FIGURE_SRC}\\s*${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b(?:re-?ent(?:er|ry)|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|dry(?:ing)?|dried)\\b`, 'i'),
+  // direct enter/occupancy instructions state the same timing without a
+  // "re-" prefix ("Enter the treated area after thirty minutes") —
+  // codex r51
+  new RegExp(`\\b(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|dry(?:ing|s)?|dried)\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}\\s*(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
+  new RegExp(`\\b${TIME_FIGURE_SRC}\\s*${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|dry(?:ing)?|dried)\\b`, 'i'),
 ];
 
 function findBannedCustomerCopy(text) {

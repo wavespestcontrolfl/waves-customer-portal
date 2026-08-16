@@ -414,6 +414,71 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.body).toContain('No remaining concerns were observed today.');
   });
 
+  // r51 (#3420): negated condition claims deny the named family.
+  test('tree_shrub refuses "The plants are not healthy" beside a recorded Good', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Good', plant_groups: 'Shrubs' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'The plants are not healthy in the rear beds.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
+  test('tree_shrub accepts "The plants are not healthy" beside a recorded Poor', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Poor', plant_groups: 'Shrubs' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'The plants are not healthy in the rear beds; we adjusted the program.',
+    });
+    expect(r.bodySource).toBe('technician_report');
+  });
+
+  // r51 (#3420): presence-state Ganoderma phrasing claims presence.
+  test('tree_shrub refuses "A Ganoderma conk was present" beside a recorded No', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Good', plant_groups: 'Palms', ganoderma_conk_observed: 'No', palm_trunk_concern: 'No' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'A Ganoderma conk was present on one palm near the drive.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
+  // r51 (#3420): noun-first species evidence claims refuse on found=No.
+  test('rodent_inspection refuses "Rat droppings were present" beside found=No', () => {
+    const r = buildTodaysResult({
+      projectType: 'rodent_inspection',
+      values: { activity_found: 'No', recommended_service: 'No service needed at this time' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'Rat droppings were present in the attic insulation.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
+  // r51 (#3420): absence claims refuse beside a clearly nonzero gauge.
+  test('flea refuses "No flea activity was observed" beside a heavy score', () => {
+    const r = buildTodaysResult({
+      projectType: 'flea',
+      values: { evidence_level: 'Heavy — adults observed' },
+      activity: { score: 4 },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'No flea activity was observed today.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
   // r50 (#3420): the body must agree with the recorded Ganoderma answer.
   test('tree_shrub refuses "No Ganoderma conks were observed" beside a recorded Yes', () => {
     const r = buildTodaysResult({

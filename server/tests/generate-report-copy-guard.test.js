@@ -327,6 +327,11 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // direct enter-time instructions reject too (r51)
+    expect(reportCopyRejection('Enter the treated area after thirty minutes.')).toMatch(/^banned:/);
+    // was/were link a bounded UPPERCASE credential (r51)
+    expect(reportCopyRejection('The gate code was BLUE for this visit.')).toBe('access_code');
+    expect(reportCopyRejection('The gate code was updated in our records.')).toBeNull();
     // return/go-back wording states the same re-entry timing (r50)
     expect(reportCopyRejection('Return to the treated area after thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('You can go back inside in 45 minutes.')).toMatch(/^banned:/);
