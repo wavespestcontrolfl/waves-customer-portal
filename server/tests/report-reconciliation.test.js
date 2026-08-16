@@ -387,6 +387,19 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.bodySource).toBeUndefined();
   });
 
+  // r47 (#3420): rated/assessed constructions extract too.
+  test('tree_shrub refuses "condition was rated excellent" beside a recorded Poor', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Poor', plant_groups: 'Shrubs' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'The overall landscape condition was rated excellent this visit.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
   test('rodent_exclusion keeps the remaining-concerns disclosure', () => {
     const r = buildTodaysResult({
       projectType: 'rodent_exclusion',
@@ -453,6 +466,31 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     });
     expect(r.bodySource).toBeUndefined();
     expect(r.body).not.toContain('No visible rodent evidence');
+  });
+
+  // r47 (#3420): active-voice findings refuse on a found=No visit.
+  test('rodent_inspection refuses "The technician observed rodent activity" beside found=No', () => {
+    const r = buildTodaysResult({
+      projectType: 'rodent_inspection',
+      values: { activity_found: 'No', recommended_service: 'No service needed at this time' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'The technician observed rodent activity in the attic today.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
+  test('rodent_inspection accepts "we have not observed rodents" on a found=No visit', () => {
+    const r = buildTodaysResult({
+      projectType: 'rodent_inspection',
+      values: { activity_found: 'No', recommended_service: 'No service needed at this time' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'We have not observed rodents anywhere on the property this visit.',
+    });
+    expect(r.bodySource).toBe('technician_report');
   });
 
   test('rodent_inspection accepts "no rodent signs" on a found=No visit', () => {

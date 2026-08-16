@@ -66,7 +66,10 @@ const REPORT_ACCESS_CODE_RES = [
   // shapes already have before keypad/lockbox ("Use BLUE at the keypad") —
   // the uncovered reverse-alphabetic × device-noun intersection (codex r46)
   /\b(?!(?:this|that|it|here|there|what|which|below|above)\b)["'‘’“”]?[a-z0-9#*]{2,12}["'‘’“”]?\s+(?:is|=)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
-  /(?:["'‘’“”][A-Za-z0-9#*]{2,12}["'‘’“”]|\b[A-Z0-9#*]{2,12})\s+(?:at|for|to|on|in|into|near|by|opens?|unlocks?)\s+(?:the\s+)?(?:[Kk]eypad|[Ll]ock\s?box)\b/,
+  // ... and the positional window covers the ordinary code nouns too
+  // ("Use BLUE for the gate code" / "for the password") — device nouns
+  // alone left that intersection open (codex r47)
+  /(?:["'‘’“”][A-Za-z0-9#*]{2,12}["'‘’“”]|\b[A-Z0-9#*]{2,12})\s+(?:at|for|to|on|in|into|near|by|opens?|unlocks?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b/,
   // spoken number-word codes ("gate code four five four five") — two or
   // more number words after a code noun, mirroring the canonical scrubber's
   // multi-token shape (codex r41)

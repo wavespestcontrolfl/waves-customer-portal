@@ -311,6 +311,18 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('Use BLUE at the keypad to enter the side yard.')).toBe('access_code');
     expect(reportCopyRejection('WAVES is the lockbox for the garage entry.')).toBe('access_code');
     expect(reportCopyRejection('We entered at the keypad and treated the lanai.')).toBeNull();
+    // ... and the positional window covers ordinary code nouns (r47)
+    expect(reportCopyRejection('Use BLUE for the gate code when you arrive.')).toBe('access_code');
+    expect(reportCopyRejection('Use BLUE for the password.')).toBe('access_code');
+  });
+
+  test('compliance-language classes reject on the shared gate (r47)', () => {
+    expect(reportCopyRejection('We used an EPA-approved treatment; the area will be dry in 30 minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Treated areas are typically dry within 45 minutes of application.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Please wait 2 hours before re-entry to treated rooms.')).toMatch(/^banned:/);
+    // the sanctioned idiom carries no figure and stays legal
+    expect(reportCopyRejection('Keep pets off the treated areas until dry.')).toBeNull();
+    expect(reportCopyRejection('We applied an EPA-registered product along the perimeter.')).toBeNull();
   });
 
   test('abbreviated trade-name echoes still reject; plain vocabulary passes (r36)', () => {

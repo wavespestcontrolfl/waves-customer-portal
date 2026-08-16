@@ -3210,6 +3210,10 @@ function buildTodaysResult({
         // (codex r46)
         new RegExp(`\\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\\s+condition)\\b[^.!?]{0,30}\\b(?:is|are|was|were|looks?|looked|remains?|remained|appears?|appeared|seems?|seemed)\\s+(?:very\\s+|quite\\s+|overall\\s+)*(?:in\\s+(?:very\\s+|quite\\s+)*)?${TS_CONDITION_WORD_SRC}\\b`, 'gi'),
         new RegExp(`\\b${TS_CONDITION_WORD_SRC}\\s+(?:overall\\s+)?(?:landscape|plant|shrub|palm|turf)?\\s*(?:condition|health|shape)\\b`, 'gi'),
+        // rated/assessed constructions — "condition was rated excellent"
+        // puts a verb between the copular verb and the condition word, so
+        // neither shape above extracts it (codex r47)
+        new RegExp(`\\b(?:rated|assessed|graded|scored|evaluated|judged|deemed|considered)\\s+(?:as\\s+)?(?:very\\s+|quite\\s+|overall\\s+)*${TS_CONDITION_WORD_SRC}\\b`, 'gi'),
       ];
       const TS_CLAIM_BANDS = {
         excellent: 'positive', healthy: 'positive', thriving: 'positive', great: 'positive', good: 'positive', strong: 'positive',
@@ -3369,8 +3373,10 @@ function buildTodaysResult({
     // noun-first evidence denials included — "No visible rodent evidence
     // was observed" is the natural form of "no evidence of rodents"
     // (codex r46)
-    const NO_ACTIVITY_CLAIM_RE = /\bno\s+(?:current\s+|visible\s+|active\s+)*(?:rodent\s+)?activity\b|\bno\s+(?:signs?|evidence)\s+of\s+rodents?\b|\bno\s+(?:current\s+|visible\s+|active\s+|fresh\s+|new\s+|obvious\s+)*rodent\s+(?:evidence|signs?|droppings|indications?)\b|\bfree\s+of\s+rodents?\b|\b(?:did\s+not|didn['’]t|could\s+not|couldn['’]t)\s+(?:find|observe|note|confirm|detect|see)\b[^.!?]{0,40}\b(?:rodents?|activity)\b|\bno\s+rodents?\s+(?:was|were)\s+(?:found|observed|seen|noted)\b/i;
-    const ACTIVITY_FOUND_CLAIM_RE = /\b(?:rodent\s+)?activity\s+(?:was|were|is)\s+(?:found|observed|confirmed|noted|present)\b|\bactive\s+rodent\b|\bevidence\s+of\s+rodents?\s+(?:was|were)\s+(?:found|observed|noted)\b/i;
+    const NO_ACTIVITY_CLAIM_RE = /\bno\s+(?:current\s+|visible\s+|active\s+)*(?:rodent\s+)?activity\b|\bno\s+(?:signs?|evidence)\s+of\s+rodents?\b|\bno\s+(?:current\s+|visible\s+|active\s+|fresh\s+|new\s+|obvious\s+)*rodent\s+(?:evidence|signs?|droppings|indications?)\b|\bfree\s+of\s+rodents?\b|\b(?:did\s+not|didn['’]t|could\s+not|couldn['’]t|have\s+not|haven['’]t|has\s+not|hasn['’]t|never)\s+(?:find|found|observe[d]?|note[d]?|confirm(?:ed)?|detect(?:ed)?|see|seen|saw|spot(?:ted)?)\b[^.!?]{0,40}\b(?:rodents?|activity)\b|\bno\s+rodents?\s+(?:was|were)\s+(?:found|observed|seen|noted)\b/i;
+    // active-voice findings included — "The technician observed rodent
+    // activity" carries the claim without any passive shape (codex r47)
+    const ACTIVITY_FOUND_CLAIM_RE = /\b(?:rodent\s+)?activity\s+(?:was|were|is)\s+(?:found|observed|confirmed|noted|present)\b|\bactive\s+rodent\b|\bevidence\s+of\s+rodents?\s+(?:was|were)\s+(?:found|observed|noted)\b|\b(?:found|observed|noted|detected|confirmed|spotted|saw)\s+(?:fresh\s+|new\s+|active\s+|visible\s+|recent\s+|significant\s+|some\s+|clear\s+)*rodents?\b|\b(?:found|observed|noted|detected|confirmed|spotted|saw)\s+(?:signs?|evidence|droppings)\s+of\s+rodents?\b/i;
     const inspectionBodyText = String(technicianReportBody || '');
     const inspectionContradiction = found
       ? NO_ACTIVITY_CLAIM_RE.test(inspectionBodyText)
@@ -3941,6 +3947,14 @@ const BANNED_CUSTOMER_COPY = [
   // shape. The tempered gaps refuse to cross "station(s)" so legitimately
   // scoped copy ("no feeding in the stations on your property") stays legal.
   /\bno\b(?:(?!\bstations?\b)[^.!?]){0,40}?\btermites?\b(?:(?!\bstations?\b)[^.!?]){0,80}?\b(?:on|at|in|around|across|throughout)\s+(?:the\s+|this\s+|your\s+)?(?:property|home|house|premises|structure)\b/i,
+  // Compliance-language classes (AGENTS.md customer-surface rule, codex r47
+  // #3420): "EPA-registered"/"EPA-exempt" are legal, "EPA-approved" never
+  // is; a fixed re-entry/drying minute-or-hour figure is never stated — the
+  // idiom is "safe once dry" with the technician confirming timing, and
+  // that idiom carries no number so it stays legal here.
+  /\bEPA[-\s]?approved\b/i,
+  /\b(?:re-?ent(?:er|ry)|dry(?:ing|s)?|dried)\b[^.!?]{0,40}\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\b/i,
+  /\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\b[^.!?]{0,40}\b(?:re-?ent(?:er|ry)|dry(?:ing)?|dried)\b/i,
 ];
 
 function findBannedCustomerCopy(text) {
