@@ -1318,7 +1318,7 @@ function findUngroundedClaim(body, grounding) {
       // ordinary English word ("Suspend service") stays prose unless used
       // like a product.
       const productShaped = new RegExp(
-        `\\b(?:appl(?:y|ied|ying)|spray(?:ed|ing)?|us(?:e|ed|ing)|treat(?:ed|ing)?\\s+with|with)\\s+(?:the\\s+)?${escapeRe(head)}\\b`
+        `\\b(?:appl(?:y|ied|ying)|spray(?:ed|ing)?|us(?:e|ed|ing)|treat(?:ed|ing)?)(?:\\s+with)?\\s+(?:the\\s+)?${escapeRe(head)}\\b`
         + `|\\b${escapeRe(head)}\\s+(?:was|is|will\\s+be)\\s+(?:used|applied|sprayed)\\b`
         + `|\\b${escapeRe(head)}\\s+(?:product|label|application)\\b`,
       ).test(outputText);
@@ -1491,7 +1491,7 @@ function findUngroundedClaim(body, grounding) {
   // Bounded modifiers between the quantity and unit ("five active
   // services", "five more times") are still count claims (r68 P2);
   // 'of' is excluded so partitives ("one of the services") stay prose.
-  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:(?!of\b)\w+\s+){0,2}(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?|pets?|dogs?|cats?|estimates?|quotes?|invoices?|payments?|units?|accounts?)\b/g)) {
+  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:(?!of\b)\w+\s+){0,2}(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?|pets?|dogs?|cats?|estimates?|quotes?|invoices?|payments?|units?|accounts?|propert(?:y|ies)|homes?|houses?)\b/g)) {
     const phrase = `${m[1]} ${m[2]}`;
     const digitMap = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', fifteen: '15', twenty: '20', thirty: '30' };
     const unit = m[2].replace(/s$/, '');
@@ -1504,7 +1504,11 @@ function findUngroundedClaim(body, grounding) {
   // appear in the fact values (r38).
   const hasRealHistory = Boolean(grounding.llmFacts?.lastVisit)
     || (Array.isArray(grounding.llmFacts?.serviceHistory) && grounding.llmFacts.serviceHistory.length > 0);
-  if (/\bhistory\s+of\b/.test(outputText) && !hasRealHistory) {
+  // A 'history of' phrase evidenced verbatim in the fact values (a
+  // recent-call or flag reporting the history) is grounded even without
+  // visit records (r75 P2).
+  if (/\bhistory\s+of\b/.test(outputText) && !hasRealHistory
+    && !/\bhistory\s+of\b/.test(groundedValueText)) {
     return { kind: 'novel_term', term: 'history' };
   }
   const accessClaim = ACCESS_STATE_RE.test(outputText) || /\baccess\s+(?:(?:has\s+been|was|is)\s+)?not\s+(?:granted|provided|given|arranged|available|confirmed|authorized)\b/i.test(outputText);
@@ -1580,7 +1584,7 @@ function findUngroundedClaim(body, grounding) {
     // Lookbehind blocks the historical qualifier PER PHRASE — a separate
     // current "appointment confirmed" fact grounds even when a historical
     // one also exists (r44 P2).
-    const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\b(?:appointments?|visits?|service|technician|tech)(?:\\s*:\\s*|\\s+)(?:(?:was|is|has\\s+been|will\\s+be)\\s+)?(?:(?:currently|now|still|already|recently)\\s+)?(?:${statusForms.join('|')})\\b(?!\\s+(?:(?:for|on|from|back)\\s+)?(?:last|yesterday|earlier|previously|weeks?|months?|days?|in\\s+\\w+)\\b)|\\b(?:${statusForms.join('|')})\\s+(?:appointments?|visits?)\\b(?!\\s)`);
+    const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\b(?:appointments?|visits?|service|technician|tech)(?:\\s*:\\s*|\\s+)(?:(?:scheduled\\s+)?(?:for|on)\\s+(?:next\\s+|this\\s+)?\\w+\\s+)?(?:(?:was|is|has\\s+been|will\\s+be)\\s+)?(?:(?:currently|now|still|already|recently)\\s+)?(?:${statusForms.join('|')})\\b(?!\\s+(?:(?:for|on|from|back)\\s+)?(?:last|yesterday|earlier|previously|weeks?|months?|days?|in\\s+\\w+)\\b)|\\b(?:${statusForms.join('|')})\\s+(?:appointments?|visits?)\\b(?!\\s)`);
     const inGlobalPhrase = phraseRe.test(currentFactValueText);
     if (!inVisit && !inGlobalPhrase) {
       return { kind: 'appointment_state', term: status };
@@ -1730,7 +1734,7 @@ function findUngroundedClaim(body, grounding) {
     const bigram2 = `${noun} accepted`;
     // Determiners normalized on the evidence side too — a fact saying
     // "accepted the renewal" grounds "accepted renewal" (r38 P2).
-    const detNormalizedValues = groundedValueText.replace(/\b(?:the|a|an|his|her|their|our)\s+/g, '');
+    const detNormalizedValues = groundedValueText.replace(/\b(?:was|is|were|are|has\s+been|had\s+been|been)\s+(?=accepted\b)/g, '').replace(/\b(?:the|a|an|his|her|their|our)\s+/g, '');
     if (!detNormalizedValues.includes(bigram1) && !detNormalizedValues.includes(bigram2)) {
       return { kind: 'acceptance_conflict', term: noun };
     }

@@ -4063,3 +4063,40 @@ describe('codex #3423 r74 — spray history, clause verbs, unit counts, historic
     expect(validateBriefJson({ ...BASE, customer_context: 'Entry card provided' }, EMPTY).reason).toBeTruthy();
   });
 });
+
+describe('codex #3423 r75 — property counts, grounded history-of, dated statuses, passive acceptance, with-phrases', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+
+  test('spelled property counts bind to facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has five properties' }, EMPTY).reason).toBeTruthy();
+  });
+
+  test('a grounded history-of phrase passes without visit records', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const histFact = { catalogVocabulary: { names: [], targets: ['ants'] }, llmFacts: { flags: [{ detail: 'customer reports history of ants' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer reports history of ants' }, histFact).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'History of termites' }, EMPTY).reason).toBeTruthy();
+  });
+
+  test('dated appointment-status evidence grounds the matching claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const dated = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'appointment for friday was confirmed' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Appointment for Friday was confirmed' }, dated).body).toBeTruthy();
+  });
+
+  test('passive acceptance evidence normalizes copulas', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const renewal = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'renewal was accepted by the customer' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Renewal was accepted by the customer' }, renewal).body).toBeTruthy();
+  });
+
+  test('ordinary with-phrases sharing a catalog head stay prose', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const advance = { catalogVocabulary: { names: ['Advance 375A'], targets: [] }, llmFacts: { recentCalls: ['customer requested service with advance notice'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer requested service with advance notice' }, advance).body).toBeTruthy();
+    const treated = { catalogVocabulary: { names: ['Advance 375A'], targets: [] }, llmFacts: { recentCalls: ['bait placed'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Treated with Advance last visit', mentioned_terms: [] }, treated).reason).toBeTruthy();
+  });
+});
