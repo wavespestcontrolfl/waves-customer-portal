@@ -2080,6 +2080,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       parcelId: rc._parcel.parcelId,
       county: rc._parcel.county,
       areaSqft: rc._parcel.polygonAreaSqft || rc._parcel.lotSqft || null,
+      // County-attested unit count. The top-level unitCount only promotes
+      // the parcel figure on association aggregates (changing it globally
+      // would move commercial per-unit pricing), but the public-quote
+      // unit-suffix guard needs the attested count for the 2–4-unit parcels
+      // detectCategory now classifies residential — without it a "Unit B"
+      // lead at a duplex would price off the whole building's sqft.
+      residentialUnits: Number(rc._parcel.residentialUnits) || null,
       source: 'fdor_cadastral',
     } : null,
 

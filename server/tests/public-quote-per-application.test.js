@@ -489,6 +489,27 @@ describe('unitOnMultiUnitParcelForcesSiteQuote — unit address on a multi-unit 
     expect(unitOnMultiUnitParcelForcesSiteQuote({ line1: '123 Main St Apt 4', line2: '' }, { unitCount: 12 })).toBe(true);
     expect(unitOnMultiUnitParcelForcesSiteQuote({ line1: '204 3rd Street West Unit 408' }, { unitCount: 32 })).toBe(true);
   });
+
+  test('a residential-classified duplex (shaped unitCount 1, parcel residentialUnits 2) still forces the site quote', () => {
+    // detectCategory now classifies county-attested ≤4-unit parcels
+    // residential, but the enrichment still describes the WHOLE building —
+    // the county's attested count rides in parcel.residentialUnits and a
+    // unit-suffixed lead must site-quote, not price off both units' sqft.
+    expect(unitOnMultiUnitParcelForcesSiteQuote(
+      { line2: 'Unit B' },
+      { unitCount: 1, isCommercial: false, parcel: { residentialUnits: 2 } },
+    )).toBe(true);
+    // Whole-building duplex request (no unit line) still prices normally.
+    expect(unitOnMultiUnitParcelForcesSiteQuote(
+      {},
+      { unitCount: 1, parcel: { residentialUnits: 2 } },
+    )).toBe(false);
+    // Single-family parcel with the attested count of 1 is unaffected.
+    expect(unitOnMultiUnitParcelForcesSiteQuote(
+      { line2: 'Unit 1' },
+      { unitCount: 1, parcel: { residentialUnits: 1 } },
+    )).toBe(false);
+  });
 });
 
 /**
