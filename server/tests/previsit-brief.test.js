@@ -3600,3 +3600,65 @@ describe('codex #3423 r64 — seven truthful-case fixes', () => {
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r66 — availability paraphrase, spelled counts, inspection history, access inflections', () => {
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('"<day> works for customer" without availability evidence is rejected; grounded passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const schedOnly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { scheduledDate: '2026-08-14' } } };
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Monday works for customer' }, schedOnly,
+    ).reason).toBeTruthy();
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer said monday works for them' }] } };
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Monday works for the customer' }, grounded,
+    ).body).toBeTruthy();
+  });
+
+  test('spelled counts of visits/appointments must ground like digits', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Customer has five visits' }, EMPTY,
+    ).reason).toBeTruthy();
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Five appointments booked' }, EMPTY,
+    ).reason).toBeTruthy();
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'account shows 5 visits completed to date' }] } };
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Customer has five visits' }, grounded,
+    ).body).toBeTruthy();
+  });
+
+  test('completed inspections/maintenance without visit history are fabricated', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Inspection was performed' }, EMPTY,
+    ).reason).toBeTruthy();
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Prior inspection performed' }, EMPTY,
+    ).reason).toBeTruthy();
+    const withHistory = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { lastVisit: { summary: 'inspection was performed on the exterior' } } };
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Inspection was performed' }, withHistory,
+    ).body).toBeTruthy();
+  });
+
+  test('third-person and future access claims must ground', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Customer provides access' }, EMPTY,
+    ).reason).toBeTruthy();
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Access will be provided' }, EMPTY,
+    ).reason).toBeTruthy();
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Customer provides a key' }, EMPTY,
+    ).reason).toBeTruthy();
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer provides access at the gate; access will be provided by resident; customer provides a key under the mat' }] } };
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Customer provides access. Access will be provided. Customer provides a key.' }, grounded,
+    ).body).toBeTruthy();
+  });
+});

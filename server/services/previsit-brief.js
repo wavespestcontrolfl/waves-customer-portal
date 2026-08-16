@@ -1038,7 +1038,7 @@ const GROUNDED_ONLY_WORDS = new Set([
 
 // 'access' as a credential or claimed access STATE must ground; as a verb
 // for reaching a grounded area it is prose (codex #3423 r44).
-const ACCESS_STATE_RE = /\baccess\s+(?:(?:has\s+been|was|is)\s+)?(?:code|card|key|granted|provided|given|arranged|available|confirmed|authorized|secured|on\s+file)\b|\b(?:gate|door|garage|provided?|granted|has|have|gave|given)\s+access\b/i;
+const ACCESS_STATE_RE = /\baccess\s+(?:(?:has\s+been|was|is|will\s+be)\s+)?(?:code|card|key|granted|provided|given|arranged|available|confirmed|authorized|secured|on\s+file)\b|\b(?:gate|door|garage|provide[sd]?|granted|has|have|gave|given)\s+access\b/i;
 
 // 'key' as an access credential ("door key", "key under the mat") must
 // ground; 'key' as emphasis ("key concern") is prose (codex #3423 r29).
@@ -1048,7 +1048,7 @@ const credentialReFor = (nouns) => new RegExp(
   `\\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\\s+(?:${nouns})\\b`
   + `|\\b(?:${nouns})\\s+(?:(?:is|are|was|were|will\\s+be)\\s+)?(?:under|hidden|inside|behind|left|beneath|provided|ready|available|at\\s+(?:the\\s+)?\\w+)\\b`
   + `|\\b(?:${nouns})\\s+(?:(?:is|are|was|were)\\s+)?(?:numbers?|on\\s+file)\\b`
-  + `|\\b(?:provided?|leave|left|gave|give|has|have|keeps?)\\s+(?:the\\s+|a\\s+)?(?:${nouns})\\b`, 'i');
+  + `|\\b(?:provide[sd]?|leave|left|gave|give|has|have|keeps?)\\s+(?:the\\s+|a\\s+)?(?:${nouns})\\b`, 'i');
 const KEY_ONLY_RE = credentialReFor('keys?');
 const PIN_ONLY_RE = credentialReFor('pins?|codes?');
 const KEY_CREDENTIAL_RE = credentialReFor('keys?|pins?|codes?');
@@ -1434,12 +1434,14 @@ function findUngroundedClaim(body, grounding) {
   }
   // Completed-work phrasing in ANY field needs a prior visit (r55).
   if (!grounding.llmFacts?.lastVisit
-    && /\b(?:service|work|treatment|visit)\s+(?:was\s+|has\s+been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:service|work|treatment)\b/.test(outputText)) {
+    && /\b(?:service|work|treatment|visit|inspection|maintenance)\s+(?:was\s+|has\s+been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:service|work|treatment|inspection|maintenance)\b|\bprior\s+(?:inspection|maintenance)\b/.test(outputText)) {
     return { kind: 'fabricated_history', term: 'no prior visit on file' };
   }
   // Spelled-out short quantities before time units are numeric claims —
   // "two hours"/"ten days" must ground like digits (r54).
-  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(minutes?|hours?|days?|weeks?)\b/g)) {
+  // r66 extends the unit set beyond durations: spelled counts of visits/
+  // bookings fabricate service history exactly like spelled durations.
+  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?)\b/g)) {
     const phrase = `${m[1]} ${m[2]}`;
     const digitMap = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', fifteen: '15', twenty: '20', thirty: '30' };
     if (!groundedValueText.includes(phrase)
@@ -1830,6 +1832,13 @@ function findUngroundedClaim(body, grounding) {
   // technician-availability fact is not customer availability (r62).
   if (/\bcustomer\b[^.;!?]{0,20}\bavailab/.test(outputText)
     && !/\b(?:customer|client|resident|they|she|he)\b[^.;!?]{0,25}\bavailab/.test(groundedValueText)) {
+    return { kind: 'novel_term', term: 'availability' };
+  }
+  // "<day> works for the customer" claims availability without the word
+  // 'available' — a scheduledDate fact must not ground an invented
+  // rescheduling day (r66).
+  if (/\bworks?\s+(?:best\s+)?for\s+(?:the\s+)?(?:customer|client|resident|them|her|him)\b/.test(outputText)
+    && !/\bavailab|\bworks?\s+(?:best\s+)?for\b/.test(groundedValueText)) {
     return { kind: 'novel_term', term: 'availability' };
   }
   for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability', 'sensitivity', 'sensitivities', 'sensitive', 'recurring', 'initial']) {
