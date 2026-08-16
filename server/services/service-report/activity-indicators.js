@@ -3276,7 +3276,9 @@ function buildTodaysResult({
       // (Excellent/Good), middle (Fair), recovering, negative
       // (Poor/Declining); any claim outside the recorded family
       // contradicts. Reconcile override honored (codex r41).
-      const TS_CONDITION_WORD_SRC = '(excellent|healthy|thriving|great|good|strong|fair|average|so[-\\s]?so|okay|ok|moderate|poor|declining|struggling|deteriorating|failing|rough|bad|recovering|improving|rebounding)';
+      // explicit negative adjectives included — "unhealthy" names the
+      // negative family directly, no negation needed (codex r55)
+      const TS_CONDITION_WORD_SRC = '(excellent|healthy|thriving|great|good|strong|fair|average|so[-\\s]?so|okay|ok|moderate|poor|declining|struggling|deteriorating|failing|rough|bad|unhealthy|unwell|sickly|dying|wilting|stressed|recovering|improving|rebounding)';
       const TS_CLAIM_RES = [
         // past-tense/copular forms included — "The plants appeared healthy"
         // is the common paraphrase the present-tense alternation missed
@@ -3292,6 +3294,7 @@ function buildTodaysResult({
         excellent: 'positive', healthy: 'positive', thriving: 'positive', great: 'positive', good: 'positive', strong: 'positive',
         fair: 'middle', average: 'middle', 'so-so': 'middle', okay: 'middle', ok: 'middle', moderate: 'middle',
         poor: 'negative', declining: 'negative', struggling: 'negative', deteriorating: 'negative', failing: 'negative', rough: 'negative', bad: 'negative',
+        unhealthy: 'negative', unwell: 'negative', sickly: 'negative', dying: 'negative', wilting: 'negative', stressed: 'negative',
         recovering: 'recovering', improving: 'recovering', rebounding: 'recovering',
       };
       const TS_RECORDED_BANDS = {
@@ -3325,11 +3328,13 @@ function buildTodaysResult({
       // "no Ganoderma conks were observed" beside a recorded Yes (or the
       // reverse) would contradict its own report one sentence later
       // (codex r50).
-      const GANODERMA_ABSENT_RE = /\bno\s+(?:visible\s+|possible\s+|suspected\s+)*(?:ganoderma\s*)?conks?\b|\bno\s+ganoderma\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were)\s+not\s+(?:observed|found|seen|noted)\b|\b(?:did\s+not|didn['’]t)\s+(?:observe|find|see|note)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b/i;
+      const GANODERMA_ABSENT_RE = /\bno\s+(?:visible\s+|possible\s+|suspected\s+)*(?:ganoderma\s*)?conks?\b|\bno\s+ganoderma\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were)\s+not\s+(?:observed|found|seen|noted|detected|identified)\b|\b(?:did\s+not|didn['’]t)\s+(?:observe|find|see|note|detect|identify|locate)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b/i;
       // presence-state phrasing ("was present", "the palm had a conk",
       // "is showing a conk") claims presence like observed/found do
       // (codex r51)
-      const GANODERMA_PRESENT_RE = /\b(?:observed|found|noted|saw|spotted|possible|suspected)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were|is|are)\s+(?:observed|found|noted|seen|present|visible|evident|developing|growing|forming)\b|\b(?:has|have|had|showing|shows?|showed|developed|revealed)\b[^.!?]{0,30}\b(?:ganoderma|conks?)\b|\bthere\s+(?:was|were|is|are|appeared?\s+to\s+be)\s+(?:a\s+|an\s+|one\s+|some\s+)?(?:possible\s+|suspected\s+)*(?:ganoderma|conks?)\b/i;
+      // ordinary discovery verbs included — "We detected a Ganoderma
+      // conk" (codex r55)
+      const GANODERMA_PRESENT_RE = /\b(?:observed|found|noted|saw|spotted|detected|identified|discovered|located|uncovered|possible|suspected)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were|is|are)\s+(?:observed|found|noted|seen|present|visible|evident|developing|growing|forming)\b|\b(?:has|have|had|showing|shows?|showed|developed|revealed)\b[^.!?]{0,30}\b(?:ganoderma|conks?)\b|\bthere\s+(?:was|were|is|are|appeared?\s+to\s+be)\s+(?:a\s+|an\s+|one\s+|some\s+)?(?:possible\s+|suspected\s+)*(?:ganoderma|conks?)\b/i;
       const gRecorded = String(values.ganoderma_conk_observed || '');
       const gAbsentClaim = GANODERMA_ABSENT_RE.test(tsBodyText);
       // strip absence phrasing first so "no conks were observed" never
@@ -4069,7 +4074,7 @@ const TIME_UNIT_SRC = '(?:minutes?|mins?|hours?|hrs?|half[-\\s]?hours?)';
 // aftercare ("avoid mowing for 48 hours") stays legal too.
 // Passive occupancy forms are anchored on be/been/being so completed-action
 // prose ("we entered through the side gate") never matches (codex r54).
-const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|(?:be|been|being)\\s+(?:safely\\s+)?(?:re-?)?(?:entered|occupied|reoccupied|used|accessed)|dry(?:ing|s)?|dried)';
+const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|access(?:ing)?\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|(?:be|been|being)\\s+(?:safely\\s+)?(?:re-?)?(?:entered|occupied|reoccupied|used|accessed)|dry(?:ing|s)?|dried)';
 // Clock times state the same fixed re-entry window as durations
 // (codex r53): "Enter the treated area at 4:30 PM", "Stay off until 6 PM".
 const CLOCK_TIME_SRC = '(?:\\d{1,2}:\\d{2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?|\\d{1,2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight)';

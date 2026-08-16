@@ -327,6 +327,11 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // direct access instructions + auxiliary credential linkers (r55)
+    expect(reportCopyRejection('Access the treated area after thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The gate code has become BLUE.')).toBe('access_code');
+    expect(reportCopyRejection('The gate code was changed to "sunrise7" today.')).toBe('access_code');
+    expect(reportCopyRejection('The gate code was changed to prevent unauthorized access.')).toBeNull();
     // passive occupancy forms, clock and duration (r54)
     expect(reportCopyRejection('The treated area may be entered after 4 PM.')).toMatch(/^banned:/);
     expect(reportCopyRejection('The room may be reoccupied after two hours.')).toMatch(/^banned:/);

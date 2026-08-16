@@ -414,6 +414,31 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.body).toContain('No remaining concerns were observed today.');
   });
 
+  // r55 (#3420): explicit negative adjectives and discovery verbs.
+  test('tree_shrub refuses "The plants are unhealthy" beside a recorded Good', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Good', plant_groups: 'Shrubs' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'The plants are unhealthy along the north bed.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
+  test('tree_shrub refuses "We detected a Ganoderma conk" beside a recorded No', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Good', plant_groups: 'Palms', ganoderma_conk_observed: 'No', palm_trunk_concern: 'No' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'We detected a Ganoderma conk near the base of one palm.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
   // r51 (#3420): negated condition claims deny the named family.
   test('tree_shrub refuses "The plants are not healthy" beside a recorded Good', () => {
     const r = buildTodaysResult({
