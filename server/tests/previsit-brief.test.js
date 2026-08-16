@@ -2421,3 +2421,47 @@ describe('codex #3423 r30 — pin credentials, member variants', () => {
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r31 — pin number, availability family, in-the-home conflict', () => {
+  test('"pin number" credential phrasings reject without grounding', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { priorities: ['Retrieve pin number'], customer_context: null },
+      { priorities: [], customer_context: 'Pin number provided' },
+    ]) {
+      expect(validateBriefJson(
+        { watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, ...body },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('availability paraphrase grounds on an available fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer available Monday mornings' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Availability confirmed Monday' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('"Treat in the home" conflicts with an interior opt-out; "around the home" does not', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { servicePreferences: { interiorSpray: false }, flags: [{ detail: 'treat around the home exterior' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: ['Treat in the home'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    ).reason).toBe('ungrounded_preference_conflict:interior');
+    expect(validateBriefJson(
+      { priorities: ['Treat around the home'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    ).reason).not.toBe('ungrounded_preference_conflict:interior');
+  });
+});

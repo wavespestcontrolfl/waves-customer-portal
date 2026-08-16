@@ -1021,7 +1021,7 @@ const GROUNDED_ONLY_WORDS = new Set([
 
 // 'key' as an access credential ("door key", "key under the mat") must
 // ground; 'key' as emphasis ("key concern") is prose (codex #3423 r29).
-const KEY_CREDENTIAL_RE = /\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\s+(?:keys?|pins?|codes?)\b|\b(?:keys?|pins?)\s+(?:under|hidden|inside|behind|left|beneath|provided)\b/i;
+const KEY_CREDENTIAL_RE = /\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\s+(?:keys?|pins?|codes?)\b|\b(?:keys?|pins?)\s+(?:under|hidden|inside|behind|left|beneath|provided)\b|\b(?:pins?|codes?)\s+(?:numbers?|on\s+file)\b/i;
 
 // Instruction objects carrying these words direct real business actions
 // ("Provide estimate", "Discuss payment", "Perform treatment") — inside
@@ -1094,6 +1094,10 @@ function wordVariants(word) {
   if (word.endsWith('ing')) out.push(word.slice(0, -3), `${word.slice(0, -3)}e`);
   if (word.endsWith('ed')) out.push(word.slice(0, -2), word.slice(0, -1));
   if (word.endsWith('ly')) out.push(word.slice(0, -2));
+  // available <-> availability are one evidence family (r31 P2) — model
+  // paraphrase between them must not defeat a real availability fact.
+  if (word === 'available') out.push('availability');
+  if (word === 'availability') out.push('available');
   // -ies plural (r28): 'sensitivities' must reach 'sensitivity'.
   if (word.endsWith('ies')) out.push(`${word.slice(0, -3)}y`);
   // Noun-of-action inflection (r24, narrowed r29): ONLY the intentional
@@ -1353,7 +1357,7 @@ function findUngroundedClaim(body, grounding) {
     // Interior room nouns included (codex #3423 r1+r13): "Vacuum basement" /
     // "Check kitchen" IS an interior instruction regardless of verb.
     // plural 'rooms' only — singular is the spacing idiom ("leave room"), r19 P2.
-    prefConflicts.push({ re: /\b(?:interior|inside|indoors?|rooms|basements?|attics?|closets?|bedrooms?|bathrooms?|kitchens?)\b/, term: 'interior' });
+    prefConflicts.push({ re: /\b(?:interior|inside|indoors?|rooms|basements?|attics?|closets?|bedrooms?|bathrooms?|kitchens?)\b|\b(?:in|within)\s+the\s+(?:home|house)\b/, term: 'interior' });
   }
   if (svcPrefFlags?.exteriorSweep === false) {
     prefConflicts.push({ re: /\b(?:eaves?|cobwebs?)\b/, term: 'eave sweep' });
