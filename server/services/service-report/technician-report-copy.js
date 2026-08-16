@@ -58,7 +58,7 @@ const REPORT_ACCESS_CODE_RES = [
   // (codex r40)
   // quoted credentials may span up to four tokens ("blue waves",
   // 'open sesame') — the shared scrubber's multi-token posture (codex r48)
-  /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=|-|was|were|remains?|remained|stays?|stayed|became|becomes|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?become|(?:(?:was|were|is|are|has|have|had)\s+(?:been\s+)?(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?)?(?:changed|switched|updated|reset|set)\s+to)?\s*(?:(?:now|currently|still|today|temporarily|again)\s+)?(?:["'‘’“”][A-Za-z0-9#*]{2,12}(?:\s+[A-Za-z0-9#*]{1,12}){0,3}["'‘’“”]|[A-Za-z]*\d[A-Za-z0-9#*]*\b)/i,
+  /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=|-|was|were|remains?|remained|stays?|stayed|became|becomes|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?become|(?:will|would|should|shall|must|might|may|can|could)\s+(?:be|remain|stay)|(?:(?:was|were|is|are|has|have|had)\s+(?:been\s+)?(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?)?(?:changed|switched|updated|reset|set)\s+to)?\s*(?:(?:now|currently|still|today|temporarily|again)\s+)?(?:["'‘’“”][A-Za-z0-9#*]{2,12}(?:\s+[A-Za-z0-9#*]{1,12}){0,3}["'‘’“”]|[A-Za-z]*\d[A-Za-z0-9#*]*\b)/i,
   // was/were are credential linkers for a bounded UPPERCASE/quoted token —
   // "The gate code was BLUE" (codex r51); bare lowercase after was/were
   // stays out ("the code was updated" is ordinary copy)
@@ -66,7 +66,7 @@ const REPORT_ACCESS_CODE_RES = [
   // UPPERCASE/quoted credential the same way is/was do (codex r52)
   // bounded temporal adverbs may sit between linker and credential —
   // "The gate code is now BLUE" (codex r53)
-  /\b(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b\s*(?:is|:|=|-|was|were|remains?|remained|stays?|stayed|became|becomes|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?become|(?:(?:was|were|is|are|has|have|had)\s+(?:been\s+)?(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?)?(?:changed|switched|updated|reset|set)\s+to)?\s*(?:(?:now|currently|still|today|temporarily|again)\s+)?["'‘’“”]?[A-Z0-9#*]{2,12}\b/,
+  /\b(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b\s*(?:is|:|=|-|was|were|remains?|remained|stays?|stayed|became|becomes|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?become|(?:will|would|should|shall|must|might|may|can|could)\s+(?:be|remain|stay)|(?:(?:was|were|is|are|has|have|had)\s+(?:been\s+)?(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?)?(?:changed|switched|updated|reset|set)\s+to)?\s*(?:(?:now|currently|still|today|temporarily|again)\s+)?["'‘’“”]?[A-Z0-9#*]{2,12}\b/,
   /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=)\s*["'‘’“”]?[a-z][a-z0-9#*]{1,11}["'‘’“”]?(?=[\s.,!?‘’“”]|$)/i,
   // reverse order ("blue is the gate password") — a leading stopword
   // ("this is the code") never counts as the credential itself (codex r38)
@@ -74,7 +74,7 @@ const REPORT_ACCESS_CODE_RES = [
   // UPPERCASE/quoted tokens get the same short positional window the digit
   // shapes already have before keypad/lockbox ("Use BLUE at the keypad") —
   // the uncovered reverse-alphabetic × device-noun intersection (codex r46)
-  /\b(?!(?:this|that|it|here|there|what|which|below|above)\b)["'‘’“”]?[a-z0-9#*]{2,12}["'‘’“”]?\s+(?:is|=|was|were|remains?|remained|stays?|stayed|became|becomes|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?become)\s+(?:(?:now|currently|still|today|temporarily|again)\s+)?(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
+  /\b(?!(?:this|that|it|here|there|what|which|below|above)\b)["'‘’“”]?[a-z0-9#*]{2,12}["'‘’“”]?\s+(?:is|=|was|were|remains?|remained|stays?|stayed|became|becomes|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?become|(?:will|would|should|shall|must|might|may|can|could)\s+(?:be|remain|stay))\s+(?:(?:now|currently|still|today|temporarily|again)\s+)?(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
   // ... and the positional window covers the ordinary code nouns too
   // ("Use BLUE for the gate code" / "for the password") — device nouns
   // alone left that intersection open (codex r47)

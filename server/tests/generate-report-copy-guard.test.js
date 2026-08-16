@@ -327,6 +327,10 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // imperative reverse clock + modal-copula credential linkers (r57)
+    expect(reportCopyRejection('After 4 PM, enter the treated area as usual.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The gate code will be BLUE starting Monday.')).toBe('access_code');
+    expect(reportCopyRejection('The gate code should be BLUE.')).toBe('access_code');
     // reverse at-time instructions + adverbs inside aux linkers (r56)
     expect(reportCopyRejection('At 4 PM, you can enter the treated area.')).toMatch(/^banned:/);
     expect(reportCopyRejection('We arrived at 2 PM and completed the perimeter service.')).toBeNull();
