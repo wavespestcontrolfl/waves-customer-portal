@@ -6008,6 +6008,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // copy with a log line — the deterministic template remains the
         // guaranteed body and the completion is never blocked on it.
         let technicianReportBody = null;
+        // Request-context rejections (trade names from THIS visit's
+        // products, companion contradictions) must survive to the RENDER
+        // path: untyped completions have no governing snapshot, so
+        // report-data would otherwise reparse the persisted notes and
+        // promote the exact body rejected here (codex r58). Stamped into
+        // service_data below.
+        let technicianReportBodyRejection = null;
         if (!isIncompleteVisit) {
           const technicianReport = technicianReportCustomerCopy(technicianNotes);
           if (technicianReport?.violations?.length) {
@@ -6054,10 +6061,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               if (screenTradeNames(technicianReportBody)) {
                 logger.warn('[completion] technician AI report copy dropped (trade_name)');
                 technicianReportBody = null;
+                technicianReportBodyRejection = 'trade_name';
               }
             } catch (err) {
               logger.warn(`[completion] technician AI report trade-name guard failed — dropping copy: ${err.message}`);
               technicianReportBody = null;
+              technicianReportBodyRejection = 'trade_name_guard_error';
             }
           }
         }
@@ -6507,6 +6516,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const sectionScreenedReportBody = companionBodyConflict ? null : technicianReportBody;
           if (companionBodyConflict) {
             logger.warn('[completion] technician AI report copy dropped (companion_contradiction)');
+            technicianReportBodyRejection = technicianReportBodyRejection || 'companion_contradiction';
+          }
+          if (technicianReportBodyRejection) {
+            // Render-path consumers must not resurrect a body the
+            // completion's request-context screens rejected (codex r58).
+            serviceData.technicianReportBodyRejected = technicianReportBodyRejection;
           }
           let typedActivity = null;
           let typedVisitSequence = 1;

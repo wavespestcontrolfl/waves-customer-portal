@@ -13307,6 +13307,11 @@ export function CompletionPanel({
       // the payload sends photoCount — the set's size is a generation
       // input like any other (codex r44)
       servicePhotos.length,
+      // a retaken/reconfirmed lawn assessment changes what completion and
+      // the final report describe — the draft must invalidate with it
+      // (codex r58)
+      lawnAssessmentId,
+      lawnAssessmentRevision,
     ]);
     if (generationInputsRef.current === null) {
       generationInputsRef.current = snapshot;
@@ -13323,7 +13328,7 @@ export function CompletionPanel({
     }
   }, [areasServiced, observationsText, recommendationsText,
     customerInteraction, customerConcern, clientPestRating,
-    servicePhotos, generating]);
+    servicePhotos, generating, lawnAssessmentId, lawnAssessmentRevision]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
   // publish it beside contradicting structured findings (codex r23). Prose

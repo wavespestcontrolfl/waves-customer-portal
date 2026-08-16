@@ -4283,8 +4283,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           || (snap.todaysResult?.reconcileConfirmed === true
             && snap.activity?.score !== 0),
       );
+    // A completion-time request-context rejection (trade name from the
+    // visit's own products, companion contradiction) is frozen into
+    // service_data — untyped visits have no governing snapshot, so
+    // without this the reparse would promote the rejected body
+    // (codex r58).
     const drivesSummary = technicianReport?.body && trapSetupScreened
-      && typedStoryAcceptedBody;
+      && typedStoryAcceptedBody
+      && !serviceData.technicianReportBodyRejected;
     if (drivesSummary) {
       visitSummary = technicianReport.body;
       visitSummarySource = 'technician_report';

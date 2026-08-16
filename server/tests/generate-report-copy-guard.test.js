@@ -327,6 +327,9 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // passive walked-on + progressive reverse credential linkers (r58)
+    expect(reportCopyRejection('The treated lawn may be walked on after 4 PM.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('BLUE is going to be the gate code.')).toBe('access_code');
     // imperative reverse clock + modal-copula credential linkers (r57)
     expect(reportCopyRejection('After 4 PM, enter the treated area as usual.')).toMatch(/^banned:/);
     expect(reportCopyRejection('The gate code will be BLUE starting Monday.')).toBe('access_code');
