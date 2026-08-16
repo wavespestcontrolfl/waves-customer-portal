@@ -2796,3 +2796,32 @@ describe('codex #3423 r41 — photo claims, contact polarity, visit-scoped appoi
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r42 — production visit status, possession keys, payment-not-due', () => {
+  test('a recent-call appointment-status fact grounds the claim without visit.status', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      // production shape: visit has no status field
+      llmFacts: { visit: { serviceType: 'General Pest Control', scheduledDate: '2026-08-20' }, flags: [{ detail: 'customer called; appointment confirmed for Thursday' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment confirmed' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('possession keys and payment-not-due reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has a key' },
+      empty,
+    ).reason).toBeTruthy();
+    const overdue = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment not due' },
+      overdue,
+    ).reason).toMatch(/payment_state_conflict/);
+  });
+});

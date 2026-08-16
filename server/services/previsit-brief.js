@@ -1030,7 +1030,7 @@ const GROUNDED_ONLY_WORDS = new Set([
 
 // 'key' as an access credential ("door key", "key under the mat") must
 // ground; 'key' as emphasis ("key concern") is prose (codex #3423 r29).
-const KEY_CREDENTIAL_RE = /\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\s+(?:keys?|pins?|codes?)\b|\b(?:keys?|pins?)\s+(?:under|hidden|inside|behind|left|beneath|provided)\b|\b(?:keys?|pins?|codes?)\s+(?:numbers?|on\s+file)\b|\b(?:provided?|leave|left|gave|give)\s+(?:the\s+|a\s+)?(?:keys?|pins?)\b/i;
+const KEY_CREDENTIAL_RE = /\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\s+(?:keys?|pins?|codes?)\b|\b(?:keys?|pins?)\s+(?:under|hidden|inside|behind|left|beneath|provided)\b|\b(?:keys?|pins?|codes?)\s+(?:numbers?|on\s+file)\b|\b(?:provided?|leave|left|gave|give|has|have|keeps?)\s+(?:the\s+|a\s+)?(?:keys?|pins?)\b/i;
 
 // Instruction objects carrying these words direct real business actions
 // ("Provide estimate", "Discuss payment", "Perform treatment") — inside
@@ -1396,13 +1396,21 @@ function findUngroundedClaim(body, grounding) {
   // Scoped to the CURRENT visit's facts when present — a historical
   // "previous appointment cancelled" in a call summary must not ground a
   // claim about the active upcoming visit (r41).
+  // Production visit facts carry no status field (r42 P2), so the claim
+  // grounds EITHER on the visit's own values OR on an appointment-status
+  // phrase in the wider facts that is NOT historically qualified —
+  // "previous appointment cancelled" must not ground the active visit
+  // (r41), but a recent-call fact "appointment confirmed" does.
   const visitValueText = grounding.llmFacts?.visit
     ? collectFactValues(grounding.llmFacts.visit).join(' ').toLowerCase()
-    : null;
+    : '';
   for (const m of outputText.matchAll(/\bappointments?\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+appointments?\b/g)) {
     const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled');
-    const scopeText = visitValueText !== null ? visitValueText : groundedValueText;
-    if (!wordVariants(status).some((v) => scopeText.includes(v))) {
+    const inVisit = wordVariants(status).some((v) => visitValueText.includes(v));
+    const phraseRe = new RegExp(`\\b(?!(?:previous|prior|last|old|earlier)\\s+)appointments?\\s+(?:was\\s+|is\\s+)?(?:${wordVariants(status).join('|')})\\b|\\b(?:${wordVariants(status).join('|')})\\s+appointments?\\b`);
+    const historically = new RegExp(`\\b(?:previous|prior|last|old|earlier)\\s+appointments?[^.;!?]{0,30}\\b(?:${wordVariants(status).join('|')})|\\b(?:previous|prior|last|old|earlier)[^.;!?]{0,20}appointments?\\s+(?:was\\s+|is\\s+)?(?:${wordVariants(status).join('|')})`);
+    const inGlobalPhrase = phraseRe.test(groundedValueText) && !historically.test(groundedValueText);
+    if (!inVisit && !inGlobalPhrase) {
       return { kind: 'appointment_state', term: status };
     }
   }
@@ -1425,7 +1433,7 @@ function findUngroundedClaim(body, grounding) {
   // the OPPOSITE of the customer's billing state — flattened token pools
   // cannot see the contradiction, so it is checked as a phrase (r32).
   if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
-    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\bnothing\s+(?:owed|due)\b/i.test(outputText)) {
+    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due)\b/i.test(outputText)) {
     return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
   }
   // 'accepted' bound to its object (r37): the estimate status must not be
