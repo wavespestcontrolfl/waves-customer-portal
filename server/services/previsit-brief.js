@@ -970,7 +970,6 @@ const COMMON_PROSE_WORDS = new Set([
   'information', 'scheduling',
   'waves', 'retrieve',
   'transition', 'transitions',
-  'list', 'lists',
   'state', 'stated', 'states',
   'introduction', 'discuss', 'discussing', 'relevant', 'mindful',
   'vacuum', 'vacuuming', 'follow-up', 'walk-through',
@@ -1039,7 +1038,7 @@ function groundedWordOk(word, groundedText, strictText = groundedText) {
 // Short/common organism names — too short (or too domain-loaded) for the
 // rare-word scan and unsound to substring-ground ('rat' matches inside
 // 'operator'). Every occurrence must be WORD-BOUNDARY grounded.
-const SHORT_ORGANISM_RE = /\b(rats?|mouse|mice|ants?|bees?|fly|flies|wasps?|ticks?|fleas?|moths?|slugs?|grubs?|mites?|voles?|moles?|gnats?|weeds?|aphids?)\b/g;
+const SHORT_ORGANISM_RE = /\b(rats?|bats?|mouse|mice|ants?|bees?|fly|flies|wasps?|ticks?|fleas?|moths?|slugs?|grubs?|mites?|voles?|moles?|gnats?|weeds?|aphids?)\b/g;
 
 // Ordinary short ALLCAPS abbreviations a brief legitimately uses without
 // grounding (times, zones, business boilerplate) — everything else
@@ -1112,14 +1111,14 @@ function extractOutputReferences(text) {
   // seen, not just "Apply Bifen SC"); the all-words-common skip in the
   // validator keeps ordinary prose objects ("use caution") from
   // over-rejecting.
-  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(instructed, m[1]);
+  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(instructed, m[1]);
   // NON-treatment imperatives ("Inspect interior", "Check attic",
   // "Monitor bait stations"): instruction fields must ground these
   // objects too — the treatment-verb capture above covers only
   // apply/spray/use/treat, and an ungrounded "Inspect interior" on an
   // exterior-only visit is exactly as contradictory as "Treat interior".
   // Same connector skip and follower-stop as the treatment capture.
-  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?|[Pp]erform(?:ed|ing|s)?|[Pp]rovid(?:e|es|ed|ing)|[Rr]etriev(?:e|es|ed|ing)|[Vv]acuum(?:ed|ing|s)?|[Dd]ocument(?:ed|ing|s)?|[Dd]iscuss(?:ed|ing|es)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(directives, m[1]);
+  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?|[Pp]erform(?:ed|ing|s)?|[Pp]rovid(?:e|es|ed|ing)|[Rr]etriev(?:e|es|ed|ing)|[Vv]acuum(?:ed|ing|s)?|[Dd]ocument(?:ed|ing|s)?|[Dd]iscuss(?:ed|ing|es)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(directives, m[1]);
   for (const m of text.matchAll(/\b(?:for|targeting|against)\s+((?:[a-z][a-z'-]*\s+){0,3}[a-z][a-z'-]*)/g)) push(targets, m[1]);
   // Organism references that never pass a preposition: "<X> activity/
   // damage/infestation" and "signs/evidence of <X>" ("Emerald ash borer

@@ -2009,3 +2009,34 @@ describe('codex #3423 r15 — cache bump, reversed retired name, access objects,
     expect(verdict.reason).toBeTruthy();
   });
 });
+
+describe('codex #3423 r16 — short organisms, indirect objects, do-not-call claims', () => {
+  test('"bat damage" and indirect-object money directives reject on empty facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { watch_items: ['Watch for bat damage'], priorities: [] },
+      { watch_items: [], priorities: ['Provide customer an estimate'] },
+      { watch_items: [], priorities: [], customer_context: 'Customer is not on do not call list' },
+    ]) {
+      const verdict = validateBriefJson(
+        { mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null, ...body },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('a grounded bat mention still passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'bats in the attic vents reported' }] },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: ['Watch for bat damage'], mentioned_terms: ['bats'], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});
