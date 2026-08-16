@@ -138,7 +138,7 @@ function makeKnex(store) {
     q.update = jest.fn((patch) => {
       if (table === 'property_application_history') {
         store.ledgerUpdates = store.ledgerUpdates || [];
-        store.ledgerUpdates.push({ where: q._where?.[0], patch });
+        store.ledgerUpdates.push({ where: q._where?.[0], notIn: q._whereNotIn || null, patch });
       }
       if (table === 'service_records') {
         store.recordUpdates = store.recordUpdates || [];
@@ -190,6 +190,11 @@ function makeKnex(store) {
 
   return knex;
 }
+
+// The ledger receives two kinds of updates: per-row re-link syncs (carry
+// service_product_id) and the deselection retraction sweep.
+const syncUpdates = (store) => (store.ledgerUpdates || []).filter((u) => 'service_product_id' in u.patch);
+const retractionSweeps = (store) => (store.ledgerUpdates || []).filter((u) => u.patch.retraction_reason === 'recap_deselected');
 
 describe('pest recap idempotency (Codex P1)', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -480,12 +485,16 @@ describe('pest recap idempotency (Codex P1)', () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(store.ledgerUpdates).toHaveLength(1);
-    const { where, patch } = store.ledgerUpdates[0];
+    const syncs = syncUpdates(store);
+    expect(syncs).toHaveLength(1);
+    const { where, patch } = syncs[0];
     expect(where).toEqual({ service_record_id: 'rec-old', product_id: 'cat-termidor' });
     expect(patch.application_rate).toBe(0.8);
     expect(patch.rate_unit).toBe('fl_oz/gal');
     expect(patch.service_product_id).toBe('sp-1');
+    // A re-link also clears any prior retraction of this row.
+    expect(patch.retracted_at).toBeNull();
+    expect(patch.retraction_reason).toBeNull();
   });
 
   test('a rate-less replacement row re-links the ledger without touching its rate', async () => {
@@ -509,8 +518,9 @@ describe('pest recap idempotency (Codex P1)', () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(store.ledgerUpdates).toHaveLength(1);
-    const { patch } = store.ledgerUpdates[0];
+    const syncs = syncUpdates(store);
+    expect(syncs).toHaveLength(1);
+    const { patch } = syncs[0];
     expect(patch.service_product_id).toBe('sp-1');
     expect(patch).not.toHaveProperty('application_rate');
     expect(patch).not.toHaveProperty('rate_unit');
@@ -538,8 +548,39 @@ describe('pest recap idempotency (Codex P1)', () => {
     // The validated id lands on the service_products row (exact-ID path in
     // the FDACS writer) and keys the ledger sync — no name-pattern match.
     expect(store.productRows[0].product_id).toBe('cat-exact');
-    expect(store.ledgerUpdates).toHaveLength(1);
-    expect(store.ledgerUpdates[0].where).toEqual({ service_record_id: 'rec-old', product_id: 'cat-exact' });
+    const syncs = syncUpdates(store);
+    expect(syncs).toHaveLength(1);
+    expect(syncs[0].where).toEqual({ service_record_id: 'rec-old', product_id: 'cat-exact' });
+  });
+
+  test('recap metadata binds to the validated catalog row, not caller-supplied fields (codex P1 r10)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: {
+        id: 'cat-exact', name: 'Advion Cockroach Gel Bait', category: 'Bait',
+        active_ingredient: 'Indoxacarb', moa_group: '22A', application_method: 'bait_placement',
+      },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Stale caller metadata.',
+      products: [{ product_id: 'cat-exact', product_name: 'Advion Cockroach Gel', product_category: 'Wrong', active_ingredient: 'Wrong AI', rate_confirmed: true }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    const row = store.productRows[0];
+    expect(row.product_name).toBe('Advion Cockroach Gel Bait');
+    expect(row.product_category).toBe('Bait');
+    expect(row.active_ingredient).toBe('Indoxacarb');
+    expect(row.moa_group).toBe('22A');
+    expect(row.application_method).toBe('bait_placement');
   });
 
   test('a CONFIRMED cleared rate is not restored and clears the ledger rate (codex P1 r9)', async () => {
@@ -566,9 +607,11 @@ describe('pest recap idempotency (Codex P1)', () => {
     // The deliberate clear survives: no prior-rate restore on the row…
     expect(store.productRows[0].application_rate).toBeUndefined();
     // …and the ledger rate is cleared with it (still re-linked).
-    expect(store.ledgerUpdates).toHaveLength(1);
-    expect(store.ledgerUpdates[0].patch).toEqual({
-      service_product_id: 'sp-1', application_rate: null, rate_unit: null,
+    const syncs = syncUpdates(store);
+    expect(syncs).toHaveLength(1);
+    expect(syncs[0].patch).toEqual({
+      service_product_id: 'sp-1', retracted_at: null, retraction_reason: null,
+      application_rate: null, rate_unit: null,
     });
   });
 
@@ -592,11 +635,15 @@ describe('pest recap idempotency (Codex P1)', () => {
 
     expect(result.ok).toBe(true);
     // Null-linked ledger rows for catalog products NOT in the replacement
-    // set are deleted in the same trx (product-less legacy rows survive
-    // via the whereNotNull guard).
-    expect(store.ledgerDeletes).toHaveLength(1);
-    expect(store.ledgerDeletes[0].where).toEqual({ service_record_id: 'rec-old' });
-    expect(store.ledgerDeletes[0].notIn).toEqual({ col: 'product_id', vals: ['cat-a'] });
+    // set are RETRACTED — never deleted (append-safe ledger, codex P1
+    // r10) — in the same trx. Product-less legacy rows survive via the
+    // whereNotNull guard.
+    expect(store.ledgerDeletes || []).toHaveLength(0);
+    const sweeps = retractionSweeps(store);
+    expect(sweeps).toHaveLength(1);
+    expect(sweeps[0].where).toEqual({ service_record_id: 'rec-old' });
+    expect(sweeps[0].notIn).toEqual({ col: 'product_id', vals: ['cat-a'] });
+    expect(sweeps[0].patch.retracted_at).toBeInstanceOf(Date);
   });
 
   test('a fresh recap completion runs the FDACS writer so its applications get ledgered (codex P1 r8)', async () => {
@@ -660,7 +707,7 @@ describe('pest recap idempotency (Codex P1)', () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(store.ledgerUpdates || []).toHaveLength(0);
+    expect(syncUpdates(store)).toHaveLength(0);
   });
 
   test('a brand-new recap record issues no pdf cache invalidation (nothing cached yet)', async () => {

@@ -198,6 +198,9 @@ const ComplianceService = {
       .leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id')
       .leftJoin('customers as c', 'pah.customer_id', 'c.id')
       .leftJoin('technicians as t', 'pah.technician_id', 't.id')
+      // Retracted rows (recap deselection corrections) are excluded from
+      // all compliance reporting — the row survives for audit only.
+      .whereNull('pah.retracted_at')
       .select(
         'pah.*',
         'pc.name as product_name',
@@ -355,6 +358,7 @@ const ComplianceService = {
     const apps = await db('property_application_history')
       .where({ customer_id: customerId })
       .where('application_date', '>=', yearStart)
+      .whereNull('property_application_history.retracted_at')
       .leftJoin('products_catalog', 'property_application_history.product_id', 'products_catalog.id')
       .select('property_application_history.*', 'products_catalog.name as product_name');
 
@@ -450,6 +454,7 @@ const ComplianceService = {
       const nApps = await db('property_application_history')
         .where({ customer_id: c.id })
         .where('application_date', '>=', yearStart)
+        .whereNull('retracted_at')
         .where(function () {
           this.where('category', 'fertilizer')
             .orWhere('category', 'lawn')
@@ -491,14 +496,17 @@ const ComplianceService = {
 
     const [appCount] = await db('property_application_history')
       .where('application_date', '>=', yearStart)
+      .whereNull('retracted_at')
       .count('* as count');
 
     const [productCount] = await db('property_application_history')
       .where('application_date', '>=', yearStart)
+      .whereNull('retracted_at')
       .countDistinct('product_id as count');
 
     const [restrictedCount] = await db('property_application_history')
       .where('application_date', '>=', yearStart)
+      .whereNull('retracted_at')
       .where({ restricted_use: true })
       .count('* as count');
 
@@ -511,6 +519,7 @@ const ComplianceService = {
         const [usage] = await db('property_application_history')
           .where({ product_id: limit.product_id })
           .where('application_date', '>=', yearStart)
+          .whereNull('retracted_at')
           .count('* as count');
         if (parseInt(usage.count) >= limit.limit_value - 1) warningCount++;
       }

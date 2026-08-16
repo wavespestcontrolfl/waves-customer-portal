@@ -514,14 +514,32 @@ async function submitRecap({
       const hasProductIdCol = await trx.schema
         .hasColumn('service_products', 'product_id')
         .catch(() => false);
+      const hasMethodCol = await trx.schema
+        .hasColumn('service_products', 'application_method')
+        .catch(() => false);
       for (const entry of productEntries) {
         if (entry.submittedProductId == null) continue;
         const catalog = await trx('products_catalog')
           .whereRaw('id::text = ?', [entry.submittedProductId])
-          .first('id');
+          .first('id', 'name', 'category', 'active_ingredient', 'moa_group', 'application_method');
         entry.catalogId = catalog?.id ?? null;
-        if (entry.catalogId != null && hasProductIdCol) {
-          entry.row.product_id = entry.catalogId;
+        if (entry.catalogId == null) continue;
+        if (hasProductIdCol) entry.row.product_id = entry.catalogId;
+        // Bind the persisted row's metadata to the VALIDATED catalog row
+        // (codex P1 r10) — the compliance writer resolves EPA/AI facts
+        // from the id, so the displayed name/category must come from the
+        // same row, not from caller-supplied fields that may be stale.
+        // Same authority order as the /complete path.
+        if (catalog.name) entry.row.product_name = String(catalog.name).slice(0, 150);
+        entry.row.product_category = catalog.category ?? entry.row.product_category;
+        entry.row.active_ingredient = catalog.active_ingredient ?? entry.row.active_ingredient;
+        entry.row.moa_group = catalog.moa_group ?? entry.row.moa_group;
+        // An explicit catalog method is a truthful application detail
+        // (codex P1 r10: the FDACS row otherwise records no method).
+        // Methodless products stay null — null is "not recorded"; a
+        // fabricated method would be a false field observation.
+        if (catalog.application_method && hasMethodCol) {
+          entry.row.application_method = catalog.application_method;
         }
       }
       // A re-submitted product with NO rate from a client that did NOT
@@ -590,6 +608,10 @@ async function submitRecap({
           .where({ service_record_id: recordId, product_id: ledgerProductId })
           .update({
             service_product_id: sp.id,
+            // Re-selecting a previously deselected product un-retracts
+            // its ledger row — the re-link IS the correction record.
+            retracted_at: null,
+            retraction_reason: null,
             ...(sp.application_rate != null
               ? { application_rate: sp.application_rate, rate_unit: sp.rate_unit || null }
               : entry.rateConfirmed
@@ -599,21 +621,27 @@ async function submitRecap({
       }
       // Deselected products (codex P1 r9): the replace removed their
       // service_products rows, so their ledger rows still carry a NULL
-      // link after the re-link pass above. Retract them so the DACS
-      // export and application-limit totals mirror the corrected record —
-      // the submitted set is authoritative for this record's applications
-      // (same replace-not-merge semantics as service_products). Rows with
-      // no catalog product are left standing: they can't be attributed to
-      // a specific product, and an unmatched-name replacement row keeps
-      // such a row as the record of its application.
+      // link after the re-link pass above. RETRACT them — never delete
+      // (codex P1 r10): the ledger is append-safe by design (the FK is ON
+      // DELETE SET NULL so rows survive product replacement), so the row
+      // stays as the auditable record of the correction while compliance
+      // reporting and application-limit totals (which filter
+      // retracted_at) mirror the corrected record. Rows with no catalog
+      // product are left standing: they can't be attributed to a specific
+      // product, and an unmatched-name replacement row keeps such a row
+      // as the record of its application.
       let staleLedgerQuery = trx('property_application_history')
         .where({ service_record_id: recordId })
         .whereNull('service_product_id')
-        .whereNotNull('product_id');
+        .whereNotNull('product_id')
+        .whereNull('retracted_at');
       if (linkedCatalogIds.length) {
         staleLedgerQuery = staleLedgerQuery.whereNotIn('product_id', linkedCatalogIds);
       }
-      await staleLedgerQuery.del();
+      await staleLedgerQuery.update({
+        retracted_at: new Date(),
+        retraction_reason: 'recap_deselected',
+      });
       // A first-time recap completion (never through /complete) has NO
       // ledger rows for the update above to hit — the recap was the only
       // completion path that skipped the FDACS writer entirely (codex P1

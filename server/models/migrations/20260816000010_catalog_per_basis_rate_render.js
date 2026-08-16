@@ -73,9 +73,13 @@ const DATA = [
     note: 'rate-render: 0.25-1.5 fl oz per gallon of water from the Atticus Adjourn SC specimen label (EPA 91234-243): 0.25 fl oz/gal (0.01%) maintenance up to 1.5 fl oz/gal (0.06%).' },
   { name: 'Tekko Trio', basis: 'display', rate: '0.5-1', unit: 'fl_oz/gal',
     note: 'rate-render: 0.5-1 fl oz per gallon of water from the Control Solutions Tekko Trio concentrate specimen label (EPA 53883-444), applied at 1 gal finished spray per 1,000-1,500 sq ft.' },
-  { name: 'Tim-bor Professional Insecticide and Fungicide', basis: 'display', rate: '1-1.5', unit: 'lb/gal',
+  // Tim-bor and Bora-Care seed application_method spot_treatment (codex
+  // P1 r10): both are surface treatments applied to wood members, and a
+  // methodless termite-line product otherwise defaults to station_check —
+  // an internally contradictory record next to a lb/gal dilution rate.
+  { name: 'Tim-bor Professional Insecticide and Fungicide', basis: 'display', method: 'spot_treatment', rate: '1-1.5', unit: 'lb/gal',
     note: 'rate-render: 1 lb per gallon of water (10% solution, two coats) or 1.5 lb/gal (15%, one coat) from the Nisus Tim-bor Professional specimen label (EPA 64405-8).' },
-  { name: 'Bora-Care', basis: 'display', rate: '1', unit: 'gal/gal',
+  { name: 'Bora-Care', basis: 'display', method: 'spot_treatment', rate: '1', unit: 'gal/gal',
     note: 'rate-render: 1:1 dilution — 1 gal Bora-Care per 1 gal water for remedial/preventative termite treatments per the Nisus label (EPA 64405-1, EPA PPLS 064405-00001-20210518.pdf).' },
 
   // ── Ornamental sprays: per 100 gallons of spray dilution ────────────
@@ -179,11 +183,15 @@ const DATA = [
     note: 'rate-render: 8 fl oz (236 mL) per gallon of water (15:1, do not dilute beyond) from the Geoponics Endurant PR directions.' },
 
   // ── Water-surface larvicides and stations ───────────────────────────
-  { name: 'Altosid 30 Day Briquets', basis: 'display', rate: '1', unit: 'each/100sf',
+  // Larvicide placements and stations seed their placement method (codex
+  // P1 r10): methodless mosquito-line products otherwise default to
+  // fog_ulv, recording tablets placed in standing water (and physical
+  // stations) as fogging applications.
+  { name: 'Altosid 30 Day Briquets', basis: 'display', method: 'spot_treatment', rate: '1', unit: 'each/100sf',
     note: 'rate-render: 1 briquet per 100 sq ft of standing-water surface (up to 2 ft deep; add 1 per additional 2 ft depth) from the Altosid Briquets label (EPA 2724-375).' },
-  { name: 'Summit Mosquito Dunk Tablets', basis: 'display', rate: '1', unit: 'each/100sf',
+  { name: 'Summit Mosquito Dunk Tablets', basis: 'display', method: 'spot_treatment', rate: '1', unit: 'each/100sf',
     note: 'rate-render: 1 dunk per up to 100 sq ft of water surface regardless of depth (fractional dunks for smaller sites) from the Summit Mosquito Dunks label (EPA 6218-47).' },
-  { name: 'In2Care Mosquito Station', basis: 'display', rate: '10-15', unit: 'each/acre',
+  { name: 'In2Care Mosquito Station', basis: 'display', method: 'station_check', rate: '10-15', unit: 'each/acre',
     note: 'rate-render: at least 1 station per 4,300 sq ft — at least 10 and not more than 15 stations per acre — from the In2Care label (EPA 91720-1, EPA PPLS 091720-00001-20220630.pdf).' },
   { name: 'Advance Termite Bait Station', basis: 'display', rate: '1', unit: 'each/20ft',
     note: 'rate-render: stations installed so the interval between any two does not exceed 20 ft (10-20 ft practice) per the Advance Termite Bait System label cited in the prior note.' },
