@@ -3924,6 +3924,11 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
 // claim ("areas are clear", "clear of pests", "activity cleared") but the
 // imperative verb stays allowed — "please clear food debris" is legitimate
 // sanitation advice.
+// Fixed-timing figures for the compliance classes below: digits OR
+// spelled-out quantities, incl. "half an hour" / "a couple of hours"
+// forms (codex r48 #3420).
+const TIME_FIGURE_SRC = '(?:\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[-\\s]?five|forty|fifty|sixty|ninety|half\\s+an?|a\\s+half|a\\s+couple(?:\\s+of)?|a\\s+few|several|an?)';
+const TIME_UNIT_SRC = '(?:minutes?|mins?|hours?|hrs?|half[-\\s]?hours?)';
 const BANNED_CUSTOMER_COPY = [
   /\beliminated\b/i,
   /\beradicated\b/i,
@@ -3953,8 +3958,11 @@ const BANNED_CUSTOMER_COPY = [
   // idiom is "safe once dry" with the technician confirming timing, and
   // that idiom carries no number so it stays legal here.
   /\bEPA[-\s]?approved\b/i,
-  /\b(?:re-?ent(?:er|ry)|dry(?:ing|s)?|dried)\b[^.!?]{0,40}\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\b/i,
-  /\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\b[^.!?]{0,40}\b(?:re-?ent(?:er|ry)|dry(?:ing)?|dried)\b/i,
+  // spelled-out quantities ("thirty minutes", "two hours", "half an hour",
+  // "a few minutes") state the same prohibited fixed timing as digits
+  // (codex r48)
+  new RegExp(`\\b(?:re-?ent(?:er|ry)|dry(?:ing|s)?|dried)\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}\\s*(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
+  new RegExp(`\\b${TIME_FIGURE_SRC}\\s*${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b(?:re-?ent(?:er|ry)|dry(?:ing)?|dried)\\b`, 'i'),
 ];
 
 function findBannedCustomerCopy(text) {

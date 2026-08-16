@@ -333,8 +333,83 @@ function composeCompletionSmsPreview({ recap, willInvoice, willReview }) {
   ].filter(Boolean).join('\n\n');
 }
 
+// Request-specific trade-name screen shared by the generate-report output
+// gate and the COMPLETION-TIME acceptance of a technician report body
+// (codex r48 #3420): generation screens per-request, but a post-generation
+// inline edit reaches completion where only static banned-word checks ran —
+// the same visit-scoped guard must rerun there. Pest-target/formulation
+// nouns appear in catalog names ("Advion Cockroach Gel Bait") but
+// legitimately belong in report copy — only distinctive brand tokens may
+// reject (codex r21/r28/r32-r34 on #3420).
+const REPORT_GENERIC_PRODUCT_TOKENS = new Set([
+  'cockroach', 'cockroaches', 'roach', 'roaches', 'termite', 'termites',
+  'rodent', 'rodents', 'mosquito', 'mosquitos', 'mosquitoes', 'ants',
+  'flea', 'fleas', 'tick', 'ticks', 'spider', 'spiders', 'wasp', 'wasps',
+  'hornet', 'hornets', 'bees', 'mice', 'rats', 'wildlife', 'station',
+  'stations', 'trap', 'traps', 'perimeter', 'barrier', 'outdoor',
+  'indoor', 'yard', 'granular', 'granules',
+  'wetting', 'agent', 'sprayable', 'spreader', 'sticker', 'adjuvant',
+  'care', 'guard', 'shield', 'defense', 'complete', 'advance', 'advanced',
+  'zone', 'zones', 'select', 'super', 'total', 'ultra', 'prime',
+  'green', 'blue', 'red', 'black', 'white', 'gold', 'silver',
+]);
+// Builds a screen(text) predicate for THIS visit's recorded products.
+// Generic tokens widen with the visit's own recorded treatment targets and
+// (via db) catalog actives/formulations — active ingredients are permitted
+// report wording even when the trade name IS the active. Products carrying
+// only a productId are name-hydrated from the catalog so they are screened
+// too. Chunked by 10 so safeProducts' cap never leaves an entry
+// unscreened. Catalog lookup failure keeps the guard strict.
+async function buildReportTradeNameScreen({ products = [], extraNames = [], db = null } = {}) {
+  const list = Array.isArray(products) ? products.filter(Boolean) : [];
+  let hydrated = list;
+  const genericTokens = new Set(REPORT_GENERIC_PRODUCT_TOKENS);
+  for (const prod of list) {
+    for (const target of Array.isArray(prod?.targets) ? prod.targets : []) {
+      String(target || '').toLowerCase().split(/[^a-z0-9]+/)
+        .filter((tok) => tok.length >= 4)
+        .forEach((tok) => genericTokens.add(tok));
+    }
+  }
+  if (db) {
+    try {
+      const ids = list.map((p) => p?.productId).filter(Boolean);
+      if (ids.length) {
+        const rows = await db('products_catalog')
+          .whereIn('id', ids)
+          .select('id', 'name', 'active_ingredient', 'formulation')
+          .catch(() => []);
+        const nameById = new Map((rows || []).map((r) => [String(r.id), r.name]));
+        hydrated = list.map((p) => (p && !p.name && !p.product_name && p.productId
+          ? { ...p, name: nameById.get(String(p.productId)) || null }
+          : p));
+        for (const row of rows || []) {
+          `${row.active_ingredient || ''} ${row.formulation || ''}`
+            .toLowerCase().split(/[^a-z0-9]+/)
+            .filter((tok) => tok.length >= 4)
+            .forEach((tok) => genericTokens.add(tok));
+        }
+      }
+    } catch { /* strict guard on failure */ }
+  }
+  const seen = new Set();
+  const guarded = [
+    ...extraNames.map((name) => ({ name })),
+    ...hydrated,
+  ].filter((p) => {
+    const key = String(p?.name || '').toLowerCase().trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const chunks = [];
+  for (let i = 0; i < guarded.length; i += 10) chunks.push(guarded.slice(i, i + 10));
+  return (text) => chunks.some((chunk) => containsProductName(text, chunk, { extraGenericTokens: genericTokens, wholeWord: true }));
+}
+
 module.exports = {
   buildPrompt,
+  buildReportTradeNameScreen,
   containsProductName,
   composeCompletionSmsPreview,
   deterministicRecap,

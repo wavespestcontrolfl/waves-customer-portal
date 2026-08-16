@@ -12210,86 +12210,19 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     // Output guard for trade names from THIS visit's own product records —
     // selected products, the free-text productsApplied names, and any typed
     // product-record values (codex r4; same contract the retired recap draft
-    // enforced via containsProductName).
-    // Pest-target/formulation nouns appear in catalog names ("Advion
-    // Cockroach Gel Bait") but legitimately belong in report copy — only
-    // distinctive brand tokens may reject output (codex r21).
-    const PEST_TARGET_TOKENS = new Set([
-      'cockroach', 'cockroaches', 'roach', 'roaches', 'termite', 'termites',
-      'rodent', 'rodents', 'mosquito', 'mosquitos', 'mosquitoes', 'ants',
-      'flea', 'fleas', 'tick', 'ticks', 'spider', 'spiders', 'wasp', 'wasps',
-      'hornet', 'hornets', 'bees', 'mice', 'rats', 'wildlife', 'station',
-      'stations', 'trap', 'traps', 'perimeter', 'barrier', 'outdoor',
-      'indoor', 'yard', 'granular', 'granules',
-      // functional product roles — "applied a wetting agent" is the CANONICAL
-      // customer copy for the matching lawn action; only distinctive brand
-      // tokens ("Dispatch") may reject (codex r28)
-      'wetting', 'agent', 'sprayable', 'spreader', 'sticker', 'adjuvant',
-      // common English words inside brand names ("Bora-Care", "T-Zone SE") —
-      // only the distinctive half rejects (codex r32/r33)
-      'care', 'guard', 'shield', 'defense', 'complete', 'advance', 'advanced',
-      'zone', 'zones', 'select', 'super', 'total', 'ultra', 'prime',
-      // color + green-up vocabulary ("LESCO Green Flo", nitrogen green-up
-      // targets) — the distinctive tokens (lesco/flo…) still reject
-      // (codex r34)
-      'green', 'blue', 'red', 'black', 'white', 'gold', 'silver',
-    ]);
-    // Typed guards lead and names dedupe — safeProducts caps at 10 entries,
-    // and duplicate selected/fallback names must not push a typed
-    // products_used value past the cap unscreened (codex r39). Chunked
-    // evaluation keeps every survivor screened regardless of count.
-    const guardSeenNames = new Set();
-    const guardedProducts = [
-      ...typedProductNameGuards.map((name) => ({ name })),
-      ...(Array.isArray(products) ? products : []),
-      ...fallbackProductNames.map((name) => ({ name })),
-    ].filter((p) => {
-      const key = String(p?.name || '').toLowerCase().trim();
-      if (!key || guardSeenNames.has(key)) return false;
-      guardSeenNames.add(key);
-      return true;
+    // enforced via containsProductName). The token exemptions, catalog
+    // active-ingredient derivation, and chunking live in the SHARED builder
+    // (completion-recap.js) so the completion-time recheck of edited bodies
+    // screens with the identical rules (codex r48).
+    const screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
+      products: Array.isArray(products) ? products : [],
+      extraNames: [...typedProductNameGuards, ...fallbackProductNames],
+      db,
     });
-    const guardedProductChunks = [];
-    for (let i = 0; i < guardedProducts.length; i += 10) {
-      guardedProductChunks.push(guardedProducts.slice(i, i + 10));
-    }
-    // Active ingredients are PERMITTED report wording (constraint #4) even
-    // when the trade name IS the active ("Prodiamine 65 WDG") — derive the
-    // exemption from the visit's own catalog rows, not a fixed noun list
-    // (codex r22). Lookup failure keeps the guard strict.
-    const guardGenericTokens = new Set(PEST_TARGET_TOKENS);
-    // The visit's own recorded treatment TARGETS are legitimate copy — the
-    // stored customer wording for Drive XLR8 literally names crabgrass, and
-    // the fixed pest list can't enumerate every target (codex r42).
-    for (const prod of Array.isArray(products) ? products : []) {
-      for (const target of Array.isArray(prod?.targets) ? prod.targets : []) {
-        String(target || '').toLowerCase().split(/[^a-z0-9]+/)
-          .filter((tok) => tok.length >= 4)
-          .forEach((tok) => guardGenericTokens.add(tok));
-      }
-    }
-    try {
-      const guardIds = (Array.isArray(products) ? products : [])
-        .map((p) => p?.productId).filter(Boolean);
-      if (guardIds.length) {
-        const rows = await db('products_catalog')
-          .whereIn('id', guardIds)
-          .select('active_ingredient', 'formulation')
-          .catch(() => []);
-        for (const row of rows || []) {
-          `${row.active_ingredient || ''} ${row.formulation || ''}`
-            .toLowerCase().split(/[^a-z0-9]+/)
-            .filter((tok) => tok.length >= 4)
-            .forEach((tok) => guardGenericTokens.add(tok));
-        }
-      }
-    } catch { /* strict guard on failure */ }
     const generated = await generateReportCopyWithFallback({
       systemPrompt,
       userMessage: fullUserMessage,
-      extraRejection: (text) => (
-        guardedProductChunks.some((chunk) => CompletionRecap.containsProductName(text, chunk, { extraGenericTokens: guardGenericTokens, wholeWord: true })) ? 'trade_name' : null
-      ),
+      extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null),
     });
     if (!generated.ok) {
       // Assessment-only requests carry no structured facts the deterministic
@@ -12321,8 +12254,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      const fallbackReport = report && guardedProductChunks.some((chunk) => CompletionRecap.containsProductName(report, chunk, { extraGenericTokens: guardGenericTokens, wholeWord: true }))
-        ? null : report;
+      const fallbackReport = report && screenTradeNames(report) ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,

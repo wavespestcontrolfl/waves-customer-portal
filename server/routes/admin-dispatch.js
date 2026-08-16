@@ -6014,6 +6014,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             logger.warn(`[completion] technician AI report copy dropped (banned: ${technicianReport.violations.join(', ')})`);
           }
           technicianReportBody = technicianReport?.body || null;
+          // The generate endpoint screens trade names per-request, but a
+          // post-generation inline edit reaches completion with only the
+          // static banned-word checks — rerun the visit-specific product
+          // guard before the body is stamped (codex r48 #3420). Fail
+          // closed: on a hit or a guard error the deterministic template
+          // remains and the completion is never blocked.
+          if (technicianReportBody) {
+            try {
+              const screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
+                products: Array.isArray(products) ? products : [],
+                db,
+              });
+              if (screenTradeNames(technicianReportBody)) {
+                logger.warn('[completion] technician AI report copy dropped (trade_name)');
+                technicianReportBody = null;
+              }
+            } catch (err) {
+              logger.warn(`[completion] technician AI report trade-name guard failed — dropping copy: ${err.message}`);
+              technicianReportBody = null;
+            }
+          }
         }
 
         completionTimerEntriesSnapshot = null;

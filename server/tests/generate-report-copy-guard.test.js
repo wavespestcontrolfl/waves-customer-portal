@@ -306,6 +306,9 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     const edited = technicianReportCustomerCopy('WHAT WE DID\n\nWe treated the home. Use gate code 4545 next time.\n\nWHAT WE FOUND\n\nActivity was low.');
     expect(edited.body).toBeNull();
     expect(edited.violations).toContain('access_code');
+    // multiword quoted credentials reject too (r48)
+    expect(reportCopyRejection('The gate code “blue waves” opens the side entry.')).toBe('access_code');
+    expect(reportCopyRejection("Use passphrase 'open sesame' at the door.")).toBe('access_code');
     // alphabetic credentials beside a device noun — the reverse and
     // positional shapes cover keypad/lockbox too (r46)
     expect(reportCopyRejection('Use BLUE at the keypad to enter the side yard.')).toBe('access_code');
@@ -320,9 +323,15 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('We used an EPA-approved treatment; the area will be dry in 30 minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Treated areas are typically dry within 45 minutes of application.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Please wait 2 hours before re-entry to treated rooms.')).toMatch(/^banned:/);
+    // spelled-out figures state the same fixed timing (r48)
+    expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
     // the sanctioned idiom carries no figure and stays legal
     expect(reportCopyRejection('Keep pets off the treated areas until dry.')).toBeNull();
     expect(reportCopyRejection('We applied an EPA-registered product along the perimeter.')).toBeNull();
+    // day-based cadences are not re-entry/drying figures
+    expect(reportCopyRejection('The barrier typically lasts 21-30 days between visits.')).toBeNull();
   });
 
   test('abbreviated trade-name echoes still reject; plain vocabulary passes (r36)', () => {

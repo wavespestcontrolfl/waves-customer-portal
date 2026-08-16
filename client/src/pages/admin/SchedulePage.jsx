@@ -6546,20 +6546,21 @@ function pruneRestoredFindingsValues(restored, fields) {
 // knockdown, and mosquito stories refuse on their cleared/none-observed
 // states (codex r43/r44 bait rule, generalized in r45).
 function typedZeroStateRefusesBody(type, values, score) {
-  if (
-    type === "termite_bait_station"
-    || type === "rodent_bait_station"
-    || type === "rodent_trapping"
-  ) return score === 0;
-  if (type === "flea") {
-    return score === 0
-      || (score == null && String(values?.evidence_level ?? "") === "None observed");
-  }
-  if (type === "german_roach_knockdown" || type === "palmetto_roach_knockdown") {
-    return score === 0
-      || (score == null && String(values?.activity_level ?? "") === "None observed");
-  }
+  // Story lanes (exclusion/inspection) consume the reviewed body in their
+  // own branches at every score, so a generation is never wasted there.
+  if (type === "rodent_exclusion" || type === "rodent_inspection") return false;
   if (type === "mosquito_event") return String(values?.activity_level ?? "") === "None observed";
+  // Derived from the renderer's refusal rule rather than an enumeration
+  // (codex r48): buildTodaysResult keeps the fixed template on a zero
+  // indicator score for EVERY gauge lane (bait/trapping, bed bug,
+  // cockroach, termite inspection, wildlife trapping, knockdowns, flea) —
+  // a non-gauge schema never carries a score, so the check is safe
+  // unconditionally.
+  if (score === 0) return true;
+  // Cleared select states refuse the same way when no score is pinned —
+  // reuse the shared cleared-boundary map instead of re-listing the lanes.
+  const rule = TYPED_SCORE_CLEARED_SELECT[type];
+  if (rule && score == null) return String(values?.[rule.field] ?? "") === rule.cleared;
   return false;
 }
 
