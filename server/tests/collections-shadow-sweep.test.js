@@ -543,3 +543,13 @@ test('a customer with ANY live/held case row is skipped — no second pipeline, 
   expect(result.casesCreated).toBe(0);
   expect(result.casesUpdated).toBe(0);
 });
+
+// codex gh-r6 P0: the stale-retirement lapse is fenced to still-shadow rows
+// — a row promoted between the select and the update escapes untouched.
+test('the stale-retirement lapse update carries the shadow state fence', () => {
+  const grepSrc = require('fs').readFileSync(
+    require.resolve('../services/collections/shadow-sweep'), 'utf8',
+  );
+  const retireBlock = grepSrc.slice(grepSrc.indexOf('let casesLapsed = 0'));
+  expect(retireBlock).toContain(".where({ current_state: 'shadow' })\n        .update({ current_state: 'lapsed'");
+});

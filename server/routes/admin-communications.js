@@ -2274,10 +2274,6 @@ router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) 
         return res.status(409).json({ error: 'case_moved', detail: 'the case changed state while approving — reload and retry' });
       }
       promotedByUs = true;
-      // The shadow proposal card says "no call will be placed" — no longer
-      // true once the promotion holds (codex gh-r2). Best-effort retire.
-      const { retireProposalCard } = require('../services/collections/outbound-voice/dial-sweep');
-      await retireProposalCard(caseRow.idempotency_key);
     } else if (caseRow.current_state !== 'approved') {
       // held / cancelled / expired / dialing — never dialable from here.
       return res.status(409).json({ error: 'case_not_dialable', state: caseRow.current_state });
@@ -2312,6 +2308,13 @@ router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) 
     }
     if (!result.dialed && result.reason !== 'dial_failed') {
       await revertOurPromotion(); // the fence no-ops when origination moved the row
+    } else {
+      // Retire the "no call will be placed" card only once a REAL dial
+      // attempt happened (codex gh-r6 P2): during the shakedown the card
+      // is the operator's only surface carrying the case id, and a
+      // transient refusal + revert must leave it standing for the retry.
+      const { retireProposalCard } = require('../services/collections/outbound-voice/dial-sweep');
+      await retireProposalCard(caseRow.idempotency_key);
     }
     // Refusals are the policy speaking — return them verbatim, 200: the
     // admin asked "try to dial", and "policy said no, case re-queued" is a

@@ -295,3 +295,25 @@ test('a pre-dial refusal reverts OUR promotion (fenced on the admin actor)', asy
   });
   expect(revert._patches[0].current_state).toBe('proposed');
 });
+
+// codex gh-r6 P2: the proposal card survives a transient refusal — it is
+// the operator's only case-id surface during the shakedown; retirement
+// happens only after a REAL dial attempt.
+test('a transient refusal leaves the proposal card standing; a real attempt retires it', async () => {
+  originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'relay_unavailable' });
+  const queues = [
+    chain({ first: { id: CASE_UUID, current_state: 'shadow', case_version: 1, idempotency_key: 'collections:c1:1:14' } }),
+    chain({ first: undefined }), // live-check
+    chain({ updateResult: 1 }), // promote
+    chain({ updateResult: 1 }), // revert (NOT the card — no whereRaw assertion)
+  ];
+  const consumed = [];
+  db.mockImplementation(() => { const q = queues.shift(); consumed.push(q); return q; });
+  await withServer(async (baseUrl) => {
+    const res = await dial(baseUrl);
+    expect(res.status).toBe(200);
+  });
+  // Exactly four db calls: read, live-check, promote, revert — no card query.
+  expect(consumed).toHaveLength(4);
+  expect(queues).toHaveLength(0);
+});

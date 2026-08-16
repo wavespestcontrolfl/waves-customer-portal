@@ -376,8 +376,13 @@ async function runShadowSweep({ now = new Date() } = {}) {
       .whereNotIn('customer_id', [...stillEligible])
       .select('id', 'idempotency_key');
     if (toLapse.length) {
+      // Fenced to still-shadow rows (codex gh-r6 P0): a dial surface can
+      // promote one of these between the select and this update — the
+      // fence makes the promotion win cleanly (no lock needed here: this
+      // is a single conditional write, not a read-then-write decision).
       casesLapsed = await db('collection_cases')
         .whereIn('id', toLapse.map((c) => c.id))
+        .where({ current_state: 'shadow' })
         .update({ current_state: 'lapsed', updated_at: db.fn.now() });
       // The proposal card must retire WITH its case (codex r5): a frozen
       // actionable card for an ineligible customer misleads, and a later

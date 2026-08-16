@@ -122,6 +122,30 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
   if (!isAutoDialEnabled()) return { skipped: true, reason: 'autodial_gate_off' };
 
   const cap = maxDialsPerRun();
+
+  // Reclaim orphaned approvals (codex gh-r6): a crash after promotion, or
+  // a failed revert, leaves a row in 'approved' that NOTHING revisits —
+  // origination's expiry check only runs when something dials the case,
+  // and neither sweep selects 'approved'. The expiry predicate is the
+  // fence: origination's claim requires approval_expires_at > now, this
+  // requires < now — disjoint, no race with a live dial.
+  let reclaimed = 0;
+  try {
+    reclaimed = await db('collection_cases')
+      .where({ current_state: 'approved' })
+      .where('approval_expires_at', '<', now)
+      .update({
+        current_state: 'proposed',
+        approved_by: null,
+        approved_at: null,
+        approval_expires_at: null,
+        updated_at: db.fn.now(),
+      });
+    if (reclaimed) logger.info(`[collections-autodial] reclaimed ${reclaimed} expired orphaned approval(s)`);
+  } catch (err) {
+    logger.warn(`[collections-autodial] orphan reclamation failed: ${err.message}`);
+  }
+
   const candidates = await db('collection_cases')
     .whereIn('current_state', ['shadow', 'proposed'])
     // Dial-failure proposals require SUPERVISED release (codex gh-r4):
@@ -189,7 +213,7 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
   if (candidates.length) {
     logger.info(`[collections-autodial] sweep: ${candidates.length} candidates, ${promoted} promoted, ${dialed} dial attempts, ${refused} policy refusals (cap ${cap})`);
   }
-  return { skipped: false, candidates: candidates.length, promoted, dialed, refused, cap };
+  return { skipped: false, candidates: candidates.length, promoted, dialed, refused, reclaimed, cap };
 }
 
 module.exports = { runCollectionsDialSweep, promoteForAutoDial, retireProposalCard, DEFAULT_MAX_PER_RUN };
