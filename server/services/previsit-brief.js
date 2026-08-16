@@ -105,7 +105,7 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Strong connectors (& + /) always denote a name suffix; weak ones
 // (- ,) and bare/and brand words need the end-of-name lookahead —
 // "- pest activity reviewed" is a clause, "- Lawn Care" a suffix (r49).
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*\w+|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b(?!\s+(?:was|is|were|are|has|have|had|will|would|being)\b))|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b(?!\s+(?:was|is|were|are|has|have|had|will|would|being)\b))|\s+(?:and\s+)?(?:group|groups|solutions|enterprises|holdings|partners|brands)\b|\s+of\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|swfl|america|tampa)\b|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)(?!\s+(?:was|is|were|are|has|have|had|will|would|being)\b))/i;
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*\w+|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b(?!\s+(?:was|is|were|are|has|have|had|will|would|being|remains?|stays?|continues?|scheduled|planned|discussed|requested|completed)\b))|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b(?!\s+(?:was|is|were|are|has|have|had|will|would|being|remains?|stays?|continues?|scheduled|planned|discussed|requested|completed)\b))|\s+(?:and\s+)?(?:group|groups|solutions|enterprises|holdings|partners|brands)\b|\s+of\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|swfl|america|tampa)\b|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)(?!\s+(?:was|is|were|are|has|have|had|will|would|being|remains?|stays?|continues?|scheduled|planned|discussed|requested|completed)\b))/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1479,7 +1479,7 @@ function findUngroundedClaim(body, grounding) {
   }
   // Completed-work phrasing in ANY field needs a prior visit (r55).
   if (!grounding.llmFacts?.lastVisit
-    && /\b(?:service|work|treatment|visit|inspection|maintenance|application)\s+(?:was\s+|ha[sd]\s+(?:(?:now|since|recently|already|just)\s+)?been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:an?\s+|the\s+)?(?:service|work|treatment|inspection|maintenance|application)\b|\bprior\s+(?:inspection|maintenance|application)\b/.test(outputText)) {
+    && /\b(?:service|work|treatment|visit|inspection|maintenance|application|spray(?:ing)?)\s+(?:was\s+|ha[sd]\s+(?:(?:now|since|recently|already|just)\s+)?been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:an?\s+|the\s+)?(?:service|work|treatment|inspection|maintenance|application|spray(?:ing)?)\b|\bprior\s+(?:inspection|maintenance|application)\b/.test(outputText)) {
     return { kind: 'fabricated_history', term: 'no prior visit on file' };
   }
   // Spelled-out short quantities before time units are numeric claims —
@@ -1491,7 +1491,7 @@ function findUngroundedClaim(body, grounding) {
   // Bounded modifiers between the quantity and unit ("five active
   // services", "five more times") are still count claims (r68 P2);
   // 'of' is excluded so partitives ("one of the services") stay prose.
-  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:(?!of\b)\w+\s+){0,2}(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?|pets?|dogs?|cats?|estimates?|quotes?|invoices?|payments?)\b/g)) {
+  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:(?!of\b)\w+\s+){0,2}(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?|pets?|dogs?|cats?|estimates?|quotes?|invoices?|payments?|units?|accounts?)\b/g)) {
     const phrase = `${m[1]} ${m[2]}`;
     const digitMap = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', fifteen: '15', twenty: '20', thirty: '30' };
     const unit = m[2].replace(/s$/, '');
@@ -1509,9 +1509,9 @@ function findUngroundedClaim(body, grounding) {
   }
   const accessClaim = ACCESS_STATE_RE.test(outputText) || /\baccess\s+(?:(?:has\s+been|was|is)\s+)?not\s+(?:granted|provided|given|arranged|available|confirmed|authorized)\b/i.test(outputText);
   if (accessClaim) {
-    const evid = /\baccess\b/.test(groundedValueText) && (ACCESS_STATE_RE.test(groundedValueText) || negNear(groundedValueText, 'access'));
-    const claimNeg = negNear(outputText, 'access');
-    const factNeg = negNear(groundedValueText, 'access');
+    const evid = /\b(?:access|entry)\b/.test(groundedValueText) && (ACCESS_STATE_RE.test(groundedValueText) || negNear(groundedValueText, '(?:access|entry)'));
+    const claimNeg = negNear(outputText, '(?:access|entry)');
+    const factNeg = negNear(groundedValueText, '(?:access|entry)');
     if (!evid || claimNeg !== factNeg) return { kind: 'novel_term', term: 'access' };
   }
   // Photo-availability claims need a photo fact (r41 P2).
@@ -1571,6 +1571,11 @@ function findUngroundedClaim(body, grounding) {
       return { kind: 'appointment_state', term: status };
     }
     if (claimNegated && factNegated) continue; // negation grounded
+    // A claim that itself carries a historical qualifier ("cancelled
+    // last week") repeats history, not current status — grounded history
+    // passes (r74 P2).
+    const claimHistorical = /^\s*(?:(?:for|on|from|back)\s+)?(?:last\s+(?:week|month|year)|yesterday|earlier|previously|in\s+\w+)\b/.test(currentClaimText.slice(m.index + m[0].length));
+    if (claimHistorical && statusForms.some((v) => new RegExp(`\\b(?:appointments?|visits?|service)\\b[^.;!?]{0,30}${v}`).test(groundedValueText))) continue;
     const inVisit = statusForms.some((v) => visitValueText.includes(v));
     // Lookbehind blocks the historical qualifier PER PHRASE — a separate
     // current "appointment confirmed" fact grounds even when a historical
@@ -1607,7 +1612,7 @@ function findUngroundedClaim(body, grounding) {
   for (const contactReq of contactClaims)
   for (const channel of [contactReq[3] ?? contactReq[2], contactReq[4]].filter(Boolean).map((c) => c.replace(/s$/, '').replace(/ed$/, '').replace(/^phone$/, 'call'))) {
     const negatedClaim = Boolean(contactReq[1]) || Boolean(contactReq[2] && /not|no\b/.test(String(contactReq[2])));
-    const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred|need|needs|needed)\b/.test(groundedValueText);
+    const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred|need|needs|needed|await|awaits|awaited)\b/.test(groundedValueText);
     const bareChannel = channel.replace(/back$/, '').replace(/ed$/, '');
     // Polarity (r41): a NEGATED preference near the channel ("does not
     // want email") must not ground the positive claim.
@@ -1622,7 +1627,7 @@ function findUngroundedClaim(body, grounding) {
     // The channel must be the OBJECT of the request — only determiners/
     // qualifiers may intervene ("requested an estimate during the phone
     // call" is not a call request, r49).
-    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?|expect(?:s|ed)?|need(?:s|ed)?)\\s+(?:(?:for|to|be|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening|(?:calls?|texts?|sms|emails?)\\s+and)\\s+){0,4}${bareChannel}`);
+    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?|expect(?:s|ed)?|need(?:s|ed)?|await(?:s|ed)?)\\s+(?:(?:for|to|be|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening|(?:calls?|texts?|sms|emails?)\\s+and)\\s+){0,4}${bareChannel}`);
     // Passive evidence forms ("a phone call was requested") support the
     // claim exactly like verb-first forms (r73).
     const passiveEvidenceRe = new RegExp(`\\b(?:phone\\s+)?${bareChannel}\\w*\\s+(?:was|is|has\\s+been|had\\s+been)\\s+requested\\b`);

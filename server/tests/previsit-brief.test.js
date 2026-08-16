@@ -4012,3 +4012,54 @@ describe('codex #3423 r73 — passive evidence, variant polarity, brand clause c
     expect(validateBriefJson({ ...BASE, customer_context: 'Bifen was used previously', mentioned_terms: [] }, bifen).reason).toBeTruthy();
   });
 });
+
+describe('codex #3423 r74 — spray history, clause verbs, unit counts, historical statuses, await evidence, entry state', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+
+  test('completed spray claims need visit history', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['The exterior spray was performed', 'Exterior spraying was completed']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+  });
+
+  test('non-copular service clauses after the canonical name stay prose', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const fact1 = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { recentCalls: ['customer contacted waves pest control and lawn service remains scheduled'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer contacted Waves Pest Control and lawn service remains scheduled' }, fact1).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Waves Pest Control and Termite Control visited.' }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'termite' }] } }).reason).toBeTruthy();
+  });
+
+  test('spelled unit and account counts bind to facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Five units on the property', 'Customer has five accounts']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+  });
+
+  test('explicitly historical appointment statuses pass when grounded', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const hist = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'the appointment was cancelled last week' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'The appointment was cancelled last week' }, hist).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'The appointment was cancelled' }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } }).reason).toBeTruthy();
+  });
+
+  test('await-based grounded contact requests pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const detail of ['customer awaits a phone call', 'customer awaits email']) {
+      const fact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail }] } };
+      const out = detail.replace('customer', 'Customer');
+      expect(validateBriefJson({ ...BASE, customer_context: out }, fact).body).toBeTruthy();
+    }
+  });
+
+  test('grounded entry-state wording passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const detail of ['entry card provided', 'entry key provided', 'entry number provided']) {
+      const fact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail }] } };
+      expect(validateBriefJson({ ...BASE, customer_context: detail[0].toUpperCase() + detail.slice(1) }, fact).body).toBeTruthy();
+    }
+    expect(validateBriefJson({ ...BASE, customer_context: 'Entry card provided' }, EMPTY).reason).toBeTruthy();
+  });
+});
