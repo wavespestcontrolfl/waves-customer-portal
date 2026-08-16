@@ -227,7 +227,7 @@ describe('idempotency + versioning', () => {
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
 
-    expect(caseUpdate.where).toHaveBeenCalledWith({ id: 'case-1', case_version: 1 });
+    expect(caseUpdate.where).toHaveBeenCalledWith({ id: 'case-1', case_version: 1, current_state: 'shadow' });
     expect(caseUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       case_version: 2,
       eligible_balance_snapshot: 15300,
@@ -506,6 +506,16 @@ test('the rotation lookup excludes only the live pipeline states', async () => {
   const grepSrc = require('fs').readFileSync(
     require.resolve('../services/collections/shadow-sweep'), 'utf8',
   );
-  expect(grepSrc).toContain("whereNotIn('current_state', ['approved', 'dialing'])");
+  expect(grepSrc).toContain("whereNotIn('current_state', ['approved', 'dialing', 'held'])");
   expect(grepSrc).not.toContain("whereIn('current_state', ['shadow', 'lapsed'])\n          .orderBy('case_version', 'desc')");
+});
+
+
+// codex gh-r3: rotation is STATE-fenced too — with proposed rows eligible,
+// a concurrent promote/claim between read and write must win cleanly.
+test('the rotation update fences on the originally read current_state', () => {
+  const grepSrc = require('fs').readFileSync(
+    require.resolve('../services/collections/shadow-sweep'), 'utf8',
+  );
+  expect(grepSrc).toContain("{ id: existing.id, case_version: existing.case_version, current_state: existing.current_state }");
 });

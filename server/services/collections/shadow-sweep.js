@@ -220,9 +220,14 @@ async function runShadowSweep({ now = new Date() } = {}) {
         // (approved, dialing) are excluded; the version bump below mints a
         // fresh key and the unchanged-check's state==='shadow' requirement
         // guarantees non-shadow rows always rotate rather than reuse.
+        // 'held' stays out too (codex gh-r3): a dispute hold is a HUMAN
+        // release state — the outcome writer deliberately leaves the case
+        // held as the remaining stop when the durable flag write failed,
+        // and automatic rotation would re-dial a disputing customer once
+        // the 7-day ledger suppression lapses.
         existing = await db('collection_cases')
           .where({ customer_id: customerId })
-          .whereNotIn('current_state', ['approved', 'dialing'])
+          .whereNotIn('current_state', ['approved', 'dialing', 'held'])
           .orderBy('case_version', 'desc')
           .first();
       }
@@ -277,10 +282,16 @@ async function runShadowSweep({ now = new Date() } = {}) {
 
       let caseRow;
       if (existing) {
-        // Version-guarded update: a concurrent sweep that already bumped the
-        // version no-ops here (and the unique idempotency_key backstops it).
+        // Version-guarded update — AND state-guarded (codex gh-r3 P0): with
+        // proposed rows now rotation-eligible, a concurrent promote/claim
+        // (admin dial, auto-dial sweep) can move the row between our read
+        // and this write; a fence on id+version alone would overwrite an
+        // approved/dialing row back to shadow with a bumped version, and a
+        // claimed origination's callbacks could no longer update the case.
+        // The concurrent promotion wins cleanly; the unique idempotency_key
+        // backstops the race either way.
         const [updated] = await db('collection_cases')
-          .where({ id: existing.id, case_version: existing.case_version })
+          .where({ id: existing.id, case_version: existing.case_version, current_state: existing.current_state })
           .update({ ...patch, updated_at: db.fn.now() })
           .returning('*');
         if (!updated) continue;
