@@ -1035,7 +1035,7 @@ const GROUNDED_ONLY_WORDS = new Set([
 
 // 'access' as a credential or claimed access STATE must ground; as a verb
 // for reaching a grounded area it is prose (codex #3423 r44).
-const ACCESS_STATE_RE = /\baccess\s+(?:code|card|key|granted|provided|given|arranged|available|on\s+file)\b|\b(?:gate|door|garage|provided?|granted|has|have|gave|given)\s+access\b/i;
+const ACCESS_STATE_RE = /\baccess\s+(?:(?:has\s+been|was|is)\s+)?(?:code|card|key|granted|provided|given|arranged|available|on\s+file)\b|\b(?:gate|door|garage|provided?|granted|has|have|gave|given)\s+access\b/i;
 
 // 'key' as an access credential ("door key", "key under the mat") must
 // ground; 'key' as emphasis ("key concern") is prose (codex #3423 r29).
@@ -1044,7 +1044,7 @@ const ACCESS_STATE_RE = /\baccess\s+(?:code|card|key|granted|provided|given|arra
 const credentialReFor = (nouns) => new RegExp(
   `\\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\\s+(?:${nouns})\\b`
   + `|\\b(?:${nouns})\\s+(?:under|hidden|inside|behind|left|beneath|provided)\\b`
-  + `|\\b(?:${nouns})\\s+(?:numbers?|on\\s+file)\\b`
+  + `|\\b(?:${nouns})\\s+(?:(?:is|are|was|were)\\s+)?(?:numbers?|on\\s+file)\\b`
   + `|\\b(?:provided?|leave|left|gave|give|has|have|keeps?)\\s+(?:the\\s+|a\\s+)?(?:${nouns})\\b`, 'i');
 const KEY_ONLY_RE = credentialReFor('keys?');
 const PIN_ONLY_RE = credentialReFor('pins?|codes?');
@@ -1102,7 +1102,7 @@ function groundedWordOk(word, groundedText, strictText = groundedText) {
 // Short/common organism names — too short (or too domain-loaded) for the
 // rare-word scan and unsound to substring-ground ('rat' matches inside
 // 'operator'). Every occurrence must be WORD-BOUNDARY grounded.
-const SHORT_ORGANISM_RE = /\b(rats?|bats?|mouse|mice|ants?|bees?|fly|flies|wasps?|ticks?|fleas?|moths?|slugs?|grubs?|mites?|voles?|moles?|gnats?|weeds?|aphids?)\b/g;
+const SHORT_ORGANISM_RE = /\b(rats?|bats?|bugs?|mouse|mice|ants?|bees?|fly|flies|wasps?|ticks?|fleas?|moths?|slugs?|grubs?|mites?|voles?|moles?|gnats?|weeds?|aphids?)\b/g;
 
 // Ordinary short ALLCAPS abbreviations a brief legitimately uses without
 // grounding (times, zones, business boilerplate) — everything else
@@ -1417,6 +1417,16 @@ function findUngroundedClaim(body, grounding) {
   if (!grounding.llmFacts?.lastVisit && body.last_visit_summary) {
     return { kind: 'fabricated_history', term: 'no prior visit on file' };
   }
+  // Spelled-out short quantities before time units are numeric claims —
+  // "two hours"/"ten days" must ground like digits (r54).
+  for (const m of outputText.matchAll(/\b(one|two|six|ten)\s+(minutes?|hours?|days?|weeks?)\b/g)) {
+    const phrase = `${m[1]} ${m[2]}`;
+    const digitMap = { one: '1', two: '2', six: '6', ten: '10' };
+    if (!groundedValueText.includes(phrase)
+      && !new RegExp(`(?<!\\d)${digitMap[m[1]]}(?![\\d.])[^.;!?]{0,10}${m[2].replace(/s$/, '')}`).test(groundedValueText)) {
+      return { kind: 'numeric', term: phrase };
+    }
+  }
   // "History of <condition>" asserts recorded history — the word must
   // appear in the fact values (r38).
   const hasRealHistory = Boolean(grounding.llmFacts?.lastVisit)
@@ -1455,7 +1465,7 @@ function findUngroundedClaim(body, grounding) {
     body.open_scope,
     body.customer_context,
   ].filter(Boolean).join(' ').toLowerCase();
-  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:for|on)\s+\w+\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
+  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:for|on)\s+\w+\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
     // Multi-word statuses ('en route', 'on site') match underscore forms too.
     const statusForms = [...new Set([...wordVariants(status.replace(/\s/g, '')), status, status.replace(/\s/g, '_'), status.replace(/\s/g, '')])];
@@ -1717,7 +1727,7 @@ function findUngroundedClaim(body, grounding) {
   // Polarity for pet/availability STATE words (r50): a negated fact must
   // not ground the positive claim, nor the reverse — inverted pet or
   // availability context is safety-relevant.
-  for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability']) {
+  for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability', 'sensitivity', 'sensitivities', 'sensitive', 'recurring', 'initial']) {
     if (!new RegExp(`\\b${pw}\\b`).test(outputText)) continue;
     const negRe = new RegExp(`\\b(?:no|not|never|without)\\b[^.;!?]{0,20}\\b${pw}\\b|\\b${pw}\\b[^.;!?]{0,20}\\b(?:not|never|absent|gone)\\b`);
     const factHasWord = wordVariants(pw).some((v) => new RegExp(`\\b${v}`).test(groundedValueText));

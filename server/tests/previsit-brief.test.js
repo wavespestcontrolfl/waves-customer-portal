@@ -3219,3 +3219,48 @@ describe('codex #3423 r53 — infinitive requests, perfect estimates, post-noun 
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r54 — copular credentials, perfect access, qualifiers, polarity set, bugs, quantities', () => {
+  test('r54 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Key is on file', 'Customer key is on file', 'Return after two hours', 'Customer reported a bug concern']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const accessibility = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'Website accessibility request was granted' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Access has been granted' },
+      accessibility,
+    ).reason).toBeTruthy();
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'The appointment scheduled for today was cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const noSens = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has no chemical sensitivities' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has chemical sensitivities' },
+      noSens,
+    ).reason).toMatch(/polarity_conflict/);
+    const recurringVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { isRecurring: true } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'This visit is not recurring' },
+      recurringVisit,
+    ).reason).toMatch(/polarity_conflict/);
+  });
+
+  test('a grounded spelled quantity passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'let treated areas dry after two hours' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Dry after two hours' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
