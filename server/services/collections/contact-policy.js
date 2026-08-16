@@ -73,6 +73,15 @@ const PILOT_MIN_DUNNING_TOUCHES = 2;
 const CALL_WINDOW_START_HOUR = 9;
 const CALL_WINDOW_END_HOUR = 18; // exclusive
 
+// The ONE call-window predicate (codex gh-r14): evaluate() and
+// origination's claim-boundary recheck must agree — via datetime-et, never
+// raw new Date() ET math (the timestamptz trap).
+function isWithinCallWindow(now) {
+  const et = etParts(now);
+  const weekday = et.dayOfWeek >= 1 && et.dayOfWeek <= 5;
+  return weekday && et.hour >= CALL_WINDOW_START_HOUR && et.hour < CALL_WINDOW_END_HOUR;
+}
+
 // Reassigned-number staleness: no customer-initiated contact from the number
 // within 90 days ⇒ an RND check is required before any automated voice
 // contact (the RND query itself is PR B / manual — here it is only a denial).
@@ -418,10 +427,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       // manual_call too (codex 2026-08-14 P1): a dial sheet must not
       // authorize an after-hours collection call just because a human
       // places it.
-      const et = etParts(now);
-      const weekday = et.dayOfWeek >= 1 && et.dayOfWeek <= 5;
-      const inHours = et.hour >= CALL_WINDOW_START_HOUR && et.hour < CALL_WINDOW_END_HOUR;
-      if (!weekday || !inHours) deny('outside_call_window');
+      if (!isWithinCallWindow(now)) deny('outside_call_window');
     }
 
     // ── Automated-voice-only checks ─────────────────────────────────────
@@ -513,6 +519,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
 module.exports = {
   evaluate,
   loadEligibleInvoices,
+  isWithinCallWindow,
   // Exported for tests / PR B reuse.
   PILOT_MIN_BALANCE_CENTS,
   PILOT_MAX_BALANCE_CENTS,

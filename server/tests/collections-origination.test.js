@@ -24,10 +24,19 @@ jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.fn = { now: jest.fn(() => 'NOW()') };
   fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  // withCaseLock (gh-r10): the dial claim runs inside db.transaction — the
+  // trx dispatches to the same table queues; the advisory-lock raw is a no-op.
+  fn.transaction = jest.fn(async (cb) => {
+    const trx = (table) => fn(table);
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.fn = fn.fn;
+    return cb(trx);
+  });
   return fn;
 });
 jest.mock('../services/collections/contact-policy', () => ({
   evaluate: jest.fn(),
+  isWithinCallWindow: jest.fn(() => true),
 }));
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(),
@@ -414,8 +423,11 @@ describe('prb-r15', () => {
       customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
       call_log: [chain('call_log', { first: undefined }), chain('call_log', { returningRows: [{ id: 'cl-1' }] }), chain('call_log')],
     });
-    await originateCollectionCall('case-1', { now: NOW });
-    expect(claimChain.where).toHaveBeenCalledWith('approval_expires_at', '>', NOW);
+    // gh-r14: the boundary compares against the FRESH claim clock, not the
+    // entry snapshot.
+    const FRESH = new Date('2026-08-12T15:10:00Z');
+    await originateCollectionCall('case-1', { now: NOW, clock: () => FRESH });
+    expect(claimChain.where).toHaveBeenCalledWith('approval_expires_at', '>', FRESH);
   });
 });
 
@@ -438,4 +450,132 @@ test('a doubly-failed never_contacted stamp on a definitive rejection keeps the 
   expect(res).toEqual({ dialed: false, reason: 'dial_failed' });
   expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(2); // one retry
   expect(stateChain.update).not.toHaveBeenCalled(); // never reset to proposed
+});
+
+// codex gh-r10: the approved→dialing claim runs under the customer case
+// lock — the same advisory lock the merge path takes — so a merge cannot
+// repoint the customer while a claim is mid-flight.
+test('the dial claim runs inside the customer case lock (db.transaction)', async () => {
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 })],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [
+      chain('call_log', { first: undefined }), // idempotency probe: no prior
+      chain('call_log', { returningRows: [{ id: 'cl-1' }] }),
+      chain('call_log'), // sid backfill update
+    ],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res.dialed).toBe(true);
+  expect(db.transaction).toHaveBeenCalledTimes(1);
+});
+
+// codex gh-r11: the in-lock claim fences customer_id — a merge committing
+// between the snapshot reads and the lock acquisition repoints the case,
+// and the claim must stand down rather than dial with the retired
+// customer's policy verdict and phone.
+test('the dial claim fences customer_id: a mid-merge repointed case stands down (dial_claim_lost)', async () => {
+  const claimChain = chain('collection_cases', { result: 0 }); // fence claims 0 rows
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), claimChain],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res).toEqual({ dialed: false, reason: 'dial_claim_lost' });
+  expect(claimChain.where).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'cust-1' }));
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+  expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+});
+
+// codex gh-r13 pins.
+test('pre-claim state transitions fence customer_id — a mid-merge repointed case is never cancelled from stale snapshots', async () => {
+  const stateChain = chain('collection_cases', { returningRows: [] });
+  setDb({
+    collection_cases: [
+      chain('collection_cases', { first: { ...CASE, approval_expires_at: new Date('2026-08-12T14:00:00Z') } }),
+      stateChain,
+    ],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res.reason).toBe('approval_expired');
+  expect(stateChain.where).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'cust-1' }));
+});
+
+test('master gate flipped off during the pre-claim reads ⇒ gated_off, claim never attempted', async () => {
+  const caseChain = chain('collection_cases', { first: { ...CASE } });
+  const customerChain = chain('customers', {
+    first: () => { process.env.GATE_VOICE_LATE_PAYMENT = 'false'; return CUSTOMER; },
+  });
+  setDb({
+    collection_cases: [caseChain], // NO claim chain — a claim would throw 'unexpected'
+    customers: [customerChain, chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res).toEqual({ dialed: false, reason: 'gated_off' });
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+  expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+});
+
+test('master gate flipped off after the claim ⇒ never_contacted stamp, call_log canceled, claim released, NO provider touch', async () => {
+  const claimChain = chain('collection_cases', { result: 1 });
+  const releaseChain = chain('collection_cases', { result: 1 });
+  const insertChain = chain('call_log', { returningRows: [{ id: 'cl-1' }] });
+  const cancelChain = chain('call_log', { result: 1 });
+  // mockResolvedValue(false) from the stamp-retry test survives
+  // clearAllMocks — restore the default explicitly (documented trap).
+  ContactLedger.markSendFailed.mockResolvedValue(true);
+  // The claim succeeds, then the flip lands during the ledger write.
+  ContactLedger.recordContact.mockImplementation(async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT = 'false';
+    calls.push('ledger.record');
+    return { id: 'ledger-1', metadata: {} };
+  });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), claimChain, releaseChain],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined }), insertChain, cancelChain],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res).toEqual({ dialed: false, reason: 'gated_off' });
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+  // The pre-provider row must not consume the frequency windows.
+  expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+    expect.objectContaining({ id: 'ledger-1' }),
+    expect.objectContaining({ stage: 'gate_recheck', never_contacted: true }),
+  );
+  expect(cancelChain._updated.status).toBe('canceled');
+  expect(releaseChain._updated.current_state).toBe('approved');
+});
+
+// codex gh-r14: time-based authorization re-checked at the claim with a
+// FRESH clock — the entry `now` can go stale across the policy evaluation.
+test('claim boundary re-checks the call window with a fresh clock — after-hours claim stands down pre-claim', async () => {
+  ContactPolicy.isWithinCallWindow.mockReturnValue(false);
+  const LATE = new Date('2026-08-12T22:30:00Z'); // 18:30 ET
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } })], // NO claim chain
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW, clock: () => LATE });
+  expect(res).toEqual({ dialed: false, reason: 'outside_call_window' });
+  expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(LATE);
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+  expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+});
+
+test('the claim WHERE compares approval expiry against the fresh clock, not the entry snapshot', async () => {
+  ContactPolicy.isWithinCallWindow.mockReturnValue(true);
+  const FRESH = new Date('2026-08-12T15:20:00Z');
+  const claimChain = chain('collection_cases', { result: 0 });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), claimChain],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW, clock: () => FRESH });
+  expect(res.reason).toBe('dial_claim_lost');
+  expect(claimChain.where).toHaveBeenCalledWith('approval_expires_at', '>', FRESH);
 });

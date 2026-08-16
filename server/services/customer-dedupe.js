@@ -779,6 +779,34 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
   let winnerBeforeMerge = null;
   let mergeLockedAt = null;
   const result = await db.transaction(async (trx) => {
+    // The collections case lock for BOTH parties, before anything moves
+    // (PR C / codex gh-r7): the repoint below rewrites collection_cases FKs
+    // while the dial surfaces promote/rotate under this same customer lock —
+    // without it, either ordering can land an approved case beside the
+    // winner's live one (two pipelines) or beside a held dispute. Two locks,
+    // deterministic order (sorted ids) to avoid lock inversion.
+    for (const custId of [winnerId, loserId].map(String).sort()) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['collections_case', custId],
+      );
+    }
+    // A collection call mid-flight defers the merge (codex gh-r10): the
+    // dial claim also takes these case locks, so this check is
+    // authoritative — a 'dialing' case means a live call is using policy
+    // and phone snapshots evaluated pre-merge, and repointing under it
+    // would strand its callbacks and ledger writes. Merges are retryable;
+    // dialing windows last minutes.
+    let dialingCase = null;
+    try {
+      dialingCase = await trx('collection_cases')
+        .whereIn('customer_id', [winnerId, loserId])
+        .where({ current_state: 'dialing' })
+        .first('id');
+    } catch { dialingCase = null; } // pre-collections envs: no table, no defer
+    if (dialingCase) {
+      throw new Error('executeMerge: deferred — a collection call is in flight for one of these customers; retry after it completes');
+    }
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loser = locked.find((r) => r.id === loserId);
@@ -1062,6 +1090,49 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         } else {
           throw new Error(`executeMerge: repoint failed on ${table}.${column}: ${e.message}`);
         }
+      }
+    }
+    // Reconcile collection cases after the repoint (PR C / codex gh-r7):
+    // the merge can land two live cases under the winner. Under the case
+    // locks taken above this read is authoritative. dialing/held rows are
+    // NEVER touched (a claimed call, a dispute hold); surplus 'approved'
+    // rows revert to 'proposed' — all of them when a dialing/held row
+    // exists, otherwise all but the newest approval. Savepoint-confined so
+    // a pre-collections environment cannot poison the merge.
+    try {
+      await trx.transaction(async (sp) => {
+        const liveCases = await sp('collection_cases')
+          .where({ customer_id: winnerId })
+          .whereIn('current_state', ['approved', 'dialing', 'held'])
+          .orderBy('approved_at', 'desc')
+          .select('id', 'current_state', 'case_version');
+        const approved = liveCases.filter((c) => c.current_state === 'approved');
+        const hasClaimedOrHeld = liveCases.length > approved.length;
+        const surplus = hasClaimedOrHeld ? approved : approved.slice(1);
+        for (const c of surplus) {
+          await sp('collection_cases')
+            .where({ id: c.id, current_state: 'approved', case_version: c.case_version })
+            .update({
+              current_state: 'proposed',
+              approved_by: null,
+              approved_at: null,
+              approval_expires_at: null,
+              hold_reason: 'merge_reconciled',
+              updated_at: sp.fn.now(),
+            });
+        }
+      });
+    } catch (reconcileErr) {
+      // Only an ABSENT table is tolerable (codex gh-r12): the savepoint
+      // exists for pre-collections environments, not to let a timeout or
+      // query error commit a merge that leaves two live approvals under
+      // the winner — the supervised endpoint's already-approved branch
+      // skips the sibling check, so both could dial. Anything but
+      // undefined_table fails the merge atomically.
+      if (reconcileErr && reconcileErr.code === '42P01') {
+        logger.warn(`[customer-dedupe] collection-case reconcile skipped (no collection_cases table): ${reconcileErr.message}`);
+      } else {
+        throw reconcileErr;
       }
     }
     // The loser's plan-rate components die with the loser (codex #3245 r8
@@ -2222,6 +2293,55 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     }
     const winnerId = journal.winner_customer_id;
     const loserId = journal.loser_customer_id;
+    // The collections case lock for BOTH parties, same as the forward
+    // merge (codex gh-r11): the undo repoints collection_cases back to the
+    // restored customer while the dial surfaces promote/claim under this
+    // lock — without it, the undo can move a case out from under a claim
+    // in flight. Same deterministic sorted order as executeMerge; case
+    // locks precede the comms lock in both directions, so the order
+    // cannot invert.
+    for (const custId of [winnerId, loserId].map(String).sort()) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['collections_case', custId],
+      );
+    }
+    // A collection call mid-flight defers the undo (codex gh-r11), for the
+    // same reason it defers the forward merge: a 'dialing' case is running
+    // on policy, ledger, and call_log data for the pre-undo owner.
+    let dialingCase = null;
+    try {
+      dialingCase = await trx('collection_cases')
+        .whereIn('customer_id', [winnerId, loserId])
+        .where({ current_state: 'dialing' })
+        .first('id');
+    } catch { dialingCase = null; } // pre-collections envs: no table, no defer
+    if (dialingCase) {
+      refuse('A collection call is in flight for one of these customers — retry the revert after it completes');
+    }
+    // COMPLETED collections activity since the merge blocks the undo too
+    // (codex gh-r14): a call that already ran left its call_log and
+    // contact-ledger rows on the post-merge winner — repointing the case
+    // back would strand that history on the wrong customer, and the
+    // restored customer's empty ledger would let the auto sweep re-dial
+    // inside the 7-day spacing window. Fail closed; this undo is by hand.
+    let collectionsActivity = null;
+    try {
+      collectionsActivity = await trx('collections_contact_ledger')
+        .whereIn('customer_id', [winnerId, loserId])
+        .where('occurred_at', '>', journal.created_at)
+        .first('id');
+      if (!collectionsActivity) {
+        collectionsActivity = await trx('call_log')
+          .where({ source: 'collections_voice' })
+          .whereIn('customer_id', [winnerId, loserId])
+          .where('created_at', '>', journal.created_at)
+          .first('id');
+      }
+    } catch { collectionsActivity = null; } // pre-collections envs: no tables, no blocker
+    if (collectionsActivity) {
+      refuse('Collections contact happened after this merge (a call or ledger entry) — the case, call log, and ledger history must be separated by hand before this merge can be undone');
+    }
     // FIRST lock after the journal row, BEFORE the customers rows (lock
     // order contract in utils/customer-comms-lock.js): every appointment
     // creator and the template-run executor take `customer-comms:<id>`

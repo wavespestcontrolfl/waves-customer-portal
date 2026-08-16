@@ -42,7 +42,7 @@ const NOW = new Date('2026-08-12T15:00:00Z'); // Wed Aug 12, 11:00 ET
 
 function chain({ result = [], first, returning } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orderBy', 'distinct', 'select', 'limit']
+  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orderBy', 'distinct', 'select', 'limit']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.insert = jest.fn(() => q);
   q.update = jest.fn(() => q);
@@ -90,6 +90,13 @@ afterAll(() => {
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_COLLECTIONS_SHADOW = 'true';
+  db.fn = { now: jest.fn(() => 'NOW()') };
+  db.transaction = jest.fn(async (fn) => {
+    const trx = (t) => db(t);
+    trx.raw = jest.fn(async () => ({}));
+    trx.fn = db.fn;
+    return fn(trx);
+  });
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   db.raw = jest.fn((expr) => expr);
   ContactPolicy.evaluate.mockResolvedValue(ALLOWED_VERDICT);
@@ -222,12 +229,12 @@ describe('idempotency + versioning', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), caseUpdate, chain({ result: [] })],
+      collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), chain({ first: { customer_id: 'cust-1' } }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
 
-    expect(caseUpdate.where).toHaveBeenCalledWith({ id: 'case-1', case_version: 1 });
+    expect(caseUpdate.where).toHaveBeenCalledWith({ id: 'case-1', customer_id: 'cust-1', case_version: 1, current_state: 'shadow' });
     expect(caseUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       case_version: 2,
       eligible_balance_snapshot: 15300,
@@ -354,8 +361,9 @@ describe('card durability', () => {
 describe('retirement + tier rotation', () => {
   test('a customer denied this sweep has their case lapsed AND its unread card retired', async () => {
     ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['flag_collection_hold'] });
-    const selectChain = chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14' }] });
-    const updateChain = chain({ result: 1 });
+    const selectChain = chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] });
+    // gh-r11: card keys derive from the rows the fenced update RETURNS.
+    const updateChain = chain({ returning: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14' }] });
     const cardChain = chain({ result: 1 });
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] })],
@@ -371,6 +379,21 @@ describe('retirement + tier rotation', () => {
     expect(cardChain.update).toHaveBeenCalledWith(expect.objectContaining({ read_at: expect.anything() }));
   });
 
+  test('gh-r11: a case promoted between the lapse select and the fenced update keeps its card', async () => {
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['flag_collection_hold'] });
+    const selectChain = chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] });
+    // The fence let the promotion win: zero rows returned ⇒ zero lapses,
+    // and NO notifications retirement query fires at all.
+    const updateChain = chain({ returning: [] });
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] })],
+      collection_cases: [selectChain, updateChain],
+      notifications: [],
+    });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result.casesLapsed).toBe(0);
+  });
+
   test('an unchanged balance that crossed a dunning tier rotates the version and files a fresh card', async () => {
     // Same invoice set + balance, but the standing key is the 14-day tier
     // while the invoice is now 35 days overdue (tier 30) ⇒ NOT unchanged.
@@ -382,7 +405,7 @@ describe('retirement + tier rotation', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: { ...INVOICE, due_date: '2026-07-08' } })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ result: [] }), chain({ first: existing }), caseUpdate, chain({ result: [] })],
+      collection_cases: [chain({ result: [] }), chain({ first: existing }), chain({ first: { customer_id: 'cust-1' } }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
@@ -414,7 +437,7 @@ describe('r4: unpaid candidates + lapsed reactivation', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ result: [] }), chain({ first: lapsed }), caseUpdate, chain({ result: [] })],
+      collection_cases: [chain({ result: [] }), chain({ first: lapsed }), chain({ first: { customer_id: 'cust-1' } }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
@@ -446,8 +469,8 @@ describe('r6: evaluation errors preserve, duplicate live cases self-heal', () =>
   test('two live shadow cases (customer merge) self-heal: newest kept, extra lapsed + its card retired', async () => {
     const healSelect = chain({
       result: [
-        { id: 'case-new', idempotency_key: 'collections:cust-1:2:14' },
-        { id: 'case-old', idempotency_key: 'collections:cust-9:1:14' },
+        { id: 'case-new', idempotency_key: 'collections:cust-1:2:14', current_state: 'shadow' },
+        { id: 'case-old', idempotency_key: 'collections:cust-9:1:14', current_state: 'shadow' },
       ],
     });
     const healUpdate = chain({ result: 1 });
@@ -485,8 +508,10 @@ test('rotating the case version retires the previous version card', async () => 
     invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
     customers: [chain({ first: CUSTOMER })],
     collection_cases: [
-      chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14' }] }), // self-heal read (single row)
+      chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] }), // self-heal read (single row)
       chain({ first: existing }),
+      chain({ first: { customer_id: 'cust-1' } }), // in-lock owner re-read
+      chain({ first: undefined }), // in-lock live-check
       chain({ returning: [{ id: 'case-1', case_version: 2, eligible_balance_snapshot: 12800 }] }),
       chain({ result: [] }),
     ],
@@ -496,4 +521,109 @@ test('rotating the case version retires the previous version card', async () => 
   expect(retireOld.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['collections:cust-1:1:14']);
   expect(retireOld.update).toHaveBeenCalledWith(expect.objectContaining({ read_at: expect.anything() }));
   expect(result.cardsFiled).toBe(1);
+});
+
+// codex gh-r2 (PR C): the existing-case lookup must see EVERY settled state
+// — a cancelled (dial-time policy denial) or post-call proposed row left
+// invisible made the sweep attempt a version-1 insert whose globally
+// unique idempotency key collided, permanently blocking regeneration.
+test('the rotation lookup excludes only the live pipeline states', async () => {
+  const grepSrc = require('fs').readFileSync(
+    require.resolve('../services/collections/shadow-sweep'), 'utf8',
+  );
+  expect(grepSrc).toContain("whereNotIn('current_state', ['approved', 'dialing', 'held'])");
+  expect(grepSrc).not.toContain("whereIn('current_state', ['shadow', 'lapsed'])\n          .orderBy('case_version', 'desc')");
+});
+
+
+// codex gh-r3: rotation is STATE-fenced too — with proposed rows eligible,
+// a concurrent promote/claim between read and write must win cleanly.
+test('the rotation update fences on the originally read current_state', () => {
+  const grepSrc = require('fs').readFileSync(
+    require.resolve('../services/collections/shadow-sweep'), 'utf8',
+  );
+  expect(grepSrc).toContain("{ id: existing.id, customer_id: customerId, case_version: existing.case_version, current_state: existing.current_state }");
+});
+
+
+// codex gh-r4 pins.
+test('a customer with ANY live/held case row is skipped — no second pipeline, no hold bypass', async () => {
+  setDbQueues({
+    customers: [chain({ first: CUSTOMER })],
+    invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+    collection_cases: [
+      chain({ result: [{ id: 'case-live', idempotency_key: 'collections:cust-1:3:14', current_state: 'dialing' }] }),
+    ],
+    notifications: [],
+  });
+  const result = await ShadowSweep.runShadowSweep({ now: NOW });
+  expect(result.casesCreated).toBe(0);
+  expect(result.casesUpdated).toBe(0);
+});
+
+// codex gh-r6 P0: the stale-retirement lapse is fenced to still-shadow rows
+// — a row promoted between the select and the update escapes untouched.
+test('the stale-retirement lapse update carries the shadow state fence', () => {
+  const grepSrc = require('fs').readFileSync(
+    require.resolve('../services/collections/shadow-sweep'), 'utf8',
+  );
+  const retireBlock = grepSrc.slice(grepSrc.indexOf('let casesLapsed = 0'));
+  expect(retireBlock).toContain(".where({ current_state: 'shadow' })\n        .update({ current_state: 'lapsed'");
+});
+
+// codex gh-r9: the self-heal snapshot + duplicate lapse run UNDER the
+// customer lock, so a promoted duplicate skips the whole customer.
+test('the self-heal runs inside withCaseLock (source shape)', () => {
+  const grepSrc = require('fs').readFileSync(
+    require.resolve('../services/collections/shadow-sweep'), 'utf8',
+  );
+  expect(grepSrc).toContain('const heal = await withCaseLock(customerId, async (trx) => {');
+  expect(grepSrc).toContain('if (heal.skip) continue;');
+});
+
+// codex gh-r10: the proposal card is filed OUTSIDE the case lock — a
+// promote+dial landing between the rotation commit and the insert would
+// leave a fresh "no call will be placed" card for a case that just dialed.
+// The sweep re-checks the state after filing and self-retires the card.
+describe('gh-r10: post-file card recheck', () => {
+  function filedQueues({ recheck, retireChain }) {
+    const caseInsert = chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800 }] });
+    const notifications = [chain({ first: null })]; // existing-card probe
+    if (retireChain) notifications.push(retireChain);
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      customers: [chain({ first: CUSTOMER })],
+      collection_cases: [chain({ result: [] }), chain({ first: undefined }), caseInsert],
+      call_log: [recheck],
+      notifications,
+    });
+  }
+
+  // gh-r12 semantics: retire ONLY on an actual standing call record —
+  // case state is not proof ('dialing' precedes the provider request and
+  // releases on pre-provider failure). The recheck probes call_log under
+  // the case's idempotency key, excluding terminal non-contact statuses.
+  test('no call record after filing keeps the card (still shadow, refused, or dial_failed alike)', async () => {
+    const retireChain = chain({ result: 1 });
+    const recheck = chain({ first: undefined });
+    filedQueues({ recheck, retireChain });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result.cardsFiled).toBe(1);
+    const raws = recheck.whereRaw.mock.calls.map((c) => c[0]).join(' ');
+    expect(raws).toContain("metadata->>'collectionsIdempotencyKey' = ?");
+    expect(raws).toContain("NOT IN ('failed', 'busy', 'no-answer', 'canceled')");
+    // gh-r13: provider-confirmed only — the row is inserted 'initiated'
+    // BEFORE the provider is touched; the sid exists only after success.
+    expect(recheck.whereNotNull).toHaveBeenCalledWith('twilio_call_sid');
+    expect(retireChain.update).not.toHaveBeenCalled();
+  });
+
+  test('a standing call record (a dial actually went out) gets the just-filed card self-retired by dedupe key', async () => {
+    const retireChain = chain({ result: 1 });
+    filedQueues({ recheck: chain({ first: { id: 'cl-1' } }), retireChain });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result.cardsFiled).toBe(1);
+    expect(retireChain.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['collections:cust-1:1:14']);
+    expect(retireChain.update).toHaveBeenCalledWith(expect.objectContaining({ read_at: expect.anything() }));
+  });
 });

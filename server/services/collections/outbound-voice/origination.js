@@ -47,9 +47,18 @@ function sortedIds(value) {
   return arr.map(String).sort();
 }
 
-async function setCaseState(caseRow, patch) {
+async function setCaseState(caseRow, patch, { fromState = 'approved' } = {}) {
+  // State-fenced (codex gh-r8): pre-claim transitions run while the row
+  // should still be 'approved' — a concurrent invocation that WON the
+  // approved→dialing claim must not have its live 'dialing' state
+  // clobbered by this loser's expired/cancelled verdict. The post-dial
+  // failure path passes fromState 'dialing' (it holds the claim).
+  // customer_id is in the fence too (codex gh-r13): a merge can repoint
+  // the case while origination evaluates the OLD owner — an expiry/policy
+  // denial reached here must not cancel the now winner-owned case using
+  // the retired loser's snapshots. A moved row matches 0 and stands down.
   const [updated] = await db('collection_cases')
-    .where({ id: caseRow.id, case_version: caseRow.case_version })
+    .where({ id: caseRow.id, customer_id: caseRow.customer_id, case_version: caseRow.case_version, current_state: fromState })
     .update({ ...patch, updated_at: db.fn.now() })
     .returning('*');
   return updated || null;
@@ -61,7 +70,7 @@ async function setCaseState(caseRow, patch) {
  * policy/gate refusals; only genuinely unexpected errors propagate to the
  * caller's catch (which must treat them as "not dialed").
  */
-async function originateCollectionCall(caseId, { now = new Date() } = {}) {
+async function originateCollectionCall(caseId, { now = new Date(), clock = () => new Date() } = {}) {
   if (!isVoiceLatePaymentEnabled()) return { dialed: false, reason: 'gated_off' };
 
   const { isEnabled } = require('../../../config/feature-gates');
@@ -170,13 +179,38 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
   // one worker proceed; the loser sees zero rows and stands down. A crash
   // after the claim leaves the case visibly stuck in 'dialing' for the
   // supervised pilot's operator to resolve — never a second dial.
-  const claimed = await db('collection_cases')
-    .where({ id: caseRow.id, current_state: 'approved', case_version: caseRow.case_version })
+  // The claim runs UNDER the customer case lock (codex gh-r10): a merge
+  // holds this lock while it reconciles/repoints, and its in-lock
+  // dialing-check must be authoritative — without the lock here, a claim
+  // could land between the merge's check and its commit and the call
+  // would proceed against mid-repoint data.
+  const { withCaseLock } = require('../case-lock');
+  // Master gate RE-CHECK at the claim boundary (codex gh-r13 P1): the
+  // entry check ran before the customer/policy/idempotency reads — an
+  // incident kill-switch flip during that window must stop the dial HERE,
+  // before any state is claimed or the provider is touched.
+  if (!isVoiceLatePaymentEnabled()) return { dialed: false, reason: 'gated_off' };
+  // Time-based authorization RE-CHECK with a FRESH clock (codex gh-r14):
+  // the entry snapshot of `now` can go stale across the policy evaluation
+  // (it may include a Stripe microdeposit lookup) — a claim reached after
+  // 18:00 ET or past approval_expires_at must stand down. The window
+  // predicate is contact-policy's own; the expiry re-check rides IN the
+  // claim's WHERE below via this same fresh clock.
+  const claimNow = clock();
+  if (!ContactPolicy.isWithinCallWindow(claimNow)) {
+    return { dialed: false, reason: 'outside_call_window' };
+  }
+  // customer_id is IN the fence (codex gh-r11): a merge committing between
+  // the snapshot reads and this lock acquisition repoints the case to the
+  // winner — the policy verdict and phone evaluated above then belong to
+  // the retired loser. A moved row claims 0 and stands down.
+  const claimed = await withCaseLock(caseRow.customer_id, async (trx) => trx('collection_cases')
+    .where({ id: caseRow.id, customer_id: caseRow.customer_id, current_state: 'approved', case_version: caseRow.case_version })
     // The 24h authorization boundary holds INSIDE the atomic claim too (gh
     // prb-r15): the policy revalidation above can cross the deadline, and
     // the earlier expiry check is not the boundary — this WHERE is.
-    .where('approval_expires_at', '>', now)
-    .update({ current_state: 'dialing', updated_at: db.fn.now() });
+    .where('approval_expires_at', '>', claimNow)
+    .update({ current_state: 'dialing', updated_at: trx.fn.now() }));
   if (!claimed) return { dialed: false, reason: 'dial_claim_lost' };
 
   // From here to calls.create, a thrown persistence failure must RELEASE
@@ -256,6 +290,30 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
   // Flipped immediately before the ONE network call below (gh prb-r11):
   // any throw while it is still false (missing Twilio config, client
   // construction) provably happened before the provider was touched.
+  // Final master-gate check before the provider (codex gh-r13 P1): the
+  // claim and the ledger/call_log writes take real time — a kill-switch
+  // flip during them must still stop the call. Release the claim cleanly;
+  // no provider request exists, so no callback will ever reconcile it.
+  if (!isVoiceLatePaymentEnabled()) {
+    // Same stamp-then-release doctrine as the pre-provider failure path
+    // (gh prb-r16): unstamped ⇒ claim deliberately kept for the operator.
+    let stamped = await ContactLedger.markSendFailed(ledgerEntry, { stage: 'gate_recheck', never_contacted: true });
+    if (!stamped) {
+      stamped = await ContactLedger.markSendFailed(ledgerEntry, { stage: 'gate_recheck', never_contacted: true });
+    }
+    if (callLogId) {
+      await db('call_log').where({ id: callLogId })
+        .update({ status: 'canceled', updated_at: new Date() })
+        .catch(() => {});
+    }
+    if (stamped) {
+      await releaseClaim();
+    } else {
+      logger.error(`[collections-voice] never_contacted stamp FAILED TWICE for ledger ${ledgerEntry.id} — case ${caseRow.id} left in 'dialing' for operator repair (gate recheck)`);
+    }
+    return { dialed: false, reason: 'gated_off' };
+  }
+
   let providerRequestStarted = false;
   try {
     const twilio = require('twilio');
@@ -339,7 +397,7 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
       approved_at: null,
       approval_expires_at: null,
       hold_reason: 'dial_failed',
-    }).catch(() => {});
+    }, { fromState: 'dialing' }).catch(() => {});
     return { dialed: false, reason: 'dial_failed' };
   }
 }
