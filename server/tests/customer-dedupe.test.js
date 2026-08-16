@@ -37,14 +37,18 @@ function makeChain(table, route) {
     // and default unknown tables to [] (truthy), which would false-fire the
     // defer. .first() must resolve a row or null — serve it centrally; the
     // defer pin test plants a row via DIALING_CASE.
-    if (table === 'collection_cases') return DIALING_CASE;
+    if (table === 'collection_cases') {
+      if (COLLECTION_CASES_ERROR) throw COLLECTION_CASES_ERROR;
+      return q.called('first') ? DIALING_CASE : [];
+    }
     return route(q);
   }).then(resolve, reject);
   return q;
 }
 
 let DIALING_CASE = null;
-afterEach(() => { DIALING_CASE = null; });
+let COLLECTION_CASES_ERROR = null;
+afterEach(() => { DIALING_CASE = null; COLLECTION_CASES_ERROR = null; });
 
 function installDb(router) {
   db.mockImplementation((table) => makeChain(table, (q) => router(table, q)));
@@ -701,6 +705,25 @@ describe('executeMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
       .rejects.toThrow(/deferred — a collection call is in flight/);
+  });
+
+  it('gh-r12: a collection-case reconcile failure FAILS the merge (atomic) — except undefined_table', async () => {
+    const build = () => buildTrx({
+      winner: { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' },
+      loser: { id: LOSER, first_name: 'Diana', last_name: null, phone: '9995550003' },
+      fkRows: FK_ROWS,
+    });
+    // A real failure (timeout, bad query) must not commit a merge that
+    // leaves two live approvals under the winner.
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    COLLECTION_CASES_ERROR = Object.assign(new Error('statement timeout'), { code: '57014' });
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/statement timeout/);
+    // An absent table (pre-collections env) stays tolerable.
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    COLLECTION_CASES_ERROR = Object.assign(new Error('relation "collection_cases" does not exist'), { code: '42P01' });
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .resolves.toBeTruthy();
   });
 
   it('refuses when both rows have Stripe profiles', async () => {

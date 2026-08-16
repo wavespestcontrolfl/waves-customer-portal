@@ -593,35 +593,31 @@ describe('gh-r10: post-file card recheck', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ result: [] }), chain({ first: undefined }), caseInsert, recheck],
+      collection_cases: [chain({ result: [] }), chain({ first: undefined }), caseInsert],
+      call_log: [recheck],
       notifications,
     });
   }
 
-  // gh-r11 semantics: retire ONLY on evidence a call is going out — the
-  // recheck matches approved/dialing; still-shadow AND settled-back-to-
-  // proposed (refused / dial_failed) both KEEP the card.
-  test('a case still in shadow after filing keeps its card', async () => {
+  // gh-r12 semantics: retire ONLY on an actual standing call record —
+  // case state is not proof ('dialing' precedes the provider request and
+  // releases on pre-provider failure). The recheck probes call_log under
+  // the case's idempotency key, excluding terminal non-contact statuses.
+  test('no call record after filing keeps the card (still shadow, refused, or dial_failed alike)', async () => {
     const retireChain = chain({ result: 1 });
-    filedQueues({ recheck: chain({ first: undefined }), retireChain });
-    const result = await ShadowSweep.runShadowSweep({ now: NOW });
-    expect(result.cardsFiled).toBe(1);
-    expect(retireChain.update).not.toHaveBeenCalled();
-  });
-
-  test('a case settled back to proposed (refusal / dial_failed) keeps its card — it is the supervised retry surface', async () => {
-    const retireChain = chain({ result: 1 });
-    const recheck = chain({ first: undefined }); // whereIn approved/dialing finds nothing
+    const recheck = chain({ first: undefined });
     filedQueues({ recheck, retireChain });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(result.cardsFiled).toBe(1);
-    expect(recheck.whereIn).toHaveBeenCalledWith('current_state', ['approved', 'dialing']);
+    const raws = recheck.whereRaw.mock.calls.map((c) => c[0]).join(' ');
+    expect(raws).toContain("metadata->>'collectionsIdempotencyKey' = ?");
+    expect(raws).toContain("NOT IN ('failed', 'busy', 'no-answer', 'canceled')");
     expect(retireChain.update).not.toHaveBeenCalled();
   });
 
-  test('a case promoted mid-flight (approved/dialing) gets its just-filed card self-retired by dedupe key', async () => {
+  test('a standing call record (a dial actually went out) gets the just-filed card self-retired by dedupe key', async () => {
     const retireChain = chain({ result: 1 });
-    filedQueues({ recheck: chain({ first: { id: 'case-1' } }), retireChain });
+    filedQueues({ recheck: chain({ first: { id: 'cl-1' } }), retireChain });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(result.cardsFiled).toBe(1);
     expect(retireChain.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['collections:cust-1:1:14']);

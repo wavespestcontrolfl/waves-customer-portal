@@ -377,14 +377,17 @@ async function runShadowSweep({ now = new Date() } = {}) {
         // insert, and the dial path's retirement then ran before the card
         // existed — leaving a fresh "no call will be placed" card for a
         // case that just dialed. Re-check and self-retire; best-effort.
-        // Retire ONLY on evidence a call is actually going out (codex
-        // gh-r11): a refused or dial_failed attempt settles the case back
-        // to 'proposed' before this recheck runs, and that card is the
-        // supervised retry surface — every non-shadow state is NOT proof
-        // of a dial.
-        const recheck = await db('collection_cases')
-          .where({ id: caseRow.id })
-          .whereIn('current_state', ['approved', 'dialing'])
+        // Retire ONLY on an actual standing call record (codex gh-r11 +
+        // gh-r12): case state is not proof — 'dialing' is entered before
+        // the provider request and is released on a pre-provider failure,
+        // and a refused attempt settles back to 'proposed'; in both cases
+        // the card is the supervised retry surface. The predicate mirrors
+        // origination's own idempotency probe: a call_log row under this
+        // case's key whose status is not a terminal non-contact.
+        const recheck = await db('call_log')
+          .where({ source: 'collections_voice' })
+          .whereRaw("metadata->>'collectionsIdempotencyKey' = ?", [idempotencyKey])
+          .whereRaw("COALESCE(status, '') NOT IN ('failed', 'busy', 'no-answer', 'canceled')")
           .first('id')
           .catch(() => null);
         if (recheck) {

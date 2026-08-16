@@ -39,7 +39,7 @@ function makeChain(table, route) {
     // default unknown tables to [] (truthy), which would false-fire the
     // undo's in-flight-call defer. .first() must resolve a row or null —
     // serve it centrally; the defer pin plants a row via DIALING_CASE.
-    if (table === 'collection_cases') return DIALING_CASE;
+    if (table === 'collection_cases') return q.called('first') ? DIALING_CASE : [];
     return route(q);
   }).then(resolve, reject);
   return q;

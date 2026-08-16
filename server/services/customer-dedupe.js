@@ -1123,7 +1123,17 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         }
       });
     } catch (reconcileErr) {
-      logger.warn(`[customer-dedupe] collection-case reconcile skipped: ${reconcileErr.message}`);
+      // Only an ABSENT table is tolerable (codex gh-r12): the savepoint
+      // exists for pre-collections environments, not to let a timeout or
+      // query error commit a merge that leaves two live approvals under
+      // the winner — the supervised endpoint's already-approved branch
+      // skips the sibling check, so both could dial. Anything but
+      // undefined_table fails the merge atomically.
+      if (reconcileErr && reconcileErr.code === '42P01') {
+        logger.warn(`[customer-dedupe] collection-case reconcile skipped (no collection_cases table): ${reconcileErr.message}`);
+      } else {
+        throw reconcileErr;
+      }
     }
     // The loser's plan-rate components die with the loser (codex #3245 r8
     // — excluded from the FK sweep above): the merge never copies
