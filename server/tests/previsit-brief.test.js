@@ -3264,3 +3264,31 @@ describe('codex #3423 r54 — copular credentials, perfect access, qualifiers, p
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r55 — generic requests, bare dates, adverbs, access confirmation, field-wide history, service suffixes', () => {
+  test('r55 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer requested contact before arrival', 'Property access confirmed', 'Service was performed today']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'The appointment today is cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const acceptedEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate currently cancelled', customer_context: null },
+      acceptedEst,
+    ).reason).toMatch(/estimate_state_conflict/);
+    const termite = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Termite Control Service' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control and Termite Control visited.' },
+      termite,
+    ).reason).toBe('noncanonical_company_name');
+  });
+});
