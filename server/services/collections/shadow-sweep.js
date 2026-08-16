@@ -370,7 +370,26 @@ async function runShadowSweep({ now = new Date() } = {}) {
       const filed = await fileProposalCard({
         dedupeKey: idempotencyKey, customer, caseRow, invoice, daysOverdue, verdict,
       });
-      if (filed) cardsFiled++;
+      if (filed) {
+        cardsFiled++;
+        // The card is filed OUTSIDE the state lock (codex gh-r10 P2): a
+        // promote+dial can land between the rotation commit and this
+        // insert, and the dial path's retirement then ran before the card
+        // existed — leaving a fresh "no call will be placed" card for a
+        // case that just dialed. Re-check and self-retire; best-effort.
+        const stillShadow = await db('collection_cases')
+          .where({ id: caseRow.id, current_state: 'shadow' })
+          .first('id')
+          .catch(() => null);
+        if (!stillShadow) {
+          await db('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereNull('read_at')
+            .whereRaw("metadata->>'dedupeKey' = ?", [idempotencyKey])
+            .update({ read_at: db.fn.now() })
+            .catch((err) => logger.warn(`[collections-shadow] post-file card recheck retirement failed: ${err.message}`));
+        }
+      }
     } catch (err) {
       // One customer's failure never kills the sweep; nothing customer-facing
       // happened, so plain log-and-continue is safe.

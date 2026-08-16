@@ -344,3 +344,23 @@ describe('gh-r9', () => {
     expect(cChain.whereNotExists).toHaveBeenCalled();
   });
 });
+
+describe('gh-r10', () => {
+  test('the IN-LOCK sibling fence blocks live states AND supervised-park hold_reasons', async () => {
+    armGates();
+    const liveCheck = promoteChain(0, { first: { id: 'sib-parked' } });
+    const queues = [promoteChain(0), /* reclaim */ candidateChain([caseRow('c1')]), ownerChain(), liveCheck];
+    db.mockImplementation(() => queues.shift());
+    const res = await runCollectionsDialSweep({ now: NOW });
+    // A sibling parked dial_failed AFTER the candidate snapshot: stand down.
+    expect(res).toMatchObject({ promoted: 0, dialed: 0 });
+    expect(originateCollectionCall).not.toHaveBeenCalled();
+    // Predicate shape: (live state) OR (supervised-park marker).
+    const blocked = liveCheck.where.mock.calls.map((c) => c[0]).find((a) => typeof a === 'function');
+    expect(blocked).toBeDefined();
+    const rec = { whereIn: jest.fn(() => rec), orWhereIn: jest.fn(() => rec) };
+    blocked.call(rec);
+    expect(rec.whereIn).toHaveBeenCalledWith('current_state', ['approved', 'dialing', 'held']);
+    expect(rec.orWhereIn).toHaveBeenCalledWith('hold_reason', ['dial_failed', 'reclaimed_orphaned_approval']);
+  });
+});

@@ -24,6 +24,14 @@ jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.fn = { now: jest.fn(() => 'NOW()') };
   fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  // withCaseLock (gh-r10): the dial claim runs inside db.transaction — the
+  // trx dispatches to the same table queues; the advisory-lock raw is a no-op.
+  fn.transaction = jest.fn(async (cb) => {
+    const trx = (table) => fn(table);
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.fn = fn.fn;
+    return cb(trx);
+  });
   return fn;
 });
 jest.mock('../services/collections/contact-policy', () => ({
@@ -438,4 +446,22 @@ test('a doubly-failed never_contacted stamp on a definitive rejection keeps the 
   expect(res).toEqual({ dialed: false, reason: 'dial_failed' });
   expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(2); // one retry
   expect(stateChain.update).not.toHaveBeenCalled(); // never reset to proposed
+});
+
+// codex gh-r10: the approved→dialing claim runs under the customer case
+// lock — the same advisory lock the merge path takes — so a merge cannot
+// repoint the customer while a claim is mid-flight.
+test('the dial claim runs inside the customer case lock (db.transaction)', async () => {
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), chain('collection_cases', { result: 1 })],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [
+      chain('call_log', { first: undefined }), // idempotency probe: no prior
+      chain('call_log', { returningRows: [{ id: 'cl-1' }] }),
+      chain('call_log'), // sid backfill update
+    ],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res.dialed).toBe(true);
+  expect(db.transaction).toHaveBeenCalledTimes(1);
 });

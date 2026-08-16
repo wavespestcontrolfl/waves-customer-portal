@@ -175,13 +175,19 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
   // one worker proceed; the loser sees zero rows and stands down. A crash
   // after the claim leaves the case visibly stuck in 'dialing' for the
   // supervised pilot's operator to resolve — never a second dial.
-  const claimed = await db('collection_cases')
+  // The claim runs UNDER the customer case lock (codex gh-r10): a merge
+  // holds this lock while it reconciles/repoints, and its in-lock
+  // dialing-check must be authoritative — without the lock here, a claim
+  // could land between the merge's check and its commit and the call
+  // would proceed against mid-repoint data.
+  const { withCaseLock } = require('../case-lock');
+  const claimed = await withCaseLock(caseRow.customer_id, async (trx) => trx('collection_cases')
     .where({ id: caseRow.id, current_state: 'approved', case_version: caseRow.case_version })
     // The 24h authorization boundary holds INSIDE the atomic claim too (gh
     // prb-r15): the policy revalidation above can cross the deadline, and
     // the earlier expiry check is not the boundary — this WHERE is.
     .where('approval_expires_at', '>', now)
-    .update({ current_state: 'dialing', updated_at: db.fn.now() });
+    .update({ current_state: 'dialing', updated_at: trx.fn.now() }));
   if (!claimed) return { dialed: false, reason: 'dial_claim_lost' };
 
   // From here to calls.create, a thrown persistence failure must RELEASE

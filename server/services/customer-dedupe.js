@@ -791,6 +791,22 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         ['collections_case', custId],
       );
     }
+    // A collection call mid-flight defers the merge (codex gh-r10): the
+    // dial claim also takes these case locks, so this check is
+    // authoritative — a 'dialing' case means a live call is using policy
+    // and phone snapshots evaluated pre-merge, and repointing under it
+    // would strand its callbacks and ledger writes. Merges are retryable;
+    // dialing windows last minutes.
+    let dialingCase = null;
+    try {
+      dialingCase = await trx('collection_cases')
+        .whereIn('customer_id', [winnerId, loserId])
+        .where({ current_state: 'dialing' })
+        .first('id');
+    } catch { dialingCase = null; } // pre-collections envs: no table, no defer
+    if (dialingCase) {
+      throw new Error('executeMerge: deferred — a collection call is in flight for one of these customers; retry after it completes');
+    }
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loser = locked.find((r) => r.id === loserId);

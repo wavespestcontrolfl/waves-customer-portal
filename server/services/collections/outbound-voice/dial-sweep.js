@@ -65,8 +65,14 @@ async function promoteForAutoDial(caseRow, now) {
     if (!current || String(current.customer_id) !== String(caseRow.customer_id)) return false;
     const liveElsewhere = await trx('collection_cases')
       .where({ customer_id: caseRow.customer_id })
-      .whereIn('current_state', ['approved', 'dialing', 'held'])
       .whereNot('id', caseRow.id)
+      // Live states AND supervised-park markers (codex gh-r10): a sibling
+      // parked dial_failed AFTER the candidate snapshot must block this
+      // promotion — the in-lock predicate is the authoritative fence.
+      .where(function blocked() {
+        this.whereIn('current_state', ['approved', 'dialing', 'held'])
+          .orWhereIn('hold_reason', ['dial_failed', 'reclaimed_orphaned_approval']);
+      })
       .first('id');
     if (liveElsewhere) return false;
     const updated = await trx('collection_cases')

@@ -32,9 +32,19 @@ function makeChain(table, route) {
   }
   q.called = (m) => q._calls.some(([name]) => name === m);
   q.args = (m) => q._calls.find(([name]) => name === m)?.[1];
-  q.then = (resolve, reject) => Promise.resolve().then(() => route(q)).then(resolve, reject);
+  q.then = (resolve, reject) => Promise.resolve().then(() => {
+    // Dial-defer probe (gh-r10): the routers here predate collection_cases
+    // and default unknown tables to [] (truthy), which would false-fire the
+    // defer. .first() must resolve a row or null — serve it centrally; the
+    // defer pin test plants a row via DIALING_CASE.
+    if (table === 'collection_cases') return DIALING_CASE;
+    return route(q);
+  }).then(resolve, reject);
   return q;
 }
+
+let DIALING_CASE = null;
+afterEach(() => { DIALING_CASE = null; });
 
 function installDb(router) {
   db.mockImplementation((table) => makeChain(table, (q) => router(table, q)));
@@ -680,6 +690,18 @@ describe('executeMerge', () => {
     { table_name: 'call_log', column_name: 'customer_id' },
     { table_name: 'notification_prefs', column_name: 'customer_id' },
   ];
+
+  it('defers when either customer has a collection case mid-dial (gh-r10)', async () => {
+    const { trx } = buildTrx({
+      winner: { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' },
+      loser: { id: LOSER, first_name: 'Diana', last_name: null, phone: '9995550003' },
+      fkRows: FK_ROWS,
+    });
+    DIALING_CASE = { id: 'case-dialing-1' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/deferred — a collection call is in flight/);
+  });
 
   it('refuses when both rows have Stripe profiles', async () => {
     const { trx } = buildTrx({

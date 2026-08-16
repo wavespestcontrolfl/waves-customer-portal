@@ -564,3 +564,38 @@ test('the self-heal runs inside withCaseLock (source shape)', () => {
   expect(grepSrc).toContain('const heal = await withCaseLock(customerId, async (trx) => {');
   expect(grepSrc).toContain('if (heal.skip) continue;');
 });
+
+// codex gh-r10: the proposal card is filed OUTSIDE the case lock — a
+// promote+dial landing between the rotation commit and the insert would
+// leave a fresh "no call will be placed" card for a case that just dialed.
+// The sweep re-checks the state after filing and self-retires the card.
+describe('gh-r10: post-file card recheck', () => {
+  function filedQueues({ recheck, retireChain }) {
+    const caseInsert = chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800 }] });
+    const notifications = [chain({ first: null })]; // existing-card probe
+    if (retireChain) notifications.push(retireChain);
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      customers: [chain({ first: CUSTOMER })],
+      collection_cases: [chain({ result: [] }), chain({ first: undefined }), caseInsert, recheck],
+      notifications,
+    });
+  }
+
+  test('a case still in shadow after filing keeps its card', async () => {
+    const retireChain = chain({ result: 1 });
+    filedQueues({ recheck: chain({ first: { id: 'case-1' } }), retireChain });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result.cardsFiled).toBe(1);
+    expect(retireChain.update).not.toHaveBeenCalled();
+  });
+
+  test('a case promoted mid-flight gets its just-filed card self-retired by dedupe key', async () => {
+    const retireChain = chain({ result: 1 });
+    filedQueues({ recheck: chain({ first: undefined }), retireChain });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result.cardsFiled).toBe(1);
+    expect(retireChain.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['collections:cust-1:1:14']);
+    expect(retireChain.update).toHaveBeenCalledWith(expect.objectContaining({ read_at: expect.anything() }));
+  });
+});

@@ -2256,6 +2256,10 @@ router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) 
           .where({ id: caseRow.id })
           .first('customer_id');
         if (!current || String(current.customer_id) !== String(caseRow.customer_id)) return false;
+        // Live states only for the SUPERVISED path: the admin endpoint IS
+        // the release mechanism for supervised parks, so a parked sibling
+        // must not block a human's deliberate retry — only genuinely live
+        // pipeline states do.
         const liveElsewhere = await trx('collection_cases')
           .where({ customer_id: caseRow.customer_id })
           .whereIn('current_state', ['approved', 'dialing', 'held'])
