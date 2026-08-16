@@ -2472,3 +2472,108 @@ describe('round-23 hardening', () => {
     expect(zipMatchesState('31401', stateForZip('31401'))).toBe(true);
   });
 });
+
+describe('round-24 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('a NARROWED quote cannot shed the third-party possessive (SMS)', async () => {
+    // The model quotes only the fragment after the possessive — ownership
+    // is judged against the containing source clause, which still carries
+    // "My accountant's".
+    const body = "My accountant's email is wrong; change it to bookkeeper@example.com";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'change it to bookkeeper@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a NARROWED evidence quote cannot shed the possessive on a call', async () => {
+    const line = "my wife's name is wrong, it is Janet Smith";
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${line}` })],
+      customer_field_candidates: [
+        candidate({ id: 'n1', field_name: 'first_name', final_recommended_value: 'Janet', evidence_quote: 'name is wrong, it is Janet Smith' }),
+        candidate({ id: 'n2', field_name: 'last_name', final_recommended_value: 'Smith', evidence_quote: 'name is wrong, it is Janet Smith' }),
+      ],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(knex._data.customers[0].first_name).toBe('Jordan');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('a historical move phrase beside a spelling fix does not clear the unit', async () => {
+    // moveContext keys on the corrected statement — the spelling-fix group
+    // in sentence 2 did not ride the move license from sentence 1.
+    const body = 'I moved to Sarasota last year. You have my street misspelled; it is 123 Main St, Sarasota 34231';
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '123 Main St', quote: 'my street misspelled; it is 123 Main St, Sarasota 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'my street misspelled; it is 123 Main St, Sarasota 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'my street misspelled; it is 123 Main St, Sarasota 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex });
+    expect(res.applied.map((a) => a.field)).not.toContain('address_line2');
+    expect(knex._data.customers[0].address_line2).toBe('Unit 4'); // unit survives the spelling fix
+    expect(knex._data.customers[0].address_line1).toBe('123 Main St');
+  });
+
+  it('a genuine move through the runner still clears the unit', async () => {
+    const body = 'We moved to 99 Pine Ave, Sarasota. Zip is 34231';
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'we moved to 99 Pine Ave', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'we moved to 99 Pine Ave, Sarasota', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'zip is 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body, knex });
+    expect(res.applied.map((a) => a.field)).toContain('address_line2');
+    expect(knex._data.customers[0].address_line2).toBeNull();
+  });
+
+  it('state- and suite-only corrections pass the entry prefilter', () => {
+    expect(detectContactCorrectionIntent('My state is wrong; it should be GA')).toBe(true);
+    expect(detectContactCorrectionIntent('My suite is wrong; it should be 4B')).toBe(true);
+  });
+
+  it('the shared ZIP inverse honors the USPS exceptional prefixes both ways', () => {
+    const { stateForZip, zipMatchesState } = require('../services/data-hygiene/normalizers');
+    expect(stateForZip('20147')).toBe('VA');
+    expect(stateForZip('20005')).toBe('DC');
+    expect(stateForZip('73301')).toBe('TX');
+    expect(stateForZip('73101')).toBe('OK');
+    expect(stateForZip('88510')).toBe('TX');
+    for (const zip of ['20147', '20005', '73301', '73101', '88510']) {
+      expect(zipMatchesState(zip, stateForZip(zip))).toBe(true);
+    }
+  });
+
+  it('numeric ZIP scalars survive the shared admin address normalizer', () => {
+    const { normalizeAdminAddressInput } = require('../utils/intake-normalize');
+    const out = normalizeAdminAddressInput({ addressLine1: '12 Oak St', city: 'Sarasota', zip: 34231 });
+    expect(out.zip).toBe('34231');
+  });
+});

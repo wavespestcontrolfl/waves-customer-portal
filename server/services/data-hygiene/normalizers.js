@@ -33,7 +33,9 @@ const ZIP3_RANGES = {
   CA: [[900, 961]],
   CO: [[800, 816]],
   CT: [[60, 69]],
-  DC: [[200, 205]],
+  // 201 is VA (not DC) — USPS exception carved out (codex #3413 r24) so
+  // stateForZip and zipMatchesState agree on the exceptional prefixes.
+  DC: [[200, 200], [202, 205]],
   DE: [[197, 199]],
   FL: [[320, 349]],
   GA: [[300, 319], [398, 399]],
@@ -62,16 +64,19 @@ const ZIP3_RANGES = {
   NV: [[889, 898]],
   NY: [[5, 5], [100, 149]],
   OH: [[430, 459]],
-  OK: [[730, 749]],
+  // 733 (Austin) is TX — USPS exception (codex #3413 r24).
+  OK: [[730, 732], [734, 749]],
   OR: [[970, 979]],
   PA: [[150, 196]],
   RI: [[28, 29]],
   SC: [[290, 299]],
   SD: [[570, 577]],
   TN: [[370, 385]],
-  TX: [[750, 799]],
+  // 733 (Austin) and 885 (El Paso overflow) are TX — USPS exceptions
+  // (codex #3413 r24).
+  TX: [[733, 733], [750, 799], [885, 885]],
   UT: [[840, 847]],
-  VA: [[220, 246]],
+  VA: [[201, 201], [220, 246]],
   VT: [[50, 59]],
   WA: [[980, 994]],
   WI: [[530, 549]],

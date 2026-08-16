@@ -56,7 +56,7 @@ const ADDRESS_FIELDS = Object.freeze(['address_line1', 'address_line2', 'city', 
 // correction language — ordinary calls state identity fields all the time
 // (a spouse booking, a different property) and none of that is a mandate
 // to rewrite the profile.
-const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|surname|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|surname|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
+const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|surname|email|e-?mail|address|street|city|state|zip|unit|apt|apartment|suite)\b|\b(name|surname|email|e-?mail|address|street|city|state|zip|unit|apt|apartment|suite)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
 
 // Ownership disclaimers are NOT name corrections: "the account is not in my
 // name — my name is Jane Smith" is a caller explaining the account belongs
@@ -325,10 +325,9 @@ async function extractSmsContactCorrections({ body }) {
       && quoteInBody(c.quote) && valueEvidenceOk(c) && clearEvidenceOk(c)
       // A third party's contact info is never the customer's correction,
       // no matter how much correction vocabulary surrounds it (r21
-      // addresses; r22 extends the same doctrine to email and name).
-      && !(ADDRESS_FIELDS.includes(c.field) && THIRD_PARTY_ADDRESS_RE.test(String(c.quote || '')))
-      && !((c.field === 'email' || c.field === 'first_name' || c.field === 'last_name')
-        && THIRD_PARTY_CONTACT_RE.test(String(c.quote || ''))));
+      // addresses; r22 email/name; r24 judged against the CONTAINING
+      // source clause so a narrowed quote can't shed the possessive).
+      && !thirdPartyOwnedStatement(c.field, sourceClauseFor(text, c.quote)));
     // Each candidate's own quote must carry correction intent bound to its
     // field category — the message-level prefilter is not per-field
     // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
@@ -422,7 +421,18 @@ async function extractSmsContactCorrections({ body }) {
         const other = c.field === 'first_name' ? 'last_name' : 'first_name';
         return arr.some((o) => o.field === other);
       })
-      .map((c) => ({ field: c.field, newValue: normValue(c.new_value), quote: normValue(c.quote) }));
+      .map((c) => ({
+        field: c.field,
+        newValue: normValue(c.new_value),
+        quote: normValue(c.quote),
+        // Whether THIS candidate rode the move license (codex #3413 r24):
+        // the apply path's moveContext (unit clearing + full-group
+        // requirement) must key on the corrected address statement, not on
+        // a move phrase anywhere in the SMS — "I moved to Sarasota last
+        // year. You have my street misspelled; it is …" is a spelling fix
+        // whose unit must survive.
+        ...(ADDRESS_FIELDS.includes(c.field) && moveLicensedFor(c) ? { moveLicensed: true } : {}),
+      }));
   } catch (err) {
     logger.warn(`[contact-correction] sms extraction failed: ${errTag(err)}`);
     return null;
@@ -471,6 +481,36 @@ const THIRD_PARTY_ADDRESS_RE = /\b(?:his|her|their)\s+(?:\w+\s+)?address\b|\b(?!
 // the exact poisoning the lane exists to prevent. Spouse/child name
 // statements likewise never rename the account holder.
 const THIRD_PARTY_CONTACT_RE = /\b(?:his|her|their)\s+(?:\w+\s+)?(?:e-?mail|name|surname)\b|\b(?!(?:previous|prior)\b)[a-z]+(?:'s|s')\s+(?:\w+\s+)?(?:e-?mail|name|surname)\b/i;
+
+// Ownership is judged against the SOURCE CLAUSE containing the quote, not
+// the extractor-controlled fragment (codex #3413 r24): a model can narrow
+// its quote to "email is wrong; change it to …", dropping the "My
+// accountant's" prefix that marks the statement third-party — grounding
+// accepts any substring, so the containing clause span of the original
+// text is the authority. Falls back to the quote itself when it cannot be
+// located (grounding rejects unlocatable quotes anyway).
+function sourceClauseFor(text, quote) {
+  const hay = normValue(text).replace(/\s+/g, ' ').toLowerCase();
+  const nq = normValue(quote).replace(/\s+/g, ' ').toLowerCase();
+  const qs = nq ? hay.indexOf(nq) : -1;
+  if (qs < 0) return String(quote || '');
+  const qe = qs + nq.length;
+  const delims = /[;!?\n]|\.(?=\s|$)/g;
+  let left = 0;
+  let right = hay.length;
+  let m;
+  while ((m = delims.exec(hay))) {
+    if (m.index < qs) left = m.index + 1;
+    if (m.index >= qe) { right = m.index; break; }
+  }
+  return hay.slice(left, right);
+}
+
+function thirdPartyOwnedStatement(field, sourceClause) {
+  if (ADDRESS_FIELDS.includes(field)) return THIRD_PARTY_ADDRESS_RE.test(sourceClause);
+  if (field === 'email' || field === 'first_name' || field === 'last_name') return THIRD_PARTY_CONTACT_RE.test(sourceClause);
+  return false;
+}
 
 // Whole-ADDRESS replacement language (codex #3413 r21) — the quote must
 // call the ADDRESS wrong, not a component ("my street is spelled wrong"
@@ -1013,9 +1053,12 @@ async function runSmsContactCorrectionInner({ customer, body, smsLogId = null, k
       // to the original sender even if the customer's phone is reassigned
       // between the webhook match and the snapshot read above.
       senderPhone,
-      // Message-level move evidence tightens the address-group requirement:
-      // a stated move must carry street+city+zip, not locality alone.
-      moveContext: MOVE_EVIDENCE_RE.test(String(body || '')),
+      // Move evidence scoped to the corrected statement (codex #3413 r24):
+      // the extractor marks address candidates that actually rode the move
+      // license — a historical move phrase elsewhere in the SMS beside a
+      // spelling-fix group must not clear the unit or tighten the group
+      // requirement as though this were a current whole-property move.
+      moveContext: corrections.some((c) => c.moveLicensed === true),
       // Queue lock-owner fence (codex #3413 r20): runs INSIDE the apply
       // transaction, so a worker whose job was reclaimed after the
       // stale-lock threshold rolls its customer write back instead of
@@ -1246,12 +1289,14 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       // SMS / r23 calls): "my wife's name is wrong, it is Janet Smith" on
       // a primary-number call passes every intent/grounding/pair check —
       // but the name belongs to a third party and must neither rename the
-      // customer nor ring a proposal bell.
-      const tpQuote = String(c.evidence_quote || '');
-      const thirdParty = (c.field_name === 'email' || CALL_AUTO_FIELDS[c.field_name])
-        ? THIRD_PARTY_CONTACT_RE.test(tpQuote)
-        : THIRD_PARTY_ADDRESS_RE.test(tpQuote);
-      if (thirdParty) return false;
+      // customer nor ring a proposal bell. Judged against the FULL caller
+      // line that grounds the quote (r24): a narrowed evidence quote must
+      // not shed the possessive that marks the statement third-party.
+      const tpNeedle = normValue(c.evidence_quote).replace(/\s+/g, ' ').toLowerCase();
+      const tpLine = callerLines.find((line) => tpNeedle.length >= 4 && line.includes(tpNeedle))
+        || String(c.evidence_quote || '');
+      const tpField = CALL_AUTO_FIELDS[c.field_name] || c.field_name;
+      if (thirdPartyOwnedStatement(tpField, tpLine)) return false;
       if (!quoteGrounded(c.evidence_quote)) return false;
       if (seenFields.has(c.field_name)) return false;
       seenFields.add(c.field_name);

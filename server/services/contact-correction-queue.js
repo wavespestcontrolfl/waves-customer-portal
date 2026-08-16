@@ -407,17 +407,20 @@ function casEquals(field, a, b) {
 
 async function rebaseSnapshot(job, snapshot, knex) {
   if (!snapshot || !job.customer_id) return snapshot;
-  // Cut on the SNAPSHOT time, not the reservation time (codex #3413 r21):
-  // the baseline is captured at context attach, which can trail the
-  // reservation by the route's media/lookup awaits — a queue write landing
-  // in that gap is already reflected in the snapshot (or superseded by an
-  // admin edit the snapshot correctly holds) and must not be overlaid.
-  const snapshotAt = job.context_attached_at || job.created_at;
+  // No timestamp cutoff (codex #3413 r24): completed_at reflects the apply
+  // TRANSACTION's clock, not when its write became visible — an older job
+  // committing just after this job's snapshot capture could carry a
+  // completed_at that PRE-dates the capture, and a time cut would exclude
+  // exactly the write the snapshot missed. The oldValue chain below is the
+  // authority: a write is overlaid only when it chains off the value being
+  // rebased, which is inherently position-independent — a write already
+  // reflected in the snapshot (or superseded by an admin edit the snapshot
+  // holds) fails the chain and falls through to the CAS, which stales
+  // conservatively.
   const earlier = await knex('contact_correction_jobs')
     .where('customer_id', job.customer_id)
     .where('id', '<', job.id)
     .where('status', 'done')
-    .where('completed_at', '>', snapshotAt)
     .orderBy('id', 'asc');
   const rebased = { ...snapshot };
   for (const e of earlier) {

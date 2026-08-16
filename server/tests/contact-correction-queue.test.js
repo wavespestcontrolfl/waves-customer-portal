@@ -393,10 +393,14 @@ describe('round-18 hardening', () => {
     expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toEqual({ last_name: 'Riverson', phone: '+15550001111' });
   });
 
-  it('does not rebase over a write that completed BEFORE the snapshot was taken', async () => {
-    // A job that finished before this message's webhook matched is already
-    // reflected in the persisted snapshot — overlaying it again would mask
-    // an admin edit that restored the older value in between.
+  it('a chained earlier write is overlaid regardless of timestamps (round-24)', async () => {
+    // completed_at reflects the apply TRANSACTION's clock, not commit
+    // visibility, so no timestamp cutoff is trustworthy — the oldValue
+    // chain is the authority. Here the earlier write chains off the
+    // baseline (Riverz→Riverson) and is overlaid; if an admin had in fact
+    // restored Riverz afterwards, the apply-level CAS would compare the
+    // rebased Riverson against the live row and stale conservatively —
+    // the admin's value survives either way.
     const knex = makeStubKnex({
       contact_correction_jobs: [
         jobRow({
@@ -406,10 +410,10 @@ describe('round-18 hardening', () => {
         }),
         jobRow({ id: 2, status: 'queued', customer_id: CUSTOMER_ID, expected_values: { last_name: 'Riverz', phone: '+15550001111' }, created_at: Date.now() - 1000 }),
       ],
-      customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverz' }],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverson' }],
     });
     await queue.processDueContactCorrectionJobs({ limit: 3, knex });
-    expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toEqual({ last_name: 'Riverz', phone: '+15550001111' });
+    expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toEqual({ last_name: 'Riverson', phone: '+15550001111' });
   });
 
   it('cancels a stale duplicate-sid reservation instead of replaying it', async () => {
@@ -522,31 +526,31 @@ describe('round-20 hardening', () => {
 });
 
 describe('round-21 hardening', () => {
-  it('rebase skips a write whose oldValue does not chain off the baseline (admin restored in between)', async () => {
-    // Job 1 wrote Riverz→Riverson AFTER this job's snapshot, but an admin
-    // then restored Riverz — the snapshot legitimately holds Riverz via a
-    // fresh capture; overlaying Riverson would resurrect the queue's older
-    // value over the admin's newer one. oldValue (Riverz) matches here, so
-    // the guard alone can't distinguish — the context-time cut does.
+  it('a write UNCOMMITTED at snapshot capture still rebases — newest message wins (round-24)', async () => {
+    // Older job A's apply transaction started before B's snapshot capture
+    // (so A's completed_at PRE-dates B's context_attached_at) but
+    // committed after it — a timestamp cutoff would exclude A even though
+    // B's snapshot never saw A's write. The oldValue chain includes it and
+    // B's correction proceeds over A's value.
     const snapAt = Date.now() - 500;
     const knex = makeStubKnex({
       contact_correction_jobs: [
         jobRow({
           id: 1, status: 'done', customer_id: CUSTOMER_ID,
           result: { applied: [{ field: 'last_name', oldValue: 'Riverz', newValue: 'Riverson' }], skipped: [] },
-          completed_at: snapAt - 200, // BEFORE the snapshot was captured
+          completed_at: snapAt - 200, // transaction clock predates the capture…
         }),
         jobRow({
           id: 2, status: 'queued', customer_id: CUSTOMER_ID,
-          expected_values: { last_name: 'Riverz', phone: '+15550001111' },
-          created_at: snapAt - 400, // reservation predates the earlier write…
-          context_attached_at: snapAt, // …but the snapshot does not
+          expected_values: { last_name: 'Riverz', phone: '+15550001111' }, // …and the snapshot missed the write
+          created_at: snapAt - 400,
+          context_attached_at: snapAt,
         }),
       ],
-      customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverz' }],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverson' }],
     });
     await queue.processDueContactCorrectionJobs({ limit: 3, knex });
-    expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toEqual({ last_name: 'Riverz', phone: '+15550001111' });
+    expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toEqual({ last_name: 'Riverson', phone: '+15550001111' });
   });
 
   it('rebase skips a post-snapshot write whose oldValue mismatches the baseline', async () => {
