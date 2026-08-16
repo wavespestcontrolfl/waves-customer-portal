@@ -183,37 +183,43 @@ async function runShadowSweep({ now = new Date() } = {}) {
       // the lookup would forever update one while the other's stale card
       // stands. Keep the newest (by update recency), lapse the rest and
       // retire their cards through the same read_at mechanism.
-      // ONE read covers both concerns (codex gh-r4): the shadow rows for
-      // the self-heal below, AND any live-pipeline/held row — a customer
-      // with an approved/dialing/held case is skipped entirely (rotating an
-      // older settled row beside a live one would mint a second dialable
-      // pipeline; rotating beside a held one would bypass the dispute
-      // hold's human release).
-      const liveRows = await db('collection_cases')
-        .where({ customer_id: customerId })
-        .whereIn('current_state', ['shadow', 'approved', 'dialing', 'held'])
-        .orderBy([{ column: 'updated_at', order: 'desc' }, { column: 'case_version', order: 'desc' }])
-        .select('id', 'idempotency_key', 'current_state');
-      if (liveRows.some((r) => r.current_state !== 'shadow')) continue;
-      const liveShadow = liveRows;
-      if (liveShadow.length > 1) {
-        const extras = liveShadow.slice(1);
-        // Fenced to still-shadow rows (codex gh-r5): a dial surface can
-        // promote one of these extras after the snapshot read — a promoted
-        // or dialing row must escape the lapse untouched.
-        await db('collection_cases')
-          .whereIn('id', extras.map((c) => c.id))
-          .where({ current_state: 'shadow' })
-          .update({ current_state: 'lapsed', updated_at: db.fn.now() });
-        const extraKeys = extras.map((c) => c.idempotency_key).filter(Boolean);
-        if (extraKeys.length) {
-          await db('notifications')
-            .where({ recipient_type: 'admin' })
-            .whereNull('read_at')
-            .whereIn(db.raw("metadata->>'dedupeKey'"), extraKeys)
-            .update({ read_at: db.fn.now() })
-            .catch((err) => logger.warn(`[collections-shadow] duplicate-case card retirement failed: ${err.message}`));
+      // ONE read covers both concerns (codex gh-r4), UNDER the customer
+      // lock (codex gh-r9): the self-heal snapshot+lapse must not
+      // interleave with a promote — with the lock, a promoted duplicate is
+      // seen as a live row and the customer is skipped entirely, so a
+      // retained shadow sibling can never be dialed past a dial_failed
+      // park's review requirement.
+      const heal = await withCaseLock(customerId, async (trx) => {
+        const liveRows = await trx('collection_cases')
+          .where({ customer_id: customerId })
+          .whereIn('current_state', ['shadow', 'approved', 'dialing', 'held'])
+          .orderBy([{ column: 'updated_at', order: 'desc' }, { column: 'case_version', order: 'desc' }])
+          .select('id', 'idempotency_key', 'current_state');
+        if (liveRows.some((r) => r.current_state !== 'shadow')) return { skip: true };
+        if (liveRows.length > 1) {
+          const extras = liveRows.slice(1);
+          // Fenced to still-shadow rows (codex gh-r5) — with the lock this
+          // is belt-and-braces.
+          await trx('collection_cases')
+            .whereIn('id', extras.map((c) => c.id))
+            .where({ current_state: 'shadow' })
+            .update({ current_state: 'lapsed', updated_at: trx.fn.now() });
+          return {
+            liveShadow: [liveRows[0]],
+            extraKeys: extras.map((c) => c.idempotency_key).filter(Boolean),
+          };
         }
+        return { liveShadow: liveRows };
+      });
+      if (heal.skip) continue;
+      const liveShadow = heal.liveShadow;
+      if (heal.extraKeys && heal.extraKeys.length) {
+        await db('notifications')
+          .where({ recipient_type: 'admin' })
+          .whereNull('read_at')
+          .whereIn(db.raw("metadata->>'dedupeKey'"), heal.extraKeys)
+          .update({ read_at: db.fn.now() })
+          .catch((err) => logger.warn(`[collections-shadow] duplicate-case card retirement failed: ${err.message}`));
       }
 
       // The retained LIVE row is authoritative (codex r8): the shadow+lapsed

@@ -151,6 +151,12 @@ async function reclaimExpiredApprovals({ now = new Date() } = {}) {
         approved_by: null,
         approved_at: null,
         approval_expires_at: null,
+        // Supervised-only on return (codex gh-r9): promotion nulled the
+        // original hold_reason, so a dial_failed park orphaned mid-flight
+        // would otherwise re-enter the automatic queue. An orphan means
+        // something went wrong — a human look is the right bar, and the
+        // candidate query excludes this marker.
+        hold_reason: 'reclaimed_orphaned_approval',
         updated_at: db.fn.now(),
       });
     if (reclaimed) logger.info(`[collections-autodial] reclaimed ${reclaimed} expired orphaned approval(s)`);
@@ -170,21 +176,25 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
 
   const candidates = await db('collection_cases')
     .whereIn('current_state', ['shadow', 'proposed'])
-    // Dial-failure proposals require SUPERVISED release (codex gh-r4):
-    // origination documents that a failed dial is never silently retried —
-    // and its failed call_log rows are deliberately excluded from the
-    // idempotency probe, so this sweep would re-dial them unaided. The
-    // admin endpoint remains their release path.
-    .whereRaw("hold_reason IS DISTINCT FROM 'dial_failed'")
-    // Customers with a live/held sibling case are excluded at SELECT time
-    // (codex gh-r7): the in-lock liveElsewhere check refuses them without
-    // changing state, so ten such rows would otherwise occupy the whole
-    // cap*5 window forever and starve every newer customer.
-    .whereNotExists(function liveSibling() {
+    // Supervised-park markers require HUMAN release (codex gh-r4/gh-r9):
+    // dial_failed (origination: a failed dial is never silently retried)
+    // and reclaimed_orphaned_approval (something went wrong mid-flight).
+    // The admin endpoint remains their release path.
+    .whereRaw("(hold_reason IS NULL OR hold_reason NOT IN ('dial_failed', 'reclaimed_orphaned_approval'))")
+    // Customers with a live/held sibling — or a supervised-parked sibling
+    // (codex gh-r9: a merge can leave a shadow row beside a dial_failed
+    // park; dialing the sibling would bypass the required review) — are
+    // excluded at SELECT time (codex gh-r7), so such rows never occupy the
+    // cap*5 window; the in-lock checks remain the authoritative fences.
+    .whereNotExists(function blockedSibling() {
       this.select(db.raw('1'))
-        .from('collection_cases as live')
-        .whereRaw('live.customer_id = collection_cases.customer_id')
-        .whereIn('live.current_state', ['approved', 'dialing', 'held']);
+        .from('collection_cases as sib')
+        .whereRaw('sib.customer_id = collection_cases.customer_id')
+        .whereRaw('sib.id <> collection_cases.id')
+        .where(function anyBlock() {
+          this.whereIn('sib.current_state', ['approved', 'dialing', 'held'])
+            .orWhereIn('sib.hold_reason', ['dial_failed', 'reclaimed_orphaned_approval']);
+        });
     })
     .where(function nextEligible() {
       this.whereNull('next_eligible_at').orWhere('next_eligible_at', '<=', now);

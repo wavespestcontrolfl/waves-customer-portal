@@ -554,3 +554,13 @@ test('the stale-retirement lapse update carries the shadow state fence', () => {
   const retireBlock = grepSrc.slice(grepSrc.indexOf('let casesLapsed = 0'));
   expect(retireBlock).toContain(".where({ current_state: 'shadow' })\n        .update({ current_state: 'lapsed'");
 });
+
+// codex gh-r9: the self-heal snapshot + duplicate lapse run UNDER the
+// customer lock, so a promoted duplicate skips the whole customer.
+test('the self-heal runs inside withCaseLock (source shape)', () => {
+  const grepSrc = require('fs').readFileSync(
+    require.resolve('../services/collections/shadow-sweep'), 'utf8',
+  );
+  expect(grepSrc).toContain('const heal = await withCaseLock(customerId, async (trx) => {');
+  expect(grepSrc).toContain('if (heal.skip) continue;');
+});

@@ -321,3 +321,26 @@ describe('gh-r7', () => {
     expect(sched).toContain('if (!isVoiceLatePaymentEnabled()) return; // fully dark — zero touches');
   });
 });
+
+// codex gh-r9 pins.
+describe('gh-r9', () => {
+  test('reclamation returns orphans to a SUPERVISED-ONLY park', async () => {
+    armGates();
+    const reclaim = promoteChain(1);
+    const queues = [reclaim, candidateChain([])];
+    db.mockImplementation(() => queues.shift());
+    await runCollectionsDialSweep({ now: NOW });
+    expect(reclaim.update.mock.calls[0][0].hold_reason).toBe('reclaimed_orphaned_approval');
+  });
+
+  test('the candidate query excludes supervised-park markers row-local AND via siblings', async () => {
+    armGates();
+    const cChain = candidateChain([]);
+    const queues = [promoteChain(0), cChain];
+    db.mockImplementation(() => queues.shift());
+    await runCollectionsDialSweep({ now: NOW });
+    const raws = cChain.whereRaw.mock.calls.map((c) => c[0]).join(' ');
+    expect(raws).toContain("NOT IN ('dial_failed', 'reclaimed_orphaned_approval')");
+    expect(cChain.whereNotExists).toHaveBeenCalled();
+  });
+});
