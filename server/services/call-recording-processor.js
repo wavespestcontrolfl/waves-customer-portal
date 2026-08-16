@@ -8144,9 +8144,18 @@ const CallRecordingProcessor = {
     // inside no-ops on a null street (completePrimaryFromCall and
     // recordCallProperty both guard), so the relaxed guard changes nothing
     // for the V1 path.
+    // ANY V2 property street opens the block (codex #3418 r17): a valid V2
+    // with no main service address but a classified entry in
+    // additional_properties still carries actionable role/persistence
+    // evidence — falling through to the no-address cleanup would resolve a
+    // card the newest extraction still supports.
     const v2HasServiceAddress = !!String(
       v2CanonicalExtraction?.property?.service_address?.street_line_1 || '',
-    ).trim();
+    ).trim()
+      || (Array.isArray(v2CanonicalExtraction?.property?.additional_properties)
+        && v2CanonicalExtraction.property.additional_properties.some(
+          (p) => String(p?.street_line_1 || '').trim(),
+        ));
     if (process.env.GATE_CUSTOMER_PROPERTIES === 'true' && customerId
       && (extracted.address_line1 || v2HasServiceAddress)) {
       try {
@@ -8199,8 +8208,16 @@ const CallRecordingProcessor = {
         // primary is created with the right occupancy (its recordCallProperty
         // branch never runs once the primary exists → it would otherwise stay the
         // default owner_occupied).
-        const isRental = bridgeNeedsConfirmation.includes('rental_or_tenant_occupied')
-          || detectRentalSignal({ extracted, callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property });
+        const isRental = v2SoleAddressAuthority
+          // Under V2 sole authority the occupancy verdict is V2's OWN
+          // (codex #3418 r17): its explicit classification plus its caller
+          // relationship — V1's text-derived signal must not create the
+          // lazy-backfilled primary as rental against V2's judgment. A
+          // V2-null occupancy means "the call didn't say": no rental.
+          ? (v2CanonicalExtraction?.property?.service_address_occupancy === 'rental_investment'
+            || detectRentalSignal({ callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property }))
+          : (bridgeNeedsConfirmation.includes('rental_or_tenant_occupied')
+            || detectRentalSignal({ extracted, callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property }));
         // The rental signal is about THIS CALL's address. ensurePrimaryProperty
         // creates the primary from customers.address_*, which can be a DIFFERENT
         // address (the customer's own home) when the call is about a secondary
@@ -8213,9 +8230,21 @@ const CallRecordingProcessor = {
         // gaps on the customer, so a genuine same-address call matches.
         const custRow = await db('customers').where({ id: customerId })
           .select('address_line1', 'address_line2', 'city', 'zip').first();
-        const callAddrKey = customerProperties.addressKey({
-          address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip,
-        });
+        // Same authority rule for the address-match key (codex #3418 r17):
+        // in V2 mode the "is this call about the primary?" comparison uses
+        // V2's OWN service address, not V1's — pairing V1's address with
+        // V2's occupancy could inherit the rental verdict onto a primary
+        // V2 never named.
+        const callAddrKey = customerProperties.addressKey(v2SoleAddressAuthority
+          ? {
+            address_line1: v2SvcAddrForComplete?.street_line_1 || null,
+            address_line2: v2SvcAddrForComplete?.street_line_2 || null,
+            city: v2SvcAddrForComplete?.city || null,
+            zip: v2SvcAddrForComplete?.postal_code || null,
+          }
+          : {
+            address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip,
+          });
         const callIsPrimaryAddress = !!callAddrKey && callAddrKey === customerProperties.addressKey(custRow || {});
         // propertyId is null only when the customer is addressless AND has no
         // primary yet — i.e. this call carries their FIRST service address (the

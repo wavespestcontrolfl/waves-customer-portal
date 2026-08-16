@@ -438,7 +438,10 @@ export default function TriageInboxTabV2() {
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/apply-property-roles`, {
       method: "POST",
-      body: JSON.stringify({}),
+      // Version binding: the server 409s if the card's proposals were
+      // refreshed (force-reprocess) after this list render — the click
+      // must apply exactly what was displayed.
+      body: JSON.stringify({ expected_updated_at: item.updated_at }),
     })
       .then(() => {
         setActioning(null);
@@ -452,6 +455,14 @@ export default function TriageInboxTabV2() {
       })
       .catch((err) => {
         setActioning(null);
+        if (err?.status === 409) {
+          // Version conflict: the card's proposals were refreshed (or the
+          // card resolved) after this render — reload so the reviewer
+          // sees the CURRENT proposals before clicking again.
+          setError("This card changed since it loaded — refreshing so you can review the latest proposals.");
+          load();
+          return;
+        }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Apply failed — try again.");
       });
   };

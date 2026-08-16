@@ -88,6 +88,7 @@ router.get('/', async (req, res) => {
         'triage_items.resolution_note',
         'triage_items.resolved_at',
         'triage_items.created_at',
+        'triage_items.updated_at',
         'call_log.lead_synopsis',
         'call_log.call_summary',
         'call_log.from_phone',
@@ -390,6 +391,19 @@ router.post('/:id/apply-property-roles', async (req, res) => {
         lost.conflict = true;
         throw lost;
       }
+      // Version binding (codex #3418 r17): a force-reprocess merges a
+      // REFRESHED payload into this same open row, so the click must be
+      // bound to the proposal version the admin actually saw — the card's
+      // updated_at as the list served it. Required (the lane is dark; no
+      // legacy clients): mismatch or absence = 409, card stays open, the
+      // reviewer reloads and re-reads the current proposals.
+      const expectedUpdatedAt = req.body?.expected_updated_at || null;
+      if (!expectedUpdatedAt
+        || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
+        const lost = new Error('card proposals changed since they were displayed — reload and review the latest');
+        lost.conflict = true;
+        throw lost;
+      }
       if (!customerId || !proposals.length) {
         const empty = new Error('no applicable proposals');
         empty.noProposals = true;
@@ -429,7 +443,7 @@ router.post('/:id/apply-property-roles', async (req, res) => {
     });
     return res.json({ ok: true, ...outcome });
   } catch (err) {
-    if (err.conflict) return res.status(409).json({ error: 'Item already resolved' });
+    if (err.conflict) return res.status(409).json({ error: err.message || 'Item changed concurrently' });
     if (err.noProposals) return res.status(400).json({ error: 'Card carries no applicable proposals' });
     logger.error(`[admin-triage] apply-property-roles failed: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to apply property roles' });
