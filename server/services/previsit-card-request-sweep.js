@@ -59,6 +59,11 @@ const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // excluded from the sweep; the office confirmation is the clearance decision.
 const OFFICE_REVIEW_SOURCE_ACTIONS = require('./call-booking-source-actions').OFFICE_REVIEW_PENDING_SOURCE_ACTIONS;
 const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS, isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+// Shared active-plan status vocabulary (codex #3426 r1 P1): recurring
+// evidence must count every NON-TERMINAL row — an in-progress (en_route/
+// on_site) recurring visit is still an active plan — not just the sweep's
+// own pending/confirmed candidate statuses.
+const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
 const BATCH_CAP = 25;
 
 function sweepGateEnabled() {
@@ -205,7 +210,7 @@ async function runSweep(dbh = db) {
       this.select(dbh.raw('1'))
         .from('scheduled_services as rec')
         .whereRaw('rec.customer_id = s.customer_id')
-        .whereIn('rec.status', LIVE_VISIT_STATUSES)
+        .whereNotIn('rec.status', TERMINAL_STATUSES)
         .where((qb) => qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id'));
     })
     // Never-invited is part of the QUERY (codex r1 P2): applying it after a
@@ -291,7 +296,7 @@ async function runSweep(dbh = db) {
           // under the lock, fail toward not texting.
           trx('scheduled_services as rec')
             .where('rec.customer_id', visit.customer_id)
-            .whereIn('rec.status', LIVE_VISIT_STATUSES)
+            .whereNotIn('rec.status', TERMINAL_STATUSES)
             .where((qb) => qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id'))
             .first('rec.id'),
         ]);

@@ -87,6 +87,13 @@ describe('previsitCardInviteEligible', () => {
     // Fail-closed race recheck inside the advisory lock, same as the
     // invited-history rechecks.
     expect(sweep).toContain('if (reqRow || stampRow || !liveCustomer || recurringRow)');
+    // Shared active-plan vocabulary (codex #3426 r1 P1): recurring evidence
+    // counts every NON-terminal row — an in-progress (en_route/on_site)
+    // recurring visit is an active plan — never only the sweep's own
+    // pending/confirmed candidate statuses.
+    expect(sweep).toContain("require('./waveguard-existing-services')");
+    expect(sweep.match(/whereNotIn\('rec\.status', TERMINAL_STATUSES\)/g)).toHaveLength(2);
+    expect(sweep).not.toContain("whereIn('rec.status', LIVE_VISIT_STATUSES)");
   });
 });
 

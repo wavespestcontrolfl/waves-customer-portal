@@ -649,6 +649,38 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       }
     };
 
+    // Existing recurring customers never get the BACKSTOP ask (owner ruling
+    // 2026-08-15, codex #3426 r1 P2). The sweep excludes them up front and
+    // rechecks under its advisory lock, but plan-conversion writers don't
+    // take that lock — a booking converted to a plan between the sweep's
+    // recheck and this send would still text. The one-text-ever claim above
+    // is the last boundary this funnel owns, so the prohibition is
+    // re-verified AFTER the claim and the claim released on evidence.
+    // Scoped to the backstop trigger only: booking-time triggers fire for a
+    // brand-new plan's own recurring rows by design. Status vocabulary is
+    // shared with waveguard-existing-services (an in-progress en_route/
+    // on_site recurring visit is still an active plan). Unlike the
+    // fail-toward-asking probes above, a lookup failure here fails toward
+    // NOT texting — this is a prohibition recheck, not an eligibility probe.
+    if (trigger === 'previsit_backstop') {
+      try {
+        const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
+        const recurringRow = await db('scheduled_services')
+          .where({ customer_id: visit.customer_id })
+          .whereNotIn('status', TERMINAL_STATUSES)
+          .where((qb) => qb.where('is_recurring', true).orWhereNotNull('recurring_parent_id'))
+          .first('id');
+        if (recurringRow) {
+          await releaseClaim();
+          return skip('existing_recurring_customer');
+        }
+      } catch (err) {
+        await releaseClaim();
+        logger.warn(`[appt-card-request] backstop recurring recheck failed — not texting: ${err.message}`);
+        return skip('recurring_recheck_failed');
+      }
+    }
+
     // Fresh rows insert WITHOUT sent_at — sent_at is the durable "a text
     // (probably) left" marker, stamped only once the provider outcome is
     // known or uncertain, so the stale-claim lease above can tell
