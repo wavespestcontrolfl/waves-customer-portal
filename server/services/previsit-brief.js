@@ -1030,7 +1030,7 @@ const GROUNDED_ONLY_WORDS = new Set([
 
 // 'key' as an access credential ("door key", "key under the mat") must
 // ground; 'key' as emphasis ("key concern") is prose (codex #3423 r29).
-const KEY_CREDENTIAL_RE = /\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\s+(?:keys?|pins?|codes?)\b|\b(?:keys?|pins?)\s+(?:under|hidden|inside|behind|left|beneath|provided)\b|\b(?:pins?|codes?)\s+(?:numbers?|on\s+file)\b|\b(?:provided?|leave|left|gave|give)\s+(?:the\s+|a\s+)?(?:keys?|pins?)\b/i;
+const KEY_CREDENTIAL_RE = /\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\s+(?:keys?|pins?|codes?)\b|\b(?:keys?|pins?)\s+(?:under|hidden|inside|behind|left|beneath|provided)\b|\b(?:keys?|pins?|codes?)\s+(?:numbers?|on\s+file)\b|\b(?:provided?|leave|left|gave|give)\s+(?:the\s+|a\s+)?(?:keys?|pins?)\b/i;
 
 // Instruction objects carrying these words direct real business actions
 // ("Provide estimate", "Discuss payment", "Perform treatment") — inside
@@ -1388,7 +1388,7 @@ function findUngroundedClaim(body, grounding) {
   // Appointment-status claims bind to fact values — the brief exists FOR a
   // scheduled visit, so "Appointment cancelled/confirmed" must be stated
   // by a fact, not inferred (r39).
-  for (const m of outputText.matchAll(/\bappointments?\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved)\b|\b(cancelled|canceled|confirmed|rescheduled)\s+appointments?\b/g)) {
+  for (const m of outputText.matchAll(/\bappointments?\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+appointments?\b/g)) {
     const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled');
     if (!wordVariants(status).some((v) => groundedValueText.includes(v))) {
       return { kind: 'appointment_state', term: status };
@@ -1397,7 +1397,7 @@ function findUngroundedClaim(body, grounding) {
   // Claimed customer CONTACT REQUESTS ("asked for a phone call") are
   // factual asks — the channel and a request verb must both appear in the
   // fact values, or the technician contacts someone who never asked (r39).
-  const contactReq = outputText.match(/\b(?:asked|asks|requested|requests)\s+(?:for\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:back)?|text|sms|email|update)\b/);
+  const contactReq = outputText.match(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:for\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:back)?|text|sms|email|update)\b/);
   if (contactReq) {
     const channel = contactReq[1];
     const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred)\b/.test(groundedValueText);
@@ -1409,7 +1409,7 @@ function findUngroundedClaim(body, grounding) {
   // the OPPOSITE of the customer's billing state — flattened token pools
   // cannot see the contradiction, so it is checked as a phrase (r32).
   if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
-    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b/i.test(outputText)) {
+    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\bnothing\s+(?:owed|due)\b/i.test(outputText)) {
     return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
   }
   // 'accepted' bound to its object (r37): the estimate status must not be

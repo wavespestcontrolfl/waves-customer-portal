@@ -202,7 +202,7 @@ const CLEAN_LLM_JSON = {
   watch_items: ['Note on file from the office'],
   last_visit_summary: 'Routine pest service in July.',
   open_scope: '',
-  customer_context: 'Prefers a text before arrival.',
+  customer_context: 'Prefers a knock before entry.',
 };
 
 beforeEach(() => {
@@ -2732,5 +2732,28 @@ describe('codex #3423 r39 — reversed payment, descriptive pets, appointment st
       { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment confirmed. Customer asked for a call.' },
       grounding,
     ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r40 — key on file, appointment lifecycle, contact verbs, balance-current', () => {
+  test('all r40 claim shapes reject on unsupported facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Key on file', 'Appointment pending', 'Appointment completed', 'Customer wants a phone call', 'Customer prefers a text update']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const overdue = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] },
+    };
+    for (const claim of ['Balance is current', 'No balance due', 'Account is current']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        overdue,
+      ).reason).toMatch(/payment_state_conflict/);
+    }
   });
 });
