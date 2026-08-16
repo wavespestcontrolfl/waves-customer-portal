@@ -327,6 +327,12 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // occupancy resumption, EPA reverse forms, continuing linkers (r63)
+    expect(reportCopyRejection('Occupancy of the treated area may resume after thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The treatment is approved by the EPA for residential use.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('This product has EPA approval.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('We applied an EPA-registered product near the lanai.')).toBeNull();
+    expect(reportCopyRejection('BLUE continues to be the gate code.')).toBe('access_code');
     // reverse-clock play/sit/use + adverbs inside modal linkers (r62)
     expect(reportCopyRejection('After 4 PM, children can play on the treated lawn.')).toMatch(/^banned:/);
     expect(reportCopyRejection('The gate code should now be BLUE.')).toBe('access_code');
