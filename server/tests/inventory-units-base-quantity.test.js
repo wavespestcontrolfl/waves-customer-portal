@@ -55,4 +55,20 @@ describe('baseQuantityUnit', () => {
     expect(convertInventoryQuantity(4, baseQuantityUnit('fl_oz/gal'), 'gal')).toBeCloseTo(0.0313, 3);
     expect(convertInventoryQuantity(10, baseQuantityUnit('g/gal'), 'g')).toBe(10);
   });
+
+  // 'each' is a registered count unit (codex P1, PR #3419 r9): count-based
+  // stock (stations, briquets, blox) can be configured through the
+  // inventory API and deducts via the identity conversion. Count never
+  // crosses into a measured dimension — item weight/volume varies per
+  // product and a fabricated factor would corrupt deductions — and the
+  // ambiguous 'oz' can only stand in for volume/weight, never a count.
+  test('each is a count inventory unit; count never converts cross-dimension', () => {
+    const { unitDefinition } = require('../services/inventory-units');
+    expect(unitDefinition('each')).toEqual({ dimension: 'count', factor: 1 });
+    expect(convertInventoryQuantity(3, 'each', 'each')).toBe(3);
+    expect(convertInventoryQuantity(3, 'each', 'lb')).toBe(null);
+    expect(convertInventoryQuantity(3, 'lb', 'each')).toBe(null);
+    expect(convertInventoryQuantity(3, 'oz', 'each')).toBe(null);
+    expect(convertInventoryQuantity(3, 'each', 'oz')).toBe(null);
+  });
 });

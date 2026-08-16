@@ -225,16 +225,24 @@ export default function ServiceRecapModal({
         .filter(Boolean)
         .map((p) => {
           // Technician-confirmed rate from the editable field. Cleared or
-          // unresolvable -> no rate submitted; the server then preserves a
-          // previously recorded rate (reopen) or records none.
+          // unresolvable -> no rate submitted; rate_confirmed tells the
+          // server the field state is deliberate (a cleared rate is an
+          // edit, not a legacy client's omission — codex P1 r9), so the
+          // server must NOT restore a previously recorded rate.
           const entry = rates[p.id];
           const rate = entry ? parseFloat(entry.rate) : NaN;
           const hasRate = Number.isFinite(rate) && rate > 0 && !!entry?.unit;
           return {
+            // The selected catalog row's id, so the server records
+            // service_products.product_id and the compliance ledger keys
+            // on the exact product instead of a name-pattern match
+            // (codex P1 r9: "Advion Cockroach Gel" vs "... Gel Bait").
+            product_id: p.id,
             product_name: p.name,
             product_category: p.category,
             active_ingredient: p.active_ingredient,
             moa_group: p.moa_group,
+            rate_confirmed: true,
             ...(hasRate ? { application_rate: rate, rate_unit: entry.unit } : {}),
           };
         });

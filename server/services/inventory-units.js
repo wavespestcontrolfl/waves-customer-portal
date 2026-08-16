@@ -36,6 +36,12 @@ const INVENTORY_UNITS = {
   g: { dimension: 'weight', factor: 0.035274 },
   gram: { dimension: 'weight', factor: 0.035274 },
   kg: { dimension: 'weight', factor: 35.274 },
+  // Count-based stock (bait stations, briquets, dunks, blox, cartridges —
+  // the each/* label bases): a discrete item count, its own dimension.
+  // Deliberately NO cross-dimension conversion: item weight/volume varies
+  // per product and inventing a per-item factor here would fabricate
+  // deduction quantities — count stock must be kept in 'each'.
+  each: { dimension: 'count', factor: 1 },
 };
 
 function unitDefinition(unit) {
@@ -44,6 +50,11 @@ function unitDefinition(unit) {
 
 function conversionBasis(fromDef, toDef) {
   if (!fromDef || !toDef) return null;
+  // Ambiguous 'oz' can only stand in for a measured dimension — never for
+  // a count ('oz' of bait stations is not a number of stations).
+  const measurable = (dim) => dim === 'volume' || dim === 'weight';
+  if (fromDef.dimension === 'ambiguous' && !measurable(toDef.dimension)) return null;
+  if (toDef.dimension === 'ambiguous' && !measurable(fromDef.dimension)) return null;
   const fromDimension = fromDef.dimension === 'ambiguous' ? toDef.dimension : fromDef.dimension;
   const toDimension = toDef.dimension === 'ambiguous' ? fromDef.dimension : toDef.dimension;
   if (!fromDimension || !toDimension || fromDimension !== toDimension) return null;
