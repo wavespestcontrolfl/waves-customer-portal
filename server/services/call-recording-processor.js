@@ -8258,8 +8258,19 @@ const CallRecordingProcessor = {
         // primary yet — i.e. this call carries their FIRST service address (the
         // !customerId upsert above is skipped when the call is pre-linked, so
         // ensurePrimaryProperty has nothing to backfill from).
+        // Full V2 occupancy for the lazy backfill (codex #3418 r30): an
+        // explicit seasonal/vacant/etc classification of the call's OWN
+        // primary address must create the row with that value — collapsing
+        // to the rental boolean invented owner_occupied, which staging then
+        // parked as a phantom contradiction.
+        const v2OccRaw = v2SoleAddressAuthority
+          ? customerProperties.normalizeOccupancy(v2CanonicalExtraction?.property?.service_address_occupancy)
+          : null;
+        const v2CallOccupancy = v2OccRaw && v2OccRaw !== 'unknown' ? v2OccRaw : null;
         const ensured = await customerProperties.ensurePrimaryProperty(customerId, {
-          occupancyType: (isRental && callIsPrimaryAddress) ? 'rental_investment' : undefined,
+          occupancyType: callIsPrimaryAddress
+            ? (v2CallOccupancy || ((isRental) ? 'rental_investment' : undefined))
+            : undefined,
           // Created in the call pipeline → carries call provenance, so the
           // enrichment lane's crash-recovery sweep can find it (a bare
           // 'backfill' label would hide exactly the rows this block

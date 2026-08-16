@@ -188,9 +188,14 @@ function uniqueCompatibleRow(entry, properties) {
   const eUnit = unitKey(entry.address_line2 || '') || streetEmbeddedUnitKey(entry.address_line1);
   const candidates = properties.filter((r) => {
     if (streetKey(r.address_line1) !== eStreet) return false;
+    const rUnit = unitKey(r.address_line2 || '') || streetEmbeddedUnitKey(r.address_line1);
     if (eUnit) {
-      const rUnit = unitKey(r.address_line2 || '') || streetEmbeddedUnitKey(r.address_line1);
       if (rUnit !== eUnit) return false;
+    } else if (rUnit) {
+      // A UNITLESS classification never attributes premise-level evidence
+      // to a specific door (codex #3418 r30) — a unit-bearing row is
+      // incompatible; the missing-unit review lane owns that ambiguity.
+      return false;
     }
     if (cityStated && String(entry.city).trim().toLowerCase() !== String(r.city || '').trim().toLowerCase()) return false;
     if (zipStated && normalizeZip(entry.zip) !== normalizeZip(r.zip)) return false;
@@ -400,7 +405,11 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
     }
   }
 
-  return { fills, proposals };
+  // Entries that resolved to NO durable row still carry evidence the
+  // office hasn't seen (codex #3418 r30) — the count rides the card so
+  // Apply knows whether the role review covered every stated address.
+  const unmatched = classified.filter((e) => !e._row).length;
+  return { fills, proposals, unmatched };
 }
 
 /**
@@ -531,7 +540,7 @@ async function stagePropertyRoleReview({
     const properties = await trx('customer_properties')
       .where({ customer_id: customerId, active: true })
       .select('id', 'address_line1', 'address_line2', 'city', 'zip', 'occupancy_type', 'is_primary', 'label', 'property_type');
-    const { fills, proposals } = buildPropertyRoleProposals({ classified, properties });
+    const { fills, proposals, unmatched } = buildPropertyRoleProposals({ classified, properties });
 
     for (const fill of fills) {
       // Fill-only fence: the row must still be unlabeled — a concurrent admin
@@ -552,7 +561,14 @@ async function stagePropertyRoleReview({
       flag: REASON_CODE,
       extraction,
       severity: 'advisory',
-      extraPayload: { customer_id: customerId, property_role_proposals: proposals },
+      extraPayload: {
+        customer_id: customerId,
+        property_role_proposals: proposals,
+        // Whether the role review covered EVERY stated address (codex
+        // #3418 r30) — Apply retires the second_service_address sibling
+        // only when nothing the caller said was left unmatched.
+        property_role_unmatched: unmatched,
+      },
     });
     // MERGE, not ignore, on the open-card unique (codex #3418 r1): a
     // force-reprocessed call re-derives its classification, and the open

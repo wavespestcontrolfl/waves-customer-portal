@@ -448,7 +448,11 @@ router.post('/:id/apply-property-roles', async (req, res) => {
       // were just reviewed and applied, so retire the sibling atomically
       // instead of forcing the office to review the addition twice (it
       // would also hold call_log.review_status open forever).
-      if (item.call_log_id) {
+      // Only when the role review covered EVERY stated address (codex
+      // #3418 r30): an unmatched/incomplete additional address still
+      // needs the office's eyes — retiring the call-wide address card
+      // would hide it. Absent field (older payloads) = NOT proven.
+      if (item.call_log_id && payload.property_role_unmatched === 0) {
         await trx('triage_items')
           .where({ call_log_id: item.call_log_id, reason_code: 'second_service_address' })
           .whereIn('status', OPEN_STATES)
