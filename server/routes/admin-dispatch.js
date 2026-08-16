@@ -10390,6 +10390,36 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // today's renders are byte-identical. Never throws.
         const { reserviceLineForCustomer } = require('../services/reservice-link');
         const completionReserviceLine = await reserviceLineForCustomer(svc.customer_id);
+        // {past_due_line} for the with-invoice completion texts (EXPAND half —
+        // same rollout discipline as {reservice_line} above: supplied at every
+        // completion-family render site BEFORE any body carries the token, so
+        // neither deploy ordering can suppress a send). Computed only when the
+        // text will carry a pay link — a paid/prepaid or report-only
+        // completion supplies '' — and excluding the visit's own invoice
+        // (today's bill is not a past-due balance). '' unless
+        // GATE_COMPLETION_SMS_BALANCE is on AND the customer has an older
+        // open self-pay balance; never throws.
+        // Suppressed outside the 8AM-8PM send window (codex P1): a late
+        // completion's rendered body is FROZEN into the scheduled-SMS queue
+        // (dispatch_completion_deferred below) and replayed verbatim at the
+        // window open — a balance settled overnight (portal payment, sweep)
+        // would still be asserted at 8 AM with no recheck. The pay link
+        // tolerates that staleness (its target renders live paid state); a
+        // static sentence claiming money owed does not, so a deferred
+        // completion simply carries no balance line. The precheck MIRRORS
+        // the authoritative validator's gating (codex r3 P2): with
+        // GATE_SMS_SEND_WINDOW off the validator never defers — nighttime
+        // completions send immediately, no frozen replay exists, and the
+        // line rides; only a window that can actually hold suppresses. The
+        // residual precheck→handoff race is closed by the
+        // stripBalanceLineFromBody pass at the QUIET_HOURS_HOLD below.
+        const { isWithinSendWindowET } = require('../services/messaging/send-window');
+        const { isEnabled: gateEnabled } = require('../config/feature-gates');
+        const { pastDueSmsLineForCustomer } = require('../services/open-balance');
+        const completionSmsCanDefer = gateEnabled('smsSendWindow') && !isWithinSendWindowET();
+        const completionPastDueLine = (invoiceCreated && payUrl && allowCompletionInvoiceLink && !completionSmsCanDefer)
+          ? await pastDueSmsLineForCustomer(svc.customer_id, { excludeInvoiceId: invoice?.id || null })
+          : '';
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
             record,
@@ -10398,6 +10428,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             smsReportUrl: reportSmsUrl,
             payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
             reserviceLine: completionReserviceLine,
+            pastDueLine: completionPastDueLine,
           })
           : null;
         // A billed report-v1 visit may take the report lane only when the
@@ -10455,6 +10486,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               portal_url: reportSmsUrl || reportUrl,
               pay_url: payUrl,
               reservice_line: completionReserviceLine,
+              past_due_line: completionPastDueLine,
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
@@ -10471,6 +10503,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             portal_url: reportSmsUrl || reportUrl,
             pay_url: payUrl,
             reservice_line: completionReserviceLine,
+            past_due_line: completionPastDueLine,
           }, {
             workflow: 'dispatch_service_complete',
             entity_type: 'service_record',
@@ -10493,6 +10526,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
               reservice_line: completionReserviceLine,
+              past_due_line: completionPastDueLine,
             };
             const paidTemplateContext = {
               workflow: 'dispatch_service_complete',
@@ -10547,6 +10581,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
               reservice_line: completionReserviceLine,
+              past_due_line: completionPastDueLine,
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
@@ -10672,13 +10707,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 completionSmsStatus: 'deferred',
                 completionSmsDeferredTo: smsResult.nextAllowedAt,
               };
+              // The balance clause never rides a frozen replay body (codex
+              // P2, round 2): the send-window PREcheck at the line's compute
+              // site can pass at 19:5x while the authoritative validator at
+              // the provider handoff defers the send — this hold IS that
+              // deferral, so strip the clause here and the queued body
+              // matches what the precheck-suppressed path would have
+              // rendered. The pay link stays (its target renders live paid
+              // state); only the static balance sentence is removed.
+              const deferredReplayBody = require('../services/open-balance')
+                .stripBalanceLineFromBody(sentSmsBody, completionPastDueLine);
               await db.transaction(async (trx) => {
                 await trx('sms_log').insert({
                 customer_id: svc.customer_id,
                 direction: 'outbound',
                 from_phone: TWILIO_NUMBERS.getOutboundNumber(),
                 to_phone: svc.cust_phone,
-                message_body: sentSmsBody,
+                message_body: deferredReplayBody,
                 status: 'scheduled',
                 scheduled_for: new Date(smsResult.nextAllowedAt),
                 message_type: sentSmsType,

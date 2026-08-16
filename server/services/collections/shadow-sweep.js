@@ -21,6 +21,7 @@ const logger = require('../logger');
 const ContactPolicy = require('./contact-policy');
 const { invoiceAmountDue } = require('../invoice-helpers');
 const { etCalendarDayOf, etDateString } = require('../../utils/datetime-et');
+const { withCaseLock } = require('./case-lock');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -182,24 +183,43 @@ async function runShadowSweep({ now = new Date() } = {}) {
       // the lookup would forever update one while the other's stale card
       // stands. Keep the newest (by update recency), lapse the rest and
       // retire their cards through the same read_at mechanism.
-      const liveShadow = await db('collection_cases')
-        .where({ customer_id: customerId, current_state: 'shadow' })
-        .orderBy([{ column: 'updated_at', order: 'desc' }, { column: 'case_version', order: 'desc' }])
-        .select('id', 'idempotency_key');
-      if (liveShadow.length > 1) {
-        const extras = liveShadow.slice(1);
-        await db('collection_cases')
-          .whereIn('id', extras.map((c) => c.id))
-          .update({ current_state: 'lapsed', updated_at: db.fn.now() });
-        const extraKeys = extras.map((c) => c.idempotency_key).filter(Boolean);
-        if (extraKeys.length) {
-          await db('notifications')
-            .where({ recipient_type: 'admin' })
-            .whereNull('read_at')
-            .whereIn(db.raw("metadata->>'dedupeKey'"), extraKeys)
-            .update({ read_at: db.fn.now() })
-            .catch((err) => logger.warn(`[collections-shadow] duplicate-case card retirement failed: ${err.message}`));
+      // ONE read covers both concerns (codex gh-r4), UNDER the customer
+      // lock (codex gh-r9): the self-heal snapshot+lapse must not
+      // interleave with a promote — with the lock, a promoted duplicate is
+      // seen as a live row and the customer is skipped entirely, so a
+      // retained shadow sibling can never be dialed past a dial_failed
+      // park's review requirement.
+      const heal = await withCaseLock(customerId, async (trx) => {
+        const liveRows = await trx('collection_cases')
+          .where({ customer_id: customerId })
+          .whereIn('current_state', ['shadow', 'approved', 'dialing', 'held'])
+          .orderBy([{ column: 'updated_at', order: 'desc' }, { column: 'case_version', order: 'desc' }])
+          .select('id', 'idempotency_key', 'current_state');
+        if (liveRows.some((r) => r.current_state !== 'shadow')) return { skip: true };
+        if (liveRows.length > 1) {
+          const extras = liveRows.slice(1);
+          // Fenced to still-shadow rows (codex gh-r5) — with the lock this
+          // is belt-and-braces.
+          await trx('collection_cases')
+            .whereIn('id', extras.map((c) => c.id))
+            .where({ current_state: 'shadow' })
+            .update({ current_state: 'lapsed', updated_at: trx.fn.now() });
+          return {
+            liveShadow: [liveRows[0]],
+            extraKeys: extras.map((c) => c.idempotency_key).filter(Boolean),
+          };
         }
+        return { liveShadow: liveRows };
+      });
+      if (heal.skip) continue;
+      const liveShadow = heal.liveShadow;
+      if (heal.extraKeys && heal.extraKeys.length) {
+        await db('notifications')
+          .where({ recipient_type: 'admin' })
+          .whereNull('read_at')
+          .whereIn(db.raw("metadata->>'dedupeKey'"), heal.extraKeys)
+          .update({ read_at: db.fn.now() })
+          .catch((err) => logger.warn(`[collections-shadow] duplicate-case card retirement failed: ${err.message}`));
       }
 
       // The retained LIVE row is authoritative (codex r8): the shadow+lapsed
@@ -211,13 +231,33 @@ async function runShadowSweep({ now = new Date() } = {}) {
       if (liveShadow.length) {
         existing = await db('collection_cases').where({ id: liveShadow[0].id }).first();
       } else {
+        // ANY settled prior case is rotation material (PR C / codex gh-r2):
+        // limiting this to shadow/lapsed made cancelled (dial-time policy
+        // denial, snapshot drift) and post-call proposed rows invisible —
+        // the sweep then attempted a version-1 insert whose globally unique
+        // idempotency key collided with the old row, permanently blocking
+        // regeneration for that customer. Only the LIVE pipeline states
+        // (approved, dialing) are excluded; the version bump below mints a
+        // fresh key and the unchanged-check's state==='shadow' requirement
+        // guarantees non-shadow rows always rotate rather than reuse.
+        // 'held' stays out too (codex gh-r3): a dispute hold is a HUMAN
+        // release state — the outcome writer deliberately leaves the case
+        // held as the remaining stop when the durable flag write failed,
+        // and automatic rotation would re-dial a disputing customer once
+        // the 7-day ledger suppression lapses.
         existing = await db('collection_cases')
           .where({ customer_id: customerId })
-          .whereIn('current_state', ['shadow', 'lapsed'])
+          .whereNotIn('current_state', ['approved', 'dialing', 'held'])
           .orderBy('case_version', 'desc')
           .first();
       }
 
+      // TOCTOU suspenders (codex gh-r4 P0): the reread above races a
+      // promote/claim — if the row we now hold is already in the live
+      // pipeline (or held), skip; the write-time state fence is the belt.
+      if (existing && ['approved', 'dialing', 'held'].includes(existing.current_state)) {
+        continue;
+      }
       const unchanged = existing
         && existing.current_state === 'shadow'
         && Number(existing.eligible_balance_snapshot) === verdict.eligibleBalanceCents
@@ -268,12 +308,38 @@ async function runShadowSweep({ now = new Date() } = {}) {
 
       let caseRow;
       if (existing) {
-        // Version-guarded update: a concurrent sweep that already bumped the
-        // version no-ops here (and the unique idempotency_key backstops it).
-        const [updated] = await db('collection_cases')
-          .where({ id: existing.id, case_version: existing.case_version })
-          .update({ ...patch, updated_at: db.fn.now() })
-          .returning('*');
+        // Version-guarded update — AND state-guarded (codex gh-r3 P0): with
+        // proposed rows now rotation-eligible, a concurrent promote/claim
+        // (admin dial, auto-dial sweep) can move the row between our read
+        // and this write; a fence on id+version alone would overwrite an
+        // approved/dialing row back to shadow with a bumped version, and a
+        // claimed origination's callbacks could no longer update the case.
+        // The concurrent promotion wins cleanly; the unique idempotency_key
+        // backstops the race either way.
+        const updated = await withCaseLock(customerId, async (trx) => {
+          // Owner re-read IN the lock (codex gh-r8): a merge committed
+          // since our read may have repointed this row to another
+          // customer — rotating it under the stale owner's lock would
+          // bypass the real owner's live/held check.
+          const currentOwner = await trx('collection_cases')
+            .where({ id: existing.id })
+            .first('customer_id');
+          if (!currentOwner || String(currentOwner.customer_id) !== String(customerId)) return null;
+          // In-lock live re-check (codex gh-r5): the promote paths take
+          // this same customer lock, so a live/held row seen here is
+          // committed truth — a 'proposed' row promoted between our reads
+          // can no longer slip past the customer-level decision.
+          const live = await trx('collection_cases')
+            .where({ customer_id: customerId })
+            .whereIn('current_state', ['approved', 'dialing', 'held'])
+            .first('id');
+          if (live) return null;
+          const [row] = await trx('collection_cases')
+            .where({ id: existing.id, customer_id: customerId, case_version: existing.case_version, current_state: existing.current_state })
+            .update({ ...patch, updated_at: trx.fn.now() })
+            .returning('*');
+          return row || null;
+        });
         if (!updated) continue;
         // The SUPERSEDED version's card retires with the rotation (codex
         // r8): its copy shows the old amount/tier and its collectionCaseId
@@ -304,7 +370,40 @@ async function runShadowSweep({ now = new Date() } = {}) {
       const filed = await fileProposalCard({
         dedupeKey: idempotencyKey, customer, caseRow, invoice, daysOverdue, verdict,
       });
-      if (filed) cardsFiled++;
+      if (filed) {
+        cardsFiled++;
+        // The card is filed OUTSIDE the state lock (codex gh-r10 P2): a
+        // promote+dial can land between the rotation commit and this
+        // insert, and the dial path's retirement then ran before the card
+        // existed — leaving a fresh "no call will be placed" card for a
+        // case that just dialed. Re-check and self-retire; best-effort.
+        // Retire ONLY on an actual standing call record (codex gh-r11 +
+        // gh-r12): case state is not proof — 'dialing' is entered before
+        // the provider request and is released on a pre-provider failure,
+        // and a refused attempt settles back to 'proposed'; in both cases
+        // the card is the supervised retry surface. The predicate mirrors
+        // origination's own idempotency probe: a call_log row under this
+        // case's key whose status is not a terminal non-contact.
+        // twilio_call_sid is backfilled only AFTER calls.create succeeds
+        // (codex gh-r13): the row is inserted 'initiated' BEFORE the
+        // provider is touched, so status alone still counts a dial that
+        // never happened. Provider-confirmed or the card stays.
+        const recheck = await db('call_log')
+          .where({ source: 'collections_voice' })
+          .whereRaw("metadata->>'collectionsIdempotencyKey' = ?", [idempotencyKey])
+          .whereRaw("COALESCE(status, '') NOT IN ('failed', 'busy', 'no-answer', 'canceled')")
+          .whereNotNull('twilio_call_sid')
+          .first('id')
+          .catch(() => null);
+        if (recheck) {
+          await db('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereNull('read_at')
+            .whereRaw("metadata->>'dedupeKey' = ?", [idempotencyKey])
+            .update({ read_at: db.fn.now() })
+            .catch((err) => logger.warn(`[collections-shadow] post-file card recheck retirement failed: ${err.message}`));
+        }
+      }
     } catch (err) {
       // One customer's failure never kills the sweep; nothing customer-facing
       // happened, so plain log-and-continue is safe.
@@ -324,15 +423,27 @@ async function runShadowSweep({ now = new Date() } = {}) {
       .whereNotIn('customer_id', [...stillEligible])
       .select('id', 'idempotency_key');
     if (toLapse.length) {
-      casesLapsed = await db('collection_cases')
+      // Fenced to still-shadow rows (codex gh-r6 P0): a dial surface can
+      // promote one of these between the select and this update — the
+      // fence makes the promotion win cleanly (no lock needed here: this
+      // is a single conditional write, not a read-then-write decision).
+      // Card keys come from the rows the fenced update ACTUALLY lapsed
+      // (codex gh-r11): a case promoted between the select and this update
+      // survives the fence, and retiring its card from the stale snapshot
+      // would strip the supervised retry surface if the attempt then
+      // refuses or dial_fails back to review.
+      const lapsedRows = await db('collection_cases')
         .whereIn('id', toLapse.map((c) => c.id))
-        .update({ current_state: 'lapsed', updated_at: db.fn.now() });
+        .where({ current_state: 'shadow' })
+        .update({ current_state: 'lapsed', updated_at: db.fn.now() })
+        .returning(['id', 'idempotency_key']);
+      casesLapsed = lapsedRows.length;
       // The proposal card must retire WITH its case (codex r5): a frozen
       // actionable card for an ineligible customer misleads, and a later
       // requalification would stack a second card beside it. Marking read
       // uses the bell's own dismissal mechanism; best-effort — a missed
       // stamp only leaves a stale card, never sends anything.
-      const keys = toLapse.map((c) => c.idempotency_key).filter(Boolean);
+      const keys = lapsedRows.map((c) => c.idempotency_key).filter(Boolean);
       if (keys.length) {
         await db('notifications')
           .where({ recipient_type: 'admin' })

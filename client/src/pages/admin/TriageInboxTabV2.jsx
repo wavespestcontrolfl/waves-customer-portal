@@ -63,7 +63,19 @@ const REASON_LABELS = {
   email_unverified: "Email spelled — read back",
   email_invalid: "Email couldn't be captured",
   secondary_contact_captured: "Second contact named — confirm",
+  property_role_confirm: "Property roles",
 };
+
+// Human-readable occupancy names for property-role proposal rows.
+const OCCUPANCY_LABELS = {
+  owner_occupied: "owner-occupied",
+  rental_investment: "rental",
+  commercial: "commercial",
+  seasonal: "seasonal",
+  vacant: "vacant",
+  unknown: "unknown",
+};
+const occupancyLabel = (v) => OCCUPANCY_LABELS[v] || v || "unknown";
 
 // Correction evidence the call processor attaches to address/email review
 // items (as-heard value, recovered/candidate values, and the exact question
@@ -244,6 +256,48 @@ function parseWrongFields(raw) {
   try { return JSON.parse(raw) || []; } catch { return []; }
 }
 
+// Pending property-role proposals on a property_role_confirm card: what the
+// call classified, current → proposed, so the office can judge the apply
+// without re-listening. Payload shape: property-role-proposals.js.
+export function PropertyRoleEvidence({ payload }) {
+  const p = parsePayload(payload);
+  const proposals = Array.isArray(p?.property_role_proposals) ? p.property_role_proposals : [];
+  if (!proposals.length) return null;
+  return (
+    <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2 flex flex-col gap-1.5">
+      <div className="text-11 text-ink-tertiary font-medium">Proposed property changes</div>
+      {proposals.map((pr, i) => (
+        <div key={i} className="text-12 text-ink-secondary">
+          {pr.kind === "primary_flip" ? (
+            <>
+              <span className="font-medium">{pr.new_primary_address || "New property"}</span>
+              {" becomes the primary residence"}
+              {pr.old_primary_address ? (
+                <>
+                  {"; "}
+                  <span className="font-medium">{pr.old_primary_address}</span>
+                  {" becomes "}
+                  {occupancyLabel(pr.old_primary_occupancy) === "unknown"
+                    ? "a secondary property"
+                    : `a ${occupancyLabel(pr.old_primary_occupancy)} property`}
+                  {". Pending visits stay pinned to it."}
+                </>
+              ) : "."}
+            </>
+          ) : (
+            <>
+              <span className="font-medium">{pr.address || "Property"}</span>
+              {": "}
+              {occupancyLabel(pr.current_occupancy)} → {occupancyLabel(pr.proposed_occupancy)}
+            </>
+          )}
+          {pr.evidence && <span className="text-ink-tertiary italic"> — "{pr.evidence}"</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function VerdictBadge({ verdict, wrongFields }) {
   if (!verdict) return null;
   if (verdict === "accept") return <Badge tone="strong">Accepted</Badge>;
@@ -305,7 +359,9 @@ export default function TriageInboxTabV2() {
           // address, not the call, and survive on the server) — so drop exactly
           // the sibling rows the server resolved, and move that many.
           const wasResolved = (i) =>
-            i.call_log_id === item.call_log_id && i.reason_code !== "email_bounce_reverify";
+            i.call_log_id === item.call_log_id
+            && i.reason_code !== "email_bounce_reverify"
+            && i.reason_code !== "property_role_confirm";
           const removed = items.filter(wasResolved).length || 1;
           setItems((prev) => prev.filter((i) => !wasResolved(i)));
           setCounts((prev) => {
@@ -332,7 +388,9 @@ export default function TriageInboxTabV2() {
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/dismiss`, {
       method: "PUT",
-      body: JSON.stringify({ note: note || null }),
+      // expected_updated_at: version binding for property-role cards — the
+      // server 409s a dismissal judged on a since-refreshed payload.
+      body: JSON.stringify({ note: note || null, expected_updated_at: item.updated_at }),
     })
       .then(() => {
         setActioning(null);
@@ -347,6 +405,12 @@ export default function TriageInboxTabV2() {
       })
       .catch((err) => {
         setActioning(null);
+        setDismissFor(null);
+        if (err?.status === 409) {
+          load(mode, status);
+          setError("This card changed since it loaded — review the refreshed proposals before dismissing.");
+          return;
+        }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
       });
   };
@@ -358,7 +422,7 @@ export default function TriageInboxTabV2() {
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/resolve`, {
       method: "PUT",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ expected_updated_at: item.updated_at }),
     })
       .then(() => {
         setActioning(null);
@@ -373,6 +437,42 @@ export default function TriageInboxTabV2() {
       .catch((err) => {
         setActioning(null);
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
+      });
+  };
+
+  // One-click apply for a property_role_confirm card — executes the parked
+  // occupancy/primary-residence proposals server-side and resolves the card.
+  const applyPropertyRoles = (item) => {
+    setActioning(item.id);
+    adminFetch(`/admin/triage/${item.id}/apply-property-roles`, {
+      method: "POST",
+      // Version binding: the server 409s if the card's proposals were
+      // refreshed (force-reprocess) after this list render — the click
+      // must apply exactly what was displayed.
+      body: JSON.stringify({ expected_updated_at: item.updated_at }),
+    })
+      .then(() => {
+        setActioning(null);
+        // Full reload rather than optimistic removal: applying roles can
+        // atomically retire the call's second_service_address sibling
+        // server-side too — the list and counts must reflect every row
+        // the server resolved, not just the clicked one.
+        load(mode, status);
+      })
+      .catch((err) => {
+        setActioning(null);
+        if (err?.status === 409) {
+          // Version conflict: the card's proposals were refreshed (or the
+          // card resolved) after this render — reload the ACTIVE view
+          // (bare load() would fall back to the open tab) so the reviewer
+          // sees the CURRENT proposals before clicking again. setError
+          // runs AFTER load() so load's own setError("") reset doesn't
+          // swallow the explanation.
+          load(mode, status);
+          setError("This card changed since it loaded — review the refreshed proposals before applying.");
+          return;
+        }
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Apply failed — try again.");
       });
   };
 
@@ -471,6 +571,10 @@ export default function TriageInboxTabV2() {
                 // Bounce follow-up cards aren't call verdicts — the server
                 // rejects accept/deny on them; they resolve individually.
                 const isBounceCard = isTriage && item.reason_code === "email_bounce_reverify";
+                // Property-role cards apply their parked proposals with one
+                // click instead of an accept/deny verdict (the server rejects
+                // verdicts on them, same as bounce cards).
+                const isPropertyRoleCard = isTriage && item.reason_code === "property_role_confirm";
                 // While the re-transcription is still running the card is a
                 // placeholder — resolving it would bury the candidates the
                 // worker is about to write (the worker reopens a card closed
@@ -497,7 +601,13 @@ export default function TriageInboxTabV2() {
                           ) : (
                             <Badge tone="neutral">Auto-routed{item.sms_enqueued ? " · SMS sent" : ""}</Badge>
                           )}
-                          <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
+                          {/* route_feedback joins by call_log_id, so a verdict
+                              on the call's ROUTING card would render here as if
+                              it judged this still-pending property card — the
+                              two resolve independently. */}
+                          {!isPropertyRoleCard && (
+                            <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
+                          )}
                         </div>
                         <div className="text-12 text-ink-tertiary mt-0.5">
                           {(item.customer_phone || item.from_phone || "")}{" · "}
@@ -521,7 +631,17 @@ export default function TriageInboxTabV2() {
                               <XCircle size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Dismiss
                             </Button>
                           )}
-                          {isBounceCard ? (
+                          {isPropertyRoleCard ? (
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              disabled={actioning === busyKey}
+                              onClick={() => applyPropertyRoles(item)}
+                            >
+                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+                              {actioning === busyKey ? "Applying…" : "Apply roles"}
+                            </Button>
+                          ) : isBounceCard ? (
                             <Button
                               size="sm"
                               variant="primary"
@@ -558,6 +678,7 @@ export default function TriageInboxTabV2() {
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
                     {isTriage && <ConfirmEvidence payload={item.payload} />}
+                    {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
 
                     {item.resolution_note && (
                       <div className="text-12 text-ink-tertiary mt-2 italic">Note: {item.resolution_note}</div>

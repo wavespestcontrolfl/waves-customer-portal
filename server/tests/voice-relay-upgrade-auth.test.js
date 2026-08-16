@@ -37,21 +37,39 @@ jest.mock('../services/voice-agent/relay-conversation', () => ({ RelayConversati
 // test is the door's behaviour rather than knex.
 const mockBurned = new Set();
 let mockBurnFails = false;
-jest.mock('../models/db', () => jest.fn(() => ({
-  insert: (row) => ({
-    onConflict: () => ({
-      ignore: () => ({
-        returning: () => {
-          if (mockBurnFails) return Promise.reject(new Error('db down'));
-          if (mockBurned.has(row.token_hash)) return Promise.resolve([]);
-          mockBurned.add(row.token_hash);
-          return Promise.resolve([{ token_hash: row.token_hash }]);
-        },
+// The upgrade also resolves the call's SOURCE from call_log (gh prb-r11) —
+// default: no row (generic). Tests set these to exercise the routing.
+let mockCallLogRow;
+let mockCallLogFails = false;
+jest.mock('../models/db', () => jest.fn((table) => {
+  if (table === 'call_log') {
+    return {
+      where: () => ({
+        first: () => (mockCallLogFails
+          ? Promise.reject(new Error('db down'))
+          : Promise.resolve(mockCallLogRow)),
+      }),
+    };
+  }
+  return {
+    insert: (row) => ({
+      onConflict: () => ({
+        ignore: () => ({
+          returning: () => {
+            if (mockBurnFails) return Promise.reject(new Error('db down'));
+            if (mockBurned.has(row.token_hash)) return Promise.resolve([]);
+            mockBurned.add(row.token_hash);
+            return Promise.resolve([{ token_hash: row.token_hash }]);
+          },
+        }),
       }),
     }),
-  }),
-  where: () => ({ del: () => Promise.resolve(0) }),
-})));
+    where: () => ({ del: () => Promise.resolve(0) }),
+  };
+}));
+jest.mock('../services/collections/outbound-voice/collections-conversation', () => ({
+  CollectionsConversation: jest.fn(() => ({ end: jest.fn(async () => {}) })),
+}));
 
 const { EventEmitter } = require('events');
 const { attachVoiceRelay } = require('../services/voice-agent/relay-server');
@@ -67,11 +85,12 @@ function attach() {
   return httpServer;
 }
 
-// The burn is a DB round trip, so the upgrade resolves asynchronously.
+// The burn AND the source resolution are DB round trips (gh prb-r11), so
+// the upgrade resolves after several async hops — flush a few macrotasks.
 async function upgrade(httpServer, url) {
   const socket = { destroy: jest.fn() };
   httpServer.emit('upgrade', { url }, socket, Buffer.alloc(0));
-  await new Promise((r) => setImmediate(r));
+  for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r));
   return socket;
 }
 
@@ -177,24 +196,38 @@ describe('ws upgrade — per-call token, never a reusable secret', () => {
       expect(handleUpgrade).not.toHaveBeenCalled();
     } finally {
       jest.useRealTimers();
-      // Restore the suite's shared burn-fake (mockImplementation survives
-      // clearAllMocks, so the stall shim would otherwise leak into later tests).
+      // Restore the suite's shared db fake (mockImplementation survives
+      // clearAllMocks, so the stall shim would otherwise leak into later
+      // tests). MUST keep the call_log dispatch (gh prb-r11) — restoring a
+      // shape without .first makes the source resolution reject every
+      // subsequent upgrade.
       const db = require('../models/db');
-      db.mockImplementation(() => ({
-        insert: (row) => ({
-          onConflict: () => ({
-            ignore: () => ({
-              returning: () => {
-                if (mockBurnFails) return Promise.reject(new Error('db down'));
-                if (mockBurned.has(row.token_hash)) return Promise.resolve([]);
-                mockBurned.add(row.token_hash);
-                return Promise.resolve([{ token_hash: row.token_hash }]);
-              },
+      db.mockImplementation((table) => {
+        if (table === 'call_log') {
+          return {
+            where: () => ({
+              first: () => (mockCallLogFails
+                ? Promise.reject(new Error('db down'))
+                : Promise.resolve(mockCallLogRow)),
+            }),
+          };
+        }
+        return {
+          insert: (row) => ({
+            onConflict: () => ({
+              ignore: () => ({
+                returning: () => {
+                  if (mockBurnFails) return Promise.reject(new Error('db down'));
+                  if (mockBurned.has(row.token_hash)) return Promise.resolve([]);
+                  mockBurned.add(row.token_hash);
+                  return Promise.resolve([{ token_hash: row.token_hash }]);
+                },
+              }),
             }),
           }),
-        }),
-        where: () => ({ del: () => Promise.resolve(0) }),
-      }));
+          where: () => ({ del: () => Promise.resolve(0) }),
+        };
+      });
     }
   });
 
@@ -298,6 +331,96 @@ describe('setup frame — bound to the authenticated CallSid', () => {
     expect(RelayConversation).not.toHaveBeenCalled();
     expect(ws.terminate).toHaveBeenCalled();
   });
+
+  // gh prb-r11: the session_mode label is frame input in BOTH directions —
+  // the routing truth is the call_log source, resolved at UPGRADE time
+  // (before any frame exists, so there is no window where prompt frames can
+  // enter the wrong loop). The connection carries the proof as
+  // authenticatedCollectionsCall.
+  describe('collections routing by upgrade-time source proof', () => {
+    const { CollectionsConversation } = require('../services/collections/outbound-voice/collections-conversation');
+
+    function connectAs(authenticatedCallSid, extras = {}) {
+      const listeners = {};
+      const ws = {
+        readyState: 1,
+        OPEN: 1,
+        on: jest.fn((event, handler) => { listeners[event] = handler; }),
+        send: jest.fn(),
+        terminate: jest.fn(),
+      };
+      mockWssHandlers.connection(ws, { authenticatedCallSid, ...extras });
+      return {
+        ws,
+        setup: (frame) => listeners.message(Buffer.from(JSON.stringify({ type: 'setup', ...frame }))),
+      };
+    }
+
+    test('a collections call whose label was stripped STILL routes to the collections session', () => {
+      const { setup } = connectAs('CA-collections-1', { authenticatedCollectionsCall: true });
+      setup({ callSid: 'CA-collections-1', from: '+19415550142' }); // NO session_mode
+      expect(CollectionsConversation).toHaveBeenCalledTimes(1);
+      expect(RelayConversation).not.toHaveBeenCalled();
+    });
+
+    test('without the proof, an unlabeled frame stays generic', () => {
+      const { setup } = connectAs('CA-inbound-1');
+      setup({ callSid: 'CA-inbound-1', from: '+19415550142' });
+      expect(RelayConversation).toHaveBeenCalledTimes(1);
+      expect(CollectionsConversation).not.toHaveBeenCalled();
+    });
+  });
+});
+
+// gh prb-r11: the upgrade resolves the source BEFORE handing the socket to
+// ws — and fails CLOSED on an unreadable source, the same envelope as the
+// burn (DB down already rejects upgrades).
+describe('ws upgrade — collections-source resolution', () => {
+  let httpServer;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockBurned.clear();
+    mockBurnFails = false;
+    mockCallLogRow = undefined;
+    mockCallLogFails = false;
+    process.env.VOICE_RELAY_ENABLED = 'true';
+    process.env.ANTHROPIC_API_KEY = 'sk-test';
+    process.env.VOICE_RELAY_WS_SECRET = SECRET;
+    httpServer = attach();
+  });
+
+  afterEach(() => {
+    mockCallLogRow = undefined;
+    mockCallLogFails = false;
+    delete process.env.VOICE_RELAY_ENABLED;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.VOICE_RELAY_WS_SECRET;
+  });
+
+  test('a collections-source row stamps authenticatedCollectionsCall on the upgrade request', async () => {
+    mockCallLogRow = { source: 'collections_voice' };
+    const token = mintCallToken(CALL_SID, { secret: SECRET });
+    await upgrade(httpServer, `/ws/voice-agent?callSid=${CALL_SID}&t=${token}`);
+    expect(handleUpgrade).toHaveBeenCalledTimes(1);
+    const [req] = handleUpgrade.mock.calls[0];
+    expect(req.authenticatedCollectionsCall).toBe(true);
+  });
+
+  test('a non-collections (or absent) row leaves the flag false', async () => {
+    mockCallLogRow = undefined;
+    const token = mintCallToken(CALL_SID, { secret: SECRET });
+    await upgrade(httpServer, `/ws/voice-agent?callSid=${CALL_SID}&t=${token}`);
+    expect(handleUpgrade.mock.calls[0][0].authenticatedCollectionsCall).toBe(false);
+  });
+
+  test('an unreadable source REJECTS the upgrade (fail closed, same envelope as the burn)', async () => {
+    mockCallLogFails = true;
+    const token = mintCallToken(CALL_SID, { secret: SECRET });
+    const socket = await upgrade(httpServer, `/ws/voice-agent?callSid=${CALL_SID}&t=${token}`);
+    expect(handleUpgrade).not.toHaveBeenCalled();
+    expect(socket.destroy).toHaveBeenCalled();
+  });
 });
 
 describe('ws upgrade — fail-closed attach', () => {
@@ -316,4 +439,30 @@ describe('ws upgrade — fail-closed attach', () => {
     expect(attachVoiceRelay(httpServer)).toBeNull();
     expect(httpServer.listenerCount('upgrade')).toBe(0);
   });
+});
+
+// gh prb-r19: the source read happens BEFORE the irreversible burn — a
+// transient read failure must not consume the one-use token, so the same
+// authenticated URL succeeds on Twilio's retry once the DB recovers.
+test('a failed source read rejects the upgrade WITHOUT burning the token', async () => {
+  jest.clearAllMocks();
+  mockBurned.clear();
+  mockBurnFails = false;
+  mockCallLogFails = true;
+  process.env.VOICE_RELAY_ENABLED = 'true';
+  process.env.ANTHROPIC_API_KEY = 'sk-test';
+  process.env.VOICE_RELAY_WS_SECRET = SECRET;
+  const httpServer = attach();
+  const token = mintCallToken('CA-retry-1', { secret: SECRET });
+  const socket = await upgrade(httpServer, `/ws/voice-agent?callSid=CA-retry-1&t=${token}`);
+  expect(socket.destroy).toHaveBeenCalled();
+  expect(mockBurned.size).toBe(0); // credential NOT consumed
+  // DB recovers — the SAME token now completes the upgrade.
+  mockCallLogFails = false;
+  await upgrade(httpServer, `/ws/voice-agent?callSid=CA-retry-1&t=${token}`);
+  expect(handleUpgrade).toHaveBeenCalledTimes(1);
+  mockCallLogFails = false;
+  delete process.env.VOICE_RELAY_ENABLED;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.VOICE_RELAY_WS_SECRET;
 });

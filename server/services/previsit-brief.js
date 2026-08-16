@@ -65,7 +65,10 @@ const { etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/dat
 const VISIT_BRIEF_TYPE = 'visit_brief_v1';
 const WDO_BRIEF_TYPE = 'wdo_inspection';
 
-const PROMPT_VERSION = 'previsit_brief_v1';
+// v2 (codex #3423 r15): the grounding-validator tightening must invalidate
+// cached v1 briefs — an unchanged grounding hash would keep serving
+// pre-tightening bodies (e.g. a cached retired-name mention) forever.
+const PROMPT_VERSION = 'previsit_brief_v2';
 
 // Statuses that are no longer an upcoming visit (mirrors
 // PREP_TERMINAL_STATUSES in appointment-tagger.js / the admin-schedule
@@ -76,6 +79,33 @@ const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'rescheduled', 'ski
 // lab confirmation). Deterministic target lists are filtered; LLM list
 // items mentioning them are dropped defensively too.
 const FORBIDDEN_TARGET_RE = /ganoderma|thielaviopsis/i;
+// The retired company name must never appear in generated output — the
+// company is "Waves Pest Control" (AGENTS.md; codex #3423 r9 showed the
+// phrase riding through common words with 'waves' allowlisted).
+// \W+ separators cover space, hyphen, slash, plus, comma, ampersand —
+// "Waves Lawn-Pest" and "Waves Lawn/Pest" are the same retired name (r14).
+// Either word order — "Waves Pest & Lawn" is the same retired name (r15).
+// The real brand ("Waves Pest Control & Lawn Care") stays safe: 'control'
+// is a word, so \W-only separators never bridge pest→lawn across it.
+const RETIRED_NAME_RE = /waves\W+(?:lawn\W*(?:and\W+)?\W*pest|pest\W*(?:and\W+)?\W*lawn)/i;
+// The APPROVED company name, as a whole normalized phrase — prose, not a
+// product reference (r17: bare 'waves' is no longer common prose).
+// Canonical name ONLY per AGENTS.md — no blessed variants (codex r19).
+const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
+// The canonical phrase followed by a brand-connector is a suffixed
+// variant ("Waves Pest Control & Lawn") — reject it outright (r20).
+// …followed by an actual brand term — bare punctuation after the name
+// ("Waves Pest Control - scheduled service") is ordinary prose (r21 P2).
+// Connector optional (r22): "Waves Pest Control Pest Services" is a
+// suffixed variant too — a brand word directly after the name rejects;
+// ordinary prose ("- routine service", "serviced the yard") does not.
+// The suffix must END the name (lookahead: punctuation/end or another
+// brand-continuation word) — "…Control and pest activity can be
+// reviewed" is a new clause, not a name suffix (r36 P2).
+// Strong connectors (& + /) always denote a name suffix; weak ones
+// (- ,) and bare/and brand words need the end-of-name lookahead —
+// "- pest activity reviewed" is a clause, "- Lawn Care" a suffix (r49).
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*\w+|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b(?!\s+(?:was|is|were|are|has|have|had|will|would|being|remains?|stays?|continues?|scheduled|planned|discussed|requested|completed|begins?|starts?|needs?|ends?|resumes?)\b))|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b(?!\s+(?:was|is|were|are|has|have|had|will|would|being|remains?|stays?|continues?|scheduled|planned|discussed|requested|completed|begins?|starts?|needs?|ends?|resumes?)\b))|\s+(?:and\s+)?(?:group|groups|solutions|enterprises|holdings|partners|brands)\b|\s+of\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|swfl|america|tampa)\b|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)(?!\s+(?:was|is|were|are|has|have|had|will|would|being|remains?|stays?|continues?|scheduled|planned|discussed|requested|completed|begins?|starts?|needs?|ends?|resumes?)\b))/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -894,29 +924,29 @@ const COMMON_PROSE_WORDS = new Set([
   'about', 'above', 'access', 'account', 'action', 'address', 'after', 'again', 'ahead', 'alert',
   'along', 'amount', 'annual', 'apply', 'applied', 'applying', 'appointment', 'approach', 'arrival', 'arrive',
   'arriving', 'asked', 'attention', 'avoid', 'balance', 'baseboard', 'baseboards', 'basement', 'bathroom', 'bedroom',
-  'before', 'begin', 'behind', 'below', 'between', 'billing', 'booked', 'booking', 'bring', 'building',
+  'before', 'begin', 'behind', 'below', 'between', 'booked', 'booking', 'bring', 'building',
   'cabinet', 'cabinets', 'called', 'calling', 'cancel', 'cancelled', 'carefully', 'caution', 'check', 'checked',
   'checking', 'clear', 'close', 'closet', 'complete', 'completed', 'concern', 'concerns', 'condition', 'conditions',
   'confirm', 'confirmed', 'contact', 'continue', 'continued', 'corner', 'corners', 'coverage', 'covered', 'crawl',
-  'credit', 'current', 'customer', 'cycle', 'damage', 'daytime', 'detail', 'details', 'discussed', 'dispatch',
-  'document', 'driveway', 'during', 'earlier', 'early', 'entry', 'estimate', 'evening', 'every', 'expect',
+  'current', 'customer', 'cycle', 'daytime', 'detail', 'details', 'discussed', 'dispatch',
+  'document', 'driveway', 'during', 'earlier', 'early', 'entry', 'evening', 'every', 'expect',
   'expects', 'extra', 'family', 'fence', 'fencing', 'first', 'flag', 'flagged', 'focus', 'follow',
-  'following', 'front', 'garage', 'garden', 'gate', 'gates', 'gutter', 'gutters', 'heavy', 'hedge',
-  'hedges', 'history', 'home', 'hours', 'inspect', 'inspected', 'inspection', 'inside', 'invoice', 'issue',
+  'following', 'front', 'garage', 'garden', 'gutter', 'gutters', 'heavy', 'hedge',
+  'hedges', 'history', 'home', 'hours', 'inspect', 'inspected', 'inspection', 'inside', 'issue',
   'issues', 'items', 'kitchen', 'knock', 'landscape', 'lanai', 'later', 'lawn', 'leave', 'light',
   'listed', 'locked', 'maintain', 'maintenance', 'member', 'membership', 'message', 'meter', 'monitor', 'monitoring',
   'month', 'monthly', 'morning', 'mulch', 'needs', 'nothing', 'note', 'noted', 'notes', 'notice',
   'notify', 'number', 'office', 'onsite', 'orders', 'other', 'outdoor', 'owner', 'panel', 'parking',
-  'patio', 'payment', 'pending', 'perimeter', 'phone', 'photo', 'photos', 'place', 'placed', 'planned',
-  'plans', 'plants', 'please', 'pool', 'porch', 'prefer', 'preference', 'preferences', 'prefers', 'pressure',
-  'previous', 'prior', 'program', 'progress', 'quote', 'rate', 'ready', 'recap', 'recent', 'recently',
+  'patio', 'pending', 'perimeter', 'phone', 'photo', 'photos', 'place', 'placed', 'planned',
+  'plans', 'plants', 'please', 'pool', 'porch', 'prefer', 'preference', 'preferences', 'prefers',
+  'previous', 'prior', 'program', 'progress', 'rate', 'ready', 'recap', 'recent', 'recently',
   'recheck', 'record', 'records', 'reminder', 'renewal', 'repair', 'report', 'reported', 'request', 'requested',
   'reschedule', 'rescheduled', 'resolve', 'resolved', 'response', 'return', 'review', 'reviewed', 'right', 'roof',
   'route', 'routine', 'schedule', 'scheduled', 'scope', 'screen', 'screened', 'season', 'secure', 'secured',
-  'sensitive', 'sensitivity', 'setup', 'sheet', 'shrubs', 'siding', 'since', 'skip', 'slab', 'small',
+  'setup', 'sheet', 'shrubs', 'siding', 'since', 'skip', 'slab', 'small',
   'soffit', 'spray', 'sprayed', 'spraying', 'spot', 'staff', 'start', 'started', 'status', 'still',
   'stone', 'stops', 'sweep', 'swept', 'technician', 'texts', 'thorough', 'through', 'times', 'today',
-  'touch', 'toward', 'treat', 'treated', 'treatment', 'treatments', 'trees', 'update', 'updated', 'upcoming',
+  'touch', 'toward', 'treat', 'treated', 'trees', 'update', 'updated', 'upcoming',
   'verify', 'visit', 'visits', 'walk', 'walkthrough', 'warrant', 'warrants', 'watch', 'water', 'weather',
   'weeks', 'weekly', 'window', 'windows', 'within', 'worth', 'yesterday', 'trail', 'trails', 'chemical', 'chemicals', 'across', 'during', 'under', 'beside', 'beneath', 'against',
   'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november',
@@ -925,34 +955,220 @@ const COMMON_PROSE_WORDS = new Set([
   // like mice/rats are scanned; ordinary short words must stay known).
   'have', 'been', 'will', 'must', 'then', 'than', 'they', 'them', 'when', 'each',
   'only', 'also', 'some', 'more', 'most', 'done', 'sure', 'fine', 'good', 'open',
-  'next', 'last', 'line', 'side', 'gate', 'note', 'call', 'text', 'week', 'days',
+  'next', 'last', 'line', 'side', 'note', 'call', 'text', 'week', 'days',
   'date', 'time', 'door', 'wall', 'lawn', 'turf', 'tree', 'were', 'work', 'both',
   'here', 'there', 'keep', 'left', 'high', 'look', 'like', 'plan', 'stop', 'take',
   'told', 'used', 'want', 'well', 'your', 'their', 'after', 'need', 'needs', 'ask',
   'asks', 'same', 'soon', 'once', 'twice', 'edge', 'best', 'back', 'full', 'half',
   'away', 'near', 'upon', 'very', 'much', 'many', 'wear', 'shoe', 'shoes', 'rain',
-  'wind', 'heat', 'cold', 'warm', 'soil', 'seed', 'file', 'down', 'knock', 'card', 'paid', 'owed', 'owes', 'due', 'dues', 'crew', 'team', 'unit', 'step', 'path', 'walk', 'tarp', 'hose', 'pump', 'tank', 'mask', 'kit',
+  'wind', 'heat', 'cold', 'warm', 'soil', 'seed', 'file', 'down', 'knock', 'paid', 'owed', 'owes', 'due', 'dues', 'crew', 'team', 'unit', 'step', 'path', 'walk', 'tarp', 'hose', 'pump', 'tank', 'mask', 'kit',
+  // Generic vocabulary from the live rejection histogram (08-14/15: 96% of
+  // briefs template-fell on words like "perform" ×79, "provide",
+  // "availability"). Deliberately NO organisms, product names, or
+  // direction/scope words (interior/attic-class) — those must still ground,
+  // and the preference-conflict scan enforces opted-out scopes regardless.
+  // NOT here (codex #3423 r1+r2): tier names (bronze/silver/gold/platinum)
+  // — an ungrounded tier claim is an invented business fact, handled by
+  // the grounded-tier skip in the product pass instead; rooms/credentials
+  // — actionable instruction objects that must keep grounding (rooms?
+  // also joins the interior opt-out conflict regex); product-shaped words
+  // (structural/control — "Apply Structural Control" must park as a
+  // product) and condition-bearing descriptors (severe/regrowth/raised/
+  // missing/recovery/occupancy/presence — "Watch for severe regrowth" is
+  // an invented field condition unless the facts state it); customer
+  // equipment (camera/cameras/irrigation/runtime — "Check cameras" on
+  // empty facts is an unsupported equipment instruction) and
+  // service-history claim words (missed/application(s) — "Missed
+  // application" must come from the facts; both appear in real groundings
+  // whenever the claim is true). The action verbs below (perform/provide/
+  // retrieve/vacuum/document/discuss) are additionally in the
+  // directive-verb capture so their OBJECTS still ground strictly.
+  'with',
+  // Spelled numbers are prose — the duration guard owns ungrounded
+  // intervals (r64).
+  'three', 'four', 'five', 'seven', 'eight', 'nine', 'fifteen', 'twenty', 'thirty',
+  'perform', 'performs', 'performed', 'performing', 'provide', 'provides', 'provided', 'providing',
+  'context', 'account', 'accounts',
+  'information',
+  'retrieve',
+  'introduction', 'discuss', 'discussing', 'relevant', 'mindful',
+  'vacuum', 'vacuuming', 'follow-up', 'walk-through',
 ]);
+
+// Business-state vocabulary, never common prose: WaveGuard tier names
+// (codex #3423 r1) and cadence/acceptance terms (r4 — "Apply Initial
+// Treatment" / "Payment accepted" on empty facts would store an invented
+// cadence or account status). These words must be word-boundary grounded;
+// when they are, a capitalized capture carrying them ("Accepted Bronze")
+// is prose about the account, not a product reference.
+const GROUNDED_ONLY_WORDS = new Set([
+  'bronze', 'silver', 'gold', 'platinum',
+  'accepted', 'accepting', 'initial', 'initially', 'recurring',
+  // r77: ALL cadence wording binds to visit facts, not just initial/
+  // recurring — 'Weekly service' on a quarterly visit contradicts the
+  // authoritative cadence.
+  'annual', 'annually', 'weekly', 'monthly', 'quarterly', 'biweekly', 'bimonthly',
+  // r5: "Customer available Monday" is a scheduling fact, not prose.
+  'available', 'availability',
+  // r10: money words require a money fact VALUE in every field — an
+  // estimate-status 'accepted' must not let "Payment accepted" through
+  // when no payment fact exists.
+  'payment', 'payments', 'invoice', 'invoices', 'refund', 'refunds', 'billing',
+  // r21: scheduling STATUSES ("Scheduling confirmed/cancelled") are
+  // appointment-state claims in ANY field, not just instructions.
+  'scheduling', 'reschedule', 'rescheduling',
+  // r23: treatment claims ("Performed treatment") assert service history
+  // in ANY field — a brief may only claim treatment a fact evidences.
+  'treatment', 'treatments',
+  // r24/r25: "Estimate provided" / "Quote provided" are money-delivery
+  // claims in ANY field (quotes ARE estimates in this system).
+  'estimate', 'estimates', 'quote', 'quotes',
+  // r36: sensitivity claims ("provided chemical sensitivity") are safety
+  // conditions in ANY field.
+  'sensitivity', 'sensitivities', 'sensitive',
+  // r34/r39: pet data is deterministic-block-only by design — an LLM pet
+  // claim in ANY field must derive from a fact (e.g. a flag).
+  'pet', 'pets', 'dog', 'dogs', 'cat', 'cats',
+  // r28: entry/payment-method state ("provided gate access"/"credit card")
+  // is claimable in ANY field — and access codes never pass through the
+  // LLM by design, so an ungrounded access claim is always invented.
+  // 'key'/'keys' are NOT here (r29 P2): "Key concern" is ordinary
+  // emphasis — credential usage is detected contextually via
+  // KEY_CREDENTIAL_RE instead.
+  // 'access' is NOT globally grounded-only (r44 P2): "Access backyard" is
+  // a verb — ACCESS_STATE_RE below guards credential/state usage.
+  'gate', 'gates', 'card', 'cards', 'fob', 'fobs', 'credit', 'credits',
+  // r69: membership/renewal state is claimable in ANY field ("Customer is
+  // a member" in context assigns benefits to a nonmember) — graduated
+  // from INSTRUCTION_EVIDENCE_WORDS; the membership object injects its
+  // own evidence tokens for the truthful case.
+  'membership', 'memberships', 'member', 'members', 'renewal', 'renewals',
+]);
+
+// 'access' as a credential or claimed access STATE must ground; as a verb
+// for reaching a grounded area it is prose (codex #3423 r44).
+const ACCESS_STATE_RE = /\b(?:access|entry)\s+(?:(?:has\s+been|was|is|will\s+be)\s+)?(?:code|card|key|numbers?|granted|provided|given|arranged|available|confirmed|authorized|secured|on\s+file)\b|\b(?:gate|door|garage|provide[sd]?|granted|has|have|gave|given)\s+access\b/i;
+
+// 'key' as an access credential ("door key", "key under the mat") must
+// ground; 'key' as emphasis ("key concern") is prose (codex #3423 r29).
+// Built per credential type (r48): a PIN fact must not ground a KEY
+// claim — the technician would look for the wrong thing.
+const credentialReFor = (nouns) => new RegExp(
+  `\\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\\s+(?:${nouns})\\b`
+  + `|\\b(?:${nouns})\\s+(?:(?:is|are|was|were|will\\s+be)\\s+)?(?:under|hidden|inside|behind|left|beneath|provided|ready|available|at\\s+(?:the\\s+)?\\w+)\\b`
+  + `|\\b(?:${nouns})\\s+(?:(?:is|are|was|were)\\s+)?(?:numbers?|on\\s+file)\\b`
+  + `|\\b(?:provide[sd]?|leave|left|gave|give|has|have|keeps?)\\s+(?:the\\s+|a\\s+)?(?:${nouns})\\b`, 'i');
+const KEY_ONLY_RE = credentialReFor('keys?');
+const PIN_ONLY_RE = credentialReFor('pins?|codes?');
+const KEY_CREDENTIAL_RE = credentialReFor('keys?|pins?|codes?');
+
+// Instruction objects carrying these words direct real business actions
+// ("Provide estimate", "Discuss payment", "Perform treatment") — inside
+// priorities/watch_items the word must be evidenced in the fact VALUES
+// even though it is ordinary prose in descriptive fields (codex #3423 r9).
+// (payment/invoice/refund/billing graduated to GROUNDED_ONLY_WORDS in r10
+// — they require evidence in EVERY field, not just instructions.)
+const INSTRUCTION_EVIDENCE_WORDS = new Set([
+  'balance', 'discount', 'discounts',
+  // r15: access-security objects ("Retrieve gate key/access card") are
+  // fabricatable from common words — the access noun must be evidenced.
+  // r19: scheduling directives ("Discuss schedule") assert a real action.
+  // 'scheduled' (adjective — "a prior scheduled service") stays prose.
+  'schedule', 'schedules',
+  // r27: safety-related directives ("Discuss chemical sensitivity") must
+  // derive from a sensitivity fact.
+  'chemical', 'chemicals',
+  // (renewal/membership graduated to GROUNDED_ONLY_WORDS in r69 — they
+  // require evidence in EVERY field, not just instructions.)
+]);
+
+// Word-level grounding for one candidate word ACROSS its stem variants.
+// Grounded-only vocabulary must match on a WORD BOUNDARY — substring
+// grounding let 'silver' ground on "silverfish" and 'gold' on "marigold"
+// (codex #3423 r5) — and strictness is decided by the BASE word, not the
+// variant: wordVariants('accepted') yields 'accept', which is not in the
+// set, so a per-variant check fell back to substring and "unaccepted
+// offer" grounded "Payment accepted" (r6). Every variant of a
+// grounded-only word boundary-matches; ordinary words keep substring
+// matching (the light-stem tiers rely on it).
+// Leaf VALUES of the grounding facts, without key names — strict grounding
+// must never ride on a field NAME: every payload carries keys like
+// history.available, which grounded "Customer available Monday" even when
+// the value was false (codex #3423 r9). Booleans excluded — true/false
+// carry no vocabulary.
+function collectFactValues(node, out = []) {
+  if (node == null || typeof node === 'boolean') return out;
+  if (typeof node === 'string' || typeof node === 'number') { out.push(String(node)); return out; }
+  if (Array.isArray(node)) { node.forEach((c) => collectFactValues(c, out)); return out; }
+  if (typeof node === 'object') { Object.values(node).forEach((c) => collectFactValues(c, out)); return out; }
+  return out;
+}
+
+function groundedWordOk(word, groundedText, strictText = groundedText) {
+  const strict = wordVariants(word).some((v) => GROUNDED_ONLY_WORDS.has(v));
+  return wordVariants(word).some((v) => (strict
+    ? new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(strictText)
+    : groundedText.includes(v)));
+}
 
 // Short/common organism names — too short (or too domain-loaded) for the
 // rare-word scan and unsound to substring-ground ('rat' matches inside
 // 'operator'). Every occurrence must be WORD-BOUNDARY grounded.
-const SHORT_ORGANISM_RE = /\b(rats?|mouse|mice|ants?|bees?|fly|flies|wasps?|ticks?|fleas?|moths?|slugs?|grubs?|mites?|voles?|moles?|gnats?|weeds?|aphids?)\b/g;
+const SHORT_ORGANISM_RE = /\b(rats?|bats?|bugs?|mouse|mice|ants?|bees?|fly|flies|wasps?|ticks?|fleas?|moths?|slugs?|grubs?|mites?|voles?|moles?|gnats?|weeds?|aphids?|roach(?:es)?|cockroach(?:es)?)\b/g;
 
 // Ordinary short ALLCAPS abbreviations a brief legitimately uses without
 // grounding (times, zones, business boilerplate) — everything else
 // ALLCAPS-short must ground or reject (bare-product scan below).
+// 'sms' deliberately NOT here (codex #3423 r9): "Customer prefers SMS" is a
+// contact-preference claim — a grounded payload mentions sms, an invented
+// preference does not, so SMS goes through the normal grounded-ALLCAPS path.
 const ACRONYM_PROSE_WORDS = new Set(['am', 'pm', 'et', 'est', 'edt', 'asap', 'hoa', 'ac', 'id', 'ok', 'po', 'llc', 'inc', 'na']);
+
+// Negation within a clause window of a word — shared by the polarity
+// guards (codex #3423 r57).
+function negNear(text, word) {
+  // The window stops at contrast conjunctions — "no dogs but does have
+  // cats" negates dogs only (r60).
+  const gap = "(?:(?!\\b(?:but|however|though|although)\\b)[^.;!?]){0,25}";
+  return new RegExp(`\\b(?:no|not|never|without|denied|isn't|wasn't)\\b${gap}\\b${word}`, 'i').test(text)
+    || new RegExp(`\\b${word}\\b(?:(?!\\b(?:but|however)\\b)[^.;!?]){0,20}\\b(?:not|never|denied)\\b`, 'i').test(text);
+}
 
 // Light stemming for the rare-word pass — plurals/participles of known or
 // grounded words must not read as novel.
 function wordVariants(word) {
   const out = [word];
+  // Singular evidence must match plural fact values (r64) — except
+  // 'initial', whose plural is the unrelated noun "customer initials"
+  // (r69).
+  if (!word.endsWith('s') && word !== 'initial') out.push(`${word}s`);
   if (word.endsWith('es')) out.push(word.slice(0, -2));
   if (word.endsWith('s')) out.push(word.slice(0, -1));
-  if (word.endsWith('ing')) out.push(word.slice(0, -3), `${word.slice(0, -3)}e`);
+  // 'missing' (state adjective) must not stem to 'missed' (event) — r53.
+  if (word.endsWith('ing') && word !== 'missing') out.push(word.slice(0, -3), `${word.slice(0, -3)}e`, `${word.slice(0, -3)}ed`);
   if (word.endsWith('ed')) out.push(word.slice(0, -2), word.slice(0, -1));
   if (word.endsWith('ly')) out.push(word.slice(0, -2));
+  // sensitive <-> sensitivity are one family (r45).
+  if (word === 'sensitive') out.push('sensitivity');
+  if (word === 'sensitivity' || word === 'sensitivities') out.push('sensitive');
+  // initial <-> initially likewise (r33 P2).
+  if (word === 'initial') out.push('initially');
+  // available <-> availability are one evidence family (r31 P2) — model
+  // paraphrase between them must not defeat a real availability fact.
+  if (word === 'available') out.push('availability');
+  if (word === 'availability') out.push('available');
+  // -ies plural (r28): 'sensitivities' must reach 'sensitivity'.
+  if (word.endsWith('ies')) out.push(`${word.slice(0, -3)}y`);
+  // Noun-of-action inflection (r24, narrowed r29): ONLY the intentional
+  // treatment<->treat pair — a generic -ment rule equated department with
+  // depart and settlement with settle, false-grounding invented claims.
+  if (word === 'treatment' || word === 'treatments') {
+    out.push('treat', 'treated', 'treating', 'treats');
+  }
+  // payment <-> pay/paid and refund <-> refunded are one billing family
+  // each (r68) — "asked how to pay" grounds "asked about payment".
+  if (word === 'payment' || word === 'payments') out.push('pay', 'pays', 'paid', 'paying');
+  if (word === 'refund' || word === 'refunds') out.push('refunded', 'refunding');
   return out;
 }
 
@@ -960,14 +1176,23 @@ function wordVariants(word) {
 // grounding payload, or (fuzzy tier — word order/articles vary in prose)
 // when every significant word of it does. A phrase left with no
 // significant words asserts nothing and passes.
-function isGroundedReference(candidate, groundedText) {
+function isGroundedReference(candidate, groundedText, strictText = groundedText) {
   const phrase = String(candidate || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
   if (!phrase) return true;
   if (groundedText.includes(phrase)) return true;
+  // Common-prose words assert nothing product- or organism-wise — the same
+  // principle as the rare-word pass and the instructed-claim skip — so only
+  // the remaining words must ground, with the same light stemming
+  // ("monitors" grounds on "monitor"). Requiring literal grounding of
+  // ordinary prose rejected ~96% of live briefs (prod histogram 08-14/15:
+  // "a prior scheduled service", "customer monitors camera"). Organisms and
+  // product names are never in the prose sets, so they still must ground.
   const words = phrase.split(' ')
-    .filter((w) => /^[a-z][a-z'-]{3,}$/.test(w) && !REFERENCE_STOP_WORDS.has(w));
+    .filter((w) => /^[a-z][a-z'-]{3,}$/.test(w))
+    .filter((w) => wordVariants(w).some((v) => GROUNDED_ONLY_WORDS.has(v))
+      || !wordVariants(w).some((v) => REFERENCE_STOP_WORDS.has(v) || COMMON_PROSE_WORDS.has(v)));
   if (!words.length) return true;
-  return words.every((w) => groundedText.includes(w));
+  return words.every((w) => groundedWordOk(w, groundedText, strictText));
 }
 
 // Allowlist-extraction of product-ish / target-ish references from brief
@@ -999,14 +1224,14 @@ function extractOutputReferences(text) {
   // seen, not just "Apply Bifen SC"); the all-words-common skip in the
   // validator keeps ordinary prose objects ("use caution") from
   // over-rejecting.
-  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(instructed, m[1]);
+  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/gi)) push(instructed, m[1]);
   // NON-treatment imperatives ("Inspect interior", "Check attic",
   // "Monitor bait stations"): instruction fields must ground these
   // objects too — the treatment-verb capture above covers only
   // apply/spray/use/treat, and an ungrounded "Inspect interior" on an
   // exterior-only visit is exactly as contradictory as "Treat interior".
   // Same connector skip and follower-stop as the treatment capture.
-  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|the|a|an|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(directives, m[1]);
+  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?|[Pp]erform(?:ed|ing|s)?|[Pp]rovid(?:e|es|ed|ing)|[Rr]etriev(?:e|es|ed|ing)|[Vv]acuum(?:ed|ing|s)?|[Dd]ocument(?:ed|ing|s)?|[Dd]iscuss(?:ed|ing|es)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/gi)) push(directives, m[1]);
   for (const m of text.matchAll(/\b(?:for|targeting|against)\s+((?:[a-z][a-z'-]*\s+){0,3}[a-z][a-z'-]*)/g)) push(targets, m[1]);
   // Organism references that never pass a preposition: "<X> activity/
   // damage/infestation" and "signs/evidence of <X>" ("Emerald ash borer
@@ -1041,6 +1266,36 @@ function findUngroundedClaim(body, grounding) {
   if (!outputFields.length) return null;
   const outputText = outputFields.join(' ').toLowerCase();
   const groundedText = JSON.stringify(grounding.llmFacts).toLowerCase();
+  // Strict (grounded-only / evidence-word) matches scope to fact VALUES —
+  // key names must never ground a business-state claim (codex #3423 r9).
+  // visit.isRecurring === true is the ONLY cadence fact an ordinary
+  // recurring visit carries; excluding booleans (r9) must not strip it or
+  // every truthful "recurring" brief re-templates (codex #3423 r10).
+  // Values join with ' ; ' so cross-fact adjacency cannot manufacture
+  // evidence bigrams ('accepted' + 'payment reminder…' — r48).
+  const groundedValueText = [
+    ...collectFactValues(grounding.llmFacts),
+    ...(grounding.llmFacts?.visit?.isRecurring === true ? ['recurring'] : []),
+    // visit.newCustomer === true is likewise the only first-visit fact —
+    // without this token every truthful "Initial visit" re-templates (r14).
+    ...(grounding.llmFacts?.visit?.newCustomer === true ? ['initial'] : []),
+    // A present estimate object is THE estimate fact (r24) — its values
+    // rarely contain the literal word.
+    ...(grounding.llmFacts?.openScope?.pendingEstimate || grounding.llmFacts?.openScope?.sourceEstimate ? ['estimate', 'quote'] : []),
+    // A present visit object IS the upcoming-treatment fact (r68) —
+    // future/current "treatment" wording is grounded by the visit itself;
+    // the completed-work guard still rejects history phrasing without a
+    // lastVisit.
+    ...(grounding.llmFacts?.visit ? ['treatment'] : []),
+    // An estimate's monthlyTotal IS the monthly-cadence fact (r77) —
+    // the amount lives under a key, and keys never join the value pool.
+    ...((grounding.llmFacts?.openScope?.pendingEstimate?.monthlyTotal ?? grounding.llmFacts?.openScope?.sourceEstimate?.monthlyTotal) != null ? ['monthly'] : []),
+    // A present membership object IS the membership fact (r29).
+    ...(grounding.llmFacts?.membership ? ['membership', 'member'] : []),
+    // The overdue_balance flag IS billing evidence — its detail ('$100.00
+    // outstanding') doesn't carry the words (r27 P2).
+    ...((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance') ? ['billing', 'invoice', 'payment', 'balance'] : []),
+  ].join(' ; ').toLowerCase();
   const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const kind of ['names', 'targets']) {
     for (const term of vocab[kind] || []) {
@@ -1048,6 +1303,35 @@ function findUngroundedClaim(body, grounding) {
       if (re.test(outputText) && !re.test(groundedText)) {
         return { kind, term };
       }
+    }
+  }
+  // A branded catalog-name HEAD in the output without any full catalog
+  // name it starts renames the product ("Bifen was used" for "Bifen IT")
+  // — caught here independently of the self-report list (r71). Common-
+  // prose heads ("Termite Bait…") and exact legacy grounded names
+  // ("Bifen" as an unlinked snapshot) are exempt.
+  {
+    const normName = (n) => String(n).toLowerCase().replace(/\s+/g, ' ').trim();
+    const catalogNorm = (vocab.names || []).map(normName);
+    const legacyNames = [
+      ...(grounding.llmFacts?.productGuidance?.productNames || []),
+      ...(grounding.llmFacts?.productGuidance?.companions || []).flatMap((c) => c.productNames || []),
+    ].map(normName);
+    const heads = new Set(catalogNorm.filter((n) => n.includes(' ')).map((n) => n.split(' ')[0]));
+    for (const head of heads) {
+      if (COMMON_PROSE_WORDS.has(head) || catalogNorm.includes(head) || legacyNames.includes(head)) continue;
+      if (!new RegExp(`\\b${escapeRe(head)}\\b`).test(outputText)) continue;
+      // Only PRODUCT-SHAPED uses count (r73) — a catalog head that is an
+      // ordinary English word ("Suspend service") stays prose unless used
+      // like a product.
+      const productShaped = new RegExp(
+        `\\b(?:appl(?:y|ied|ying)|spray(?:ed|ing)?|us(?:e|ed|ing)|treat(?:ed|ing)?)(?:\\s+with)?\\s+(?:the\\s+)?${escapeRe(head)}\\b`
+        + `|\\b${escapeRe(head)}\\s+(?:was|is|will\\s+be)\\s+(?:used|applied|sprayed)\\b`
+        + `|\\b${escapeRe(head)}\\s+(?:product|label|application)\\b`,
+      ).test(outputText);
+      if (!productShaped) continue;
+      const fullPresent = catalogNorm.some((n) => n.split(' ')[0] === head && new RegExp(`\\b${escapeRe(n)}\\b`).test(outputText));
+      if (!fullPresent) return { kind: 'novel_product', term: head };
     }
   }
   // Extraction runs PER FIELD — joined text lets the capitalized-run and
@@ -1069,6 +1353,30 @@ function findUngroundedClaim(body, grounding) {
   const allWordsCommon = (term) => String(term).toLowerCase().split(/\s+/).every((w) => (
     w.length < 4 || REFERENCE_STOP_WORDS.has(w) || COMMON_PROSE_WORDS.has(w)
   ));
+  // Capitalized-run business-state prose ("Accepted Bronze"): a
+  // grounded-only word makes the capture product-shaped, but when it IS
+  // grounded the phrase is a sentence about the account, not a product
+  // name. Ungrounded grounded-only words never pass (and the rare-word
+  // pass rejects them in any field). Used by the capitalized-run product
+  // path ONLY — application-verb objects keep the strict skip so "Apply
+  // Silver Control" still parks as a product.
+  const boundaryGroundedWord = (w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedValueText);
+  // Tier/grounded-only words exempt a capitalized run ONLY in claim-like
+  // shapes — "Gold Chemical" must park as a product even for a real Gold
+  // member (r53): the grounded-only skip excludes runs where the
+  // grounded-only word is followed by a non-claim noun.
+  const TIER_WORD_RE = /^(?:bronze|silver|gold|platinum)$/;
+  const commonOrGroundedProse = (term) => {
+    const words = String(term).toLowerCase().split(/\s+/);
+    return words.every((w, i) => {
+      if (w.length < 4 || REFERENCE_STOP_WORDS.has(w) || COMMON_PROSE_WORDS.has(w)) return true;
+      if (!wordVariants(w).some((v) => GROUNDED_ONLY_WORDS.has(v))) return false;
+      if (!groundedWordOk(w, groundedText, groundedValueText)) return false;
+      // A tier word followed by more product-shaped words is a product name.
+      if (TIER_WORD_RE.test(w) && i < words.length - 1 && !/^(?:member(?:ship)?|tier|plan|level|customer|client|account|status)$/.test(words[i + 1])) return false;
+      return true;
+    });
+  };
   // Instruction fields (priorities, watch_items) direct the technician —
   // an application-verb product reference there must name a product on
   // the CURRENT visit's fixed list, not merely anything in the grounding:
@@ -1113,8 +1421,17 @@ function findUngroundedClaim(body, grounding) {
   const instructedClaimGrounded = (term) => {
     const phrase = String(term || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
     if (!phrase) return true;
-    if (groundedText.includes(phrase)) return true;
     const words = phrase.split(' ').filter((w) => w.length >= 4);
+    // Money/scope-bearing and grounded-only objects require VALUE evidence
+    // BEFORE the whole-phrase fast path (codex #3423 r9+r12): every real
+    // payload carries keys like sourceEstimate/pendingEstimate even when
+    // their values are null, and `groundedText.includes('estimate')`
+    // matched the KEY — so "Provide estimate" validated with no estimate.
+    const evidence = words.filter((w) => INSTRUCTION_EVIDENCE_WORDS.has(w) || GROUNDED_ONLY_WORDS.has(w));
+    if (evidence.length && !evidence.every((w) => wordVariants(w).some(
+      (v) => new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedValueText),
+    ))) return false;
+    if (groundedText.includes(phrase)) return true;
     // No 4+-letter words at all does NOT make the claim grounded: a
     // short verb object ("Use DDT" → 'ddt') is exactly the shape every
     // length-gated pass ignores (rare-word scan starts at 4, catalog
@@ -1130,7 +1447,7 @@ function findUngroundedClaim(body, grounding) {
     // prose words asserts nothing beyond its verb.
     const significant = words.filter((w) => !COMMON_PROSE_WORDS.has(w));
     if (!significant.length) return true;
-    return significant.every((w) => wordVariants(w).some((v) => groundedText.includes(v)));
+    return significant.every((w) => groundedWordOk(w, groundedText, groundedValueText));
   };
   const labeledFields = [
     ...(body.priorities || []).map((text) => ({ text, instructional: true })),
@@ -1151,16 +1468,399 @@ function findUngroundedClaim(body, grounding) {
   const prefConflicts = [];
   const svcPrefFlags = grounding.llmFacts?.servicePreferences || null;
   if (svcPrefFlags?.interiorSpray === false) {
-    prefConflicts.push({ re: /\b(?:interior|inside|indoors?)\b/, term: 'interior' });
+    // Interior room nouns included (codex #3423 r1+r13): "Vacuum basement" /
+    // "Check kitchen" IS an interior instruction regardless of verb.
+    // plural 'rooms' only — singular is the spacing idiom ("leave room"), r19 P2.
+    prefConflicts.push({ re: /\b(?:interior|inside|indoors?|rooms|basements?|attics?|closets?|bedrooms?|bathrooms?|kitchens?)\b|\b(?:in|within)\s+the\s+(?:home|house)\b/, term: 'interior' });
   }
   if (svcPrefFlags?.exteriorSweep === false) {
-    prefConflicts.push({ re: /\b(?:eaves?|cobwebs?)\b/, term: 'eave sweep' });
+    prefConflicts.push({ re: /\b(?:eaves?|cobwebs?)\b|\bexterior\s+sweep\b|\bsweep\s+(?:the\s+)?exterior\b/, term: 'eave sweep' });
   }
+  // Completed-service wording in last_visit_summary requires an actual
+  // prior visit — "Service performed" for a customer with no lastVisit
+  // fact is a fabricated service record (r38).
+  // The FIELD is the last-visit summary — any nonempty content without a
+  // lastVisit fact fabricates prior work (r46 generalizes the r38 guard).
+  if (!grounding.llmFacts?.lastVisit && body.last_visit_summary) {
+    return { kind: 'fabricated_history', term: 'no prior visit on file' };
+  }
+  // Completed-work phrasing in ANY field needs a prior visit (r55).
+  if (!grounding.llmFacts?.lastVisit
+    && /\b(?:service|work|treatment|visit|inspection|maintenance|application|spray(?:ing)?)\s+(?:was\s+|ha[sd]\s+(?:(?:now|since|recently|already|just)\s+)?been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:an?\s+|the\s+)?(?:(?!of\b)\w+\s+){0,2}(?:service|work|treatment|inspection|maintenance|application|spray(?:ing)?)\b|\bprior\s+(?:inspection|maintenance|application)\b|\b(?:was|were|ha[sd]\s+been)\s+(?:sprayed|treated|serviced)\b|\btech(?:nician)?\s+(?:sprayed|treated|serviced)\b|\b(?:sprayed|treated|serviced)\s+(?:the\s+)?\w+(?:\s+\w+)?\s+(?:yesterday|previously|earlier|last\s+(?:week|month|visit|time))\b/.test(outputText)) {
+    return { kind: 'fabricated_history', term: 'no prior visit on file' };
+  }
+  // Spelled-out short quantities before time units are numeric claims —
+  // "two hours"/"ten days" must ground like digits (r54).
+  // r66 extends the unit set beyond durations: spelled counts of visits/
+  // bookings fabricate service history exactly like spelled durations.
+  // …and communication volumes ("five calls") fabricate interaction
+  // history the same way (r67 P2).
+  // Bounded modifiers between the quantity and unit ("five active
+  // services", "five more times") are still count claims (r68 P2);
+  // 'of' is excluded so partitives ("one of the services") stay prose.
+  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:(?!of\b)\w+\s+){0,2}(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?|pets?|dogs?|cats?|estimates?|quotes?|invoices?|payments?|units?|accounts?|propert(?:y|ies)|homes?|houses?|technicians?|techs?|crews?)\b/g)) {
+    const phrase = `${m[1]} ${m[2]}`;
+    const digitMap = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', fifteen: '15', twenty: '20', thirty: '30' };
+    const unit = m[2].replace(/s$/, '');
+    if (!new RegExp(`\\b${m[1]}\\b[^.;!?]{0,20}${unit}`).test(groundedValueText)
+      && !new RegExp(`(?<!\\d)${digitMap[m[1]]}(?![\\d.])[^.;!?]{0,20}${unit}`).test(groundedValueText)) {
+      return { kind: 'numeric', term: phrase };
+    }
+  }
+  // "History of <condition>" asserts recorded history — the word must
+  // appear in the fact values (r38).
+  const hasRealHistory = Boolean(grounding.llmFacts?.lastVisit)
+    || (Array.isArray(grounding.llmFacts?.serviceHistory) && grounding.llmFacts.serviceHistory.length > 0);
+  // A 'history of' phrase evidenced verbatim in the fact values (a
+  // recent-call or flag reporting the history) is grounded even without
+  // visit records (r75 P2).
+  if (/\bhistory\s+of\b/.test(outputText) && !hasRealHistory
+    && !/\bhistory\s+of\b/.test(groundedValueText)) {
+    return { kind: 'novel_term', term: 'history' };
+  }
+  const accessClaim = ACCESS_STATE_RE.test(outputText) || /\baccess\s+(?:(?:has\s+been|was|is)\s+)?not\s+(?:granted|provided|given|arranged|available|confirmed|authorized)\b/i.test(outputText);
+  if (accessClaim) {
+    const evid = /\b(?:access|entry)\b/.test(groundedValueText) && (ACCESS_STATE_RE.test(groundedValueText) || negNear(groundedValueText, '(?:access|entry)'));
+    const claimNeg = negNear(outputText, '(?:access|entry)');
+    const factNeg = negNear(groundedValueText, '(?:access|entry)');
+    if (!evid || claimNeg !== factNeg) return { kind: 'novel_term', term: 'access' };
+  }
+  // Photo-availability claims need a photo fact (r41 P2).
+  {
+    const photoClaim = /\b(?:provide[sd]?|supplied|supplies|sent|sends|shared|shares)\s+(?:(?:a|the|some|new)\s+)?(?:\w+\s+){0,2}photos?\b|\bphotos?\s+(?:(?:were|are|was|is|(?:have|has|had)\s+been|will\s+be)\s+)?(?:not\s+)?(?:provided|supplied|sent|shared|attached|on\s+file)\b|\bno\s+photos?\b|\b(?:customer|client|resident)s?\b[^.;!?]{0,20}\b(?:has|have|had)\s+(?:a\s+|the\s+|some\s+|new\s+)?photos?\b/.test(outputText);
+    if (photoClaim) {
+      const claimNeg = negNear(outputText, 'photos?');
+      const factHas = /\bphotos?\b/.test(groundedValueText);
+      const factNeg = negNear(groundedValueText, 'photos?');
+      if (!factHas || claimNeg !== factNeg) return { kind: 'novel_term', term: 'photos' };
+    }
+  }
+  // Appointment-status claims bind to fact values — the brief exists FOR a
+  // scheduled visit, so "Appointment cancelled/confirmed" must be stated
+  // by a fact, not inferred (r39).
+  // Scoped to the CURRENT visit's facts when present — a historical
+  // "previous appointment cancelled" in a call summary must not ground a
+  // claim about the active upcoming visit (r41).
+  // Production visit facts carry no status field (r42 P2), so the claim
+  // grounds EITHER on the visit's own values OR on an appointment-status
+  // phrase in the wider facts that is NOT historically qualified —
+  // "previous appointment cancelled" must not ground the active visit
+  // (r41), but a recent-call fact "appointment confirmed" does.
+  const { lastVisit: _lvx, serviceHistory: _shx, ...currentFacts } = grounding.llmFacts || {};
+  const currentFactValueText = collectFactValues(currentFacts).join(' ; ').toLowerCase();
+  const visitValueText = grounding.llmFacts?.visit
+    ? collectFactValues(grounding.llmFacts.visit).join(' ; ').toLowerCase()
+    : '';
+  // The last-visit summary is historical BY DEFINITION (production
+  // lastVisit is built from completed records) — status wording there is
+  // not a claim about the upcoming visit (r50 P2).
+  const currentClaimText = [
+    ...(body.priorities || []),
+    ...(body.watch_items || []),
+    body.open_scope,
+    body.customer_context,
+  ].filter(Boolean).join(' ').toLowerCase();
+  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)(?:\s*:\s*|\s+)(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:status\s*)?(?:\s*:\s*)?(?:(?:was|is|will\s+be|ha[sd]\s+(?:(?:now|since|recently|already|just|apparently|reportedly)\s+)?been|got)\s+)?(?:(?:currently|now|still|recently|already)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
+    const claimNegated = Boolean(m[1]);
+    // Trailing coordinated statuses ("confirmed but later cancelled") are
+    // separate claims (r60).
+    const trailing = currentClaimText.slice(m.index + m[0].length).match(/^\s*(?:,?\s*(?:but|then|and)\s+(?:later\s+|now\s+)?)(cancelled|canceled|rescheduled|moved|completed?|skipped|missed)\b/);
+    if (trailing) {
+      const tStatus = trailing[1].replace(/^canceled$/, 'cancelled');
+      const tForms = [...new Set([...wordVariants(tStatus), tStatus])];
+      const tInVisit = tForms.some((v) => visitValueText.includes(v));
+      const tPhrase = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\b(?:appointments?|visits?|service)\\s+[^.;!?]{0,30}(?:${tForms.join('|')})\\b`);
+      if (!tInVisit && !tPhrase.test(currentFactValueText)) {
+        return { kind: 'appointment_state', term: tStatus };
+      }
+    }
+    const status = String(m[2] || m[3]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
+    // Multi-word statuses ('en route', 'on site') match underscore forms too.
+    const statusForms = [...new Set([...wordVariants(status.replace(/\s/g, '')), status, status.replace(/\s/g, '_'), status.replace(/\s/g, '')])];
+    const factNegated = statusForms.some((v) => negNear(currentFactValueText, v));
+    if (claimNegated !== factNegated && (claimNegated || factNegated)) {
+      return { kind: 'appointment_state', term: status };
+    }
+    if (claimNegated && factNegated) continue; // negation grounded
+    // A claim that itself carries a historical qualifier ("cancelled
+    // last week") repeats history, not current status — grounded history
+    // passes (r74 P2).
+    const claimHistorical = /^\s*(?:(?:for|on|from|back)\s+)?(?:last\s+(?:week|month|year)|yesterday|earlier|previously|in\s+\w+)\b/.test(currentClaimText.slice(m.index + m[0].length));
+    if (claimHistorical && statusForms.some((v) => new RegExp(`\\b(?:appointments?|visits?|service)\\b[^.;!?]{0,30}${v}`).test(groundedValueText))) continue;
+    const inVisit = statusForms.some((v) => visitValueText.includes(v));
+    // Lookbehind blocks the historical qualifier PER PHRASE — a separate
+    // current "appointment confirmed" fact grounds even when a historical
+    // one also exists (r44 P2).
+    const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\b(?:appointments?|visits?|service|technician|tech)(?:\\s*:\\s*|\\s+)(?:(?:scheduled\\s+)?(?:for|on)\\s+(?:next\\s+|this\\s+)?\\w+\\s+)?(?:(?:was|is|has\\s+been|will\\s+be)\\s+)?(?:(?:currently|now|still|already|recently)\\s+)?(?:${statusForms.join('|')})\\b(?!\\s+(?:(?:for|on|from|back)\\s+)?(?:last|yesterday|earlier|previously|weeks?|months?|days?|in\\s+\\w+)\\b)|\\b(?:${statusForms.join('|')})\\s+(?:appointments?|visits?)\\b(?!\\s+(?:\\w+\\s+){0,2}(?:cancelled|canceled|rescheduled|moved|skipped|missed)\\b)`);
+    const inGlobalPhrase = phraseRe.test(currentFactValueText);
+    if (!inVisit && !inGlobalPhrase) {
+      return { kind: 'appointment_state', term: status };
+    }
+  }
+  // Active-voice status claims ("Customer confirmed the appointment")
+  // assert the same current state as the noun-first forms (r77).
+  for (const m of currentClaimText.matchAll(/\b(?:customer|client|resident|office|tech(?:nician)?)\s+(?:ha[sd]\s+)?(?:(never|not)\s+)?(confirmed|cancelled|canceled|rescheduled|moved|skipped|missed|completed)\s+(?:the\s+|an?\s+|their\s+|his\s+|her\s+)?(?:appointments?|visits?)\b/g)) {
+    const avNegated = Boolean(m[1]);
+    const avStatus = m[2].replace(/^canceled$/, 'cancelled');
+    const avForms = [...new Set([...wordVariants(avStatus), avStatus])];
+    const avFactNeg = avForms.some((v) => negNear(currentFactValueText, v));
+    if (avNegated !== avFactNeg && (avNegated || avFactNeg)) return { kind: 'appointment_state', term: avStatus };
+    if (avNegated && avFactNeg) continue;
+    const avInVisit = avForms.some((v) => visitValueText.includes(v));
+    const avInPhrase = avForms.some((v) => new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\b${v}\\b[^.;!?]{0,30}\\b(?:appointments?|visits?)\\b|\\b(?:appointments?|visits?)\\b[^.;!?]{0,30}\\b${v}\\b`).test(currentFactValueText));
+    if (!avInVisit && !avInPhrase) return { kind: 'appointment_state', term: avStatus };
+  }
+  // First-visit synonyms bind to the new-customer fact (r77) — a
+  // returning customer must not be cached as a first-time stop, and an
+  // unreadable-history outage must fail closed.
+  if (/\bnew\s+customer\b|\bfirst\s+(?:visit|service|appointment)\b|\bno\s+prior\s+(?:visits?|services?)\b|\bno\s+service\s+history\b|\bnever\s+(?:been\s+)?serviced\b/.test(outputText)
+    && grounding.llmFacts?.visit?.newCustomer !== true) {
+    return { kind: 'novel_term', term: 'new customer' };
+  }
+  // Balance-state claims need financial evidence in EITHER polarity —
+  // the balance vocabulary is common prose (r77).
+  if (/\b(?:owes?|owed)\b|\bbalance\s+(?:is\s+)?(?:due|owed|outstanding|zero|paid|clear(?:ed)?)\b|\b(?:has|have)\s+(?:a\s+|an\s+|no\s+)?(?:outstanding\s+)?balance\b|\bno\s+balance\b/.test(outputText)
+    && !/\b(?:balance|owes?|owed|outstanding|overdue|past\s+due|amount\s+due)\b/.test(groundedValueText)
+    && !(grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')) {
+    return { kind: 'novel_term', term: 'balance' };
+  }
+  // 'one-time' cadence is hyphen-split by the word scans — checked as a
+  // phrase (r77).
+  if (/\bone[-\s]?time\b/.test(outputText) && !/\bone[-\s]?time\b/.test(groundedValueText)) {
+    return { kind: 'novel_term', term: 'one-time' };
+  }
+  // Implicit customer-presence claims ("will be home Monday") are
+  // availability claims (r77).
+  if (/\b(?:customer|client|resident)\b[^.;!?]{0,15}\b(?:will\s+be\s+(?:home|there|present)|can\s+meet|will\s+meet|plans?\s+to\s+be\s+(?:home|there))\b/.test(outputText)
+    && !/\bavailab|\b(?:will\s+be|is|are)\s+(?:home|there|present)\b|\bcan\s+meet\b|\bworks?\s+for\b/.test(groundedValueText)) {
+    return { kind: 'novel_term', term: 'availability' };
+  }
+  // Claimed customer CONTACT REQUESTS ("asked for a phone call") are
+  // factual asks — the channel and a request verb must both appear in the
+  // fact values, or the technician contacts someone who never asked (r39).
+  const instructionalText = [...(body.priorities || []), ...(body.watch_items || [])].join('. ').toLowerCase();
+  // EVERY contact claim is validated, not just the first (r46).
+  const contactClaims = [
+    ...outputText.matchAll(/\b(?:(does\s+not|doesn't|do\s+not|don't|will\s+not|won't)\s+)?(?:asked|asks|requested|requests|wants?|want|wanted|prefers?|prefer|preferred|expects?|expect|expected|awaits?|await)\s+(?:that\s+(?:you|we|the\s+tech(?:nician)?)\s+)?(?:(?:you|us|the\s+tech(?:nician)?)\s+)?(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:be\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back|ed)?|text(?:s|ed)?|sms|email(?:s|ed)?|updates?|contact(?:ed)?)(?:\s+(?:and|or)\s+(call(?:s|back)?|texts?|sms|emails?))?\b/g),
+    ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email|contact|phone)\s+(?:the\s+)?customer\b/g)],
+    // Imperative channel verbs with implicit customer ("Please call
+    // before arrival") in INSTRUCTION fields (r51).
+    ...[...instructionalText.matchAll(/(?:^|[.;!?]\s*)(?:please\s+)?(do\s+not\s+|don't\s+)?(call|text|email|contact|phone)\s+(?:before|after|prior|when|upon|on\s+arrival|ahead)\b/g)],
+    // Passive/modal contact instructions ("Customer must be called",
+    // "needs to be contacted") claim a contact requirement (r67).
+    ...[...outputText.matchAll(/\bcustomer\s+(?:(must\s+not|should\s+not|shouldn't|is\s+not\s+to|does\s+not\s+need\s+to)\s+|(?:must|needs?\s+to|should|has\s+to|is\s+to|will)\s+)(?:not\s+)?be\s+(call(?:ed)?|text(?:ed)?|email(?:ed)?|contact(?:ed)?|phoned?)\b/g)],
+    // Passive request with the channel as subject — "A phone call was
+    // requested before arrival" (r67).
+    // Negation trails the channel here, so a lookahead captures it into
+    // the tuple's group-1 negation slot.
+    ...[...outputText.matchAll(/\b(?:a|an|the)\s+(?:(?:phone|text)\s+)?(?=(?:call(?:back)?|text|sms|email|contact)\s+(?:was|is|has\s+been|had\s+been)\s+(not\s+)?request)(call(?:back)?|text|sms|email|contact)\b/g)],
+    // Needs-based noun forms — "Customer needs a call before arrival"
+    // directs outreach exactly like a request verb (r69).
+    ...[...outputText.matchAll(/\bcustomer\s+(?:(does\s+not\s+need|doesn't\s+need|needs\s+no)\s+|needs?\s+)(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:back)?|text|sms|email|contact)\b/g)],
+  ];
+  for (const contactReq of contactClaims)
+  for (const channel of [contactReq[3] ?? contactReq[2], contactReq[4]].filter(Boolean).map((c) => c.replace(/s$/, '').replace(/ed$/, '').replace(/^phone$/, 'call'))) {
+    const negatedClaim = Boolean(contactReq[1]) || Boolean(contactReq[2] && /not|no\b/.test(String(contactReq[2])));
+    const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred|need|needs|needed|await|awaits|awaited)\b/.test(groundedValueText);
+    const bareChannel = channel.replace(/back$/, '').replace(/ed$/, '');
+    // Polarity (r41): a NEGATED preference near the channel ("does not
+    // want email") must not ground the positive claim.
+    // The negation window must not cross ANOTHER channel word — "not …
+    // email but wants a call" negates email only (r44 P2).
+    const negatedNearChannel = new RegExp(`\\b(?:not?|no|never|don't|doesn't|does\\s+not|do\\s+not|declined?|refused?|opt(?:ed)?\\s*out|stop)\\b(?:(?!\\b(?:call|text|sms|email|update)s?\\b)[^.;!?]){0,40}\\b${bareChannel}`).test(groundedValueText);
+    // Polarity must MATCH: a negative claim needs a negated fact; a
+    // positive claim needs a non-negated one (r41+r43).
+    // The request verb and claimed channel must share a CLAUSE, with no
+    // other channel word between them (r48) — "wants email; previous call
+    // disconnected" must not ground a call request.
+    // The channel must be the OBJECT of the request — only determiners/
+    // qualifiers may intervene ("requested an estimate during the phone
+    // call" is not a call request, r49).
+    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?|expect(?:s|ed)?|need(?:s|ed)?|await(?:s|ed)?)\\s+(?:(?:for|to|be|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening|that|technician|tech|you|we|us|(?:calls?|texts?|sms|emails?)\\s+and)\\s+){0,6}${bareChannel}`);
+    // Passive evidence forms ("a phone call was requested") support the
+    // claim exactly like verb-first forms (r73).
+    const passiveEvidenceRe = new RegExp(`\\b(?:phone\\s+)?${bareChannel}\\w*\\s+(?:was|is|has\\s+been|had\\s+been)\\s+requested\\b`);
+    const factSupports = clauseRe.test(groundedValueText) || passiveEvidenceRe.test(groundedValueText);
+    if (negatedClaim ? !(factSupports && negatedNearChannel) : (!factSupports || negatedNearChannel)) {
+      return { kind: 'contact_request', term: channel };
+    }
+  }
+  // A positive payment-state phrase under an overdue_balance flag asserts
+  // the OPPOSITE of the customer's billing state — flattened token pools
+  // cannot see the contradiction, so it is checked as a phrase (r32).
+  if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
+    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance|bill)\s+(?:has\s+been\s+|was\s+|is\s+)?paid\b|\bno\s+invoices?\s+outstanding\b|\boutstanding\s+(?:balance|invoice)s?\s+(?:resolved|cleared|paid|settled)\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due|outstanding)\b|\bno\s+outstanding\s+(?:balance|invoices?|payments?)?\b|\bzero\s+balance\b|\b(?:account|balance)\s+(?:is\s+)?paid\s*(?:up|off)\b|\b(?:payments?|account)\s+(?:are|is)\s+up\s+to\s+date\b|\ball\s+payments?\s+(?:are\s+)?current\b|\b(?:customer|client)\s+owes\s+nothing\b|\b(?:invoice|account|balance)\s+(?:is\s+)?current\b|\b(?:invoice|account)\s+has\s+no\s+(?:amount|balance)\s+due\b/i.test(outputText)) {
+    return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
+  }
+  // Payment lifecycle claims bind to the recorded status for EVERY
+  // payment fact, not just overdue accounts (r69), across ALL recognized
+  // states (r70) — a pending/refunded/voided/failed payment must not be
+  // rewritten as completed, nor any other cross-state inversion.
+  const PAY_STATES = [
+    ['completed', '(?:complete[d]?|received|processed|successful|went\\s+through|posted|confirmed|made)'],
+    ['failed', '(?:fail(?:ed|ure)?|declined?|unsuccessful|error(?:ed)?|bounced?|did\\s+not\\s+go\\s+through)'],
+    ['pending', '(?:pending|processing|awaiting|in\\s+progress|not\\s+yet\\s+(?:posted|processed))'],
+    ['refunded', '(?:refund(?:ed)?)'],
+    ['voided', '(?:void(?:ed)?|cancell?ed)'],
+    ['action_required', '(?:action\\s+required|requires\\s+action|needs\\s+attention)'],
+  ];
+  const factPayStates = new Set(PAY_STATES
+    .filter(([, src]) => new RegExp(`\\bpayments?\\b[^.;!?]{0,30}${src}|${src}[^.;!?]{0,30}\\bpayments?\\b`).test(groundedValueText))
+    .map(([k]) => k));
+  if (/\bpaid\b/.test(groundedValueText)) factPayStates.add('completed');
+  if (factPayStates.size > 0) {
+    for (const [state, src] of PAY_STATES) {
+      if (new RegExp(`\\bpayment\\s+(?:(?:was|is|ha[sd]\\s+(?:(?:now|currently|already|recently|just)\\s+)?been)\\s+)?(?:(?:now|currently|already|recently|just)\\s+)?${src}\\b|\\b${src}\\s+(?:the\\s+|an?\\s+)?payments?\\b`).test(outputText)
+        && !factPayStates.has(state)) {
+        return { kind: 'payment_state_conflict', term: `payment ${state} not on file` };
+      }
+    }
+  }
+  // Account lifecycle wording ("account closed"/"account active") is a
+  // customer-state claim — 'account' is common prose and the state words
+  // stem to common verbs, so it is checked as a phrase (r72).
+  const acctClaim = outputText.match(/\baccounts?\b[^.;!?]{0,25}\b(closed|active|inactive|suspended|cancelled|canceled|on\s+hold|frozen|terminated|deactivated|reactivated)\b|\b(closed|active|inactive|suspended|frozen|terminated)\s+accounts?\b/);
+  if (acctClaim) {
+    const acctState = (acctClaim[1] || acctClaim[2]).replace(/^canceled$/, 'cancelled');
+    if (!new RegExp(`\\baccounts?\\b[^.;!?]{0,30}\\b${acctState}|\\b${acctState}\\b[^.;!?]{0,30}\\baccounts?\\b`).test(groundedValueText)) {
+      return { kind: 'novel_term', term: 'account status' };
+    }
+  }
+  // Tier words bind to ACTUAL tier facts — an HOA or product name
+  // containing 'gold' must not assign a WaveGuard tier (r45).
+  // Membership-shaped claims bind ONLY to the actual membership tier — a
+  // pending estimate's tier is a proposal, not account status (r56).
+  const membershipTierText = String(grounding.llmFacts?.membership?.tier || '').toLowerCase();
+  const tierText = [
+    grounding.llmFacts?.membership?.tier,
+    grounding.llmFacts?.openScope?.sourceEstimate?.tier,
+    grounding.llmFacts?.openScope?.pendingEstimate?.tier,
+  ].filter(Boolean).join(' ').toLowerCase();
+  // Only tier CLAIMS bind to tier fields (r46 P2) — a grounded HOA or
+  // product name containing a tier word is not a membership assertion.
+  const currentClaimTextForTier = outputText;
+  for (const m of outputText.matchAll(/\b(bronze|silver|gold|platinum)\s+(?:member(?:ship)?|tier|plan|level|customer|client|account|status)\b|\b(?:member(?:ship)?|tier|plan|level)\s*[:\-]?\s*(bronze|silver|gold|platinum)\b|\baccepted\s+(bronze|silver|gold|platinum)\b|\b(?:is|was|as)\s+(?:not\s+)?(?:a\s+|an\s+)?(bronze|silver|gold|platinum)\b/g)) {
+    const tier = m[1] || m[2] || m[3] || m[4];
+    // member/customer/copular shapes = MEMBERSHIP claims; accepted/tier/
+    // plan shapes may also describe the estimate.
+    const precedingText = currentClaimTextForTier.slice(0, m.index);
+    const membershipShaped = (Boolean(m[1] && /member|customer|client|account|status/.test(m[0])) || Boolean(m[4])
+      || /\b(?:customer|client|resident)\b[^.;!?]{0,20}$/.test(precedingText))
+      && !/\b(?:estimate|quote|proposal)s?\b[^.;!?]{0,15}$/.test(precedingText)
+      // A tier followed by the estimate noun is estimate-scoped even with
+      // a customer subject — "Customer accepted Gold estimate" (r73 P2).
+      && !/^\s*(?:estimates?|quotes?|proposals?)\b/.test(outputText.slice(m.index + m[0].length));
+    const scope = membershipShaped ? membershipTierText : tierText;
+    const claimNeg = negNear(outputText, tier);
+    if (!new RegExp(`\\b${tier}\\b`).test(scope) || (claimNeg && membershipShaped)) {
+      // A negated membership claim contradicts the grounded tier itself.
+      return { kind: 'novel_term', term: tier };
+    }
+  }
+  // 'accepted' bound to its object (r37): the estimate status must not be
+  // reassigned to an unrelated noun ("Customer accepted renewal") — the
+  // acceptance bigram itself must appear in the fact values unless the
+  // object is the estimate/quote/tier the status genuinely describes.
+  // 'payment' is NOT exempt (r48): payment acceptance needs a payment-
+  // status phrase, never acceptance borrowed from an estimate.
+  const ACCEPT_OBJECT_OK = new Set(['estimate', 'estimates', 'quote', 'quotes', 'bronze', 'silver', 'gold', 'platinum']);
+  // The trailing form is a lookahead so "customer accepted renewal" yields
+  // BOTH matches — a consuming second branch swallowed 'accepted' and hid
+  // the reassigned object.
+  // Per-FIELD scan — joined output text manufactured phantom bigrams
+  // across field boundaries (r46 fix during the r37 guard).
+  // Copulas stripped so "Estimate was accepted" binds 'estimate', not
+  // 'was' (r49 P2) — and "Renewal was accepted" still binds 'renewal'.
+  for (const fieldText of outputFields.map((f) => String(f).toLowerCase().replace(/\b(?:was|is|were|are|has\s+been|had\s+been|been)\s+(?=accepted\b)/g, '')))
+  for (const m of fieldText.matchAll(/\baccepted\s+(?:the\s+|a\s+|an\s+|his\s+|her\s+|their\s+|our\s+)?([a-z][a-z'-]{2,})\b|\b([a-z][a-z'-]{2,})(?=\s+accepted\b)/g)) {
+    const noun = m[1] || m[2];
+    if (ACCEPT_OBJECT_OK.has(noun) || noun === 'customer') continue;
+    const bigram1 = `accepted ${noun}`;
+    const bigram2 = `${noun} accepted`;
+    // Determiners normalized on the evidence side too — a fact saying
+    // "accepted the renewal" grounds "accepted renewal" (r38 P2).
+    const detNormalizedValues = groundedValueText.replace(/\b(?:was|is|were|are|has\s+been|had\s+been|been)\s+(?=accepted\b)/g, '').replace(/\b(?:the|a|an|his|her|their|our)\s+/g, '');
+    if (!detNormalizedValues.includes(bigram1) && !detNormalizedValues.includes(bigram2)) {
+      return { kind: 'acceptance_conflict', term: noun };
+    }
+  }
+  // Estimate/quote LIFECYCLE wording must match the actual estimate
+  // object's status — the estimate token asserts existence, never state
+  // (r33: "Estimate cancelled" over an accepted estimate is fabricated).
+  const estimateStatuses = [
+    grounding.llmFacts?.openScope?.sourceEstimate?.status,
+    grounding.llmFacts?.openScope?.pendingEstimate?.status,
+  ].filter(Boolean).map((v) => String(v).toLowerCase().replace(/^canceled$/, 'cancelled'));
+  // A pendingEstimate object IS the pending state, status field or not.
+  if (grounding.llmFacts?.openScope?.pendingEstimate) estimateStatuses.push('pending');
+  // Per-estimate identity (r63): a claim naming the PENDING estimate must
+  // bind to the pending estimate's own status, never the source's.
+  const pendingStatus = String(grounding.llmFacts?.openScope?.pendingEstimate?.status || (grounding.llmFacts?.openScope?.pendingEstimate ? 'pending' : '')).toLowerCase();
+  const pendingTier = String(grounding.llmFacts?.openScope?.pendingEstimate?.tier || '').toLowerCase();
+  if (estimateStatuses.length) {
+    // Negated verb-object forms ("did not accept the estimate") assert
+    // lifecycle state too and must not invert the recorded one (r72).
+    for (const m of outputText.matchAll(/\b(?:did\s+not|didn't|has\s+not|hasn't|have\s+not|haven't|never)\s+(accept|decline|approve|reject)(?:ed)?\s+(?:the\s+|an?\s+|this\s+|that\s+)?(?:estimates?|quotes?|proposals?)\b/g)) {
+      const verbState = { accept: 'accepted', decline: 'declined', approve: 'approved', reject: 'rejected' }[m[1]];
+      if (estimateStatuses.includes(verbState)) {
+        return { kind: 'estimate_state_conflict', term: `not ${verbState}` };
+      }
+    }
+    for (const m of outputText.matchAll(/\b(?:(?:pending|proposal|bronze|silver|gold|platinum)\s+)?(?:estimates?|quotes?)\s+(?:(?:currently|now|still|recently)\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(?:(?:currently|now|still|recently)\s+)?(?:(not)\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\s+(?:estimates?|quotes?)\b/g)) {
+      const pendingScoped = /\b(?:pending|proposal)\s+estimates?\b/.test(m[0]) || (pendingTier && new RegExp(`\\b${pendingTier}\\s+estimates?\\b`).test(m[0]));
+      const negatedLifecycle = Boolean(m[1]);
+      const claimed = String(m[2] || m[3]).replace(/^canceled$/, 'cancelled').replace(/^drafted$/, 'draft');
+      // A NEGATED lifecycle claim contradicts a matching status (r62).
+      if (negatedLifecycle && estimateStatuses.includes(claimed)) {
+        return { kind: 'estimate_state_conflict', term: `not ${claimed}` };
+      }
+      if (negatedLifecycle) continue;
+      if (pendingScoped) {
+        if (claimed !== pendingStatus && !(claimed === 'pending' && pendingStatus)) {
+          return { kind: 'estimate_state_conflict', term: claimed };
+        }
+        continue;
+      }
+      if (!estimateStatuses.includes(claimed)) {
+        return { kind: 'estimate_state_conflict', term: claimed };
+      }
+    }
+  }
+  // Evidence-bearing words are validated FIELD-WIDE in instructions —
+  // capture geometry (token caps, connectors) must never decide whether
+  // "estimate"/"payment"-class words reach the gate (codex #3423 r20).
+  const evidenceWordGrounded = (w) => wordVariants(w).some(
+    (v) => new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedValueText),
+  );
   for (const field of labeledFields) {
+    if (field.instructional) {
+      // {2,} so 3-letter credential nouns ('key', 'fob') reach the set (r25);
+      // hyphenated compounds are split so "Chemical-sensitivity" cannot
+      // hide its evidence word inside one token (r32).
+      for (const raw of (String(field.text).toLowerCase().match(/[a-z][a-z'-]{2,}/g) || [])) {
+        for (const w of raw.split('-').filter(Boolean)) {
+          if (INSTRUCTION_EVIDENCE_WORDS.has(w) && !evidenceWordGrounded(w)) {
+            return { kind: 'instruction', term: w };
+          }
+        }
+      }
+    }
     if (field.instructional && prefConflicts.length) {
       const fieldText = String(field.text).toLowerCase();
       for (const conflict of prefConflicts) {
         if (conflict.re.test(fieldText)) return { kind: 'preference_conflict', term: conflict.term };
+      }
+    }
+    // Descriptive claims of PLANNED/INCLUDED service in an opted-out
+    // scope contradict the same preferences (r72) — negated or opt-out
+    // sentences ("no interior spray requested") stay prose.
+    if (!field.instructional && prefConflicts.length) {
+      for (const sentence of String(field.text).toLowerCase().split(/[.;!?]/)) {
+        if (!/\b(?:planned|scheduled|will\s+be|included?|includes|expect(?:ed)?|to\s+be\s+(?:treated|serviced|performed)|being\s+(?:treated|serviced))\b/.test(sentence)) continue;
+        if (/\b(?:no|not|never|opt(?:ed)?\s*out|declin\w*|exclud\w*|skip\w*|avoid\w*|without|instead\s+of|rather\s+than|in\s+place\s+of|except)\b/.test(sentence)) continue;
+        for (const conflict of prefConflicts) {
+          if (conflict.re.test(sentence)) return { kind: 'preference_conflict', term: conflict.term };
+        }
       }
     }
     // Instruction fields: scan for EVERY known product name regardless of
@@ -1177,7 +1877,13 @@ function findUngroundedClaim(body, grounding) {
     }
     const refs = extractOutputReferences(String(field.text));
     for (const term of refs.products) {
-      if (allWordsCommon(term)) continue;
+      // The canonical name inside a prose run ("Call Waves Pest Control"):
+      // strip it and skip when the remainder is ordinary prose (r25 P2) —
+      // a novel token beside it ("PhantomGuard Waves Pest Control") still
+      // parks, and NONCANONICAL_SUFFIX_RE already rejected brand suffixes.
+      const withoutName = String(term).replace(/\bwaves\s+pest\s+control\b/g, ' ').replace(/\s+/g, ' ').trim();
+      if (withoutName !== String(term).trim() && (withoutName === '' || allWordsCommon(withoutName))) continue;
+      if (commonOrGroundedProse(term)) continue;
       // A sentence-case application verb rides into the capitalized-run
       // capture ("Applied Prodiamine") — the verb is not part of the
       // product name; ground the remainder.
@@ -1222,7 +1928,7 @@ function findUngroundedClaim(body, grounding) {
       }
     }
     for (const term of refs.targets) {
-      if (!isGroundedReference(term, groundedText)) return { kind: 'novel_target', term };
+      if (!isGroundedReference(term, groundedText, groundedValueText)) return { kind: 'novel_target', term };
     }
   }
   // Rare-word pass — the shape regexes above cannot see every sentence
@@ -1263,18 +1969,138 @@ function findUngroundedClaim(body, grounding) {
       return { kind: 'novel_product', term: m[0] };
     }
   }
-  const wordKnown = (word) => wordVariants(word).some((v) => (
-    REFERENCE_STOP_WORDS.has(v)
-    || COMMON_PROSE_WORDS.has(v)
-    || selfReported.has(v)
-    || groundedText.includes(v)
-  ));
-  for (const field of outputFields) {
+  // Activity assertions ("Customer reported pest activity") are field
+  // conditions — grounded when the values mention activity, real history
+  // exists, or the qualifying subject itself is value-grounded ("ant
+  // activity" over an ants fact — the fact IS the activity) (r44).
+  // Only PEST-context activity counts as field-condition evidence —
+  // 'recent account activity' is not (r59).
+  const pestActivityEvidence = /\b(?:pest|insect|ant|termite|rodent|roach|spider|mosquito|flea|tick|wasp|bug)s?[^.;!?]{0,20}activit|activit[^.;!?]{0,20}\b(?:pest|insect|ant|termite|rodent)s?\b/.test(groundedValueText);
+  if (pestActivityEvidence) {
+    // Polarity: 'reported no pest activity' must not ground the positive
+    // claim (r57).
+    const factNegAct = negNear(groundedValueText, 'activit[a-z]*');
+    for (const sentence of outputText.split(/[.;!?]/)) {
+      if (!/\bactivity\b/.test(sentence)) continue;
+      const claimNegAct = negNear(sentence, 'activity');
+      if (claimNegAct !== factNegAct) return { kind: 'polarity_conflict', term: 'activity' };
+    }
+  }
+  if (!pestActivityEvidence) {
+    for (const m of outputText.matchAll(/(?:\b([a-z][a-z'-]*)\s+)?\bactivity\b/g)) {
+      const subject = m[1];
+      // The subject's evidence sentence must be a non-negated observation
+      // — "asked about termite warranty" and "reported no ants" are not
+      // infestations (r72).
+      const subjectGrounded = subject && !REFERENCE_STOP_WORDS.has(subject)
+        && groundedValueText.split(/[.;!?]/).some((s) =>
+          wordVariants(subject).some((v) => s.includes(v) && !negNear(s, v))
+          && !/\b(?:warrant\w*|quotes?|estimates?|pricing|prices?|costs?|invoic\w*|billing)\b/.test(s));
+      if (!subjectGrounded) return { kind: 'novel_term', term: 'activity' };
+    }
+  }
+  // Polarity for pet/availability STATE words (r50): a negated fact must
+  // not ground the positive claim, nor the reverse — inverted pet or
+  // availability context is safety-relevant.
+  // Sensitivity evidence must be customer/chemical-scoped — 'sensitive
+  // turf' protocol guidance is not a medical fact (r59).
+  if (/\bsensitiv/.test(outputText) && /\bcustomer\b[^.;!?]{0,30}sensitiv|sensitiv[^.;!?]{0,30}\bchemicals?\b/.test(outputText)) {
+    if (!/\b(?:customer|client|resident)\b[^.;!?]{0,40}sensitiv|sensitiv[^.;!?]{0,40}\bchemicals?\b|\bchemicals?\b[^.;!?]{0,40}sensitiv/.test(groundedValueText)) {
+      return { kind: 'novel_term', term: 'sensitivity' };
+    }
+  }
+  // Customer-availability claims bind to customer-subject evidence — a
+  // technician-availability fact is not customer availability (r62).
+  if (/\bcustomer\b[^.;!?]{0,20}\bavailab/.test(outputText)
+    && !/\b(?:customer|client|resident|they|she|he)\b[^.;!?]{0,25}\bavailab/.test(groundedValueText)) {
+    return { kind: 'novel_term', term: 'availability' };
+  }
+  // "<day> works for the customer" claims availability without the word
+  // 'available' — a scheduledDate fact must not ground an invented
+  // rescheduling day (r66).
+  if (/\bworks?\s+(?:best\s+)?for\s+(?:the\s+)?(?:customer|client|resident|them|her|him)\b/.test(outputText)
+    && !/\bavailab|\bworks?\s+(?:best\s+)?for\b/.test(groundedValueText)) {
+    return { kind: 'novel_term', term: 'availability' };
+  }
+  // Pet evidence must keep its customer/property subject (r69) — a dog
+  // seen next door or with a neighbor is not the customer's pet.
+  if (/\b(?:customer|client|resident)s?\b[^.;!?]{0,30}\b(?:dog|cat|pet)s?\b|\b(?:dog|cat|pet)s?\b[^.;!?]{0,40}\b(?:on\s+(?:the\s+)?(?:property|premises|site)|in\s+the\s+(?:home|house|yard)|at\s+the\s+(?:property|home|house))\b/.test(outputText)) {
+    const petEvidence = groundedValueText.split(/[.;!?]/).some((s) =>
+      /\b(?:dog|cat|pet)s?\b/.test(s)
+      && !/\bnext\s+door\b|\bneighbor|\bnearby\b|\bstray\b|\btech(?:nician)?(?:'s)?\s+(?:dog|cat|pet)/.test(s)
+      && /\b(?:customer|client|resident|owner|their|has|have)\b|\b(?:at|on|in)\s+(?:the\s+|this\s+)?(?:property|premises|site|home|house|yard)\b/.test(s));
+    if (!petEvidence) return { kind: 'novel_term', term: 'pet' };
+  }
+  for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability', 'sensitivity', 'sensitivities', 'sensitive', 'recurring', 'initial',
+    // r77: pest-presence polarity — 'reports no termites' must not
+    // ground 'has termites'.
+    'ant', 'ants', 'termite', 'termites', 'roach', 'roaches', 'spider', 'spiders', 'rodent', 'rodents', 'mouse', 'mice', 'rat', 'rats', 'wasp', 'wasps', 'flea', 'fleas', 'tick', 'ticks', 'mosquito', 'mosquitoes', 'bee', 'bees']) {
+    if (!new RegExp(`\\b${pw}\\b`).test(outputText)) continue;
+    const matchedVariants = wordVariants(pw).filter((v) => new RegExp(`\\b${v}`).test(groundedValueText));
+    if (!matchedVariants.length) continue; // ungrounded handling stays with the word passes
+    // Negation must be checked against the SAME variants that establish
+    // grounding — "no chemical sensitivity" must not positively ground
+    // "sensitivities" (r73).
+    const factNeg = matchedVariants.some((v) => negNear(groundedValueText, v));
+    // EVERY sentence mentioning the word must match fact polarity — a
+    // supported negative sentence must not mask a contradictory positive
+    // one (r52).
+    for (const fieldStr of outputFields.map((f) => String(f).toLowerCase()))
+    for (const sentence of fieldStr.split(/[.;!?]/)) {
+      if (!new RegExp(`\\b${pw}\\b`).test(sentence)) continue;
+      const outNeg = negNear(sentence, pw);
+      if (outNeg !== factNeg) return { kind: 'polarity_conflict', term: pw };
+    }
+  }
+  const wordKnown = (word) => {
+    // Grounded-only status (on ANY stem variant) outranks prose-set
+    // membership — 'scheduling' stems to common 'schedule', which must not
+    // launder an appointment-state claim past the evidence check (r21).
+    if (wordVariants(word).some((v) => GROUNDED_ONLY_WORDS.has(v))) {
+      // Self-report is a CLAIM, not evidence — grounded-only words need a
+      // fact value regardless of mentioned_terms (r26).
+      return groundedWordOk(word, groundedText, groundedValueText);
+    }
+    return wordVariants(word).some((v) => (
+      REFERENCE_STOP_WORDS.has(v)
+      || COMMON_PROSE_WORDS.has(v)
+      || selfReported.has(v)
+    )) || groundedWordOk(word, groundedText, groundedValueText);
+  };
+  // The approved company name self-grounds as a PHRASE only — a bare
+  // 'waves' outside it is a rare word ("Apply Waves" is a nonexistent
+  // product, codex #3423 r17).
+  const APPROVED_NAME_RE = /\bwaves\s+pest\s+control\b/gi;
+  for (const rawField of outputFields) {
+    const field = String(rawField).replace(APPROVED_NAME_RE, ' ');
     // 4+ characters: 'mice'/'rats'/'tick'/'flea'-length organisms must
     // not slip under the scan (3-letter singulars are covered in practice
     // by substring grounding — 'ant' grounds on 'ants').
-    for (const m of String(field).toLowerCase().matchAll(/[a-z][a-z'-]{3,}/g)) {
+    for (const m of String(field).toLowerCase().matchAll(/[a-z][a-z'-]{2,}/g)) {
       const word = m[0];
+      // Short tokens are only examined when they are grounded-only
+      // vocabulary ('fob') or credential 'key' usage — everything else
+      // below 4 letters keeps the historical exemption (r28/r29).
+      if (word.length < 4) {
+        if (GROUNDED_ONLY_WORDS.has(word) && !groundedWordOk(word, groundedText, groundedValueText)) {
+          return { kind: 'novel_term', term: word };
+        }
+        // Credential claims ground only on credential-PHRASED facts —
+        // an unrelated "key concern" value must not authorize a
+        // credential (r47).
+        const typeRe = word === 'key' ? KEY_ONLY_RE : PIN_ONLY_RE;
+        if ((word === 'key' || word === 'pin') && typeRe.test(String(field)) && !typeRe.test(groundedValueText)) {
+          return { kind: 'novel_term', term: word };
+        }
+        continue;
+      }
+      if (word === 'code' || word === 'codes') {
+        // Credential-phrased 'code' needs code/pin-specific evidence — a
+        // promo code cannot ground "Door code on file" (r51).
+        if (PIN_ONLY_RE.test(String(field)) && !PIN_ONLY_RE.test(groundedValueText)) {
+          return { kind: 'novel_term', term: word };
+        }
+      }
       // Hyphenated prose ("re-check", "walk-through"): known when every
       // part is known; short parts are below the rare-word threshold.
       const parts = word.split('-').filter(Boolean);
@@ -1326,12 +2152,18 @@ function validateBriefJson(json, grounding) {
     .filter((v) => typeof v === 'string')
     .join(' ');
   if (FORBIDDEN_TARGET_RE.test(rawText)) return { reason: 'forbidden_genus' };
+  if (RETIRED_NAME_RE.test(rawText)) return { reason: 'retired_company_name' };
+  if (NONCANONICAL_SUFFIX_RE.test(rawText)) return { reason: 'noncanonical_company_name' };
   // Structured self-report (complement to the prose regexes below, which
   // only see a few sentence shapes): the model must list every product
   // and pest/organism it mentions, and every listed term must be
   // grounded. A missing list rejects the leg.
   if (!Array.isArray(json.mentioned_terms)) return { reason: 'mentioned_terms_not_array' };
   const selfReportGrounding = JSON.stringify(grounding.llmFacts).toLowerCase();
+  // Grounded-only words in a self-reported term must match fact VALUES —
+  // the serialized form contains null keys like openScope.sourceEstimate,
+  // which must never ground 'estimate' (codex #3423 r26).
+  const selfReportValueText = collectFactValues(grounding.llmFacts).join(' ; ').toLowerCase();
   for (const term of json.mentioned_terms) {
     if (typeof term !== 'string') return { reason: 'mentioned_terms_not_string' };
     if (FORBIDDEN_TARGET_RE.test(term)) return { reason: 'forbidden_genus' };
@@ -1340,6 +2172,26 @@ function validateBriefJson(json, grounding) {
     // two-letter suffix is under the significant-word threshold).
     const phrase = String(term).toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
     if (phrase && !selfReportGrounding.includes(phrase)) {
+      return { reason: `ungrounded_term:${cleanText(term, 60)}` };
+    }
+    // A term that prefix-truncates a catalog product name renames the
+    // authoritative product ("Bifen" for "Bifen IT") — the whole name is
+    // required (codex #3423 r67).
+    const catalogNames = (grounding.catalogVocabulary?.names || []).map((n) => String(n).toLowerCase().replace(/\s+/g, ' ').trim());
+    // A legacy service_products snapshot with no catalog link can carry
+    // the short name as its authoritative form ("Bifen", product_id null)
+    // — an EXACT match to a grounded product name is not a truncation
+    // (r69 P2).
+    const groundedProductNames = [
+      ...(grounding.llmFacts?.productGuidance?.productNames || []),
+      ...(grounding.llmFacts?.productGuidance?.companions || []).flatMap((c) => c.productNames || []),
+    ].map((n) => String(n).toLowerCase().replace(/\s+/g, ' ').trim());
+    if (phrase && !catalogNames.includes(phrase) && !groundedProductNames.includes(phrase)
+      && catalogNames.some((n) => n.startsWith(`${phrase} `))) {
+      return { reason: `truncated_product_term:${cleanText(term, 60)}` };
+    }
+    const strictWords = phrase.split(/\s+/).filter((w) => wordVariants(w).some((v) => GROUNDED_ONLY_WORDS.has(v)));
+    if (strictWords.some((w) => !groundedWordOk(w, selfReportGrounding, selfReportValueText))) {
       return { reason: `ungrounded_term:${cleanText(term, 60)}` };
     }
   }
@@ -1389,7 +2241,15 @@ async function generateBriefBody(grounding, deps = {}) {
   const callModel = deps.callModel
     || ((payload, opts) => dispatchWithFallback(MODELS.TEXT_POLICIES.visitBrief, {
       jsonMode: true,
-      maxTokens: 1000,
+      // 1000 truncated real responses mid-JSON (prod 08-14/15: 36 empty_json
+      // legs + "not_an_object (response truncated at max_tokens=1000)") —
+      // the body plus mentioned_terms self-report doesn't reliably fit.
+      maxTokens: 2000,
+      // 2000 crosses OPENAI_REASONING_FLOOR_TOKENS, which would silently
+      // flip the GPT fallback from 'none' to default 'low' reasoning on
+      // this high-volume summarization lane (codex #3423 r2) — the raise
+      // is JSON headroom only, never a reasoning upgrade.
+      reasoningEffort: 'none',
       ...payload,
     }, opts));
   try {

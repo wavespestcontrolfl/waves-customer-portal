@@ -641,11 +641,14 @@ class BalanceReminder {
       // is not a touch. Best-effort; a missed stamp only under-counts.
       await ContactLedger.markDelivered(smsLedger);
       // Email sidecar — its OWN channel consult and its own pre-send row.
+      // The same-run SMS row is excluded (gh prb-r18): the any-channel 24h
+      // window must not fence the sidecar with its own sibling leg.
       if (await collectionsChannelPermitted({
         customerId: customer.id,
         invoiceId: oldestInvoice.id,
         channel: "email",
         purpose: "late_payment",
+        excludeLedgerIds: [smsLedger.id],
         logTag: "balance-reminder",
       })) {
         let emailLedger = null;

@@ -185,6 +185,31 @@ function normalizeStrictBoolean(value) {
   return value === true || (typeof value === 'string' && value.trim().toLowerCase() === 'true');
 }
 
+// Tri-state boolean for classification fields where "unstated" must survive
+// as null (never coerced to false — a null primary-residence signal means
+// "the call didn't say", not "it isn't").
+function normalizeNullableBoolean(value) {
+  if (value === true || value === false) return value;
+  if (typeof value === 'string') {
+    const v = value.trim().toLowerCase();
+    if (v === 'true') return true;
+    if (v === 'false') return false;
+  }
+  return null;
+}
+
+// Occupancy vocabulary — pinned to the customer_properties PG enum and the
+// extraction schema's occupancy enum (schema 1.9.0). Re-declared here rather
+// than imported: utils must not require services.
+const CALL_OCCUPANCY_TYPES = new Set([
+  'owner_occupied', 'rental_investment', 'commercial', 'seasonal', 'vacant', 'unknown',
+]);
+function normalizeCallOccupancy(value) {
+  if (typeof value !== 'string') return null;
+  const v = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return CALL_OCCUPANCY_TYPES.has(v) ? v : null;
+}
+
 // Model-emitted additional_properties (multi-property calls): keep only entries
 // with a usable street line, normalize each address component with the same
 // helpers as the primary address, and cap the list — a hallucinated flood of
@@ -204,6 +229,8 @@ function normalizeAdditionalProperties(value) {
       state: normalizeCallState(entry.state),
       zip: normalizeZip(entry.zip),
       is_rental: normalizeStrictBoolean(entry.is_rental),
+      occupancy: normalizeCallOccupancy(entry.occupancy),
+      is_primary_residence: normalizeNullableBoolean(entry.is_primary_residence),
       property_type: cleanNullableText(entry.property_type),
       notes: cleanNullableText(entry.notes),
     });
@@ -280,6 +307,8 @@ function normalizeCallExtraction(extracted = {}, { callerPhone = null } = {}) {
     is_lead: normalizeIsLead(source.is_lead),
     call_type: normalizeCallType(source.call_type),
     additional_properties: normalizeAdditionalProperties(source.additional_properties),
+    service_address_occupancy: normalizeCallOccupancy(source.service_address_occupancy),
+    service_address_is_primary_residence: normalizeNullableBoolean(source.service_address_is_primary_residence),
     quote_requested: normalizeStrictBoolean(source.quote_requested),
     quote_promised: normalizeStrictBoolean(source.quote_promised),
     secondary_contact: normalizeSecondaryContact(source.secondary_contact),

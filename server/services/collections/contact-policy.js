@@ -73,6 +73,15 @@ const PILOT_MIN_DUNNING_TOUCHES = 2;
 const CALL_WINDOW_START_HOUR = 9;
 const CALL_WINDOW_END_HOUR = 18; // exclusive
 
+// The ONE call-window predicate (codex gh-r14): evaluate() and
+// origination's claim-boundary recheck must agree — via datetime-et, never
+// raw new Date() ET math (the timestamptz trap).
+function isWithinCallWindow(now) {
+  const et = etParts(now);
+  const weekday = et.dayOfWeek >= 1 && et.dayOfWeek <= 5;
+  return weekday && et.hour >= CALL_WINDOW_START_HOUR && et.hour < CALL_WINDOW_END_HOUR;
+}
+
 // Reassigned-number staleness: no customer-initiated contact from the number
 // within 90 days ⇒ an RND check is required before any automated voice
 // contact (the RND query itself is PR B / manual — here it is only a denial).
@@ -142,7 +151,44 @@ async function deliveredDunningTouches(invoice) {
   return touches;
 }
 
-async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0 } = {}) {
+
+// Eligible-invoice authority — shared by evaluate() AND dial-time
+// disclosure (codex prb-r1: the relay told a legacy-unpaid customer their
+// account was settled because it read a different loader). Open-balance
+// rows + legacy 'unpaid' (same predicates, same self-pay authority) minus
+// admin-stopped sequences (fail closed on a check error).
+async function loadEligibleInvoices(customerId) {
+  const eligible = await openBalanceInvoices(customerId);
+  const legacyUnpaid = await db('invoices')
+    .where({ customer_id: customerId, status: 'unpaid' })
+    .whereNull('payer_id')
+    .whereNull('payer_statement_id')
+    .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
+    .orderBy('created_at', 'asc')
+    .select('*');
+  if (legacyUnpaid.length) {
+    const { rowIsSelfPayDue } = require('../open-balance');
+    const seenIds = new Set(eligible.map((inv) => String(inv.id)));
+    for (const row of legacyUnpaid) {
+      if (seenIds.has(String(row.id))) continue;
+      if (await rowIsSelfPayDue(customerId, row)) eligible.push(row);
+    }
+  }
+  if (eligible.length) {
+    const { isDunningStopped } = require('../invoice-followups');
+    const kept = [];
+    for (const inv of eligible) {
+      try {
+        if (!(await isDunningStopped(inv.id))) kept.push(inv);
+      } catch { /* excluded — fail closed */ }
+    }
+    eligible.length = 0;
+    eligible.push(...kept);
+  }
+  return eligible;
+}
+
+async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [] } = {}) {
   const result = {
     allowed: false,
     denialReasons: [],
@@ -199,44 +245,11 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // 'processing', which the loader above already excludes (it admits only
     // sent/viewed/overdue), same as paid/void/draft; credit-covered rows
     // fall to its cents test.
-    const eligible = await openBalanceInvoices(customerId);
-    // Legacy 'unpaid' status (codex r-gh2): the dunning rails
-    // (latePaymentCheck/getCustomerBalance) explicitly serve it, but the
-    // open-balance loader admits only sent/viewed/overdue — without this
-    // arm, a customer whose only debt is a legacy-unpaid invoice is denied
-    // no_eligible_balance and loses reminders the moment the gate flips.
-    // Same predicates as openInvoiceQuery, same self-pay authority
-    // (rowIsSelfPayDue — live payer re-resolution), merged and deduped.
-    const legacyUnpaid = await db('invoices')
-      .where({ customer_id: customerId, status: 'unpaid' })
-      .whereNull('payer_id')
-      .whereNull('payer_statement_id')
-      .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
-      .orderBy('created_at', 'asc')
-      .select('*');
-    if (legacyUnpaid.length) {
-      const { rowIsSelfPayDue } = require('../open-balance');
-      const seenIds = new Set(eligible.map((inv) => String(inv.id)));
-      for (const row of legacyUnpaid) {
-        if (seenIds.has(String(row.id))) continue;
-        if (await rowIsSelfPayDue(customerId, row)) eligible.push(row);
-      }
-    }
-    // Admin-stopped dunning sequences (codex r7): 'stopped' is documented
-    // as "stop ALL automated dunning for this invoice" — such an invoice
-    // can neither back a voice case nor count as dunning-eligible balance.
-    // A check error EXCLUDES the invoice (fail closed).
-    if (eligible.length) {
-      const { isDunningStopped } = require('../invoice-followups');
-      const kept = [];
-      for (const inv of eligible) {
-        try {
-          if (!(await isDunningStopped(inv.id))) kept.push(inv);
-        } catch { /* excluded — fail closed */ }
-      }
-      eligible.length = 0;
-      eligible.push(...kept);
-    }
+    const eligible = await loadEligibleInvoices(customerId);
+    // (loader: open-balance + legacy 'unpaid' + stopped-sequence filter —
+    // extracted so dial-time disclosure shares the SAME authority, codex
+    // prb-r1.) Historical rationale for the arms lives on the loader.
+    // Legacy 'unpaid' status (codex r-gh2)
     result.eligibleInvoiceIds = eligible.map((inv) => inv.id);
     result.eligibleBalanceCents = eligible.reduce(
       (sum, inv) => sum + Math.round(invoiceAmountDue(inv) * 100),
@@ -302,7 +315,10 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
 
     // ── Rolling frequency windows (collections ledger) ──────────────────
     const windowStart = new Date(now.getTime() - 7 * DAY_MS);
-    const recent = await db('collections_contact_ledger')
+    // Rows stamped never_contacted (a dial rejected before Twilio touched
+    // the customer, gh prb-r8) don't consume the frequency windows.
+    let recent = await db('collections_contact_ledger')
+      .whereRaw("COALESCE(metadata->>'never_contacted', '') <> 'true'")
       .where({ customer_id: customerId })
       .where('occurred_at', '>', windowStart)
       .orderBy('occurred_at', 'desc')
@@ -318,7 +334,14 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     const liveCall = await db('call_log')
       .where({ customer_id: customerId, status: 'completed' })
       .where('created_at', '>', windowStart)
-      .whereRaw("(call_outcome IS NULL OR call_outcome NOT IN ('voicemail', 'missed', 'spam'))")
+      // The collections lane's own non-live outcomes are excluded too (gh
+      // prb-r9): writeCallOutcome classifies these live=false, so a
+      // completed voicemail/vestibule-only/failed collections call must not
+      // masquerade as a live human conversation here and suppress SMS/email
+      // for a week. 'vestibule_office' deliberately still counts — a press-0
+      // transfer can become a real office conversation on the same leg
+      // (over-suppression is the safe direction there).
+      .whereRaw("(call_outcome IS NULL OR call_outcome NOT IN ('voicemail', 'missed', 'spam', 'voicemail_left', 'machine_no_voicemail', 'no_answer', 'vestibule_declined', 'vestibule_no_input', 'vestibule_consent_unrecorded', 'suppressed_at_answer', 'completed_no_outcome', 'relay_failed', 'dial_failed'))")
       .whereRaw("(answered_by IS NULL OR answered_by <> 'voicemail')")
       .whereRaw('(duration_seconds IS NULL OR duration_seconds >= 30)')
       .orderBy('created_at', 'desc')
@@ -331,18 +354,44 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       // eligibility earlier than the real seven-day boundary.
       recent.sort((a, b) => new Date(b.occurred_at) - new Date(a.occurred_at));
     }
+    // The ACTIVE collections call's own ledger row must not veto its
+    // in-call writes (gh prb-r2: the pay-link consult always found the
+    // current call inside the 24h window). Scoped to call-shaped rows
+    // carrying exactly this case id — every other contact still counts.
+    if (excludeCollectionCaseId) {
+      recent = recent.filter((row) => {
+        if (!isVoiceLike(row.channel)) return true;
+        let meta = row.metadata;
+        if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+        return String(meta?.collectionCaseId || '') !== String(excludeCollectionCaseId);
+      });
+    }
+    // A SAME-RUN companion leg must not be fenced by its own sibling's row
+    // (gh prb-r18): the documented email sidecars record the SMS leg first
+    // and then evaluate email — the any-channel 24h window would otherwise
+    // deny every sidecar (and the email fallback after a terminal SMS
+    // failure) the moment the gate flips. The caller names the specific
+    // sibling row ids; every OTHER contact still counts.
+    if (excludeLedgerIds && excludeLedgerIds.length) {
+      const excluded = new Set(excludeLedgerIds.map(String));
+      recent = recent.filter((row) => !excluded.has(String(row.id)));
+    }
     result.recentContacts = recent;
     const within = (row, ms) => now.getTime() - new Date(row.occurred_at).getTime() < ms;
+    // The 24-hour window is ANY-channel for EVERY requested channel (scope:
+    // "rolling suppression — 24h after any dunning SMS"; codex prb-r1 — it
+    // previously bound only the call channels, so the newly wired SMS/email
+    // rails could stack same-day touches the policy documents as denied).
+    const any24h = recent.find((r) => within(r, DAY_MS));
+    if (any24h) {
+      deny('contact_within_24h');
+      proposeNextEligible(new Date(new Date(any24h.occurred_at).getTime() + DAY_MS));
+    }
     // Voice frequency spacing applies to BOTH voice and manual_call (codex
     // 2026-08-14 P1): manual calls COUNT as voice contacts in the ledger, so
     // a dial-sheet consumer evaluating manual_call must not be authorized
     // into a back-to-back call the automated channel would be denied.
     if (isVoiceLike(channel)) {
-      const any24h = recent.find((r) => within(r, DAY_MS));
-      if (any24h) {
-        deny('contact_within_24h');
-        proposeNextEligible(new Date(new Date(any24h.occurred_at).getTime() + DAY_MS));
-      }
       // A manual call IS a voice contact for spacing purposes.
       const voice7d = recent.find((r) => isVoiceLike(r.channel));
       if (voice7d) {
@@ -351,8 +400,20 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       }
     } else if (channel === 'sms' || channel === 'email') {
       // A live conversation (either direction of a real call) supersedes the
-      // automated text/email cadence for a week.
-      const live = recent.find((r) => isVoiceLike(r.channel));
+      // automated text/email cadence for a week. Only LIVE ones (gh
+      // prb-r12): a ledger voice row finalized live_conversation:false
+      // (voicemail, no-input, machine, failed dial) is spacing data for the
+      // VOICE channel, not a conversation — it must not silence texts for a
+      // week. A row with NO outcome yet (in-flight call) conservatively
+      // counts; the call_log synthetic row is already live-filtered.
+      const live = recent.find((r) => {
+        if (!isVoiceLike(r.channel)) return false;
+        if (r.source === 'call_log') return true;
+        let meta = r.metadata;
+        if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+        if (meta && meta.outcome !== undefined) return meta.live_conversation === true;
+        return true;
+      });
       if (live) {
         deny('live_conversation_within_7d');
         proposeNextEligible(new Date(new Date(live.occurred_at).getTime() + 7 * DAY_MS));
@@ -366,10 +427,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       // manual_call too (codex 2026-08-14 P1): a dial sheet must not
       // authorize an after-hours collection call just because a human
       // places it.
-      const et = etParts(now);
-      const weekday = et.dayOfWeek >= 1 && et.dayOfWeek <= 5;
-      const inHours = et.hour >= CALL_WINDOW_START_HOUR && et.hour < CALL_WINDOW_END_HOUR;
-      if (!weekday || !inHours) deny('outside_call_window');
+      if (!isWithinCallWindow(now)) deny('outside_call_window');
     }
 
     // ── Automated-voice-only checks ─────────────────────────────────────
@@ -460,6 +518,8 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
 
 module.exports = {
   evaluate,
+  loadEligibleInvoices,
+  isWithinCallWindow,
   // Exported for tests / PR B reuse.
   PILOT_MIN_BALANCE_CENTS,
   PILOT_MAX_BALANCE_CENTS,
@@ -468,4 +528,9 @@ module.exports = {
   PILOT_MIN_DUNNING_TOUCHES,
   RND_STALENESS_DAYS,
   FLAG_BLOCKED_CHANNELS,
+  // The staffed-call window — exported so PR B's human-escape-hatch and
+  // vestibule share the SAME window the policy enforces (one source of truth
+  // for "are we inside calling hours").
+  CALL_WINDOW_START_HOUR,
+  CALL_WINDOW_END_HOUR,
 };

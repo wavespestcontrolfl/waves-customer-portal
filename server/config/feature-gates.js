@@ -40,6 +40,7 @@
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
+ *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -125,6 +126,20 @@ const gates = {
   // fail-closed ==='true' in EVERY environment. Gate off: emails
   // byte-identical to today.
   balanceVisibility: process.env.GATE_BALANCE_VISIBILITY === 'true',
+
+  // Past-due balance line on the completion SMS (owner directive
+  // 2026-08-15): customers whose invoices deliver via the completion-SMS
+  // rail never see the balanceVisibility email note — the with-invoice
+  // completion texts get a one-sentence past-due reminder instead. The line
+  // is code-built (open-balance.pastDueSmsLineForCustomer) from the SAME
+  // self-pay open-invoice authority as the email note, excluding the visit's
+  // own invoice, and renders '' while this gate is off — the {past_due_line}
+  // token ships expand/contract like {reservice_line}, so sends stay
+  // byte-identical until Adam approves the copy and flips. Display-only; no
+  // money moves and no sibling data ever rides the public /pay surface.
+  // Customer-facing copy change, so fail-closed ==='true' in EVERY
+  // environment. Kill switch: unset or any non-'true' value.
+  completionSmsBalance: process.env.GATE_COMPLETION_SMS_BALANCE === 'true',
 
   // Completion full-balance Auto Pay pull (owner ruling 2026-08-08: "when
   // autopay runs after a visit and the customer also has an old unpaid
@@ -1524,6 +1539,20 @@ const gates = {
   // needs no redeploy. Kill switch: unset — hint requests answer gated:true
   // with no slots and every picker renders exactly as today.
   bestTimeHints: gateEnvValue('GATE_BEST_TIME_HINTS'),
+
+  // Call property-role classification (2026-08-15): the extraction classifies
+  // each property a call discusses (occupancy + which one is the caller's
+  // primary residence); the pipeline fills only-unknown occupancies directly
+  // and parks everything else as a 'property_role_confirm' Needs Review card
+  // the office applies with one click — never a silent primary flip or
+  // occupancy overwrite (a 2026-08-13 multi-property call left a
+  // portfolio inverted). OFF everywhere until Adam flips it; the processor
+  // reads the env at call time (gateEnvValue) so a flip needs no redeploy.
+  // Co-req: GATE_CUSTOMER_PROPERTIES (the staging block lives inside the
+  // multi-property persistence path — no property rows, nothing to label).
+  // While dark: extraction still captures the new fields (capture-only);
+  // nothing fills, parks, or renders. Kill switch: unset the var.
+  callPropertyRole: gateEnvValue('GATE_CALL_PROPERTY_ROLE'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

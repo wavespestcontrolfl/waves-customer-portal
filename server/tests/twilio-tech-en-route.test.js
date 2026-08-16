@@ -566,11 +566,16 @@ describe("TwilioService legacy customer SMS helpers", () => {
       // reservice_line joined 2026-08-08 (streamline EXPAND half): supplied at
       // every completion render site before the token lands in the body; ''
       // with the gates dark.
+      // past_due_line joined 2026-08-15 ({past_due_line} EXPAND half): this
+      // un-billed summary path always supplies '' — the line rides only the
+      // with-invoice completion texts, but an unsupplied key would suppress
+      // the send if a customized body ever carries the token.
       {
         first_name: "Sam",
         service_type: "Pest Control",
         portal_url: expect.stringContaining("http"),
         reservice_line: "",
+        past_due_line: "",
       },
       { workflow: "service_complete", entity_type: "service_record", entity_id: "record-1" },
     );

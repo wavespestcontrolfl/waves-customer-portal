@@ -5244,7 +5244,9 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "city": "string or null — the city as stated, even when outside Florida (out-of-area calls need the real city for triage)",
   "state": "FL",
   "zip": "string or null",
-  "additional_properties": [{"address_line1": "street address", "address_line2": "unit or null", "city": "string or null", "state": "FL", "zip": "string or null", "is_rental": true/false, "property_type": "condo/house/commercial/etc or null", "notes": "anything the caller said about this property, or null"}],
+  "additional_properties": [{"address_line1": "street address", "address_line2": "unit or null", "city": "string or null", "state": "FL", "zip": "string or null", "is_rental": true/false, "occupancy": "one of: owner_occupied, rental_investment, commercial, seasonal, vacant, unknown — or null when unstated", "is_primary_residence": true/false/null, "property_type": "condo/house/commercial/etc or null", "notes": "anything the caller said about this property, or null"}],
+  "service_address_occupancy": "occupancy of the MAIN address_line1 property, same enum as above — or null when unstated",
+  "service_address_is_primary_residence": true/false/null,
   "secondary_contact": {"first_name": "string or null", "last_name": "string or null", "phone": "string or null", "email": "string or null", "role": "one of: home_buyer, home_seller, tenant, landlord, lender, spouse_partner, family_member, real_estate_agent, property_manager, other, unknown", "wants_notifications": true/false, "is_billing_party": true/false (true ONLY when the caller clearly says THIS person pays — 'the owner pays by credit card', 'bill the management company'; merely being owner/landlord/manager is NOT enough), "notes": "string or null"} or null,
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
@@ -5272,6 +5274,7 @@ IMPORTANT — multiple properties (address_line1 vs additional_properties):
 - When the caller says a second property has the "same" city/ZIP/community as the first ("same zip and everything"), RESOLVE it: copy the stated city/ZIP onto that entry.
 - is_rental: true when the caller says the property is a rental, investment property, tenant-occupied, or Airbnb/short-term rental.
 - additional_properties is [] when only one property is discussed. Never invent a second property from a mailing address or a passing mention of a neighbor's home.
+- PROPERTY ROLES: classify occupancy for EVERY property discussed (the main address via service_address_occupancy, each extra via its occupancy) ONLY when stated or strongly implied — "we rent it out" / "the tenant lives there" = rental_investment, "our winter place" = seasonal, "we live here" = owner_occupied; else null. Mark which ONE property is the caller's PRIMARY RESIDENCE (the home they live in as their main one) via service_address_is_primary_residence / is_primary_residence: true only on clear evidence ("our new house", "we just moved in", "where we live"); false when the caller marks it as NOT their home; null when the call never says. A wrong true is worse than a null.
 
 IMPORTANT — secondary_contact (a SECOND person who is a party to the service):
 - Set secondary_contact when the caller names ANOTHER person as a party to the service being arranged AND gives at least their name or contact info — a realtor booking an inspection names the home buyer, a landlord names the tenant, a spouse names the account holder, an adult child books for a parent.
@@ -6552,6 +6555,20 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // A previously classified call reprocessed into spam/non-workable
+      // must not leave its property_role_confirm card actionable — the
+      // office could still one-click property mutations from the
+      // superseded extraction (codex #3418 r11). Fail-soft, under the
+      // shared per-call triage lock inside the helper.
+      await require('./property-role-proposals').resolveSupersededCard(
+        db, call.id,
+        `Superseded — the call was reclassified ${extracted.is_spam ? 'spam' : 'non-workable voicemail'} on reprocess.`,
+        // Generation-fenced (codex #3418 r14) like the invalidation sweep
+        // below: the terminal write just cleared our token, so only the
+        // generation proves a newer pass hasn't claimed and staged a
+        // VALID card this cleanup would wrongly resolve.
+        { procGeneration },
+      );
       // SECOND invalidation pass, after the terminal status committed
       // (codex P1, PR #3304 GH r8g): the pre-write pass stamps the durable
       // call-side block first, so a composer that had already locked the
@@ -7549,6 +7566,15 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // Retire any open property_role_confirm card from a prior pass — the
+      // veto blocks every canonical write, so its parked mutations are
+      // superseded and must not stay one-click applicable (codex #3418
+      // r11). Fail-soft, locked inside the helper.
+      await require('./property-role-proposals').resolveSupersededCard(
+        db, call.id, 'Superseded — the reprocessed extraction was hard-vetoed before canonical writes.',
+        // Generation-fenced (codex #3418 r14) — see the spam-path call.
+        { procGeneration },
+      );
       await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
       logger.info(`[call-proc] V2 hard veto for ${callSid}; skipped canonical writes (customer/lead/appointment)`);
       return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };
@@ -8111,26 +8137,95 @@ const CallRecordingProcessor = {
     // no primary yet (an addressless customer's first address — captured here even
     // when no second_service_address was raised), and otherwise stores a second
     // property. Never overwrites an existing primary mirror.
-    if (process.env.GATE_CUSTOMER_PROPERTIES === 'true' && customerId && extracted.address_line1) {
+    // Entry ALSO on a V2-only canonical address (codex #3418 r7): when V2 is
+    // valid but V1 left address_line1 null, the role staging (and its V2
+    // persistence loop) live inside this block — gating on the V1 field
+    // alone silently dropped the V2 classification. Every V1-shaped step
+    // inside no-ops on a null street (completePrimaryFromCall and
+    // recordCallProperty both guard), so the relaxed guard changes nothing
+    // for the V1 path.
+    // ANY V2 property street opens the block (codex #3418 r17): a valid V2
+    // with no main service address but a classified entry in
+    // additional_properties still carries actionable role/persistence
+    // evidence — falling through to the no-address cleanup would resolve a
+    // card the newest extraction still supports.
+    const v2HasServiceAddress = !!String(
+      v2CanonicalExtraction?.property?.service_address?.street_line_1 || '',
+    ).trim()
+      || (Array.isArray(v2CanonicalExtraction?.property?.additional_properties)
+        && v2CanonicalExtraction.property.additional_properties.some(
+          (p) => String(p?.street_line_1 || '').trim(),
+        ));
+    if (process.env.GATE_CUSTOMER_PROPERTIES === 'true' && customerId
+      && (extracted.address_line1 || v2HasServiceAddress)) {
       try {
+        // Claim fence at BLOCK ENTRY (codex #3418 r15): everything below —
+        // primary completion, property persistence, role staging — commits
+        // customer-data mutations outside the finalizer's token fence, so
+        // a stalled worker reclaimed by a newer pass must not execute ANY
+        // of it on its obsolete extraction (the later per-step fences
+        // narrow the window further; this closes the front door).
+        const propBlockClaim = await db('call_log')
+          .where({ id: call.id, processing_token: procToken })
+          .first('id');
+        if (!propBlockClaim) {
+          const lost = new Error('processing claim lost before property block');
+          lost.claimLost = true;
+          throw lost;
+        }
         const customerProperties = require('./customer-properties');
         // Unit/line2 from the V2 service_address (legacy extraction + flatView drop it).
         const callUnit = extracted.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
+        // ONE canonical address authority per call (codex #3418 r11+r13):
+        // when the role lane is on and valid V2 exists, EVERY property
+        // mutation in this block draws from V2 — the persistence loops
+        // below skip their V1 writes, and the primary-completion here
+        // must not graft V1's city/ZIP either (V1 matching an existing
+        // partial primary street while V2 names another address would
+        // complete the mirror with the wrong extractor's facts).
+        const v2SoleAddressAuthority = require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')
+          && !!v2CanonicalExtraction?.property;
+        const v2SvcAddrForComplete = v2SoleAddressAuthority
+          ? (v2CanonicalExtraction.property.service_address || null)
+          : null;
         // When this call is the customer's PRIMARY street but adds city/ZIP/unit
         // the records lack, complete the mirror AND the existing primary property
         // (recomputing its key) BEFORE snapshotting — otherwise the primary is
         // captured partial / unitless and a later full-address call duplicates it.
-        await customerProperties.completePrimaryFromCall(customerId, {
-          address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip,
-        });
+        const completed = await customerProperties.completePrimaryFromCall(customerId, v2SoleAddressAuthority
+          ? {
+            address_line1: v2SvcAddrForComplete?.street_line_1 || null,
+            address_line2: v2SvcAddrForComplete?.street_line_2 || null,
+            city: v2SvcAddrForComplete?.city || null,
+            zip: v2SvcAddrForComplete?.postal_code || null,
+          }
+          : {
+            address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip,
+          // Atomic claim fence (codex #3418 r18) — the entry SELECT above
+          // narrows the window; this makes the completion writes
+          // themselves conditional on the live claim.
+          }, { claimFence: { callLogId: call.id, procToken } });
+        if (completed?.claimLost) {
+          const lost = new Error('processing claim lost during primary completion');
+          lost.claimLost = true;
+          throw lost;
+        }
         // Rental signal — works in BOTH shadow and enforce (DRIVES_ROUTING) modes:
         // the shadow bridge may not have run, so re-derive from the V2 extraction.
         // Computed BEFORE ensurePrimaryProperty so a first-call tenant/rental
         // primary is created with the right occupancy (its recordCallProperty
         // branch never runs once the primary exists → it would otherwise stay the
         // default owner_occupied).
-        const isRental = bridgeNeedsConfirmation.includes('rental_or_tenant_occupied')
-          || detectRentalSignal({ extracted, callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property });
+        const isRental = v2SoleAddressAuthority
+          // Under V2 sole authority the occupancy verdict is V2's OWN
+          // (codex #3418 r17): its explicit classification plus its caller
+          // relationship — V1's text-derived signal must not create the
+          // lazy-backfilled primary as rental against V2's judgment. A
+          // V2-null occupancy means "the call didn't say": no rental.
+          ? (v2CanonicalExtraction?.property?.service_address_occupancy === 'rental_investment'
+            || detectRentalSignal({ callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property }))
+          : (bridgeNeedsConfirmation.includes('rental_or_tenant_occupied')
+            || detectRentalSignal({ extracted, callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property }));
         // The rental signal is about THIS CALL's address. ensurePrimaryProperty
         // creates the primary from customers.address_*, which can be a DIFFERENT
         // address (the customer's own home) when the call is about a secondary
@@ -8143,22 +8238,53 @@ const CallRecordingProcessor = {
         // gaps on the customer, so a genuine same-address call matches.
         const custRow = await db('customers').where({ id: customerId })
           .select('address_line1', 'address_line2', 'city', 'zip').first();
-        const callAddrKey = customerProperties.addressKey({
-          address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip,
-        });
+        // Same authority rule for the address-match key (codex #3418 r17):
+        // in V2 mode the "is this call about the primary?" comparison uses
+        // V2's OWN service address, not V1's — pairing V1's address with
+        // V2's occupancy could inherit the rental verdict onto a primary
+        // V2 never named.
+        const callAddrKey = customerProperties.addressKey(v2SoleAddressAuthority
+          ? {
+            address_line1: v2SvcAddrForComplete?.street_line_1 || null,
+            address_line2: v2SvcAddrForComplete?.street_line_2 || null,
+            city: v2SvcAddrForComplete?.city || null,
+            zip: v2SvcAddrForComplete?.postal_code || null,
+          }
+          : {
+            address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip,
+          });
         const callIsPrimaryAddress = !!callAddrKey && callAddrKey === customerProperties.addressKey(custRow || {});
         // propertyId is null only when the customer is addressless AND has no
         // primary yet — i.e. this call carries their FIRST service address (the
         // !customerId upsert above is skipped when the call is pre-linked, so
         // ensurePrimaryProperty has nothing to backfill from).
+        // Full V2 occupancy for the lazy backfill (codex #3418 r30): an
+        // explicit seasonal/vacant/etc classification of the call's OWN
+        // primary address must create the row with that value — collapsing
+        // to the rental boolean invented owner_occupied, which staging then
+        // parked as a phantom contradiction.
+        const v2OccRaw = v2SoleAddressAuthority
+          ? customerProperties.normalizeOccupancy(v2CanonicalExtraction?.property?.service_address_occupancy)
+          : null;
+        const v2CallOccupancy = v2OccRaw && v2OccRaw !== 'unknown' ? v2OccRaw : null;
         const ensured = await customerProperties.ensurePrimaryProperty(customerId, {
-          occupancyType: (isRental && callIsPrimaryAddress) ? 'rental_investment' : undefined,
+          occupancyType: callIsPrimaryAddress
+            ? (v2CallOccupancy || ((isRental) ? 'rental_investment' : undefined))
+            : undefined,
           // Created in the call pipeline → carries call provenance, so the
           // enrichment lane's crash-recovery sweep can find it (a bare
           // 'backfill' label would hide exactly the rows this block
           // enqueues lookups for).
           source: 'call_pipeline',
+          // Atomic claim fence (codex #3418 r18) — the lazy backfill must
+          // not create a primary from a reclaimed worker's extraction.
+          claimFence: { callLogId: call.id, procToken },
         });
+        if (ensured?.claimLost) {
+          const lost = new Error('processing claim lost during primary backfill');
+          lost.claimLost = true;
+          throw lost;
+        }
         const isFirstAddress = !ensured.propertyId;
         // A SECONDARY write needs a complete-enough address (city + ZIP) so its
         // dedup key matches a later full-address call — otherwise a partial row
@@ -8179,7 +8305,10 @@ const CallRecordingProcessor = {
           }
         };
         enqueueLookup(ensured);
-        if (isFirstAddress || (bridgeNeedsConfirmation.includes('second_service_address') && hasFullAddress)) {
+        // V1 persistence writes yield under V2 sole authority (codex
+        // #3418 r11) — see the authority decision above.
+        if (!v2SoleAddressAuthority
+          && (isFirstAddress || (bridgeNeedsConfirmation.includes('second_service_address') && hasFullAddress))) {
           const recorded = await customerProperties.recordCallProperty({
             customerId,
             address_line1: extracted.address_line1,
@@ -8200,7 +8329,7 @@ const CallRecordingProcessor = {
         // an incomplete one still surfaces via the advisory triage flag above.
         // recordCallProperty dedups on the full address key, so reprocessing a
         // call (or a repeat caller) never duplicates a property.
-        for (const extra of callAdditionalProps) {
+        for (const extra of (v2SoleAddressAuthority ? [] : callAdditionalProps)) {
           const extraCity = String(extra.city || '').trim();
           const extraZip = String(extra.zip || '').trim();
           if (!extraCity || !extraZip) continue;
@@ -8221,11 +8350,179 @@ const CallRecordingProcessor = {
           });
           enqueueLookup(recordedExtra);
         }
+
+        // Property-role classification (gated separately): fill only-unknown
+        // occupancies from the call's explicit classification, and park a
+        // property_role_confirm Needs Review card for anything that CHANGES
+        // existing facts (occupancy contradictions, a primary-residence
+        // flip) — one office click applies it, nothing flips silently.
+        // Runs AFTER the recording writes above so classified addresses can
+        // match the rows this very call created. Env read at call time so a
+        // gate flip needs no redeploy.
+        if (require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')) {
+          try {
+            const { stagePropertyRoleReview } = require('./property-role-proposals');
+            // V2 canonical extraction is the SOLE authority for the role
+            // classification when it ran (codex #3418 r1+r3): a valid-V2
+            // null means "the call didn't say", and the independently
+            // generated V1 values must not fill it in — per-field fallback
+            // let V1/V2 disagreement stage writes neither extractor fully
+            // supports. V1 supplies the roles ONLY when V2 is absent
+            // entirely; the same authority rule picks the additional-props
+            // list the staging reads (resolveCallAdditionalProperties
+            // prefers V1, so it is not used here).
+            const v2RoleProp = v2CanonicalExtraction?.property || null;
+            // Single-extractor coherence (codex #3418 r5): in V2 mode the
+            // MAIN entry's address comes from V2's own service_address, not
+            // the V1-canonical `extracted` row — pairing V1's address with
+            // V2's classification could label the property V1 named with a
+            // judgment V2 made about a different one.
+            const v2Addr = v2RoleProp?.service_address || null;
+            const roleView = v2RoleProp
+              ? {
+                address_line1: v2Addr?.street_line_1 || null,
+                address_line2: v2Addr?.street_line_2 || null,
+                city: v2Addr?.city || null,
+                // V2's own state (codex #3418 r24) — falling back to V1's
+                // would graft a disagreeing state onto the V2 premise.
+                state: v2Addr?.state || null,
+                zip: v2Addr?.postal_code || null,
+                // V2's classified type rides through as the same
+                // FAIL-CLOSED commercial veto the additional properties
+                // carry (codex #3418 r28) — a commercial/hoa main entry
+                // with a residence claim must be rejected even before the
+                // async lookup types the freshly created row.
+                property_type: v2RoleProp.property_type || null,
+                service_address_occupancy: v2RoleProp.service_address_occupancy || null,
+                service_address_is_primary_residence:
+                  typeof v2RoleProp.service_address_is_primary_residence === 'boolean'
+                    ? v2RoleProp.service_address_is_primary_residence
+                    : null,
+              }
+              : {
+                ...extracted,
+                address_line2: callUnit,
+                service_address_occupancy: extracted.service_address_occupancy || null,
+                service_address_is_primary_residence:
+                  typeof extracted.service_address_is_primary_residence === 'boolean'
+                    ? extracted.service_address_is_primary_residence
+                    : null,
+              };
+            const roleAdditionalProps = v2RoleProp
+              ? require('../utils/extraction-compat').mapAdditionalPropertiesToLegacy(v2RoleProp.additional_properties)
+              : callAdditionalProps;
+            // Persist the V2 address set BEFORE matching (codex #3418 r6):
+            // the persistence loop above records `extracted` and the
+            // V1-preferred additional list, so when V1/V2 disagree a
+            // V2-only address has no durable row and its classification
+            // would be silently dropped by the staging's no-matching-row
+            // skip. recordCallProperty dedups on the full address key, so
+            // addresses V1 also carried are no-ops; same city+ZIP
+            // completeness rule as the V1 loop. Occupancy stays
+            // 'unknown' (rental only on the entry's own explicit signal)
+            // — the role staging right below fills/parks the classified
+            // occupancy through its own fences.
+            // Claim fence BEFORE the durable inserts (codex #3418 r14):
+            // staging's own fence stops the fill/card writes, but this
+            // persistence loop precedes it — a stalled worker reclaimed by
+            // a newer pass must not attach its obsolete extraction's
+            // addresses (and paid enrichment lookups) to the customer.
+            const persistClaimLive = v2RoleProp
+              ? await db('call_log').where({ id: call.id, processing_token: procToken }).first('id')
+              : null;
+            if (v2RoleProp && !persistClaimLive) {
+              logger.warn(`[property-role] V2 persistence skipped for ${maskSid(callSid)} — processing claim lost to a newer worker`);
+            }
+            if (v2RoleProp && persistClaimLive) {
+              const v2Persist = [
+                { ...roleView, is_rental: false },
+                ...roleAdditionalProps,
+              ];
+              // City+ZIP completeness is a SECONDARY-address rule (dedup
+              // key match). The customer's FIRST service address is
+              // recorded regardless of completeness — the V1 lane's
+              // exception (codex #3418 r10) — and it belongs to the FIRST
+              // entry that actually carries a street, wherever it sits
+              // (codex #3418 r18): an additional-properties-only
+              // extraction's first extra IS the addressless customer's
+              // first address, not a secondary.
+              let firstStreetPending = true;
+              for (const entry of v2Persist) {
+                const entryCity = String(entry.city || '').trim();
+                const entryZip = String(entry.zip || '').trim();
+                if (!String(entry.address_line1 || '').trim()) continue;
+                const firstAddressException = isFirstAddress && firstStreetPending;
+                firstStreetPending = false;
+                if (!firstAddressException && (!entryCity || !entryZip)) continue;
+                const recordedV2 = await customerProperties.recordCallProperty({
+                  customerId,
+                  address_line1: entry.address_line1,
+                  address_line2: entry.address_line2 || null,
+                  city: entryCity || null,
+                  // V2 sole authority: NEVER V1's state (codex r24) — a null
+                  // defaults to FL inside recordCallProperty, which is the
+                  // service area, not the other extractor's guess.
+                  state: entry.state || null,
+                  zip: entryZip || null,
+                  occupancyType: entry.is_rental ? 'rental_investment' : 'unknown',
+                  source: 'call_pipeline',
+                  // Per-write claim fence (codex #3418 r16): the pre-loop
+                  // check narrows the window; this makes EACH durable
+                  // insert atomic with the live claim (FOR UPDATE on the
+                  // call_log row inside the insert's own transaction).
+                  claimFence: { callLogId: call.id, procToken },
+                });
+                if (recordedV2?.claimLost) {
+                  logger.warn(`[property-role] V2 persistence aborted mid-loop for ${maskSid(callSid)} — processing claim lost to a newer worker`);
+                  break;
+                }
+                enqueueLookup(recordedV2);
+              }
+            }
+            const staged = await stagePropertyRoleReview({
+              db,
+              customerId,
+              callLogId: call.id,
+              extracted: roleView,
+              additionalProps: roleAdditionalProps,
+              extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+              buildTriageItem,
+              // Claim fence (codex #3418 r13): staging verifies this
+              // token is still the live claim inside its locked trx, so
+              // a stalled worker reclaimed by a newer pass cannot fill
+              // occupancies or replace the card with obsolete proposals.
+              procToken,
+            });
+            if (staged.fills || staged.parked) {
+              logger.info(`[property-role] ${maskSid(callSid)}: ${staged.fills} occupancy fill(s)${staged.parked ? ' + review card parked' : ''}`);
+            }
+          } catch (roleErr) {
+            logger.warn(`[property-role] staging skipped for ${maskSid(callSid)}: ${roleErr.code || roleErr.name || 'db_error'}`);
+          }
+        }
       } catch (e) {
-        // Log the error CODE/NAME only — a DB error message can echo the failing
-        // address (e.g. unique-constraint "Key (address_key)=(...) already exists").
-        logger.warn(`[customer-properties] call-pipeline write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+        if (e.claimLost) {
+          logger.warn(`[customer-properties] property block skipped for ${maskSid(callSid)} — processing claim lost to a newer worker`);
+        } else {
+          // Log the error CODE/NAME only — a DB error message can echo the failing
+          // address (e.g. unique-constraint "Key (address_key)=(...) already exists").
+          logger.warn(`[customer-properties] call-pipeline write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+        }
       }
+    } else if (process.env.GATE_CUSTOMER_PROPERTIES === 'true' && customerId
+      && require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')) {
+      // Reprocess produced a valid, non-terminal extraction with NO service
+      // street in EITHER extractor (codex #3418 r16): the property block is
+      // skipped, so staging's no-signal supersede never runs — an open
+      // property_role_confirm card from the PRIOR extraction would stay
+      // one-click actionable. Retire it here, generation-fenced like the
+      // terminal paths (a reclaimed stale worker must not resolve a newer
+      // pass's valid card). Fail-soft, locked inside the helper.
+      await require('./property-role-proposals').resolveSupersededCard(
+        db, call.id,
+        'Superseded — the reprocessed extraction carries no service address, so the prior property-role proposals no longer apply.',
+        { procGeneration },
+      );
     }
 
     // Secondary-contact persistence (additive, gated, non-blocking). Runs
@@ -11239,15 +11536,39 @@ const CallRecordingProcessor = {
                 // portal render the booked property, not the customer's
                 // primary mirror (a rental booking used to dispatch to the
                 // customer's home).
-                const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, {
-                  ...extracted,
-                  // flatView historically dropped street_line_2; a condo unit
-                  // must survive into the stamp/key (codex P2).
-                  address_line2: extracted.address_line2
-                    || v2ApprovedExtraction?.property?.service_address?.street_line_2
-                    || v2CanonicalExtraction?.property?.service_address?.street_line_2
-                    || null,
-                }, trx);
+                // V2 address authority carries into booking (codex #3418
+                // r18): when the role lane persists ONLY V2's address set,
+                // the visit stamp must resolve against that same set —
+                // passing V1's disagreeing address could stamp/dispatch a
+                // property the canonical persistence path rejected. A
+                // V2-null main street falls back to the on-file address
+                // inside the resolver, same as V1 mode.
+                const bookingV2Authority = require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')
+                  && !!v2CanonicalExtraction?.property;
+                const bookingSvcAddr = bookingV2Authority
+                  ? (v2CanonicalExtraction.property.service_address || null)
+                  : null;
+                const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, bookingV2Authority
+                  ? {
+                    ...extracted,
+                    address_line1: bookingSvcAddr?.street_line_1 || null,
+                    address_line2: bookingSvcAddr?.street_line_2 || null,
+                    city: bookingSvcAddr?.city || null,
+                    // State exclusively from V2 (codex #3418 r25) — FL
+                    // default matches the persistence path; never V1's
+                    // disagreeing state onto the V2 premise.
+                    state: bookingSvcAddr?.state || 'FL',
+                    zip: bookingSvcAddr?.postal_code || null,
+                  }
+                  : {
+                    ...extracted,
+                    // flatView historically dropped street_line_2; a condo unit
+                    // must survive into the stamp/key (codex P2).
+                    address_line2: extracted.address_line2
+                      || v2ApprovedExtraction?.property?.service_address?.street_line_2
+                      || v2CanonicalExtraction?.property?.service_address?.street_line_2
+                      || null,
+                  }, trx);
                 // findExistingCallAppointment only sees THIS call's rows —
                 // a visit booked through ANY other channel (a human in the
                 // portal mid-call, online self-booking) is invisible to it,

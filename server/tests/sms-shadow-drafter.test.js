@@ -15,7 +15,7 @@ const {
 const { CUSTOMER_SMS_HOUSE_VOICE, AGENT_CONFIG } = require('../services/ai-assistant/managed-agent-config');
 
 describe('few-shot voice grounding (v7)', () => {
-  test('prompt version bumped to v10', () => {
+  test('prompt version stays v10', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v10');
   });
 
@@ -752,5 +752,49 @@ describe('sms shadow drafter — structural unsendability', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v10');
     expect(INTENDED_ACTION_TYPES).toContain('escalate');
     expect(INTENDED_ACTION_TYPES).toContain('none');
+  });
+});
+
+describe('sealed-lane dispatch budget (08-15 tuning)', () => {
+  test('pinned sealed drafts dispatch with maxTokens 1000, the :sealed suffix, and no fallback', async () => {
+    // 600 truncated 2-4 sealed-exam legs/day in prod ("unparseable
+    // (response truncated at max_tokens=600)") — pin the raised budget so
+    // a silent revert can't reintroduce false provider failures.
+    jest.resetModules();
+    const dispatched = [];
+    jest.doMock('../services/llm/call', () => ({
+      dispatchWithFallback: async (policy, payload) => {
+        dispatched.push({ policy, payload });
+        return { ok: false, reason: 'test-stub' };
+      },
+    }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const MODELS = require('../config/models');
+    await drafter.generateDraftOnce({}, 'sys', 'user', MODELS.ROUTES.smsDraftDefault, { pinned: true });
+    jest.dontMock('../services/llm/call');
+    expect(dispatched).toHaveLength(1);
+    // r46: sealed legs measure the LIVE cap — the exam gates live behavior.
+    expect(dispatched[0].payload.maxTokens).toBe(600);
+    expect(dispatched[0].policy.name).toMatch(/^smsShadow:[a-z]+:sealed$/);
+    expect(dispatched[0].policy.fallback).toBeUndefined();
+  });
+
+  test('live drafts keep the 600 cap — it is the composer card\'s last length guard (codex #3423 r2)', async () => {
+    jest.resetModules();
+    const dispatched = [];
+    jest.doMock('../services/llm/call', () => ({
+      dispatchWithFallback: async (policy, payload) => {
+        dispatched.push({ policy, payload });
+        return { ok: false, reason: 'test-stub' };
+      },
+    }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const MODELS = require('../config/models');
+    await drafter.generateDraftOnce({}, 'sys', 'user', MODELS.ROUTES.smsDraftDefault, { pinned: false });
+    jest.dontMock('../services/llm/call');
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0].payload.maxTokens).toBe(600);
+    expect(dispatched[0].policy.name).toMatch(/^smsShadow:[a-z]+$/);
+    expect(dispatched[0].policy.fallback).toBeTruthy();
   });
 });

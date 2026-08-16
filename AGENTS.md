@@ -588,6 +588,44 @@ violations at the severity noted.
   only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
   same noindex/no-referrer/no-store headers as `/report/:token`),
   `/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound),
+  `/api/webhooks/twilio/collections-vestibule[-key|-noinput]` +
+  `/api/webhooks/twilio/collections-relay-complete` +
+  `/api/webhooks/twilio/collections-transfer-complete` +
+  `/api/webhooks/twilio/collections-call-status` (POST; machine-to-machine
+  TwiML webhooks for the OUTBOUND collections voice lane — Twilio-signature
+  validated at the mount like every Twilio inbound route, and additionally
+  fail-closed to a bare `<Hangup/>` unless `GATE_VOICE_LATE_PAYMENT` is exactly
+  'true' AND the `callLogId` query param resolves to a call_log row this lane
+  itself originated (direction 'outbound', source 'collections_voice', a linked
+  collection case) whose CallSid matches the request. The vestibule is a FIXED
+  DTMF consent stage: deterministic script, `<Gather input="dtmf">` only, no
+  ConversationRelay/recording before press-1 — no call audio ever reaches
+  Waves systems pre-consent — and metadata-only logging before consent. The
+  ONE documented exception: Twilio's carrier-side AMD classification
+  (`machineDetection: DetectMessageEnd`) runs before the vestibule and
+  returns only a label (human/machine), never audio — a deliberate,
+  counsel-review-before-flip item (DECISIONS-PRB #13), required so machine
+  answers route to the capped generic-callback voicemail instead of playing
+  the consent script to an answering machine. Press-1 renders `<Connect><ConversationRelay>` to the
+  existing `/ws/voice-agent` endpoint with a per-call minted token and a
+  `session_mode=collections` Parameter — which the ws server treats as an
+  UNVERIFIED hint and re-proves against the same call_log row before any
+  account data exists in the session. Treat the gate, the call_log linkage
+  check, and the no-audio-before-consent contract as security-critical.
+  Dials originate from exactly two surfaces (PR C), both funneling through
+  `originateCollectionCall` — the single authorization boundary that
+  re-runs the full contact policy at dial time: the admin-only
+  `POST /api/admin/communications/collections-cases/:id/dial` (supervised
+  single dial, requireAdmin, master-gated) and the auto-dial cron sweep
+  behind `GATE_VOICE_LATE_PAYMENT_AUTODIAL` (which requires the master AND
+  `GATE_COLLECTIONS_POLICY` gates; autodial gate off = zero reads from the
+  SWEEP, pinned — the scheduler tick then runs only the master-gated
+  expired-approval reclamation, and a fully dark master = zero touches;
+  bounded
+  by `COLLECTIONS_AUTODIAL_MAX_PER_RUN`, default 2, hard ceiling 10). A
+  diff adding any OTHER path to `originateCollectionCall`, weakening the
+  guarded promote fences (state + case_version), or letting the sweep make
+  its own eligibility judgments is a P0),
   `/api/bouncie` + `/api/webhooks/bouncie`, `/api/webhooks/sendgrid`,
   `/api/webhooks/resend` (Svix-signed), `/api/webhooks/lead`
   (+ `POST /api/leads`, an alias accepting the same pair with identical

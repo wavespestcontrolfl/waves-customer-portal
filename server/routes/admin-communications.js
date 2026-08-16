@@ -2152,6 +2152,193 @@ router.post('/contact-compliance-checks', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/communications/collections-voice-status — kill-switch
+// dashboard read for the collections outbound-voice lane (PR B). Read-only:
+// gate states, case counts by state, and the last few call outcomes off the
+// collections contact ledger (masked; no PII beyond what the admin bell
+// already shows). Safe with the lane dark — every count is simply zero.
+router.get('/collections-voice-status', async (req, res, next) => {
+    let queryFailed = null;
+  try {
+    const { isVoiceLatePaymentEnabled, isPayLinkEnabled, isAutoDialEnabled } = require('../services/collections/outbound-voice/gates');
+    const { retentionDays } = require('../services/collections/outbound-voice/retention');
+
+    const caseRows = await db('collection_cases')
+      .select('current_state')
+      .count('* as count')
+      .groupBy('current_state')
+      .catch((err) => { queryFailed = err.message; return []; });
+    const caseCounts = {};
+    for (const row of caseRows) caseCounts[row.current_state] = parseInt(row.count, 10);
+
+    const recent = await db('collections_contact_ledger')
+      .where({ channel: 'voice', source: 'collections_voice' })
+      .orderBy('occurred_at', 'desc')
+      .limit(10)
+      .select('id', 'customer_id', 'occurred_at', 'metadata')
+      .catch((err) => { queryFailed = err.message; return []; });
+    const lastOutcomes = recent.map((r) => {
+      const meta = typeof r.metadata === 'string'
+        ? (() => { try { return JSON.parse(r.metadata); } catch { return {}; } })()
+        : (r.metadata || {});
+      return {
+        occurredAt: r.occurred_at,
+        customerId: r.customer_id,
+        outcome: meta.outcome || 'dialed',
+        liveConversation: Boolean(meta.live_conversation),
+        voicemailLeft: Boolean(meta.voicemail_left),
+        payLinkSent: Boolean(meta.pay_link_sent),
+        sendFailed: Boolean(meta.send_failed),
+      };
+    });
+
+    if (queryFailed) {
+      // A dashboard read failure must SURFACE (gh prb-r8), never render as
+      // an empty-but-healthy lane.
+      return res.status(503).json({ error: 'collections_status_unavailable', detail: queryFailed });
+    }
+    res.json({
+      gates: {
+        GATE_VOICE_LATE_PAYMENT: isVoiceLatePaymentEnabled(),
+        GATE_VOICE_LATE_PAYMENT_PAYLINK: isPayLinkEnabled(),
+        GATE_COLLECTIONS_POLICY: process.env.GATE_COLLECTIONS_POLICY === 'true',
+        GATE_COLLECTIONS_SHADOW: process.env.GATE_COLLECTIONS_SHADOW === 'true',
+        // Effective state (codex gh-r1 P2): an armed auto-dial and a
+        // disabled sweep must never look identical on the kill-switch view.
+        GATE_VOICE_LATE_PAYMENT_AUTODIAL: isAutoDialEnabled(),
+      },
+      retentionDays: retentionDays(),
+      caseCounts,
+      lastOutcomes,
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/communications/collections-cases/:id/dial — the SUPERVISED
+// single-dial lever (PR C): the shakedown tool and the standing manual
+// escape hatch. Admin-only (requireAdmin — this places a phone call), and
+// refuses entirely while the master gate is dark. Promotes a 'shadow' or
+// 'proposed' case to 'approved' (guarded on state + case_version; a
+// concurrent move loses cleanly) stamped with the acting admin, then hands
+// it to originateCollectionCall — which re-runs the FULL contact policy at
+// dial time and fails closed on every leg. This endpoint makes no
+// eligibility judgment of its own; the policy engine is the boundary.
+router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) => {
+  try {
+    const { isVoiceLatePaymentEnabled } = require('../services/collections/outbound-voice/gates');
+    if (!isVoiceLatePaymentEnabled()) {
+      return res.status(409).json({ error: 'lane_dark', detail: 'GATE_VOICE_LATE_PAYMENT is off' });
+    }
+    // UUID guard (codex gh-r2): a malformed id would make Postgres throw a
+    // 22P02 cast error and turn a bad identifier into a 500.
+    if (!UUID_RE.test(String(req.params.id || ''))) {
+      return res.status(400).json({ error: 'invalid_case_id' });
+    }
+    const caseRow = await db('collection_cases')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'current_state', 'case_version', 'idempotency_key', 'hold_reason');
+    if (!caseRow) return res.status(404).json({ error: 'case_not_found' });
+
+    const actor = `admin:${req.technician?.email || req.technicianId || 'unknown'}`;
+    let promotedByUs = false;
+    if (caseRow.current_state === 'shadow' || caseRow.current_state === 'proposed') {
+      const now = new Date();
+      // Under the customer case lock (codex gh-r5): promotion is a
+      // customer-level decision — the shadow sweep's rotation and the
+      // auto-dial promote take the same lock, and another live/held case
+      // for this customer refuses (two pipelines / dispute-hold bypass).
+      const { withCaseLock } = require('../services/collections/case-lock');
+      const promoted = await withCaseLock(caseRow.customer_id, async (trx) => {
+        // Owner re-read IN the lock (codex gh-r8): a merge committed since
+        // our read may have repointed the row — locking the stale owner
+        // would govern the wrong customer. Update fences customer_id too.
+        const current = await trx('collection_cases')
+          .where({ id: caseRow.id })
+          .first('customer_id');
+        if (!current || String(current.customer_id) !== String(caseRow.customer_id)) return false;
+        // Live states only for the SUPERVISED path: the admin endpoint IS
+        // the release mechanism for supervised parks, so a parked sibling
+        // must not block a human's deliberate retry — only genuinely live
+        // pipeline states do.
+        const liveElsewhere = await trx('collection_cases')
+          .where({ customer_id: caseRow.customer_id })
+          .whereIn('current_state', ['approved', 'dialing', 'held'])
+          .whereNot('id', caseRow.id)
+          .first('id');
+        if (liveElsewhere) return 'live_elsewhere';
+        const updated = await trx('collection_cases')
+          .where({ id: caseRow.id, customer_id: caseRow.customer_id, current_state: caseRow.current_state, case_version: caseRow.case_version })
+          .update({
+            current_state: 'approved',
+            approved_by: actor,
+            approved_at: now,
+            approval_expires_at: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+            hold_reason: null,
+            updated_at: trx.fn.now(),
+          });
+        return updated > 0;
+      });
+      if (promoted === 'live_elsewhere') {
+        return res.status(409).json({ error: 'another_case_live', detail: 'this customer already has an approved/dialing/held case' });
+      }
+      if (!promoted) {
+        return res.status(409).json({ error: 'case_moved', detail: 'the case changed state while approving — reload and retry' });
+      }
+      promotedByUs = true;
+    } else if (caseRow.current_state !== 'approved') {
+      // held / cancelled / expired / dialing — never dialable from here.
+      return res.status(409).json({ error: 'case_not_dialable', state: caseRow.current_state });
+    }
+
+    // Mirror of the sweep's revert (codex gh-r5): a pre-dial refusal or
+    // throw leaves the row 'approved' — invisible to both sweeps and with
+    // its card already retired — so OUR promotion is returned to the
+    // queue. Fenced on state, version, and this request's actor; rows
+    // origination moved are untouched.
+    const revertOurPromotion = async () => {
+      if (!promotedByUs) return;
+      await db('collection_cases')
+        .where({ id: caseRow.id, current_state: 'approved', case_version: caseRow.case_version, approved_by: actor })
+        .update({
+          current_state: 'proposed',
+          approved_by: null,
+          approved_at: null,
+          approval_expires_at: null,
+          // Restore the pre-promotion hold_reason (codex gh-r8): promotion
+          // nulls it, and a dial_failed park that loses its marker through
+          // promote+revert would re-enter the automatic queue silently.
+          hold_reason: caseRow.hold_reason ?? null,
+          updated_at: db.fn.now(),
+        })
+        .catch((err) => logger.warn(`[collections-dial] admin-promotion revert failed for case ${caseRow.id}: ${err.message} — approval expiry (24h) is the backstop`));
+    };
+
+    const { originateCollectionCall } = require('../services/collections/outbound-voice/origination');
+    let result;
+    try {
+      result = await originateCollectionCall(caseRow.id);
+    } catch (err) {
+      await revertOurPromotion();
+      throw err;
+    }
+    if (!result.dialed && result.reason !== 'dial_failed') {
+      await revertOurPromotion(); // the fence no-ops when origination moved the row
+    } else if (result.dialed) {
+      // Retire the "no call will be placed" card only once a call actually
+      // went out (codex gh-r6 P2 / gh-r7): during the shakedown the card is
+      // the operator's only surface carrying the case id. dial_failed keeps
+      // it too — origination parks that case for SUPERVISED reapproval (the
+      // auto sweep excludes it), so the card is the retry path.
+      const { retireProposalCard } = require('../services/collections/outbound-voice/dial-sweep');
+      await retireProposalCard(caseRow.idempotency_key);
+    }
+    // Refusals are the policy speaking — return them verbatim, 200: the
+    // admin asked "try to dial", and "policy said no, case re-queued" is a
+    // successful answer to that question.
+    return res.json(result);
+  } catch (err) { next(err); }
+});
+
 router._internals = {
   buildSmsRewritePrompt,
   cleanSmsRewriteOutput,

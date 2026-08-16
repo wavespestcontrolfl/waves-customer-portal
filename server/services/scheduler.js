@@ -2695,6 +2695,70 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 11:23AM (Mon–Fri) — Collections AUTO-DIAL sweep (PR C, the ruled
+  // fully-automatic trigger). Promotes eligible shadow/proposed cases and
+  // hands them to origination, which re-runs the full contact policy at
+  // dial time. DARK unless GATE_VOICE_LATE_PAYMENT_AUTODIAL=true (which
+  // itself requires the master + policy gates) — gate off means ZERO reads
+  // (pinned). 11:23 is an unoccupied fixed minute inside the 9:00–18:00 ET
+  // call window, ~40min after the 10:42 shadow sweep so freshly proposed
+  // cases are dialable the same day. Bounded: at most
+  // COLLECTIONS_AUTODIAL_MAX_PER_RUN (default 2) dial attempts per run —
+  // pilot pace, never a volume dialer.
+  // =========================================================================
+  cron.schedule('23 11 * * 1-5', async () => {
+    try {
+      // Gate BEFORE the lock (codex gh-r1): runExclusive itself takes a DB
+      // connection, an advisory lock, and a job_health write — a fully dark
+      // tick must touch NOTHING. Master on + autodial off (the supervised
+      // shakedown mode) runs ONLY the orphan-approval reclamation (codex
+      // gh-r7: that mode is exactly the one that creates admin orphans, and
+      // nothing else ever revisits 'approved' rows).
+      const { isAutoDialEnabled, isVoiceLatePaymentEnabled } = require('./collections/outbound-voice/gates');
+      if (!isVoiceLatePaymentEnabled()) return; // fully dark — zero touches
+      await runExclusive('collections-dial-sweep', async () => {
+        const DialSweep = require('./collections/outbound-voice/dial-sweep');
+        // Master RE-CHECK inside the lock (codex gh-r13): the tick can wait
+        // on runExclusive — an incident flip during that wait must mean
+        // fully-dark zero-touches, not "autodial-dark maintenance".
+        if (!isVoiceLatePaymentEnabled()) return;
+        if (!isAutoDialEnabled()) {
+          const reclaimed = await DialSweep.reclaimExpiredApprovals();
+          if (reclaimed) logger.info(`Collections maintenance: reclaimed ${reclaimed} expired approval(s) (autodial dark)`);
+          return;
+        }
+        const result = await DialSweep.runCollectionsDialSweep();
+        if (result.skipped) return; // gate flipped mid-tick — stay silent
+        logger.info(`Collections auto-dial sweep: ${result.candidates} candidates, ${result.promoted} promoted, ${result.dialed} dial attempts, ${result.refused} refusals, ${result.reclaimed} reclaimed`);
+      });
+    } catch (err) {
+      logger.error(`Collections auto-dial sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 3:37AM — Collections call retention sweep (PR B). Purges the
+  // conversational CONTENT (transcripts, recordings) of collections_voice
+  // calls older than COLLECTIONS_RETENTION_DAYS (default 90) — its own
+  // shorter policy, never the inbound pipeline's. Deliberately UNGATED:
+  // deletion is the conservative direction, and while the lane is dark there
+  // are zero collections_voice rows so this is a provable no-op (pinned).
+  // =========================================================================
+  cron.schedule('37 3 * * *', async () => {
+    try {
+      await runExclusive('collections-retention-sweep', async () => {
+        const Retention = require('./collections/outbound-voice/retention');
+        const result = await Retention.runCollectionsRetentionSweep();
+        if (result.considered) {
+          logger.info(`Collections retention sweep: ${result.purged} purged, ${result.failed} deferred`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Collections retention sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 10:05AM — Pre-visit late-balance reminders (owner directive
   // 2026-07-17). One text+email per RECURRING visit landing in 3 days when
   // the customer has a late RECURRING balance (unpaid dues / overdue
