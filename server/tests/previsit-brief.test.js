@@ -1881,3 +1881,32 @@ describe('codex #3423 r10 — recurring boolean evidence + money words grounded 
     expect(verdict.body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r12 — evidence check precedes the whole-phrase fast path', () => {
+  test('null-valued estimate keys never ground "Provide estimate"', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    // Real payloads always carry these keys; the values are null here.
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { sourceEstimate: null, pendingEstimate: null } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: ['Provide estimate'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+
+  test('a real estimate value still grounds the directive', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer asked us to provide estimate for lawn care' }] },
+    };
+    const verdict = validateBriefJson(
+      { priorities: ['Provide estimate'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});

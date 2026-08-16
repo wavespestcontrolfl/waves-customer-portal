@@ -1237,8 +1237,17 @@ function findUngroundedClaim(body, grounding) {
   const instructedClaimGrounded = (term) => {
     const phrase = String(term || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
     if (!phrase) return true;
-    if (groundedText.includes(phrase)) return true;
     const words = phrase.split(' ').filter((w) => w.length >= 4);
+    // Money/scope-bearing and grounded-only objects require VALUE evidence
+    // BEFORE the whole-phrase fast path (codex #3423 r9+r12): every real
+    // payload carries keys like sourceEstimate/pendingEstimate even when
+    // their values are null, and `groundedText.includes('estimate')`
+    // matched the KEY — so "Provide estimate" validated with no estimate.
+    const evidence = words.filter((w) => INSTRUCTION_EVIDENCE_WORDS.has(w) || GROUNDED_ONLY_WORDS.has(w));
+    if (evidence.length && !evidence.every((w) => wordVariants(w).some(
+      (v) => new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedValueText),
+    ))) return false;
+    if (groundedText.includes(phrase)) return true;
     // No 4+-letter words at all does NOT make the claim grounded: a
     // short verb object ("Use DDT" → 'ddt') is exactly the shape every
     // length-gated pass ignores (rare-word scan starts at 4, catalog
@@ -1246,14 +1255,6 @@ function findUngroundedClaim(body, grounding) {
     // failed, so the claim appears nowhere in the grounding. Fail
     // closed rather than accept it vacuously.
     if (!words.length) return false;
-    // Money/scope-bearing objects require evidence even though their
-    // vocabulary is common (codex #3423 r9): "Provide estimate" /
-    // "Discuss payment" / "Perform treatment" direct real business
-    // actions, so the carrying word must appear in the fact VALUES.
-    const evidence = words.filter((w) => INSTRUCTION_EVIDENCE_WORDS.has(w));
-    if (evidence.length && !evidence.every((w) => wordVariants(w).some(
-      (v) => new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedValueText),
-    ))) return false;
     // Ordinary prose vocabulary self-grounds ("treated", "carefully") —
     // requiring it verbatim would template-fallback normal sentences.
     // Reference STOPWORDS do NOT: they carry the direction of the claim
