@@ -211,6 +211,32 @@ describe('buildPropertyRoleProposals', () => {
     expect(fullMiss.proposals).toHaveLength(0);
   });
 
+  test('full + street-only duplicates resolving to ONE row re-dedupe — conflicting occupancies drop (codex r20)', () => {
+    const { fills, proposals } = buildPropertyRoleProposals({
+      classified: [
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: 'seasonal', is_primary_residence: null },
+        // Same property stated again by street only, with a DIFFERENT occupancy.
+        { address_line1: '660 Shell Cove', city: null, zip: null, occupancy: 'rental_investment', is_primary_residence: null },
+      ],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    // Both resolve to prop-new — the model contradicted itself about ONE
+    // property, so the occupancy signal drops instead of array order
+    // winning the unknown-row fill.
+    expect(fills).toHaveLength(0);
+    expect(proposals).toHaveLength(0);
+    // Complementary duplicates across the two forms still merge.
+    const merged = buildPropertyRoleProposals({
+      classified: [
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true },
+        { address_line1: '660 Shell Cove', city: null, zip: null, occupancy: 'owner_occupied', is_primary_residence: null },
+      ],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    expect(merged.fills).toEqual([{ property_id: 'prop-new', occupancy: 'owner_occupied' }]);
+    expect(merged.proposals.filter((p) => p.kind === 'primary_flip')).toHaveLength(1);
+  });
+
   test('proposals carry the staged address_key (codex r19)', () => {
     const { proposals } = buildPropertyRoleProposals({
       classified: [
@@ -592,6 +618,32 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     expect(unresolved.service_address_line1).toBe('8380 Sea Breeze Ct');
     expect(provenOther.property_id).toBeNull();
     expect(provenOther.service_address_line1).toBeNull();
+  });
+
+  test('an estimate-born COMPLETED-but-ongoing recurring anchor is pinned via the estimate proof (codex r20)', async () => {
+    const old = { ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1' };
+    // Falls between the live-estimate pass (terminal) and the recurring
+    // parent stamp (estimate-born) — auto-extension clones its stamp.
+    const anchor = {
+      id: 'v-anchor', customer_id: 'cust-1', status: 'completed',
+      is_recurring: true, recurring_ongoing: true,
+      property_id: null, service_address_line1: null, source_estimate_id: 'est-9', lat: null, lng: null,
+    };
+    const trx = makeTrx({
+      rows: {
+        customer_properties: [old, neu],
+        customers: [{ id: 'cust-1' }],
+        scheduled_services: [anchor],
+        estimates: [{ id: 'est-9', address: null, property_id: null }], // not proven other
+      },
+    });
+    await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
+    });
+    expect(anchor.property_id).toBe('prop-old');
+    expect(anchor.service_address_line1).toBe('8380 Sea Breeze Ct');
   });
 
   test('re-click on an already-flipped card is idempotent (applied, no writes)', async () => {

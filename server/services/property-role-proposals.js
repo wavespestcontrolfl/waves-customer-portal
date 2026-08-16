@@ -177,7 +177,7 @@ function uniqueCompatibleRow(entry, properties) {
  * primary row — two claimants is a model contradiction, so nothing flips.
  */
 function buildPropertyRoleProposals({ classified: rawClassified = [], properties = [] }) {
-  const classified = dedupeClassified(rawClassified);
+  const preDeduped = dedupeClassified(rawClassified);
   const fills = [];
   const proposals = [];
   const rowsByKey = new Map();
@@ -186,6 +186,30 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
     if (key) rowsByKey.set(key, row);
   }
   const currentPrimary = properties.find((p) => p.is_primary) || null;
+
+  // RESOLVE first, then re-dedupe on the RESOLVED identity (codex #3418
+  // r20): a property stated twice — once full, once street-only — carries
+  // two different address keys, so the raw dedupe keeps both, yet the
+  // partial-match fallback can resolve both to the SAME stored row and
+  // conflicting occupancies would evade the duplicate-conflict drop
+  // (array order deciding the unknown-row fill). Rewriting each matched
+  // entry to its row's canonical address makes the second dedupe pass
+  // collapse same-row entries under the exact same merge/conflict rules.
+  const resolvedEntries = preDeduped.map((entry) => {
+    const key = addressKey(entry);
+    const row = (key ? rowsByKey.get(key) : null) || uniqueCompatibleRow(entry, properties);
+    return row
+      ? {
+        ...entry,
+        address_line1: row.address_line1,
+        address_line2: row.address_line2,
+        city: row.city,
+        zip: row.zip,
+        _row: row,
+      }
+      : entry;
+  });
+  const classified = dedupeClassified(resolvedEntries);
 
   // Contradiction is judged across ALL classified entries, matched or not
   // (codex #3418 r4): an unmatched claimant — e.g. an extra whose
@@ -197,8 +221,7 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
 
   const primaryClaims = [];
   for (const entry of classified) {
-    const key = addressKey(entry);
-    const row = (key ? rowsByKey.get(key) : null) || uniqueCompatibleRow(entry, properties);
+    const row = entry._row || null;
     if (!row) continue; // nothing durable to label — the persistence step records rows first
 
     // A residence claim on a commercial-typed row is rejected wholesale
@@ -705,14 +728,26 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         // to target another property: excluded only when its estimate
         // links a different property_id, or its parsed address clearly
         // names a different address/street than the old primary.
+        const hasOngoing = await trx.schema.hasColumn('scheduled_services', 'recurring_ongoing');
         {
-          const estRows = await trx('scheduled_services')
+          // Estimate-born COMPLETED-but-ongoing recurring anchors are IN
+          // scope here too (codex #3418 r20): the recurring-parent stamp
+          // below excludes estimate-born rows (the estimate lane owns
+          // their address) and this pass excluded terminal rows — leaving
+          // exactly those anchors unstamped while auto-extension keeps
+          // cloning their empty stamp. The estimate proof below decides
+          // them the same way it decides live estimate visits.
+          let estQuery = trx('scheduled_services')
             .where({ customer_id: customerId })
             .whereNull('property_id')
             .whereNull('service_address_line1')
-            .whereNotNull('source_estimate_id')
-            .whereNotIn('status', TERMINAL_VISIT_STATUSES)
-            .select('id', 'source_estimate_id');
+            .whereNotNull('source_estimate_id');
+          estQuery = hasOngoing
+            ? estQuery.where((qb) => qb
+              .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+              .orWhere({ is_recurring: true, recurring_ongoing: true }))
+            : estQuery.whereNotIn('status', TERMINAL_VISIT_STATUSES);
+          const estRows = await estQuery.select('id', 'source_estimate_id');
           if (estRows.length) {
             const { parseEstimateAddress } = require('./estimate-property-linkage');
             const estIds = [...new Set(estRows.map((r) => r.source_estimate_id))];
@@ -764,7 +799,6 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         // status; a cancelled series has recurring_ongoing=false and is
         // untouched. Column-existence check keeps pre-migration envs
         // working (no ongoing column = no auto-extension either).
-        const hasOngoing = await trx.schema.hasColumn('scheduled_services', 'recurring_ongoing');
         if (hasOngoing) {
           await trx('scheduled_services')
             .where({ customer_id: customerId, is_recurring: true, recurring_ongoing: true })
