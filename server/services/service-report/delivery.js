@@ -56,6 +56,7 @@ function buildServiceReportV1SmsVars({
   payUrl,
   serviceType,
   reserviceLine,
+  pastDueLine,
 } = {}) {
   const url = String(reportUrl || '').trim();
   if (!url) return null;
@@ -86,6 +87,15 @@ function buildServiceReportV1SmsVars({
     // the migration appending the token to the bodies — ships as a separate
     // PR once this is deployed.
     reservice_line: typeof reserviceLine === 'string' ? reserviceLine : '',
+    // EXPAND half for the completion-SMS past-due balance line (same rollout
+    // discipline again): supplied at every render site BEFORE any template
+    // body carries {past_due_line}. The clause is computed by the caller
+    // (open-balance.pastDueSmsLineForCustomer) and is '' unless
+    // GATE_COMPLETION_SMS_BALANCE is on AND the customer has an older open
+    // self-pay balance beyond the visit's own invoice. The contract half —
+    // the migration appending the token to the two with-invoice bodies —
+    // ships as a separate PR once this is deployed.
+    past_due_line: typeof pastDueLine === 'string' ? pastDueLine : '',
   };
 }
 
@@ -96,6 +106,7 @@ function buildServiceReportV1DeliveryContext({
   smsReportUrl,
   payUrl,
   reserviceLine,
+  pastDueLine,
 } = {}) {
   if (!shouldSendServiceReportV1Delivery(record)) {
     return { enabled: false, smsType: null, metadata: {} };
@@ -114,6 +125,7 @@ function buildServiceReportV1DeliveryContext({
     payUrl,
     serviceType,
     reserviceLine,
+    pastDueLine,
   });
   return {
     enabled: true,

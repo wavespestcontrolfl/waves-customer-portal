@@ -1136,6 +1136,12 @@ const TwilioService = {
             // the plan grants a lane; unsupplied would suppress the send once
             // the token lands in the body.
             reservice_line: await require("./reservice-link").reserviceLineForCustomer(customerId),
+            // {past_due_line} defense (same suppression rationale as above):
+            // this un-billed summary path supplies '' — the line rides only
+            // the with-invoice completion texts, but an owner-customized
+            // body carrying the token must render blank, not silence the
+            // send.
+            past_due_line: "",
           }, { workflow: "service_complete", entity_type: "service_record", entity_id: serviceRecordId })
         : null;
     if (!body) {
