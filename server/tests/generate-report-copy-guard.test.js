@@ -341,6 +341,29 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(containsProductName('We treated the affected zone today.', [{ name: 'T-Zone SE' }], o)).toBe(false);
   });
 
+  // r49 (#3420): the shared builder screens extraNames and fails CLOSED
+  // when catalog hydration is load-bearing for an id-only entry's name.
+  test('buildReportTradeNameScreen: extraNames reject, hydration failure propagates only when load-bearing', async () => {
+    const CompletionRecap = require('../services/completion-recap');
+    const screen = await CompletionRecap.buildReportTradeNameScreen({
+      products: [],
+      extraNames: ['Termidor HE'],
+    });
+    expect(screen('We applied Termidor HE along the foundation.')).toBe(true);
+    expect(screen('We applied a non-repellent termiticide along the foundation.')).toBe(false);
+    const failingDb = () => ({ whereIn: () => ({ select: () => Promise.reject(new Error('catalog down')) }) });
+    await expect(CompletionRecap.buildReportTradeNameScreen({
+      products: [{ productId: 'abc' }],
+      db: failingDb,
+    })).rejects.toThrow('catalog down');
+    // a named entry keeps the (stricter) guard on the same failure
+    const strict = await CompletionRecap.buildReportTradeNameScreen({
+      products: [{ name: 'Talstar P', productId: 'abc' }],
+      db: failingDb,
+    });
+    expect(strict('We applied Talstar around the perimeter.')).toBe(true);
+  });
+
   test('product-record raw values ride productValues for the trade-name output guard', () => {
     const sections = typedFindingsPromptSections('termite_treatment', {
       products_used: 'Termidor HE',

@@ -12214,11 +12214,23 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     // active-ingredient derivation, and chunking live in the SHARED builder
     // (completion-recap.js) so the completion-time recheck of edited bodies
     // screens with the identical rules (codex r48).
-    const screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
-      products: Array.isArray(products) ? products : [],
-      extraNames: [...typedProductNameGuards, ...fallbackProductNames],
-      db,
-    });
+    // The builder propagates a catalog failure only when an id-only product
+    // depends on it for its name — the guard cannot run complete, so fail
+    // retryable like the other grounding outages (codex r49).
+    let screenTradeNames;
+    try {
+      screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
+        products: Array.isArray(products) ? products : [],
+        extraNames: [...typedProductNameGuards, ...fallbackProductNames],
+        db,
+      });
+    } catch (err) {
+      logger.warn(`[generate-report] trade-name guard build failed — failing retryable: ${err.message}`);
+      return res.status(503).json({
+        error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+        retryable: true,
+      });
+    }
     const generated = await generateReportCopyWithFallback({
       systemPrompt,
       userMessage: fullUserMessage,
@@ -13260,3 +13272,6 @@ module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
 // lazily by the IB move_stops_to_day tool so its opt-in customer texts go
 // through the exact same path as update-details and the bulk reschedule.
 module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
+// Completion reruns the visit-scoped trade-name screen with the SAME typed
+// product-field classification generation used (codex r49 #3420).
+module.exports.typedFindingsPromptSections = typedFindingsPromptSections;

@@ -372,25 +372,34 @@ async function buildReportTradeNameScreen({ products = [], extraNames = [], db =
     }
   }
   if (db) {
+    let rows = [];
     try {
       const ids = list.map((p) => p?.productId).filter(Boolean);
-      if (ids.length) {
-        const rows = await db('products_catalog')
+      rows = ids.length
+        ? await db('products_catalog')
           .whereIn('id', ids)
           .select('id', 'name', 'active_ingredient', 'formulation')
-          .catch(() => []);
-        const nameById = new Map((rows || []).map((r) => [String(r.id), r.name]));
-        hydrated = list.map((p) => (p && !p.name && !p.product_name && p.productId
-          ? { ...p, name: nameById.get(String(p.productId)) || null }
-          : p));
-        for (const row of rows || []) {
-          `${row.active_ingredient || ''} ${row.formulation || ''}`
-            .toLowerCase().split(/[^a-z0-9]+/)
-            .filter((tok) => tok.length >= 4)
-            .forEach((tok) => genericTokens.add(tok));
-        }
-      }
-    } catch { /* strict guard on failure */ }
+        : [];
+    } catch (err) {
+      // A failed lookup loses two different things: exemption tokens
+      // (guard gets STRICTER — safe to continue) and hydrated names for
+      // id-only entries (guard gets WEAKER — their trade names would go
+      // unscreened). When any entry depends on hydration for its name the
+      // error must propagate so the caller drops the copy instead of
+      // approving it (codex r49); otherwise continue exemption-less.
+      if (list.some((p) => p && !p.name && !p.product_name && p.productId)) throw err;
+      rows = [];
+    }
+    const nameById = new Map((rows || []).map((r) => [String(r.id), r.name]));
+    hydrated = list.map((p) => (p && !p.name && !p.product_name && p.productId
+      ? { ...p, name: nameById.get(String(p.productId)) || null }
+      : p));
+    for (const row of rows || []) {
+      `${row.active_ingredient || ''} ${row.formulation || ''}`
+        .toLowerCase().split(/[^a-z0-9]+/)
+        .filter((tok) => tok.length >= 4)
+        .forEach((tok) => genericTokens.add(tok));
+    }
   }
   const seen = new Set();
   const guarded = [

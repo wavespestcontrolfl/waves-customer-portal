@@ -6022,8 +6022,33 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // remains and the completion is never blocked.
           if (technicianReportBody) {
             try {
+              // Typed product-record fields (e.g. termite_treatment
+              // products_used) can carry a trade name with no matching
+              // selected product — generation screens them via extraNames,
+              // so completion must too (codex r49). Same classification
+              // helper, all companions included: a recorded trade name is
+              // banned from customer copy regardless of the companion's
+              // delivery mode. Errors here propagate to the catch below
+              // and drop the body.
+              const { typedFindingsPromptSections } = require('./admin-schedule');
+              const typedGuardNames = [];
+              if (typedFindings?.type) {
+                typedGuardNames.push(...typedFindingsPromptSections(
+                  typedFindings.type, typedFindings.values || {},
+                ).productValues);
+              }
+              for (const entry of Array.isArray(companionFindings) ? companionFindings : []) {
+                const entryValues = entry?.values && typeof entry.values === 'object' && !Array.isArray(entry.values)
+                  ? entry.values : null;
+                if (entry?.type && entryValues) {
+                  typedGuardNames.push(...typedFindingsPromptSections(
+                    entry.type, entryValues, { companion: true },
+                  ).productValues);
+                }
+              }
               const screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
                 products: Array.isArray(products) ? products : [],
+                extraNames: typedGuardNames,
                 db,
               });
               if (screenTradeNames(technicianReportBody)) {
