@@ -1172,14 +1172,14 @@ function extractOutputReferences(text) {
   // seen, not just "Apply Bifen SC"); the all-words-common skip in the
   // validator keeps ordinary prose objects ("use caution") from
   // over-rejecting.
-  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/gi)) push(instructed, m[1]);
+  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/gi)) push(instructed, m[1]);
   // NON-treatment imperatives ("Inspect interior", "Check attic",
   // "Monitor bait stations"): instruction fields must ground these
   // objects too — the treatment-verb capture above covers only
   // apply/spray/use/treat, and an ungrounded "Inspect interior" on an
   // exterior-only visit is exactly as contradictory as "Treat interior".
   // Same connector skip and follower-stop as the treatment capture.
-  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?|[Pp]erform(?:ed|ing|s)?|[Pp]rovid(?:e|es|ed|ing)|[Rr]etriev(?:e|es|ed|ing)|[Vv]acuum(?:ed|ing|s)?|[Dd]ocument(?:ed|ing|s)?|[Dd]iscuss(?:ed|ing|es)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/gi)) push(directives, m[1]);
+  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?|[Pp]erform(?:ed|ing|s)?|[Pp]rovid(?:e|es|ed|ing)|[Rr]etriev(?:e|es|ed|ing)|[Vv]acuum(?:ed|ing|s)?|[Dd]ocument(?:ed|ing|s)?|[Dd]iscuss(?:ed|ing|es)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/gi)) push(directives, m[1]);
   for (const m of text.matchAll(/\b(?:for|targeting|against)\s+((?:[a-z][a-z'-]*\s+){0,3}[a-z][a-z'-]*)/g)) push(targets, m[1]);
   // Organism references that never pass a preposition: "<X> activity/
   // damage/infestation" and "signs/evidence of <X>" ("Emerald ash borer
@@ -1272,7 +1272,7 @@ function findUngroundedClaim(body, grounding) {
   const boundaryGroundedWord = (w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedValueText);
   const commonOrGroundedProse = (term) => String(term).toLowerCase().split(/\s+/).every((w) => (
     w.length < 4 || REFERENCE_STOP_WORDS.has(w) || COMMON_PROSE_WORDS.has(w)
-    || (GROUNDED_ONLY_WORDS.has(w) && boundaryGroundedWord(w))
+    || (wordVariants(w).some((v) => GROUNDED_ONLY_WORDS.has(v)) && groundedWordOk(w, groundedText, groundedValueText))
   ));
   // Instruction fields (priorities, watch_items) direct the technician —
   // an application-verb product reference there must name a product on
@@ -1379,6 +1379,23 @@ function findUngroundedClaim(body, grounding) {
   if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
     && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\bpaid\s+in\s+full\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b/i.test(outputText)) {
     return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
+  }
+  // 'accepted' bound to its object (r37): the estimate status must not be
+  // reassigned to an unrelated noun ("Customer accepted renewal") — the
+  // acceptance bigram itself must appear in the fact values unless the
+  // object is the estimate/quote/tier the status genuinely describes.
+  const ACCEPT_OBJECT_OK = new Set(['estimate', 'estimates', 'quote', 'quotes', 'bronze', 'silver', 'gold', 'platinum', 'payment']);
+  // The trailing form is a lookahead so "customer accepted renewal" yields
+  // BOTH matches — a consuming second branch swallowed 'accepted' and hid
+  // the reassigned object.
+  for (const m of outputText.matchAll(/\baccepted\s+(?:the\s+|a\s+|an\s+|his\s+|her\s+|their\s+|our\s+)?([a-z][a-z'-]{2,})\b|\b([a-z][a-z'-]{2,})(?=\s+accepted\b)/g)) {
+    const noun = m[1] || m[2];
+    if (ACCEPT_OBJECT_OK.has(noun) || noun === 'customer') continue;
+    const bigram1 = `accepted ${noun}`;
+    const bigram2 = `${noun} accepted`;
+    if (!groundedValueText.includes(bigram1) && !groundedValueText.includes(bigram2)) {
+      return { kind: 'acceptance_conflict', term: noun };
+    }
   }
   // Estimate/quote LIFECYCLE wording must match the actual estimate
   // object's status — the estimate token asserts existence, never state

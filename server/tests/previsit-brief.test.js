@@ -2605,3 +2605,49 @@ describe('codex #3423 r36 — descriptive sensitivity claims, clause-safe suffix
     expect(verdict.reason).not.toBe('noncanonical_company_name');
   });
 });
+
+describe('codex #3423 r37 — capitalized inflections, with-connector, acceptance binding', () => {
+  test('title-cased paraphrase grounds through variants', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer available Monday; appointment rescheduled' }] },
+    };
+    for (const claim of ['Availability Confirmed Monday', 'Rescheduling Confirmed Monday']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      ).body).toBeTruthy();
+    }
+  });
+
+  test('"Treated perimeter with Bifen IT" grounds on product history', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: ['bifen it'], targets: [] },
+      llmFacts: { lastVisit: { productNames: ['Bifen IT'], recap: 'Treated perimeter' } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: ['bifen it'], last_visit_summary: 'Treated perimeter with Bifen IT', open_scope: null, customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('estimate acceptance cannot be reassigned to other objects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } }, membership: { tier: 'Bronze' } },
+    };
+    for (const claim of ['Customer accepted renewal', 'Customer accepted appointment']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      ).reason).toMatch(/acceptance_conflict/);
+    }
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate accepted', customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
