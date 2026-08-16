@@ -384,10 +384,15 @@ async function runShadowSweep({ now = new Date() } = {}) {
         // the card is the supervised retry surface. The predicate mirrors
         // origination's own idempotency probe: a call_log row under this
         // case's key whose status is not a terminal non-contact.
+        // twilio_call_sid is backfilled only AFTER calls.create succeeds
+        // (codex gh-r13): the row is inserted 'initiated' BEFORE the
+        // provider is touched, so status alone still counts a dial that
+        // never happened. Provider-confirmed or the card stays.
         const recheck = await db('call_log')
           .where({ source: 'collections_voice' })
           .whereRaw("metadata->>'collectionsIdempotencyKey' = ?", [idempotencyKey])
           .whereRaw("COALESCE(status, '') NOT IN ('failed', 'busy', 'no-answer', 'canceled')")
+          .whereNotNull('twilio_call_sid')
           .first('id')
           .catch(() => null);
         if (recheck) {

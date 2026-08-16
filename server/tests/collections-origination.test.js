@@ -483,3 +483,64 @@ test('the dial claim fences customer_id: a mid-merge repointed case stands down 
   expect(mockCallsCreate).not.toHaveBeenCalled();
   expect(ContactLedger.recordContact).not.toHaveBeenCalled();
 });
+
+// codex gh-r13 pins.
+test('pre-claim state transitions fence customer_id — a mid-merge repointed case is never cancelled from stale snapshots', async () => {
+  const stateChain = chain('collection_cases', { returningRows: [] });
+  setDb({
+    collection_cases: [
+      chain('collection_cases', { first: { ...CASE, approval_expires_at: new Date('2026-08-12T14:00:00Z') } }),
+      stateChain,
+    ],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res.reason).toBe('approval_expired');
+  expect(stateChain.where).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'cust-1' }));
+});
+
+test('master gate flipped off during the pre-claim reads ⇒ gated_off, claim never attempted', async () => {
+  const caseChain = chain('collection_cases', { first: { ...CASE } });
+  const customerChain = chain('customers', {
+    first: () => { process.env.GATE_VOICE_LATE_PAYMENT = 'false'; return CUSTOMER; },
+  });
+  setDb({
+    collection_cases: [caseChain], // NO claim chain — a claim would throw 'unexpected'
+    customers: [customerChain, chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res).toEqual({ dialed: false, reason: 'gated_off' });
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+  expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+});
+
+test('master gate flipped off after the claim ⇒ never_contacted stamp, call_log canceled, claim released, NO provider touch', async () => {
+  const claimChain = chain('collection_cases', { result: 1 });
+  const releaseChain = chain('collection_cases', { result: 1 });
+  const insertChain = chain('call_log', { returningRows: [{ id: 'cl-1' }] });
+  const cancelChain = chain('call_log', { result: 1 });
+  // mockResolvedValue(false) from the stamp-retry test survives
+  // clearAllMocks — restore the default explicitly (documented trap).
+  ContactLedger.markSendFailed.mockResolvedValue(true);
+  // The claim succeeds, then the flip lands during the ledger write.
+  ContactLedger.recordContact.mockImplementation(async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT = 'false';
+    calls.push('ledger.record');
+    return { id: 'ledger-1', metadata: {} };
+  });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), claimChain, releaseChain],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined }), insertChain, cancelChain],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res).toEqual({ dialed: false, reason: 'gated_off' });
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+  // The pre-provider row must not consume the frequency windows.
+  expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+    expect.objectContaining({ id: 'ledger-1' }),
+    expect.objectContaining({ stage: 'gate_recheck', never_contacted: true }),
+  );
+  expect(cancelChain._updated.status).toBe('canceled');
+  expect(releaseChain._updated.current_state).toBe('approved');
+});

@@ -2718,6 +2718,10 @@ function initScheduledJobs() {
       if (!isVoiceLatePaymentEnabled()) return; // fully dark — zero touches
       await runExclusive('collections-dial-sweep', async () => {
         const DialSweep = require('./collections/outbound-voice/dial-sweep');
+        // Master RE-CHECK inside the lock (codex gh-r13): the tick can wait
+        // on runExclusive — an incident flip during that wait must mean
+        // fully-dark zero-touches, not "autodial-dark maintenance".
+        if (!isVoiceLatePaymentEnabled()) return;
         if (!isAutoDialEnabled()) {
           const reclaimed = await DialSweep.reclaimExpiredApprovals();
           if (reclaimed) logger.info(`Collections maintenance: reclaimed ${reclaimed} expired approval(s) (autodial dark)`);

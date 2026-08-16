@@ -42,7 +42,7 @@ const NOW = new Date('2026-08-12T15:00:00Z'); // Wed Aug 12, 11:00 ET
 
 function chain({ result = [], first, returning } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orderBy', 'distinct', 'select', 'limit']
+  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orderBy', 'distinct', 'select', 'limit']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.insert = jest.fn(() => q);
   q.update = jest.fn(() => q);
@@ -612,6 +612,9 @@ describe('gh-r10: post-file card recheck', () => {
     const raws = recheck.whereRaw.mock.calls.map((c) => c[0]).join(' ');
     expect(raws).toContain("metadata->>'collectionsIdempotencyKey' = ?");
     expect(raws).toContain("NOT IN ('failed', 'busy', 'no-answer', 'canceled')");
+    // gh-r13: provider-confirmed only — the row is inserted 'initiated'
+    // BEFORE the provider is touched; the sid exists only after success.
+    expect(recheck.whereNotNull).toHaveBeenCalledWith('twilio_call_sid');
     expect(retireChain.update).not.toHaveBeenCalled();
   });
 

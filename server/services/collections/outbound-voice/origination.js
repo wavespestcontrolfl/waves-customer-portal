@@ -53,8 +53,12 @@ async function setCaseState(caseRow, patch, { fromState = 'approved' } = {}) {
   // approved→dialing claim must not have its live 'dialing' state
   // clobbered by this loser's expired/cancelled verdict. The post-dial
   // failure path passes fromState 'dialing' (it holds the claim).
+  // customer_id is in the fence too (codex gh-r13): a merge can repoint
+  // the case while origination evaluates the OLD owner — an expiry/policy
+  // denial reached here must not cancel the now winner-owned case using
+  // the retired loser's snapshots. A moved row matches 0 and stands down.
   const [updated] = await db('collection_cases')
-    .where({ id: caseRow.id, case_version: caseRow.case_version, current_state: fromState })
+    .where({ id: caseRow.id, customer_id: caseRow.customer_id, case_version: caseRow.case_version, current_state: fromState })
     .update({ ...patch, updated_at: db.fn.now() })
     .returning('*');
   return updated || null;
@@ -181,6 +185,11 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
   // could land between the merge's check and its commit and the call
   // would proceed against mid-repoint data.
   const { withCaseLock } = require('../case-lock');
+  // Master gate RE-CHECK at the claim boundary (codex gh-r13 P1): the
+  // entry check ran before the customer/policy/idempotency reads — an
+  // incident kill-switch flip during that window must stop the dial HERE,
+  // before any state is claimed or the provider is touched.
+  if (!isVoiceLatePaymentEnabled()) return { dialed: false, reason: 'gated_off' };
   // customer_id is IN the fence (codex gh-r11): a merge committing between
   // the snapshot reads and this lock acquisition repoints the case to the
   // winner — the policy verdict and phone evaluated above then belong to
@@ -271,6 +280,30 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
   // Flipped immediately before the ONE network call below (gh prb-r11):
   // any throw while it is still false (missing Twilio config, client
   // construction) provably happened before the provider was touched.
+  // Final master-gate check before the provider (codex gh-r13 P1): the
+  // claim and the ledger/call_log writes take real time — a kill-switch
+  // flip during them must still stop the call. Release the claim cleanly;
+  // no provider request exists, so no callback will ever reconcile it.
+  if (!isVoiceLatePaymentEnabled()) {
+    // Same stamp-then-release doctrine as the pre-provider failure path
+    // (gh prb-r16): unstamped ⇒ claim deliberately kept for the operator.
+    let stamped = await ContactLedger.markSendFailed(ledgerEntry, { stage: 'gate_recheck', never_contacted: true });
+    if (!stamped) {
+      stamped = await ContactLedger.markSendFailed(ledgerEntry, { stage: 'gate_recheck', never_contacted: true });
+    }
+    if (callLogId) {
+      await db('call_log').where({ id: callLogId })
+        .update({ status: 'canceled', updated_at: new Date() })
+        .catch(() => {});
+    }
+    if (stamped) {
+      await releaseClaim();
+    } else {
+      logger.error(`[collections-voice] never_contacted stamp FAILED TWICE for ledger ${ledgerEntry.id} — case ${caseRow.id} left in 'dialing' for operator repair (gate recheck)`);
+    }
+    return { dialed: false, reason: 'gated_off' };
+  }
+
   let providerRequestStarted = false;
   try {
     const twilio = require('twilio');

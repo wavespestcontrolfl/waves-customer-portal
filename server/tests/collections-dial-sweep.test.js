@@ -380,3 +380,13 @@ describe('gh-r11', () => {
     expect(originateCollectionCall).not.toHaveBeenCalled();
   });
 });
+
+// codex gh-r13: the scheduler tick re-checks the MASTER gate inside the
+// runExclusive lock — a kill-switch flip while the tick waits on the lock
+// must mean fully-dark zero-touches, never "autodial-dark maintenance".
+test('scheduler source pin: master gate re-checked inside the cron lock before any maintenance', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+  const tick = src.slice(src.indexOf("'23 11 * * 1-5'"));
+  const lockBody = tick.slice(tick.indexOf('runExclusive('), tick.indexOf('runCollectionsDialSweep'));
+  expect(lockBody).toContain('if (!isVoiceLatePaymentEnabled()) return;');
+});
