@@ -1094,7 +1094,7 @@ function wordVariants(word) {
   const out = [word];
   if (word.endsWith('es')) out.push(word.slice(0, -2));
   if (word.endsWith('s')) out.push(word.slice(0, -1));
-  if (word.endsWith('ing')) out.push(word.slice(0, -3), `${word.slice(0, -3)}e`);
+  if (word.endsWith('ing')) out.push(word.slice(0, -3), `${word.slice(0, -3)}e`, `${word.slice(0, -3)}ed`);
   if (word.endsWith('ed')) out.push(word.slice(0, -2), word.slice(0, -1));
   if (word.endsWith('ly')) out.push(word.slice(0, -2));
   // initial <-> initially likewise (r33 P2).

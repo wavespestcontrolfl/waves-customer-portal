@@ -2567,3 +2567,17 @@ describe('codex #3423 r34 — pets, pest pressure, punctuated suffixes, lifecycl
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r35 — rescheduled inflection family', () => {
+  test('a rescheduled fact grounds rescheduling wording', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'appointment rescheduled to Monday per customer call' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Rescheduling confirmed Monday' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
