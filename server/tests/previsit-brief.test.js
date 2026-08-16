@@ -2245,3 +2245,29 @@ describe('codex #3423 r25 — singular keys, canonical name in prose, quote clai
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r26 — self-report is not evidence; canonical-name boundaries', () => {
+  test('mentioned_terms cannot launder a grounded-only word past null estimate keys', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { sourceEstimate: null, pendingEstimate: null } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: ['estimate'], last_visit_summary: 'Estimate provided', open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+
+  test('glued canonical-name suffixes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const name of ['Waves Pest Controls', 'Waves Pest Controller']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: `${name} visited.` },
+        grounding,
+      ).reason).toBe('noncanonical_company_name');
+    }
+  });
+});

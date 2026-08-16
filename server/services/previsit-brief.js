@@ -99,7 +99,7 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Connector optional (r22): "Waves Pest Control Pest Services" is a
 // suffixed variant too — a brand word directly after the name rejects;
 // ordinary prose ("- routine service", "serviced the yard") does not.
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control\s*(?:(?:&|\+|\/|-|\band\b)\s*)?(?:lawn|pest|care|control)\b/i;
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:(?:&|\+|\/|-|\band\b)\s*)?(?:lawn|pest|care|control)\b)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1375,7 +1375,7 @@ function findUngroundedClaim(body, grounding) {
       // strip it and skip when the remainder is ordinary prose (r25 P2) —
       // a novel token beside it ("PhantomGuard Waves Pest Control") still
       // parks, and NONCANONICAL_SUFFIX_RE already rejected brand suffixes.
-      const withoutName = String(term).replace(/waves\s+pest\s+control/g, ' ').replace(/\s+/g, ' ').trim();
+      const withoutName = String(term).replace(/\bwaves\s+pest\s+control\b/g, ' ').replace(/\s+/g, ' ').trim();
       if (withoutName !== String(term).trim() && (withoutName === '' || allWordsCommon(withoutName))) continue;
       if (commonOrGroundedProse(term)) continue;
       // A sentence-case application verb rides into the capitalized-run
@@ -1468,7 +1468,9 @@ function findUngroundedClaim(body, grounding) {
     // membership — 'scheduling' stems to common 'schedule', which must not
     // launder an appointment-state claim past the evidence check (r21).
     if (wordVariants(word).some((v) => GROUNDED_ONLY_WORDS.has(v))) {
-      return selfReported.has(word) || groundedWordOk(word, groundedText, groundedValueText);
+      // Self-report is a CLAIM, not evidence — grounded-only words need a
+      // fact value regardless of mentioned_terms (r26).
+      return groundedWordOk(word, groundedText, groundedValueText);
     }
     return wordVariants(word).some((v) => (
       REFERENCE_STOP_WORDS.has(v)
@@ -1479,7 +1481,7 @@ function findUngroundedClaim(body, grounding) {
   // The approved company name self-grounds as a PHRASE only — a bare
   // 'waves' outside it is a rare word ("Apply Waves" is a nonexistent
   // product, codex #3423 r17).
-  const APPROVED_NAME_RE = /waves\s+pest\s+control/gi;
+  const APPROVED_NAME_RE = /\bwaves\s+pest\s+control\b/gi;
   for (const rawField of outputFields) {
     const field = String(rawField).replace(APPROVED_NAME_RE, ' ');
     // 4+ characters: 'mice'/'rats'/'tick'/'flea'-length organisms must
@@ -1546,6 +1548,10 @@ function validateBriefJson(json, grounding) {
   // grounded. A missing list rejects the leg.
   if (!Array.isArray(json.mentioned_terms)) return { reason: 'mentioned_terms_not_array' };
   const selfReportGrounding = JSON.stringify(grounding.llmFacts).toLowerCase();
+  // Grounded-only words in a self-reported term must match fact VALUES —
+  // the serialized form contains null keys like openScope.sourceEstimate,
+  // which must never ground 'estimate' (codex #3423 r26).
+  const selfReportValueText = collectFactValues(grounding.llmFacts).join(' ').toLowerCase();
   for (const term of json.mentioned_terms) {
     if (typeof term !== 'string') return { reason: 'mentioned_terms_not_string' };
     if (FORBIDDEN_TARGET_RE.test(term)) return { reason: 'forbidden_genus' };
@@ -1554,6 +1560,10 @@ function validateBriefJson(json, grounding) {
     // two-letter suffix is under the significant-word threshold).
     const phrase = String(term).toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
     if (phrase && !selfReportGrounding.includes(phrase)) {
+      return { reason: `ungrounded_term:${cleanText(term, 60)}` };
+    }
+    const strictWords = phrase.split(/\s+/).filter((w) => wordVariants(w).some((v) => GROUNDED_ONLY_WORDS.has(v)));
+    if (strictWords.some((w) => !groundedWordOk(w, selfReportGrounding, selfReportValueText))) {
       return { reason: `ungrounded_term:${cleanText(term, 60)}` };
     }
   }
