@@ -34,6 +34,13 @@ const {
   normalizeZip,
 } = require('./customer-properties');
 const { resolveLocation } = require('../config/locations');
+const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
+
+// Canonical commercial test (codex #3418 r24): admin/persisted rows carry
+// subtypes ('office', 'warehouse', 'business', …) that the pricing engine
+// canonicalizes to 'commercial' — a literal compare would treat them as
+// residential and let a residence flip mirror a commercial classification.
+const isCommercialType = (v) => normalizePropertyType(v) === 'commercial';
 
 const REASON_CODE = 'property_role_confirm';
 // Visit statuses that are already settled — never re-pin those. Includes
@@ -113,6 +120,17 @@ function dedupeClassified(classified) {
       byKey.set(key, merged);
       out.push(merged);
       continue;
+    }
+    // Conflict sentinels PROPAGATE (codex #3418 r24): an incoming entry
+    // that is itself a merged group can carry a conflict flag with its
+    // value already cleared — the flag, not the value, is the evidence.
+    if (entry._occupancy_conflict && !prev._occupancy_conflict) {
+      prev.occupancy = null;
+      prev._occupancy_conflict = true;
+    }
+    if (entry._primary_conflict && !prev._primary_conflict) {
+      prev.is_primary_residence = null;
+      prev._primary_conflict = true;
     }
     if (entry.occupancy) {
       if (prev._occupancy_conflict || (prev.occupancy && prev.occupancy !== entry.occupancy)) {
@@ -232,7 +250,7 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
     // rejected "this is my home" must not fill owner_occupied (or park a
     // change) onto the commercial row it was rejected against.
     const commercialResidenceClaim = entry.is_primary_residence === true
-      && String(row.property_type || '').trim().toLowerCase() === 'commercial';
+      && isCommercialType(row.property_type);
     if (commercialResidenceClaim && entry.occupancy) {
       logger.warn('[property-role] occupancy signal dropped — it rides a residence claim rejected against a commercial-typed property');
     }
@@ -290,7 +308,7 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
     logger.warn(`[property-role] ${claimedPrimaryTotal} properties classified as primary residence on one call — skipping flip proposal (contradiction)`);
   } else if (primaryClaims.length === 1) {
     const { entry, row } = primaryClaims[0];
-    if (String(row.property_type || '').trim().toLowerCase() === 'commercial') {
+    if (isCommercialType(row.property_type)) {
       // A primary-RESIDENCE claim on a commercial-typed row is contradictory,
       // and the flip's mirror would copy that classification onto
       // customers.property_type, which feeds service_taxability — the
@@ -592,7 +610,7 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       .first();
     let viable = !!target;
     if (viable && !target.is_primary) { // already-primary = idempotent, always viable
-      if (String(target.property_type || '').trim().toLowerCase() === 'commercial') viable = false;
+      if (isCommercialType(target.property_type)) viable = false;
       // Address fence (codex #3418 r19): the flip was reviewed against
       // the staged addresses — a Customer 360 rewrite of either row's
       // address under the same id makes the click apply to a property
@@ -682,7 +700,7 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       // the card never showed the reviewer a property-type/tax change.
       // Staging suppresses these flips; this catches a row RE-TYPED
       // commercial between parking and the click.
-      if (String(newPrimary.property_type || '').trim().toLowerCase() === 'commercial') { skipped += 1; continue; }
+      if (isCommercialType(newPrimary.property_type)) { skipped += 1; continue; }
       // The flip rides on the row's CURRENT occupancy being compatible
       // with "primary residence" (codex #3418 r9): owner_occupied (the
       // companion occupancy_change just landed, or it always was) or
@@ -878,7 +896,10 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
               .orWhereRaw('lower(service_address_city) = lower(?)', [oldPrimary.city || '']))
             .andWhere((qb5) => qb5
               .whereNull('service_address_line2')
-              .orWhereRaw('lower(service_address_line2) = lower(?)', [oldPrimary.address_line2 || ''])));
+              .orWhereRaw('lower(service_address_line2) = lower(?)', [oldPrimary.address_line2 || '']))
+            .andWhere((qb6) => qb6
+              .whereNull('service_address_state')
+              .orWhereRaw('lower(service_address_state) = lower(?)', [oldPrimary.state || 'FL'])));
         // PARTIALLY stamped visits (codex #3418 r22): a row carrying the
         // old primary's street but missing city/state/ZIP/unit used to be
         // completed by dispatch's per-column customer-mirror fallback —
@@ -887,6 +908,11 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         // primary itself (COALESCE = never overwrites a present value).
         {
           const stampCompletion = {
+            // Fill-only street too (codex r24): a row LINKED by property_id
+            // with a null line1 was excluded from the pin (it requires a
+            // null property_id) — post-flip dispatch would COALESCE the
+            // NEW primary's street onto the old locality.
+            service_address_line1: trx.raw('COALESCE(service_address_line1, ?)', [oldPrimary.address_line1 ?? null]),
             service_address_line2: trx.raw('COALESCE(service_address_line2, ?)', [oldPrimary.address_line2 ?? null]),
             service_address_city: trx.raw('COALESCE(service_address_city, ?)', [oldPrimary.city ?? null]),
             service_address_state: trx.raw('COALESCE(service_address_state, ?)', [oldPrimary.state || 'FL']),

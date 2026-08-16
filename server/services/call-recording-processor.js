@@ -8372,6 +8372,9 @@ const CallRecordingProcessor = {
                 address_line1: v2Addr?.street_line_1 || null,
                 address_line2: v2Addr?.street_line_2 || null,
                 city: v2Addr?.city || null,
+                // V2's own state (codex #3418 r24) — falling back to V1's
+                // would graft a disagreeing state onto the V2 premise.
+                state: v2Addr?.state || null,
                 zip: v2Addr?.postal_code || null,
                 service_address_occupancy: v2RoleProp.service_address_occupancy || null,
                 service_address_is_primary_residence:
@@ -8439,7 +8442,10 @@ const CallRecordingProcessor = {
                   address_line1: entry.address_line1,
                   address_line2: entry.address_line2 || null,
                   city: entryCity || null,
-                  state: entry.state || extracted.state,
+                  // V2 sole authority: NEVER V1's state (codex r24) — a null
+                  // defaults to FL inside recordCallProperty, which is the
+                  // service area, not the other extractor's guess.
+                  state: entry.state || null,
                   zip: entryZip || null,
                   occupancyType: entry.is_rental ? 'rental_investment' : 'unknown',
                   source: 'call_pipeline',
