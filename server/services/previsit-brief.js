@@ -1362,6 +1362,13 @@ function findUngroundedClaim(body, grounding) {
   if (svcPrefFlags?.exteriorSweep === false) {
     prefConflicts.push({ re: /\b(?:eaves?|cobwebs?)\b/, term: 'eave sweep' });
   }
+  // A positive payment-state phrase under an overdue_balance flag asserts
+  // the OPPOSITE of the customer's billing state — flattened token pools
+  // cannot see the contradiction, so it is checked as a phrase (r32).
+  if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
+    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\bpaid\s+in\s+full\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b/i.test(outputText)) {
+    return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
+  }
   // Evidence-bearing words are validated FIELD-WIDE in instructions —
   // capture geometry (token caps, connectors) must never decide whether
   // "estimate"/"payment"-class words reach the gate (codex #3423 r20).
@@ -1370,10 +1377,14 @@ function findUngroundedClaim(body, grounding) {
   );
   for (const field of labeledFields) {
     if (field.instructional) {
-      // {2,} so 3-letter credential nouns ('key', 'fob') reach the set (r25).
-      for (const w of (String(field.text).toLowerCase().match(/[a-z][a-z'-]{2,}/g) || [])) {
-        if (INSTRUCTION_EVIDENCE_WORDS.has(w) && !evidenceWordGrounded(w)) {
-          return { kind: 'instruction', term: w };
+      // {2,} so 3-letter credential nouns ('key', 'fob') reach the set (r25);
+      // hyphenated compounds are split so "Chemical-sensitivity" cannot
+      // hide its evidence word inside one token (r32).
+      for (const raw of (String(field.text).toLowerCase().match(/[a-z][a-z'-]{2,}/g) || [])) {
+        for (const w of raw.split('-').filter(Boolean)) {
+          if (INSTRUCTION_EVIDENCE_WORDS.has(w) && !evidenceWordGrounded(w)) {
+            return { kind: 'instruction', term: w };
+          }
         }
       }
     }

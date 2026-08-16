@@ -199,7 +199,7 @@ function baseResponses(overrides = {}) {
 const CLEAN_LLM_JSON = {
   priorities: ['Ant activity near the garage'],
   mentioned_terms: ['ants'],
-  watch_items: ['Chemical-sensitivity note on file'],
+  watch_items: ['Note on file from the office'],
   last_visit_summary: 'Routine pest service in July.',
   open_scope: '',
   customer_context: 'Prefers a text before arrival.',
@@ -2463,5 +2463,38 @@ describe('codex #3423 r31 — pin number, availability family, in-the-home confl
       { priorities: ['Treat around the home'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
       grounding,
     ).reason).not.toBe('ungrounded_preference_conflict:interior');
+  });
+});
+
+describe('codex #3423 r32 — hyphenated evidence, payment-state contradiction', () => {
+  test('hyphenated compounds cannot hide evidence words', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Chemical-sensitivity note on file', 'Renewal-information pending', 'Membership-status pending']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [claim], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('"Payment accepted" contradicts an overdue balance even with an accepted estimate', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: {
+        openScope: { sourceEstimate: { status: 'accepted' } },
+        flags: [{ type: 'overdue_balance', severity: 'medium', detail: '$100.00 outstanding' }],
+      },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment accepted' },
+      grounding,
+    ).reason).toMatch(/payment_state_conflict/);
+    // A truthful outstanding-balance summary still grounds.
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment outstanding' },
+      grounding,
+    ).body).toBeTruthy();
   });
 });
