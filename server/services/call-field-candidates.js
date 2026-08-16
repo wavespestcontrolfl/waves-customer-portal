@@ -108,8 +108,27 @@ async function stageCustomerFieldCandidates(args = {}) {
           source: row.source,
         })
         .where('final_recommended_value', row.final_recommended_value)
-        .first('id');
-      if (existing) { stagedIds.push(existing.id); continue; }
+        .first('id', 'customer_id', 'status');
+      if (existing) {
+        // Linkage can change between passes (an unlinked call later linked
+        // and force-reprocessed): a same-value row carrying the old/null
+        // customer_id would be returned as this pass's provenance and then
+        // filtered out by the runner's customer scope, silently dropping
+        // the correction (codex #3413 r17). Relink a still-pending row to
+        // the current linkage; a row already resolved under the OLD
+        // linkage is history — stage a fresh row instead.
+        if ((existing.customer_id || null) === (row.customer_id || null)) {
+          stagedIds.push(existing.id);
+          continue;
+        }
+        if (existing.status === 'pending') {
+          await db('customer_field_candidates')
+            .where({ id: existing.id, status: 'pending' })
+            .update({ customer_id: row.customer_id || null, updated_at: db.fn.now() });
+          stagedIds.push(existing.id);
+          continue;
+        }
+      }
       const inserted = await db('customer_field_candidates').insert(row).returning('id');
       const id = inserted?.[0]?.id ?? inserted?.[0];
       if (id != null) stagedIds.push(id);

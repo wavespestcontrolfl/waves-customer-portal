@@ -1,5 +1,18 @@
+// Delegating db mock — staging tests install a per-test stub; the pure
+// builder tests never touch it.
+let mockDbStub = null;
+jest.mock('../models/db', () => {
+  const proxy = (...args) => mockDbStub(...args);
+  proxy.fn = { now: () => 'NOW' };
+  proxy.schema = { hasTable: async () => true };
+  return proxy;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
 const {
   buildCustomerFieldCandidates,
+  stageCustomerFieldCandidates,
+  __resetForTests,
 } = require('../services/call-field-candidates');
 
 function validV2Extraction(overrides = {}) {
@@ -131,5 +144,103 @@ describe('call field candidates', () => {
         source: 'legacy_gemini',
       }),
     ]));
+  });
+});
+
+describe('staging dedupe linkage (codex #3413 r17)', () => {
+  const CALL_ID = '11111111-1111-4111-8111-111111111111';
+  const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
+  const OTHER_CUSTOMER_ID = '33333333-3333-4333-8333-333333333333';
+
+  // Minimal chainable stub over an in-memory candidates table.
+  function installDbStub(rows = []) {
+    const data = rows.map((r) => ({ ...r }));
+    let nextId = 100;
+    mockDbStub = (table) => {
+      if (table !== 'customer_field_candidates') throw new Error(`unexpected table ${table}`);
+      const preds = [];
+      const chain = {
+        where(a, b) {
+          if (typeof a === 'object') for (const [k, v] of Object.entries(a)) preds.push((r) => r[k] === v);
+          else preds.push((r) => r[a] === b);
+          return chain;
+        },
+        first(...cols) {
+          const row = data.find((r) => preds.every((p) => p(r)));
+          if (!row) return Promise.resolve(undefined);
+          return Promise.resolve(Object.fromEntries(cols.map((c) => [c, row[c]])));
+        },
+        update(vals) {
+          const matched = data.filter((r) => preds.every((p) => p(r)));
+          for (const r of matched) Object.assign(r, vals);
+          return Promise.resolve(matched.length);
+        },
+        insert(row) {
+          const stored = { id: `cand-${++nextId}`, ...row };
+          data.push(stored);
+          const result = Promise.resolve([{ id: stored.id }]);
+          result.returning = () => Promise.resolve([{ id: stored.id }]);
+          return result;
+        },
+      };
+      return chain;
+    };
+    return data;
+  }
+
+  const existingRow = (over = {}) => ({
+    id: 'cand-1',
+    call_log_id: CALL_ID,
+    customer_id: null,
+    field_name: 'last_name',
+    final_recommended_value: 'Rodriguez',
+    source: 'gemini_v2',
+    status: 'pending',
+    ...over,
+  });
+
+  const stageArgs = () => ({
+    callId: CALL_ID,
+    customerId: CUSTOMER_ID,
+    extraction: {},
+    v2Extraction: validV2Extraction({
+      caller: { name_full: null, first_name: null, email: null, phone_e164: null },
+      property: { service_address: null },
+      service_request: { primary_service_category: null },
+      confidence: {},
+    }),
+  });
+
+  beforeEach(() => { __resetForTests(); });
+  afterEach(() => { mockDbStub = null; });
+
+  test('relinks a still-pending same-value row to the newly linked customer', async () => {
+    // A force-reprocessed call that was unlinked at first staging: the
+    // dedupe row carries customer_id NULL, and without the relink the
+    // runner's customer scope silently drops the correction.
+    const data = installDbStub([existingRow({ customer_id: null })]);
+    const res = await stageCustomerFieldCandidates(stageArgs());
+    expect(res.stagedIds).toEqual(['cand-1']);
+    expect(data[0].customer_id).toBe(CUSTOMER_ID);
+  });
+
+  test('reuses a same-value row already carrying the current linkage untouched', async () => {
+    const data = installDbStub([existingRow({ customer_id: CUSTOMER_ID })]);
+    const res = await stageCustomerFieldCandidates(stageArgs());
+    expect(res.stagedIds).toEqual(['cand-1']);
+    expect(res.staged).toBe(0);
+    expect(data[0].customer_id).toBe(CUSTOMER_ID);
+  });
+
+  test('a row already resolved under the OLD linkage is history — a fresh row is staged', async () => {
+    const data = installDbStub([existingRow({ customer_id: OTHER_CUSTOMER_ID, status: 'auto_applied' })]);
+    const res = await stageCustomerFieldCandidates(stageArgs());
+    expect(res.staged).toBe(1);
+    expect(res.stagedIds).toHaveLength(1);
+    expect(res.stagedIds[0]).not.toBe('cand-1');
+    // The resolved row keeps its original linkage and status.
+    expect(data[0].customer_id).toBe(OTHER_CUSTOMER_ID);
+    expect(data[0].status).toBe('auto_applied');
+    expect(data[1].customer_id).toBe(CUSTOMER_ID);
   });
 });

@@ -792,15 +792,15 @@ async function applyContactCorrections({ customerId, corrections, source, source
 /**
  * SMS entry point — webhook post-ack, fire-and-forget, linked customer only.
  */
-// Per-customer in-process run queue (round-12): two detached SMS runners
-// for the same customer must not snapshot concurrently — with parallel
+// Per-customer in-process run chain (round-12): two runners for the same
+// customer in ONE process must not snapshot concurrently — with parallel
 // runs, both snapshot the ORIGINAL value and whichever transaction commits
 // first wins, so an older message's slow extraction could beat (and then
-// CAS-reject) the customer's newer correction. Chaining runs in webhook
-// arrival order makes the second run snapshot AFTER the first commits, so
-// the newest message wins. (The portal is a single-process deploy;
-// a cross-instance race still fails closed on the CAS rather than
-// interleaving.)
+// CAS-reject) the customer's newer correction. Cross-instance ordering and
+// crash durability are NOT this chain's job (round-17): the webhook path
+// runs through contact-correction-queue, whose DB-backed per-sender fence
+// serializes across overlapping deploy instances; this chain remains as
+// same-process defense for direct callers.
 const customerRunChain = new Map();
 function serializePerCustomer(customerId, fn) {
   const prev = customerRunChain.get(customerId) || Promise.resolve();
@@ -813,54 +813,26 @@ function serializePerCustomer(customerId, fn) {
   return run;
 }
 
-// Queue-position reservation for webhook callers (round-13): the webhook
-// branches invoke the runner after DIFFERENT awaited work, so invoke-time
-// chaining would not preserve Twilio arrival order — a newer message on a
-// fast branch could enter the queue before an older message on a slow
-// branch. The route reserves at ENTRY, keyed on the SENDER phone (round-14
-// — available synchronously, BEFORE media upload and the customer lookup,
-// both variable-latency awaits that could reorder reservations).
-//
-// The hold is a BACKSTOP only (round-15): the webhook cancels every slot it
-// does not run on ALL exit paths (route-level finally), so a reservation
-// that is neither run nor cancelled means the route died without unwinding
-// (process crash mid-handler) — the backstop then unblocks the sender's
-// queue. It is sized far above any legitimate branch latency (an intake LLM
-// call can take minutes). A run() arriving AFTER the backstop released the
-// position is DROPPED, never re-enqueued: round-14 appended it instead, and
-// losing the reserved position let a stale message snapshot AFTER a newer
-// correction committed — the CAS then accepted the stale overwrite. Ordering
-// is the slot's one job; a request that cannot keep its position fails
-// closed. cancel() is for paths that know the message needs no run.
-const SLOT_HOLD_MS = 600_000;
-function reserveSmsCorrectionSlot(senderKey) {
-  const queueKey = `sms:${tail10(senderKey) || String(senderKey || 'unknown')}`;
-  let release;
-  let settled = false;
-  let expired = false;
-  const gate = new Promise((resolve) => { release = resolve; });
-  const slot = serializePerCustomer(queueKey, () => gate.then((fn) => (fn ? fn() : { applied: [], skipped: [], reason: 'slot_cancelled' })));
-  const timer = setTimeout(() => {
-    if (!settled) { settled = true; expired = true; release(null); }
-  }, SLOT_HOLD_MS);
-  if (typeof timer?.unref === 'function') timer.unref();
-  return {
-    run(args) {
-      clearTimeout(timer);
-      if (expired) {
-        logger.warn(`[contact-correction] queue slot backstop expired before run; dropping (fail closed)`);
-        return Promise.resolve({ applied: [], skipped: [], reason: 'slot_expired' });
-      }
-      if (settled) return slot;
-      settled = true;
-      release(() => runSmsContactCorrectionInner(args));
-      return slot;
-    },
-    cancel() {
-      clearTimeout(timer);
-      if (!settled) { settled = true; release(null); }
-    },
-  };
+// Webhook arrival ordering + crash durability moved to the DB-backed
+// contact-correction-queue (round-17): the rounds 13–15 in-memory
+// reservation slot preserved Twilio arrival order within one process, but
+// Railway runs overlapping instances during deploys — a process-local
+// fence cannot order two rapid corrections routed to different instances,
+// and a detached run died with the process while the MessageSid claim
+// stayed durable (Twilio's retry was then ignored, losing the correction).
+// The queue keeps the same shape — reserve at entry, enqueue on the branch
+// that fires, cancel on every other exit path — as durable rows.
+
+// CAS baseline captured at webhook match time (round-15): the fields the
+// apply transaction compare-and-sets, taken from the customer row AS THE
+// WEBHOOK MATCHED IT so an admin edit made while the message waits in the
+// queue reads as a concurrent change. Persisted on the job row (round-17)
+// so the baseline survives a deploy.
+function snapshotContactCasFields(row) {
+  if (!row) return null;
+  const fields = [...APPLYABLE_FIELDS, 'phone'];
+  if (!fields.every((f) => f in row)) return null;
+  return Object.fromEntries(fields.map((f) => [f, row[f] ?? null]));
 }
 
 async function runSmsContactCorrection(args) {
@@ -1250,7 +1222,7 @@ module.exports = {
   extractSmsContactCorrections,
   applyContactCorrections,
   runSmsContactCorrection,
-  reserveSmsCorrectionSlot,
+  snapshotContactCasFields,
   runCallContactCorrection,
   APPLYABLE_FIELDS,
   _private: { FIELD_VALIDATORS, CORRECTION_HINT_RE, CALL_CONFIDENCE_FLOOR, CALL_AUTO_FIELDS, CALL_PROPOSE_FIELDS, sameValue, addressGroupComplete },

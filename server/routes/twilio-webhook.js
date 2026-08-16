@@ -154,7 +154,7 @@ router.post('/sms', async (req, res) => {
   // reservation on EVERY exit path (round-15) — early returns, throws, and
   // branches that never reach a fire site all unwind the sender's queue
   // position instead of leaning on the wall-clock backstop.
-  let correctionSlot = null;
+  let correctionJobId = null;
   let correctionFired = false;
   try {
     const { isEnabled } = require('../config/feature-gates');
@@ -165,15 +165,20 @@ router.post('/sms', async (req, res) => {
 
     const { From, To, Body, MessageSid } = req.body;
     const smsReaction = isSmsReaction(Body);
-    // Contact-correction queue slot, reserved at TRUE entry (round-14):
-    // keyed on the sender's phone — available synchronously, BEFORE the
-    // media upload and customer lookup awaits whose variable latency could
-    // reorder reservations between rapid messages. Whether the sender maps
-    // to a linked customer is decided at fire time; unlinked/unused slots
-    // are cancelled (or self-expire without discarding a live run).
+    // Contact-correction queue reservation at TRUE entry (round-14): keyed
+    // on the sender's phone — available synchronously, BEFORE the media
+    // upload and customer lookup awaits whose variable latency could
+    // reorder reservations between rapid messages. A DURABLE row
+    // (round-17): its bigserial id records arrival order across overlapping
+    // deploy instances, and a row left 'reserved' by a crash is replayed by
+    // the queue worker — the recovery for a message whose MessageSid claim
+    // is durable but whose detached run died (Twilio's retry is ignored).
+    // Whether the sender maps to a linked customer is decided at fire time;
+    // unlinked/unused reservations are cancelled.
     const contactCorrection = require('../services/contact-correction');
-    correctionSlot = (Body && !smsReaction && contactCorrection.detectContactCorrectionIntent(Body))
-      ? contactCorrection.reserveSmsCorrectionSlot(From)
+    const correctionQueue = require('../services/contact-correction-queue');
+    correctionJobId = (Body && !smsReaction && contactCorrection.detectContactCorrectionIntent(Body))
+      ? await correctionQueue.reserveContactCorrectionJob({ senderPhone: From, messageSid: MessageSid, body: Body })
       : null;
     const schedulingIntent = hasSchedulingIntent(Body);
     // NOT a subset of schedulingIntent (codex #3232 r10): away phrases
@@ -229,26 +234,30 @@ router.post('/sms', async (req, res) => {
 
     // An intent-bearing message from a number with NO linked customer will
     // never fire a correction — release its reserved queue position now.
-    if (correctionSlot && !customer?.id) correctionSlot.cancel();
-    const fireContactCorrection = (smsLogId) => {
-      if (!correctionSlot || !customer?.id) return;
-      // Marked synchronously so the route-level finally (which runs before
-      // the setImmediate callback) never cancels a slot a branch decided to
-      // run.
+    if (correctionJobId && !customer?.id) {
+      void correctionQueue.cancelContactCorrectionJob(correctionJobId, 'unlinked');
+      correctionJobId = null;
+    }
+    const fireContactCorrection = async (smsLogId) => {
+      if (!correctionJobId || !customer?.id) return;
+      // Marked synchronously so the route-level finally never cancels a
+      // reservation a branch decided to run.
       correctionFired = true;
-      // matchedSnapshot: the customer row AS MATCHED at webhook entry — the
-      // runner's compare-and-set baselines against these values (round-15),
-      // so an admin edit made while this message waits in the queue reads
-      // as a concurrent change instead of being overwritten.
-      const correctionArgs = { customer, body: Body, smsLogId: smsLogId || null, senderPhone: From, matchedSnapshot: customer };
-      // Deliberate fire-and-forget: the runner is fail-soft internally and
-      // never rejects; the guard here only logs (id-only, no message
-      // content) if that contract is ever broken.
-      setImmediate(() => {
-        void correctionSlot.run(correctionArgs).catch((err) => {
-          logger.warn(`[contact-correction] post-ack run rejected for customer ${customer.id}, sms_log ${correctionArgs.smsLogId || 'n/a'}: ${err.message}`);
-        });
+      // expectedValues: the CAS baseline from the customer row AS MATCHED
+      // at webhook entry (round-15) — persisted on the job so an admin
+      // edit made while this message waits in the queue reads as a
+      // concurrent change even after a deploy. The enqueue is AWAITED
+      // before the TwiML ack (round-17): once it commits, the correction
+      // survives the process. Fail-soft — an enqueue error leaves the row
+      // 'reserved' for the worker's stale sweep to replay, and never
+      // affects inbound SMS handling.
+      const enqueued = await correctionQueue.enqueueContactCorrectionJob(correctionJobId, {
+        customerId: customer.id,
+        smsLogId: smsLogId || null,
+        expectedValues: contactCorrection.snapshotContactCasFields(customer),
       });
+      if (enqueued) correctionQueue.kickContactCorrectionQueue();
+      else logger.warn(`[contact-correction] enqueue deferred to stale sweep for customer ${customer.id}, sms_log ${smsLogId || 'n/a'}`);
     };
 
     // Dual-write to unified messages table. Wrapped in fire-and-forget
@@ -460,8 +469,8 @@ router.post('/sms', async (req, res) => {
           // A handled reschedule reply can still CONTAIN an explicit contact
           // correction ("1. Also, my email is wrong; use …") — the
           // correction block further down is unreachable past this return,
-          // so it fires here too (round-11), through the entry-reserved slot.
-          fireContactCorrection(rescheduleSmsLogId);
+          // so it fires here too (round-11), through the entry reservation.
+          await fireContactCorrection(rescheduleSmsLogId);
           return res.type('text/xml').send('<Response></Response>');
         }
       } catch (e) { logger.error(`Reschedule reply check failed: ${e.message}`); }
@@ -511,9 +520,9 @@ router.post('/sms', async (req, res) => {
           // correction (an awaiting_address customer correcting their email,
           // say) — the correction block further down is unreachable past
           // this return, so it fires here too (round-10), through the
-          // entry-reserved slot. The gate and the LLM extraction decide
+          // entry reservation. The gate and the LLM extraction decide
           // whether anything applies.
-          fireContactCorrection(intakeSmsLogId);
+          await fireContactCorrection(intakeSmsLogId);
           return res.type('text/xml').send('<Response></Response>');
         }
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
@@ -698,10 +707,10 @@ router.post('/sms', async (req, res) => {
     // Customer-stated contact correction ("you spelled my name wrong, it's
     // …") — auto-applied behind GATE_CONTACT_CORRECTION, LINKED customers
     // only (a shared/unknown number could correct the wrong record). Cheap
-    // regex prefilter here; the LLM extraction and the writes run post-ack
-    // and fail-soft, so the webhook ack is never delayed and an error here
-    // can never affect inbound SMS handling.
-    fireContactCorrection(smsLogEntry?.id || null);
+    // regex prefilter here; only the durable enqueue happens before the
+    // ack — the LLM extraction and the writes run in the queue worker,
+    // fail-soft, so an error here can never affect inbound SMS handling.
+    await fireContactCorrection(smsLogEntry?.id || null);
 
     // Event-driven health rescore for any matched customer (the opt-out branch
     // above already fired for cancellations). Not gated on messageType: an
@@ -1113,11 +1122,15 @@ router.post('/sms', async (req, res) => {
     res.type('text/xml').send('<Response></Response>');
   } finally {
     // Release an un-run correction reservation on every exit path — a
-    // branch that fired keeps its slot (correctionFired is set
-    // synchronously before this runs); everything else must not leave the
-    // sender's queue position held until the backstop. cancel() is
-    // idempotent, so paths that already cancelled are unaffected.
-    if (correctionSlot && !correctionFired) correctionSlot.cancel();
+    // branch that fired keeps its row (correctionFired is set
+    // synchronously before its first await); everything else must not
+    // leave the sender's queue position held until the worker's stale
+    // sweep. cancel() only touches rows still 'reserved', so already
+    // enqueued or already cancelled jobs are unaffected.
+    if (correctionJobId && !correctionFired) {
+      void require('../services/contact-correction-queue')
+        .cancelContactCorrectionJob(correctionJobId, 'route_exit');
+    }
   }
 });
 
@@ -1317,3 +1330,7 @@ router._internals = {
 };
 
 module.exports = router;
+// The contact-correction queue's stale-reservation sweep re-derives the
+// SMS linking decision a dead instance never finished — same matcher, same
+// single-active-customer doctrine (round-17).
+module.exports.findSingleCustomerByPhone = findSingleCustomerByPhone;

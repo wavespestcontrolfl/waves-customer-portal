@@ -1,0 +1,368 @@
+/**
+ * Durable contact-correction queue (codex #3413 r17): DB-backed
+ * replacement for the in-memory reservation slot. Contracts under test:
+ *
+ *  - reserve/enqueue/cancel lifecycle — a reservation records arrival
+ *    order durably; enqueue attaches the payload and never resurrects a
+ *    cancelled row; cancel only touches rows still 'reserved'.
+ *  - per-sender ordering fence — a newer job never runs while an older
+ *    job for the same sender is reserved, queued, or running, so source
+ *    order holds across overlapping deploy instances.
+ *  - crash recovery — stale 'running' locks requeue; stale 'reserved'
+ *    rows (route died before its finally) are promoted when the message
+ *    still shows correction intent and links to a single customer, and
+ *    cancelled otherwise. This is the replay for a message whose
+ *    MessageSid claim was durable but whose detached run died.
+ *  - runner integration — the worker passes the persisted CAS baseline
+ *    as matchedSnapshot and retries ONLY the runner's internal-error
+ *    shape, up to max_attempts.
+ *
+ * Synthetic fixtures only — never real customer data.
+ */
+
+const CUSTOMER_ID = '00000000-0000-4000-8000-0000000000c1';
+
+jest.mock('../models/db', () => {
+  const dbMock = jest.fn();
+  dbMock.fn = { now: jest.fn(() => ({ __now: true })) };
+  dbMock.raw = jest.fn((sql) => ({ __raw: sql }));
+  dbMock.transaction = jest.fn();
+  dbMock.schema = { hasTable: jest.fn(async () => false) };
+  return dbMock;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+
+const mockDetectIntent = jest.fn();
+const mockRunSms = jest.fn();
+jest.mock('../services/contact-correction', () => ({
+  detectContactCorrectionIntent: (...args) => mockDetectIntent(...args),
+  runSmsContactCorrection: (...args) => mockRunSms(...args),
+}));
+
+const mockFindByPhone = jest.fn();
+jest.mock('../routes/twilio-webhook', () => ({
+  findSingleCustomerByPhone: (...args) => mockFindByPhone(...args),
+}));
+
+const queue = require('../services/contact-correction-queue');
+
+// ---------------------------------------------------------------------------
+// Minimal thenable knex stub — supports exactly the shapes the queue issues.
+// Timestamps are epoch ms; fn.now()/raw('now() ± interval …') resolve
+// against Date.now() at evaluation time.
+// ---------------------------------------------------------------------------
+function makeStubKnex(rowsByTable = {}) {
+  const data = {};
+  for (const [table, rows] of Object.entries(rowsByTable)) data[table] = rows.map((r) => ({ ...r }));
+  let nextId = 1000;
+
+  const MIN = 60_000;
+  function resolveVal(v) {
+    if (v && v.__now) return Date.now();
+    if (v && v.__raw) {
+      const m = /now\(\)\s*([+-])\s*interval\s*'(\d+)\s*minutes?'/i.exec(v.__raw);
+      if (m) return Date.now() + (m[1] === '-' ? -1 : 1) * Number(m[2]) * MIN;
+      return v.__raw;
+    }
+    return v;
+  }
+
+  function builder(table) {
+    if (!data[table]) data[table] = [];
+    const preds = [];
+    let order = null;
+    let lim = null;
+    const chain = {
+      where(a, b, c) {
+        if (typeof a === 'object' && a !== null) {
+          for (const [k, v] of Object.entries(a)) preds.push((r) => r[k] === v);
+        } else if (c !== undefined) {
+          preds.push((r) => {
+            const rv = r[a];
+            const cv = resolveVal(c);
+            if (b === '<=') return rv != null && rv <= cv;
+            if (b === '<') return rv != null && rv < cv;
+            if (b === '>=') return rv != null && rv >= cv;
+            return rv === cv;
+          });
+        } else {
+          preds.push((r) => r[a] === b);
+        }
+        return chain;
+      },
+      whereIn(col, vals) { preds.push((r) => vals.includes(r[col])); return chain; },
+      whereNull(col) { preds.push((r) => r[col] == null); return chain; },
+      orderBy(col, dir = 'asc') { order = { col, dir }; return chain; },
+      limit(n) { lim = n; return chain; },
+      forUpdate() { return chain; },
+      skipLocked() { return chain; },
+      _select() {
+        let rows = data[table].filter((r) => preds.every((p) => p(r)));
+        if (order) rows = [...rows].sort((x, y) => (x[order.col] < y[order.col] ? -1 : 1) * (order.dir === 'desc' ? -1 : 1));
+        if (lim != null) rows = rows.slice(0, lim);
+        return rows.map((r) => ({ ...r }));
+      },
+      then(onOk, onErr) { return Promise.resolve(chain._select()).then(onOk, onErr); },
+      first(...cols) {
+        const row = chain._select()[0];
+        if (!row) return Promise.resolve(undefined);
+        if (!cols.length) return Promise.resolve(row);
+        return Promise.resolve(Object.fromEntries(cols.map((c) => [c, row[c]])));
+      },
+      update(vals) {
+        const matched = data[table].filter((r) => preds.every((p) => p(r)));
+        for (const r of matched) {
+          for (const [k, v] of Object.entries(vals)) {
+            if (v && v.__raw === 'attempts + 1') r[k] = Number(r.attempts || 0) + 1;
+            else if (v && v.__raw && /GREATEST/i.test(v.__raw)) r[k] = Math.max(Number(r.attempts || 0) - 1, 0);
+            else r[k] = resolveVal(v);
+          }
+        }
+        const result = Promise.resolve(matched.length);
+        result.returning = () => Promise.resolve(matched.map((r) => ({ ...r })));
+        return result;
+      },
+      insert(row) {
+        const stored = {
+          id: ++nextId,
+          status: 'reserved',
+          attempts: 0,
+          max_attempts: 3,
+          next_attempt_at: Date.now(),
+          created_at: Date.now(),
+          ...row,
+        };
+        data[table].push(stored);
+        const result = Promise.resolve([{ ...stored }]);
+        result.returning = () => Promise.resolve([{ ...stored }]);
+        return result;
+      },
+    };
+    return chain;
+  }
+
+  const stub = (table) => builder(table);
+  stub.fn = { now: () => ({ __now: true }) };
+  stub.raw = (sql) => ({ __raw: sql });
+  stub.schema = { hasTable: async () => true };
+  stub.transaction = async (fn) => fn(stub);
+  stub._data = data;
+  return stub;
+}
+
+const jobRow = (over = {}) => ({
+  id: 1,
+  sender_key: '5550001111',
+  sender_phone: '+15550001111',
+  message_sid: 'SM-test-1',
+  body: 'You spelled my last name wrong, it is Rivers',
+  customer_id: null,
+  sms_log_id: null,
+  expected_values: null,
+  status: 'reserved',
+  attempts: 0,
+  max_attempts: 3,
+  next_attempt_at: Date.now() - 1000,
+  locked_at: null,
+  locked_by: null,
+  created_at: Date.now() - 1000,
+  ...over,
+});
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockDetectIntent.mockReturnValue(true);
+  mockRunSms.mockResolvedValue({ applied: [], skipped: [], reason: 'no_corrections' });
+});
+
+describe('reservation lifecycle', () => {
+  it('reserve inserts an arrival-order row keyed on the sender tail-10', async () => {
+    const knex = makeStubKnex();
+    const id = await queue.reserveContactCorrectionJob({
+      senderPhone: '+1 (555) 000-1111', messageSid: 'SM-1', body: 'my name is wrong, it is Rivers', knex,
+    });
+    expect(id).toBeTruthy();
+    const row = knex._data.contact_correction_jobs[0];
+    expect(row.sender_key).toBe('5550001111');
+    expect(row.status).toBe('reserved');
+  });
+
+  it('enqueue attaches the payload and never resurrects a cancelled row', async () => {
+    const knex = makeStubKnex({ contact_correction_jobs: [jobRow(), jobRow({ id: 2, status: 'cancelled' })] });
+    const ok = await queue.enqueueContactCorrectionJob(1, {
+      customerId: CUSTOMER_ID, smsLogId: 'sms-1', expectedValues: { last_name: 'Riverz' }, knex,
+    });
+    expect(ok).toBe(true);
+    expect(knex._data.contact_correction_jobs[0].status).toBe('queued');
+    expect(knex._data.contact_correction_jobs[0].customer_id).toBe(CUSTOMER_ID);
+
+    const revived = await queue.enqueueContactCorrectionJob(2, { customerId: CUSTOMER_ID, knex });
+    expect(revived).toBe(false);
+    expect(knex._data.contact_correction_jobs[1].status).toBe('cancelled');
+  });
+
+  it('cancel releases only rows still reserved', async () => {
+    const knex = makeStubKnex({ contact_correction_jobs: [jobRow(), jobRow({ id: 2, status: 'queued' })] });
+    expect(await queue.cancelContactCorrectionJob(1, 'route_exit', { knex })).toBe(true);
+    expect(knex._data.contact_correction_jobs[0].status).toBe('cancelled');
+    expect(await queue.cancelContactCorrectionJob(2, 'route_exit', { knex })).toBe(false);
+    expect(knex._data.contact_correction_jobs[1].status).toBe('queued');
+  });
+});
+
+describe('per-sender ordering fence', () => {
+  it('an older active job blocks the same sender\'s newer queued job — across passes, source order wins', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 1, status: 'queued', customer_id: CUSTOMER_ID, body: 'older correction, it is Riverson' }),
+        jobRow({ id: 2, status: 'queued', customer_id: CUSTOMER_ID, body: 'newer correction, it is Rivers' }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverz' }],
+    });
+    const first = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(first.claimed).toBe(1);
+    expect(mockRunSms).toHaveBeenCalledTimes(1);
+    expect(mockRunSms.mock.calls[0][0].body).toContain('older correction');
+    expect(knex._data.contact_correction_jobs[0].status).toBe('done');
+    expect(knex._data.contact_correction_jobs[1].status).toBe('queued');
+
+    const second = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(second.claimed).toBe(1);
+    expect(mockRunSms.mock.calls[1][0].body).toContain('newer correction');
+  });
+
+  it('a still-reserved older message blocks the sender\'s queue (no out-of-order run)', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 1, status: 'reserved', created_at: Date.now() - 1000 }),
+        jobRow({ id: 2, status: 'queued', customer_id: CUSTOMER_ID }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.claimed).toBe(0);
+    expect(mockRunSms).not.toHaveBeenCalled();
+  });
+
+  it('different senders claim independently in one pass', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 1, status: 'queued', customer_id: CUSTOMER_ID }),
+        jobRow({ id: 2, status: 'queued', customer_id: CUSTOMER_ID, sender_key: '5550002222', sender_phone: '+15550002222' }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.claimed).toBe(2);
+  });
+});
+
+describe('crash recovery', () => {
+  it('requeues stale running locks', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 1, status: 'running', customer_id: CUSTOMER_ID, locked_at: Date.now() - 11 * 60_000, locked_by: 'dead:1' }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.recovered).toBe(1);
+    // Recovered job is claimable in the same pass.
+    expect(summary.claimed).toBe(1);
+    expect(knex._data.contact_correction_jobs[0].status).toBe('done');
+  });
+
+  it('promotes a stale reservation whose message still shows intent and links to a customer', async () => {
+    mockFindByPhone.mockResolvedValue({ id: CUSTOMER_ID });
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 1, created_at: Date.now() - 11 * 60_000 })],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+      sms_log: [{ id: 'sms-9', twilio_sid: 'SM-test-1', direction: 'inbound', created_at: Date.now() }],
+    });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.promoted).toBe(1);
+    expect(summary.claimed).toBe(1);
+    const job = knex._data.contact_correction_jobs[0];
+    expect(job.status).toBe('done');
+    expect(job.customer_id).toBe(CUSTOMER_ID);
+    expect(job.sms_log_id).toBe('sms-9');
+    // No match-time snapshot survives a crash — the runner falls back to
+    // its run-start read.
+    expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toBeNull();
+  });
+
+  it('cancels stale reservations with no intent or no linked customer', async () => {
+    mockDetectIntent.mockReturnValueOnce(false);
+    mockFindByPhone.mockResolvedValue(null);
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 1, created_at: Date.now() - 11 * 60_000 }),
+        jobRow({ id: 2, sender_key: '5550002222', sender_phone: '+15550002222', created_at: Date.now() - 11 * 60_000 }),
+      ],
+    });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.promoted).toBe(0);
+    expect(knex._data.contact_correction_jobs[0].status).toBe('cancelled');
+    expect(knex._data.contact_correction_jobs[0].cancel_reason).toBe('stale_no_intent');
+    expect(knex._data.contact_correction_jobs[1].status).toBe('cancelled');
+    expect(knex._data.contact_correction_jobs[1].cancel_reason).toBe('stale_unlinked');
+  });
+
+  it('a fresh reservation is left alone by the stale sweep', async () => {
+    const knex = makeStubKnex({ contact_correction_jobs: [jobRow({ id: 1, created_at: Date.now() - 1000 })] });
+    await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(knex._data.contact_correction_jobs[0].status).toBe('reserved');
+  });
+});
+
+describe('runner integration', () => {
+  it('passes the persisted CAS baseline as matchedSnapshot and records the result', async () => {
+    const snapshot = { first_name: 'Jordan', last_name: 'Riverz', phone: '+15550001111' };
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 1, status: 'queued', customer_id: CUSTOMER_ID, sms_log_id: 'sms-1', expected_values: snapshot })],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverz' }],
+    });
+    mockRunSms.mockResolvedValue({ applied: [{ field: 'last_name' }], skipped: [], reason: undefined });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.succeeded).toBe(1);
+    const args = mockRunSms.mock.calls[0][0];
+    expect(args.customer.id).toBe(CUSTOMER_ID);
+    expect(args.smsLogId).toBe('sms-1');
+    expect(args.senderPhone).toBe('+15550001111');
+    expect(args.matchedSnapshot).toEqual(snapshot);
+    expect(knex._data.contact_correction_jobs[0].status).toBe('done');
+  });
+
+  it('a deleted customer resolves the job without running the extractor', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 1, status: 'queued', customer_id: CUSTOMER_ID })],
+      customers: [{ id: CUSTOMER_ID, deleted_at: Date.now() }],
+    });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.succeeded).toBe(1);
+    expect(mockRunSms).not.toHaveBeenCalled();
+    expect(knex._data.contact_correction_jobs[0].status).toBe('done');
+  });
+
+  it('retries only the runner\'s internal-error shape, then fails terminally at max_attempts', async () => {
+    mockRunSms.mockResolvedValue({ applied: [], skipped: [], reason: 'error' });
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 1, status: 'queued', customer_id: CUSTOMER_ID, max_attempts: 2 })],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    let summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.failed).toBe(1);
+    const job = knex._data.contact_correction_jobs[0];
+    expect(job.status).toBe('queued');
+    expect(job.attempts).toBe(1);
+    // Backoff pushed next_attempt_at into the future — not claimable yet.
+    summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.claimed).toBe(0);
+    // Force due; second (final) attempt fails terminally.
+    job.next_attempt_at = Date.now() - 1000;
+    summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.failed).toBe(1);
+    expect(job.status).toBe('failed');
+    expect(job.attempts).toBe(2);
+  });
+});
