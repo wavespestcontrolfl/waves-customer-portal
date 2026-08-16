@@ -11677,6 +11677,17 @@ router.post('/generate-report', async (req, res) => {
       || typedHasFindingInput
       || hasValidLawnAssessment;
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
+    // Typed findings ground ONLY through the visit's completion profile —
+    // without a scheduledServiceId the entire grounding block is skipped,
+    // so a typed-only request would open the gate on findings the prompt
+    // then never carries and return ungrounded generic prose (codex r45).
+    // The ID-less legacy path stays for ordinary notes/products reports.
+    if (!scheduledServiceId && typedHasFindingInput) {
+      return res.status(400).json({
+        error: 'Typed findings require the scheduled service — reopen the visit and try again.',
+        code: 'typed_findings_require_service',
+      });
+    }
 
     const PEST_ACTIVITY_LABELS = { 0: 'none', 1: 'very low', 2: 'low', 3: 'moderate', 4: 'high', 5: 'severe' };
 

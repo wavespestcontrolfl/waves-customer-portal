@@ -6539,6 +6539,30 @@ function pruneRestoredFindingsValues(restored, fields) {
 
 // Render-time fallback for a companion section with no state yet. Never
 // mutated — every companion handler spreads into fresh objects.
+// Typed zero states whose renderer refuses generated copy at completion —
+// buildTodaysResult keeps the fixed template for them, so Generate must
+// hold: the tech would review (and the business be billed for) prose the
+// report never publishes. Bait/trap gauges refuse on a zero score; flea,
+// knockdown, and mosquito stories refuse on their cleared/none-observed
+// states (codex r43/r44 bait rule, generalized in r45).
+function typedZeroStateRefusesBody(type, values, score) {
+  if (
+    type === "termite_bait_station"
+    || type === "rodent_bait_station"
+    || type === "rodent_trapping"
+  ) return score === 0;
+  if (type === "flea") {
+    return score === 0
+      || (score == null && String(values?.evidence_level ?? "") === "None observed");
+  }
+  if (type === "german_roach_knockdown" || type === "palmetto_roach_knockdown") {
+    return score === 0
+      || (score == null && String(values?.activity_level ?? "") === "None observed");
+  }
+  if (type === "mosquito_event") return String(values?.activity_level ?? "") === "None observed";
+  return false;
+}
+
 const EMPTY_COMPANION_ENTRY = {
   values: {},
   chips: [],
@@ -9808,18 +9832,20 @@ export function CompletionPanel({
   // technician-set — even on the same value.
   const [typedActivityTouched, setTypedActivityTouched] = useState(false);
   const [typedNextStepChips, setTypedNextStepChips] = useState([]);
-  // Companion-only profiles whose every customer-facing companion is a
-  // zero-score bait story can never publish generated copy — hold Generate
-  // the same way the primary bait zero state does (codex r44). Absent
-  // delivery (older feeds) defaults customer-facing, matching the server.
+  // Companion-only profiles whose every customer-facing companion sits in a
+  // fixed-copy zero state can never publish generated copy — hold Generate
+  // the same way the primary zero states do (codex r44, generalized r45).
+  // Absent delivery (older feeds) defaults customer-facing, matching the
+  // server.
   const customerFacingCompanions = companionSchemas.filter(
     (schema) => schema.delivery !== "internal_only",
   );
-  const baitZeroCompanionOnly = !isTypedFindings
+  const zeroStateCompanionOnly = !isTypedFindings
     && customerFacingCompanions.length > 0
-    && customerFacingCompanions.every((schema) =>
-      ["termite_bait_station", "rodent_bait_station"].includes(schema.type)
-      && (companionState[schema.type] || EMPTY_COMPANION_ENTRY).score === 0);
+    && customerFacingCompanions.every((schema) => {
+      const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
+      return typedZeroStateRefusesBody(schema.type, entry.values, entry.score);
+    });
   const [typedRecommendations, setTypedRecommendations] = useState("");
   const [typedRecommendationsEdited, setTypedRecommendationsEdited] =
     useState(false);
@@ -14427,15 +14453,13 @@ export function CompletionPanel({
                   // generating settles) — hold generation until it resolves
                   // (codex r6).
                   || (stationFeatureOn && stationRegistryState === "loading")
-                  // Bait zero states always refuse the drafted body for
-                  // fixed wording — don't bill a model call the report can
-                  // never publish (codex r43); companion-only profiles whose
-                  // every customer-facing companion is a zero-score bait
-                  // story hold the same way (codex r44).
+                  // Fixed-copy zero states always refuse the drafted body —
+                  // don't bill a model call the report can never publish
+                  // (codex r43, generalized to every zero-state story in
+                  // r45); companion-only profiles hold the same way (r44).
                   || (isTypedFindings
-                    && ["termite_bait_station", "rodent_bait_station"].includes(typedFindingsSchema?.type)
-                    && typedActivityScore === 0)
-                  || baitZeroCompanionOnly}
+                    && typedZeroStateRefusesBody(typedFindingsSchema?.type, findingsValues, typedActivityScore))
+                  || zeroStateCompanionOnly}
                 style={{
                   ...secondaryPill,
                   marginTop: 4,
@@ -16635,11 +16659,10 @@ export function CompletionPanel({
                 || (isLawn && lawnAssessmentReady === false)
                 // Same station-registry hold as the mobile Generate button.
                 || (stationFeatureOn && stationRegistryState === "loading")
-                // Same bait zero-state hold as the mobile button (codex r43).
+                // Same zero-state hold as the mobile button (codex r43/r45).
                 || (isTypedFindings
-                  && ["termite_bait_station", "rodent_bait_station"].includes(typedFindingsSchema?.type)
-                  && typedActivityScore === 0)
-                || baitZeroCompanionOnly}
+                  && typedZeroStateRefusesBody(typedFindingsSchema?.type, findingsValues, typedActivityScore))
+                || zeroStateCompanionOnly}
               style={{
                 width: "100%",
                 padding: "10px 16px",

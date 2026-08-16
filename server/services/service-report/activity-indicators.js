@@ -3195,20 +3195,36 @@ function buildTodaysResult({
       // healthy" draft beside a Poor/Declining finding (or the reverse)
       // keeps the deterministic copy; reconcile override honored
       // (codex r41).
-      const TS_POSITIVE_CLAIM_RE = /\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\s+condition)\b[^.!?]{0,30}\b(?:is|are|was|were|looks?|looked|remains?|appears?)\s+(?:very\s+|quite\s+|overall\s+)*(?:in\s+(?:very\s+|quite\s+)*)?(?:excellent|healthy|thriving|great|good|strong)\b|\b(?:excellent|healthy|thriving|great|good|strong)\s+(?:overall\s+)?(?:landscape|plant|shrub|palm|turf)?\s*(?:condition|health|shape)\b/i;
-      const TS_NEGATIVE_CLAIM_RE = /\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\s+condition)\b[^.!?]{0,30}\b(?:is|are|was|were|looks?|looked|remains?|appears?)\s+(?:very\s+|quite\s+|overall\s+)*(?:in\s+(?:very\s+|quite\s+)*)?(?:poor|declining|struggling|deteriorating|failing|rough|bad)\b|\b(?:poor|declining|struggling|deteriorating|failing|rough|bad)\s+(?:overall\s+)?(?:landscape|plant|shrub|palm|turf)?\s*(?:condition|health|shape)\b/i;
+      // Every explicit condition claim is EXTRACTED and its family compared
+      // to the recorded value's family — the former positive/negative
+      // buckets missed cross-family middle values ("condition is fair"
+      // beside a recorded Poor matched neither bucket and shipped a Poor
+      // headline over a Fair body — codex r45). Four families: positive
+      // (Excellent/Good), middle (Fair), recovering, negative
+      // (Poor/Declining); any claim outside the recorded family
+      // contradicts. Reconcile override honored (codex r41).
+      const TS_CONDITION_WORD_SRC = '(excellent|healthy|thriving|great|good|strong|fair|average|so[-\\s]?so|okay|ok|moderate|poor|declining|struggling|deteriorating|failing|rough|bad|recovering|improving|rebounding)';
+      const TS_CLAIM_RES = [
+        new RegExp(`\\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\\s+condition)\\b[^.!?]{0,30}\\b(?:is|are|was|were|looks?|looked|remains?|appears?)\\s+(?:very\\s+|quite\\s+|overall\\s+)*(?:in\\s+(?:very\\s+|quite\\s+)*)?${TS_CONDITION_WORD_SRC}\\b`, 'gi'),
+        new RegExp(`\\b${TS_CONDITION_WORD_SRC}\\s+(?:overall\\s+)?(?:landscape|plant|shrub|palm|turf)?\\s*(?:condition|health|shape)\\b`, 'gi'),
+      ];
+      const TS_CLAIM_BANDS = {
+        excellent: 'positive', healthy: 'positive', thriving: 'positive', great: 'positive', good: 'positive', strong: 'positive',
+        fair: 'middle', average: 'middle', 'so-so': 'middle', okay: 'middle', ok: 'middle', moderate: 'middle',
+        poor: 'negative', declining: 'negative', struggling: 'negative', deteriorating: 'negative', failing: 'negative', rough: 'negative', bad: 'negative',
+        recovering: 'recovering', improving: 'recovering', rebounding: 'recovering',
+      };
+      const TS_RECORDED_BANDS = {
+        Excellent: 'positive', Good: 'positive', Fair: 'middle', Recovering: 'recovering', Poor: 'negative', Declining: 'negative',
+      };
       const tsBodyText = String(technicianReportBody || '');
-      // Every condition family reconciles (codex r43): a positive claim
-      // contradicts anything below Good; a negative claim contradicts
-      // anything at-or-above Fair (a flat "declining" claim contradicts
-      // Recovering too).
-      const tsContradiction = (
-        ['Poor', 'Declining', 'Fair', 'Recovering'].includes(condition)
-        && TS_POSITIVE_CLAIM_RE.test(tsBodyText)
-      ) || (
-        ['Excellent', 'Good', 'Fair', 'Recovering'].includes(condition)
-        && TS_NEGATIVE_CLAIM_RE.test(tsBodyText)
-      );
+      const tsRecordedBand = TS_RECORDED_BANDS[condition] || null;
+      const tsClaimedBands = TS_CLAIM_RES
+        .flatMap((re) => [...tsBodyText.matchAll(re)])
+        .map((m) => TS_CLAIM_BANDS[String(m[1] || '').toLowerCase().replace(/[\s-]+/g, '-')])
+        .filter(Boolean);
+      const tsContradiction = Boolean(tsRecordedBand)
+        && tsClaimedBands.some((band) => band !== tsRecordedBand);
       const tsReportBody = technicianReportBody
         && (reconcileConfirmed || !tsContradiction)
         ? technicianReportBody

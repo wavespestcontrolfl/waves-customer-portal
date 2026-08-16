@@ -322,6 +322,45 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.body).toContain('No visible Ganoderma conks');
   });
 
+  // r45 (#3420): explicit condition claims are extracted and compared by
+  // family — a cross-family MIDDLE value must refuse, same-family accepts.
+  test('tree_shrub refuses a "fair" claim beside a recorded Poor (cross-family middle value)', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Poor', plant_groups: 'Shrubs' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'The overall landscape condition is fair after treatment.',
+    });
+    expect(r.bodySource).toBeUndefined();
+    expect(r.body).not.toContain('fair after treatment');
+  });
+
+  test('tree_shrub accepts a "fair" claim beside a recorded Fair', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Fair', plant_groups: 'Shrubs' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'Overall condition is fair, with new growth on the hedges.',
+    });
+    expect(r.bodySource).toBe('technician_report');
+  });
+
+  test('tree_shrub refuses a recovering-family claim beside a recorded Good', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Good', plant_groups: 'Shrubs' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'The turf is improving nicely after treatment.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
   test('rodent_exclusion keeps the remaining-concerns disclosure', () => {
     const r = buildTodaysResult({
       projectType: 'rodent_exclusion',
