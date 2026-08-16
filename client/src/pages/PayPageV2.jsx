@@ -1780,12 +1780,18 @@ export default function PayPageV2() {
         // setup.baseAmount, so sync the displayed amount due + credit line to it.
         // Otherwise the page would keep showing the pre-credit gross from the
         // earlier read-only GET while Stripe charges the reduced amount.
-        const setupAmountDue = Number(setup.amountDue ?? setup.baseAmount ?? setup.amount);
         // Combined balance payment: setup.baseAmount is the COMBINED total
         // (this invoice + the itemized previous balance), not this invoice's
-        // amount due — never sync it onto the invoice card (it would show
-        // the combined figure as today's invoice and fake a credit line).
-        if (Number.isFinite(setupAmountDue) && !setup.combined) {
+        // amount due — sync the anchor card from ITS OWN entry in the
+        // combined breakdown instead (codex r2 P1: auto-applied partial
+        // credit reduces the anchor's share, and skipping the sync entirely
+        // would render the pre-credit amount with no credit line while
+        // Stripe charges the reduced total).
+        const combinedAnchorEntry = setup.combined?.invoices?.find((i) => i.isCurrent) || null;
+        const setupAmountDue = setup.combined
+          ? Number(combinedAnchorEntry?.amountDue)
+          : Number(setup.amountDue ?? setup.baseAmount ?? setup.amount);
+        if (Number.isFinite(setupAmountDue)) {
           setData((prev) => {
             if (!prev?.invoice) return prev;
             const total = Number(prev.invoice.total ?? setupAmountDue);

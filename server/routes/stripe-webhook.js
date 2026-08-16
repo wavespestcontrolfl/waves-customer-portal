@@ -1118,14 +1118,26 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
   // Saved-card fences, per allocated invoice: an unresolved off-session
   // claim on ANY of them means that invoice's money state is ambiguous —
   // quarantine the whole combined settle for the operator (an active claim
-  // asks Stripe to retry, mirroring the single path).
+  // asks Stripe to retry, mirroring the single path). The one exception
+  // (codex r2 P1, mirroring the single path's retryingQuarantinedIntent):
+  // a fence raised by the durable quarantine THIS exact PI wrote on an
+  // earlier delivery must not refuse its own retry forever — once the
+  // competing attempt resolves, the retry settles and the post-settle
+  // orphan resolution below clears the quarantine row.
   const {
     assertNoInvoiceChargeReconciliationPending,
+    parkInvoiceForSavedCardReconciliation,
   } = require('../services/stripe');
   for (const entry of allocation) {
     try {
       await assertNoInvoiceChargeReconciliationPending(entry.invoiceId);
     } catch (fenceErr) {
+      const retryingQuarantinedIntent = fenceErr.code === 'STRIPE_CHARGED_DB_FAILED'
+        && String(fenceErr.stripePaymentIntentId || '') === String(piId);
+      if (retryingQuarantinedIntent) {
+        logger.info(`[stripe-webhook] Retrying quarantined combined PI ${piId} on invoice ${entry.invoiceId} after saved-card claim resolved`);
+        continue;
+      }
       if (fenceErr.code === 'STRIPE_CHARGE_IN_PROGRESS') {
         await recordOrphanSucceededPaymentIntent(
           paymentIntent,
@@ -1137,6 +1149,18 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
       const reason = `Succeeded combined PI ${piId} conflicts with unresolved saved-card attempt on invoice ${entry.invoiceId}`;
       logger.error(`[stripe-webhook] Quarantining ${reason}`);
       await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, reason);
+      // Park the conflicted invoice like the single path: status-only
+      // collection surfaces must stop offering payment until the operator
+      // resolves the conflict — and the parked quarantine is exactly what
+      // the retry exception above recognizes and settles through.
+      const quarantineError = new Error(reason);
+      quarantineError.code = 'STRIPE_CHARGED_DB_FAILED';
+      quarantineError.stripePaymentIntentId = piId;
+      quarantineError.reconciliationRequired = true;
+      await parkInvoiceForSavedCardReconciliation({
+        invoiceId: entry.invoiceId,
+        error: quarantineError,
+      });
       return;
     }
   }
@@ -1171,6 +1195,18 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
     }
     throw err; // infrastructure failure → 500 → Stripe redelivers
   }
+
+  // A settle that came back through the quarantine-retry exception above
+  // leaves its own fence row in stripe_orphan_charges — resolve it now
+  // that the anchor invoice + a paid ledger row exist (single-path
+  // parity).
+  await resolveOrphanSucceededPaymentIntentIfSettled(piId);
+
+  // Same post-settlement save/consent/enroll mirror as the single path
+  // (codex r2 P1): a combined ACH signup's /consent deferred enrollment
+  // to THIS event — skipping it would leave the consented method
+  // unenrolled forever. Throws → Stripe retries (idempotent end to end).
+  await mirrorSavedMethodForSucceededIntent(paymentIntent);
 
   await maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated);
 }
@@ -1836,6 +1872,62 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   }
 
   // ── Save payment method on the customer if they opted in ─────
+  // Extracted to mirrorSavedMethodForSucceededIntent so the combined
+  // full-balance succeeded handler runs the SAME post-settlement
+  // save/consent/enroll behavior (codex #3427 r2 P1) — an ACH combined
+  // payment whose /consent deferred enrollment would otherwise clear
+  // with the consented method unenrolled forever.
+  await mirrorSavedMethodForSucceededIntent(paymentIntent);
+
+  const paidInvoice = await db('invoices')
+    .where({ stripe_payment_intent_id: piId })
+    .where({ status: 'paid' })
+    .first();
+  if (paidInvoice) {
+    await ReceiptDeliveryQueue.enqueueReceiptDelivery({
+      invoiceId: paidInvoice.id,
+      stripePaymentIntentId: piId,
+      source: 'stripe_webhook',
+    });
+    ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
+    // Fire-and-forget: a settled invoice may be gating a payment-held WDO
+    // report — nudge the release sweep (60s interval is the fallback).
+    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 3000 });
+  }
+
+  // ── Bell + push for the admin team ──
+  //
+  // Fire-and-forget via Promise.catch (NOT awaited) so the webhook 2xx
+  // is not gated on notification fan-out. triggerNotification does a
+  // DB read for active admins + per-user prefs + sequential
+  // webpush.sendNotification calls per push subscription — awaiting it
+  // inline could push the webhook past Stripe's timeout and trigger
+  // retry storms even though the core payment writes already committed
+  // (codex P1 on PR #534). Emit only when the PI is bound to one of
+  // our invoices — otherwise there's nothing to deep-link into.
+  //
+  // Dedupe: Stripe's at-least-once delivery + multi-event flows (a
+  // single real payment can produce `payment_intent.succeeded` AND
+  // `charge.succeeded` with distinct event.id values) mean the
+  // existing event.id-keyed dedupe in stripe_webhook_events doesn't
+  // catch duplicates at the PAYMENT INTENT level. The
+  // stripe_payment_notification_log table claims (PI, outcome) atomically
+  // via INSERT ... ON CONFLICT DO NOTHING — only the first claimer fires.
+  notifyPaymentSuccess(paymentIntent).catch((err) => {
+    logger.warn(`[stripe-webhook] payment_succeeded notify failed: ${err.message}`);
+  });
+}
+
+/**
+ * Save-card mirror + consent-gated autopay enrollment for a succeeded
+ * PaymentIntent — shared by the single-invoice and combined succeeded
+ * handlers. Body moved verbatim from handlePaymentIntentSucceeded;
+ * see the inline comments for the full contract. Throws so the caller
+ * 500s and Stripe retries (idempotent end to end).
+ */
+async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
+  const piId = paymentIntent.id;
+  // ── Save payment method on the customer if they opted in ─────
   //
   // When the /pay/:token page sets `setup_future_usage: 'off_session'`
   // on the PI (customer ticked "Save this card on file"), Stripe attaches
@@ -2018,44 +2110,6 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       throw err;
     }
   }
-
-  const paidInvoice = await db('invoices')
-    .where({ stripe_payment_intent_id: piId })
-    .where({ status: 'paid' })
-    .first();
-  if (paidInvoice) {
-    await ReceiptDeliveryQueue.enqueueReceiptDelivery({
-      invoiceId: paidInvoice.id,
-      stripePaymentIntentId: piId,
-      source: 'stripe_webhook',
-    });
-    ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
-    // Fire-and-forget: a settled invoice may be gating a payment-held WDO
-    // report — nudge the release sweep (60s interval is the fallback).
-    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 3000 });
-  }
-
-  // ── Bell + push for the admin team ──
-  //
-  // Fire-and-forget via Promise.catch (NOT awaited) so the webhook 2xx
-  // is not gated on notification fan-out. triggerNotification does a
-  // DB read for active admins + per-user prefs + sequential
-  // webpush.sendNotification calls per push subscription — awaiting it
-  // inline could push the webhook past Stripe's timeout and trigger
-  // retry storms even though the core payment writes already committed
-  // (codex P1 on PR #534). Emit only when the PI is bound to one of
-  // our invoices — otherwise there's nothing to deep-link into.
-  //
-  // Dedupe: Stripe's at-least-once delivery + multi-event flows (a
-  // single real payment can produce `payment_intent.succeeded` AND
-  // `charge.succeeded` with distinct event.id values) mean the
-  // existing event.id-keyed dedupe in stripe_webhook_events doesn't
-  // catch duplicates at the PAYMENT INTENT level. The
-  // stripe_payment_notification_log table claims (PI, outcome) atomically
-  // via INSERT ... ON CONFLICT DO NOTHING — only the first claimer fires.
-  notifyPaymentSuccess(paymentIntent).catch((err) => {
-    logger.warn(`[stripe-webhook] payment_succeeded notify failed: ${err.message}`);
-  });
 }
 
 async function scheduleReviewAfterPaidInvoice(piId) {
@@ -2913,6 +2967,66 @@ async function handleChargeRefunded(charge) {
             return null;
           }
         }
+      }
+    }
+    // Combined full-balance charge: N per-invoice ledger rows share this
+    // one charge, so the generic cumulative stamp below would smear the
+    // charge-level refund total onto every row (codex r2 P1). A FULL
+    // refund settles cleanly (each row refunded at its own share, each
+    // invoice reopened, applied credit returned); a PARTIAL refund cannot
+    // be attributed to a share from the charge alone — record it for the
+    // operator and touch nothing.
+    {
+      const combinedRows = await trx('payments').where({ stripe_charge_id: chargeId });
+      const rowMeta = (row) => {
+        try { return row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch { return {}; }
+      };
+      if (combinedRows.some((r) => rowMeta(r).combined_payment)) {
+        if (!isFullRefund) {
+          logger.error(`[stripe-webhook] PARTIAL refund on combined charge ${chargeId} — cannot attribute to a share; parked for operator`);
+          await trx('stripe_orphan_charges')
+            .insert({
+              stripe_payment_intent_id: `${charge.payment_intent || chargeId}:partial-refund`,
+              stripe_charge_id: chargeId,
+              customer_id: combinedRows[0]?.customer_id || null,
+              invoice_id: null,
+              amount: refundAmountDollars,
+              source: 'combined_pay_webhook',
+              original_db_error: `Partial refund ${refundId || 'unknown'} of $${refundAmountDollars} on a combined balance charge — attribute and reconcile manually`,
+            })
+            .onConflict('stripe_payment_intent_id')
+            .ignore();
+          try {
+            await NotificationService.notifyAdmin(
+              'refund',
+              `Partial refund on combined payment: $${refundAmountDollars}`,
+              `Charge ${chargeId} settled multiple invoices; a partial refund can't be auto-attributed. Reconcile in /admin/revenue.`,
+              { icon: '⚠️', link: '/admin/revenue' },
+            );
+          } catch { /* non-critical */ }
+          return combinedRows[0] || null;
+        }
+        const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
+        for (const row of combinedRows) {
+          const meta = rowMeta(row);
+          await trx('payments').where({ id: row.id }).update({
+            status: 'refunded',
+            refund_amount: row.amount,
+            refund_status: 'full',
+            stripe_refund_id: refundId,
+            metadata: JSON.stringify(metadataWithStampedRefund(row.metadata, refundId)),
+          });
+          const invId = meta.invoice_id || null;
+          if (invId) {
+            await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
+            await trx('invoices')
+              .where({ id: invId })
+              .whereIn('status', ['paid', 'processing'])
+              .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() });
+          }
+        }
+        logger.info(`[stripe-webhook] Combined charge ${chargeId} fully refunded — ${combinedRows.length} rows refunded at their shares, invoices reopened as refunded`);
+        return combinedRows[0] || null;
       }
     }
     await trx('payments')

@@ -169,6 +169,17 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
   const ids = allocation.map((a) => a.invoiceId).sort();
   const rows = await trx('invoices').whereIn('id', ids).orderBy('id', 'asc').forUpdate();
   const byId = new Map(rows.map((r) => [String(r.id), r]));
+  // Stopped-dunning re-check under the money-seam lock (codex r2 P1): an
+  // admin stopping a SIBLING's dunning after mint is an instruction not to
+  // force-collect it — refuse-as-stale so the page reloads and the fresh
+  // selection excludes it. The ANCHOR is exempt: the customer actively
+  // paying today's own invoice is not forced collection.
+  const siblingIds = allocation
+    .map((a) => a.invoiceId)
+    .filter((id) => String(id) !== String(anchorInvoiceId));
+  const stoppedNow = siblingIds.length
+    ? await dunningStoppedInvoiceIds(siblingIds, { database: trx })
+    : new Set();
   const staleErr = (why) => {
     const err = new Error('The account balance changed since this page loaded — refreshing to the latest amounts.');
     err.statusCode = 409;
@@ -179,6 +190,7 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
   for (const entry of allocation) {
     const row = byId.get(String(entry.invoiceId));
     if (!row) throw staleErr(`invoice ${entry.invoiceId} not found`);
+    if (stoppedNow.has(String(entry.invoiceId))) throw staleErr(`dunning stopped on invoice ${row.invoice_number}`);
     if (!isInvoiceCollectibleStatus(row.status)) throw staleErr(`invoice ${row.invoice_number} is ${row.status}`);
     if (row.payer_id || row.payer_statement_id) throw staleErr(`invoice ${row.invoice_number} became payer-billed`);
     if (amountDueCents(row) !== entry.cents) throw staleErr(`invoice ${row.invoice_number} remainder changed`);
@@ -229,7 +241,15 @@ async function combinedContextForInvoice(anchorInvoice, { database = db } = {}) 
     .whereNot('id', anchorInvoice.id)
     .whereIn('status', ['sent', 'viewed', 'overdue'])
     .orderBy('created_at', 'asc');
-  const live = siblings.filter((s) => amountDueCents(s) > 0);
+  let live = siblings.filter((s) => amountDueCents(s) > 0);
+  // An admin stopping a sibling's dunning after mint drops it from the
+  // combined charge (codex r2 P1) — the same "don't force-collect" signal
+  // the initial selection honors. The dropped row's stale stamp is cleared
+  // by the update-amount/finalize cleanup paths.
+  if (live.length) {
+    const stopped = await dunningStoppedInvoiceIds(live.map((s) => s.id), { database });
+    if (stopped.size) live = live.filter((s) => !stopped.has(String(s.id)));
+  }
   if (!live.length) return null;
   const allocation = buildAllocation(anchorInvoice, live);
   return { siblings: live, allocation, totalCents: allocationTotalCents(allocation) };
@@ -249,7 +269,7 @@ async function clearPaymentIntentStamps(database, paymentIntentId, { keepInvoice
     .where({ stripe_payment_intent_id: paymentIntentId })
     .whereNotIn('status', ['paid', 'processing', 'prepaid']);
   if (keepInvoiceIds.length) query.whereNotIn('id', keepInvoiceIds);
-  return query.update({ stripe_payment_intent_id: null, updated_at: database.fn.now() });
+  return query.update({ stripe_payment_intent_id: null, updated_at: new Date() });
 }
 
 /**
@@ -278,10 +298,11 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
   const chargedCents = Number(paymentIntent.amount_received || paymentIntent.amount || 0);
   const allocCents = allocationTotalCents(allocation);
   const surchargeCents = Math.round(Number(paymentIntent.metadata?.card_surcharge || 0) * 100);
-  // Cash captured must equal allocation + recorded surcharge to the cent
-  // (1c rounding tolerance). A mismatch means the PI amount drifted from
-  // the allocation snapshot — never guess a split; the caller quarantines.
-  if (paymentStatus === 'paid' && Math.abs(chargedCents - (allocCents + surchargeCents)) > 1) {
+  // Cash captured must equal allocation + recorded surcharge EXACTLY
+  // (codex r2 P0): both sides are integer cents with no rounding step left,
+  // so any difference — even one cent — means the PI amount drifted from
+  // the allocation snapshot. Never guess a split; the caller quarantines.
+  if (paymentStatus === 'paid' && chargedCents !== allocCents + surchargeCents) {
     const err = new Error(
       `Combined PI ${piId} captured ${chargedCents}c but allocation+surcharge is ${allocCents + surchargeCents}c`,
     );
@@ -329,15 +350,21 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
         continue;
       }
       if (['paid', 'prepaid'].includes(status)) {
-        // Already settled. By THIS PI (redelivery/race) → idempotent skip.
-        // By a DIFFERENT PI → this allocation's share was double-collected;
-        // record the residual so an operator refunds it.
+        // Already settled. By THIS PI (redelivery/race) → idempotent pass,
+        // but still counted as settled so the post-settle side effects
+        // (receipt enqueue, dunning stop, term sync — all idempotent)
+        // re-run: a crash between the money commit and that loop must not
+        // lose them forever (codex r2 P2). By a DIFFERENT PI → this
+        // allocation's share was double-collected; record the residual so
+        // an operator refunds it.
         if (String(invoice.stripe_payment_intent_id || '') !== String(piId)) {
           logger.error(`[pay-combined] settle: invoice ${invoice.invoice_number} already ${status} by another payment — recording residual for PI ${piId}`);
           await recordResidual(trx, paymentIntent, entry, `invoice already ${status} by ${invoice.stripe_payment_intent_id || 'unknown'}`);
+          continue;
         }
         const existing = rowForInvoice(invoice.id);
         if (existing && isAnchor) anchorPaymentRow = existing;
+        settledInvoiceIds.push(invoice.id);
         continue;
       }
       if (String(invoice.stripe_payment_intent_id || '') && String(invoice.stripe_payment_intent_id) !== String(piId)) {
@@ -435,16 +462,18 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
       } catch (e) {
         logger.warn(`[pay-combined] term sync failed for invoice ${invId}: ${e.message}`);
       }
-      try {
-        const ReceiptDeliveryQueue = require('./receipt-delivery-queue');
-        await ReceiptDeliveryQueue.enqueueReceiptDelivery({
-          invoiceId: invId,
-          stripePaymentIntentId: piId,
-          source: 'combined_pay',
-        });
-      } catch (e) {
-        logger.warn(`[pay-combined] receipt enqueue failed for invoice ${invId}: ${e.message}`);
-      }
+      // The durable receipt job is NOT best-effort (codex r2 P2): the queue
+      // row is the only durable form of the customer's receipt once this
+      // settle commits, so an enqueue failure must THROW — the webhook
+      // 500s, Stripe redelivers, and the idempotent settle re-runs this
+      // loop (mirrors the single-invoice /confirm, which awaits the
+      // enqueue uncaught).
+      const ReceiptDeliveryQueue = require('./receipt-delivery-queue');
+      await ReceiptDeliveryQueue.enqueueReceiptDelivery({
+        invoiceId: invId,
+        stripePaymentIntentId: piId,
+        source: 'combined_pay',
+      });
     }
     try {
       require('./receipt-delivery-queue').scheduleReceiptDeliveryDrain({ delayMs: 1000, limit: 10 });

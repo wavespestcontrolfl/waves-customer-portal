@@ -2697,6 +2697,26 @@ const StripeService = {
       throw new Error('Payment is not a Stripe payment — cannot refund via Stripe');
     }
 
+    // Combined full-balance rows are one SHARE of a single Stripe charge —
+    // this per-row refund path prices from payment.amount as if it were the
+    // whole charge, so a share-sized refund would be a partial refund at
+    // Stripe that the webhook then smears across every sibling row (codex
+    // r2 P1). Per-share Stripe refunds are refused until the refund rail is
+    // allocation-aware; a FULL-charge dashboard refund settles correctly
+    // (all rows refunded, all invoices reopened), and account credit
+    // covers per-invoice adjustments.
+    let refundRowMeta = {};
+    try {
+      refundRowMeta = payment.metadata
+        ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata)
+        : {};
+    } catch { refundRowMeta = {}; }
+    if (refundRowMeta.combined_payment) {
+      throw new Error(
+        'This payment is one share of a combined balance charge. Refund the FULL charge from the Stripe dashboard (every included invoice reopens), or issue account credit for a per-invoice adjustment.',
+      );
+    }
+
     const paidCents = Math.round(parseFloat(payment.amount) * 100);
     const priorCents = Math.round(parseFloat(payment.refund_amount || 0) * 100);
     const remainingCents = paidCents - priorCents;
@@ -3120,6 +3140,18 @@ const StripeService = {
     try {
       const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
+        // Combined setups serialize per customer BEFORE any row lock (codex
+        // r2 P2): two combined setups from different anchor links otherwise
+        // each hold their own anchor and then want the other's inside the
+        // sorted allocation lock — a deadlock Postgres resolves by killing
+        // one customer request. Single-invoice setups (one row lock, no
+        // allocation) skip the serialization entirely.
+        if (opts.includeOpenBalance && invoice.customer_id && !invoice.payer_id) {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['pay.combined.customer', String(invoice.customer_id)],
+          );
+        }
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceId })
           .forUpdate()
@@ -3822,6 +3854,16 @@ const StripeService = {
     try {
       const paymentIntent = await stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
       logger.info(`[stripe] PI ${effectivePaymentIntentId} updated → base=$${base} surcharge=0 total=$${base} (method=${selectedMethodCategory})`);
+      // Keep the DB stamps and the PI's allocation in lockstep (codex r2
+      // P1): when this update DROPPED a previously-combined allocation
+      // (gate flipped off, sibling paid/stopped elsewhere), the dropped
+      // siblings' stamps must clear too, or their own pay links stay stuck
+      // behind a PI whose metadata no longer names them.
+      await PayCombined.clearPaymentIntentStamps(db, effectivePaymentIntentId, {
+        keepInvoiceIds: combinedCtx
+          ? combinedCtx.allocation.map((a) => String(a.invoiceId))
+          : [String(invoiceId)],
+      });
       if (retargeted) {
         // A newer tender switch can repoint the invoice between the lineage
         // vetting above and this update settling. Re-read before handing the
@@ -4156,6 +4198,16 @@ const StripeService = {
 
     try {
       const confirmed = await db.transaction(async (finalizeTrx) => {
+        // Same per-customer serialization as the combined mint (codex r2
+        // P2): a combined finalize holds the anchor lock and then the
+        // sorted allocation locks — serialize against other combined
+        // money seams for this customer before any row lock.
+        if (finalizeCombinedCtx && invoice.customer_id) {
+          await finalizeTrx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['pay.combined.customer', String(invoice.customer_id)],
+          );
+        }
         const lockedInvoice = await finalizeTrx('invoices')
           .where({ id: invoiceId })
           .forUpdate()
@@ -4167,6 +4219,16 @@ const StripeService = {
           throw new Error('Invoice has a different active payment');
         }
         let lockedBaseAmount;
+        if (!finalizeCombinedCtx) {
+          // Single-invoice finalize on a PI that previously carried an
+          // allocation (gate flipped off, siblings paid/stopped): release
+          // the stale sibling stamps in the same transaction that confirms
+          // the anchor-only amount, so the kill switch actually restores
+          // each sibling's own pay link (codex r2 P1).
+          await PayCombined.clearPaymentIntentStamps(finalizeTrx, invoice.stripe_payment_intent_id, {
+            keepInvoiceIds: [String(invoiceId)],
+          });
+        }
         if (finalizeCombinedCtx) {
           // Combined: lock EVERY allocated invoice (ascending-id order) and
           // re-verify each row's remainder against the allocation — any

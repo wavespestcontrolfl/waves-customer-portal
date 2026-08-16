@@ -616,6 +616,10 @@ describe('StripeService.finalizeInvoicePayment saved-card serialization', () => 
     const invoiceQuery = {
       where: jest.fn(() => invoiceQuery),
       forUpdate: jest.fn(() => invoiceQuery),
+      // Combined-stamp cleanup (clearPaymentIntentStamps) chains
+      // where→whereNotIn→whereNotIn→update on the trx invoices table.
+      whereNotIn: jest.fn(() => invoiceQuery),
+      update: jest.fn().mockResolvedValue(0),
       first: jest.fn().mockResolvedValue(invoice),
     };
     const attemptQuery = {
@@ -725,6 +729,10 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
     const invoiceQuery = {
       where: jest.fn(() => invoiceQuery),
       forUpdate: jest.fn(() => invoiceQuery),
+      // Combined-stamp cleanup (clearPaymentIntentStamps) chains
+      // where→whereNotIn→whereNotIn→update on the trx invoices table.
+      whereNotIn: jest.fn(() => invoiceQuery),
+      update: jest.fn().mockResolvedValue(0),
       first: jest.fn().mockResolvedValue(invoice),
     };
     const attemptQuery = {
@@ -883,6 +891,10 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
 
     const rootInvoiceQuery = {
       where: jest.fn(() => rootInvoiceQuery),
+      // Combined-stamp cleanup after a tender switch runs on the ROOT db
+      // handle (where→whereNotIn→whereNotIn→update).
+      whereNotIn: jest.fn(() => rootInvoiceQuery),
+      update: jest.fn().mockResolvedValue(0),
       first: jest.fn().mockResolvedValue(invoiceRow),
     };
     // Transaction-scoped invoice query: supports the forUpdate read and the
