@@ -624,23 +624,33 @@ async function submitRecap({
       // rate-less row WITH rate_confirmed is a deliberate clear (codex P1
       // r9) — the tech removed a wrong rate, so nothing is restored.
       const rateless = productEntries
-        .filter((e) => e.row.application_rate == null && !e.rateConfirmed)
-        .map((e) => e.row);
+        .filter((e) => e.row.application_rate == null && !e.rateConfirmed);
       if (rateless.length && !createdRecord) {
         const priorRows = await trx('service_products')
           .where({ service_record_id: recordId })
-          .select('product_name', 'application_rate', 'rate_unit')
+          .select([
+            'product_name', 'application_rate', 'rate_unit',
+            ...(hasProductIdCol ? ['product_id'] : []),
+          ])
           .catch(() => []);
-        const priorByName = new Map(
-          (Array.isArray(priorRows) ? priorRows : [])
-            .filter((r) => r.application_rate != null)
-            .map((r) => [String(r.product_name || '').trim().toLowerCase(), r]),
+        const withRate = (Array.isArray(priorRows) ? priorRows : [])
+          .filter((r) => r.application_rate != null);
+        // Catalog id first (codex P2 r17): binding already rewrote the
+        // row's product_name to the CURRENT catalog name, so after a
+        // rename the recorded row's old name can never match — only the
+        // stable id can. Names remain the fallback for id-less rows.
+        const priorById = new Map(
+          withRate.filter((r) => r.product_id != null).map((r) => [String(r.product_id), r]),
         );
-        for (const row of rateless) {
-          const prior = priorByName.get(String(row.product_name).trim().toLowerCase());
+        const priorByName = new Map(
+          withRate.map((r) => [String(r.product_name || '').trim().toLowerCase(), r]),
+        );
+        for (const e of rateless) {
+          const prior = (e.catalogId != null ? priorById.get(String(e.catalogId)) : null)
+            || priorByName.get(String(e.row.product_name).trim().toLowerCase());
           if (prior) {
-            row.application_rate = prior.application_rate;
-            row.rate_unit = prior.rate_unit;
+            e.row.application_rate = prior.application_rate;
+            e.row.rate_unit = prior.rate_unit;
           }
         }
       }
@@ -779,6 +789,35 @@ async function submitRecap({
       // retract (codex P1 r12) — an unconfirmed partial submit preserved
       // its unmatched rows above, so absence from it proves nothing.
       if (productsConfirmed === true) {
+        // Preserved (unrepresentable) products survive the replace, but
+        // an EARLIER pre-retraction-era replace may have left their
+        // identified ledger row orphaned (service_product_id nulled by ON
+        // DELETE SET NULL) — and linkedCatalogIds only carries submitted
+        // products, so the sweep would retract an application that is
+        // still on the service record (codex P1 r17). Re-link each
+        // preserved row's orphaned ledger row to its surviving
+        // service_products row and exclude its catalog id from the sweep.
+        if (preserveNames.length) {
+          const preservedRows = await trx('service_products')
+            .where({ service_record_id: recordId })
+            .whereRaw('LOWER(TRIM(product_name)) = ANY(?::text[])', [preserveNames])
+            .select(['id', 'product_name', ...(hasProductIdCol ? ['product_id'] : [])]);
+          for (const row of (Array.isArray(preservedRows) ? preservedRows : [])) {
+            let preservedCatalogId = row.product_id ?? null;
+            if (preservedCatalogId == null && row.product_name) {
+              const catalog = await trx('products_catalog')
+                .where('name', 'ilike', `%${row.product_name}%`)
+                .first('id');
+              preservedCatalogId = catalog?.id ?? null;
+            }
+            if (preservedCatalogId == null) continue;
+            linkedCatalogIds.push(preservedCatalogId);
+            await trx('property_application_history')
+              .where({ service_record_id: recordId, product_id: preservedCatalogId })
+              .whereNull('service_product_id')
+              .update({ service_product_id: row.id });
+          }
+        }
         let staleLedgerQuery = trx('property_application_history')
           .where({ service_record_id: recordId })
           .whereNull('service_product_id')

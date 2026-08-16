@@ -844,6 +844,71 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(retractionSweeps(store)).toHaveLength(1);
   });
 
+  test('a renamed product restores its prior rate by catalog id (codex P2 r17)', async () => {
+    // The catalog row was renamed since the visit; the modal matched by
+    // stable id and submits the NEW name with no rate. The prior recorded
+    // rate can only be found through product_id — the recorded row still
+    // carries the old name.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-x', name: 'New Name' },
+      priorProductRows: [{ product_name: 'Old Name', application_rate: 0.7, rate_unit: 'oz', product_id: 'cat-x' }],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Renamed product resubmit.',
+      products: [{ product_id: 'cat-x', product_name: 'New Name' }],
+      productsConfirmed: true,
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productRows[0].application_rate).toBe(0.7);
+    expect(store.productRows[0].rate_unit).toBe('oz');
+  });
+
+  test('a preserved product\'s orphaned ledger row is re-linked, not swept (codex P1 r17)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-c' },
+      // The surviving preserved row an earlier replace left with an
+      // orphaned identified ledger row.
+      priorProductRows: [{ id: 'sp-ghost', product_name: 'Ghost Product', product_id: 'cat-ghost' }],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Preserved ghost, kept C.',
+      products: [{ product_id: 'cat-c', product_name: 'Product C', application_rate: '1', rate_unit: 'oz', rate_confirmed: true }],
+      productsConfirmed: true,
+      productsPreserve: ['Ghost Product'],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // The orphaned identified row is re-linked to the surviving source row…
+    const relink = (store.ledgerUpdates || []).find(
+      (u) => u.where && u.where.product_id === 'cat-ghost',
+    );
+    expect(relink).toBeDefined();
+    expect(relink.patch).toEqual({ service_product_id: 'sp-ghost' });
+    // …and its catalog id is excluded from the retraction sweep.
+    const sweeps = retractionSweeps(store);
+    expect(sweeps).toHaveLength(1);
+    expect(sweeps[0].notIn.vals).toEqual(['cat-c', 'cat-ghost']);
+  });
+
   test('an UNCONFIRMED empty set still preserves recorded products (legacy resend)', async () => {
     const store = {
       serviceStatus: 'completed',
