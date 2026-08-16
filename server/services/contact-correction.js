@@ -128,15 +128,22 @@ const ZIP_RE = /^\d{5}(-\d{4})?$/;
 const STATE_RE = /^[A-Za-z]{2}$/;
 const ADDRESS_RE = /^[\p{L}\p{N}][\p{L}\p{N}#'.,/ -]{0,119}$/u;
 
+// Length caps mirror the PERSISTED columns (initial_schema: first/last/city
+// varchar(50), email varchar(150), line1 varchar(200), line2 varchar(100))
+// — round-16: a syntactically valid value longer than its column used to
+// pass validation and then blow up the customer UPDATE, rolling back the
+// WHOLE batch into the fail-soft 'error' lane, so a valid sibling
+// correction silently never applied. Over-long values are rejected here as
+// invalid candidates instead; the rest of the batch survives.
 const FIELD_VALIDATORS = {
-  first_name: (v) => NAME_RE.test(v),
-  last_name: (v) => NAME_RE.test(v),
-  email: (v) => EMAIL_RE.test(v) && v.length <= 254,
+  first_name: (v) => NAME_RE.test(v) && v.length <= 50,
+  last_name: (v) => NAME_RE.test(v) && v.length <= 50,
+  email: (v) => EMAIL_RE.test(v) && v.length <= 150,
   address_line1: (v) => ADDRESS_RE.test(v),
   // Empty = explicit clear ("no unit, that was our old apartment") — the
   // only field where an empty replacement is a valid correction.
-  address_line2: (v) => v === '' || ADDRESS_RE.test(v),
-  city: (v) => NAME_RE.test(v),
+  address_line2: (v) => v === '' || (ADDRESS_RE.test(v) && v.length <= 100),
+  city: (v) => NAME_RE.test(v) && v.length <= 50,
   state: (v) => STATE_RE.test(v),
   zip: (v) => ZIP_RE.test(v),
 };
@@ -183,6 +190,55 @@ function tokenBoundedIncludes(haystack, needle) {
 // removal evidence in the message — "my unit is wrong, please fix it" must
 // not clear the unit on a model's empty-string guess.
 const UNIT_REMOVAL_RE = /\b(?:no|without|remove[ds]?|removing|drop(?:ped)?|delete[ds]?)\s+(?:the\s+|an?\s+|my\s+|that\s+)?(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[^.?!\n]{0,40}\b(?:removed?|gone|no longer|doesn'?t (?:exist|apply))\b|\b(?:was|were)\s+(?:our|my|the)\s+old\s+(?:apartment|unit)\b|\bold\s+(?:apartment|unit)\b/i;
+
+// Value/intent CO-LOCATION with the correcting statement (round-16):
+// message-wide value grounding let a grounded "my email is wrong; please
+// fix it" quote pair with contact data stated elsewhere for someone ELSE
+// ("send the receipt to my accountant at bookkeeper@example.com") — both
+// halves genuinely appear in the message, but the replacement was never
+// part of the correcting statement. Evaluated over the MESSAGE's clause
+// sequence, anchored at the quote: intent clauses are the quote's own
+// clauses that bind the field category; the value must sit in an intent
+// clause itself, or in a clause IMMEDIATELY ADJACENT to one that is about
+// the value — naming the field topic ("Email is jane@example.com") or
+// consisting of essentially nothing but the value ("It is
+// jane@example.com", "Use jane@example.com"). An adjacent clause with its
+// own unrelated business ("Send the receipt to my accountant at …") never
+// donates its value, and a clause further away never qualifies at all — a
+// model widening its quote across statements gains nothing, because intent
+// stays confined to clauses that actually carry correction language. A
+// quote with NO intent clause (a licensed address fragment like "zip is
+// 34231") is itself the value statement and must contain the value.
+function valueCoLocated(field, quote, value, text) {
+  const v = normValue(value);
+  if (v === '') return true; // explicit clear — removal-language-gated separately
+  const cat = field === 'email' ? 'email' : ADDRESS_FIELDS.includes(field) ? 'address' : 'name';
+  const nq = normValue(quote).replace(/\s+/g, ' ').trim().toLowerCase();
+  const clauses = normValue(text).split(CLAUSE_SPLIT_RE)
+    .map((cl) => cl.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (!nq || !clauses.length) return false;
+  // A body clause belongs to the quote when either contains the other —
+  // covers a fragment quote inside one clause and a quote spanning several.
+  const inQuote = clauses.map((cl) => {
+    const lc = cl.toLowerCase();
+    return lc.includes(nq) || nq.includes(lc);
+  });
+  const isIntent = clauses.map((cl, i) => inQuote[i]
+    && (clauseBindsCategory(cl, cat) || (cat === 'address' && MOVE_EVIDENCE_RE.test(cl))));
+  if (!isIntent.some(Boolean)) return tokenBoundedIncludes(quote, v);
+  const topicRe = TOPIC_RES.find(([c]) => c === cat)[1];
+  for (let j = 0; j < clauses.length; j += 1) {
+    if (!tokenBoundedIncludes(clauses[j], v)) continue;
+    if (isIntent[j]) return true;
+    const adjacent = (j > 0 && isIntent[j - 1]) || (j + 1 < clauses.length && isIntent[j + 1]);
+    if (!adjacent) continue;
+    topicRe.lastIndex = 0;
+    if (topicRe.test(clauses[j])) return true;
+    if (clauses[j].length - v.length <= 20) return true;
+  }
+  return false;
+}
 
 // PII-safe error tag for warn logs: database errors can embed the very
 // contact values being written (e.g. a unique address_key collision quotes
@@ -244,17 +300,20 @@ async function extractSmsContactCorrections({ body }) {
     // wrong, please fix it" is a genuine quote, but a model that invents
     // the new value alongside it would sail through quote grounding — a
     // value the customer never typed never applies. Token-delimited
-    // (round-13): "Lee" must not ground on "please". Empty = explicit
-    // clear, which carries no text by definition (removal-language-gated
-    // below).
-    const valueInBody = (v) => normValue(v) === '' || tokenBoundedIncludes(text, v);
+    // (round-13): "Lee" must not ground on "please". CO-LOCATED with the
+    // correction evidence inside the candidate's own quote (round-16) —
+    // message-wide grounding let a real correction quote pair with contact
+    // data the customer stated about someone else later in the message.
+    // Empty = explicit clear, which carries no text by definition
+    // (removal-language-gated below).
+    const valueEvidenceOk = (c) => valueCoLocated(c.field, c.quote, c.new_value, text);
     // An empty address_line2 (explicit unit clear) has no value text to
     // ground — require affirmative removal language in the message instead
     // (round-11).
     const clearEvidenceOk = (c) => !(c.field === 'address_line2' && normValue(c.new_value) === '')
       || UNIT_REMOVAL_RE.test(text);
     const base = list.filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field)
-      && quoteInBody(c.quote) && valueInBody(c.new_value) && clearEvidenceOk(c));
+      && quoteInBody(c.quote) && valueEvidenceOk(c) && clearEvidenceOk(c));
     // Each candidate's own quote must carry correction intent bound to its
     // field category — the message-level prefilter is not per-field
     // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
@@ -1022,9 +1081,17 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     // evidence quote, so a grounded "my last name is wrong" quote could
     // otherwise carry a hallucinated surname into auto-apply. Matching is
     // token-delimited (round-12) — plain substring would let "Lee" ground
-    // on the word "please".
-    const valueGroundedInCallerSpeech = (v) => normValue(v) !== ''
-      && callerLines.some((line) => tokenBoundedIncludes(line, v));
+    // on the word "please". CO-LOCATED with the quote (round-16): the value
+    // must appear on the SAME caller line that grounds the evidence quote —
+    // a caller statement is one line of the diarized transcript, and a value
+    // spoken in different, unrelated caller speech (a mailing address for
+    // someone else, say) is not part of the correcting statement.
+    const valueGroundedWithQuote = (c) => {
+      const needle = normValue(c.evidence_quote).replace(/\s+/g, ' ').toLowerCase();
+      if (needle.length < 4 || normValue(c.final_recommended_value) === '') return false;
+      return callerLines.some((line) => line.includes(needle)
+        && tokenBoundedIncludes(line, c.final_recommended_value));
+    };
 
     const seenFields = new Set();
     const candidates = rows.filter((c) => {
@@ -1100,7 +1167,7 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     const nameCandidates = (callerIsPrimary
       ? candidates.filter((c) => CALL_AUTO_FIELDS[c.field_name]
         && quoteBindsNameField(c.field_name, c.evidence_quote)
-        && valueGroundedInCallerSpeech(c.final_recommended_value))
+        && valueGroundedWithQuote(c))
       : [])
       // (round-15) Same unqualified whole-name pair rule as the SMS
       // extractor: a quote correcting the whole name ("you have my name

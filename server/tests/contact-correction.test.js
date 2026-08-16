@@ -1938,6 +1938,101 @@ describe('round-15 hardening', () => {
   });
 });
 
+describe('round-16 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it("someone else's grounded contact data never rides a real correction quote (value/intent co-location)", async () => {
+    const body = 'My email is wrong; please fix it. Send the receipt to my accountant at bookkeeper@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: 'my email is wrong; please fix it', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+    // A model that widens the quote to span both statements gains nothing —
+    // the intervening clause keeps the value out of the correcting statement.
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: body, confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('an adjacent clause with its own unrelated business never donates its value even without filler between', async () => {
+    const body = 'My email is wrong. Send the receipt to my accountant at bookkeeper@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: body, confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a bare adjacent value statement still corrects ("My email is wrong. It is …")', async () => {
+    const body = 'My email is wrong. It is jordan.rivers@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'jordan.rivers@example.com', quote: body, confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['email']);
+  });
+
+  it('a topic-named adjacent clause still corrects ("My email is wrong. Email is …")', async () => {
+    const body = 'My email is wrong. Email is jordan.rivers@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'jordan.rivers@example.com', quote: body, confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['email']);
+  });
+
+  it('a call value spoken on a DIFFERENT caller line than the correction quote never applies', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({
+        transcription: [
+          'Caller: my last name is spelled wrong',
+          'Caller: send the mail to Rivers and Sons Roofing',
+        ].join('\n'),
+      })],
+      customer_field_candidates: [
+        candidate({ id: 'split', evidence_quote: 'my last name is spelled wrong' }),
+      ],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+  });
+
+  it('rejects an over-column email (151+ chars) without sinking the sibling correction', async () => {
+    const longEmail = `${'a'.repeat(145)}@ex.com`; // valid shape, 152 chars > varchar(150)
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'email', newValue: longEmail, quote: 'my email is wrong' },
+        { field: 'last_name', newValue: 'Rivers', quote: 'my last name is wrong, it is Rivers' },
+      ],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied.map((a) => a.field)).toEqual(['last_name']);
+    expect(res.skipped.some((s) => s.field === 'email')).toBe(true);
+    expect(knex._data.customers[0].email).toBe('jordan.riverz@example.com');
+    expect(knex._data.customers[0].last_name).toBe('Rivers');
+  });
+});
+
 describe('field allowlist', () => {
   it('never includes phone', () => {
     expect(APPLYABLE_FIELDS).not.toContain('phone');

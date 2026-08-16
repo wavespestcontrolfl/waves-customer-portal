@@ -130,6 +130,15 @@ async function replayPendingBells() {
       .where('ad.status', 'pending_review')
       .whereRaw("ad.input_snapshot->>'bell_pending' = 'true'")
       .where('ad.created_at', '<', db.raw("now() - interval '10 minutes'"))
+      // Replay horizon (#3413 round-16): this pass exists to recover bells
+      // whose post-ack fire crashed MINUTES ago — not to resurrect old
+      // flags when the lane is re-enabled after an operational mute
+      // (visit completion is deliberately not an auto-resolution, so
+      // bell_pending markers from before a gate-off period survive
+      // indefinitely, and an unmute used to replay them all as a burst of
+      // obsolete urgent bells). Flags past the horizon keep their pending
+      // marker for the review queue but never re-ring.
+      .where('ad.created_at', '>', db.raw("now() - interval '24 hours'"))
       // Newest-first (codex r19): persistently-failing replays must not
       // starve fresh flags out of the capped batch.
       .orderBy('ad.created_at', 'desc')
