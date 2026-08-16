@@ -191,11 +191,6 @@ function baseUnitOf(unit) {
   const u = String(unit || "");
   return u.includes("/") ? u.split("/")[0] : u;
 }
-// The rate-prefill decision (isPerBasisUnit, the pest 4-oz house default,
-// per-basis low bounds) lives in lib/product-rate-prefill.js — shared with
-// ServiceRecapModal so both completion paths prefill identically (codex P1
-// r6). Re-exported here for the existing importers.
-export { isPerBasisUnit, resolveRatePrefill };
 const AREAS_BY_SERVICE = {
   pest: [
     "Perimeter",

@@ -76,6 +76,10 @@ function makeKnex(store) {
         q._whereNotIn = { col, vals };
         return q;
       }),
+      whereIn: jest.fn(function whereIn(col, vals) {
+        q._whereIn = { col, vals };
+        return q;
+      }),
       whereRaw: jest.fn(function whereRaw(...args) {
         q._whereRaw = args;
         return q;
@@ -86,7 +90,11 @@ function makeKnex(store) {
       // rows; a test opts in by seeding store.priorProductRows.
       select: table === 'service_products'
         ? jest.fn(() => Promise.resolve(store.priorProductRows || []))
-        : jest.fn().mockReturnThis(),
+        // The legacy product-less ledger capture — a test opts in by
+        // seeding store.legacyLedgerRows.
+        : table === 'property_application_history'
+          ? jest.fn(() => Promise.resolve(store.legacyLedgerRows || []))
+          : jest.fn().mockReturnThis(),
       forUpdate: jest.fn().mockReturnThis(),
       del: jest.fn(() => {
         if (table === 'service_products') {
@@ -146,7 +154,9 @@ function makeKnex(store) {
     q.update = jest.fn((patch) => {
       if (table === 'property_application_history') {
         store.ledgerUpdates = store.ledgerUpdates || [];
-        store.ledgerUpdates.push({ where: q._where?.[0], notIn: q._whereNotIn || null, patch });
+        store.ledgerUpdates.push({
+          where: q._where?.[0], notIn: q._whereNotIn || null, whereIn: q._whereIn || null, patch,
+        });
       }
       if (table === 'service_records') {
         store.recordUpdates = store.recordUpdates || [];
@@ -745,6 +755,62 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(store.productDeleteScopes).toEqual([{ partial: true, names: [['product a']] }]);
     // And no retraction sweep ran: absence from an unconfirmed set proves nothing.
     expect(retractionSweeps(store)).toHaveLength(0);
+  });
+
+  test('a same-name replacement re-adopts a product-less legacy ledger row (codex P1 r14)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: undefined, // no catalog match -> no identified-row sync
+      legacyLedgerRows: [{ ledger_id: 'led-1', product_name: 'Termidor' }],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Legacy row adoption.',
+      products: [{ product_name: 'Termidor', application_rate: '0.8', rate_unit: 'fl_oz/gal', rate_confirmed: true }],
+      productsConfirmed: true,
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    const adoption = (store.ledgerUpdates || []).find((u) => u.where && u.where.id === 'led-1');
+    expect(adoption).toBeDefined();
+    expect(adoption.patch.service_product_id).toBe('sp-1');
+    expect(adoption.patch.application_rate).toBe(0.8);
+    // Adopted, so the leftover retraction never targets it.
+    expect((store.ledgerUpdates || []).filter((u) => u.whereIn)).toHaveLength(0);
+  });
+
+  test('an authoritative clear retracts captured product-less legacy rows (codex P1 r14)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      legacyLedgerRows: [{ ledger_id: 'led-1', product_name: 'Old Legacy Product' }],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Cleared everything, legacy row included.',
+      products: [],
+      productsConfirmed: true,
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // The sweep can't reach a null-product row — the captured-id pass must.
+    const leftover = (store.ledgerUpdates || []).find((u) => u.whereIn);
+    expect(leftover).toBeDefined();
+    expect(leftover.whereIn).toEqual({ col: 'id', vals: ['led-1'] });
+    expect(leftover.patch.retraction_reason).toBe('recap_deselected');
   });
 
   test('an UNCONFIRMED empty set still preserves recorded products (legacy resend)', async () => {

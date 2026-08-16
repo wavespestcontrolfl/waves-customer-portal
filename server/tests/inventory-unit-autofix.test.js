@@ -115,7 +115,7 @@ describe('autofix candidate predicate', () => {
     // unreachable. 'gal' is excluded; 'Gallons'/'gallon' are NOT excluded.
     const [notInColumn, notInList] = candidateQuery.args('whereNotIn');
     expect(notInColumn).toBe('inventory_unit');
-    expect(notInList).toEqual(['fl_oz', 'gal', 'qt', 'pt', 'ml', 'l', 'lb', 'g', 'kg']);
+    expect(notInList).toEqual(['fl_oz', 'gal', 'qt', 'pt', 'ml', 'l', 'lb', 'g', 'kg', 'each']);
     expect(notInList).toContain('gal');
     expect(notInList).not.toContain('gallon');
     expect(notInList).not.toContain('Gallons');

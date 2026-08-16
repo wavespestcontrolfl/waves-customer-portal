@@ -614,6 +614,28 @@ async function submitRecap({
           }
         }
       }
+      // Product-less legacy ledger rows (product_id NULL — a supported
+      // legacy state in the FDACS writer) are reachable ONLY through
+      // their service_product_id link, which the delete below SET-NULLs.
+      // Capture them WITH their source row's product name BEFORE the FK
+      // link is erased (codex P1 r14) so the replace can reconcile them:
+      // a same-name replacement row re-adopts its legacy row (one record,
+      // no second identified row minted beside it), and an authoritative
+      // set retracts the leftovers like any other deselected application
+      // — the retraction sweep's product_id predicate can't reach them.
+      const legacyLedgerRows = createdRecord
+        ? []
+        : await trx('property_application_history')
+          .leftJoin('service_products', 'property_application_history.service_product_id', 'service_products.id')
+          .where('property_application_history.service_record_id', recordId)
+          .whereNull('property_application_history.product_id')
+          .whereNotNull('property_application_history.service_product_id')
+          .select('property_application_history.id as ledger_id', 'service_products.product_name');
+      const legacyByName = new Map();
+      for (const row of (Array.isArray(legacyLedgerRows) ? legacyLedgerRows : [])) {
+        const name = String(row.product_name || '').trim().toLowerCase();
+        if (name && !legacyByName.has(name)) legacyByName.set(name, row.ledger_id);
+      }
       // An AUTHORITATIVE set (productsConfirmed) replaces everything; an
       // UNCONFIRMED set replaces only the rows it names — a recorded
       // product the client could not represent (inactive/renamed, so the
@@ -664,29 +686,45 @@ async function submitRecap({
             .first('id');
           ledgerProductId = catalog?.id ?? null;
         }
-        if (ledgerProductId == null) continue;
-        linkedCatalogIds.push(ledgerProductId);
-        await trx('property_application_history')
-          .where({ service_record_id: recordId, product_id: ledgerProductId })
-          .update({
-            service_product_id: sp.id,
-            // Re-selecting a previously deselected product un-retracts
-            // its ledger row — the re-link IS the correction record.
-            retracted_at: null,
-            retraction_reason: null,
-            // The validated catalog method reaches EXISTING ledger rows
-            // too (codex P1 r12) — createComplianceRecords skips the
-            // stable (service_record_id, product_id) row, so this sync is
-            // the only writer that can refresh its method.
-            ...(entry.row && entry.row.application_method
-              ? { application_method: entry.row.application_method }
+        const ledgerSyncPatch = {
+          service_product_id: sp.id,
+          // Re-selecting a previously deselected product un-retracts
+          // its ledger row — the re-link IS the correction record.
+          retracted_at: null,
+          retraction_reason: null,
+          // The validated catalog method reaches EXISTING ledger rows
+          // too (codex P1 r12) — createComplianceRecords skips the
+          // stable (service_record_id, product_id) row, so this sync is
+          // the only writer that can refresh its method.
+          ...(entry.row && entry.row.application_method
+            ? { application_method: entry.row.application_method }
+            : {}),
+          ...(sp.application_rate != null
+            ? { application_rate: sp.application_rate, rate_unit: sp.rate_unit || null }
+            : entry.rateConfirmed
+              ? { application_rate: null, rate_unit: null }
               : {}),
-            ...(sp.application_rate != null
-              ? { application_rate: sp.application_rate, rate_unit: sp.rate_unit || null }
-              : entry.rateConfirmed
-                ? { application_rate: null, rate_unit: null }
-                : {}),
-          });
+        };
+        let synced = 0;
+        if (ledgerProductId != null) {
+          linkedCatalogIds.push(ledgerProductId);
+          synced = await trx('property_application_history')
+            .where({ service_record_id: recordId, product_id: ledgerProductId })
+            .update(ledgerSyncPatch);
+        }
+        // No identified ledger row took the sync — re-adopt a captured
+        // product-less legacy row of the same name instead (codex P1
+        // r14): the legacy row stays THE record of this application, and
+        // createComplianceRecords sees it linked so it never mints a
+        // second identified row beside it.
+        const legacyKey = String(sp.product_name).trim().toLowerCase();
+        const legacyId = legacyByName.get(legacyKey);
+        if (!synced && legacyId != null) {
+          legacyByName.delete(legacyKey);
+          await trx('property_application_history')
+            .where({ id: legacyId })
+            .update(ledgerSyncPatch);
+        }
       }
       // Deselected products (codex P1 r9): the replace removed their
       // service_products rows, so their ledger rows still carry a NULL
@@ -714,6 +752,21 @@ async function submitRecap({
           retracted_at: new Date(),
           retraction_reason: 'recap_deselected',
         });
+        // Captured product-less rows no replacement re-adopted: their
+        // source row was deleted and the authoritative set does not
+        // contain them — retract them like any other deselected
+        // application (codex P1 r14).
+        const leftoverLegacyIds = [...legacyByName.values()];
+        if (leftoverLegacyIds.length) {
+          await trx('property_application_history')
+            .whereIn('id', leftoverLegacyIds)
+            .whereNull('service_product_id')
+            .whereNull('retracted_at')
+            .update({
+              retracted_at: new Date(),
+              retraction_reason: 'recap_deselected',
+            });
+        }
       }
       // A first-time recap completion (never through /complete) has NO
       // ledger rows for the update above to hit — the recap was the only

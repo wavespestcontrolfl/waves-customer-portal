@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import { isPerBasisUnit } from "../../lib/product-rate-prefill";
 import {
   PRODUCT_DESCRIPTIONS,
   TRACK_SAFETY_RULES,
   catalogUnitOption,
-  isPerBasisUnit,
   allowedTargetLinesForServiceType,
   allowedTargetLinesForVisit,
   ALL_TARGET_LINES,
