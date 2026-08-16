@@ -8376,6 +8376,12 @@ const CallRecordingProcessor = {
                 // would graft a disagreeing state onto the V2 premise.
                 state: v2Addr?.state || null,
                 zip: v2Addr?.postal_code || null,
+                // V2's classified type rides through as the same
+                // FAIL-CLOSED commercial veto the additional properties
+                // carry (codex #3418 r28) — a commercial/hoa main entry
+                // with a residence claim must be rejected even before the
+                // async lookup types the freshly created row.
+                property_type: v2RoleProp.property_type || null,
                 service_address_occupancy: v2RoleProp.service_address_occupancy || null,
                 service_address_is_primary_residence:
                   typeof v2RoleProp.service_address_is_primary_residence === 'boolean'
