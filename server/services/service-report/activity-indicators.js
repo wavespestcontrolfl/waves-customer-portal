@@ -4123,6 +4123,10 @@ const BANNED_CUSTOMER_COPY = [
   // at 2 PM and entered through the side gate" stays legal.
   new RegExp(`\\b${REENTRY_VERB_SRC}\\b[^.!?]{0,40}\\b(?:at|by|until|till|before|after|around)\\s+${CLOCK_TIME_SRC}\\b`, 'i'),
   new RegExp(`\\b(?:until|till|before|by)\\s+${CLOCK_TIME_SRC}\\b[^.!?]{0,40}\\b${REENTRY_VERB_SRC}\\b`, 'i'),
+  // reverse at-time INSTRUCTIONS (codex r56): "At 4 PM, you can enter the
+  // treated area" — gated on a modal/permission marker before the entry
+  // verb so arrival prose ("we arrived at 2 PM and entered…") stays legal
+  new RegExp(`\\b(?:at|around|after)\\s+${CLOCK_TIME_SRC}\\b[^.!?]{0,40}\\b(?:can|may|could|free\\s+to|safe\\s+to|able\\s+to|allowed\\s+to)\\s+(?:safely\\s+)?(?:re-?)?(?:enter|occupy|return|access|go\\s+back|come\\s+back|walk\\s+on)\\b`, 'i'),
 ];
 
 function findBannedCustomerCopy(text) {
