@@ -358,14 +358,21 @@ async function stagePropertyRoleReview({
   db, customerId, callLogId, extracted, additionalProps, extraction, buildTriageItem,
   procToken = null,
 }) {
-  // Claim fence (codex #3418 r13): a stalled worker whose processing
+  // Claim fence (codex #3418 r13+r15): a stalled worker whose processing
   // claim was reclaimed must not fill occupancies or replace the card
-  // with its obsolete payload after a newer worker's corrected pass —
-  // verified INSIDE each locked transaction, right before the writes.
+  // with its obsolete payload after a newer worker's corrected pass.
+  // FOR UPDATE makes the check ATOMIC with this transaction's writes —
+  // the reclaim UPDATE rotates the token on this same call_log row, so
+  // holding the row lock through commit means the reclaim either already
+  // happened (we see the rotated token and bail) or waits for us. Lock
+  // order stays customers row → triage advisory → call_log row, the same
+  // sequence every triage writer follows; the reclaim itself holds no
+  // prior locks, so it simply queues on the row.
   const claimHeld = async (trx) => {
     if (!procToken) return true;
     const owned = await trx('call_log')
       .where({ id: callLogId, processing_token: procToken })
+      .forUpdate()
       .first('id');
     return !!owned;
   };

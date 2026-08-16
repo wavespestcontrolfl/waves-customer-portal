@@ -8150,6 +8150,20 @@ const CallRecordingProcessor = {
     if (process.env.GATE_CUSTOMER_PROPERTIES === 'true' && customerId
       && (extracted.address_line1 || v2HasServiceAddress)) {
       try {
+        // Claim fence at BLOCK ENTRY (codex #3418 r15): everything below —
+        // primary completion, property persistence, role staging — commits
+        // customer-data mutations outside the finalizer's token fence, so
+        // a stalled worker reclaimed by a newer pass must not execute ANY
+        // of it on its obsolete extraction (the later per-step fences
+        // narrow the window further; this closes the front door).
+        const propBlockClaim = await db('call_log')
+          .where({ id: call.id, processing_token: procToken })
+          .first('id');
+        if (!propBlockClaim) {
+          const lost = new Error('processing claim lost before property block');
+          lost.claimLost = true;
+          throw lost;
+        }
         const customerProperties = require('./customer-properties');
         // Unit/line2 from the V2 service_address (legacy extraction + flatView drop it).
         const callUnit = extracted.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null;
@@ -8405,9 +8419,13 @@ const CallRecordingProcessor = {
           }
         }
       } catch (e) {
-        // Log the error CODE/NAME only — a DB error message can echo the failing
-        // address (e.g. unique-constraint "Key (address_key)=(...) already exists").
-        logger.warn(`[customer-properties] call-pipeline write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+        if (e.claimLost) {
+          logger.warn(`[customer-properties] property block skipped for ${maskSid(callSid)} — processing claim lost to a newer worker`);
+        } else {
+          // Log the error CODE/NAME only — a DB error message can echo the failing
+          // address (e.g. unique-constraint "Key (address_key)=(...) already exists").
+          logger.warn(`[customer-properties] call-pipeline write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+        }
       }
     }
 
