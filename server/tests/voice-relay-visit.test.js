@@ -344,9 +344,12 @@ describe('get_service_report', () => {
     );
   });
 
-  // ⭐ PARSER-APPROVED IS NOT CODE-FREE: a valid reviewed section can still
-  // carry a gate code — the canonical redactor runs over the approved copy.
-  test('a gate code inside the REVIEWED draft is redacted before speech', async () => {
+  // ⭐ PARSER-APPROVED IS NOT CODE-FREE: a valid reviewed section carrying a
+  // gate code now fails the parse ITSELF (containsReportAccessCode nulls the
+  // body — #3420), so the draft never reaches the relay at all. The relay's
+  // own canonical redactor stays as defense in depth for anything the parser
+  // shape lets through.
+  test('a gate code inside the REVIEWED draft rejects the parse — nothing from the draft is spoken', async () => {
     const notesWithCode = [
       'WHAT WE DID',
       'We treated the exterior perimeter. Gate code 4417 for the side entrance.',
@@ -355,8 +358,10 @@ describe('get_service_report', () => {
     ].join('\n');
     primeDb({ service_records: [{ ...RECORD, technician_notes: notesWithCode }] });
     const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
-    expect(out).toContain('kitchen slab'); // the reviewed note still speaks
-    expect(out).not.toContain('4417');     // the code does not
+    expect(out).not.toContain('4417');          // the code never egresses
+    expect(out).not.toContain('kitchen slab');  // and neither does the rest of the rejected draft
+    expect(out).not.toMatch(/report summary/i); // the visit line still speaks without it
+    expect(out).toContain('Visit on');
   });
 
   test('an internal note APPENDED to the reviewed draft rejects the whole parse — nothing is spoken', async () => {

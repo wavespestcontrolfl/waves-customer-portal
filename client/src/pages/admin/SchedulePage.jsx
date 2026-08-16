@@ -9808,6 +9808,18 @@ export function CompletionPanel({
   // technician-set — even on the same value.
   const [typedActivityTouched, setTypedActivityTouched] = useState(false);
   const [typedNextStepChips, setTypedNextStepChips] = useState([]);
+  // Companion-only profiles whose every customer-facing companion is a
+  // zero-score bait story can never publish generated copy — hold Generate
+  // the same way the primary bait zero state does (codex r44). Absent
+  // delivery (older feeds) defaults customer-facing, matching the server.
+  const customerFacingCompanions = companionSchemas.filter(
+    (schema) => schema.delivery !== "internal_only",
+  );
+  const baitZeroCompanionOnly = !isTypedFindings
+    && customerFacingCompanions.length > 0
+    && customerFacingCompanions.every((schema) =>
+      ["termite_bait_station", "rodent_bait_station"].includes(schema.type)
+      && (companionState[schema.type] || EMPTY_COMPANION_ENTRY).score === 0);
   const [typedRecommendations, setTypedRecommendations] = useState("");
   const [typedRecommendationsEdited, setTypedRecommendationsEdited] =
     useState(false);
@@ -12163,6 +12175,13 @@ export function CompletionPanel({
     );
   }
   async function handlePhotoSelect(e) {
+    // Photo count is a generation input (payload photoCount) — the set is
+    // frozen while the model is drafting, same as every typed field
+    // (codex r44).
+    if (generating) {
+      if (photoInputRef.current) photoInputRef.current.value = "";
+      return;
+    }
     const files = Array.from(e.target.files || []);
     if (servicePhotos.length + files.length > 5) {
       alert("Maximum 5 photos allowed.");
@@ -12193,6 +12212,7 @@ export function CompletionPanel({
     if (photoInputRef.current) photoInputRef.current.value = "";
   }
   function removePhoto(index) {
+    if (generating) return;
     setServicePhotos((prev) => prev.filter((_, i) => i !== index));
     setTypedPhotoSummary("");
   }
@@ -13249,6 +13269,9 @@ export function CompletionPanel({
     const snapshot = JSON.stringify([
       areasServiced, observationsText, recommendationsText,
       customerInteraction, customerConcern, clientPestRating,
+      // the payload sends photoCount — the set's size is a generation
+      // input like any other (codex r44)
+      servicePhotos.length,
     ]);
     if (generationInputsRef.current === null) {
       generationInputsRef.current = snapshot;
@@ -13264,7 +13287,8 @@ export function CompletionPanel({
       invalidateGeneratedReportOnTypedEdit();
     }
   }, [areasServiced, observationsText, recommendationsText,
-    customerInteraction, customerConcern, clientPestRating, generating]);
+    customerInteraction, customerConcern, clientPestRating,
+    servicePhotos, generating]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
   // publish it beside contradicting structured findings (codex r23). Prose
@@ -13274,7 +13298,12 @@ export function CompletionPanel({
     if (!installed) return;
     generatedReportTextRef.current = null;
     if (String(notes || "").trim() === installed) {
-      setNotes("");
+      // The tech's handwritten pre-generation notes come BACK when the
+      // draft clears — clearing to empty would drop them from a
+      // no-regenerate completion and from the next generation's grounding
+      // (codex r44).
+      setNotes(preGenerationNotesRef.current || "");
+      preGenerationNotesRef.current = null;
       setAiReportUsed(false);
       setGeneratedReportCleared(true);
     }
@@ -14400,10 +14429,13 @@ export function CompletionPanel({
                   || (stationFeatureOn && stationRegistryState === "loading")
                   // Bait zero states always refuse the drafted body for
                   // fixed wording — don't bill a model call the report can
-                  // never publish (codex r43).
+                  // never publish (codex r43); companion-only profiles whose
+                  // every customer-facing companion is a zero-score bait
+                  // story hold the same way (codex r44).
                   || (isTypedFindings
                     && ["termite_bait_station", "rodent_bait_station"].includes(typedFindingsSchema?.type)
-                    && typedActivityScore === 0)}
+                    && typedActivityScore === 0)
+                  || baitZeroCompanionOnly}
                 style={{
                   ...secondaryPill,
                   marginTop: 4,
@@ -14486,10 +14518,10 @@ export function CompletionPanel({
                 <button
                   type="button"
                   onClick={() => photoInputRef.current?.click()}
-                  disabled={servicePhotos.length >= 5}
+                  disabled={servicePhotos.length >= 5 || generating}
                   style={{
                     ...secondaryPill,
-                    opacity: servicePhotos.length >= 5 ? 0.5 : 1,
+                    opacity: servicePhotos.length >= 5 || generating ? 0.5 : 1,
                   }}
                 >
                   Add photos
@@ -14523,6 +14555,7 @@ export function CompletionPanel({
                         <button
                           type="button"
                           onClick={() => removePhoto(i)}
+                          disabled={generating}
                           aria-label="Remove photo"
                           style={{
                             position: "absolute",
@@ -16605,7 +16638,8 @@ export function CompletionPanel({
                 // Same bait zero-state hold as the mobile button (codex r43).
                 || (isTypedFindings
                   && ["termite_bait_station", "rodent_bait_station"].includes(typedFindingsSchema?.type)
-                  && typedActivityScore === 0)}
+                  && typedActivityScore === 0)
+                || baitZeroCompanionOnly}
               style={{
                 width: "100%",
                 padding: "10px 16px",
@@ -16653,7 +16687,7 @@ export function CompletionPanel({
               />{" "}
               <button
                 onClick={() => photoInputRef.current?.click()}
-                disabled={servicePhotos.length >= 5}
+                disabled={servicePhotos.length >= 5 || generating}
                 style={{
                   ...btnBase,
                   background: "transparent",
@@ -16661,7 +16695,7 @@ export function CompletionPanel({
                   border: `1px solid ${D.teal}44`,
                   height: 40,
                   fontSize: 13,
-                  opacity: servicePhotos.length >= 5 ? 0.5 : 1,
+                  opacity: servicePhotos.length >= 5 || generating ? 0.5 : 1,
                 }}
               >
                 {" "}
@@ -16696,6 +16730,7 @@ export function CompletionPanel({
                       />{" "}
                       <button
                         onClick={() => removePhoto(i)}
+                        disabled={generating}
                         style={{
                           position: "absolute",
                           top: -6,
