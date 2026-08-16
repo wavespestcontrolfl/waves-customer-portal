@@ -2313,3 +2313,37 @@ describe('codex #3423 r27 — sensitivity directives, corporate suffixes, overdu
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r28 — descriptive access/card claims, Ltd suffix, -ies stemming', () => {
+  test('descriptive payment-method and entry claims reject on empty facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer provided credit card', 'Customer provided gate access']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('"Waves Pest Control Ltd" rejects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control Ltd visited.' },
+      grounding,
+    ).reason).toBe('noncanonical_company_name');
+  });
+
+  test('a singular sensitivity fact grounds the plural directive', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ type: 'sensitivity', detail: 'chemical sensitivity on file' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: ['Discuss chemical sensitivities'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});

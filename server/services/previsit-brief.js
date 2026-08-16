@@ -99,7 +99,7 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Connector optional (r22): "Waves Pest Control Pest Services" is a
 // suffixed variant too — a brand word directly after the name rejects;
 // ordinary prose ("- routine service", "serviced the yard") does not.
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:(?:&|\+|\/|-|,|\band\b)\s*)?(?:lawn|pest|care|control|llc|inc|corp|co)\b)/i;
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:(?:&|\+|\/|-|,|\band\b)\s*)?(?:lawn|pest|care|control|llc|inc|corp|co|ltd|llp)\b)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -915,17 +915,17 @@ const REFERENCE_STOP_WORDS = new Set([
 // organism, so an unrecognized rare word fails the leg to the template
 // (safe degradation; the brief must never carry invented guidance).
 const COMMON_PROSE_WORDS = new Set([
-  'about', 'above', 'access', 'account', 'action', 'address', 'after', 'again', 'ahead', 'alert',
+  'about', 'above', 'account', 'action', 'address', 'after', 'again', 'ahead', 'alert',
   'along', 'amount', 'annual', 'apply', 'applied', 'applying', 'appointment', 'approach', 'arrival', 'arrive',
   'arriving', 'asked', 'attention', 'avoid', 'balance', 'baseboard', 'baseboards', 'basement', 'bathroom', 'bedroom',
   'before', 'begin', 'behind', 'below', 'between', 'booked', 'booking', 'bring', 'building',
   'cabinet', 'cabinets', 'called', 'calling', 'cancel', 'cancelled', 'carefully', 'caution', 'check', 'checked',
   'checking', 'clear', 'close', 'closet', 'complete', 'completed', 'concern', 'concerns', 'condition', 'conditions',
   'confirm', 'confirmed', 'contact', 'continue', 'continued', 'corner', 'corners', 'coverage', 'covered', 'crawl',
-  'credit', 'current', 'customer', 'cycle', 'daytime', 'detail', 'details', 'discussed', 'dispatch',
+  'current', 'customer', 'cycle', 'daytime', 'detail', 'details', 'discussed', 'dispatch',
   'document', 'driveway', 'during', 'earlier', 'early', 'entry', 'evening', 'every', 'expect',
   'expects', 'extra', 'family', 'fence', 'fencing', 'first', 'flag', 'flagged', 'focus', 'follow',
-  'following', 'front', 'garage', 'garden', 'gate', 'gates', 'gutter', 'gutters', 'heavy', 'hedge',
+  'following', 'front', 'garage', 'garden', 'gutter', 'gutters', 'heavy', 'hedge',
   'hedges', 'history', 'home', 'hours', 'inspect', 'inspected', 'inspection', 'inside', 'issue',
   'issues', 'items', 'kitchen', 'knock', 'landscape', 'lanai', 'later', 'lawn', 'leave', 'light',
   'listed', 'locked', 'maintain', 'maintenance', 'member', 'membership', 'message', 'meter', 'monitor', 'monitoring',
@@ -949,13 +949,13 @@ const COMMON_PROSE_WORDS = new Set([
   // like mice/rats are scanned; ordinary short words must stay known).
   'have', 'been', 'will', 'must', 'then', 'than', 'they', 'them', 'when', 'each',
   'only', 'also', 'some', 'more', 'most', 'done', 'sure', 'fine', 'good', 'open',
-  'next', 'last', 'line', 'side', 'gate', 'note', 'call', 'text', 'week', 'days',
+  'next', 'last', 'line', 'side', 'note', 'call', 'text', 'week', 'days',
   'date', 'time', 'door', 'wall', 'lawn', 'turf', 'tree', 'were', 'work', 'both',
   'here', 'there', 'keep', 'left', 'high', 'look', 'like', 'plan', 'stop', 'take',
   'told', 'used', 'want', 'well', 'your', 'their', 'after', 'need', 'needs', 'ask',
   'asks', 'same', 'soon', 'once', 'twice', 'edge', 'best', 'back', 'full', 'half',
   'away', 'near', 'upon', 'very', 'much', 'many', 'wear', 'shoe', 'shoes', 'rain',
-  'wind', 'heat', 'cold', 'warm', 'soil', 'seed', 'file', 'down', 'knock', 'card', 'paid', 'owed', 'owes', 'due', 'dues', 'crew', 'team', 'unit', 'step', 'path', 'walk', 'tarp', 'hose', 'pump', 'tank', 'mask', 'kit',
+  'wind', 'heat', 'cold', 'warm', 'soil', 'seed', 'file', 'down', 'knock', 'paid', 'owed', 'owes', 'due', 'dues', 'crew', 'team', 'unit', 'step', 'path', 'walk', 'tarp', 'hose', 'pump', 'tank', 'mask', 'kit',
   // Generic vocabulary from the live rejection histogram (08-14/15: 96% of
   // briefs template-fell on words like "perform" ×79, "provide",
   // "availability"). Deliberately NO organisms, product names, or
@@ -1010,6 +1010,10 @@ const GROUNDED_ONLY_WORDS = new Set([
   // r24/r25: "Estimate provided" / "Quote provided" are money-delivery
   // claims in ANY field (quotes ARE estimates in this system).
   'estimate', 'estimates', 'quote', 'quotes',
+  // r28: entry/payment-method state ("provided gate access"/"credit card")
+  // is claimable in ANY field — and access codes never pass through the
+  // LLM by design, so an ungrounded access claim is always invented.
+  'gate', 'gates', 'access', 'card', 'cards', 'key', 'keys', 'fob', 'fobs', 'credit', 'credits',
 ]);
 
 // Instruction objects carrying these words direct real business actions
@@ -1019,10 +1023,9 @@ const GROUNDED_ONLY_WORDS = new Set([
 // (payment/invoice/refund/billing graduated to GROUNDED_ONLY_WORDS in r10
 // — they require evidence in EVERY field, not just instructions.)
 const INSTRUCTION_EVIDENCE_WORDS = new Set([
-  'credit', 'credits', 'balance', 'discount', 'discounts',
+  'balance', 'discount', 'discounts',
   // r15: access-security objects ("Retrieve gate key/access card") are
   // fabricatable from common words — the access noun must be evidenced.
-  'gate', 'gates', 'access', 'card', 'cards', 'key', 'keys', 'fob', 'fobs',
   // r19: scheduling directives ("Discuss schedule") assert a real action.
   // 'scheduled' (adjective — "a prior scheduled service") stays prose.
   'schedule', 'schedules',
@@ -1082,6 +1085,8 @@ function wordVariants(word) {
   if (word.endsWith('ing')) out.push(word.slice(0, -3), `${word.slice(0, -3)}e`);
   if (word.endsWith('ed')) out.push(word.slice(0, -2), word.slice(0, -1));
   if (word.endsWith('ly')) out.push(word.slice(0, -2));
+  // -ies plural (r28): 'sensitivities' must reach 'sensitivity'.
+  if (word.endsWith('ies')) out.push(`${word.slice(0, -3)}y`);
   // Noun-of-action inflection (r24): 'treatment' must ground on
   // 'treat'/'treated'/'treating' in the facts.
   if (word.endsWith('ment') || word.endsWith('ments')) {
@@ -1493,8 +1498,17 @@ function findUngroundedClaim(body, grounding) {
     // 4+ characters: 'mice'/'rats'/'tick'/'flea'-length organisms must
     // not slip under the scan (3-letter singulars are covered in practice
     // by substring grounding — 'ant' grounds on 'ants').
-    for (const m of String(field).toLowerCase().matchAll(/[a-z][a-z'-]{3,}/g)) {
+    for (const m of String(field).toLowerCase().matchAll(/[a-z][a-z'-]{2,}/g)) {
       const word = m[0];
+      // Short tokens are only examined when they are grounded-only
+      // vocabulary ('key', 'fob') — everything else below 4 letters keeps
+      // the historical exemption (r28).
+      if (word.length < 4) {
+        if (GROUNDED_ONLY_WORDS.has(word) && !groundedWordOk(word, groundedText, groundedValueText)) {
+          return { kind: 'novel_term', term: word };
+        }
+        continue;
+      }
       // Hyphenated prose ("re-check", "walk-through"): known when every
       // part is known; short parts are below the rare-word threshold.
       const parts = word.split('-').filter(Boolean);
