@@ -1154,6 +1154,10 @@ function wordVariants(word) {
   if (word === 'treatment' || word === 'treatments') {
     out.push('treat', 'treated', 'treating', 'treats');
   }
+  // payment <-> pay/paid and refund <-> refunded are one billing family
+  // each (r68) — "asked how to pay" grounds "asked about payment".
+  if (word === 'payment' || word === 'payments') out.push('pay', 'pays', 'paid', 'paying');
+  if (word === 'refund' || word === 'refunds') out.push('refunded', 'refunding');
   return out;
 }
 
@@ -1267,6 +1271,11 @@ function findUngroundedClaim(body, grounding) {
     // A present estimate object is THE estimate fact (r24) — its values
     // rarely contain the literal word.
     ...(grounding.llmFacts?.openScope?.pendingEstimate || grounding.llmFacts?.openScope?.sourceEstimate ? ['estimate', 'quote'] : []),
+    // A present visit object IS the upcoming-treatment fact (r68) —
+    // future/current "treatment" wording is grounded by the visit itself;
+    // the completed-work guard still rejects history phrasing without a
+    // lastVisit.
+    ...(grounding.llmFacts?.visit ? ['treatment'] : []),
     // A present membership object IS the membership fact (r29).
     ...(grounding.llmFacts?.membership ? ['membership', 'member'] : []),
     // The overdue_balance flag IS billing evidence — its detail ('$100.00
@@ -1443,11 +1452,15 @@ function findUngroundedClaim(body, grounding) {
   // bookings fabricate service history exactly like spelled durations.
   // …and communication volumes ("five calls") fabricate interaction
   // history the same way (r67 P2).
-  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?)\b/g)) {
+  // Bounded modifiers between the quantity and unit ("five active
+  // services", "five more times") are still count claims (r68 P2);
+  // 'of' is excluded so partitives ("one of the services") stay prose.
+  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:(?!of\b)\w+\s+){0,2}(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?)\b/g)) {
     const phrase = `${m[1]} ${m[2]}`;
     const digitMap = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', fifteen: '15', twenty: '20', thirty: '30' };
-    if (!groundedValueText.includes(phrase)
-      && !new RegExp(`(?<!\\d)${digitMap[m[1]]}(?![\\d.])[^.;!?]{0,10}${m[2].replace(/s$/, '')}`).test(groundedValueText)) {
+    const unit = m[2].replace(/s$/, '');
+    if (!new RegExp(`\\b${m[1]}\\b[^.;!?]{0,20}${unit}`).test(groundedValueText)
+      && !new RegExp(`(?<!\\d)${digitMap[m[1]]}(?![\\d.])[^.;!?]{0,20}${unit}`).test(groundedValueText)) {
       return { kind: 'numeric', term: phrase };
     }
   }

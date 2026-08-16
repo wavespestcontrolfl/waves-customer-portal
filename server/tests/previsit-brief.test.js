@@ -3729,3 +3729,34 @@ describe('codex #3423 r67 — perfect-tense adverbs, passive contact, organism b
     expect(validateBriefJson({ ...BASE, customer_context: 'Customer called five times' }, grounded).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r68 — modifier-spanning counts, upcoming treatment, money inflections', () => {
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('spelled counts with intervening modifiers must ground', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer has five active services', 'Customer called five more times']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'account shows five active services on file' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has five active services' }, grounded).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'One of the services is lawn care' }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'lawn care services on the account' }] } }).body).toBeTruthy();
+  });
+
+  test('the current visit grounds upcoming-treatment wording; history phrasing still rejects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const visitOnly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Quarterly Pest Control' } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'The upcoming treatment is routine' }, visitOnly).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Treatment was performed' }, visitOnly).reason).toBeTruthy();
+  });
+
+  test('pay/paid grounds payment; refunded grounds refund', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const payFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer asked how to pay' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer asked about payment' }, payFact).body).toBeTruthy();
+    const refundFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer was refunded yesterday' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Refund was completed' }, refundFact).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer asked about payment' }, EMPTY).reason).toBeTruthy();
+  });
+});
