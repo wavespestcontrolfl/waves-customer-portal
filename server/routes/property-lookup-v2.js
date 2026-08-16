@@ -2732,9 +2732,14 @@ function detectCategory(rc, ai = {}) {
   // Common-area parcels are association-owned regardless of unit count; the
   // multifamily-flavored strings alone defer to a county-attested small
   // residential count (≥5-unit ruling — duplex/guest house = residential).
+  // The reclassification rides the unit-scope guardrails gate: a residential
+  // verdict hands a unit-suffixed estimator draft the whole building's
+  // county sqft, and the protections that catch that
+  // (applyUnitScopeToPropertyFacts + the review marker) only run gate-on —
+  // until then the conservative COMMERCIAL verdict stands (codex P1).
   if (/(hoa\s*common|common\s*area)/.test(text)) return 'COMMERCIAL';
   if (/(apartment|apartments|multi\s*family|multifamily)/.test(text)
-    && !countyAttestedSmallResidential(signalRc)) return 'COMMERCIAL';
+    && !(unitScopeGuardrailsEnabled() && countyAttestedSmallResidential(signalRc))) return 'COMMERCIAL';
   if (hasStructuredCommercialAiSignal(ai)) return 'COMMERCIAL';
   if (signalRc?.unitCount && signalRc.unitCount > 4)
     return 'COMMERCIAL';

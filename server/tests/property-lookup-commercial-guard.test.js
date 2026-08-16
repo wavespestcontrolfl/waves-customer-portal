@@ -188,7 +188,12 @@ describe('county-attested small parcels stay residential (≥5-unit ruling, 2026
   // Florida PAOs file duplex/guest-house parcels under DOR 08xx and the
   // parcel parsers map every 08xx to the string "Multifamily" — the owner's
   // ruling is that fewer than five units is residential, so the bare
-  // multifamily text vote defers to a county-attested count ≤4.
+  // multifamily text vote defers to a county-attested count ≤4. The
+  // reclassification only runs with the unit-scope guardrails gate ON —
+  // estimator drafts depend on that machinery to catch unit-suffixed
+  // requests against whole-building measurements.
+  beforeEach(() => { process.env.GATE_UNIT_SCOPE_GUARDRAILS = 'true'; });
+  afterEach(() => { delete process.env.GATE_UNIT_SCOPE_GUARDRAILS; });
   function countyDuplexParcel(overrides = {}) {
     return {
       formattedAddress: '48 Osprey Bend, Osprey, FL 34229',
@@ -274,6 +279,13 @@ describe('county-attested small parcels stay residential (≥5-unit ruling, 2026
 
   test('hasCommercialSignalText synthetic defaults keep the multifamily text vote (no provenance)', () => {
     expect(detectCategory({ propertyType: 'Multifamily', unitCount: 1 }, {})).toBe('COMMERCIAL');
+  });
+
+  test('gate OFF: even an attested duplex keeps the conservative COMMERCIAL verdict (codex P1)', () => {
+    // With GATE_UNIT_SCOPE_GUARDRAILS off, estimator drafts have no
+    // unit-scope protection — the reclassification must not outrun it.
+    delete process.env.GATE_UNIT_SCOPE_GUARDRAILS;
+    expect(detectCategory(countyDuplexParcel(), {})).toBe('COMMERCIAL');
   });
 });
 
