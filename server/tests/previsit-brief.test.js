@@ -2897,3 +2897,51 @@ describe('codex #3423 r44 — activity evidence, real history, access verb, scop
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r45 — tier binding, contact imperatives, outstanding, visit phrasing, sensitive', () => {
+  test('r45 claim shapes reject on unsupported facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const hoa = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { propertyProfile: { hoaName: 'Gold Tree HOA' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Gold member' },
+      hoa,
+    ).reason).toMatch(/gold/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { priorities: ['Call customer before arrival'] },
+      { priorities: ['Do not call customer'] },
+      { priorities: [], customer_context: 'Customer is sensitive to chemicals' },
+    ]) {
+      expect(validateBriefJson(
+        { watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null, ...body },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const overdue = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] } };
+    for (const claim of ['Nothing outstanding', 'No outstanding balance']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        overdue,
+      ).reason).toMatch(/payment_state_conflict/);
+    }
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest', scheduledDate: '2026-08-20' } } };
+    for (const claim of ['Visit cancelled', 'Technician is en route']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        prodVisit,
+      ).reason).toMatch(/appointment_state/);
+    }
+  });
+
+  test('grounded tier and sensitivity claims pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { membership: { tier: 'Gold' }, flags: [{ detail: 'chemical sensitivity on file' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Gold member. Customer is sensitive to chemicals.' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});

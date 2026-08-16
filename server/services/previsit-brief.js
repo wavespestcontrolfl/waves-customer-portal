@@ -940,7 +940,7 @@ const COMMON_PROSE_WORDS = new Set([
   'recheck', 'record', 'records', 'reminder', 'renewal', 'repair', 'report', 'reported', 'request', 'requested',
   'reschedule', 'rescheduled', 'resolve', 'resolved', 'response', 'return', 'review', 'reviewed', 'right', 'roof',
   'route', 'routine', 'schedule', 'scheduled', 'scope', 'screen', 'screened', 'season', 'secure', 'secured',
-  'sensitive', 'setup', 'sheet', 'shrubs', 'siding', 'since', 'skip', 'slab', 'small',
+  'setup', 'sheet', 'shrubs', 'siding', 'since', 'skip', 'slab', 'small',
   'soffit', 'spray', 'sprayed', 'spraying', 'spot', 'staff', 'start', 'started', 'status', 'still',
   'stone', 'stops', 'sweep', 'swept', 'technician', 'texts', 'thorough', 'through', 'times', 'today',
   'touch', 'toward', 'treat', 'treated', 'trees', 'update', 'updated', 'upcoming',
@@ -1015,7 +1015,7 @@ const GROUNDED_ONLY_WORDS = new Set([
   'estimate', 'estimates', 'quote', 'quotes',
   // r36: sensitivity claims ("provided chemical sensitivity") are safety
   // conditions in ANY field.
-  'sensitivity', 'sensitivities',
+  'sensitivity', 'sensitivities', 'sensitive',
   // r34/r39: pet data is deterministic-block-only by design — an LLM pet
   // claim in ANY field must derive from a fact (e.g. a flag).
   'pet', 'pets', 'dog', 'dogs', 'cat', 'cats',
@@ -1109,6 +1109,9 @@ function wordVariants(word) {
   if (word.endsWith('ing')) out.push(word.slice(0, -3), `${word.slice(0, -3)}e`, `${word.slice(0, -3)}ed`);
   if (word.endsWith('ed')) out.push(word.slice(0, -2), word.slice(0, -1));
   if (word.endsWith('ly')) out.push(word.slice(0, -2));
+  // sensitive <-> sensitivity are one family (r45).
+  if (word === 'sensitive') out.push('sensitivity');
+  if (word === 'sensitivity' || word === 'sensitivities') out.push('sensitive');
   // initial <-> initially likewise (r33 P2).
   if (word === 'initial') out.push('initially');
   // available <-> availability are one evidence family (r31 P2) — model
@@ -1415,7 +1418,7 @@ function findUngroundedClaim(body, grounding) {
   const visitValueText = grounding.llmFacts?.visit
     ? collectFactValues(grounding.llmFacts.visit).join(' ').toLowerCase()
     : '';
-  for (const m of outputText.matchAll(/\bappointments?\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+appointments?\b/g)) {
+  for (const m of outputText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
     // Multi-word statuses ('en route', 'on site') match underscore forms too.
     const statusForms = [...new Set([...wordVariants(status.replace(/\s/g, '')), status, status.replace(/\s/g, '_'), status.replace(/\s/g, '')])];
@@ -1432,7 +1435,10 @@ function findUngroundedClaim(body, grounding) {
   // Claimed customer CONTACT REQUESTS ("asked for a phone call") are
   // factual asks — the channel and a request verb must both appear in the
   // fact values, or the technician contacts someone who never asked (r39).
-  const contactReq = outputText.match(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:for\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?)\b/);
+  const contactReq = outputText.match(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:for\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?)\b/)
+    // Direct channel imperatives ("Call customer", "Do not text customer")
+    // are the same claim class (r45).
+    || (() => { const m = outputText.match(/\b(do\s+not\s+|don't\s+)?(call|text|email)\s+(?:the\s+)?customer\b/); return m ? [m[0], m[1], m[2]] : null; })();
   if (contactReq) {
     const negatedClaim = Boolean(contactReq[1]);
     const channel = contactReq[2].replace(/s$/, '');
@@ -1454,8 +1460,20 @@ function findUngroundedClaim(body, grounding) {
   // the OPPOSITE of the customer's billing state — flattened token pools
   // cannot see the contradiction, so it is checked as a phrase (r32).
   if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
-    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due)\b/i.test(outputText)) {
+    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due|outstanding)\b|\bno\s+outstanding\s+(?:balance|invoices?|payments?)?\b|\bzero\s+balance\b/i.test(outputText)) {
     return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
+  }
+  // Tier words bind to ACTUAL tier facts — an HOA or product name
+  // containing 'gold' must not assign a WaveGuard tier (r45).
+  const tierText = [
+    grounding.llmFacts?.membership?.tier,
+    grounding.llmFacts?.openScope?.sourceEstimate?.tier,
+    grounding.llmFacts?.openScope?.pendingEstimate?.tier,
+  ].filter(Boolean).join(' ').toLowerCase();
+  for (const tier of ['bronze', 'silver', 'gold', 'platinum']) {
+    if (new RegExp(`\\b${tier}\\b`).test(outputText) && !new RegExp(`\\b${tier}\\b`).test(tierText)) {
+      return { kind: 'novel_term', term: tier };
+    }
   }
   // 'accepted' bound to its object (r37): the estimate status must not be
   // reassigned to an unrelated noun ("Customer accepted renewal") — the
