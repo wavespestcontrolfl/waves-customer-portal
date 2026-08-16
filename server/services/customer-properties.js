@@ -116,18 +116,40 @@ async function listProperties(customerId) {
  * created after the migration). Idempotent — the partial-unique index makes a
  * concurrent double-create safe. Returns { created, propertyId }.
  */
-async function ensurePrimaryProperty(customerOrId, { occupancyType, source } = {}) {
+async function ensurePrimaryProperty(customerOrId, opts = {}) {
+  // Optional processing-claim fence (#3418 r18): FOR UPDATE on the
+  // call_log row inside one transaction spanning the existence check and
+  // the insert, so a reclaimed stale worker cannot lazily create the
+  // primary from its obsolete extraction. Unfenced callers unchanged.
+  const { claimFence = null } = opts;
+  if (claimFence && claimFence.callLogId && claimFence.procToken) {
+    return db.transaction(async (trx) => {
+      const owned = await trx('call_log')
+        .where({ id: claimFence.callLogId, processing_token: claimFence.procToken })
+        .forUpdate()
+        .first('id');
+      if (!owned) return { created: false, propertyId: null, claimLost: true };
+      return ensurePrimaryCore(customerOrId, opts, trx);
+    });
+  }
+  return ensurePrimaryCore(customerOrId, opts, db);
+}
+
+async function ensurePrimaryCore(customerOrId, { occupancyType, source } = {}, conn = db) {
   const customer = typeof customerOrId === 'string'
-    ? await db('customers').where({ id: customerOrId }).first()
+    ? await conn('customers').where({ id: customerOrId }).first()
     : customerOrId;
   if (!customer || !customer.id) return { created: false, propertyId: null };
 
-  const existing = await db('customer_properties').where({ customer_id: customer.id, is_primary: true }).first();
+  const existing = await conn('customer_properties').where({ customer_id: customer.id, is_primary: true }).first();
   if (existing) return { created: false, propertyId: existing.id };
   if (!String(customer.address_line1 || '').trim()) return { created: false, propertyId: null };
 
   try {
-    const [row] = await db('customer_properties').insert({
+    // The insert runs in a NESTED transaction (savepoint under a fence
+    // trx; a plain top-level trx otherwise) so the 23505 primary-race
+    // catch below never poisons an enclosing transaction.
+    const [row] = await conn.transaction((sp) => sp('customer_properties').insert({
       customer_id: customer.id,
       label: customer.profile_label || 'Primary',
       // Default owner-occupied for a plain backfill, but honor a caller-supplied
@@ -157,7 +179,7 @@ async function ensurePrimaryProperty(customerOrId, { occupancyType, source } = {
       // paid work on it (call-property-lookup's recovery sweep).
       source: source || 'backfill',
       active: true,
-    }).returning('id');
+    }).returning('id'));
     return { created: true, propertyId: row && (row.id || row) };
   } catch (e) {
     // ONLY the partial-unique primary race (another writer created the primary
@@ -306,24 +328,52 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
  * corrupt the primary's identity and make the later secondary insert dedup against
  * the now-mutated primary. The unit-bearing call is handled by recordCallProperty.
  */
-async function completePrimaryFromCall(customerId, call = {}) {
-  if (!customerId || !String(call.address_line1 || '').trim()) return;
-  const cust = await db('customers').where({ id: customerId })
+async function completePrimaryFromCall(customerId, call = {}, { claimFence = null } = {}) {
+  if (!customerId || !String(call.address_line1 || '').trim()) return undefined;
+  // Optional processing-claim fence (#3418 r18): same shape as
+  // recordCallProperty's — FOR UPDATE on the call_log row inside one
+  // transaction spanning the reads and both completion writes, so a
+  // reclaimed stale worker cannot graft its obsolete city/ZIP. Unfenced
+  // callers keep the exact legacy behavior (bare db, swallowed per-write
+  // errors).
+  if (claimFence && claimFence.callLogId && claimFence.procToken) {
+    return db.transaction(async (trx) => {
+      const owned = await trx('call_log')
+        .where({ id: claimFence.callLogId, processing_token: claimFence.procToken })
+        .forUpdate()
+        .first('id');
+      if (!owned) return { claimLost: true };
+      return completePrimaryCore(customerId, call, trx);
+    });
+  }
+  return completePrimaryCore(customerId, call, db);
+}
+
+async function completePrimaryCore(customerId, call, conn) {
+  // Inside a fence transaction a swallowed failed statement would POISON
+  // the trx (later statements 25P02) — so errors propagate there and only
+  // the legacy bare-db path keeps its per-write swallow.
+  const swallow = (p, label) => (conn === db
+    ? p.catch((e) => logger.warn(`[customer-properties] ${label} skipped for ${customerId}: ${e.code || e.name || 'db_error'}`))
+    : p);
+  const cust = await conn('customers').where({ id: customerId })
     .select('address_line1', 'address_line2', 'city', 'zip').first();
-  if (!cust || !String(cust.address_line1 || '').trim()) return;
-  if (streetKey(cust.address_line1) !== streetKey(call.address_line1)) return;
+  if (!cust || !String(cust.address_line1 || '').trim()) return undefined;
+  if (streetKey(cust.address_line1) !== streetKey(call.address_line1)) return undefined;
 
   const gap = (cur) => !String(cur || '').trim();
   const patch = {};
   if (gap(cust.city) && call.city) patch.city = call.city;
   if (gap(cust.zip) && call.zip) patch.zip = call.zip;
   if (Object.keys(patch).length) {
-    await db('customers').where({ id: customerId }).update({ ...patch, updated_at: new Date() })
-      .catch((e) => logger.warn(`[customer-properties] mirror complete skipped for ${customerId}: ${e.code || e.name || 'db_error'}`));
+    await swallow(
+      conn('customers').where({ id: customerId }).update({ ...patch, updated_at: new Date() }),
+      'mirror complete',
+    );
   }
 
-  const primary = await db('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
-  if (!primary) return;
+  const primary = await conn('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
+  if (!primary) return undefined;
   const ppatch = {};
   if (gap(primary.city) && call.city) ppatch.city = call.city;
   if (gap(primary.zip) && call.zip) ppatch.zip = call.zip;
@@ -335,11 +385,14 @@ async function completePrimaryFromCall(customerId, call = {}) {
       zip: ppatch.zip || primary.zip,
     });
     ppatch.updated_at = new Date();
-    await db('customer_properties').where({ id: primary.id }).update(ppatch)
-      // Log the error CODE only — a DB error on an address_key write can echo the
-      // canonicalized address (PII) in its message.
-      .catch((e) => logger.warn(`[customer-properties] primary complete skipped for ${customerId}: ${e.code || e.name || 'db_error'}`));
+    // Log the error CODE only — a DB error on an address_key write can echo the
+    // canonicalized address (PII) in its message.
+    await swallow(
+      conn('customer_properties').where({ id: primary.id }).update(ppatch),
+      'primary complete',
+    );
   }
+  return undefined;
 }
 
 /**

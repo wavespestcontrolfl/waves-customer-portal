@@ -8192,7 +8192,7 @@ const CallRecordingProcessor = {
         // the records lack, complete the mirror AND the existing primary property
         // (recomputing its key) BEFORE snapshotting — otherwise the primary is
         // captured partial / unitless and a later full-address call duplicates it.
-        await customerProperties.completePrimaryFromCall(customerId, v2SoleAddressAuthority
+        const completed = await customerProperties.completePrimaryFromCall(customerId, v2SoleAddressAuthority
           ? {
             address_line1: v2SvcAddrForComplete?.street_line_1 || null,
             address_line2: v2SvcAddrForComplete?.street_line_2 || null,
@@ -8201,7 +8201,15 @@ const CallRecordingProcessor = {
           }
           : {
             address_line1: extracted.address_line1, address_line2: callUnit, city: extracted.city, zip: extracted.zip,
-          });
+          // Atomic claim fence (codex #3418 r18) — the entry SELECT above
+          // narrows the window; this makes the completion writes
+          // themselves conditional on the live claim.
+          }, { claimFence: { callLogId: call.id, procToken } });
+        if (completed?.claimLost) {
+          const lost = new Error('processing claim lost during primary completion');
+          lost.claimLost = true;
+          throw lost;
+        }
         // Rental signal — works in BOTH shadow and enforce (DRIVES_ROUTING) modes:
         // the shadow bridge may not have run, so re-derive from the V2 extraction.
         // Computed BEFORE ensurePrimaryProperty so a first-call tenant/rental
@@ -8257,7 +8265,15 @@ const CallRecordingProcessor = {
           // 'backfill' label would hide exactly the rows this block
           // enqueues lookups for).
           source: 'call_pipeline',
+          // Atomic claim fence (codex #3418 r18) — the lazy backfill must
+          // not create a primary from a reclaimed worker's extraction.
+          claimFence: { callLogId: call.id, procToken },
         });
+        if (ensured?.claimLost) {
+          const lost = new Error('processing claim lost during primary backfill');
+          lost.claimLost = true;
+          throw lost;
+        }
         const isFirstAddress = !ensured.propertyId;
         // A SECONDARY write needs a complete-enough address (city + ZIP) so its
         // dedup key matches a later full-address call — otherwise a partial row
@@ -8399,20 +8415,25 @@ const CallRecordingProcessor = {
             }
             if (v2RoleProp && persistClaimLive) {
               const v2Persist = [
-                { ...roleView, is_rental: false, __mainEntry: true },
+                { ...roleView, is_rental: false },
                 ...roleAdditionalProps,
               ];
+              // City+ZIP completeness is a SECONDARY-address rule (dedup
+              // key match). The customer's FIRST service address is
+              // recorded regardless of completeness — the V1 lane's
+              // exception (codex #3418 r10) — and it belongs to the FIRST
+              // entry that actually carries a street, wherever it sits
+              // (codex #3418 r18): an additional-properties-only
+              // extraction's first extra IS the addressless customer's
+              // first address, not a secondary.
+              let firstStreetPending = true;
               for (const entry of v2Persist) {
                 const entryCity = String(entry.city || '').trim();
                 const entryZip = String(entry.zip || '').trim();
                 if (!String(entry.address_line1 || '').trim()) continue;
-                // City+ZIP completeness is a SECONDARY-address rule (dedup
-                // key match). The customer's FIRST service address is
-                // recorded regardless of completeness — the V1 lane's
-                // exception (codex #3418 r10) — so a V2-only partial main
-                // street on an addressless customer still gets a durable
-                // row for the role staging to match.
-                if (!(entry.__mainEntry && isFirstAddress) && (!entryCity || !entryZip)) continue;
+                const firstAddressException = isFirstAddress && firstStreetPending;
+                firstStreetPending = false;
+                if (!firstAddressException && (!entryCity || !entryZip)) continue;
                 const recordedV2 = await customerProperties.recordCallProperty({
                   customerId,
                   address_line1: entry.address_line1,
@@ -11492,15 +11513,36 @@ const CallRecordingProcessor = {
                 // portal render the booked property, not the customer's
                 // primary mirror (a rental booking used to dispatch to the
                 // customer's home).
-                const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, {
-                  ...extracted,
-                  // flatView historically dropped street_line_2; a condo unit
-                  // must survive into the stamp/key (codex P2).
-                  address_line2: extracted.address_line2
-                    || v2ApprovedExtraction?.property?.service_address?.street_line_2
-                    || v2CanonicalExtraction?.property?.service_address?.street_line_2
-                    || null,
-                }, trx);
+                // V2 address authority carries into booking (codex #3418
+                // r18): when the role lane persists ONLY V2's address set,
+                // the visit stamp must resolve against that same set —
+                // passing V1's disagreeing address could stamp/dispatch a
+                // property the canonical persistence path rejected. A
+                // V2-null main street falls back to the on-file address
+                // inside the resolver, same as V1 mode.
+                const bookingV2Authority = require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')
+                  && !!v2CanonicalExtraction?.property;
+                const bookingSvcAddr = bookingV2Authority
+                  ? (v2CanonicalExtraction.property.service_address || null)
+                  : null;
+                const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, bookingV2Authority
+                  ? {
+                    ...extracted,
+                    address_line1: bookingSvcAddr?.street_line_1 || null,
+                    address_line2: bookingSvcAddr?.street_line_2 || null,
+                    city: bookingSvcAddr?.city || null,
+                    state: bookingSvcAddr?.state || extracted.state || null,
+                    zip: bookingSvcAddr?.postal_code || null,
+                  }
+                  : {
+                    ...extracted,
+                    // flatView historically dropped street_line_2; a condo unit
+                    // must survive into the stamp/key (codex P2).
+                    address_line2: extracted.address_line2
+                      || v2ApprovedExtraction?.property?.service_address?.street_line_2
+                      || v2CanonicalExtraction?.property?.service_address?.street_line_2
+                      || null,
+                  }, trx);
                 // findExistingCallAppointment only sees THIS call's rows —
                 // a visit booked through ANY other channel (a human in the
                 // portal mid-call, online self-booking) is invisible to it,

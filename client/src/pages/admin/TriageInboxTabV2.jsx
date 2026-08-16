@@ -457,10 +457,13 @@ export default function TriageInboxTabV2() {
         setActioning(null);
         if (err?.status === 409) {
           // Version conflict: the card's proposals were refreshed (or the
-          // card resolved) after this render — reload so the reviewer
-          // sees the CURRENT proposals before clicking again.
-          setError("This card changed since it loaded — refreshing so you can review the latest proposals.");
-          load();
+          // card resolved) after this render — reload the ACTIVE view
+          // (bare load() would fall back to the open tab) so the reviewer
+          // sees the CURRENT proposals before clicking again. setError
+          // runs AFTER load() so load's own setError("") reset doesn't
+          // swallow the explanation.
+          load(mode, status);
+          setError("This card changed since it loaded — review the refreshed proposals before applying.");
           return;
         }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Apply failed — try again.");
