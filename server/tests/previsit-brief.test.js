@@ -4100,3 +4100,48 @@ describe('codex #3423 r75 — property counts, grounded history-of, dated status
     expect(validateBriefJson({ ...BASE, customer_context: 'Treated with Advance last visit', mentioned_terms: [] }, treated).reason).toBeTruthy();
   });
 });
+
+describe('codex #3423 r76 — modifier treatments, photo modifiers, technician counts, subject-bearing requests, clause verbs, qualified statuses, contrast opt-outs', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+
+  test('modifier-spanning completed treatments reject without history', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson({ ...BASE, customer_context: 'Technician performed the exterior treatment' }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } }).reason).toBeTruthy();
+  });
+
+  test('photo-provision claims with modifiers need a photo fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer provided current photos' }, EMPTY).reason).toBeTruthy();
+  });
+
+  test('spelled technician counts bind to facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson({ ...BASE, customer_context: 'Five technicians scheduled' }, EMPTY).reason).toBeTruthy();
+  });
+
+  test('subject-bearing grounded contact requests round-trip', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const fact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer requested that the technician call' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer requested that the technician call' }, fact).body).toBeTruthy();
+  });
+
+  test('ordinary clause verbs after the canonical name stay prose', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const fact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { recentCalls: ['customer called waves pest control and lawn service begins tuesday'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer called Waves Pest Control and lawn service begins Tuesday' }, fact).body).toBeTruthy();
+  });
+
+  test('qualified reverse-order status evidence grounds the claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const fact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'confirmed appointment on file' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Confirmed appointment on file' }, fact).body).toBeTruthy();
+  });
+
+  test('contrast descriptions of opt-outs stay valid', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const optOut = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { servicePreferences: { interiorSpray: false }, flags: [{ detail: 'exterior service planned instead of interior' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Exterior service planned instead of interior' }, optOut).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Interior service planned' }, optOut).reason).toBeTruthy();
+  });
+});
