@@ -306,7 +306,7 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
     }
   }
   const record = await query.first('id', 'service_date', 'service_type', 'technician_notes',
-    'structured_notes', 'status', 'started_at', 'ended_at', 'advisory');
+    'structured_notes', 'status', 'started_at', 'ended_at', 'advisory', 'service_data');
   if (!record) {
     return wanted
       ? 'No completed visit on file for that date on this account. Do not describe a visit that is not on file.'
@@ -381,7 +381,19 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
   // produces no spoken note at all. The WDO fee scrub still runs on top.
   const { technicianReportCustomerCopy } = require('../service-report/technician-report-copy');
   const { customerSafeServiceNotes } = require('../project-types');
-  const reportCopy = technicianReportCustomerCopy(record.technician_notes);
+  // A completion-time request-context rejection (visit trade name,
+  // companion contradiction) is frozen into service_data — the phone
+  // report honors it like the web report does, and an unreadable
+  // service_data fails CLOSED to "rejected" (codex r61 #3420).
+  const visitBodyRejected = (() => {
+    try {
+      const sd = typeof record.service_data === 'string'
+        ? JSON.parse(record.service_data || '{}')
+        : (record.service_data || {});
+      return Boolean(sd?.technicianReportBodyRejected);
+    } catch { return true; }
+  })();
+  const reportCopy = visitBodyRejected ? null : technicianReportCustomerCopy(record.technician_notes);
   // ⭐ PARSER-APPROVED IS NOT CODE-FREE. The reviewed parse validates shape and
   // compliance language, but a valid one-line section can still carry "gate
   // code 4417" — the canonical redactor runs over the approved copy too, and

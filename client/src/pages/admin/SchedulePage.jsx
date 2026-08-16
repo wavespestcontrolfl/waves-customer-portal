@@ -11711,7 +11711,17 @@ export function CompletionPanel({
       // Typed completions keep their own recommendations box (inside the
       // findings section) — since the recap-only draft was retired, the full
       // generate action is the one AI path and must see that text too.
-      ...(isTypedFindings ? freeTextLines(typedRecommendations) : []),
+      // Submission persists this box as ONE collapsed 240-char entry
+      // (normalizeCompletionTextArray) — generation must see exactly what
+      // will persist, or the body can describe advice absent from the
+      // record (codex r61).
+      ...(isTypedFindings
+        ? (() => {
+          const packed = String(typedRecommendations || "")
+            .trim().replace(/\s+/g, " ").slice(0, 240);
+          return packed ? [packed] : [];
+        })()
+        : []),
     ];
     // Typed structured findings ground the prompt the same way the retired
     // findings-recap draft grounded its recommendations: only non-empty

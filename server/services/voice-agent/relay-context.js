@@ -728,7 +728,7 @@ async function loadCompletedVisits(customerId, limit = 5) {
     .orderBy('service_date', 'desc')
     .orderBy('id', 'desc')
     .limit(limit)
-    .select('service_date', 'service_type', 'technician_notes', 'structured_notes', 'status');
+    .select('service_date', 'service_type', 'technician_notes', 'structured_notes', 'status', 'service_data');
   const { customerSafeServiceNotes } = require('../project-types');
   return rows.map((svc) => {
     let structured = {};
@@ -756,7 +756,18 @@ async function loadCompletedVisits(customerId, limit = 5) {
     // already uses (relay-visit.js): parse first, fee scrub on top, and
     // anything that is not the reviewed two-section draft simply isn't spoken.
     const { technicianReportCustomerCopy } = require('../service-report/technician-report-copy');
-    const reportCopy = suppressed ? null : technicianReportCustomerCopy(svc.technician_notes);
+    // Completion-time request-context rejections frozen into service_data
+    // gate the spoken note too; unreadable service_data fails CLOSED
+    // (codex r61 #3420 — mirror of relay-visit).
+    const svcBodyRejected = (() => {
+      try {
+        const sd = typeof svc.service_data === 'string'
+          ? JSON.parse(svc.service_data || '{}')
+          : (svc.service_data || {});
+        return Boolean(sd?.technicianReportBodyRejected);
+      } catch { return true; }
+    })();
+    const reportCopy = (suppressed || svcBodyRejected) ? null : technicianReportCustomerCopy(svc.technician_notes);
     // ⭐ PARSER-APPROVED IS NOT CODE-FREE (mirror of relay-visit's report
     // path): the reviewed parse validates shape and compliance language, but a
     // valid section can still carry a gate or lockbox code — the canonical

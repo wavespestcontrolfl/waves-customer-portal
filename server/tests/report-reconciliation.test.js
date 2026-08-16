@@ -542,6 +542,9 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
       technicianReportBody: 'We sealed two additional gaps at the soffit line today.',
     });
     expect(clean.bodySource).toBe('technician_report');
+    // r61: the mandated remaining-concerns disclosure carries on trend
+    // visits too.
+    expect(clean.body).toContain('No remaining concerns were observed today.');
     const denial = buildTodaysResult({
       ...base,
       technicianReportBody: 'The exclusion repairs could not be completed today.',
@@ -736,6 +739,19 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
       technicianReportBody: 'We checked the attic and found no fresh rat droppings.',
     });
     expect(clean.bodySource).toBe('technician_report');
+  });
+
+  // r61 (#3420): existential evidence claims refuse on found=No.
+  test('rodent_inspection refuses "There were signs of rodents" beside found=No', () => {
+    const r = buildTodaysResult({
+      projectType: 'rodent_inspection',
+      values: { activity_found: 'No', recommended_service: 'No service needed at this time' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'There were signs of rodents in the attic insulation.',
+    });
+    expect(r.bodySource).toBeUndefined();
   });
 
   test('rodent_inspection accepts "we have not observed rodents" on a found=No visit', () => {

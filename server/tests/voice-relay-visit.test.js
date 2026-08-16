@@ -344,6 +344,22 @@ describe('get_service_report', () => {
     );
   });
 
+  // r61 (#3420): a completion-time request-context rejection frozen into
+  // service_data silences the spoken note too — the phone report must not
+  // resurrect copy the web report refuses.
+  test('a frozen completion rejection keeps the reviewed draft out of the spoken report', async () => {
+    primeDb({
+      service_records: [{
+        ...RECORD,
+        technician_notes: REVIEWED_REPORT_NOTES,
+        service_data: JSON.stringify({ technicianReportBodyRejected: 'trade_name' }),
+      }],
+    });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).not.toContain('We treated the exterior perimeter');
+    expect(out).not.toMatch(/report summary/i);
+  });
+
   // ⭐ PARSER-APPROVED IS NOT CODE-FREE: a valid reviewed section carrying a
   // gate code now fails the parse ITSELF (containsReportAccessCode nulls the
   // body — #3420), so the draft never reaches the relay at all. The relay's

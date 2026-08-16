@@ -3086,7 +3086,7 @@ function activityLevelContradictions(text, finalBand) {
 const NO_REPAIRS_CLAIM_RE = /\bno\s+(?:exclusion\s+)?(?:repairs?|work)\s+(?:was|were)\s+(?:completed|performed|done|made|needed)\b|\b(?:did\s+not|didn['’]t)\s+(?:complete|perform|make)\b[^.!?]{0,25}\b(?:repairs?|exclusion)\b|\b(?:repairs?|work|exclusion)\b[^.!?]{0,30}\b(?:could\s+not|couldn['’]t|cannot|can['’]t|will\s+not|won['’]t)\s+be\s+(?:completed|performed|done|made|finished)\b|\bunable\s+to\s+(?:complete|perform|finish|make|do)\b[^.!?]{0,30}\b(?:repairs?|exclusion|work)\b/i;
 const RODENT_NOUN_SRC = '(?:rodents?|rats?|mice|mouse)';
 const NO_ACTIVITY_CLAIM_RE = new RegExp(`\\bno\\s+(?:current\\s+|visible\\s+|active\\s+)*(?:${RODENT_NOUN_SRC}\\s+)?activity\\b|\\bno\\s+(?:signs?|evidence)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\bno\\s+(?:current\\s+|visible\\s+|active\\s+|fresh\\s+|new\\s+|obvious\\s+)*${RODENT_NOUN_SRC}\\s+(?:evidence|signs?|droppings|indications?)\\b|\\bfree\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b(?:did\\s+not|didn['’]t|could\\s+not|couldn['’]t|have\\s+not|haven['’]t|has\\s+not|hasn['’]t|never)\\s+(?:find|found|observe[d]?|note[d]?|confirm(?:ed)?|detect(?:ed)?|see|seen|saw|spot(?:ted)?)\\b[^.!?]{0,40}\\b(?:${RODENT_NOUN_SRC}|activity)\\b|\\bno\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|seen|noted)\\b`, 'i');
-const ACTIVITY_FOUND_CLAIM_RE = new RegExp(`\\b(?:${RODENT_NOUN_SRC}\\s+)?activity\\s+(?:was|were|is)\\s+(?:found|observed|confirmed|noted|present)\\b|\\bactive\\s+${RODENT_NOUN_SRC}\\b|\\bevidence\\s+of\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|noted)\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:a\\s+|an\\s+|the\\s+|some\\s+|several\\s+|multiple\\s+|two\\s+|three\\s+|a\\s+few\\s+)?(?:fresh\\s+|new\\s+|active\\s+|visible\\s+|recent\\s+|significant\\s+|clear\\s+|live\\s+|dead\\s+)*${RODENT_NOUN_SRC}\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:signs?|evidence|droppings)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b${RODENT_NOUN_SRC}\\s+(?:droppings?|evidence|signs?|tracks?|gnawing|nesting)\\b[^.!?]{0,30}\\b(?:was|were|is|are)\\s+(?:present|found|observed|visible|noted|seen|evident|discovered)\\b`, 'i');
+const ACTIVITY_FOUND_CLAIM_RE = new RegExp(`\\b(?:${RODENT_NOUN_SRC}\\s+)?activity\\s+(?:was|were|is)\\s+(?:found|observed|confirmed|noted|present)\\b|\\bactive\\s+${RODENT_NOUN_SRC}\\b|\\bevidence\\s+of\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|noted)\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:a\\s+|an\\s+|the\\s+|some\\s+|several\\s+|multiple\\s+|two\\s+|three\\s+|a\\s+few\\s+)?(?:fresh\\s+|new\\s+|active\\s+|visible\\s+|recent\\s+|significant\\s+|clear\\s+|live\\s+|dead\\s+)*${RODENT_NOUN_SRC}\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:signs?|evidence|droppings)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b${RODENT_NOUN_SRC}\\s+(?:droppings?|evidence|signs?|tracks?|gnawing|nesting)\\b[^.!?]{0,30}\\b(?:was|were|is|are)\\s+(?:present|found|observed|visible|noted|seen|evident|discovered)\\b|\\bthere\\s+(?:was|were|is|are)\\s+(?:some\\s+|fresh\\s+|new\\s+|visible\\s+|clear\\s+)*(?:signs?|evidence|droppings)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\bthere\\s+(?:was|were|is|are)\\s+(?:a\\s+|an\\s+|some\\s+)?${RODENT_NOUN_SRC}\\b`, 'i');
 // "Inspection only" is a valid exclusion_work_completed chip — those
 // visits recorded NO repairs, so the repair-denial screen must not reject
 // truthful copy, and the composition must not claim completed repairs
@@ -3772,6 +3772,26 @@ function buildTodaysResult({
     const setupLine = initialTrapSetup && !capturesRecorded
       ? ' We return to check them, record what they catch, and adjust placements from there.'
       : '';
+    // Story-lane trend visits keep their owner-mandated disclosures even
+    // though the generic gauge path composes them (codex r61): the
+    // exclusion remaining-concerns sentence and the inspection
+    // recommended-service sentence carry in EVERY body, same as their
+    // first-visit branches.
+    let storyMandatedLine = '';
+    if (projectType === 'rodent_exclusion') {
+      const trendConcerns = String(values.remaining_concerns || '')
+        .split(',').map((s) => s.trim()).filter(Boolean)
+        .filter((c) => c !== 'No remaining concerns observed');
+      storyMandatedLine = trendConcerns.length
+        ? ` Remaining concerns: ${joinPhrases(trendConcerns.map((c) => c.toLowerCase()))}.`
+        : ' No remaining concerns were observed today.';
+    } else if (projectType === 'rodent_inspection') {
+      const trendService = String(values.recommended_service || '');
+      const trendUrgency = String(values.urgency || '');
+      storyMandatedLine = trendService && trendService !== 'No service needed at this time'
+        ? ` Based on today's findings, we recommend ${trendService.charAt(0).toLowerCase()}${trendService.slice(1)}${trendUrgency === 'High' ? ' — scheduling soon is recommended' : ''}.`
+        : ' No service is needed at this time based on today’s findings.';
+    }
     if (visitSequence > 1 && activity.trendWord) {
       // Stable needs its own sentence shape — "has about the same as the
       // last visit since our last visit" is not English (Codex P2).
@@ -3785,7 +3805,7 @@ function buildTodaysResult({
         // visitSequence > 1 with a resolved trendWord — and that is the
         // main case the selector exists for. Omitting the guidance here
         // dropped it from exactly the reports that needed it most.
-        body: `${gaugeReportBody || whatWeDid}${setupLine} ${nextStep}`,
+        body: `${gaugeReportBody || whatWeDid}${setupLine}${storyMandatedLine} ${nextStep}`,
         nextStep,
         ...(gaugeReportBody ? { bodySource: 'technician_report' } : {}),
       };
@@ -3793,14 +3813,14 @@ function buildTodaysResult({
     if (activity.score === 0) {
       return {
         headline: `No active signs of ${noun.toLowerCase()} activity observed today.`,
-        body: `${whatWeDid}${setupLine} Continue monitoring and contact us if activity returns.`,
+        body: `${whatWeDid}${setupLine}${storyMandatedLine} Continue monitoring and contact us if activity returns.`,
         nextStep,
       };
     }
     const levelWord = SCORE_LEVEL_WORDS[activity.score] || 'activity';
     return {
       headline: `${noun} activity was ${levelWord.replace(' activity', '').toLowerCase()} today.`,
-      body: `${gaugeReportBody || whatWeDid}${setupLine} ${nextStep}`,
+      body: `${gaugeReportBody || whatWeDid}${setupLine}${storyMandatedLine} ${nextStep}`,
       nextStep,
       ...(gaugeReportBody ? { bodySource: 'technician_report' } : {}),
     };
@@ -4086,7 +4106,7 @@ const TIME_UNIT_SRC = '(?:minutes?|mins?|hours?|hrs?|half[-\\s]?hours?)';
 // aftercare ("avoid mowing for 48 hours") stays legal too.
 // Passive occupancy forms are anchored on be/been/being so completed-action
 // prose ("we entered through the side gate") never matches (codex r54).
-const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|play(?:ing)?\\s+on|sit(?:ting)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|access(?:ing)?\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|(?:be|been|being)\\s+(?:safely\\s+)?(?:(?:re-?)?(?:entered|occupied|reoccupied|used|accessed)|walked\\s+on|played\\s+on|sat\\s+on|returned\\s+to)|dry(?:ing|s)?|dried)';
+const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|play(?:ing)?\\s+on|sit(?:ting)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|access(?:ing)?\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|us(?:e|ing)\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|(?:be|been|being)\\s+(?:safely\\s+)?(?:(?:re-?)?(?:entered|occupied|reoccupied|used|accessed)|walked\\s+on|played\\s+on|sat\\s+on|returned\\s+to)|dry(?:ing|s)?|dried)';
 // Clock times state the same fixed re-entry window as durations
 // (codex r53): "Enter the treated area at 4:30 PM", "Stay off until 6 PM".
 const CLOCK_TIME_SRC = '(?:\\d{1,2}:\\d{2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?|\\d{1,2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight)';

@@ -12071,10 +12071,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
               typedProductNameGuards.push(...sections.productValues);
               const scoreLine = typedActivityLine(confirmedPrimaryType, typedActivityScoreNum, { words: true });
               if (scoreLine) typedFallbackObservations.push(scoreLine);
-              const typedChipsValidation = ActivityIndicators.validateNextStepChips(
-                nextStepChips, confirmedPrimaryType, effectiveTypedValues,
-              );
-              if (typedChipsValidation.ok) typedFallbackNextSteps.push(...typedChipsValidation.chips);
+              // Selected chips deliberately stay OUT of the fallback's
+              // recommendations sentence — the typed renderer appends each
+              // as its own mandated nextStep line, so including them here
+              // repeated every instruction on the report (codex r61).
             }
             const fallbackSeenTypes = new Set();
             for (const entry of companionEntries) {
@@ -12091,10 +12091,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
               typedProductNameGuards.push(...sections.productValues);
               const companionScoreLine = typedActivityLine(entry.type, entry?.activityScore, { words: true });
               if (companionScoreLine) typedFallbackObservations.push(companionScoreLine);
-              const companionChipsValidation = ActivityIndicators.validateNextStepChips(
-                entry?.nextStepChips, entry.type, companionValues,
-              );
-              if (companionChipsValidation.ok) typedFallbackNextSteps.push(...companionChipsValidation.chips);
+              // Companion chips stay out of the fallback too — same
+              // deterministic-append duplication (codex r61).
             }
           }
         } else {
