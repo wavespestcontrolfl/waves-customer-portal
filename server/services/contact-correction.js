@@ -80,7 +80,7 @@ const NAME_OWNERSHIP_DISCLAIMER_RE = /\b(?:not|isn'?t|no longer|never|won'?t be)
 // jane@x.com" beside an address correction is identification, not a
 // mandate. Clauses split on sentence boundaries (dot only when followed by
 // whitespace, so emails and street abbreviations survive).
-const CW_SRC = '(?:wrong|incorrect|misspell\\w*|spell\\w*|typo|actually|correct\\w*|fix\\w*|updat\\w*|chang\\w*|remov\\w*|drop\\w*|delet\\w*|no\\s+longer|should\\s+be|not\\b|new\\b|old\\b)';
+const CW_SRC = '(?:wrong|incorrect|misspell\\w*|spell\\w*|typo|actually|correct\\w*|fix\\w*|updat\\w*|chang\\w*|remov\\w*|drop\\w*|delet\\w*|no\\s+longer|should\\s+be|\\bnot\\b|\\bnew\\b|\\bold\\b)';
 const ADDR_TOPIC_SRC = '(?:address|street|city|zip|unit|apt|apartment|suite|lot)';
 const CW_RE = new RegExp(CW_SRC, 'gi');
 const TOPIC_RES = [
@@ -642,12 +642,24 @@ async function applyContactCorrections({ customerId, corrections, source, source
         // the same statement window; the canonical admin path then
         // re-geocodes post-commit (mirrored below).
         await trx('customers').where({ id: customerId }).update({ latitude: null, longitude: null });
-        // explicitLine2: this lane's line2 writes are deliberate (explicit
-        // unit clear, whole-street move auto-clear, promoted inline unit) —
-        // a null must CLEAR the primary property's unit, not fall back to it.
-        await require('./customer-properties').syncPrimaryAddress(after, trx, {
-          explicitLine2: updates.address_line2 !== undefined,
-        });
+        // Sparse-mirror guard (round-15): syncPrimaryAddress derives the
+        // primary property's street/zip/key from the CUSTOMER row, so when
+        // the mirror is incomplete (e.g. recordCallProperty created the
+        // property but its fail-soft customer-mirror update failed) a
+        // permitted city/zip/unit-only correction would clear the property's
+        // real street/zip and rekey it off the partial row. Leave the
+        // property untouched until the mirror carries a complete address —
+        // same fail-closed shape as the blank-line1 re-geocode guard.
+        const mirrorComplete = ['address_line1', 'city', 'zip']
+          .every((f) => normValue(after[f]) !== '');
+        if (mirrorComplete) {
+          // explicitLine2: this lane's line2 writes are deliberate (explicit
+          // unit clear, whole-street move auto-clear, promoted inline unit) —
+          // a null must CLEAR the primary property's unit, not fall back to it.
+          await require('./customer-properties').syncPrimaryAddress(after, trx, {
+            explicitLine2: updates.address_line2 !== undefined,
+          });
+        }
         await require('./customer-address-fanout').propagateCustomerAddressChange({ before, after }, trx);
         addressApplied = true;
       }
@@ -750,13 +762,18 @@ function serializePerCustomer(customerId, fn) {
 // — available synchronously, BEFORE media upload and the customer lookup,
 // both variable-latency awaits that could reorder reservations).
 //
-// The 60-second hold only bounds how long the queue position is defended —
-// it never discards a live request (round-14): a slow branch (an intake
-// LLM call can take minutes) that run()s after the hold expires is APPENDED
-// to the queue and still executes; ordering degrades gracefully and the
-// CAS/sender fences still fail closed. cancel() is for paths that know the
-// message needs no correction run.
-const SLOT_HOLD_MS = 60_000;
+// The hold is a BACKSTOP only (round-15): the webhook cancels every slot it
+// does not run on ALL exit paths (route-level finally), so a reservation
+// that is neither run nor cancelled means the route died without unwinding
+// (process crash mid-handler) — the backstop then unblocks the sender's
+// queue. It is sized far above any legitimate branch latency (an intake LLM
+// call can take minutes). A run() arriving AFTER the backstop released the
+// position is DROPPED, never re-enqueued: round-14 appended it instead, and
+// losing the reserved position let a stale message snapshot AFTER a newer
+// correction committed — the CAS then accepted the stale overwrite. Ordering
+// is the slot's one job; a request that cannot keep its position fails
+// closed. cancel() is for paths that know the message needs no run.
+const SLOT_HOLD_MS = 600_000;
 function reserveSmsCorrectionSlot(senderKey) {
   const queueKey = `sms:${tail10(senderKey) || String(senderKey || 'unknown')}`;
   let release;
@@ -765,17 +782,18 @@ function reserveSmsCorrectionSlot(senderKey) {
   const gate = new Promise((resolve) => { release = resolve; });
   const slot = serializePerCustomer(queueKey, () => gate.then((fn) => (fn ? fn() : { applied: [], skipped: [], reason: 'slot_cancelled' })));
   const timer = setTimeout(() => {
-    if (!settled) { expired = true; release(null); }
+    if (!settled) { settled = true; expired = true; release(null); }
   }, SLOT_HOLD_MS);
   if (typeof timer?.unref === 'function') timer.unref();
   return {
     run(args) {
       clearTimeout(timer);
+      if (expired) {
+        logger.warn(`[contact-correction] queue slot backstop expired before run; dropping (fail closed)`);
+        return Promise.resolve({ applied: [], skipped: [], reason: 'slot_expired' });
+      }
       if (settled) return slot;
       settled = true;
-      if (expired) {
-        return serializePerCustomer(queueKey, () => runSmsContactCorrectionInner(args));
-      }
       release(() => runSmsContactCorrectionInner(args));
       return slot;
     },
@@ -792,20 +810,33 @@ async function runSmsContactCorrection(args) {
   return serializePerCustomer(customerId, () => runSmsContactCorrectionInner(args));
 }
 
-async function runSmsContactCorrectionInner({ customer, body, smsLogId = null, knex = db, senderPhone = null }) {
+async function runSmsContactCorrectionInner({ customer, body, smsLogId = null, knex = db, senderPhone = null, matchedSnapshot = null }) {
   try {
     if (!require('../config/feature-gates').isEnabled('contactCorrection')) return { applied: [], skipped: [], reason: 'gate_off' };
     if (!customer?.id) return { applied: [], skipped: [], reason: 'unlinked' };
-    // Pre-extraction snapshot for the compare-and-set inside the apply
-    // transaction: extraction is an in-flight LLM call, and a field an admin
-    // (or a newer message) changed underneath it must not be overwritten by
-    // this pass's stale proposal.
+    // Snapshot for the compare-and-set inside the apply transaction:
+    // extraction is an in-flight LLM call, and a field an admin (or a newer
+    // message) changed underneath it must not be overwritten by this pass's
+    // stale proposal.
+    // The baseline is the customer row AS THE WEBHOOK MATCHED IT (round-15):
+    // a runner-start read would post-date an admin edit made while this
+    // message waited in the queue, so the CAS would accept the older SMS as
+    // a valid overwrite of the admin's newer value. Callers pass the matched
+    // row; the runner-start read remains only as a fallback for callers that
+    // have no match-time row. All CAS fields must be present on the passed
+    // row or it is ignored (a partial row would read as concurrent change).
     // Includes phone (round-10): the sender's number is the batch's identity
     // anchor — a concurrent phone change/reassignment stales the whole batch.
-    const expectedValues = await knex('customers')
-      .where({ id: customer.id })
-      .whereNull('deleted_at')
-      .first([...APPLYABLE_FIELDS, 'phone']);
+    const casFields = [...APPLYABLE_FIELDS, 'phone'];
+    const snapshotRow = (matchedSnapshot && casFields.every((f) => f in matchedSnapshot))
+      ? matchedSnapshot
+      : await knex('customers')
+        .where({ id: customer.id })
+        .whereNull('deleted_at')
+        .first(casFields);
+    const expectedValues = snapshotRow
+      ? Object.fromEntries(casFields.map((f) => [f, snapshotRow[f]]))
+      : null;
     const corrections = await extractSmsContactCorrections({ body });
     if (!corrections.length) return { applied: [], skipped: [], reason: 'none_detected' };
     return await applyContactCorrections({
@@ -876,7 +907,10 @@ const CALL_PROPOSE_FIELDS = Object.freeze(['email', 'address_line1', 'address_li
 // ("wrong" within 60 chars of "name"). Call names keep the STRICTER
 // vocabulary: no bare spell/new/old ("let me spell my name" is routine
 // identity collection, round-7).
-const CALL_NAME_CW_RE = /wrong|incorrect|misspell\w*|typo|actually|correct\w*|not\b/gi;
+// `not`/`new`/`old` carry BOTH boundaries (round-15): with only the trailing
+// one, "cannot spell my name" matched `not\b` and a routine spelling exchange
+// read as an error claim (same for "renew"/"bold" in the SMS vocabulary).
+const CALL_NAME_CW_RE = /wrong|incorrect|misspell\w*|typo|actually|correct\w*|\bnot\b/gi;
 function callNameCorrectionIntent(quote) {
   return normValue(quote).split(CLAUSE_SPLIT_RE)
     .some((cl) => clauseBindsCategory(cl, 'name', CALL_NAME_CW_RE));
@@ -1063,11 +1097,23 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       }
     }
 
-    const nameCandidates = callerIsPrimary
+    const nameCandidates = (callerIsPrimary
       ? candidates.filter((c) => CALL_AUTO_FIELDS[c.field_name]
         && quoteBindsNameField(c.field_name, c.evidence_quote)
         && valueGroundedInCallerSpeech(c.final_recommended_value))
-      : [];
+      : [])
+      // (round-15) Same unqualified whole-name pair rule as the SMS
+      // extractor: a quote correcting the whole name ("you have my name
+      // wrong; it is Jane Smith") corrects BOTH components — a staging pass
+      // that emitted only first_name would graft the new first name onto
+      // the record's old surname, a hybrid nobody stated. Single-component
+      // candidates survive only under explicitly first-/last-scoped quotes.
+      .filter((c, _i, arr) => {
+        const q = String(c.evidence_quote || '');
+        if (/\bfirst name\b/i.test(q) || /\b(?:last name|surname)\b/i.test(q)) return true;
+        const other = c.field_name === 'first_name' ? 'last_name' : 'first_name';
+        return arr.some((o) => o.field_name === other);
+      });
     if (!nameCandidates.length) {
       if (!callerIsPrimary && candidates.some((c) => CALL_AUTO_FIELDS[c.field_name])) {
         return { applied: [], skipped: [{ field: 'name', reason: 'caller_not_primary' }], reason: proposals.length ? 'proposed_only' : 'caller_not_primary' };

@@ -149,6 +149,13 @@ router.post('/sms', async (req, res) => {
   // later error — sms_log.twilio_sid is not unique, so a Twilio retry would
   // duplicate the row. Better to keep the (already-logged) message claimed.
   let persisted = false;
+  // Contact-correction queue slot + whether a branch actually ran it.
+  // Declared out here so the route-level finally can release an un-run
+  // reservation on EVERY exit path (round-15) — early returns, throws, and
+  // branches that never reach a fire site all unwind the sender's queue
+  // position instead of leaning on the wall-clock backstop.
+  let correctionSlot = null;
+  let correctionFired = false;
   try {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('webhooks')) {
@@ -165,7 +172,7 @@ router.post('/sms', async (req, res) => {
     // to a linked customer is decided at fire time; unlinked/unused slots
     // are cancelled (or self-expire without discarding a live run).
     const contactCorrection = require('../services/contact-correction');
-    const correctionSlot = (Body && !smsReaction && contactCorrection.detectContactCorrectionIntent(Body))
+    correctionSlot = (Body && !smsReaction && contactCorrection.detectContactCorrectionIntent(Body))
       ? contactCorrection.reserveSmsCorrectionSlot(From)
       : null;
     const schedulingIntent = hasSchedulingIntent(Body);
@@ -225,7 +232,15 @@ router.post('/sms', async (req, res) => {
     if (correctionSlot && !customer?.id) correctionSlot.cancel();
     const fireContactCorrection = (smsLogId) => {
       if (!correctionSlot || !customer?.id) return;
-      const correctionArgs = { customer, body: Body, smsLogId: smsLogId || null, senderPhone: From };
+      // Marked synchronously so the route-level finally (which runs before
+      // the setImmediate callback) never cancels a slot a branch decided to
+      // run.
+      correctionFired = true;
+      // matchedSnapshot: the customer row AS MATCHED at webhook entry — the
+      // runner's compare-and-set baselines against these values (round-15),
+      // so an admin edit made while this message waits in the queue reads
+      // as a concurrent change instead of being overwritten.
+      const correctionArgs = { customer, body: Body, smsLogId: smsLogId || null, senderPhone: From, matchedSnapshot: customer };
       // Deliberate fire-and-forget: the runner is fail-soft internally and
       // never rejects; the guard here only logs (id-only, no message
       // content) if that contract is ever broken.
@@ -1096,6 +1111,13 @@ router.post('/sms', async (req, res) => {
       link: '/admin/communications',
     });
     res.type('text/xml').send('<Response></Response>');
+  } finally {
+    // Release an un-run correction reservation on every exit path — a
+    // branch that fired keeps its slot (correctionFired is set
+    // synchronously before this runs); everything else must not leave the
+    // sender's queue position held until the backstop. cancel() is
+    // idempotent, so paths that already cancelled are unaffected.
+    if (correctionSlot && !correctionFired) correctionSlot.cancel();
   }
 });
 

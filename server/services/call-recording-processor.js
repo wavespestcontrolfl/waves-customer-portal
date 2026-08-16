@@ -8383,8 +8383,12 @@ const CallRecordingProcessor = {
       // Provenance fence (round-14): consume ONLY the candidate rows THIS
       // pass staged (or matched via the value-keyed dedupe) — rows a stale
       // worker inserted after losing its claim must not ride this pass's
-      // valid token into auto-apply.
-      candidateIds: candidateStaging?.stagedIds || null,
+      // valid token into auto-apply. Fails CLOSED when staging produced no
+      // provenance list (round-15): a pass whose extraction staged nothing
+      // — or whose staging errored — passes [] and applies nothing, rather
+      // than opening the scope to older pending rows a previous pass
+      // deliberately left behind.
+      candidateIds: candidateStaging?.stagedIds || [],
     }).catch((err) => {
       logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);
     });

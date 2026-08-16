@@ -211,7 +211,7 @@ const baseCustomer = () => ({
 // quotes must ground against a CALLER line or the lane fails closed.
 const DIARIZED_TRANSCRIPT = [
   'Agent: thanks for calling, how can I help you today?',
-  'Caller: you spelled my name wrong, it is Rivers with an S',
+  'Caller: you have my name wrong, it is Jordan Rivers',
   'Caller: my last name is spelled wrong, it is Rivers',
   'Caller: you have the wrong email, it is jordan dot rivers at example dot com',
   'Caller: the email is wrong, it is jordan dot rivers at example dot com',
@@ -440,7 +440,7 @@ describe('runCallContactCorrection', () => {
     status: 'pending',
     field_name: 'last_name',
     final_recommended_value: 'Rivers',
-    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
     confidence: 0.95,
     ...over,
   });
@@ -453,7 +453,7 @@ describe('runCallContactCorrection', () => {
     });
     const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
     expect(res.applied).toEqual([
-      { field: 'last_name', oldValue: 'Riverz', newValue: 'Rivers', quote: 'you spelled my name wrong, it is Rivers with an S' },
+      { field: 'last_name', oldValue: 'Riverz', newValue: 'Rivers', quote: 'my last name is spelled wrong, it is Rivers' },
     ]);
     expect(knex._data.customers[0].last_name).toBe('Rivers');
     expect(knex._data.customer_field_candidates[0].status).toBe('auto_applied');
@@ -629,7 +629,7 @@ describe('round-3 hardening', () => {
     status: 'pending',
     field_name: 'last_name',
     final_recommended_value: 'Rivers',
-    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
     confidence: 0.95,
     ...over,
   });
@@ -717,7 +717,7 @@ describe('round-4 hardening', () => {
     status: 'pending',
     field_name: 'last_name',
     final_recommended_value: 'Rivers',
-    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
     confidence: 0.95,
     ...over,
   });
@@ -773,7 +773,7 @@ describe('round-6 hardening', () => {
     status: 'pending',
     field_name: 'last_name',
     final_recommended_value: 'Rivers',
-    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
     confidence: 0.95,
     ...over,
   });
@@ -798,7 +798,7 @@ describe('round-6 hardening', () => {
       customers: [baseCustomer()],
       call_log: [callLogRow({
         transcription: [
-          'Agent: you spelled my name wrong, it is Rivers with an S',
+          'Agent: my last name is spelled wrong, it is Rivers',
           'Agent: the email is wrong, it is jordan dot rivers at example dot com',
           'Caller: sure, whatever works',
         ].join('\n'),
@@ -853,7 +853,7 @@ describe('round-6 hardening', () => {
   });
 
   it('stamps the applied candidate even when its raw value needed canonicalization', async () => {
-    const quote = 'you spelled my name wrong, it is MCGOWAN';
+    const quote = 'my last name is spelled wrong, it is MCGOWAN';
     const knex = makeStubKnex({
       customers: [baseCustomer()],
       call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
@@ -877,7 +877,7 @@ describe('round-7 hardening', () => {
     status: 'pending',
     field_name: 'last_name',
     final_recommended_value: 'Rivers',
-    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
     confidence: 0.95,
     ...over,
   });
@@ -901,7 +901,7 @@ describe('round-7 hardening', () => {
       call_log: [callLogRow({
         transcription: [
           'Speaker 1: thanks for calling, how can I help?',
-          'Speaker 2: you spelled my name wrong, it is Rivers with an S',
+          'Speaker 2: my last name is spelled wrong, it is Rivers',
         ].join('\n'),
       })],
       customer_field_candidates: [candidate({ id: 'sp' })],
@@ -1012,7 +1012,7 @@ describe('round-8 hardening', () => {
     status: 'pending',
     field_name: 'last_name',
     final_recommended_value: 'Rivers',
-    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
     confidence: 0.95,
     ...over,
   });
@@ -1181,7 +1181,7 @@ describe('round-9 hardening', () => {
     status: 'pending',
     field_name: 'last_name',
     final_recommended_value: 'Rivers',
-    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
     confidence: 0.95,
     ...over,
   });
@@ -1329,7 +1329,7 @@ describe('round-10 hardening', () => {
     status: 'pending',
     field_name: 'last_name',
     final_recommended_value: 'Rivers',
-    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
     confidence: 0.95,
     ...over,
   });
@@ -1406,7 +1406,7 @@ describe('round-11 hardening', () => {
     status: 'pending',
     field_name: 'last_name',
     final_recommended_value: 'Rivers',
-    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
     confidence: 0.95,
     ...over,
   });
@@ -1513,7 +1513,7 @@ describe('round-12 hardening', () => {
     status: 'pending',
     field_name: 'last_name',
     final_recommended_value: 'Rivers',
-    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
     confidence: 0.95,
     ...over,
   });
@@ -1693,7 +1693,7 @@ describe('round-14 hardening', () => {
     status: 'pending',
     field_name: 'last_name',
     final_recommended_value: 'Rivers',
-    evidence_quote: 'you spelled my name wrong, it is Rivers with an S',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
     confidence: 0.95,
     ...over,
   });
@@ -1788,10 +1788,13 @@ describe('round-14 hardening', () => {
     expect(res.map((c) => c.field).sort()).toEqual(['first_name', 'last_name']);
   });
 
-  it('a slot that outlives its hold window still runs (appended, not discarded)', async () => {
+  it('a run() after the backstop released the position is DROPPED, never re-enqueued (round-15)', async () => {
+    // Round-14 appended the late run to the tail instead — losing the
+    // reserved position let a stale message snapshot AFTER a newer
+    // correction committed, and the CAS then accepted the stale overwrite.
     jest.useFakeTimers();
     const slot = reserveSmsCorrectionSlot('+15550001111');
-    jest.advanceTimersByTime(61_000); // hold expires — queue position released
+    jest.advanceTimersByTime(601_000); // backstop expires — queue position released
     jest.useRealTimers();
     const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
     mockCallAnthropic.mockResolvedValue({
@@ -1799,6 +1802,137 @@ describe('round-14 hardening', () => {
       json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
     });
     const res = await slot.run({ customer: { id: CUSTOMER_ID }, body: 'You spelled my last name wrong, it is Rivers', knex });
+    expect(res.reason).toBe('slot_expired');
+    expect(res.applied).toEqual([]);
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+    expect(mockCallAnthropic).not.toHaveBeenCalled();
+  });
+});
+
+describe('round-15 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('an unqualified whole-name CALL quote with only one staged component never applies', async () => {
+    const quote = 'you have my name wrong, it is Jordan Rivers';
+    const knex = makeStubKnex({
+      customers: [baseCustomer()], call_log: [callLogRow()],
+      customer_field_candidates: [candidate({ id: 'lone', evidence_quote: quote })],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+    expect(knex._data.customer_field_candidates[0].status).toBe('pending');
+  });
+
+  it('an unqualified whole-name CALL quote with BOTH components staged still applies', async () => {
+    const quote = 'you have my name wrong, it is Jordan Rivers';
+    const knex = makeStubKnex({
+      customers: [baseCustomer()], call_log: [callLogRow()],
+      customer_field_candidates: [
+        candidate({ id: 'fn', field_name: 'first_name', final_recommended_value: 'Jordan', evidence_quote: quote }),
+        candidate({ id: 'ln', field_name: 'last_name', final_recommended_value: 'Rivers', evidence_quote: quote }),
+      ],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied.map((a) => a.field)).toContain('last_name');
+    expect(knex._data.customers[0].last_name).toBe('Rivers');
+  });
+
+  it('"cannot" never satisfies the call-name correction bar (`not` is word-bounded)', async () => {
+    const quote = 'I cannot spell my name, it is Jane Smith';
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [
+        candidate({ id: 'fn', field_name: 'first_name', final_recommended_value: 'Jane', evidence_quote: quote }),
+        candidate({ id: 'ln', field_name: 'last_name', final_recommended_value: 'Smith', evidence_quote: quote }),
+      ],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('no_candidates');
+    expect(knex._data.customers[0].first_name).toBe('Jordan');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+  });
+
+  it('"renew" never licenses an SMS correction (`new` is word-bounded in the correction vocabulary)', async () => {
+    const body = 'Time to renew, my email is jordan.rivers@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'jordan.rivers@example.com', quote: 'time to renew, my email is jordan.rivers@example.com', confidence: 'high' }] },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res).toEqual([]);
+  });
+
+  it('a city-only correction on a SPARSE customer mirror never syncs (and so never rekeys) the primary property', async () => {
+    const sparse = { ...baseCustomer(), address_line1: null, address_line2: null, zip: null };
+    const knex = makeStubKnex({ customers: [sparse], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [{ field: 'city', newValue: 'Sarasota', quote: 'the city is wrong, it is Sarasota' }],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied.map((a) => a.field)).toEqual(['city']);
+    expect(knex._data.customers[0].city).toBe('Sarasota');
+    expect(mockSyncPrimaryAddress).not.toHaveBeenCalled();
+  });
+
+  it('a city correction on a COMPLETE mirror still syncs the primary property', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [{ field: 'city', newValue: 'Sarasota', quote: 'the city is wrong, it is Sarasota' }],
+      source: 'sms',
+      knex,
+    });
+    expect(res.applied.map((a) => a.field)).toEqual(['city']);
+    expect(mockSyncPrimaryAddress).toHaveBeenCalledTimes(1);
+  });
+
+  it('the CAS baselines against the MATCHED row — an admin edit while the message queued stales the batch', async () => {
+    // Admin fixed the surname AFTER the webhook matched this message but
+    // BEFORE the runner started; a runner-start snapshot would post-date
+    // the edit and accept the older SMS as a valid overwrite.
+    const adminEdited = { ...baseCustomer(), last_name: 'Updated' };
+    const knex = makeStubKnex({ customers: [adminEdited], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({
+      customer: { id: CUSTOMER_ID },
+      body: 'You spelled my last name wrong, it is Rivers',
+      knex,
+      matchedSnapshot: { ...baseCustomer() }, // as matched: still Riverz
+    });
+    expect(res.applied).toEqual([]);
+    expect(knex._data.customers[0].last_name).toBe('Updated');
+  });
+
+  it('a PARTIAL matched snapshot is ignored — the runner falls back to its own read', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({
+      customer: { id: CUSTOMER_ID },
+      body: 'You spelled my last name wrong, it is Rivers',
+      knex,
+      matchedSnapshot: { last_name: 'Riverz' }, // missing the other CAS fields
+    });
     expect(res.applied.map((a) => a.field)).toEqual(['last_name']);
     expect(knex._data.customers[0].last_name).toBe('Rivers');
   });
