@@ -2211,6 +2211,55 @@ router.get('/collections-voice-status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/communications/collections-cases/:id/dial — the SUPERVISED
+// single-dial lever (PR C): the shakedown tool and the standing manual
+// escape hatch. Admin-only (requireAdmin — this places a phone call), and
+// refuses entirely while the master gate is dark. Promotes a 'shadow' or
+// 'proposed' case to 'approved' (guarded on state + case_version; a
+// concurrent move loses cleanly) stamped with the acting admin, then hands
+// it to originateCollectionCall — which re-runs the FULL contact policy at
+// dial time and fails closed on every leg. This endpoint makes no
+// eligibility judgment of its own; the policy engine is the boundary.
+router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) => {
+  try {
+    const { isVoiceLatePaymentEnabled } = require('../services/collections/outbound-voice/gates');
+    if (!isVoiceLatePaymentEnabled()) {
+      return res.status(409).json({ error: 'lane_dark', detail: 'GATE_VOICE_LATE_PAYMENT is off' });
+    }
+    const caseRow = await db('collection_cases')
+      .where({ id: req.params.id })
+      .first('id', 'current_state', 'case_version');
+    if (!caseRow) return res.status(404).json({ error: 'case_not_found' });
+
+    if (caseRow.current_state === 'shadow' || caseRow.current_state === 'proposed') {
+      const now = new Date();
+      const promoted = await db('collection_cases')
+        .where({ id: caseRow.id, current_state: caseRow.current_state, case_version: caseRow.case_version })
+        .update({
+          current_state: 'approved',
+          approved_by: `admin:${req.technician?.email || req.technicianId || 'unknown'}`,
+          approved_at: now,
+          approval_expires_at: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+          hold_reason: null,
+          updated_at: db.fn.now(),
+        });
+      if (!promoted) {
+        return res.status(409).json({ error: 'case_moved', detail: 'the case changed state while approving — reload and retry' });
+      }
+    } else if (caseRow.current_state !== 'approved') {
+      // held / cancelled / expired / dialing — never dialable from here.
+      return res.status(409).json({ error: 'case_not_dialable', state: caseRow.current_state });
+    }
+
+    const { originateCollectionCall } = require('../services/collections/outbound-voice/origination');
+    const result = await originateCollectionCall(caseRow.id);
+    // Refusals are the policy speaking — return them verbatim, 200: the
+    // admin asked "try to dial", and "policy said no, case re-queued" is a
+    // successful answer to that question.
+    return res.json(result);
+  } catch (err) { next(err); }
+});
+
 router._internals = {
   buildSmsRewritePrompt,
   cleanSmsRewriteOutput,

@@ -611,7 +611,18 @@ violations at the severity noted.
   `session_mode=collections` Parameter — which the ws server treats as an
   UNVERIFIED hint and re-proves against the same call_log row before any
   account data exists in the session. Treat the gate, the call_log linkage
-  check, and the no-audio-before-consent contract as security-critical),
+  check, and the no-audio-before-consent contract as security-critical.
+  Dials originate from exactly two surfaces (PR C), both funneling through
+  `originateCollectionCall` — the single authorization boundary that
+  re-runs the full contact policy at dial time: the admin-only
+  `POST /api/admin/communications/collections-cases/:id/dial` (supervised
+  single dial, requireAdmin, master-gated) and the auto-dial cron sweep
+  behind `GATE_VOICE_LATE_PAYMENT_AUTODIAL` (which requires the master AND
+  `GATE_COLLECTIONS_POLICY` gates; gate off = zero reads, pinned; bounded
+  by `COLLECTIONS_AUTODIAL_MAX_PER_RUN`, default 2, hard ceiling 10). A
+  diff adding any OTHER path to `originateCollectionCall`, weakening the
+  guarded promote fences (state + case_version), or letting the sweep make
+  its own eligibility judgments is a P0),
   `/api/bouncie` + `/api/webhooks/bouncie`, `/api/webhooks/sendgrid`,
   `/api/webhooks/resend` (Svix-signed), `/api/webhooks/lead`
   (+ `POST /api/leads`, an alias accepting the same pair with identical

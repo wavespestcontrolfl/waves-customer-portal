@@ -1,0 +1,158 @@
+/**
+ * collections/outbound-voice/dial-sweep.js (PR C) — pins:
+ *  - GATE OFF ⇒ ZERO db reads (provable no-op, byte-identical dark), and
+ *    every gate in the chain is required (autodial alone never lights it);
+ *  - candidates = shadow/proposed with next_eligible_at null-or-past;
+ *  - GUARDED promote (state + case_version fence) stamped
+ *    'system:autodial' with a 24h expiry; a lost promote stands down;
+ *  - the cap counts DIAL ATTEMPTS (dialed or dial_failed), never policy
+ *    refusals — refusals must not starve a run, attempts must not exceed
+ *    pilot pace;
+ *  - origination is the only authorization boundary this module trusts.
+ */
+
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../models/db', () => {
+  const fn = jest.fn();
+  fn.fn = { now: jest.fn(() => 'NOW()') };
+  return fn;
+});
+jest.mock('../services/collections/outbound-voice/origination', () => ({
+  originateCollectionCall: jest.fn(),
+}));
+
+const db = require('../models/db');
+const { originateCollectionCall } = require('../services/collections/outbound-voice/origination');
+const { runCollectionsDialSweep, DEFAULT_MAX_PER_RUN } = require('../services/collections/outbound-voice/dial-sweep');
+
+const NOW = new Date('2026-08-12T15:30:00Z'); // Wed 11:30 ET — in window
+
+function candidateChain(rows) {
+  const q = { _wheres: [] };
+  ['whereIn', 'where', 'whereNull', 'orWhere', 'orderBy', 'limit'].forEach((m) => {
+    q[m] = jest.fn(() => q);
+  });
+  q.select = jest.fn(async () => rows);
+  return q;
+}
+
+function promoteChain(result = 1) {
+  const q = {};
+  q.where = jest.fn(() => q);
+  q.update = jest.fn(async () => result);
+  return q;
+}
+
+function caseRow(id, state = 'shadow') {
+  return { id, current_state: state, case_version: 1 };
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  delete process.env.GATE_VOICE_LATE_PAYMENT;
+  delete process.env.GATE_VOICE_LATE_PAYMENT_AUTODIAL;
+  delete process.env.GATE_COLLECTIONS_POLICY;
+  delete process.env.COLLECTIONS_AUTODIAL_MAX_PER_RUN;
+  originateCollectionCall.mockResolvedValue({ dialed: true, reason: 'dialed' });
+});
+
+afterAll(() => {
+  delete process.env.GATE_VOICE_LATE_PAYMENT;
+  delete process.env.GATE_VOICE_LATE_PAYMENT_AUTODIAL;
+  delete process.env.GATE_COLLECTIONS_POLICY;
+  delete process.env.COLLECTIONS_AUTODIAL_MAX_PER_RUN;
+});
+
+function armGates() {
+  process.env.GATE_VOICE_LATE_PAYMENT = 'true';
+  process.env.GATE_VOICE_LATE_PAYMENT_AUTODIAL = 'true';
+  process.env.GATE_COLLECTIONS_POLICY = 'true';
+}
+
+test('every gate in the chain is required — any one off ⇒ ZERO db reads', async () => {
+  const combos = [
+    {}, // all off
+    { GATE_VOICE_LATE_PAYMENT_AUTODIAL: 'true' }, // autodial alone
+    { GATE_VOICE_LATE_PAYMENT: 'true', GATE_VOICE_LATE_PAYMENT_AUTODIAL: 'true' }, // no policy gate
+    { GATE_VOICE_LATE_PAYMENT: 'true', GATE_COLLECTIONS_POLICY: 'true' }, // no autodial gate
+  ];
+  for (const combo of combos) {
+    delete process.env.GATE_VOICE_LATE_PAYMENT;
+    delete process.env.GATE_VOICE_LATE_PAYMENT_AUTODIAL;
+    delete process.env.GATE_COLLECTIONS_POLICY;
+    Object.assign(process.env, combo);
+    const res = await runCollectionsDialSweep({ now: NOW });
+    expect(res).toEqual({ skipped: true, reason: 'autodial_gate_off' });
+  }
+  expect(db).not.toHaveBeenCalled();
+  expect(originateCollectionCall).not.toHaveBeenCalled();
+});
+
+test('promotes a shadow candidate with the guarded fence and dials it', async () => {
+  armGates();
+  const cChain = candidateChain([caseRow('case-1')]);
+  const pChain = promoteChain(1);
+  const queues = [cChain, pChain];
+  db.mockImplementation(() => queues.shift());
+  const res = await runCollectionsDialSweep({ now: NOW });
+  expect(res).toMatchObject({ skipped: false, promoted: 1, dialed: 1, refused: 0 });
+  // Candidate query shape.
+  expect(cChain.whereIn).toHaveBeenCalledWith('current_state', ['shadow', 'proposed']);
+  // Guarded promote: state + version fence, system stamp, 24h expiry.
+  expect(pChain.where).toHaveBeenCalledWith({ id: 'case-1', current_state: 'shadow', case_version: 1 });
+  const patch = pChain.update.mock.calls[0][0];
+  expect(patch.current_state).toBe('approved');
+  expect(patch.approved_by).toBe('system:autodial');
+  expect(patch.approval_expires_at.getTime() - patch.approved_at.getTime()).toBe(24 * 60 * 60 * 1000);
+  expect(originateCollectionCall).toHaveBeenCalledWith('case-1', { now: NOW });
+});
+
+test('a LOST promote stands down — no dial for that case', async () => {
+  armGates();
+  const queues = [candidateChain([caseRow('case-1')]), promoteChain(0)];
+  db.mockImplementation(() => queues.shift());
+  const res = await runCollectionsDialSweep({ now: NOW });
+  expect(res).toMatchObject({ promoted: 0, dialed: 0 });
+  expect(originateCollectionCall).not.toHaveBeenCalled();
+});
+
+test('the cap counts dial ATTEMPTS; policy refusals pass through without consuming it', async () => {
+  armGates();
+  const rows = [caseRow('c1'), caseRow('c2'), caseRow('c3'), caseRow('c4')];
+  const queues = [candidateChain(rows), promoteChain(1), promoteChain(1), promoteChain(1), promoteChain(1)];
+  db.mockImplementation(() => queues.shift());
+  originateCollectionCall
+    .mockResolvedValueOnce({ dialed: false, reason: 'policy_denied' }) // refusal — no cap
+    .mockResolvedValueOnce({ dialed: true, reason: 'dialed' }) // attempt 1
+    .mockResolvedValueOnce({ dialed: false, reason: 'dial_failed' }) // attempt 2 (failed dial IS an attempt)
+    .mockResolvedValueOnce({ dialed: true, reason: 'dialed' }); // must never run (cap 2)
+  const res = await runCollectionsDialSweep({ now: NOW });
+  expect(res).toMatchObject({ dialed: 2, refused: 1 });
+  expect(originateCollectionCall).toHaveBeenCalledTimes(3);
+});
+
+test('COLLECTIONS_AUTODIAL_MAX_PER_RUN respects the hard ceiling and bad values fall to the default', async () => {
+  armGates();
+  process.env.COLLECTIONS_AUTODIAL_MAX_PER_RUN = '50'; // above ceiling
+  const queues = [candidateChain([])];
+  db.mockImplementation(() => queues.shift());
+  const res = await runCollectionsDialSweep({ now: NOW });
+  expect(res.cap).toBe(10); // hard ceiling
+  process.env.COLLECTIONS_AUTODIAL_MAX_PER_RUN = 'lots';
+  const queues2 = [candidateChain([])];
+  db.mockImplementation(() => queues2.shift());
+  const res2 = await runCollectionsDialSweep({ now: NOW });
+  expect(res2.cap).toBe(DEFAULT_MAX_PER_RUN);
+});
+
+test('an unexpected originate THROW is treated as an attempt (conservative pace) and the sweep survives', async () => {
+  armGates();
+  const rows = [caseRow('c1'), caseRow('c2')];
+  const queues = [candidateChain(rows), promoteChain(1), promoteChain(1)];
+  db.mockImplementation(() => queues.shift());
+  originateCollectionCall
+    .mockRejectedValueOnce(new Error('unexpected'))
+    .mockResolvedValueOnce({ dialed: true, reason: 'dialed' });
+  const res = await runCollectionsDialSweep({ now: NOW });
+  expect(res).toMatchObject({ dialed: 2 }); // throw counted as an attempt
+});

@@ -2695,6 +2695,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 11:23AM (Mon–Fri) — Collections AUTO-DIAL sweep (PR C, the ruled
+  // fully-automatic trigger). Promotes eligible shadow/proposed cases and
+  // hands them to origination, which re-runs the full contact policy at
+  // dial time. DARK unless GATE_VOICE_LATE_PAYMENT_AUTODIAL=true (which
+  // itself requires the master + policy gates) — gate off means ZERO reads
+  // (pinned). 11:23 is an unoccupied fixed minute inside the 9:00–18:00 ET
+  // call window, ~40min after the 10:42 shadow sweep so freshly proposed
+  // cases are dialable the same day. Bounded: at most
+  // COLLECTIONS_AUTODIAL_MAX_PER_RUN (default 2) dial attempts per run —
+  // pilot pace, never a volume dialer.
+  // =========================================================================
+  cron.schedule('23 11 * * 1-5', async () => {
+    try {
+      await runExclusive('collections-dial-sweep', async () => {
+        const DialSweep = require('./collections/outbound-voice/dial-sweep');
+        const result = await DialSweep.runCollectionsDialSweep();
+        if (result.skipped) return; // dark — stay silent
+        logger.info(`Collections auto-dial sweep: ${result.candidates} candidates, ${result.promoted} promoted, ${result.dialed} dial attempts, ${result.refused} refusals`);
+      });
+    } catch (err) {
+      logger.error(`Collections auto-dial sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:37AM — Collections call retention sweep (PR B). Purges the
   // conversational CONTENT (transcripts, recordings) of collections_voice
   // calls older than COLLECTIONS_RETENTION_DAYS (default 90) — its own

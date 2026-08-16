@@ -16,6 +16,17 @@ function isVoiceLatePaymentEnabled() {
   return process.env.GATE_VOICE_LATE_PAYMENT === 'true';
 }
 
+// GATE_VOICE_LATE_PAYMENT_AUTODIAL sub-gates the AUTOMATIC dial sweep (the
+// ruled fully-automatic trigger, 2026-08-14) — flipped only after the
+// supervised 5-call shakedown. Requires the master gate AND the PR A policy
+// gate: an auto-dial without the policy engine evaluating would be a dial
+// with no authorization boundary. Enumerate every gate.
+function isAutoDialEnabled() {
+  return isVoiceLatePaymentEnabled()
+    && process.env.GATE_VOICE_LATE_PAYMENT_AUTODIAL === 'true'
+    && process.env.GATE_COLLECTIONS_POLICY === 'true';
+}
+
 function isPayLinkEnabled() {
   // HARD dependency on the PR A policy gate (gh prb-r3): the rail-guard
   // consult passes unconditionally while GATE_COLLECTIONS_POLICY is off, so
@@ -26,4 +37,4 @@ function isPayLinkEnabled() {
     && process.env.GATE_COLLECTIONS_POLICY === 'true';
 }
 
-module.exports = { isVoiceLatePaymentEnabled, isPayLinkEnabled };
+module.exports = { isVoiceLatePaymentEnabled, isPayLinkEnabled, isAutoDialEnabled };
