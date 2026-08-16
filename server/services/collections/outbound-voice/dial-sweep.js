@@ -111,6 +111,12 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
   const cap = maxDialsPerRun();
   const candidates = await db('collection_cases')
     .whereIn('current_state', ['shadow', 'proposed'])
+    // Dial-failure proposals require SUPERVISED release (codex gh-r4):
+    // origination documents that a failed dial is never silently retried —
+    // and its failed call_log rows are deliberately excluded from the
+    // idempotency probe, so this sweep would re-dial them unaided. The
+    // admin endpoint remains their release path.
+    .whereRaw("hold_reason IS DISTINCT FROM 'dial_failed'")
     .where(function nextEligible() {
       this.whereNull('next_eligible_at').orWhere('next_eligible_at', '<=', now);
     })

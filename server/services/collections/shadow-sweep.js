@@ -182,10 +182,19 @@ async function runShadowSweep({ now = new Date() } = {}) {
       // the lookup would forever update one while the other's stale card
       // stands. Keep the newest (by update recency), lapse the rest and
       // retire their cards through the same read_at mechanism.
-      const liveShadow = await db('collection_cases')
-        .where({ customer_id: customerId, current_state: 'shadow' })
+      // ONE read covers both concerns (codex gh-r4): the shadow rows for
+      // the self-heal below, AND any live-pipeline/held row — a customer
+      // with an approved/dialing/held case is skipped entirely (rotating an
+      // older settled row beside a live one would mint a second dialable
+      // pipeline; rotating beside a held one would bypass the dispute
+      // hold's human release).
+      const liveRows = await db('collection_cases')
+        .where({ customer_id: customerId })
+        .whereIn('current_state', ['shadow', 'approved', 'dialing', 'held'])
         .orderBy([{ column: 'updated_at', order: 'desc' }, { column: 'case_version', order: 'desc' }])
-        .select('id', 'idempotency_key');
+        .select('id', 'idempotency_key', 'current_state');
+      if (liveRows.some((r) => r.current_state !== 'shadow')) continue;
+      const liveShadow = liveRows;
       if (liveShadow.length > 1) {
         const extras = liveShadow.slice(1);
         await db('collection_cases')
@@ -232,6 +241,12 @@ async function runShadowSweep({ now = new Date() } = {}) {
           .first();
       }
 
+      // TOCTOU suspenders (codex gh-r4 P0): the reread above races a
+      // promote/claim — if the row we now hold is already in the live
+      // pipeline (or held), skip; the write-time state fence is the belt.
+      if (existing && ['approved', 'dialing', 'held'].includes(existing.current_state)) {
+        continue;
+      }
       const unchanged = existing
         && existing.current_state === 'shadow'
         && Number(existing.eligible_balance_snapshot) === verdict.eligibleBalanceCents

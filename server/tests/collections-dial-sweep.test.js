@@ -29,7 +29,7 @@ const NOW = new Date('2026-08-12T15:30:00Z'); // Wed 11:30 ET — in window
 
 function candidateChain(rows) {
   const q = { _wheres: [] };
-  ['whereIn', 'where', 'whereNull', 'orWhere', 'orderBy', 'limit'].forEach((m) => {
+  ['whereIn', 'where', 'whereRaw', 'whereNull', 'orWhere', 'orderBy', 'limit'].forEach((m) => {
     q[m] = jest.fn(() => q);
   });
   q.select = jest.fn(async () => rows);

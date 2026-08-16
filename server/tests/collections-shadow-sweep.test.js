@@ -354,7 +354,7 @@ describe('card durability', () => {
 describe('retirement + tier rotation', () => {
   test('a customer denied this sweep has their case lapsed AND its unread card retired', async () => {
     ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['flag_collection_hold'] });
-    const selectChain = chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14' }] });
+    const selectChain = chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] });
     const updateChain = chain({ result: 1 });
     const cardChain = chain({ result: 1 });
     setDbQueues({
@@ -446,8 +446,8 @@ describe('r6: evaluation errors preserve, duplicate live cases self-heal', () =>
   test('two live shadow cases (customer merge) self-heal: newest kept, extra lapsed + its card retired', async () => {
     const healSelect = chain({
       result: [
-        { id: 'case-new', idempotency_key: 'collections:cust-1:2:14' },
-        { id: 'case-old', idempotency_key: 'collections:cust-9:1:14' },
+        { id: 'case-new', idempotency_key: 'collections:cust-1:2:14', current_state: 'shadow' },
+        { id: 'case-old', idempotency_key: 'collections:cust-9:1:14', current_state: 'shadow' },
       ],
     });
     const healUpdate = chain({ result: 1 });
@@ -485,7 +485,7 @@ test('rotating the case version retires the previous version card', async () => 
     invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
     customers: [chain({ first: CUSTOMER })],
     collection_cases: [
-      chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14' }] }), // self-heal read (single row)
+      chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] }), // self-heal read (single row)
       chain({ first: existing }),
       chain({ returning: [{ id: 'case-1', case_version: 2, eligible_balance_snapshot: 12800 }] }),
       chain({ result: [] }),
@@ -518,4 +518,20 @@ test('the rotation update fences on the originally read current_state', () => {
     require.resolve('../services/collections/shadow-sweep'), 'utf8',
   );
   expect(grepSrc).toContain("{ id: existing.id, case_version: existing.case_version, current_state: existing.current_state }");
+});
+
+
+// codex gh-r4 pins.
+test('a customer with ANY live/held case row is skipped — no second pipeline, no hold bypass', async () => {
+  setDbQueues({
+    customers: [chain({ first: CUSTOMER })],
+    invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+    collection_cases: [
+      chain({ result: [{ id: 'case-live', idempotency_key: 'collections:cust-1:3:14', current_state: 'dialing' }] }),
+    ],
+    notifications: [],
+  });
+  const result = await ShadowSweep.runShadowSweep({ now: NOW });
+  expect(result.casesCreated).toBe(0);
+  expect(result.casesUpdated).toBe(0);
 });
