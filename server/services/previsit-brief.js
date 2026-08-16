@@ -65,7 +65,10 @@ const { etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/dat
 const VISIT_BRIEF_TYPE = 'visit_brief_v1';
 const WDO_BRIEF_TYPE = 'wdo_inspection';
 
-const PROMPT_VERSION = 'previsit_brief_v1';
+// v2 (codex #3423 r15): the grounding-validator tightening must invalidate
+// cached v1 briefs — an unchanged grounding hash would keep serving
+// pre-tightening bodies (e.g. a cached retired-name mention) forever.
+const PROMPT_VERSION = 'previsit_brief_v2';
 
 // Statuses that are no longer an upcoming visit (mirrors
 // PREP_TERMINAL_STATUSES in appointment-tagger.js / the admin-schedule
@@ -81,7 +84,10 @@ const FORBIDDEN_TARGET_RE = /ganoderma|thielaviopsis/i;
 // phrase riding through common words with 'waves' allowlisted).
 // \W+ separators cover space, hyphen, slash, plus, comma, ampersand —
 // "Waves Lawn-Pest" and "Waves Lawn/Pest" are the same retired name (r14).
-const RETIRED_NAME_RE = /waves\W+lawn\W*(?:and\W+)?\W*pest/i;
+// Either word order — "Waves Pest & Lawn" is the same retired name (r15).
+// The real brand ("Waves Pest Control & Lawn Care") stays safe: 'control'
+// is a word, so \W-only separators never bridge pest→lawn across it.
+const RETIRED_NAME_RE = /waves\W+(?:lawn\W*(?:and\W+)?\W*pest|pest\W*(?:and\W+)?\W*lawn)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -963,7 +969,7 @@ const COMMON_PROSE_WORDS = new Set([
   'context', 'account', 'accounts',
   'information', 'scheduling',
   'waves', 'retrieve',
-  'transition', 'transitions', 'minute', 'minutes',
+  'transition', 'transitions',
   'list', 'lists',
   'state', 'stated', 'states',
   'introduction', 'discuss', 'discussing', 'relevant', 'mindful',
@@ -996,6 +1002,9 @@ const GROUNDED_ONLY_WORDS = new Set([
 const INSTRUCTION_EVIDENCE_WORDS = new Set([
   'estimate', 'estimates', 'treatment', 'treatments', 'quote', 'quotes',
   'credit', 'credits', 'balance', 'discount', 'discounts',
+  // r15: access-security objects ("Retrieve gate key/access card") are
+  // fabricatable from common words — the access noun must be evidenced.
+  'gate', 'gates', 'access', 'card', 'cards', 'keys',
 ]);
 
 // Word-level grounding for one candidate word ACROSS its stem variants.

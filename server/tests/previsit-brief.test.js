@@ -1965,3 +1965,47 @@ describe('codex #3423 r14 — punctuated retired name, first-visit token, condit
     expect(verdict.reason).toBeTruthy();
   });
 });
+
+describe('codex #3423 r15 — cache bump, reversed retired name, access objects, durations', () => {
+  test('reversed and punctuated retired names reject; the real brand does not', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const name of ['Waves Pest & Lawn', 'Waves Pest and Lawn']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: `${name} visited.` },
+        grounding,
+      ).reason).toBe('retired_company_name');
+    }
+    const real = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control and Lawn Care visited.' },
+      grounding,
+    );
+    expect(real.reason).not.toBe('retired_company_name');
+  });
+
+  test('access-object directives require fact-value evidence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Retrieve gate key', 'Retrieve access card']) {
+      expect(validateBriefJson(
+        { priorities: [claim], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'gate key hidden under the planter' }] } };
+    expect(validateBriefJson(
+      { priorities: ['Retrieve gate key'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+
+  test('spelled-out duration claims reject without grounding', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: ['Dry after ten minutes'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+});
