@@ -3520,3 +3520,42 @@ describe('codex #3423 r62 — six precision extensions', () => {
     ).reason).toBeTruthy();
   });
 });
+
+describe('codex #3423 r63 — colon states, paid-current inversions, expected contact, estimate identity, of-prose', () => {
+  test('r63 rejection cases', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Upcoming appointment: cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const overdue = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] } };
+    for (const claim of ['Account is up to date', 'Customer owes nothing']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        overdue,
+      ).reason).toMatch(/payment_state_conflict/);
+    }
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'The customer expects a call before arrival' },
+      empty,
+    ).reason).toMatch(/contact_request/);
+    const twoEstimates = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' }, pendingEstimate: { status: 'pending', tier: 'Silver' } } } };
+    for (const claim of ['Pending estimate accepted', 'Silver estimate accepted']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: claim, customer_context: null },
+        twoEstimates,
+      ).reason).toMatch(/estimate_state_conflict/);
+    }
+  });
+
+  test('canonical name followed by of-prose passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer informed office of the issue' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer informed Waves Pest Control of the issue.' },
+      grounding,
+    ).reason).not.toBe('noncanonical_company_name');
+  });
+});

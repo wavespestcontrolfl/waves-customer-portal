@@ -105,7 +105,7 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Strong connectors (& + /) always denote a name suffix; weak ones
 // (- ,) and bare/and brand words need the end-of-name lookahead —
 // "- pest activity reviewed" is a clause, "- Lawn Care" a suffix (r49).
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+of\s+\w+|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)\b)/i;
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+of\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|swfl|america|tampa)\b|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)\b)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1491,7 +1491,7 @@ function findUngroundedClaim(body, grounding) {
     body.open_scope,
     body.customer_context,
   ].filter(Boolean).join(' ').toLowerCase();
-  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:status\s*:?\s+)?(?:(?:was|is|will\s+be|has\s+been|had\s+been|got)\s+)?(?:(?:currently|now|still|recently|already)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
+  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)(?:\s*:\s*|\s+)(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:status\s*)?(?:\s*:\s*)?(?:(?:was|is|will\s+be|has\s+been|had\s+been|got)\s+)?(?:(?:currently|now|still|recently|already)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const claimNegated = Boolean(m[1]);
     // Trailing coordinated statuses ("confirmed but later cancelled") are
     // separate claims (r60).
@@ -1529,7 +1529,7 @@ function findUngroundedClaim(body, grounding) {
   const instructionalText = [...(body.priorities || []), ...(body.watch_items || [])].join('. ').toLowerCase();
   // EVERY contact claim is validated, not just the first (r46).
   const contactClaims = [
-    ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:that\s+(?:you|we|the\s+tech(?:nician)?)\s+)?(?:(?:you|us|the\s+tech(?:nician)?)\s+)?(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:be\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back|ed)?|text(?:s|ed)?|sms|email(?:s|ed)?|updates?|contact(?:ed)?)(?:\s+(?:and|or)\s+(call(?:s|back)?|texts?|sms|emails?))?\b/g),
+    ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred|expects?|expected|awaits?)\s+(?:that\s+(?:you|we|the\s+tech(?:nician)?)\s+)?(?:(?:you|us|the\s+tech(?:nician)?)\s+)?(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:be\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back|ed)?|text(?:s|ed)?|sms|email(?:s|ed)?|updates?|contact(?:ed)?)(?:\s+(?:and|or)\s+(call(?:s|back)?|texts?|sms|emails?))?\b/g),
     ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email|contact|phone)\s+(?:the\s+)?customer\b/g)],
     // Imperative channel verbs with implicit customer ("Please call
     // before arrival") in INSTRUCTION fields (r51).
@@ -1553,7 +1553,7 @@ function findUngroundedClaim(body, grounding) {
     // The channel must be the OBJECT of the request — only determiners/
     // qualifiers may intervene ("requested an estimate during the phone
     // call" is not a call request, r49).
-    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?)\\s+(?:(?:for|to|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening)\\s+){0,3}${bareChannel}`);
+    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?|expect(?:s|ed)?)\\s+(?:(?:for|to|be|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening)\\s+){0,3}${bareChannel}`);
     const factSupports = clauseRe.test(groundedValueText);
     if (negatedClaim ? !(factSupports && negatedNearChannel) : (!factSupports || negatedNearChannel)) {
       return { kind: 'contact_request', term: channel };
@@ -1563,7 +1563,7 @@ function findUngroundedClaim(body, grounding) {
   // the OPPOSITE of the customer's billing state — flattened token pools
   // cannot see the contradiction, so it is checked as a phrase (r32).
   if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
-    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance|bill)\s+(?:has\s+been\s+|was\s+|is\s+)?paid\b|\bno\s+invoices?\s+outstanding\b|\boutstanding\s+(?:balance|invoice)s?\s+(?:resolved|cleared|paid|settled)\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due|outstanding)\b|\bno\s+outstanding\s+(?:balance|invoices?|payments?)?\b|\bzero\s+balance\b|\b(?:account|balance)\s+(?:is\s+)?paid\s*(?:up|off)\b|\bpayments?\s+(?:are|is)\s+up\s+to\s+date\b|\b(?:invoice|account|balance)\s+(?:is\s+)?current\b|\b(?:invoice|account)\s+has\s+no\s+(?:amount|balance)\s+due\b/i.test(outputText)) {
+    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance|bill)\s+(?:has\s+been\s+|was\s+|is\s+)?paid\b|\bno\s+invoices?\s+outstanding\b|\boutstanding\s+(?:balance|invoice)s?\s+(?:resolved|cleared|paid|settled)\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due|outstanding)\b|\bno\s+outstanding\s+(?:balance|invoices?|payments?)?\b|\bzero\s+balance\b|\b(?:account|balance)\s+(?:is\s+)?paid\s*(?:up|off)\b|\b(?:payments?|account)\s+(?:are|is)\s+up\s+to\s+date\b|\ball\s+payments?\s+(?:are\s+)?current\b|\b(?:customer|client)\s+owes\s+nothing\b|\b(?:invoice|account|balance)\s+(?:is\s+)?current\b|\b(?:invoice|account)\s+has\s+no\s+(?:amount|balance)\s+due\b/i.test(outputText)) {
     return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
   }
   // Tier words bind to ACTUAL tier facts — an HOA or product name
@@ -1630,8 +1630,13 @@ function findUngroundedClaim(body, grounding) {
   ].filter(Boolean).map((v) => String(v).toLowerCase().replace(/^canceled$/, 'cancelled'));
   // A pendingEstimate object IS the pending state, status field or not.
   if (grounding.llmFacts?.openScope?.pendingEstimate) estimateStatuses.push('pending');
+  // Per-estimate identity (r63): a claim naming the PENDING estimate must
+  // bind to the pending estimate's own status, never the source's.
+  const pendingStatus = String(grounding.llmFacts?.openScope?.pendingEstimate?.status || (grounding.llmFacts?.openScope?.pendingEstimate ? 'pending' : '')).toLowerCase();
+  const pendingTier = String(grounding.llmFacts?.openScope?.pendingEstimate?.tier || '').toLowerCase();
   if (estimateStatuses.length) {
-    for (const m of outputText.matchAll(/\b(?:estimates?|quotes?)\s+(?:(?:currently|now|still|recently)\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(?:(?:currently|now|still|recently)\s+)?(?:(not)\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\s+(?:estimates?|quotes?)\b/g)) {
+    for (const m of outputText.matchAll(/\b(?:(?:pending|proposal|bronze|silver|gold|platinum)\s+)?(?:estimates?|quotes?)\s+(?:(?:currently|now|still|recently)\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(?:(?:currently|now|still|recently)\s+)?(?:(not)\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\s+(?:estimates?|quotes?)\b/g)) {
+      const pendingScoped = /\b(?:pending|proposal)\s+estimates?\b/.test(m[0]) || (pendingTier && new RegExp(`\\b${pendingTier}\\s+estimates?\\b`).test(m[0]));
       const negatedLifecycle = Boolean(m[1]);
       const claimed = String(m[2] || m[3]).replace(/^canceled$/, 'cancelled').replace(/^drafted$/, 'draft');
       // A NEGATED lifecycle claim contradicts a matching status (r62).
@@ -1639,6 +1644,12 @@ function findUngroundedClaim(body, grounding) {
         return { kind: 'estimate_state_conflict', term: `not ${claimed}` };
       }
       if (negatedLifecycle) continue;
+      if (pendingScoped) {
+        if (claimed !== pendingStatus && !(claimed === 'pending' && pendingStatus)) {
+          return { kind: 'estimate_state_conflict', term: claimed };
+        }
+        continue;
+      }
       if (!estimateStatuses.includes(claimed)) {
         return { kind: 'estimate_state_conflict', term: claimed };
       }
