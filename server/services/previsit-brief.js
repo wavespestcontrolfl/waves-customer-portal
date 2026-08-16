@@ -1034,6 +1034,11 @@ const GROUNDED_ONLY_WORDS = new Set([
   // 'access' is NOT globally grounded-only (r44 P2): "Access backyard" is
   // a verb — ACCESS_STATE_RE below guards credential/state usage.
   'gate', 'gates', 'card', 'cards', 'fob', 'fobs', 'credit', 'credits',
+  // r69: membership/renewal state is claimable in ANY field ("Customer is
+  // a member" in context assigns benefits to a nonmember) — graduated
+  // from INSTRUCTION_EVIDENCE_WORDS; the membership object injects its
+  // own evidence tokens for the truthful case.
+  'membership', 'memberships', 'member', 'members', 'renewal', 'renewals',
 ]);
 
 // 'access' as a credential or claimed access STATE must ground; as a verb
@@ -1069,8 +1074,8 @@ const INSTRUCTION_EVIDENCE_WORDS = new Set([
   // r27: safety-related directives ("Discuss chemical sensitivity") must
   // derive from a sensitivity fact.
   'chemical', 'chemicals',
-  // r29: account-lifecycle directives ("Discuss renewal/membership").
-  'renewal', 'renewals', 'membership', 'memberships', 'member', 'members',
+  // (renewal/membership graduated to GROUNDED_ONLY_WORDS in r69 — they
+  // require evidence in EVERY field, not just instructions.)
 ]);
 
 // Word-level grounding for one candidate word ACROSS its stem variants.
@@ -1129,8 +1134,10 @@ function negNear(text, word) {
 // grounded words must not read as novel.
 function wordVariants(word) {
   const out = [word];
-  // Singular evidence must match plural fact values (r64).
-  if (!word.endsWith('s')) out.push(`${word}s`);
+  // Singular evidence must match plural fact values (r64) — except
+  // 'initial', whose plural is the unrelated noun "customer initials"
+  // (r69).
+  if (!word.endsWith('s') && word !== 'initial') out.push(`${word}s`);
   if (word.endsWith('es')) out.push(word.slice(0, -2));
   if (word.endsWith('s')) out.push(word.slice(0, -1));
   // 'missing' (state adjective) must not stem to 'missed' (event) — r53.
@@ -1564,11 +1571,14 @@ function findUngroundedClaim(body, grounding) {
     // Negation trails the channel here, so a lookahead captures it into
     // the tuple's group-1 negation slot.
     ...[...outputText.matchAll(/\b(?:a|an|the)\s+(?:(?:phone|text)\s+)?(?=(?:call(?:back)?|text|sms|email|contact)\s+(?:was|is|has\s+been|had\s+been)\s+(not\s+)?request)(call(?:back)?|text|sms|email|contact)\b/g)],
+    // Needs-based noun forms — "Customer needs a call before arrival"
+    // directs outreach exactly like a request verb (r69).
+    ...[...outputText.matchAll(/\bcustomer\s+(?:(does\s+not\s+need|doesn't\s+need|needs\s+no)\s+|needs?\s+)(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:back)?|text|sms|email|contact)\b/g)],
   ];
   for (const contactReq of contactClaims)
   for (const channel of [contactReq[3] ?? contactReq[2], contactReq[4]].filter(Boolean).map((c) => c.replace(/s$/, '').replace(/ed$/, '').replace(/^phone$/, 'call'))) {
     const negatedClaim = Boolean(contactReq[1]) || Boolean(contactReq[2] && /not|no\b/.test(String(contactReq[2])));
-    const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred)\b/.test(groundedValueText);
+    const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred|need|needs|needed)\b/.test(groundedValueText);
     const bareChannel = channel.replace(/back$/, '').replace(/ed$/, '');
     // Polarity (r41): a NEGATED preference near the channel ("does not
     // want email") must not ground the positive claim.
@@ -1583,7 +1593,7 @@ function findUngroundedClaim(body, grounding) {
     // The channel must be the OBJECT of the request — only determiners/
     // qualifiers may intervene ("requested an estimate during the phone
     // call" is not a call request, r49).
-    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?|expect(?:s|ed)?)\\s+(?:(?:for|to|be|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening|(?:calls?|texts?|sms|emails?)\\s+and)\\s+){0,4}${bareChannel}`);
+    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?|expect(?:s|ed)?|need(?:s|ed)?)\\s+(?:(?:for|to|be|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening|(?:calls?|texts?|sms|emails?)\\s+and)\\s+){0,4}${bareChannel}`);
     const factSupports = clauseRe.test(groundedValueText);
     if (negatedClaim ? !(factSupports && negatedNearChannel) : (!factSupports || negatedNearChannel)) {
       return { kind: 'contact_request', term: channel };
@@ -1595,6 +1605,19 @@ function findUngroundedClaim(body, grounding) {
   if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
     && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance|bill)\s+(?:has\s+been\s+|was\s+|is\s+)?paid\b|\bno\s+invoices?\s+outstanding\b|\boutstanding\s+(?:balance|invoice)s?\s+(?:resolved|cleared|paid|settled)\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due|outstanding)\b|\bno\s+outstanding\s+(?:balance|invoices?|payments?)?\b|\bzero\s+balance\b|\b(?:account|balance)\s+(?:is\s+)?paid\s*(?:up|off)\b|\b(?:payments?|account)\s+(?:are|is)\s+up\s+to\s+date\b|\ball\s+payments?\s+(?:are\s+)?current\b|\b(?:customer|client)\s+owes\s+nothing\b|\b(?:invoice|account|balance)\s+(?:is\s+)?current\b|\b(?:invoice|account)\s+has\s+no\s+(?:amount|balance)\s+due\b/i.test(outputText)) {
     return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
+  }
+  // Payment lifecycle claims bind to the recorded status for EVERY
+  // payment fact, not just overdue accounts (r69) — a failed attempt
+  // must not be inverted into a completed payment, nor the reverse.
+  const paymentFailedFact = /\bpayments?\b[^.;!?]{0,30}\b(?:fail(?:ed|ure)?|declined?|unsuccessful|error(?:ed)?|bounced?|did\s+not\s+go\s+through)\b|\b(?:fail(?:ed)?|declined?)\b[^.;!?]{0,30}\bpayments?\b/.test(groundedValueText);
+  const paymentCompletedFact = /\bpayments?\b[^.;!?]{0,30}\b(?:complete[d]?|received|processed|successful|went\s+through|posted|confirmed)\b|\b(?:received|processed|collected)\b[^.;!?]{0,30}\bpayments?\b|\bpaid\b/.test(groundedValueText);
+  if (/\bpayment\s+(?:was\s+|has\s+been\s+|is\s+)?(?:complete[d]?|received|processed|successful|made|confirmed|went\s+through|posted)\b/.test(outputText)
+    && paymentFailedFact && !paymentCompletedFact) {
+    return { kind: 'payment_state_conflict', term: 'payment failed on file' };
+  }
+  if (/\bpayment\s+(?:was\s+|has\s+been\s+|is\s+)?(?:fail(?:ed)?|declined?|unsuccessful)\b/.test(outputText)
+    && paymentCompletedFact && !paymentFailedFact) {
+    return { kind: 'payment_state_conflict', term: 'payment completed on file' };
   }
   // Tier words bind to ACTUAL tier facts — an HOA or product name
   // containing 'gold' must not assign a WaveGuard tier (r45).
@@ -1864,6 +1887,15 @@ function findUngroundedClaim(body, grounding) {
     && !/\bavailab|\bworks?\s+(?:best\s+)?for\b/.test(groundedValueText)) {
     return { kind: 'novel_term', term: 'availability' };
   }
+  // Pet evidence must keep its customer/property subject (r69) — a dog
+  // seen next door or with a neighbor is not the customer's pet.
+  if (/\b(?:customer|client|resident)s?\b[^.;!?]{0,30}\b(?:dog|cat|pet)s?\b|\b(?:dog|cat|pet)s?\b[^.;!?]{0,40}\b(?:on\s+(?:the\s+)?(?:property|premises|site)|in\s+the\s+(?:home|house|yard)|at\s+the\s+(?:property|home|house))\b/.test(outputText)) {
+    const petEvidence = groundedValueText.split(/[.;!?]/).some((s) =>
+      /\b(?:dog|cat|pet)s?\b/.test(s)
+      && !/\bnext\s+door\b|\bneighbor|\bnearby\b|\bstray\b|\btech(?:nician)?(?:'s)?\s+(?:dog|cat|pet)/.test(s)
+      && /\b(?:customer|client|resident|owner|their|has|have)\b|\b(?:at|on|in)\s+(?:the\s+|this\s+)?(?:property|premises|site|home|house|yard)\b/.test(s));
+    if (!petEvidence) return { kind: 'novel_term', term: 'pet' };
+  }
   for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability', 'sensitivity', 'sensitivities', 'sensitive', 'recurring', 'initial']) {
     if (!new RegExp(`\\b${pw}\\b`).test(outputText)) continue;
     const factHasWord = wordVariants(pw).some((v) => new RegExp(`\\b${v}`).test(groundedValueText));
@@ -2005,7 +2037,16 @@ function validateBriefJson(json, grounding) {
     // authoritative product ("Bifen" for "Bifen IT") — the whole name is
     // required (codex #3423 r67).
     const catalogNames = (grounding.catalogVocabulary?.names || []).map((n) => String(n).toLowerCase().replace(/\s+/g, ' ').trim());
-    if (phrase && !catalogNames.includes(phrase) && catalogNames.some((n) => n.startsWith(`${phrase} `))) {
+    // A legacy service_products snapshot with no catalog link can carry
+    // the short name as its authoritative form ("Bifen", product_id null)
+    // — an EXACT match to a grounded product name is not a truncation
+    // (r69 P2).
+    const groundedProductNames = [
+      ...(grounding.llmFacts?.productGuidance?.productNames || []),
+      ...(grounding.llmFacts?.productGuidance?.companions || []).flatMap((c) => c.productNames || []),
+    ].map((n) => String(n).toLowerCase().replace(/\s+/g, ' ').trim());
+    if (phrase && !catalogNames.includes(phrase) && !groundedProductNames.includes(phrase)
+      && catalogNames.some((n) => n.startsWith(`${phrase} `))) {
       return { reason: `truncated_product_term:${cleanText(term, 60)}` };
     }
     const strictWords = phrase.split(/\s+/).filter((w) => wordVariants(w).some((v) => GROUNDED_ONLY_WORDS.has(v)));

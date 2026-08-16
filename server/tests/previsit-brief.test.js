@@ -3760,3 +3760,63 @@ describe('codex #3423 r68 — modifier-spanning counts, upcoming treatment, mone
     expect(validateBriefJson({ ...BASE, customer_context: 'Customer asked about payment' }, EMPTY).reason).toBeTruthy();
   });
 });
+
+describe('codex #3423 r69 — needs-based contact, payment lifecycle, membership fields, initials, pet subject, legacy products', () => {
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('needs-based contact nouns require a contact fact, on both sides', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer needs a call before arrival', 'Customer needs contact before arrival']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const needsFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer needs a call before arrival' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer needs a call before arrival' }, needsFact).body).toBeTruthy();
+  });
+
+  test('a failed payment fact cannot ground a completed-payment claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const failedFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment failed on the last attempt' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment completed' }, failedFact).reason).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment failed on the last attempt' }, failedFact).body).toBeTruthy();
+    const okFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment received on the account' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment received' }, okFact).body).toBeTruthy();
+  });
+
+  test('membership claims require evidence in descriptive fields too', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer has a membership', 'Customer is a member', 'Membership is active']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const withMembership = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { membership: { tier: 'Silver' } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has a membership' }, withMembership).body).toBeTruthy();
+  });
+
+  test('customer initials do not ground initial-service claims', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const initialsFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer initials are AB' }] } };
+    for (const s of ['Initial treatment planned', 'This is the initial service']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, initialsFact).reason).toBeTruthy();
+    }
+    const newCust = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { newCustomer: true } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'This is the initial service' }, newCust).body).toBeTruthy();
+  });
+
+  test('a neighbor dog does not become the customer pet', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const neighborDog = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'technician saw a dog next door' }] } };
+    for (const s of ['Customer has a dog', 'Dog is on the property']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, neighborDog).reason).toBeTruthy();
+    }
+    const ownDog = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has a dog in the yard' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has a dog' }, ownDog).body).toBeTruthy();
+  });
+
+  test('an exact legacy product name is not a truncation', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const legacy = { catalogVocabulary: { names: ['Bifen IT'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen'] } } };
+    expect(validateBriefJson({ ...BASE, priorities: ['Apply Bifen'], mentioned_terms: ['bifen'] }, legacy).body).toBeTruthy();
+    const catalogOnly = { catalogVocabulary: { names: ['Bifen IT'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen IT'] } } };
+    expect(validateBriefJson({ ...BASE, priorities: ['Apply Bifen IT'], mentioned_terms: ['bifen'] }, catalogOnly).reason).toMatch(/^truncated_product_term:/);
+  });
+});
