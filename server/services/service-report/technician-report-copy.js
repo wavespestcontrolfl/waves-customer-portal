@@ -62,6 +62,10 @@ const REPORT_ACCESS_CODE_RES = [
   // reverse order ("blue is the gate password") — a leading stopword
   // ("this is the code") never counts as the credential itself (codex r38)
   /\b(?!(?:this|that|it|here|there|what|which|below|above)\b)["'‘’“”]?[a-z0-9#*]{2,12}["'‘’“”]?\s+(?:is|=)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase)\b/i,
+  // spoken number-word codes ("gate code four five four five") — two or
+  // more number words after a code noun, mirroring the canonical scrubber's
+  // multi-token shape (codex r41)
+  /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b\s*(?:is|:|=|-)?\s*(?:(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten)[\s-]*){2,6}\b/i,
 ];
 function containsReportAccessCode(text) {
   const value = String(text || '');

@@ -3190,12 +3190,26 @@ function buildTodaysResult({
       }
       // Reviewed Generate-AI copy replaces the scope/what-we-did portion
       // (owner 2026-08-11 rule); the Ganoderma answer and next step are
-      // mandated and carry in EVERY body (codex r24 #3420).
+      // mandated and carry in EVERY body (codex r24 #3420). The body must
+      // agree with the recorded landscape CONDITION — a "landscape is
+      // healthy" draft beside a Poor/Declining finding (or the reverse)
+      // keeps the deterministic copy; reconcile override honored
+      // (codex r41).
+      const TS_POSITIVE_CLAIM_RE = /\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\s+condition)\b[^.!?]{0,30}\b(?:is|are|was|were|looks?|looked|remains?|appears?)\s+(?:very\s+|quite\s+|overall\s+)*(?:excellent|healthy|thriving|great|good|strong)\b|\b(?:excellent|healthy|thriving|great|good|strong)\s+(?:overall\s+)?(?:landscape|plant|shrub|palm|turf)\s+(?:condition|health|shape)\b/i;
+      const TS_NEGATIVE_CLAIM_RE = /\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\s+condition)\b[^.!?]{0,30}\b(?:is|are|was|were|looks?|looked|remains?|appears?)\s+(?:very\s+|quite\s+|overall\s+)*(?:poor|declining|struggling|deteriorating|failing)\b|\b(?:poor|declining|struggling|deteriorating|failing)\s+(?:overall\s+)?(?:landscape|plant|shrub|palm|turf)\s+(?:condition|health|shape)\b/i;
+      const tsBodyText = String(technicianReportBody || '');
+      const tsContradiction = ['Poor', 'Declining'].includes(condition)
+        ? TS_POSITIVE_CLAIM_RE.test(tsBodyText)
+        : (['Excellent', 'Good'].includes(condition) && TS_NEGATIVE_CLAIM_RE.test(tsBodyText));
+      const tsReportBody = technicianReportBody
+        && (reconcileConfirmed || !tsContradiction)
+        ? technicianReportBody
+        : null;
       return {
         headline,
-        body: `${technicianReportBody || `${scopeSentence} ${whatWeDid}`}${palmNote} ${nextStep}`.replace(/\s+/g, ' ').trim(),
+        body: `${tsReportBody || `${scopeSentence} ${whatWeDid}`}${palmNote} ${nextStep}`.replace(/\s+/g, ' ').trim(),
         nextStep,
-        ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
+        ...(tsReportBody ? { bodySource: 'technician_report' } : {}),
       };
     }
   }
