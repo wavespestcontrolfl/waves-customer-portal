@@ -604,7 +604,22 @@ async function submitRecap({
           }
         }
       }
-      await trx('service_products').where({ service_record_id: recordId }).del();
+      // An AUTHORITATIVE set (productsConfirmed) replaces everything; an
+      // UNCONFIRMED set replaces only the rows it names — a recorded
+      // product the client could not represent (inactive/renamed, so the
+      // modal cleared productsConfirmed) must survive a partial resubmit
+      // (codex P1 r12), keeping both its service_products row and its
+      // live ledger link.
+      if (productsConfirmed === true) {
+        await trx('service_products').where({ service_record_id: recordId }).del();
+      } else {
+        await trx('service_products')
+          .where({ service_record_id: recordId })
+          .whereRaw('LOWER(TRIM(product_name)) = ANY(?::text[])', [
+            productRows.map((r) => String(r.product_name).trim().toLowerCase()),
+          ])
+          .del();
+      }
       const insertedProducts = productRows.length
         ? await trx('service_products')
           .insert(productRows)
@@ -649,6 +664,13 @@ async function submitRecap({
             // its ledger row — the re-link IS the correction record.
             retracted_at: null,
             retraction_reason: null,
+            // The validated catalog method reaches EXISTING ledger rows
+            // too (codex P1 r12) — createComplianceRecords skips the
+            // stable (service_record_id, product_id) row, so this sync is
+            // the only writer that can refresh its method.
+            ...(entry.row && entry.row.application_method
+              ? { application_method: entry.row.application_method }
+              : {}),
             ...(sp.application_rate != null
               ? { application_rate: sp.application_rate, rate_unit: sp.rate_unit || null }
               : entry.rateConfirmed
@@ -666,19 +688,23 @@ async function submitRecap({
       // retracted_at) mirror the corrected record. Rows with no catalog
       // product are left standing: they can't be attributed to a specific
       // product, and an unmatched-name replacement row keeps such a row
-      // as the record of its application.
-      let staleLedgerQuery = trx('property_application_history')
-        .where({ service_record_id: recordId })
-        .whereNull('service_product_id')
-        .whereNotNull('product_id')
-        .whereNull('retracted_at');
-      if (linkedCatalogIds.length) {
-        staleLedgerQuery = staleLedgerQuery.whereNotIn('product_id', linkedCatalogIds);
+      // as the record of its application. Only an AUTHORITATIVE set may
+      // retract (codex P1 r12) — an unconfirmed partial submit preserved
+      // its unmatched rows above, so absence from it proves nothing.
+      if (productsConfirmed === true) {
+        let staleLedgerQuery = trx('property_application_history')
+          .where({ service_record_id: recordId })
+          .whereNull('service_product_id')
+          .whereNotNull('product_id')
+          .whereNull('retracted_at');
+        if (linkedCatalogIds.length) {
+          staleLedgerQuery = staleLedgerQuery.whereNotIn('product_id', linkedCatalogIds);
+        }
+        await staleLedgerQuery.update({
+          retracted_at: new Date(),
+          retraction_reason: 'recap_deselected',
+        });
       }
-      await staleLedgerQuery.update({
-        retracted_at: new Date(),
-        retraction_reason: 'recap_deselected',
-      });
       // A first-time recap completion (never through /complete) has NO
       // ledger rows for the update above to hit — the recap was the only
       // completion path that skipped the FDACS writer entirely (codex P1

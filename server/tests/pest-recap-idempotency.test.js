@@ -76,7 +76,10 @@ function makeKnex(store) {
         q._whereNotIn = { col, vals };
         return q;
       }),
-      whereRaw: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn(function whereRaw(...args) {
+        q._whereRaw = args;
+        return q;
+      }),
       orderBy: jest.fn().mockReturnThis(),
       leftJoin: jest.fn().mockReturnThis(),
       // The preserve-prior-rate lookup reads the existing service_products
@@ -86,7 +89,12 @@ function makeKnex(store) {
         : jest.fn().mockReturnThis(),
       forUpdate: jest.fn().mockReturnThis(),
       del: jest.fn(() => {
-        if (table === 'service_products') store.productDeletes = (store.productDeletes || 0) + 1;
+        if (table === 'service_products') {
+          store.productDeletes = (store.productDeletes || 0) + 1;
+          store.productDeleteScopes = (store.productDeleteScopes || []).concat([
+            q._whereRaw ? { partial: true, names: q._whereRaw[1] } : { partial: false },
+          ]);
+        }
         if (table === 'property_application_history') {
           store.ledgerDeletes = store.ledgerDeletes || [];
           store.ledgerDeletes.push({ where: q._where?.[0], notIn: q._whereNotIn || null });
@@ -629,6 +637,7 @@ describe('pest recap idempotency (Codex P1)', () => {
       actorId: 'tech-1',
       technicianNotes: 'Reselected only product A.',
       products: [{ product_name: 'Product A', application_rate: '1', rate_unit: 'oz', rate_confirmed: true }],
+      productsConfirmed: true,
       sendSms: false,
       knex,
     });
@@ -708,6 +717,34 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(sweeps).toHaveLength(1);
     expect(sweeps[0].notIn).toBeNull();
     expect(createComplianceRecords).not.toHaveBeenCalled();
+  });
+
+  test('an UNCONFIRMED partial submit replaces only the named rows and never retracts (codex P1 r12)', async () => {
+    // A recorded product missing from the active catalog flips
+    // productsConfirmed off in the modal; resubmitting the representable
+    // subset must not delete the unmatched row or retract its ledger row.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-a' },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Partial resubmit.',
+      products: [{ product_name: 'Product A', application_rate: '1', rate_unit: 'oz', rate_confirmed: true }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // The delete was scoped to the submitted names — unmatched rows survive.
+    expect(store.productDeleteScopes).toEqual([{ partial: true, names: [['product a']] }]);
+    // And no retraction sweep ran: absence from an unconfirmed set proves nothing.
+    expect(retractionSweeps(store)).toHaveLength(0);
   });
 
   test('an UNCONFIRMED empty set still preserves recorded products (legacy resend)', async () => {

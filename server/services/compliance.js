@@ -544,6 +544,7 @@ const ComplianceService = {
       .leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id')
       .leftJoin('customers as c', 'pah.customer_id', 'c.id')
       .leftJoin('technicians as t', 'pah.technician_id', 't.id')
+      .whereNull('pah.retracted_at')
       .select('pah.id', 'pah.application_date', 'pc.name as product_name',
         'c.first_name', 'c.last_name', 't.name as tech_name')
       .orderBy('pah.application_date', 'desc')
