@@ -3198,9 +3198,17 @@ function buildTodaysResult({
       const TS_POSITIVE_CLAIM_RE = /\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\s+condition)\b[^.!?]{0,30}\b(?:is|are|was|were|looks?|looked|remains?|appears?)\s+(?:very\s+|quite\s+|overall\s+)*(?:in\s+(?:very\s+|quite\s+)*)?(?:excellent|healthy|thriving|great|good|strong)\b|\b(?:excellent|healthy|thriving|great|good|strong)\s+(?:overall\s+)?(?:landscape|plant|shrub|palm|turf)?\s*(?:condition|health|shape)\b/i;
       const TS_NEGATIVE_CLAIM_RE = /\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\s+condition)\b[^.!?]{0,30}\b(?:is|are|was|were|looks?|looked|remains?|appears?)\s+(?:very\s+|quite\s+|overall\s+)*(?:in\s+(?:very\s+|quite\s+)*)?(?:poor|declining|struggling|deteriorating|failing|rough|bad)\b|\b(?:poor|declining|struggling|deteriorating|failing|rough|bad)\s+(?:overall\s+)?(?:landscape|plant|shrub|palm|turf)?\s*(?:condition|health|shape)\b/i;
       const tsBodyText = String(technicianReportBody || '');
-      const tsContradiction = ['Poor', 'Declining'].includes(condition)
-        ? TS_POSITIVE_CLAIM_RE.test(tsBodyText)
-        : (['Excellent', 'Good'].includes(condition) && TS_NEGATIVE_CLAIM_RE.test(tsBodyText));
+      // Every condition family reconciles (codex r43): a positive claim
+      // contradicts anything below Good; a negative claim contradicts
+      // anything at-or-above Fair (a flat "declining" claim contradicts
+      // Recovering too).
+      const tsContradiction = (
+        ['Poor', 'Declining', 'Fair', 'Recovering'].includes(condition)
+        && TS_POSITIVE_CLAIM_RE.test(tsBodyText)
+      ) || (
+        ['Excellent', 'Good', 'Fair', 'Recovering'].includes(condition)
+        && TS_NEGATIVE_CLAIM_RE.test(tsBodyText)
+      );
       const tsReportBody = technicianReportBody
         && (reconcileConfirmed || !tsContradiction)
         ? technicianReportBody
@@ -3231,15 +3239,23 @@ function buildTodaysResult({
     const realConcerns = concerns.filter((c) => c !== 'No remaining concerns observed');
     // Reviewed Generate-AI copy replaces the repair-story sentences (owner
     // 2026-08-11 rule); the remaining-concerns disclosure and next step are
-    // mandated and carry in EVERY body (codex r24 #3420).
+    // mandated and carry in EVERY body (codex r24 #3420). The body must not
+    // deny the recorded repairs — "no exclusion repairs were completed"
+    // beside the fixed repairs-completed headline keeps the deterministic
+    // copy; reconcile override honored (codex r43).
+    const NO_REPAIRS_CLAIM_RE = /\bno\s+(?:exclusion\s+)?(?:repairs?|work)\s+(?:was|were)\s+(?:completed|performed|done|made|needed)\b|\b(?:did\s+not|didn['’]t)\s+(?:complete|perform|make)\b[^.!?]{0,25}\b(?:repairs?|exclusion)\b/i;
+    const exclusionReportBody = technicianReportBody
+      && (reconcileConfirmed || !NO_REPAIRS_CLAIM_RE.test(String(technicianReportBody)))
+      ? technicianReportBody
+      : null;
     const exclusionMandated = [
       realConcerns.length
         ? `Remaining concerns: ${joinPhrases(realConcerns.map((c) => c.toLowerCase()))}.`
         : 'No remaining concerns were observed today.',
       nextStep,
     ].filter(Boolean);
-    const exclusionDescriptive = technicianReportBody
-      ? [technicianReportBody]
+    const exclusionDescriptive = exclusionReportBody
+      ? [exclusionReportBody]
       : [
         areas.length
           ? `Completed rodent exclusion work today around the ${joinPhrases(areas)}.`
@@ -3252,7 +3268,7 @@ function buildTodaysResult({
       headline: 'Exclusion repairs were completed to reduce rodent access and help prevent re-entry.',
       body: [...exclusionDescriptive, ...exclusionMandated].join(' ').replace(/\s+/g, ' ').trim(),
       nextStep,
-      ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
+      ...(exclusionReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 
@@ -3327,7 +3343,7 @@ function buildTodaysResult({
     // agree with the boolean finding — a draft claiming "no activity" on a
     // found=Yes visit (or vice versa) keeps the deterministic copy, with
     // the reconciliation override honored (codex r39).
-    const NO_ACTIVITY_CLAIM_RE = /\bno\s+(?:current\s+|visible\s+|active\s+)*(?:rodent\s+)?activity\b|\bno\s+(?:signs?|evidence)\s+of\s+rodents?\b|\bfree\s+of\s+rodents?\b/i;
+    const NO_ACTIVITY_CLAIM_RE = /\bno\s+(?:current\s+|visible\s+|active\s+)*(?:rodent\s+)?activity\b|\bno\s+(?:signs?|evidence)\s+of\s+rodents?\b|\bfree\s+of\s+rodents?\b|\b(?:did\s+not|didn['’]t|could\s+not|couldn['’]t)\s+(?:find|observe|note|confirm|detect|see)\b[^.!?]{0,40}\b(?:rodents?|activity)\b|\bno\s+rodents?\s+(?:was|were)\s+(?:found|observed|seen|noted)\b/i;
     const ACTIVITY_FOUND_CLAIM_RE = /\b(?:rodent\s+)?activity\s+(?:was|were|is)\s+(?:found|observed|confirmed|noted|present)\b|\bactive\s+rodent\b|\bevidence\s+of\s+rodents?\s+(?:was|were)\s+(?:found|observed|noted)\b/i;
     const inspectionBodyText = String(technicianReportBody || '');
     const inspectionContradiction = found

@@ -277,6 +277,20 @@ function containsProductName(text, products, { extraGenericTokens = null, wholeW
           && !/^\d+$/.test(token));
         if (hasIdentity && normHay.includes(` ${pair[0]} ${pair[1]} `)) return true;
       }
+      // Brand-stem echoes for ALL-generic names ("Advance Termite Bait
+      // Station" → "Advance bait stations"): the leading name token acts as
+      // the stem and pairs with ANY other name token in the copy, so
+      // ordinary lone uses ("in advance of the visit") still pass
+      // (codex r43).
+      if (!longDistinctive.length && nameTokens.length >= 2) {
+        const stem = nameTokens[0];
+        if (stem.length >= 4 && !/^\d+$/.test(stem)) {
+          for (const other of nameTokens.slice(1)) {
+            if (/^\d+$/.test(other) || FORMULATION_SUFFIX_TOKENS.has(other)) continue;
+            if (normHay.includes(` ${stem} ${other} `) || normHay.includes(` ${stem} ${other}s `)) return true;
+          }
+        }
+      }
     }
     return false;
   });

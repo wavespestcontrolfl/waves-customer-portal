@@ -9825,6 +9825,11 @@ export function CompletionPanel({
   // initialized" (fresh mount or just-restored draft), so the first run
   // records without invalidating.
   const generationInputsRef = useRef(null);
+  // The tech's own notes from BEFORE the first Generate — regeneration must
+  // ground in these, not in the previously installed AI prose (feeding a
+  // draft back as "technician-confirmed" serviceNotes would entrench the
+  // first model's claims — codex r43).
+  const preGenerationNotesRef = useRef(null);
   // AI photo analysis (optional, never blocks submit): summary is editable,
   // captions attach to the photo entries. Not draft-persisted — photos
   // themselves aren't, and a summary without its photos would be stale.
@@ -10936,6 +10941,7 @@ export function CompletionPanel({
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
+        preGenerationNotes: preGenerationNotesRef.current,
         // The station auto-count baseline restores with it — otherwise the
         // registry's post-reload load re-derives the SAME counts against an
         // empty baseline and clears a valid draft (codex r28).
@@ -11217,6 +11223,9 @@ export function CompletionPanel({
     setAiReportUsed(savedDraft.aiReportUsed === true);
     generatedReportTextRef.current = typeof savedDraft.generatedReportText === "string" && savedDraft.generatedReportText
       ? savedDraft.generatedReportText
+      : null;
+    preGenerationNotesRef.current = typeof savedDraft.preGenerationNotes === "string"
+      ? savedDraft.preGenerationNotes
       : null;
     stationAutoCountsRef.current = savedDraft.stationAutoCounts
       && typeof savedDraft.stationAutoCounts === "object"
@@ -11560,6 +11569,11 @@ export function CompletionPanel({
     // deterministic REGENERATION replaces a previously installed AI report,
     // so the flag follows each installed result exactly (codex r29).
     setAiReportUsed(!deterministic);
+    // Capture the tech's own notes the FIRST time a draft replaces them —
+    // an untouched installed draft is never the grounding for regeneration.
+    if (notes.trim() !== String(generatedReportTextRef.current || "").trim()) {
+      preGenerationNotesRef.current = notes;
+    }
     generatedReportTextRef.current = String(reportText || "").trim();
     setGeneratedReportCleared(false);
     if (!chipLinesDetached) {
@@ -11800,7 +11814,16 @@ export function CompletionPanel({
             timeZone: "America/New_York",
           })
         : "",
-      serviceNotes: stripChipTagLines(notes),
+      // Regeneration grounds in the tech's OWN notes: when the notes box
+      // still holds the installed draft, the pre-generation notes are the
+      // grounding (codex r43) — a hand-edited draft is the tech's copy and
+      // grounds itself.
+      serviceNotes: stripChipTagLines(
+        generatedReportTextRef.current
+          && notes.trim() === String(generatedReportTextRef.current).trim()
+          ? (preGenerationNotesRef.current || "")
+          : notes,
+      ),
       productsApplied,
       areasServiced,
       actionsCompleted,
@@ -14374,7 +14397,13 @@ export function CompletionPanel({
                   // model saw the snapshot (the paused autofill re-runs when
                   // generating settles) — hold generation until it resolves
                   // (codex r6).
-                  || (stationFeatureOn && stationRegistryState === "loading")}
+                  || (stationFeatureOn && stationRegistryState === "loading")
+                  // Bait zero states always refuse the drafted body for
+                  // fixed wording — don't bill a model call the report can
+                  // never publish (codex r43).
+                  || (isTypedFindings
+                    && ["termite_bait_station", "rodent_bait_station"].includes(typedFindingsSchema?.type)
+                    && typedActivityScore === 0)}
                 style={{
                   ...secondaryPill,
                   marginTop: 4,
@@ -16572,7 +16601,11 @@ export function CompletionPanel({
               disabled={generating
                 || (isLawn && lawnAssessmentReady === false)
                 // Same station-registry hold as the mobile Generate button.
-                || (stationFeatureOn && stationRegistryState === "loading")}
+                || (stationFeatureOn && stationRegistryState === "loading")
+                // Same bait zero-state hold as the mobile button (codex r43).
+                || (isTypedFindings
+                  && ["termite_bait_station", "rodent_bait_station"].includes(typedFindingsSchema?.type)
+                  && typedActivityScore === 0)}
               style={{
                 width: "100%",
                 padding: "10px 16px",
