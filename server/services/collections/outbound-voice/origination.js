@@ -181,8 +181,12 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
   // could land between the merge's check and its commit and the call
   // would proceed against mid-repoint data.
   const { withCaseLock } = require('../case-lock');
+  // customer_id is IN the fence (codex gh-r11): a merge committing between
+  // the snapshot reads and this lock acquisition repoints the case to the
+  // winner — the policy verdict and phone evaluated above then belong to
+  // the retired loser. A moved row claims 0 and stands down.
   const claimed = await withCaseLock(caseRow.customer_id, async (trx) => trx('collection_cases')
-    .where({ id: caseRow.id, current_state: 'approved', case_version: caseRow.case_version })
+    .where({ id: caseRow.id, customer_id: caseRow.customer_id, current_state: 'approved', case_version: caseRow.case_version })
     // The 24h authorization boundary holds INSIDE the atomic claim too (gh
     // prb-r15): the policy revalidation above can cross the deadline, and
     // the earlier expiry check is not the boundary — this WHERE is.

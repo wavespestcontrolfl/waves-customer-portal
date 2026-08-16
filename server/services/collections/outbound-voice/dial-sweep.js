@@ -61,8 +61,15 @@ async function promoteForAutoDial(caseRow, now) {
     // real owner. The update also fences customer_id as the belt.
     const current = await trx('collection_cases')
       .where({ id: caseRow.id })
-      .first('customer_id');
+      .first('customer_id', 'hold_reason');
     if (!current || String(current.customer_id) !== String(caseRow.customer_id)) return false;
+    // The candidate ITSELF can be the freshly parked row (codex gh-r11): an
+    // admin promote + definitive provider rejection between the snapshot
+    // and this lock returns the row to 'proposed' at the SAME version with
+    // hold_reason 'dial_failed' — the state+version fence below would pass
+    // and clear the park. Supervised parks release only through the admin
+    // endpoint; a parked candidate stands down.
+    if (['dial_failed', 'reclaimed_orphaned_approval'].includes(current.hold_reason)) return false;
     const liveElsewhere = await trx('collection_cases')
       .where({ customer_id: caseRow.customer_id })
       .whereNot('id', caseRow.id)

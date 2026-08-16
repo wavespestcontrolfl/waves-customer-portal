@@ -377,11 +377,17 @@ async function runShadowSweep({ now = new Date() } = {}) {
         // insert, and the dial path's retirement then ran before the card
         // existed — leaving a fresh "no call will be placed" card for a
         // case that just dialed. Re-check and self-retire; best-effort.
-        const stillShadow = await db('collection_cases')
-          .where({ id: caseRow.id, current_state: 'shadow' })
+        // Retire ONLY on evidence a call is actually going out (codex
+        // gh-r11): a refused or dial_failed attempt settles the case back
+        // to 'proposed' before this recheck runs, and that card is the
+        // supervised retry surface — every non-shadow state is NOT proof
+        // of a dial.
+        const recheck = await db('collection_cases')
+          .where({ id: caseRow.id })
+          .whereIn('current_state', ['approved', 'dialing'])
           .first('id')
           .catch(() => null);
-        if (!stillShadow) {
+        if (recheck) {
           await db('notifications')
             .where({ recipient_type: 'admin' })
             .whereNull('read_at')
@@ -413,16 +419,23 @@ async function runShadowSweep({ now = new Date() } = {}) {
       // promote one of these between the select and this update — the
       // fence makes the promotion win cleanly (no lock needed here: this
       // is a single conditional write, not a read-then-write decision).
-      casesLapsed = await db('collection_cases')
+      // Card keys come from the rows the fenced update ACTUALLY lapsed
+      // (codex gh-r11): a case promoted between the select and this update
+      // survives the fence, and retiring its card from the stale snapshot
+      // would strip the supervised retry surface if the attempt then
+      // refuses or dial_fails back to review.
+      const lapsedRows = await db('collection_cases')
         .whereIn('id', toLapse.map((c) => c.id))
         .where({ current_state: 'shadow' })
-        .update({ current_state: 'lapsed', updated_at: db.fn.now() });
+        .update({ current_state: 'lapsed', updated_at: db.fn.now() })
+        .returning(['id', 'idempotency_key']);
+      casesLapsed = lapsedRows.length;
       // The proposal card must retire WITH its case (codex r5): a frozen
       // actionable card for an ineligible customer misleads, and a later
       // requalification would stack a second card beside it. Marking read
       // uses the bell's own dismissal mechanism; best-effort — a missed
       // stamp only leaves a stale card, never sends anything.
-      const keys = toLapse.map((c) => c.idempotency_key).filter(Boolean);
+      const keys = lapsedRows.map((c) => c.idempotency_key).filter(Boolean);
       if (keys.length) {
         await db('notifications')
           .where({ recipient_type: 'admin' })

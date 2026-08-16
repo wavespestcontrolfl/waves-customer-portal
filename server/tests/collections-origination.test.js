@@ -465,3 +465,21 @@ test('the dial claim runs inside the customer case lock (db.transaction)', async
   expect(res.dialed).toBe(true);
   expect(db.transaction).toHaveBeenCalledTimes(1);
 });
+
+// codex gh-r11: the in-lock claim fences customer_id — a merge committing
+// between the snapshot reads and the lock acquisition repoints the case,
+// and the claim must stand down rather than dial with the retired
+// customer's policy verdict and phone.
+test('the dial claim fences customer_id: a mid-merge repointed case stands down (dial_claim_lost)', async () => {
+  const claimChain = chain('collection_cases', { result: 0 }); // fence claims 0 rows
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), claimChain],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res).toEqual({ dialed: false, reason: 'dial_claim_lost' });
+  expect(claimChain.where).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'cust-1' }));
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+  expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+});

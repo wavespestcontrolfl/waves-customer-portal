@@ -34,9 +34,19 @@ function makeChain(table, route) {
   }
   q.called = (m) => q._calls.some(([name]) => name === m);
   q.args = (m) => q._calls.find(([name]) => name === m)?.[1];
-  q.then = (resolve, reject) => Promise.resolve().then(() => route(q)).then(resolve, reject);
+  q.then = (resolve, reject) => Promise.resolve().then(() => {
+    // Dial-defer probe (gh-r11): routers here predate collection_cases and
+    // default unknown tables to [] (truthy), which would false-fire the
+    // undo's in-flight-call defer. .first() must resolve a row or null —
+    // serve it centrally; the defer pin plants a row via DIALING_CASE.
+    if (table === 'collection_cases') return DIALING_CASE;
+    return route(q);
+  }).then(resolve, reject);
   return q;
 }
+
+let DIALING_CASE = null;
+afterEach(() => { DIALING_CASE = null; });
 
 function installDb(router) {
   db.mockImplementation((table) => makeChain(table, (q) => router(table, q)));
@@ -1353,13 +1363,33 @@ describe('revertMerge', () => {
     });
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
-    // Every appointment creator takes the same key before touching the
-    // customer row (utils/customer-comms-lock.js) — the undo must hold it
-    // before ANY of its probes so an uncommitted insert can never hide.
-    expect(state.rawCalls.length).toBeGreaterThan(0);
-    const [sql, bindings] = state.rawCalls[0];
+    // Acquisition order (gh-r11): the collections_case locks for BOTH
+    // parties (sorted — same as executeMerge) come first, then the
+    // customer-comms key, all BEFORE any probe. Every appointment creator
+    // takes the comms key before touching the customer row
+    // (utils/customer-comms-lock.js) — the undo must hold it before ANY of
+    // its probes so an uncommitted insert can never hide; no other path
+    // takes comms-then-case, so this order cannot invert.
+    expect(state.rawCalls.length).toBeGreaterThanOrEqual(3);
+    const sortedParties = [WINNER, LOSER].map(String).sort();
+    state.rawCalls.slice(0, 2).forEach(([sql, bindings], i) => {
+      expect(String(sql)).toContain('pg_advisory_xact_lock');
+      expect(bindings).toEqual(['collections_case', sortedParties[i]]);
+    });
+    const [sql, bindings] = state.rawCalls[2];
     expect(String(sql)).toContain('pg_advisory_xact_lock');
     expect(bindings).toEqual([`customer-comms:${WINNER}`]);
+  });
+
+  it('defers (409) while either customer has a collection call mid-dial (gh-r11)', async () => {
+    const { trx } = buildRevertTrx({
+      journal: baseJournal(), winner: baseWinner(), loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1'] } },
+    });
+    DIALING_CASE = { id: 'case-dialing-1' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('collection call is in flight') });
   });
 
   it('restores the SNAPSHOT active/deleted state — a deliberately-deactivated loser stays deactivated (r20)', async () => {

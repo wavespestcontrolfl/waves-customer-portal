@@ -2283,6 +2283,32 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     }
     const winnerId = journal.winner_customer_id;
     const loserId = journal.loser_customer_id;
+    // The collections case lock for BOTH parties, same as the forward
+    // merge (codex gh-r11): the undo repoints collection_cases back to the
+    // restored customer while the dial surfaces promote/claim under this
+    // lock — without it, the undo can move a case out from under a claim
+    // in flight. Same deterministic sorted order as executeMerge; case
+    // locks precede the comms lock in both directions, so the order
+    // cannot invert.
+    for (const custId of [winnerId, loserId].map(String).sort()) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['collections_case', custId],
+      );
+    }
+    // A collection call mid-flight defers the undo (codex gh-r11), for the
+    // same reason it defers the forward merge: a 'dialing' case is running
+    // on policy, ledger, and call_log data for the pre-undo owner.
+    let dialingCase = null;
+    try {
+      dialingCase = await trx('collection_cases')
+        .whereIn('customer_id', [winnerId, loserId])
+        .where({ current_state: 'dialing' })
+        .first('id');
+    } catch { dialingCase = null; } // pre-collections envs: no table, no defer
+    if (dialingCase) {
+      refuse('A collection call is in flight for one of these customers — retry the revert after it completes');
+    }
     // FIRST lock after the journal row, BEFORE the customers rows (lock
     // order contract in utils/customer-comms-lock.js): every appointment
     // creator and the template-run executor take `customer-comms:<id>`

@@ -362,7 +362,8 @@ describe('retirement + tier rotation', () => {
   test('a customer denied this sweep has their case lapsed AND its unread card retired', async () => {
     ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['flag_collection_hold'] });
     const selectChain = chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] });
-    const updateChain = chain({ result: 1 });
+    // gh-r11: card keys derive from the rows the fenced update RETURNS.
+    const updateChain = chain({ returning: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14' }] });
     const cardChain = chain({ result: 1 });
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] })],
@@ -376,6 +377,21 @@ describe('retirement + tier rotation', () => {
     // The proposal card retires WITH the case (codex r5) — via the bell's
     // own read_at mechanism, never a delete.
     expect(cardChain.update).toHaveBeenCalledWith(expect.objectContaining({ read_at: expect.anything() }));
+  });
+
+  test('gh-r11: a case promoted between the lapse select and the fenced update keeps its card', async () => {
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['flag_collection_hold'] });
+    const selectChain = chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] });
+    // The fence let the promotion win: zero rows returned ⇒ zero lapses,
+    // and NO notifications retirement query fires at all.
+    const updateChain = chain({ returning: [] });
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] })],
+      collection_cases: [selectChain, updateChain],
+      notifications: [],
+    });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result.casesLapsed).toBe(0);
   });
 
   test('an unchanged balance that crossed a dunning tier rotates the version and files a fresh card', async () => {
@@ -582,17 +598,30 @@ describe('gh-r10: post-file card recheck', () => {
     });
   }
 
+  // gh-r11 semantics: retire ONLY on evidence a call is going out — the
+  // recheck matches approved/dialing; still-shadow AND settled-back-to-
+  // proposed (refused / dial_failed) both KEEP the card.
   test('a case still in shadow after filing keeps its card', async () => {
     const retireChain = chain({ result: 1 });
-    filedQueues({ recheck: chain({ first: { id: 'case-1' } }), retireChain });
+    filedQueues({ recheck: chain({ first: undefined }), retireChain });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(result.cardsFiled).toBe(1);
     expect(retireChain.update).not.toHaveBeenCalled();
   });
 
-  test('a case promoted mid-flight gets its just-filed card self-retired by dedupe key', async () => {
+  test('a case settled back to proposed (refusal / dial_failed) keeps its card — it is the supervised retry surface', async () => {
     const retireChain = chain({ result: 1 });
-    filedQueues({ recheck: chain({ first: undefined }), retireChain });
+    const recheck = chain({ first: undefined }); // whereIn approved/dialing finds nothing
+    filedQueues({ recheck, retireChain });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result.cardsFiled).toBe(1);
+    expect(recheck.whereIn).toHaveBeenCalledWith('current_state', ['approved', 'dialing']);
+    expect(retireChain.update).not.toHaveBeenCalled();
+  });
+
+  test('a case promoted mid-flight (approved/dialing) gets its just-filed card self-retired by dedupe key', async () => {
+    const retireChain = chain({ result: 1 });
+    filedQueues({ recheck: chain({ first: { id: 'case-1' } }), retireChain });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(result.cardsFiled).toBe(1);
     expect(retireChain.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['collections:cust-1:1:14']);

@@ -364,3 +364,19 @@ describe('gh-r10', () => {
     expect(rec.orWhereIn).toHaveBeenCalledWith('hold_reason', ['dial_failed', 'reclaimed_orphaned_approval']);
   });
 });
+
+describe('gh-r11', () => {
+  test('a candidate that got supervised-parked between snapshot and lock stands down (own hold_reason re-read)', async () => {
+    armGates();
+    // Admin promote + definitive provider rejection landed after the
+    // snapshot: same owner, same version, state back to 'proposed', but
+    // hold_reason now 'dial_failed'. The in-lock re-read must stand down
+    // before the state+version-fenced update can clear the park.
+    const parkedOwner = promoteChain(0, { first: { customer_id: 'cust-1', hold_reason: 'dial_failed' } });
+    const queues = [promoteChain(0), /* reclaim */ candidateChain([caseRow('c1', 'proposed')]), parkedOwner];
+    db.mockImplementation(() => queues.shift());
+    const res = await runCollectionsDialSweep({ now: NOW });
+    expect(res).toMatchObject({ promoted: 0, dialed: 0 });
+    expect(originateCollectionCall).not.toHaveBeenCalled();
+  });
+});
