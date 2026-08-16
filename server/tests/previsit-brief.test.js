@@ -2095,3 +2095,26 @@ describe('codex #3423 r19 — scheduling evidence, room-as-spacing, canonical na
     expect(verdict.reason).not.toBe('ungrounded_preference_conflict:interior');
   });
 });
+
+describe('codex #3423 r20 — noncanonical suffix, field-wide evidence', () => {
+  test('a suffixed canonical name rejects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const name of ['Waves Pest Control & Lawn', 'Waves Pest Control and Lawn Care']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: `${name} visited.` },
+        grounding,
+      ).reason).toBe('noncanonical_company_name');
+    }
+  });
+
+  test('evidence words are caught field-wide regardless of capture geometry', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { priorities: ['Provide customer with more information on estimate'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBe('ungrounded_instruction:estimate');
+  });
+});

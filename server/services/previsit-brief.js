@@ -92,6 +92,9 @@ const RETIRED_NAME_RE = /waves\W+(?:lawn\W*(?:and\W+)?\W*pest|pest\W*(?:and\W+)?
 // product reference (r17: bare 'waves' is no longer common prose).
 // Canonical name ONLY per AGENTS.md — no blessed variants (codex r19).
 const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
+// The canonical phrase followed by a brand-connector is a suffixed
+// variant ("Waves Pest Control & Lawn") — reject it outright (r20).
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control\s*(?:&|\+|\/|-|\band\b)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1009,7 +1012,8 @@ const INSTRUCTION_EVIDENCE_WORDS = new Set([
   // fabricatable from common words — the access noun must be evidenced.
   'gate', 'gates', 'access', 'card', 'cards', 'keys',
   // r19: scheduling directives ("Discuss scheduling") assert a real action.
-  'schedule', 'schedules', 'scheduling', 'reschedule', 'rescheduling', 'scheduled',
+  // 'scheduled' (adjective — "a prior scheduled service") stays prose.
+  'schedule', 'schedules', 'scheduling', 'reschedule', 'rescheduling',
 ]);
 
 // Word-level grounding for one candidate word ACROSS its stem variants.
@@ -1310,7 +1314,20 @@ function findUngroundedClaim(body, grounding) {
   if (svcPrefFlags?.exteriorSweep === false) {
     prefConflicts.push({ re: /\b(?:eaves?|cobwebs?)\b/, term: 'eave sweep' });
   }
+  // Evidence-bearing words are validated FIELD-WIDE in instructions —
+  // capture geometry (token caps, connectors) must never decide whether
+  // "estimate"/"payment"-class words reach the gate (codex #3423 r20).
+  const evidenceWordGrounded = (w) => wordVariants(w).some(
+    (v) => new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedValueText),
+  );
   for (const field of labeledFields) {
+    if (field.instructional) {
+      for (const w of (String(field.text).toLowerCase().match(/[a-z][a-z'-]{3,}/g) || [])) {
+        if (INSTRUCTION_EVIDENCE_WORDS.has(w) && !evidenceWordGrounded(w)) {
+          return { kind: 'instruction', term: w };
+        }
+      }
+    }
     if (field.instructional && prefConflicts.length) {
       const fieldText = String(field.text).toLowerCase();
       for (const conflict of prefConflicts) {
@@ -1486,6 +1503,7 @@ function validateBriefJson(json, grounding) {
     .join(' ');
   if (FORBIDDEN_TARGET_RE.test(rawText)) return { reason: 'forbidden_genus' };
   if (RETIRED_NAME_RE.test(rawText)) return { reason: 'retired_company_name' };
+  if (NONCANONICAL_SUFFIX_RE.test(rawText)) return { reason: 'noncanonical_company_name' };
   // Structured self-report (complement to the prose regexes below, which
   // only see a few sentence shapes): the model must list every product
   // and pest/organism it mentions, and every listed term must be
