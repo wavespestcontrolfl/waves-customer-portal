@@ -3820,3 +3820,32 @@ describe('codex #3423 r69 — needs-based contact, payment lifecycle, membership
     expect(validateBriefJson({ ...BASE, priorities: ['Apply Bifen IT'], mentioned_terms: ['bifen'] }, catalogOnly).reason).toMatch(/^truncated_product_term:/);
   });
 });
+
+describe('codex #3423 r70 — access numbers, full payment lifecycle, pet counts', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('access-number claims need credential evidence, not a matching digit', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const dateOnly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { scheduledDate: '2026-08-20' } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Access number 2026' }, dateOnly).reason).toBeTruthy();
+    const credFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'gate access number 2026 on file' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Access number 2026 on file' }, credFact).body).toBeTruthy();
+  });
+
+  test('every payment lifecycle state binds to the recorded state', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const pending = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment is pending' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment completed' }, pending).reason).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment is pending' }, pending).body).toBeTruthy();
+    const refunded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment was refunded last week' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment completed' }, refunded).reason).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment was refunded' }, refunded).body).toBeTruthy();
+  });
+
+  test('spelled pet counts bind to the grounded count', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const oneDog = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has one dog' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has five dogs' }, oneDog).reason).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has one dog' }, oneDog).body).toBeTruthy();
+  });
+});

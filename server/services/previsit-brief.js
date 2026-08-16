@@ -1043,7 +1043,7 @@ const GROUNDED_ONLY_WORDS = new Set([
 
 // 'access' as a credential or claimed access STATE must ground; as a verb
 // for reaching a grounded area it is prose (codex #3423 r44).
-const ACCESS_STATE_RE = /\baccess\s+(?:(?:has\s+been|was|is|will\s+be)\s+)?(?:code|card|key|granted|provided|given|arranged|available|confirmed|authorized|secured|on\s+file)\b|\b(?:gate|door|garage|provide[sd]?|granted|has|have|gave|given)\s+access\b/i;
+const ACCESS_STATE_RE = /\b(?:access|entry)\s+(?:(?:has\s+been|was|is|will\s+be)\s+)?(?:code|card|key|numbers?|granted|provided|given|arranged|available|confirmed|authorized|secured|on\s+file)\b|\b(?:gate|door|garage|provide[sd]?|granted|has|have|gave|given)\s+access\b/i;
 
 // 'key' as an access credential ("door key", "key under the mat") must
 // ground; 'key' as emphasis ("key concern") is prose (codex #3423 r29).
@@ -1462,7 +1462,7 @@ function findUngroundedClaim(body, grounding) {
   // Bounded modifiers between the quantity and unit ("five active
   // services", "five more times") are still count claims (r68 P2);
   // 'of' is excluded so partitives ("one of the services") stay prose.
-  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:(?!of\b)\w+\s+){0,2}(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?)\b/g)) {
+  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:(?!of\b)\w+\s+){0,2}(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?|pets?|dogs?|cats?)\b/g)) {
     const phrase = `${m[1]} ${m[2]}`;
     const digitMap = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', fifteen: '15', twenty: '20', thirty: '30' };
     const unit = m[2].replace(/s$/, '');
@@ -1607,17 +1607,28 @@ function findUngroundedClaim(body, grounding) {
     return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
   }
   // Payment lifecycle claims bind to the recorded status for EVERY
-  // payment fact, not just overdue accounts (r69) — a failed attempt
-  // must not be inverted into a completed payment, nor the reverse.
-  const paymentFailedFact = /\bpayments?\b[^.;!?]{0,30}\b(?:fail(?:ed|ure)?|declined?|unsuccessful|error(?:ed)?|bounced?|did\s+not\s+go\s+through)\b|\b(?:fail(?:ed)?|declined?)\b[^.;!?]{0,30}\bpayments?\b/.test(groundedValueText);
-  const paymentCompletedFact = /\bpayments?\b[^.;!?]{0,30}\b(?:complete[d]?|received|processed|successful|went\s+through|posted|confirmed)\b|\b(?:received|processed|collected)\b[^.;!?]{0,30}\bpayments?\b|\bpaid\b/.test(groundedValueText);
-  if (/\bpayment\s+(?:was\s+|has\s+been\s+|is\s+)?(?:complete[d]?|received|processed|successful|made|confirmed|went\s+through|posted)\b/.test(outputText)
-    && paymentFailedFact && !paymentCompletedFact) {
-    return { kind: 'payment_state_conflict', term: 'payment failed on file' };
-  }
-  if (/\bpayment\s+(?:was\s+|has\s+been\s+|is\s+)?(?:fail(?:ed)?|declined?|unsuccessful)\b/.test(outputText)
-    && paymentCompletedFact && !paymentFailedFact) {
-    return { kind: 'payment_state_conflict', term: 'payment completed on file' };
+  // payment fact, not just overdue accounts (r69), across ALL recognized
+  // states (r70) — a pending/refunded/voided/failed payment must not be
+  // rewritten as completed, nor any other cross-state inversion.
+  const PAY_STATES = [
+    ['completed', '(?:complete[d]?|received|processed|successful|went\\s+through|posted|confirmed|made)'],
+    ['failed', '(?:fail(?:ed|ure)?|declined?|unsuccessful|error(?:ed)?|bounced?|did\\s+not\\s+go\\s+through)'],
+    ['pending', '(?:pending|processing|awaiting|in\\s+progress|not\\s+yet\\s+(?:posted|processed))'],
+    ['refunded', '(?:refund(?:ed)?)'],
+    ['voided', '(?:void(?:ed)?|cancell?ed)'],
+    ['action_required', '(?:action\\s+required|requires\\s+action|needs\\s+attention)'],
+  ];
+  const factPayStates = new Set(PAY_STATES
+    .filter(([, src]) => new RegExp(`\\bpayments?\\b[^.;!?]{0,30}${src}|${src}[^.;!?]{0,30}\\bpayments?\\b`).test(groundedValueText))
+    .map(([k]) => k));
+  if (/\bpaid\b/.test(groundedValueText)) factPayStates.add('completed');
+  if (factPayStates.size > 0) {
+    for (const [state, src] of PAY_STATES) {
+      if (new RegExp(`\\bpayment\\s+(?:was\\s+|has\\s+been\\s+|had\\s+been\\s+|is\\s+)?${src}\\b`).test(outputText)
+        && !factPayStates.has(state)) {
+        return { kind: 'payment_state_conflict', term: `payment ${state} not on file` };
+      }
+    }
   }
   // Tier words bind to ACTUAL tier facts — an HOA or product name
   // containing 'gold' must not assign a WaveGuard tier (r45).
