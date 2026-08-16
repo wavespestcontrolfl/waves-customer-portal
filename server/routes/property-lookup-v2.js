@@ -2693,11 +2693,17 @@ function commercialSignalRecord(rc) {
 // the vote: _parcel.residentialUnits is county GIS by construction
 // (attachParcelMeta), and rc.unitCount only when the record is authoritative
 // (county/cadastral merge, or authoritative unitCount field evidence).
-// Synthetic caller defaults (unitCount: 1 with no provenance — see
-// hasCommercialSignalText) and web-sourced counts keep the text vote:
-// suppressing on those would reopen the Gateway Ave hole in the other
-// direction. When BOTH counts exist the larger wins — the association
-// aggregate shape carries unitCount 1 beside _parcel.residentialUnits 30–48.
+// Synthetic defaults keep the text vote: shapeAsPropertyRecord seeds
+// unitCount: 1 on EVERY record (ai-property-lookup.js), so a record-level
+// count may only vote here on authoritative unitCount FIELD evidence — a
+// bare `_source: county` proves nothing about where the 1 came from (codex
+// P1: a county multifamily parcel whose GIS omitted unit data must keep the
+// conservative COMMERCIAL verdict). hasCommercialSignalText's shaped
+// { unitCount: 1 } caller default stays non-attested the same way, and
+// web-sourced counts keep the vote too — suppressing on those would reopen
+// the Gateway Ave hole in the other direction. When BOTH counts exist the
+// larger wins — the association aggregate shape carries unitCount 1 beside
+// _parcel.residentialUnits 30–48.
 function countyAttestedSmallResidential(rc) {
   if (!rc) return false;
   const counts = [];
@@ -2705,10 +2711,9 @@ function countyAttestedSmallResidential(rc) {
   if (Number.isFinite(parcelUnits) && parcelUnits > 0) counts.push(parcelUnits);
   const evidence = rc._fieldEvidence?.unitCount;
   const evidenceSource = String(evidence?.sourceType || '').toLowerCase();
-  const countAuthoritative = rc._source === 'county' || rc._source === 'cadastral'
-    || AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(evidenceSource);
   const recordUnits = Number(rc.unitCount);
-  if (countAuthoritative && Number.isFinite(recordUnits) && recordUnits > 0) counts.push(recordUnits);
+  if (AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(evidenceSource)
+    && Number.isFinite(recordUnits) && recordUnits > 0) counts.push(recordUnits);
   return counts.length > 0 && Math.max(...counts) <= 4;
 }
 

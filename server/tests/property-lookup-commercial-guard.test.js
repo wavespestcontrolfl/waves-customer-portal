@@ -224,6 +224,17 @@ describe('county-attested small parcels stay residential (≥5-unit ruling, 2026
     expect(detectCategory(countyDuplexParcel({ _parcel: undefined }), {})).toBe('COMMERCIAL');
   });
 
+  test('the shaped unitCount: 1 seed on a county record is NOT attested — GIS omitted unit data (codex P1)', () => {
+    // shapeAsPropertyRecord seeds unitCount: 1 on every record, so a county
+    // multifamily parcel whose GIS response carried no residentialUnits
+    // arrives with a synthetic 1 — _source alone must not turn it into a
+    // county-attested small parcel.
+    expect(detectCategory(countyDuplexParcel({
+      unitCount: 1,
+      _parcel: { county: 'Sarasota', dorUseCode: '0810' },
+    }), {})).toBe('COMMERCIAL');
+  });
+
   test('authoritative unitCount field evidence on a hybrid also suppresses the vote', () => {
     expect(detectCategory(hybridCountyWonRecord({
       propertyType: 'Multifamily',
