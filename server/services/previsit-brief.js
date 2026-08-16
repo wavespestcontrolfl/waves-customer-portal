@@ -99,7 +99,7 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Connector optional (r22): "Waves Pest Control Pest Services" is a
 // suffixed variant too — a brand word directly after the name rejects;
 // ordinary prose ("- routine service", "serviced the yard") does not.
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:(?:&|\+|\/|-|,|\band\b)\s*)?(?:lawn|pest|care|control|llc|inc|corp|co|ltd|llp)\b)/i;
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:(?:&|\+|\/|-|,|\band\b)\s*)?(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -932,7 +932,7 @@ const COMMON_PROSE_WORDS = new Set([
   'month', 'monthly', 'morning', 'mulch', 'needs', 'nothing', 'note', 'noted', 'notes', 'notice',
   'notify', 'number', 'office', 'onsite', 'orders', 'other', 'outdoor', 'owner', 'panel', 'parking',
   'patio', 'pending', 'perimeter', 'phone', 'photo', 'photos', 'place', 'placed', 'planned',
-  'plans', 'plants', 'please', 'pool', 'porch', 'prefer', 'preference', 'preferences', 'prefers', 'pressure',
+  'plans', 'plants', 'please', 'pool', 'porch', 'prefer', 'preference', 'preferences', 'prefers',
   'previous', 'prior', 'program', 'progress', 'rate', 'ready', 'recap', 'recent', 'recently',
   'recheck', 'record', 'records', 'reminder', 'renewal', 'repair', 'report', 'reported', 'request', 'requested',
   'reschedule', 'rescheduled', 'resolve', 'resolved', 'response', 'return', 'review', 'reviewed', 'right', 'roof',
@@ -1041,6 +1041,9 @@ const INSTRUCTION_EVIDENCE_WORDS = new Set([
   'chemical', 'chemicals', 'sensitivity', 'sensitivities',
   // r29: account-lifecycle directives ("Discuss renewal/membership").
   'renewal', 'renewals', 'membership', 'memberships', 'member', 'members',
+  // r34: pet guidance is deterministic-block-only by design — an LLM pet
+  // directive must derive from a fact (e.g. a flag mentioning the pet).
+  'pet', 'pets', 'dog', 'dogs', 'cat', 'cats',
 ]);
 
 // Word-level grounding for one candidate word ACROSS its stem variants.
@@ -1381,7 +1384,7 @@ function findUngroundedClaim(body, grounding) {
   // A pendingEstimate object IS the pending state, status field or not.
   if (grounding.llmFacts?.openScope?.pendingEstimate) estimateStatuses.push('pending');
   if (estimateStatuses.length) {
-    for (const m of outputText.matchAll(/\b(?:estimates?|quotes?)\s+(?:was\s+|is\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected)\s+(?:estimates?|quotes?)\b/g)) {
+    for (const m of outputText.matchAll(/\b(?:estimates?|quotes?)\s+(?:was\s+|is\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided)\s+(?:estimates?|quotes?)\b/g)) {
       const claimed = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled');
       if (!estimateStatuses.includes(claimed)) {
         return { kind: 'estimate_state_conflict', term: claimed };

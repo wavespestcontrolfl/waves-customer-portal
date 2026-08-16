@@ -2530,3 +2530,40 @@ describe('codex #3423 r33 — estimate-status binding, initial family', () => {
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r34 — pets, pest pressure, punctuated suffixes, lifecycle words', () => {
+  test('pet directives, pressure claims, L.P. suffix, and unmatched lifecycle words reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { priorities: ['Discuss pet concerns'] },
+      { priorities: ['Provide pet information'] },
+      { priorities: [], watch_items: ['Signs of pest pressure'] },
+      { priorities: [], customer_context: 'Waves Pest Control L.P. visited.' },
+    ]) {
+      expect(validateBriefJson(
+        { watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null, ...body },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const acceptedEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    for (const claim of ['Estimate completed', 'Estimate closed']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: claim, customer_context: null },
+        acceptedEst,
+      ).reason).toMatch(/estimate_state_conflict/);
+    }
+  });
+
+  test('a pet flag grounds a pet directive; pressure grounds from notes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'dog on property; heavy pest pressure noted at fence line' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: ['Discuss dog concerns'], watch_items: ['Signs of pest pressure'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
