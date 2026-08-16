@@ -2391,3 +2391,33 @@ describe('codex #3423 r29 — key emphasis, -ment stemming, renewal/membership d
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r30 — pin credentials, member variants', () => {
+  test('pin credential claims reject; bait-pin prose is untouched by the credential regex', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { priorities: ['Retrieve door pin'], customer_context: null },
+      { priorities: [], customer_context: 'Door pin provided' },
+    ]) {
+      expect(validateBriefJson(
+        { watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, ...body },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('"Discuss member status" needs membership facts; grounded case passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: ['Discuss member status'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toBeTruthy();
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { membership: { tier: 'Silver' } } };
+    expect(validateBriefJson(
+      { priorities: ['Discuss member status'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+});

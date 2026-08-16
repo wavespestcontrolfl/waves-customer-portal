@@ -1021,7 +1021,7 @@ const GROUNDED_ONLY_WORDS = new Set([
 
 // 'key' as an access credential ("door key", "key under the mat") must
 // ground; 'key' as emphasis ("key concern") is prose (codex #3423 r29).
-const KEY_CREDENTIAL_RE = /\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\s+keys?\b|\bkeys?\s+(?:under|hidden|inside|behind|left|beneath)\b/i;
+const KEY_CREDENTIAL_RE = /\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\s+(?:keys?|pins?|codes?)\b|\b(?:keys?|pins?)\s+(?:under|hidden|inside|behind|left|beneath|provided)\b/i;
 
 // Instruction objects carrying these words direct real business actions
 // ("Provide estimate", "Discuss payment", "Perform treatment") — inside
@@ -1040,7 +1040,7 @@ const INSTRUCTION_EVIDENCE_WORDS = new Set([
   // derive from a sensitivity fact.
   'chemical', 'chemicals', 'sensitivity', 'sensitivities',
   // r29: account-lifecycle directives ("Discuss renewal/membership").
-  'renewal', 'renewals', 'membership', 'memberships',
+  'renewal', 'renewals', 'membership', 'memberships', 'member', 'members',
 ]);
 
 // Word-level grounding for one candidate word ACROSS its stem variants.
@@ -1214,7 +1214,7 @@ function findUngroundedClaim(body, grounding) {
     // rarely contain the literal word.
     ...(grounding.llmFacts?.openScope?.pendingEstimate || grounding.llmFacts?.openScope?.sourceEstimate ? ['estimate', 'quote'] : []),
     // A present membership object IS the membership fact (r29).
-    ...(grounding.llmFacts?.membership ? ['membership'] : []),
+    ...(grounding.llmFacts?.membership ? ['membership', 'member'] : []),
     // The overdue_balance flag IS billing evidence — its detail ('$100.00
     // outstanding') doesn't carry the words (r27 P2).
     ...((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance') ? ['billing', 'invoice', 'payment', 'balance'] : []),
@@ -1518,7 +1518,7 @@ function findUngroundedClaim(body, grounding) {
         if (GROUNDED_ONLY_WORDS.has(word) && !groundedWordOk(word, groundedText, groundedValueText)) {
           return { kind: 'novel_term', term: word };
         }
-        if (word === 'key' && KEY_CREDENTIAL_RE.test(String(field)) && !groundedWordOk('key', groundedText, groundedValueText)) {
+        if ((word === 'key' || word === 'pin') && KEY_CREDENTIAL_RE.test(String(field)) && !groundedWordOk(word, groundedText, groundedValueText)) {
           return { kind: 'novel_term', term: word };
         }
         continue;
