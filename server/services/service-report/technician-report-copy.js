@@ -58,13 +58,15 @@ const REPORT_ACCESS_CODE_RES = [
   // (codex r40)
   // quoted credentials may span up to four tokens ("blue waves",
   // 'open sesame') — the shared scrubber's multi-token posture (codex r48)
-  /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=|-|was|were|remains?|remained|stays?|stayed|became|becomes)?\s*(?:["'‘’“”][A-Za-z0-9#*]{2,12}(?:\s+[A-Za-z0-9#*]{1,12}){0,3}["'‘’“”]|[A-Za-z]*\d[A-Za-z0-9#*]*\b)/i,
+  /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=|-|was|were|remains?|remained|stays?|stayed|became|becomes)?\s*(?:(?:now|currently|still|today|temporarily|again)\s+)?(?:["'‘’“”][A-Za-z0-9#*]{2,12}(?:\s+[A-Za-z0-9#*]{1,12}){0,3}["'‘’“”]|[A-Za-z]*\d[A-Za-z0-9#*]*\b)/i,
   // was/were are credential linkers for a bounded UPPERCASE/quoted token —
   // "The gate code was BLUE" (codex r51); bare lowercase after was/were
   // stays out ("the code was updated" is ordinary copy)
   // continuing-state verbs (remains/stays/became) link a bounded
   // UPPERCASE/quoted credential the same way is/was do (codex r52)
-  /\b(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b\s*(?:is|:|=|-|was|were|remains?|remained|stays?|stayed|became|becomes)?\s*["'‘’“”]?[A-Z0-9#*]{2,12}\b/,
+  // bounded temporal adverbs may sit between linker and credential —
+  // "The gate code is now BLUE" (codex r53)
+  /\b(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b\s*(?:is|:|=|-|was|were|remains?|remained|stays?|stayed|became|becomes)?\s*(?:(?:now|currently|still|today|temporarily|again)\s+)?["'‘’“”]?[A-Z0-9#*]{2,12}\b/,
   /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=)\s*["'‘’“”]?[a-z][a-z0-9#*]{1,11}["'‘’“”]?(?=[\s.,!?‘’“”]|$)/i,
   // reverse order ("blue is the gate password") — a leading stopword
   // ("this is the code") never counts as the credential itself (codex r38)

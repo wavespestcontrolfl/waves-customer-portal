@@ -327,6 +327,12 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // clock-time forms state the same fixed window (r53)
+    expect(reportCopyRejection('Enter the treated area at 4:30 PM.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Stay off the treated lawn until 6 PM.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('We arrived at 2 PM and treated the perimeter.')).toBeNull();
+    // temporal adverbs between linker and credential (r53)
+    expect(reportCopyRejection('The gate code is now BLUE.')).toBe('access_code');
     // keep-out / stay-off instructions state the same window (r52)
     expect(reportCopyRejection('Keep people and pets out of the treated area for thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Stay off the treated lawn for two hours.')).toMatch(/^banned:/);

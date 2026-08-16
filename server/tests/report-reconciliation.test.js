@@ -479,6 +479,28 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.bodySource).toBeUndefined();
   });
 
+  // r53 (#3420): story-lane TREND visits consume the reviewed body.
+  test('rodent_exclusion trend visit consumes a clean body and refuses a repair denial', () => {
+    const base = {
+      projectType: 'rodent_exclusion',
+      values: { exclusion_work_completed: 'Yes', remaining_concerns: 'No remaining concerns observed' },
+      visitSequence: 2,
+      activity: { score: 2, trendWord: 'improving' },
+      whatWeDid: 'x',
+      nextStep: 'n.',
+    };
+    const clean = buildTodaysResult({
+      ...base,
+      technicianReportBody: 'We sealed two additional gaps at the soffit line today.',
+    });
+    expect(clean.bodySource).toBe('technician_report');
+    const denial = buildTodaysResult({
+      ...base,
+      technicianReportBody: 'The exclusion repairs could not be completed today.',
+    });
+    expect(denial.bodySource).toBeUndefined();
+  });
+
   // r52 (#3420): absence contradicts EVERY nonzero gauge, not just band 2+.
   test('flea refuses "No flea activity was observed" beside a low score too', () => {
     const r = buildTodaysResult({

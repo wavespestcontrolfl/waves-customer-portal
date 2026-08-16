@@ -3073,6 +3073,32 @@ function activityLevelContradictions(text, finalBand) {
   return found;
 }
 
+// Story-lane body screens, hoisted to module scope so BOTH the story
+// branches and the gauge branch (trend visits land there) apply them
+// (codex r53 #3420).
+const NO_REPAIRS_CLAIM_RE = /\bno\s+(?:exclusion\s+)?(?:repairs?|work)\s+(?:was|were)\s+(?:completed|performed|done|made|needed)\b|\b(?:did\s+not|didn['’]t)\s+(?:complete|perform|make)\b[^.!?]{0,25}\b(?:repairs?|exclusion)\b|\b(?:repairs?|work|exclusion)\b[^.!?]{0,30}\b(?:could\s+not|couldn['’]t|cannot|can['’]t|will\s+not|won['’]t)\s+be\s+(?:completed|performed|done|made|finished)\b|\bunable\s+to\s+(?:complete|perform|finish|make|do)\b[^.!?]{0,30}\b(?:repairs?|exclusion|work)\b/i;
+const RODENT_NOUN_SRC = '(?:rodents?|rats?|mice|mouse)';
+const NO_ACTIVITY_CLAIM_RE = new RegExp(`\\bno\\s+(?:current\\s+|visible\\s+|active\\s+)*(?:${RODENT_NOUN_SRC}\\s+)?activity\\b|\\bno\\s+(?:signs?|evidence)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\bno\\s+(?:current\\s+|visible\\s+|active\\s+|fresh\\s+|new\\s+|obvious\\s+)*${RODENT_NOUN_SRC}\\s+(?:evidence|signs?|droppings|indications?)\\b|\\bfree\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b(?:did\\s+not|didn['’]t|could\\s+not|couldn['’]t|have\\s+not|haven['’]t|has\\s+not|hasn['’]t|never)\\s+(?:find|found|observe[d]?|note[d]?|confirm(?:ed)?|detect(?:ed)?|see|seen|saw|spot(?:ted)?)\\b[^.!?]{0,40}\\b(?:${RODENT_NOUN_SRC}|activity)\\b|\\bno\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|seen|noted)\\b`, 'i');
+const ACTIVITY_FOUND_CLAIM_RE = new RegExp(`\\b(?:${RODENT_NOUN_SRC}\\s+)?activity\\s+(?:was|were|is)\\s+(?:found|observed|confirmed|noted|present)\\b|\\bactive\\s+${RODENT_NOUN_SRC}\\b|\\bevidence\\s+of\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|noted)\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:a\\s+|an\\s+|the\\s+|some\\s+|several\\s+|multiple\\s+|two\\s+|three\\s+|a\\s+few\\s+)?(?:fresh\\s+|new\\s+|active\\s+|visible\\s+|recent\\s+|significant\\s+|clear\\s+|live\\s+|dead\\s+)*${RODENT_NOUN_SRC}\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:signs?|evidence|droppings)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b${RODENT_NOUN_SRC}\\s+(?:droppings?|evidence|signs?|tracks?|gnawing|nesting)\\b[^.!?]{0,30}\\b(?:was|were|is|are)\\s+(?:present|found|observed|visible|noted|seen|evident|discovered)\\b`, 'i');
+// True when a reviewed body contradicts the recorded story facts of an
+// exclusion/inspection section — used by the first-visit story branches
+// AND the gauge branch their trend visits land in (codex r53).
+function rodentStoryBodyContradiction(projectType, values = {}, text = '') {
+  const body = String(text || '');
+  if (!body.trim()) return false;
+  if (projectType === 'rodent_exclusion') {
+    return Boolean(values.exclusion_work_completed) && NO_REPAIRS_CLAIM_RE.test(body);
+  }
+  if (projectType === 'rodent_inspection') {
+    const recorded = String(values.activity_found || '');
+    if (!recorded) return false;
+    return recorded === 'Yes'
+      ? NO_ACTIVITY_CLAIM_RE.test(body)
+      : ACTIVITY_FOUND_CLAIM_RE.test(body.replace(new RegExp(NO_ACTIVITY_CLAIM_RE.source, 'gi'), ''));
+  }
+  return false;
+}
+
 /**
  * Deterministic Today's Result copy (contract §6). AI may later polish the
  * recommendations field, but this template output always exists and always
@@ -3331,8 +3357,7 @@ function buildTodaysResult({
     // modal and inability denials included — "repairs could not be
     // completed" / "we were unable to complete the repairs" deny the
     // recorded work just as plainly as "no repairs were completed"
-    // (codex r46)
-    const NO_REPAIRS_CLAIM_RE = /\bno\s+(?:exclusion\s+)?(?:repairs?|work)\s+(?:was|were)\s+(?:completed|performed|done|made|needed)\b|\b(?:did\s+not|didn['’]t)\s+(?:complete|perform|make)\b[^.!?]{0,25}\b(?:repairs?|exclusion)\b|\b(?:repairs?|work|exclusion)\b[^.!?]{0,30}\b(?:could\s+not|couldn['’]t|cannot|can['’]t|will\s+not|won['’]t)\s+be\s+(?:completed|performed|done|made|finished)\b|\bunable\s+to\s+(?:complete|perform|finish|make|do)\b[^.!?]{0,30}\b(?:repairs?|exclusion|work)\b/i;
+    // (codex r46; regex hoisted to module scope in r53)
     const exclusionReportBody = technicianReportBody
       && (reconcileConfirmed || !NO_REPAIRS_CLAIM_RE.test(String(technicianReportBody)))
       ? technicianReportBody
@@ -3436,22 +3461,10 @@ function buildTodaysResult({
     // was observed" is the natural form of "no evidence of rodents"
     // (codex r46)
     // rat/mouse species nouns claim (and deny) the same finding as
-    // "rodent" (codex r50)
-    const RODENT_NOUN_SRC = '(?:rodents?|rats?|mice|mouse)';
-    const NO_ACTIVITY_CLAIM_RE = new RegExp(`\\bno\\s+(?:current\\s+|visible\\s+|active\\s+)*(?:${RODENT_NOUN_SRC}\\s+)?activity\\b|\\bno\\s+(?:signs?|evidence)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\bno\\s+(?:current\\s+|visible\\s+|active\\s+|fresh\\s+|new\\s+|obvious\\s+)*${RODENT_NOUN_SRC}\\s+(?:evidence|signs?|droppings|indications?)\\b|\\bfree\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b(?:did\\s+not|didn['’]t|could\\s+not|couldn['’]t|have\\s+not|haven['’]t|has\\s+not|hasn['’]t|never)\\s+(?:find|found|observe[d]?|note[d]?|confirm(?:ed)?|detect(?:ed)?|see|seen|saw|spot(?:ted)?)\\b[^.!?]{0,40}\\b(?:${RODENT_NOUN_SRC}|activity)\\b|\\bno\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|seen|noted)\\b`, 'i');
-    // active-voice findings included — "The technician observed rodent
-    // activity" carries the claim without any passive shape (codex r47);
-    // species nouns with optional articles claim it too — "saw a rat",
-    // "spotted mice" (codex r50)
-    const ACTIVITY_FOUND_CLAIM_RE = new RegExp(`\\b(?:${RODENT_NOUN_SRC}\\s+)?activity\\s+(?:was|were|is)\\s+(?:found|observed|confirmed|noted|present)\\b|\\bactive\\s+${RODENT_NOUN_SRC}\\b|\\bevidence\\s+of\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|noted)\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:a\\s+|an\\s+|the\\s+|some\\s+|several\\s+|multiple\\s+|two\\s+|three\\s+|a\\s+few\\s+)?(?:fresh\\s+|new\\s+|active\\s+|visible\\s+|recent\\s+|significant\\s+|clear\\s+|live\\s+|dead\\s+)*${RODENT_NOUN_SRC}\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:signs?|evidence|droppings)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b${RODENT_NOUN_SRC}\\s+(?:droppings?|evidence|signs?|tracks?|gnawing|nesting)\\b[^.!?]{0,30}\\b(?:was|were|is|are)\\s+(?:present|found|observed|visible|noted|seen|evident|discovered)\\b`, 'i');
-    const inspectionBodyText = String(technicianReportBody || '');
-    const inspectionContradiction = found
-      ? NO_ACTIVITY_CLAIM_RE.test(inspectionBodyText)
-      // strip negated phrases first so "no activity was observed" never
-      // reads as a positive claim
-      : ACTIVITY_FOUND_CLAIM_RE.test(inspectionBodyText.replace(new RegExp(NO_ACTIVITY_CLAIM_RE.source, 'gi'), ''));
+    // "rodent" (codex r50; regexes hoisted to module scope in r53 and
+    // shared via rodentStoryBodyContradiction with the gauge branch)
     const inspectionReportBody = technicianReportBody
-      && (reconcileConfirmed || !inspectionContradiction)
+      && (reconcileConfirmed || !rodentStoryBodyContradiction('rodent_inspection', values, technicianReportBody))
       ? technicianReportBody
       : null;
     const inspectionMandated = [
@@ -3675,8 +3688,14 @@ function buildTodaysResult({
     // appended right after it. Falls back to the deterministic sentence,
     // which is always stage-correct because it is composed from the same
     // declaration.
-    const storyKeepsTemplate = projectType === 'rodent_exclusion' || projectType === 'rodent_inspection';
-    const rawGaugeBody = !storyKeepsTemplate && activity.score !== 0
+    // Story-lane TREND visits consume the reviewed body like every other
+    // gauge lane (owner 2026-08-11 collective rule; codex r53 — the old
+    // unconditional template kept Generate billing for prose completion
+    // silently discarded). The same story screens their first-visit
+    // branches run apply here, reconcile override honored downstream.
+    const storyScreened = !rodentStoryBodyContradiction(projectType, values, technicianReportBody)
+      || reconcileConfirmed;
+    const rawGaugeBody = storyScreened && activity.score !== 0
       ? technicianReportBody
       : null;
     // Stage guard (setup only) AND count guard (both stages): the draft is
@@ -4018,6 +4037,14 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
 // forms (codex r48 #3420).
 const TIME_FIGURE_SRC = '(?:\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty[-\\s]?five|forty|fifty|sixty|ninety|half\\s+an?|a\\s+half|a\\s+couple(?:\\s+of)?|a\\s+few|several|an?)';
 const TIME_UNIT_SRC = '(?:minutes?|mins?|hours?|hrs?|half[-\\s]?hours?)';
+// One entry-verb alternation shared by the duration and clock-time shapes
+// (codex r52/r53). "keep an eye out" carries no of/off/away-from and stays
+// legal; "avoid" is scoped to treated-surface nouns so agronomic
+// aftercare ("avoid mowing for 48 hours") stays legal too.
+const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|dry(?:ing|s)?|dried)';
+// Clock times state the same fixed re-entry window as durations
+// (codex r53): "Enter the treated area at 4:30 PM", "Stay off until 6 PM".
+const CLOCK_TIME_SRC = '(?:\\d{1,2}:\\d{2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?|\\d{1,2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight)';
 const BANNED_CUSTOMER_COPY = [
   /\beliminated\b/i,
   /\beradicated\b/i,
@@ -4056,13 +4083,13 @@ const BANNED_CUSTOMER_COPY = [
   // direct enter/occupancy instructions state the same timing without a
   // "re-" prefix ("Enter the treated area after thirty minutes") —
   // codex r51
-  // keep-out / stay-off / avoid-the-treated-area instructions state the
-  // same fixed re-entry window from the exclusion side (codex r52);
-  // "keep an eye out" carries no of/off/away-from and stays legal, and
-  // "avoid" is scoped to treated-surface nouns so agronomic aftercare
-  // ("avoid mowing for 48 hours") stays legal too
-  new RegExp(`\\b(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|dry(?:ing|s)?|dried)\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}\\s*(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
-  new RegExp(`\\b${TIME_FIGURE_SRC}\\s*${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|dry(?:ing)?|dried)\\b`, 'i'),
+  new RegExp(`\\b${REENTRY_VERB_SRC}\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}\\s*(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
+  new RegExp(`\\b${TIME_FIGURE_SRC}\\s*${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b${REENTRY_VERB_SRC}\\b`, 'i'),
+  // clock-time forms (codex r53): forward takes any temporal preposition;
+  // the reverse direction takes DEADLINE prepositions only, so "We arrived
+  // at 2 PM and entered through the side gate" stays legal.
+  new RegExp(`\\b${REENTRY_VERB_SRC}\\b[^.!?]{0,40}\\b(?:at|by|until|till|before|after|around)\\s+${CLOCK_TIME_SRC}\\b`, 'i'),
+  new RegExp(`\\b(?:until|till|before|by)\\s+${CLOCK_TIME_SRC}\\b[^.!?]{0,40}\\b${REENTRY_VERB_SRC}\\b`, 'i'),
 ];
 
 function findBannedCustomerCopy(text) {
