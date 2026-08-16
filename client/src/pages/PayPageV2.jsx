@@ -1741,10 +1741,11 @@ export default function PayPageV2() {
       .then(async (r) => {
         const setup = await r.json().catch(() => ({}));
         if (!r.ok) {
-          if (setup.staleInvoice) {
-            // The invoice changed since this page rendered — reload to show
-            // the customer the updated details before they pay. Never-resolving
-            // promise: the navigation supersedes this chain.
+          if (setup.staleInvoice || setup.staleBalance) {
+            // The invoice (or, for a combined balance payment, one of the
+            // other open invoices) changed since this page rendered — reload
+            // to show the customer the updated amounts before they pay.
+            // Never-resolving promise: the navigation supersedes this chain.
             window.location.reload();
             return new Promise(() => {});
           }
@@ -1780,7 +1781,11 @@ export default function PayPageV2() {
         // Otherwise the page would keep showing the pre-credit gross from the
         // earlier read-only GET while Stripe charges the reduced amount.
         const setupAmountDue = Number(setup.amountDue ?? setup.baseAmount ?? setup.amount);
-        if (Number.isFinite(setupAmountDue)) {
+        // Combined balance payment: setup.baseAmount is the COMBINED total
+        // (this invoice + the itemized previous balance), not this invoice's
+        // amount due — never sync it onto the invoice card (it would show
+        // the combined figure as today's invoice and fake a credit line).
+        if (Number.isFinite(setupAmountDue) && !setup.combined) {
           setData((prev) => {
             if (!prev?.invoice) return prev;
             const total = Number(prev.invoice.total ?? setupAmountDue);
@@ -1806,6 +1811,10 @@ export default function PayPageV2() {
           baseAmount: setup.baseAmount ?? setup.amount,
           cardSurchargeRate: setup.cardSurchargeRate ?? 0.029,
           publishableKey: setup.publishableKey || data.stripe.publishableKey,
+          // Server-authoritative combined breakdown (invoice list + total);
+          // the summary renders from THIS once the PI exists, falling back
+          // to the GET's previousBalance before setup completes.
+          combined: setup.combined || null,
         });
         setPaymentState('ready');
       })
@@ -2427,6 +2436,39 @@ export default function PayPageV2() {
                 <SummaryRow label="Account credit applied" value={`− ${fmtCurrency(invoice.creditApplied)}`} />
               )}
               <SummaryRow label="Total due" value={fmtCurrency(invoice.amountDue ?? invoice.total)} strong />
+              {(() => {
+                // Combined balance payment (server-gated): itemize the other
+                // open invoices this payment also settles. Once /setup has
+                // minted the PI its breakdown is authoritative; before that,
+                // the GET's previousBalance previews the same selection.
+                const combinedSetup = stripeSetup?.combined;
+                const prev = combinedSetup
+                  ? (() => {
+                    const others = combinedSetup.invoices.filter((i) => !i.isCurrent);
+                    return {
+                      invoices: others,
+                      total: Math.round(others.reduce((s, i) => s + Number(i.amountDue || 0), 0) * 100) / 100,
+                      combinedTotal: combinedSetup.total,
+                    };
+                  })()
+                  : data.previousBalance;
+                if (!prev || !prev.invoices?.length) return null;
+                return (
+                  <>
+                    <div style={{ ...eyebrow, marginTop: SP.md, marginBottom: SP.xs }}>Also due on your account</div>
+                    {prev.invoices.map((inv) => (
+                      <SummaryRow
+                        key={inv.invoiceNumber}
+                        label={`Invoice ${inv.invoiceNumber}${inv.serviceType ? ` — ${inv.serviceType}` : ''}`}
+                        value={fmtCurrency(inv.amountDue)}
+                        muted
+                      />
+                    ))}
+                    <SummaryRow label="Previous balance" value={fmtCurrency(prev.total)} />
+                    <SummaryRow label="Total due today" value={fmtCurrency(prev.combinedTotal)} strong />
+                  </>
+                );
+              })()}
             </div>
 
             {invoice.notes && (
@@ -2449,7 +2491,10 @@ export default function PayPageV2() {
               <div>
                 <div style={{ ...eyebrow, marginBottom: 6 }}>Pay securely</div>
                 <div style={{ fontSize: FS.h2, fontWeight: FW.heavy, color: DOC.ink, lineHeight: LH.solid }}>
-                  {fmtCurrency(invoice.amountDue ?? invoice.total)}
+                  {fmtCurrency(stripeSetup?.combined?.total
+                    ?? data.previousBalance?.combinedTotal
+                    ?? invoice.amountDue
+                    ?? invoice.total)}
                 </div>
                 <div style={{ marginTop: 6, fontSize: FS.body, color: DOC.muted }}>
                   {invoiceStatusLabel}

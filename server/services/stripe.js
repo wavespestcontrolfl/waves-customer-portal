@@ -3116,6 +3116,7 @@ const StripeService = {
     let cardTotal;
     let coveredByCredit = false;
     let captureHeld = false;
+    let combinedSummary = null;
     try {
       const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
@@ -3207,7 +3208,8 @@ const StripeService = {
             // mismatch, not a transient blip: surface it as-is, do not fail-closed
             // retry it.
             const triagedInvoiceId = triagedPi.metadata?.waves_invoice_id || null;
-            if (triagedInvoiceId && String(triagedInvoiceId) !== String(invoiceId)) {
+            if (triagedInvoiceId && String(triagedInvoiceId) !== String(invoiceId)
+              && !require('./pay-combined').paymentIntentOwnsInvoice(triagedPi.metadata, invoiceId)) {
               throw new Error('PaymentIntent does not belong to this invoice');
             }
             // `requires_action` is NOT uniformly live. An ACH micro-deposit
@@ -3224,6 +3226,10 @@ const StripeService = {
               try {
                 if (triagedPi.status !== 'canceled') await stripe.paymentIntents.cancel(triagedPi.id);
                 await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null });
+                // A combined PI is stamped on its siblings too — clearing a
+                // dead PI clears it EVERYWHERE, or the siblings stay bound to
+                // a PaymentIntent that will never collect them.
+                await require('./pay-combined').clearPaymentIntentStamps(trx, triagedPi.id);
                 lockedInvoice.stripe_payment_intent_id = null;
               } catch (e) {
                 logger.warn(`[stripe] pay-page stale-PI triage could not clear dead PI for invoice ${invoiceId}: ${e.message}`);
@@ -3273,8 +3279,81 @@ const StripeService = {
           }
         }
 
+        // Combined full-balance charge (payIncludeBalance, owner ruling
+        // 2026-08-16): when the route opted in and the customer has other
+        // open self-pay invoices, the PI is priced at the COMBINED total and
+        // carries a per-invoice allocation in metadata; every included
+        // sibling is stamped with this PI below, which extends the
+        // stale-render edit lock to it and 409s any other pay session on it.
+        // Selection failures / gate off / payer-billed anchors all yield
+        // null → the flow is byte-identical to single-invoice.
+        const PayCombined = require('./pay-combined');
+        let combinedAllocation = null;
+        if (opts.includeOpenBalance && !lockedInvoice.payer_id && !opts.holdCoverageForCapture) {
+          const siblings = await PayCombined.combinedEligibleSiblings(lockedInvoice, {
+            database: trx,
+            reusePaymentIntentId: lockedInvoice.stripe_payment_intent_id || null,
+          });
+          if (siblings?.length) {
+            combinedAllocation = PayCombined.buildAllocation(lockedInvoice, siblings);
+            // Lock + re-verify the snapshot against the locked rows (the
+            // selection read above is unlocked; a sibling edited/collected in
+            // the gap refuses here instead of pricing a changed balance).
+            await PayCombined.verifyAllocationLocked(trx, combinedAllocation, {
+              anchorInvoiceId: invoiceId,
+              expectPaymentIntentId: lockedInvoice.stripe_payment_intent_id || null,
+              allowUnbound: true,
+            });
+          }
+        }
+        const combinedSiblingIds = combinedAllocation
+          ? combinedAllocation.filter((a) => String(a.invoiceId) !== String(invoiceId)).map((a) => a.invoiceId)
+          : [];
+        combinedSummary = combinedAllocation
+          ? {
+            invoices: combinedAllocation.map((a) => ({
+              invoiceNumber: a.invoiceNumber,
+              amountDue: a.cents / 100,
+              isCurrent: String(a.invoiceId) === String(invoiceId),
+            })),
+            total: PayCombined.allocationTotalCents(combinedAllocation) / 100,
+          }
+          : null;
+        // Stamp/unstamp siblings against whatever PI ends up live. Shared by
+        // the reuse and fresh-mint paths below. The count assertion is the
+        // fail-closed leg: a sibling that raced uncollectible between the
+        // lock and this update aborts the mint rather than charging a total
+        // that includes it.
+        const stampCombinedSiblings = async (piId) => {
+          if (lockedInvoice.stripe_payment_intent_id || combinedSiblingIds.length) {
+            // Drop stale stamps: rows bound to the anchor's prior PI that the
+            // new allocation no longer includes (or ALL siblings, when this
+            // mint is single-invoice again — gate flipped off, balance paid).
+            await PayCombined.clearPaymentIntentStamps(trx, lockedInvoice.stripe_payment_intent_id || piId, {
+              keepInvoiceIds: [String(invoiceId), ...combinedSiblingIds.map(String)],
+            });
+          }
+          if (!combinedSiblingIds.length) return;
+          const stamped = await trx('invoices')
+            .whereIn('id', combinedSiblingIds)
+            .whereNotIn('status', ['paid', 'processing', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+            .where(function pinnable() {
+              this.whereNull('stripe_payment_intent_id').orWhere('stripe_payment_intent_id', piId);
+              if (lockedInvoice.stripe_payment_intent_id) this.orWhere('stripe_payment_intent_id', lockedInvoice.stripe_payment_intent_id);
+            })
+            .update({ processor: 'stripe', stripe_payment_intent_id: piId, updated_at: trx.fn.now() });
+          if (stamped !== combinedSiblingIds.length) {
+            const err = new Error('The account balance changed since this page loaded — refreshing to the latest amounts.');
+            err.statusCode = 409;
+            err.staleBalance = true;
+            throw err;
+          }
+        };
+
         // Charge base = amount due (total − applied account credit), not raw total.
-        baseAmount = invoiceAmountDue(lockedInvoice);
+        baseAmount = combinedAllocation
+          ? PayCombined.allocationTotalCents(combinedAllocation) / 100
+          : invoiceAmountDue(lockedInvoice);
         // PI starts at BASE amount only — no surcharge at setup time.
         // Card payments: surcharge is applied via the /quote → /finalize two-step flow.
         // Express Checkout (wallets): intentionally base-only in phase 1 (no surcharge).
@@ -3290,13 +3369,20 @@ const StripeService = {
         const piParams = {
           amount: baseCents,
           currency: 'usd',
-          description: `Invoice ${lockedInvoice.invoice_number} — ${lockedInvoice.title || 'Waves Pest Control'}`,
+          description: combinedAllocation
+            ? `Invoices ${combinedAllocation.map((a) => a.invoiceNumber).join(', ')} — Waves Pest Control`
+            : `Invoice ${lockedInvoice.invoice_number} — ${lockedInvoice.title || 'Waves Pest Control'}`,
           metadata: {
             waves_invoice_id: invoiceId,
             invoice_number: lockedInvoice.invoice_number,
             waves_customer_id: lockedInvoice.customer_id,
             base_amount: String(baseAmount),
             card_surcharge: '0',
+            // Combined allocation (or explicit CLEAR on a reused PI whose
+            // previous session was combined — Stripe metadata updates MERGE,
+            // and a stale allocation would settle invoices this session no
+            // longer charges).
+            combined_allocation: combinedAllocation ? PayCombined.encodeAllocation(combinedAllocation) : '',
             save_card_opt_in: saveCard ? 'true' : 'false',
             selected_method_category: 'card',
             // CLEAR any surcharge-finalization metadata (Stripe metadata updates
@@ -3335,11 +3421,33 @@ const StripeService = {
 
           const activeIntent = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
           const activeIntentInvoiceId = activeIntent.metadata?.waves_invoice_id || null;
-          if (activeIntentInvoiceId && String(activeIntentInvoiceId) !== String(invoiceId)) {
+          const activeOwnsAsCombinedSibling = activeIntentInvoiceId
+            && String(activeIntentInvoiceId) !== String(invoiceId)
+            && PayCombined.paymentIntentOwnsInvoice(activeIntent.metadata, invoiceId);
+          if (activeIntentInvoiceId && String(activeIntentInvoiceId) !== String(invoiceId)
+            && !activeOwnsAsCombinedSibling) {
             throw new Error('PaymentIntent does not belong to this invoice');
           }
-
-          if (activeIntent.status === 'requires_payment_method') {
+          // This invoice rides ANOTHER invoice's combined PI (it is a stamped
+          // sibling and the customer opened its own pay link). The combined
+          // PI must never be updated into a single-invoice shape from here —
+          // that would hijack the anchor's live session. Unconfirmed → cancel
+          // it, clear its stamps everywhere, and mint fresh below (the
+          // anchor's page 409s to a refresh on its next call). In-flight →
+          // fall through to the in-flight handling, which refuses politely.
+          if (activeOwnsAsCombinedSibling && activeIntent.status === 'requires_payment_method') {
+            try {
+              await stripe.paymentIntents.cancel(activeIntent.id);
+              await PayCombined.clearPaymentIntentStamps(trx, activeIntent.id);
+              await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null, updated_at: trx.fn.now() });
+              lockedInvoice.stripe_payment_intent_id = null;
+            } catch (e) {
+              logger.warn(`[stripe] could not release combined PI ${activeIntent.id} for sibling invoice ${invoiceId}: ${e.message}`);
+              const err = new Error('Could not prepare your payment — please try again in a moment');
+              err.statusCode = 409;
+              throw err;
+            }
+          } else if (activeIntent.status === 'requires_payment_method') {
             const updateParams = { ...piParams };
             delete updateParams.currency;
             if (!stripeCustomerId) {
@@ -3359,10 +3467,14 @@ const StripeService = {
                 updated_at: trx.fn.now(),
               });
             if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
+            await stampCombinedSiblings(paymentIntent.id);
             return;
           }
 
-          if (activeIntent.status !== 'canceled') {
+          // (lockedInvoice.stripe_payment_intent_id goes null when the
+          // combined-sibling release above just canceled the active PI —
+          // nothing left to triage, fall through to a fresh mint.)
+          if (activeIntent.status !== 'canceled' && lockedInvoice.stripe_payment_intent_id) {
             // ACH micro-deposit verification also lives in `requires_action`, but
             // it is the OPPOSITE of an abandoned card intent: the customer chose
             // bank debit, Stripe has already sent two small deposits to their
@@ -3469,6 +3581,7 @@ const StripeService = {
           updated_at: trx.fn.now(),
         });
         if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
+        await stampCombinedSiblings(paymentIntent.id);
       });
 
       if (coveredByCredit) {
@@ -3499,7 +3612,7 @@ const StripeService = {
         return { covered_by_credit: true, status: 'prepaid', clientSecret: null, paymentIntentId: null, amount: 0 };
       }
 
-      logger.info(`[stripe] Invoice PaymentIntent created: ${paymentIntent.id} for invoice ${invoice.invoice_number} (base=$${baseAmount})`);
+      logger.info(`[stripe] Invoice PaymentIntent created: ${paymentIntent.id} for invoice ${invoice.invoice_number} (base=$${baseAmount}${combinedSummary ? `, combined over ${combinedSummary.invoices.length} invoices` : ''})`);
       return {
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
@@ -3507,6 +3620,7 @@ const StripeService = {
         baseAmount,
         cardSurchargeRate: CONFIGURED_COST_BPS / 10_000,
         surchargeRateBps: CONFIGURED_COST_BPS,
+        ...(combinedSummary ? { combined: combinedSummary } : {}),
       };
     } catch (err) {
       if (err.statusCode) {
@@ -3652,8 +3766,14 @@ const StripeService = {
       );
     }
     const selectedMethodCategory = methodCategory || 'card';
-    // Charge base = amount due (total − applied account credit), not raw total.
-    const base = invoiceAmountDue(invoice);
+    // Charge base = amount due (total − applied account credit), not raw
+    // total — or the COMBINED total when this PI carries a full-balance
+    // allocation (payIncludeBalance): the stamped sibling rows are the
+    // allocation authority, re-derived live so a tender switch re-prices
+    // from exactly the rows the PI will settle.
+    const PayCombined = require('./pay-combined');
+    const combinedCtx = await PayCombined.combinedContextForInvoice(invoice);
+    const base = combinedCtx ? combinedCtx.totalCents / 100 : invoiceAmountDue(invoice);
     const baseCents = Math.round(base * 100);
 
     // Lock the PI to the selected tender family before Stripe can confirm.
@@ -3671,6 +3791,9 @@ const StripeService = {
         invoice_number: invoice.invoice_number,
         base_amount: String(base),
         card_surcharge: '0',
+        // Refresh (or clear) the combined allocation alongside the amount —
+        // the two must never disagree, and Stripe metadata updates MERGE.
+        combined_allocation: combinedCtx ? PayCombined.encodeAllocation(combinedCtx.allocation) : '',
         selected_method_category: String(selectedMethodCategory),
         save_card_opt_in: saveCard ? 'true' : 'false',
         // CLEAR any surcharge-finalization metadata (Stripe metadata updates
@@ -3849,6 +3972,14 @@ const StripeService = {
         .whereNotIn('status', ['paid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'])
         .update({ processor: 'stripe', stripe_payment_intent_id: newIntent.id });
       if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
+      // A combined PI's siblings ride the same stamp — repoint them to the
+      // replacement so the allocation in the new PI's metadata and the DB
+      // bindings never disagree (settle keys off both).
+      await trx('invoices')
+        .where({ stripe_payment_intent_id: oldPaymentIntentId })
+        .whereNotIn('id', [invoiceId])
+        .whereNotIn('status', ['paid', 'processing', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+        .update({ processor: 'stripe', stripe_payment_intent_id: newIntent.id, updated_at: new Date() });
     });
 
     logger.info(
@@ -3889,9 +4020,12 @@ const StripeService = {
 
     const methodType = pm.type || 'card';
     const funding = pm.card?.funding || null;
-    // Charge base = amount due (total − applied account credit), not raw total.
-    // The quote stores this as invoiceTotal below, so /finalize matches.
-    const baseAmount = invoiceAmountDue(invoice);
+    // Charge base = amount due (total − applied account credit), not raw
+    // total — or the COMBINED total for a full-balance PI. The quote stores
+    // this as invoiceTotal below, so /finalize matches (finalize re-derives
+    // the same combined base and refuses on drift).
+    const quoteCombinedCtx = await require('./pay-combined').combinedContextForInvoice(invoice);
+    const baseAmount = quoteCombinedCtx ? quoteCombinedCtx.totalCents / 100 : invoiceAmountDue(invoice);
 
     const chargeInfo = computeChargeAmount(baseAmount, methodType, { funding });
     const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = chargeInfo;
@@ -3963,9 +4097,12 @@ const StripeService = {
     // Re-derive charge from PM + invoice — never trust client-provided amounts
     const pm = await stripe.paymentMethods.retrieve(quote.paymentMethodId);
     const funding = pm.card?.funding || null;
-    // Charge base = amount due (total − applied account credit), not raw total —
-    // must match the same calc the quote captured as invoiceTotal.
-    const baseAmount = invoiceAmountDue(invoice);
+    // Charge base = amount due (total − applied account credit), not raw
+    // total — or the COMBINED total for a full-balance PI. Must match the
+    // same calc the quote captured as invoiceTotal.
+    const PayCombined = require('./pay-combined');
+    const finalizeCombinedCtx = await PayCombined.combinedContextForInvoice(invoice);
+    const baseAmount = finalizeCombinedCtx ? finalizeCombinedCtx.totalCents / 100 : invoiceAmountDue(invoice);
 
     if (quote.invoiceTotal != null && Math.abs(baseAmount - quote.invoiceTotal) > 0.01) {
       throw new Error('Invoice total changed since quote was created. Please request a new quote.');
@@ -3988,6 +4125,9 @@ const StripeService = {
         waves_customer_id: invoice.customer_id,
         base_amount: String(baseCents / 100),
         card_surcharge: String(surchargeCents / 100),
+        // The allocation the settle paths will split this charge by — kept
+        // in lockstep with the amount (empty string CLEARS a stale one).
+        combined_allocation: finalizeCombinedCtx ? PayCombined.encodeAllocation(finalizeCombinedCtx.allocation) : '',
         surcharge_rate_bps: String(rateBps),
         surcharge_policy_version: policyVersion,
         card_funding: funding || 'unknown',
@@ -4026,7 +4166,20 @@ const StripeService = {
           !== String(invoice.stripe_payment_intent_id)) {
           throw new Error('Invoice has a different active payment');
         }
-        const lockedBaseAmount = invoiceAmountDue(lockedInvoice);
+        let lockedBaseAmount;
+        if (finalizeCombinedCtx) {
+          // Combined: lock EVERY allocated invoice (ascending-id order) and
+          // re-verify each row's remainder against the allocation — any
+          // drift refuses before money moves, exactly like the single-
+          // invoice total check below.
+          await PayCombined.verifyAllocationLocked(finalizeTrx, finalizeCombinedCtx.allocation, {
+            anchorInvoiceId: invoiceId,
+            expectPaymentIntentId: invoice.stripe_payment_intent_id,
+          });
+          lockedBaseAmount = finalizeCombinedCtx.totalCents / 100;
+        } else {
+          lockedBaseAmount = invoiceAmountDue(lockedInvoice);
+        }
         if (Math.abs(lockedBaseAmount - baseAmount) > 0.01) {
           throw new Error('Invoice total changed since quote was created. Please request a new quote.');
         }
@@ -4034,7 +4187,15 @@ const StripeService = {
         // Final serialized fence: saved-card claims take this same invoice lock
         // before inserting their durable attempt. Hold it through Stripe confirm
         // so a claim cannot appear after the assertion but before money moves.
+        // For a combined charge the fence covers EVERY allocated invoice — a
+        // saved-card claim on any sibling suppresses the whole combined
+        // confirm (that sibling's money may already be moving elsewhere).
         await assertNoInvoiceChargeReconciliationPending(invoiceId, finalizeTrx);
+        if (finalizeCombinedCtx) {
+          for (const sibling of finalizeCombinedCtx.siblings) {
+            await assertNoInvoiceChargeReconciliationPending(sibling.id, finalizeTrx);
+          }
+        }
 
         try {
           await stripe.paymentIntents.update(
@@ -4520,7 +4681,10 @@ const StripeService = {
       // same PI. createInvoicePaymentIntent always sets waves_invoice_id;
       // a missing-metadata PI cannot belong to this flow.
       const piInvoiceId = pi.metadata?.waves_invoice_id;
-      if (!piInvoiceId || String(piInvoiceId) !== String(invoiceId)) {
+      const ConfirmPayCombined = require('./pay-combined');
+      if (!piInvoiceId
+        || (String(piInvoiceId) !== String(invoiceId)
+          && !ConfirmPayCombined.paymentIntentOwnsInvoice(pi.metadata, invoiceId))) {
         logger.warn(
           `[stripe] confirmInvoicePayment refused — PI ${paymentIntentId} ` +
           `metadata.waves_invoice_id=${piInvoiceId || 'null'} does not match invoice ${invoiceId}`,
@@ -4682,9 +4846,44 @@ const StripeService = {
       }
 
       const actualMethodType = pmdType || resolvedPaymentMethod;
-      // Tender match prices from amount due (total − applied credit), not raw total.
-      const invoiceBaseAmount = invoiceAmountDue(invoice);
+      // Tender match prices from amount due (total − applied credit), not
+      // raw total — or the ALLOCATION total for a combined full-balance PI
+      // (the PI's own snapshot: what was actually priced and charged).
+      let confirmCombinedAllocation = null;
+      try {
+        confirmCombinedAllocation = ConfirmPayCombined.parseCombinedAllocation(pi.metadata);
+      } catch (allocErr) {
+        // A combined PI whose allocation can't be read must never settle as
+        // single-invoice — that would mark one invoice paid with the whole
+        // combined charge.
+        logger.error(`[stripe] confirmInvoicePayment: malformed combined allocation on PI ${paymentIntentId}: ${allocErr.message}`);
+        throw new Error('Payment allocation could not be verified — please contact us before retrying.');
+      }
+      const invoiceBaseAmount = confirmCombinedAllocation
+        ? ConfirmPayCombined.allocationTotalCents(confirmCombinedAllocation) / 100
+        : invoiceAmountDue(invoice);
       assertInvoicePaymentIntentTenderMatches(pi, actualMethodType, invoiceBaseAmount);
+
+      // Combined full-balance PI: settle EVERY allocated invoice through the
+      // one shared, idempotent settle (per-invoice ledger rows, receipts,
+      // dunning stops) instead of the single-invoice transaction below.
+      if (confirmCombinedAllocation) {
+        const combinedOutcome = await ConfirmPayCombined.settleCombinedPaymentIntent(pi, {
+          paymentMethod: actualMethodType,
+          cardBrand,
+          cardLastFour: cardLastFour || bankLastFour || null,
+          receiptUrl,
+        });
+        if (combinedOutcome.anchorPaymentRow) return combinedOutcome.anchorPaymentRow;
+        // The anchor row can be absent only when its allocation share was
+        // recorded as a residual (invoice raced terminal) — surface loudly.
+        const fallbackRow = await db('payments')
+          .where({ stripe_payment_intent_id: paymentIntentId })
+          .orderBy('created_at', 'desc')
+          .first();
+        if (fallbackRow) return fallbackRow;
+        throw new Error('Combined payment settled but no ledger row was recorded — operator review required');
+      }
 
       const paymentStatus = invoicePaymentStatusForIntent(pi, actualMethodType);
       const invoiceStatus = paymentStatus === 'paid' ? 'paid' : 'processing';

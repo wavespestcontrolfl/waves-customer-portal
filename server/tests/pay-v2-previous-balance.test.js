@@ -1,15 +1,17 @@
 /**
- * GET /api/pay/:token — sibling-invoice isolation contract (balance-visibility
- * lane, pre-push P0 ×2).
+ * GET /api/pay/:token — previous-balance itemization contract.
  *
- * The pay page is an unauthenticated, PERMANENT, per-invoice bearer surface
- * (AGENTS.md: links are commonly forwarded — bookkeepers, spouses).
- * Possession of one invoice token must never disclose the account's OTHER
- * invoices — not their tokens, not their numbers/amounts/history, not the
- * balance total. Even with GATE_BALANCE_VISIBILITY on and other open
- * invoices present, the payload carries NO previous-balance data; the
- * consolidated view lives on customer-addressed surfaces only (invoice
- * email note + authenticated portal Billing tab).
+ * Owner ruling 2026-08-16 (payIncludeBalance) SUPERSEDED the original
+ * sibling-isolation P0 this suite used to pin: with the gate ON, the pay
+ * page itemizes the customer's other open self-pay invoices (numbers,
+ * dates, amounts) and the pay flow charges the combined total. Two parts
+ * of the old contract survive unchanged and stay pinned here:
+ *   1. Gate OFF ⇒ the payload is byte-identical to the pre-ruling surface
+ *      (no previousBalance key, no sibling data anywhere) — the kill
+ *      switch fully restores the old disclosure posture.
+ *   2. Sibling TOKENS never ride the payload in ANY state — one leaked
+ *      pay link must not fan out into bearer credentials for the
+ *      account's other invoices.
  */
 
 jest.mock('../services/logger', () => ({
@@ -30,22 +32,22 @@ jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../services/bill-payment-error-alerts', () => ({ alertBillPaymentError: jest.fn(async () => {}) }));
 jest.mock('../services/payer', () => ({ attachToInvoice: jest.fn(async () => null) }));
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: jest.fn(() => true),
+  isEnabled: jest.fn(() => false),
   gates: { autoApplyAccountCredit: false },
 }));
+const SIBLING_TOKEN = 'sibling-token-must-never-leak';
 jest.mock('../services/open-balance', () => ({
-  openBalanceInvoices: jest.fn(async () => [{ invoice_number: 'INV-OLD', total: '450.00', credit_applied: 0 }]),
-  openBalanceSummary: jest.fn(async () => ({
-    total: 450,
-    count: 1,
-    moreCount: 0,
-    invoices: [{ invoice_number: 'INV-OLD', total: '450.00', credit_applied: 0 }],
-  })),
+  openBalanceInvoices: jest.fn(async () => []),
+  openBalanceSummary: jest.fn(async () => ({ total: 0, count: 0, moreCount: 0, invoices: [] })),
+}));
+jest.mock('../services/completion-balance-sweep', () => ({
+  dunningStoppedInvoiceIds: jest.fn(async () => new Set()),
 }));
 
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 const openBalance = require('../services/open-balance');
+const { isEnabled } = require('../config/feature-gates');
 const payRouter = require('../routes/pay-v2');
 
 function chain({ first } = {}) {
@@ -54,6 +56,19 @@ function chain({ first } = {}) {
   q.first = jest.fn(async () => first);
   return q;
 }
+
+const siblingRow = () => ({
+  id: 'inv-old-1',
+  token: SIBLING_TOKEN,
+  invoice_number: 'INV-OLD',
+  status: 'overdue',
+  service_type: 'Lawn Care',
+  service_date: '2026-08-01',
+  due_date: '2026-08-15',
+  total: '44.55',
+  credit_applied: 0,
+  stripe_payment_intent_id: null,
+});
 
 function invoiceData(overrides = {}) {
   return {
@@ -94,21 +109,66 @@ async function getPayPage(data) {
   return { body };
 }
 
-describe('GET /pay/:token sibling-invoice isolation', () => {
-  beforeEach(() => jest.clearAllMocks());
+describe('GET /pay/:token previous-balance itemization', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    isEnabled.mockImplementation(() => false);
+    openBalance.openBalanceInvoices.mockImplementation(async () => []);
+  });
 
-  test('even with the visibility gate on and other open invoices, the payload carries NO sibling data', async () => {
+  test('gate OFF: payload is byte-identical to the pre-ruling surface — no sibling data at all', async () => {
+    openBalance.openBalanceInvoices.mockImplementation(async () => [siblingRow()]);
     const { body } = await getPayPage(invoiceData());
 
     expect(body).not.toHaveProperty('previousBalance');
-    // The route never consults the open-balance surface at all.
-    expect(openBalance.openBalanceSummary).not.toHaveBeenCalled();
-    expect(openBalance.openBalanceInvoices).not.toHaveBeenCalled();
-    // Nothing about the sibling invoice leaks anywhere in the payload.
     const serialized = JSON.stringify(body);
     expect(serialized).not.toContain('INV-OLD');
-    expect(serialized).not.toContain('450');
-    // The page still renders its own invoice normally.
+    expect(serialized).not.toContain('44.55');
+    expect(serialized).not.toContain(SIBLING_TOKEN);
     expect(body.invoice.invoiceNumber).toBe('WPC-2026-0123');
+  });
+
+  test('gate ON with open siblings: itemized previousBalance with combined total — but NEVER sibling tokens', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    openBalance.openBalanceInvoices.mockImplementation(async () => [siblingRow()]);
+    const { body } = await getPayPage(invoiceData());
+
+    expect(body.previousBalance).toEqual({
+      invoices: [{
+        invoiceNumber: 'INV-OLD',
+        serviceType: 'Lawn Care',
+        serviceDate: '2026-08-01',
+        dueDate: '2026-08-15',
+        amountDue: 44.55,
+      }],
+      total: 44.55,
+      combinedTotal: 194.55,
+    });
+    // The hard line that survived the ruling: sibling bearer tokens never
+    // ride this payload.
+    expect(JSON.stringify(body)).not.toContain(SIBLING_TOKEN);
+  });
+
+  test('gate ON, no open siblings: previousBalance key is absent (not null)', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    const { body } = await getPayPage(invoiceData());
+    expect(body).not.toHaveProperty('previousBalance');
+  });
+
+  test('gate ON, payer-billed anchor: never itemizes the homeowner balance', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    openBalance.openBalanceInvoices.mockImplementation(async () => [siblingRow()]);
+    const { body } = await getPayPage(invoiceData({ payer_id: 'payer-1' }));
+    expect(body).not.toHaveProperty('previousBalance');
+  });
+
+  test('gate ON, incomplete sibling read (resolve failure): declines to itemize rather than understate', async () => {
+    isEnabled.mockImplementation((key) => key === 'payIncludeBalance');
+    openBalance.openBalanceInvoices.mockImplementation(async (customerId, { onResolveFailure } = {}) => {
+      if (onResolveFailure) onResolveFailure(new Error('payer service down'));
+      return [siblingRow()];
+    });
+    const { body } = await getPayPage(invoiceData());
+    expect(body).not.toHaveProperty('previousBalance');
   });
 });

@@ -116,10 +116,11 @@ const gates = {
   // Overdue-balance visibility (owner ruling 2026-08-08, Donovan case): the
   // invoice EMAIL carries a "previous balance" note when the customer has
   // other open, live-payer-verified self-pay invoices, so one email surfaces
-  // everything owed. EMAIL ONLY by design — the public /pay page is an
-  // unauthenticated per-invoice bearer surface and must never disclose
-  // sibling-invoice data (pre-push P0 ×2); the authenticated portal Billing
-  // tab (portalPayNow) is the in-app counterpart. Display-only — no money
+  // everything owed. Originally EMAIL ONLY (the /pay page was barred from
+  // sibling data — pre-push P0 ×2); the 2026-08-16 owner ruling under
+  // payIncludeBalance below supersedes that bar for the pay page. The
+  // authenticated portal Billing tab (portalPayNow) is the in-app
+  // counterpart. Display-only — no money
   // moves under this gate and every underlying invoice stays intact
   // (dunning still ages off each invoice's own due date, so the oldest debt
   // keeps escalating — ruling #2). Customer-facing copy change, so
@@ -153,6 +154,21 @@ const gates = {
   // today). Money surface — fail-closed ==='true' in EVERY environment.
   // Kill switch: unset or any non-'true' value.
   completionBalanceSweep: process.env.GATE_COMPLETION_BALANCE_SWEEP === 'true',
+
+  // Pay-page full-balance collection (owner ruling 2026-08-16, SUPERSEDING
+  // the "no sibling-invoice data on /pay" P0 and the email-only scope of
+  // balanceVisibility above): the public /pay page ITEMIZES the customer's
+  // other open self-pay invoices (numbers/dates/amounts — never their
+  // tokens) and the single Pay button charges the COMBINED total. One
+  // PaymentIntent carries a per-invoice allocation in metadata (the
+  // payer-statement pattern); the settle paths mark every allocated invoice
+  // paid with its own ledger row, so per-invoice receipts, dunning stops,
+  // and reporting all stay per-invoice. Invoices are never merged or
+  // re-totalled; admin-stopped-dunning invoices are excluded from the
+  // forced total. Money surface — fail-closed ==='true' in EVERY
+  // environment. Gate off: the pay page and all pay flows are byte-
+  // identical to today. Kill switch: unset or any non-'true' value.
+  payIncludeBalance: process.env.GATE_PAY_INCLUDE_BALANCE === 'true',
 
   // Service-report cross-sell (owner-approved 2026-08-11): the LIVE web
   // report offers the next service family the customer lacks (pest ↔ lawn,

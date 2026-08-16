@@ -1070,6 +1070,111 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
 // through so the ACH settlement-date restamp below can't drift onto the
 // webhook DELIVERY day when a retry crosses a month/year boundary (mirrors
 // handlePaymentIntentProcessing's initiatedAt).
+/**
+ * Combined full-balance PI (payIncludeBalance) — settle every allocated
+ * invoice through the shared idempotent settle. Guards mirror the
+ * single-invoice path where they still apply at the combined shape:
+ * surcharge-bypass quarantine, per-invoice saved-card fences, tender match
+ * against the ALLOCATION total (the PI's own pricing snapshot), and an
+ * allocation-vs-captured cents check inside the settle itself. Any refusal
+ * records the orphan so captured money is never silently unaccounted.
+ */
+async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated = null) {
+  const PayCombined = require('../services/pay-combined');
+  const piId = paymentIntent.id;
+  const chargedCents = Number(paymentIntent.amount_received || paymentIntent.amount || 0);
+  const chargedTotal = chargedCents > 0 ? centsToDollars(chargedCents) : centsToDollars(paymentIntent.amount);
+  const details = await paymentDetailsFromIntent(paymentIntent);
+
+  let allocation;
+  try {
+    allocation = PayCombined.parseCombinedAllocation(paymentIntent.metadata);
+  } catch (err) {
+    logger.error(`[stripe-webhook] Combined PI ${piId} has a malformed allocation: ${err.message} — quarantining`);
+    await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, `Malformed combined allocation: ${err.message}`);
+    return;
+  }
+
+  // Surcharge-bypass quarantine (same detector as the single path; the
+  // invoice arg is only used for alert labeling — pass the anchor).
+  const anchorId = paymentIntent.metadata?.waves_invoice_id || allocation[0].invoiceId;
+  const anchorInvoice = await db('invoices').where({ id: anchorId }).first().catch(() => null);
+  const surchargeQuarantine = await shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, anchorInvoice);
+  if (surchargeQuarantine && !isTerminalInvoicePaymentIntent(paymentIntent, details.paymentMethod)) {
+    logger.error(`[stripe-webhook] Quarantining succeeded combined PI ${piId}: ${surchargeQuarantine.reason}`);
+    await alertSurchargeBypass(
+      paymentIntent,
+      anchorInvoice,
+      surchargeQuarantine.alertType,
+      surchargeQuarantine.severity,
+      surchargeQuarantine.title,
+      surchargeQuarantine.description,
+      surchargeQuarantine.metadata,
+    );
+    await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, surchargeQuarantine.reason);
+    return;
+  }
+
+  // Saved-card fences, per allocated invoice: an unresolved off-session
+  // claim on ANY of them means that invoice's money state is ambiguous —
+  // quarantine the whole combined settle for the operator (an active claim
+  // asks Stripe to retry, mirroring the single path).
+  const {
+    assertNoInvoiceChargeReconciliationPending,
+  } = require('../services/stripe');
+  for (const entry of allocation) {
+    try {
+      await assertNoInvoiceChargeReconciliationPending(entry.invoiceId);
+    } catch (fenceErr) {
+      if (fenceErr.code === 'STRIPE_CHARGE_IN_PROGRESS') {
+        await recordOrphanSucceededPaymentIntent(
+          paymentIntent,
+          chargedTotal,
+          `Succeeded combined PI ${piId} raced active saved-card attempt on invoice ${entry.invoiceId}`,
+        );
+        throw new Error(`Saved-card charge attempt on invoice ${entry.invoiceId} is still active; retry combined succeeded webhook`);
+      }
+      const reason = `Succeeded combined PI ${piId} conflicts with unresolved saved-card attempt on invoice ${entry.invoiceId}`;
+      logger.error(`[stripe-webhook] Quarantining ${reason}`);
+      await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, reason);
+      return;
+    }
+  }
+
+  // Tender match against the allocation total — the base the PI was priced
+  // from at mint/finalize.
+  try {
+    assertInvoicePaymentIntentTenderMatches(
+      paymentIntent,
+      details.paymentMethod,
+      PayCombined.allocationTotalCents(allocation) / 100,
+    );
+  } catch (err) {
+    logger.error(`[stripe-webhook] Refusing succeeded combined PI ${piId}: ${err.message}`);
+    await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, `Rejected combined payment tender mismatch: ${err.message}`);
+    return;
+  }
+
+  try {
+    const outcome = await PayCombined.settleCombinedPaymentIntent(paymentIntent, {
+      paymentMethod: details.paymentMethod,
+      cardBrand: details.cardBrand,
+      cardLastFour: details.cardLastFour,
+      receiptUrl: details.receiptUrl,
+    }, { eventCreated });
+    logger.info(`[stripe-webhook] Combined PI ${piId} settled ${outcome.settled}/${allocation.length} invoices (${outcome.paymentStatus})`);
+  } catch (err) {
+    if (err.code === 'COMBINED_ALLOCATION_MISMATCH') {
+      logger.error(`[stripe-webhook] ${err.message} — quarantining`);
+      await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, err.message);
+      return;
+    }
+    throw err; // infrastructure failure → 500 → Stripe redelivers
+  }
+
+  await maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated);
+}
+
 async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent succeeded: ${piId}`);
@@ -1104,6 +1209,19 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   if (paymentIntent.metadata?.purpose === 'appointment_card_no_show_fee') {
     await recordAppointmentCardNoShowFeePayment(paymentIntent);
     return;
+  }
+
+  // Combined full-balance PI (payIncludeBalance): one charge settling
+  // SEVERAL invoices per its metadata allocation. Route before the
+  // single-invoice guards — they resolve an arbitrary stamped row via
+  // findInvoiceForPaymentIntent and would tender-mismatch the combined
+  // amount against one invoice's remainder, quarantining valid money.
+  {
+    const PayCombined = require('../services/pay-combined');
+    if (PayCombined.isCombinedPiMetadata(paymentIntent.metadata)) {
+      await handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated);
+      return;
+    }
   }
 
   const chargedCents = Number(paymentIntent.amount_received || paymentIntent.amount || 0);
@@ -2169,9 +2287,22 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
       failure_reason: `${failureMessage}${failureCode ? ` (${failureCode})` : ''}`,
     });
 
+  // A combined full-balance PI (payIncludeBalance) is stamped on EVERY
+  // allocated invoice, so the processing revert walks all rows carrying
+  // this PI — a single-row revert would strand the siblings in
+  // 'processing' forever after a combined ACH bounce. Single-invoice PIs
+  // keep the original single-row lookup exactly.
   const failedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
-  if (failedInvoice?.status === 'processing') {
-    const nextStatus = nextInvoiceStatusAfterFailedPayment(failedInvoice);
+  const failedInvoices = failedInvoice ? [failedInvoice] : [];
+  if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)) {
+    const allStamped = await db('invoices').where({ stripe_payment_intent_id: piId });
+    for (const r of (Array.isArray(allStamped) ? allStamped : [])) {
+      if (!failedInvoice || String(r.id) !== String(failedInvoice.id)) failedInvoices.push(r);
+    }
+  }
+  for (const failedRow of failedInvoices) {
+    if (failedRow.status !== 'processing') continue;
+    const nextStatus = nextInvoiceStatusAfterFailedPayment(failedRow);
     // Clearing ach_processing_notified_at means a re-attempted ACH on
     // the same invoice (different bank account, customer retries, etc.)
     // will trigger a fresh "we got it" acknowledgment when its
@@ -2179,7 +2310,7 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
     // dedupe lock from the first attempt would permanently suppress
     // notifications for every subsequent attempt on the same invoice.
     await db('invoices')
-      .where({ id: failedInvoice.id })
+      .where({ id: failedRow.id })
       .update({
         status: nextStatus,
         paid_at: null,
@@ -4168,12 +4299,89 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
  * fresh acknowledgment email, while genuine duplicate webhook deliveries
  * of the same event remain deduped at the email_messages level.
  */
+/**
+ * Combined full-balance ACH in flight: mark EVERY allocated invoice (and a
+ * per-invoice ledger row) 'processing' via the shared settle, after the
+ * same freshness + expected-amount guards as the single path — the
+ * expected ACH amount is the ALLOCATION total (ACH is never surcharged).
+ * The customer-facing "we got it" acknowledgment fires once, on the
+ * anchor invoice, with the combined amount.
+ */
+async function handleCombinedPaymentIntentProcessing(paymentIntent, eventCreated = null, eventId = null) {
+  const PayCombined = require('../services/pay-combined');
+  const piId = paymentIntent.id;
+  const isAch = isAchPaymentIntent(paymentIntent, paymentIntent.metadata?.selected_method_category);
+  if (!isAch) {
+    logger.info(`[stripe-webhook] Ignoring non-ACH combined processing event: ${piId}`);
+    return;
+  }
+  const stripe = getStripe();
+  if (stripe) {
+    const currentIntent = await stripe.paymentIntents.retrieve(piId);
+    if (currentIntent.status !== 'processing') {
+      logger.info(`[stripe-webhook] Ignoring stale combined processing event for PI ${piId}; current status is ${currentIntent.status}`);
+      return;
+    }
+  }
+
+  let allocation;
+  try {
+    allocation = PayCombined.parseCombinedAllocation(paymentIntent.metadata);
+  } catch (err) {
+    logger.error(`[stripe-webhook] Combined processing PI ${piId} has a malformed allocation: ${err.message}`);
+    if (stripe) {
+      try { await stripe.paymentIntents.cancel(piId); } catch (e) { logger.warn(`[stripe-webhook] could not cancel malformed combined PI ${piId}: ${e.message}`); }
+    }
+    throw new Error(`Combined processing PI ${piId} allocation malformed; retry after cancellation`);
+  }
+
+  const expectedCents = PayCombined.allocationTotalCents(allocation);
+  const actualCents = Number(paymentIntent.amount || 0);
+  if (actualCents !== expectedCents) {
+    logger.error(`[stripe-webhook] Combined ACH processing amount mismatch on PI ${piId}. Expected ${expectedCents}c from allocation; got ${actualCents}c.`);
+    if (stripe) {
+      try { await stripe.paymentIntents.cancel(piId); } catch (cancelErr) { logger.warn(`[stripe-webhook] Could not cancel mismatched combined processing PI ${piId}: ${cancelErr.message}`); }
+    }
+    throw new Error(`Combined ACH processing PI ${piId} amount mismatch; retry after cancellation`);
+  }
+
+  await PayCombined.settleCombinedPaymentIntent(paymentIntent, {
+    paymentMethod: 'us_bank_account',
+    cardBrand: null,
+    cardLastFour: null,
+    receiptUrl: null,
+  }, { eventCreated });
+
+  const anchorInvoiceId = paymentIntent.metadata?.waves_invoice_id || allocation[0].invoiceId;
+  setImmediate(() => {
+    dispatchAchProcessingAcknowledgment({
+      invoiceId: anchorInvoiceId,
+      piId,
+      amount: centsToDollars(actualCents),
+      eventCreated,
+      eventId,
+    }).catch((err) => {
+      logger.error(`[stripe-webhook] Combined ACH processing acknowledgment failed for PI ${piId}: ${err.message}`);
+    });
+  });
+}
+
 async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null, eventId = null) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent processing (ACH in flight): ${piId}`);
   if (paymentIntent.metadata?.waves_statement_id) {
     await handleStatementPaymentIntentEvent(paymentIntent, 'processing');
     return;
+  }
+  // Combined full-balance PI: the single-invoice expected-amount check
+  // below prices from ONE invoice's remainder and would cancel a valid
+  // combined ACH debit — route to the allocation-aware path.
+  {
+    const PayCombined = require('../services/pay-combined');
+    if (PayCombined.isCombinedPiMetadata(paymentIntent.metadata)) {
+      await handleCombinedPaymentIntentProcessing(paymentIntent, eventCreated, eventId);
+      return;
+    }
   }
   const invoice = await findInvoiceForPaymentIntent(paymentIntent);
   const isAch = isAchPaymentIntent(paymentIntent, paymentIntent.metadata?.selected_method_category);
@@ -4991,6 +5199,52 @@ async function handleDisputeCreated(dispute) {
           { icon: '⚠️', link: '/admin/payers' },
         );
       } catch (err) { logger.error(`[stripe-webhook] Statement dispute notification failed: ${err.message}`); }
+      return;
+    }
+  }
+
+  // Combined full-balance charge (payIncludeBalance): ONE charge backs a
+  // payments row PER allocated invoice — a chargeback claws back the whole
+  // charge, so EVERY row flips disputed and EVERY invoice it settled
+  // reopens. The generic single-row path below would revert only .first().
+  {
+    const combinedRows = await db('payments').where({ stripe_charge_id: chargeId });
+    const parseMeta = (row) => {
+      try { return row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch { return {}; }
+    };
+    if (combinedRows.length && combinedRows.some((r) => parseMeta(r).combined_payment)) {
+      for (const row of combinedRows) {
+        const meta = parseMeta(row);
+        // Same late-replay guard as the single path: a dispute already
+        // CLOSED owns its row — never flip a won charge back to disputed.
+        if (meta.dispute_final && meta.dispute_id === dispute.id) continue;
+        await db('payments').where({ id: row.id }).update({
+          status: 'disputed',
+          failure_reason: `Dispute: ${reason}`,
+          metadata: JSON.stringify({ ...meta, dispute_id: dispute.id, ...(meta.invoice_id ? { dispute_invoice_id: meta.invoice_id } : {}) }),
+        });
+        const rowInvoice = await findInvoiceForPayment(row);
+        const invoicePi = rowInvoice?.stripe_payment_intent_id ? String(rowInvoice.stripe_payment_intent_id) : null;
+        const disputedPiId = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
+        if (rowInvoice && ['paid', 'processing'].includes(rowInvoice.status)
+          && invoicePi && disputedPiId && invoicePi === disputedPiId) {
+          await db('invoices').where({ id: rowInvoice.id }).update({
+            status: 'overdue',
+            paid_at: null,
+            stripe_payment_intent_id: null,
+            stripe_charge_id: null,
+            updated_at: db.fn.now(),
+          });
+        }
+      }
+      try {
+        await NotificationService.notifyAdmin(
+          'dispute',
+          `Combined payment dispute: $${amount}`,
+          `Dispute ${dispute.id} on a combined balance charge (${reason}) — ${combinedRows.length} invoices reopened. Respond with evidence in the Stripe dashboard.`,
+          { icon: '⚠️', link: '/admin/invoices' },
+        );
+      } catch (err) { logger.error(`[stripe-webhook] Combined dispute notification failed: ${err.message}`); }
       return;
     }
   }

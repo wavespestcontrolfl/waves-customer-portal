@@ -573,7 +573,14 @@ violations at the severity noted.
   `/invoice.pdf`, `/attachments/:id` — the invoice pay surface; router-wide
   60/min limiter + url-safe 20-64 token format gate with generic 404,
   mirroring pay-statement.js; legacy 25-32 char invoice tokens remain
-  valid),
+  valid. OWNER RULING 2026-08-16, superseding the earlier "no sibling-
+  invoice data on this surface" P0: with GATE_PAY_INCLUDE_BALANCE on, the
+  pay page ITEMIZES the customer's other open self-pay invoices — numbers,
+  dates, amounts, an accepted forwarded-link disclosure — and the Pay
+  button charges the COMBINED total via one PI carrying a per-invoice
+  metadata allocation (services/pay-combined.js is the one authority for
+  selection, allocation, and settle). Sibling TOKENS still never ride the
+  payload, and gate off ⇒ byte-identical to the single-invoice surface),
   `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
   statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
   64-hex `payer_statements.token` format gate + public-route rate limit; resolves
