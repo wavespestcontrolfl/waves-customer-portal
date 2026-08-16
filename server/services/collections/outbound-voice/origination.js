@@ -70,7 +70,7 @@ async function setCaseState(caseRow, patch, { fromState = 'approved' } = {}) {
  * policy/gate refusals; only genuinely unexpected errors propagate to the
  * caller's catch (which must treat them as "not dialed").
  */
-async function originateCollectionCall(caseId, { now = new Date() } = {}) {
+async function originateCollectionCall(caseId, { now = new Date(), clock = () => new Date() } = {}) {
   if (!isVoiceLatePaymentEnabled()) return { dialed: false, reason: 'gated_off' };
 
   const { isEnabled } = require('../../../config/feature-gates');
@@ -190,6 +190,16 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
   // incident kill-switch flip during that window must stop the dial HERE,
   // before any state is claimed or the provider is touched.
   if (!isVoiceLatePaymentEnabled()) return { dialed: false, reason: 'gated_off' };
+  // Time-based authorization RE-CHECK with a FRESH clock (codex gh-r14):
+  // the entry snapshot of `now` can go stale across the policy evaluation
+  // (it may include a Stripe microdeposit lookup) — a claim reached after
+  // 18:00 ET or past approval_expires_at must stand down. The window
+  // predicate is contact-policy's own; the expiry re-check rides IN the
+  // claim's WHERE below via this same fresh clock.
+  const claimNow = clock();
+  if (!ContactPolicy.isWithinCallWindow(claimNow)) {
+    return { dialed: false, reason: 'outside_call_window' };
+  }
   // customer_id is IN the fence (codex gh-r11): a merge committing between
   // the snapshot reads and this lock acquisition repoints the case to the
   // winner — the policy verdict and phone evaluated above then belong to
@@ -199,7 +209,7 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
     // The 24h authorization boundary holds INSIDE the atomic claim too (gh
     // prb-r15): the policy revalidation above can cross the deadline, and
     // the earlier expiry check is not the boundary — this WHERE is.
-    .where('approval_expires_at', '>', now)
+    .where('approval_expires_at', '>', claimNow)
     .update({ current_state: 'dialing', updated_at: trx.fn.now() }));
   if (!claimed) return { dialed: false, reason: 'dial_claim_lost' };
 

@@ -34,6 +34,13 @@ const logger = require('../../logger');
 const { isAutoDialEnabled } = require('./gates');
 const { withCaseLock } = require('../case-lock');
 
+// Supervised-only parks (codex gh-r9/gh-r14): these hold_reasons release
+// ONLY through the admin dial endpoint — the auto sweep must treat any of
+// them, row-local or on a sibling, as a hard exclusion. merge_reconciled
+// joined in gh-r14: a reconciled (demoted) approval re-emerging after a
+// merge or its undo is a supervised decision, never an auto candidate.
+const SUPERVISED_HOLDS = ['dial_failed', 'reclaimed_orphaned_approval', 'merge_reconciled'];
+
 const DEFAULT_MAX_PER_RUN = 2;
 const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -69,7 +76,7 @@ async function promoteForAutoDial(caseRow, now) {
     // hold_reason 'dial_failed' — the state+version fence below would pass
     // and clear the park. Supervised parks release only through the admin
     // endpoint; a parked candidate stands down.
-    if (['dial_failed', 'reclaimed_orphaned_approval'].includes(current.hold_reason)) return false;
+    if (SUPERVISED_HOLDS.includes(current.hold_reason)) return false;
     const liveElsewhere = await trx('collection_cases')
       .where({ customer_id: caseRow.customer_id })
       .whereNot('id', caseRow.id)
@@ -78,7 +85,7 @@ async function promoteForAutoDial(caseRow, now) {
       // promotion — the in-lock predicate is the authoritative fence.
       .where(function blocked() {
         this.whereIn('current_state', ['approved', 'dialing', 'held'])
-          .orWhereIn('hold_reason', ['dial_failed', 'reclaimed_orphaned_approval']);
+          .orWhereIn('hold_reason', SUPERVISED_HOLDS);
       })
       .first('id');
     if (liveElsewhere) return false;
@@ -193,7 +200,7 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
     // dial_failed (origination: a failed dial is never silently retried)
     // and reclaimed_orphaned_approval (something went wrong mid-flight).
     // The admin endpoint remains their release path.
-    .whereRaw("(hold_reason IS NULL OR hold_reason NOT IN ('dial_failed', 'reclaimed_orphaned_approval'))")
+    .whereRaw(`(hold_reason IS NULL OR hold_reason NOT IN (${SUPERVISED_HOLDS.map(() => '?').join(', ')}))`, SUPERVISED_HOLDS)
     // Customers with a live/held sibling — or a supervised-parked sibling
     // (codex gh-r9: a merge can leave a shadow row beside a dial_failed
     // park; dialing the sibling would bypass the required review) — are
@@ -206,7 +213,7 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
         .whereRaw('sib.id <> collection_cases.id')
         .where(function anyBlock() {
           this.whereIn('sib.current_state', ['approved', 'dialing', 'held'])
-            .orWhereIn('sib.hold_reason', ['dial_failed', 'reclaimed_orphaned_approval']);
+            .orWhereIn('sib.hold_reason', SUPERVISED_HOLDS);
         });
     })
     .where(function nextEligible() {

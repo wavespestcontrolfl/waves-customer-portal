@@ -36,6 +36,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/collections/contact-policy', () => ({
   evaluate: jest.fn(),
+  isWithinCallWindow: jest.fn(() => true),
 }));
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(),
@@ -422,8 +423,11 @@ describe('prb-r15', () => {
       customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
       call_log: [chain('call_log', { first: undefined }), chain('call_log', { returningRows: [{ id: 'cl-1' }] }), chain('call_log')],
     });
-    await originateCollectionCall('case-1', { now: NOW });
-    expect(claimChain.where).toHaveBeenCalledWith('approval_expires_at', '>', NOW);
+    // gh-r14: the boundary compares against the FRESH claim clock, not the
+    // entry snapshot.
+    const FRESH = new Date('2026-08-12T15:10:00Z');
+    await originateCollectionCall('case-1', { now: NOW, clock: () => FRESH });
+    expect(claimChain.where).toHaveBeenCalledWith('approval_expires_at', '>', FRESH);
   });
 });
 
@@ -543,4 +547,35 @@ test('master gate flipped off after the claim ⇒ never_contacted stamp, call_lo
   );
   expect(cancelChain._updated.status).toBe('canceled');
   expect(releaseChain._updated.current_state).toBe('approved');
+});
+
+// codex gh-r14: time-based authorization re-checked at the claim with a
+// FRESH clock — the entry `now` can go stale across the policy evaluation.
+test('claim boundary re-checks the call window with a fresh clock — after-hours claim stands down pre-claim', async () => {
+  ContactPolicy.isWithinCallWindow.mockReturnValue(false);
+  const LATE = new Date('2026-08-12T22:30:00Z'); // 18:30 ET
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } })], // NO claim chain
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW, clock: () => LATE });
+  expect(res).toEqual({ dialed: false, reason: 'outside_call_window' });
+  expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(LATE);
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+  expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+});
+
+test('the claim WHERE compares approval expiry against the fresh clock, not the entry snapshot', async () => {
+  ContactPolicy.isWithinCallWindow.mockReturnValue(true);
+  const FRESH = new Date('2026-08-12T15:20:00Z');
+  const claimChain = chain('collection_cases', { result: 0 });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), claimChain],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW, clock: () => FRESH });
+  expect(res.reason).toBe('dial_claim_lost');
+  expect(claimChain.where).toHaveBeenCalledWith('approval_expires_at', '>', FRESH);
 });

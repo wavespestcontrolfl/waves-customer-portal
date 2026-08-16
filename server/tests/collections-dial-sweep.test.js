@@ -339,8 +339,10 @@ describe('gh-r9', () => {
     const queues = [promoteChain(0), cChain];
     db.mockImplementation(() => queues.shift());
     await runCollectionsDialSweep({ now: NOW });
-    const raws = cChain.whereRaw.mock.calls.map((c) => c[0]).join(' ');
-    expect(raws).toContain("NOT IN ('dial_failed', 'reclaimed_orphaned_approval')");
+    // gh-r14: parameterized over SUPERVISED_HOLDS (merge_reconciled joined).
+    const rawCall = cChain.whereRaw.mock.calls.find((c) => String(c[0]).includes('hold_reason IS NULL'));
+    expect(rawCall[0]).toContain('NOT IN (?, ?, ?)');
+    expect(rawCall[1]).toEqual(['dial_failed', 'reclaimed_orphaned_approval', 'merge_reconciled']);
     expect(cChain.whereNotExists).toHaveBeenCalled();
   });
 });
@@ -361,7 +363,7 @@ describe('gh-r10', () => {
     const rec = { whereIn: jest.fn(() => rec), orWhereIn: jest.fn(() => rec) };
     blocked.call(rec);
     expect(rec.whereIn).toHaveBeenCalledWith('current_state', ['approved', 'dialing', 'held']);
-    expect(rec.orWhereIn).toHaveBeenCalledWith('hold_reason', ['dial_failed', 'reclaimed_orphaned_approval']);
+    expect(rec.orWhereIn).toHaveBeenCalledWith('hold_reason', ['dial_failed', 'reclaimed_orphaned_approval', 'merge_reconciled']);
   });
 });
 

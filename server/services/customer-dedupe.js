@@ -2319,6 +2319,29 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     if (dialingCase) {
       refuse('A collection call is in flight for one of these customers — retry the revert after it completes');
     }
+    // COMPLETED collections activity since the merge blocks the undo too
+    // (codex gh-r14): a call that already ran left its call_log and
+    // contact-ledger rows on the post-merge winner — repointing the case
+    // back would strand that history on the wrong customer, and the
+    // restored customer's empty ledger would let the auto sweep re-dial
+    // inside the 7-day spacing window. Fail closed; this undo is by hand.
+    let collectionsActivity = null;
+    try {
+      collectionsActivity = await trx('collections_contact_ledger')
+        .whereIn('customer_id', [winnerId, loserId])
+        .where('occurred_at', '>', journal.created_at)
+        .first('id');
+      if (!collectionsActivity) {
+        collectionsActivity = await trx('call_log')
+          .where({ source: 'collections_voice' })
+          .whereIn('customer_id', [winnerId, loserId])
+          .where('created_at', '>', journal.created_at)
+          .first('id');
+      }
+    } catch { collectionsActivity = null; } // pre-collections envs: no tables, no blocker
+    if (collectionsActivity) {
+      refuse('Collections contact happened after this merge (a call or ledger entry) — the case, call log, and ledger history must be separated by hand before this merge can be undone');
+    }
     // FIRST lock after the journal row, BEFORE the customers rows (lock
     // order contract in utils/customer-comms-lock.js): every appointment
     // creator and the template-run executor take `customer-comms:<id>`

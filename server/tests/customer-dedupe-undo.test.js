@@ -40,13 +40,20 @@ function makeChain(table, route) {
     // undo's in-flight-call defer. .first() must resolve a row or null —
     // serve it centrally; the defer pin plants a row via DIALING_CASE.
     if (table === 'collection_cases') return q.called('first') ? DIALING_CASE : [];
+    // Post-merge activity probes (gh-r14) — same truthy-[] trap.
+    if (table === 'collections_contact_ledger') return q.called('first') ? LEDGER_ACTIVITY : [];
+    if (table === 'call_log' && q.called('first') && q.args('where')?.[0]?.source === 'collections_voice') {
+      return CALL_ACTIVITY;
+    }
     return route(q);
   }).then(resolve, reject);
   return q;
 }
 
 let DIALING_CASE = null;
-afterEach(() => { DIALING_CASE = null; });
+let LEDGER_ACTIVITY = null;
+let CALL_ACTIVITY = null;
+afterEach(() => { DIALING_CASE = null; LEDGER_ACTIVITY = null; CALL_ACTIVITY = null; });
 
 function installDb(router) {
   db.mockImplementation((table) => makeChain(table, (q) => router(table, q)));
@@ -1379,6 +1386,28 @@ describe('revertMerge', () => {
     const [sql, bindings] = state.rawCalls[2];
     expect(String(sql)).toContain('pg_advisory_xact_lock');
     expect(bindings).toEqual([`customer-comms:${WINNER}`]);
+  });
+
+  it('refuses (409) when collections contact happened after the merge — ledger entry (gh-r14)', async () => {
+    const { trx } = buildRevertTrx({
+      journal: baseJournal(), winner: baseWinner(), loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1'] } },
+    });
+    LEDGER_ACTIVITY = { id: 'ledger-post-merge' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('Collections contact happened after this merge') });
+  });
+
+  it('refuses (409) when collections contact happened after the merge — call_log row (gh-r14)', async () => {
+    const { trx } = buildRevertTrx({
+      journal: baseJournal(), winner: baseWinner(), loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1'] } },
+    });
+    CALL_ACTIVITY = { id: 'call-post-merge' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('Collections contact happened after this merge') });
   });
 
   it('defers (409) while either customer has a collection call mid-dial (gh-r11)', async () => {
