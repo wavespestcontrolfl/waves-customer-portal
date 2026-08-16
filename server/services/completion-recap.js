@@ -248,13 +248,14 @@ function containsProductName(text, products, { extraGenericTokens = null, wholeW
       return true;
     }
     if (!wholeWord) return false;
-    // A name whose long tokens are all generic/short ("T-Zone SE",
-    // "PGF Complete 16-4-8") still gates: distinctive short acronyms
-    // (2-3 chars, non-numeric, not a formulation suffix) match as whole
-    // words, and the full normalized name matches as a phrase
-    // (codex r35 on #3420).
-    if (longDistinctive.length) return false;
-    const shortDistinctive = nameTokens.filter((token) => token.length >= 2
+    // Abbreviated echoes gate too — even when the full name carries another
+    // distinctive token the copy omitted ("Green Flo" for "LESCO Green Flo",
+    // codex r38): adjacent token pairs with identity match as phrases below
+    // for EVERY name. Distinctive short acronyms (2-3 chars) additionally
+    // match as whole words, but only for names whose long tokens are all
+    // generic ("PGF Complete") — widening that to every name would let a
+    // lone formulation acronym reject ordinary copy (codex r35).
+    const shortDistinctive = (longDistinctive.length ? [] : nameTokens).filter((token) => token.length >= 2
       && token.length <= 3
       && !/^\d+$/.test(token)
       && !FORMULATION_SUFFIX_TOKENS.has(token)

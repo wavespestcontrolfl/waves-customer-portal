@@ -13227,8 +13227,13 @@ export function CompletionPanel({
       return;
     }
     if (generationInputsRef.current !== snapshot) {
+      // Mid-request changes HOLD the old baseline (interaction/concern/
+      // rating controls stay enabled while generating) — when the request
+      // settles the mismatch is still visible here and the just-installed
+      // response invalidates immediately (codex r38).
+      if (generating) return;
       generationInputsRef.current = snapshot;
-      if (!generating) invalidateGeneratedReportOnTypedEdit();
+      invalidateGeneratedReportOnTypedEdit();
     }
   }, [areasServiced, observationsText, recommendationsText,
     customerInteraction, customerConcern, clientPestRating, generating]);
