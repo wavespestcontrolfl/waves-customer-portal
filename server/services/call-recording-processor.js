@@ -8393,7 +8393,16 @@ const CallRecordingProcessor = {
                   zip: entryZip || null,
                   occupancyType: entry.is_rental ? 'rental_investment' : 'unknown',
                   source: 'call_pipeline',
+                  // Per-write claim fence (codex #3418 r16): the pre-loop
+                  // check narrows the window; this makes EACH durable
+                  // insert atomic with the live claim (FOR UPDATE on the
+                  // call_log row inside the insert's own transaction).
+                  claimFence: { callLogId: call.id, procToken },
                 });
+                if (recordedV2?.claimLost) {
+                  logger.warn(`[property-role] V2 persistence aborted mid-loop for ${maskSid(callSid)} — processing claim lost to a newer worker`);
+                  break;
+                }
                 enqueueLookup(recordedV2);
               }
             }
@@ -8427,6 +8436,20 @@ const CallRecordingProcessor = {
           logger.warn(`[customer-properties] call-pipeline write skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
         }
       }
+    } else if (process.env.GATE_CUSTOMER_PROPERTIES === 'true' && customerId
+      && require('../config/feature-gates').gateEnvValue('GATE_CALL_PROPERTY_ROLE')) {
+      // Reprocess produced a valid, non-terminal extraction with NO service
+      // street in EITHER extractor (codex #3418 r16): the property block is
+      // skipped, so staging's no-signal supersede never runs — an open
+      // property_role_confirm card from the PRIOR extraction would stay
+      // one-click actionable. Retire it here, generation-fenced like the
+      // terminal paths (a reclaimed stale worker must not resolve a newer
+      // pass's valid card). Fail-soft, locked inside the helper.
+      await require('./property-role-proposals').resolveSupersededCard(
+        db, call.id,
+        'Superseded — the reprocessed extraction carries no service address, so the prior property-role proposals no longer apply.',
+        { procGeneration },
+      );
     }
 
     // Secondary-contact persistence (additive, gated, non-blocking). Runs

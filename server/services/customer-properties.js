@@ -180,7 +180,7 @@ async function ensurePrimaryProperty(customerOrId, { occupancyType, source } = {
  * customers.address_* (filled only when empty), so the ~310 mirror readers see a
  * service address. Returns { created, propertyId }.
  */
-async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, occupancyType, label, source = 'call_pipeline' }) {
+async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, occupancyType, label, source = 'call_pipeline', claimFence = null }) {
   const street = String(address_line1 || '').trim();
   if (!customerId || !street) return { created: false, propertyId: null };
 
@@ -198,6 +198,20 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
   // fail-open).
   return db.transaction(async (trx) => {
   await trx('customers').where({ id: customerId }).forUpdate().first('id');
+  // Optional processing-claim fence (#3418 r16): a call-pipeline caller
+  // passes { callLogId, procToken } so THIS durable insert is conditioned
+  // on the live claim ATOMICALLY — FOR UPDATE on the call_log row holds
+  // it through commit, so the reclaim either already rotated the token
+  // (we bail, nothing written) or queues behind this transaction. Lock
+  // order customers → call_log row matches the staging/triage writers;
+  // the reclaim UPDATE holds no prior locks.
+  if (claimFence && claimFence.callLogId && claimFence.procToken) {
+    const owned = await trx('call_log')
+      .where({ id: claimFence.callLogId, processing_token: claimFence.procToken })
+      .forUpdate()
+      .first('id');
+    if (!owned) return { created: false, propertyId: null, claimLost: true };
+  }
   // Fast-path dedup on the full address; the partial-unique index (migration) is
   // the atomic backstop against a concurrent double-insert.
   const existing = await trx('customer_properties').where({ customer_id: customerId });
