@@ -1016,6 +1016,9 @@ const GROUNDED_ONLY_WORDS = new Set([
   // r36: sensitivity claims ("provided chemical sensitivity") are safety
   // conditions in ANY field.
   'sensitivity', 'sensitivities',
+  // r34/r39: pet data is deterministic-block-only by design — an LLM pet
+  // claim in ANY field must derive from a fact (e.g. a flag).
+  'pet', 'pets', 'dog', 'dogs', 'cat', 'cats',
   // r28: entry/payment-method state ("provided gate access"/"credit card")
   // is claimable in ANY field — and access codes never pass through the
   // LLM by design, so an ungrounded access claim is always invented.
@@ -1047,9 +1050,6 @@ const INSTRUCTION_EVIDENCE_WORDS = new Set([
   'chemical', 'chemicals',
   // r29: account-lifecycle directives ("Discuss renewal/membership").
   'renewal', 'renewals', 'membership', 'memberships', 'member', 'members',
-  // r34: pet guidance is deterministic-block-only by design — an LLM pet
-  // directive must derive from a fact (e.g. a flag mentioning the pet).
-  'pet', 'pets', 'dog', 'dogs', 'cat', 'cats',
 ]);
 
 // Word-level grounding for one candidate word ACROSS its stem variants.
@@ -1385,11 +1385,31 @@ function findUngroundedClaim(body, grounding) {
   if (/\bhistory\s+of\b/.test(outputText) && !groundedValueText.includes('history')) {
     return { kind: 'novel_term', term: 'history' };
   }
+  // Appointment-status claims bind to fact values — the brief exists FOR a
+  // scheduled visit, so "Appointment cancelled/confirmed" must be stated
+  // by a fact, not inferred (r39).
+  for (const m of outputText.matchAll(/\bappointments?\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved)\b|\b(cancelled|canceled|confirmed|rescheduled)\s+appointments?\b/g)) {
+    const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled');
+    if (!wordVariants(status).some((v) => groundedValueText.includes(v))) {
+      return { kind: 'appointment_state', term: status };
+    }
+  }
+  // Claimed customer CONTACT REQUESTS ("asked for a phone call") are
+  // factual asks — the channel and a request verb must both appear in the
+  // fact values, or the technician contacts someone who never asked (r39).
+  const contactReq = outputText.match(/\b(?:asked|asks|requested|requests)\s+(?:for\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:back)?|text|sms|email|update)\b/);
+  if (contactReq) {
+    const channel = contactReq[1];
+    const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred)\b/.test(groundedValueText);
+    if (!(hasRequestVerb && groundedValueText.includes(channel.replace(/back$/, '')))) {
+      return { kind: 'contact_request', term: channel };
+    }
+  }
   // A positive payment-state phrase under an overdue_balance flag asserts
   // the OPPOSITE of the customer's billing state — flattened token pools
   // cannot see the contradiction, so it is checked as a phrase (r32).
   if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
-    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\bpaid\s+in\s+full\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b/i.test(outputText)) {
+    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b/i.test(outputText)) {
     return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
   }
   // 'accepted' bound to its object (r37): the estimate status must not be

@@ -2699,3 +2699,38 @@ describe('codex #3423 r38 — determiner evidence, provided-key, fabricated hist
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r39 — reversed payment, descriptive pets, appointment status, contact requests', () => {
+  test('all four r39 claim shapes reject on unsupported facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const overdue = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } }, flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] },
+    };
+    for (const claim of ['Accepted payment', 'Customer paid the balance']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        overdue,
+      ).reason).toMatch(/payment_state_conflict/);
+    }
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer provided dog information', 'Pet information provided', 'Appointment cancelled', 'Customer asked for a phone call', 'Customer asked for text update']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        empty,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('grounded appointment status and contact request pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { visit: { status: 'confirmed' }, flags: [{ detail: 'customer asked for a call before arrival' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment confirmed. Customer asked for a call.' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
