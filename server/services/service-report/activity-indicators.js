@@ -3195,8 +3195,8 @@ function buildTodaysResult({
       // healthy" draft beside a Poor/Declining finding (or the reverse)
       // keeps the deterministic copy; reconcile override honored
       // (codex r41).
-      const TS_POSITIVE_CLAIM_RE = /\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\s+condition)\b[^.!?]{0,30}\b(?:is|are|was|were|looks?|looked|remains?|appears?)\s+(?:very\s+|quite\s+|overall\s+)*(?:excellent|healthy|thriving|great|good|strong)\b|\b(?:excellent|healthy|thriving|great|good|strong)\s+(?:overall\s+)?(?:landscape|plant|shrub|palm|turf)\s+(?:condition|health|shape)\b/i;
-      const TS_NEGATIVE_CLAIM_RE = /\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\s+condition)\b[^.!?]{0,30}\b(?:is|are|was|were|looks?|looked|remains?|appears?)\s+(?:very\s+|quite\s+|overall\s+)*(?:poor|declining|struggling|deteriorating|failing)\b|\b(?:poor|declining|struggling|deteriorating|failing)\s+(?:overall\s+)?(?:landscape|plant|shrub|palm|turf)\s+(?:condition|health|shape)\b/i;
+      const TS_POSITIVE_CLAIM_RE = /\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\s+condition)\b[^.!?]{0,30}\b(?:is|are|was|were|looks?|looked|remains?|appears?)\s+(?:very\s+|quite\s+|overall\s+)*(?:in\s+(?:very\s+|quite\s+)*)?(?:excellent|healthy|thriving|great|good|strong)\b|\b(?:excellent|healthy|thriving|great|good|strong)\s+(?:overall\s+)?(?:landscape|plant|shrub|palm|turf)?\s*(?:condition|health|shape)\b/i;
+      const TS_NEGATIVE_CLAIM_RE = /\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\s+condition)\b[^.!?]{0,30}\b(?:is|are|was|were|looks?|looked|remains?|appears?)\s+(?:very\s+|quite\s+|overall\s+)*(?:in\s+(?:very\s+|quite\s+)*)?(?:poor|declining|struggling|deteriorating|failing|rough|bad)\b|\b(?:poor|declining|struggling|deteriorating|failing|rough|bad)\s+(?:overall\s+)?(?:landscape|plant|shrub|palm|turf)?\s*(?:condition|health|shape)\b/i;
       const tsBodyText = String(technicianReportBody || '');
       const tsContradiction = ['Poor', 'Declining'].includes(condition)
         ? TS_POSITIVE_CLAIM_RE.test(tsBodyText)

@@ -12247,6 +12247,16 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     // exemption from the visit's own catalog rows, not a fixed noun list
     // (codex r22). Lookup failure keeps the guard strict.
     const guardGenericTokens = new Set(PEST_TARGET_TOKENS);
+    // The visit's own recorded treatment TARGETS are legitimate copy — the
+    // stored customer wording for Drive XLR8 literally names crabgrass, and
+    // the fixed pest list can't enumerate every target (codex r42).
+    for (const prod of Array.isArray(products) ? products : []) {
+      for (const target of Array.isArray(prod?.targets) ? prod.targets : []) {
+        String(target || '').toLowerCase().split(/[^a-z0-9]+/)
+          .filter((tok) => tok.length >= 4)
+          .forEach((tok) => guardGenericTokens.add(tok));
+      }
+    }
     try {
       const guardIds = (Array.isArray(products) ? products : [])
         .map((p) => p?.productId).filter(Boolean);

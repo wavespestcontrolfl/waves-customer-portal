@@ -4276,8 +4276,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       || governingSnapshots.some(
         (snap) => snap.todaysResult?.bodySource === 'technician_report'
           // A frozen reconcile confirmation is a PERSON accepting the body
-          // over the matcher — honored here like trapSetupScreened above.
-          || snap.todaysResult?.reconcileConfirmed === true,
+          // over the matcher — honored here like trapSetupScreened above,
+          // EXCEPT on zero-state snapshots: their stories refuse the body
+          // for fixed wording regardless of the count reconciliation, so
+          // the flag never means body acceptance there (codex r42).
+          || (snap.todaysResult?.reconcileConfirmed === true
+            && snap.activity?.score !== 0),
       );
     const drivesSummary = technicianReport?.body && trapSetupScreened
       && typedStoryAcceptedBody;

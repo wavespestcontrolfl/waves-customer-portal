@@ -66,6 +66,12 @@ const REPORT_ACCESS_CODE_RES = [
   // more number words after a code noun, mirroring the canonical scrubber's
   // multi-token shape (codex r41)
   /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b\s*(?:is|:|=|-)?\s*(?:(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten)[\s-]*){2,6}\b/i,
+  // unlinked positional word codes (codex r42): "gate code blue waves" —
+  // a physical-access context word anchors the ambiguous nouns, while the
+  // credential-specific nouns (passphrase/passcode/password) need no
+  // anchor; a leading verb/stopword ("gate code was updated") never counts.
+  /\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\s+(?:code|combo|combination|pin)\b\s*:?\s*(?!(?:is|was|were|for|the|we|to|that|this|will|should|of|and|or|in|on|at|has|have|had|used|works?|worked|changed|updated|remains?|stays?|near|by)\b)[a-z][a-z0-9#*]{1,11}\b/i,
+  /\b(?:passphrase|passcode|password)\b\s*:?\s*(?!(?:is|was|were|for|the|we|to|that|this|will|should|of|and|or|in|on|at|has|have|had|used|works?|worked|changed|updated|remains?|stays?|near|by)\b)[a-z][a-z0-9#*]{1,11}\b/i,
 ];
 function containsReportAccessCode(text) {
   const value = String(text || '');
@@ -184,7 +190,10 @@ function summaryCopySignature(service = {}) {
     .filter((snap) => snap?.todaysResult);
   const typedStoryAcceptedBody = !governing.length
     || governing.some((snap) => snap.todaysResult?.bodySource === 'technician_report'
-      || snap.todaysResult?.reconcileConfirmed === true);
+      // mirror report-data: a reconcile confirmation never accepts the body
+      // on a zero-state snapshot (codex r42)
+      || (snap.todaysResult?.reconcileConfirmed === true
+        && snap.activity?.score !== 0));
   const drivesSummary = !!parsed?.body && typedStoryAcceptedBody;
   if (!drivesSummary) return '';
   return `-tr${crypto.createHash('sha256').update(parsed.body).digest('hex').slice(0, 8)}`;
