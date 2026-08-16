@@ -632,9 +632,39 @@
                   "null"
                 ],
                 "description": "What the caller said about this property: services wanted, access, exterior covered by HOA, etc."
+              },
+              "is_primary_residence": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "true ONLY when the caller states/strongly implies THIS property is their main home; false when stated otherwise; null when unstated."
               }
             }
           }
+        },
+        "service_address_occupancy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "owner_occupied",
+            "rental_investment",
+            "commercial",
+            "seasonal",
+            "vacant",
+            "unknown",
+            null
+          ],
+          "description": "Occupancy of the MAIN service_address when the caller states or strongly implies it; null when unstated."
+        },
+        "service_address_is_primary_residence": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "true ONLY when the caller states/strongly implies the service_address is the home they LIVE in as their main residence; false when they state it is not (rental, seasonal, tenant-occupied); null when unstated."
         }
       }
     },

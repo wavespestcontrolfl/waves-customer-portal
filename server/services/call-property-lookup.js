@@ -336,14 +336,31 @@ async function enrichPropertyById(propertyId) {
     logger.warn('[call-property-lookup] visit mirror update failed', { propertyId, error: errId(err) });
   }
   try {
-    if (row.is_primary) {
-      const customer = await db('customers').where({ id: row.customer_id }).first();
+    // LIVE re-read of the primary flag (codex #3418 r8): `row` is the
+    // pre-lookup snapshot, and a property-role primary FLIP can commit
+    // while the external lookup runs — the stale snapshot made a
+    // just-promoted row skip its customer mirror until the nightly
+    // reconciliation (and would let a just-demoted row attempt one; the
+    // address fence below already blocks that, but the decision should
+    // not depend on it).
+    const liveRole = await db('customer_properties')
+      .where({ id: propertyId, active: true })
+      .first('is_primary', 'address_key', 'customer_id');
+    // The looked-up-address fence STAYS on the re-read (codex #3418 r9):
+    // an address edit between the fenced property update and this point
+    // gives the row a NEW address_key while mirrorLat/afterType still
+    // describe the OLD address — matching the customer against the new
+    // key would mirror stale facts onto it (and old coords can make
+    // ensureCustomerGeocoded skip the re-geocode). Facts mirror only
+    // while the row still IS the address that was looked up.
+    if (liveRole?.is_primary && liveRole.address_key === row.address_key) {
+      const customer = await db('customers').where({ id: liveRole.customer_id }).first();
       // Fence: mirror only while the customers primary-address mirror still
       // IS this property's address — and the SAME captured address columns
       // are reasserted in the UPDATE predicate, so an edit committing
       // between this read and the write matches nothing (the read-then-
       // compare alone left that window open).
-      if (customer && addressKey(customer) === row.address_key) {
+      if (customer && addressKey(customer) === liveRole.address_key) {
         const mirror = {};
         if (mirrorLat != null && mirrorLng != null) {
           mirror.latitude = db.raw('CASE WHEN latitude IS NULL AND longitude IS NULL THEN ? ELSE latitude END', [mirrorLat]);
@@ -360,7 +377,7 @@ async function enrichPropertyById(propertyId) {
         if (Object.keys(mirror).length) {
           mirror.updated_at = db.fn.now();
           await db('customers')
-            .where({ id: row.customer_id })
+            .where({ id: liveRole.customer_id })
             .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
               customer.address_line1 || '', customer.address_line2 || '', customer.city || '', customer.zip || '',
             ])

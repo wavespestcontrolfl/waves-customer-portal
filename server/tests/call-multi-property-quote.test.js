@@ -105,6 +105,8 @@ describe('flatView / mapAdditionalPropertiesToLegacy', () => {
       state: 'FL',
       zip: '34211',
       is_rental: true,
+      occupancy: 'rental_investment',
+      is_primary_residence: null,
       property_type: 'condo',
       notes: 'interior only',
     });

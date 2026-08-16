@@ -35,7 +35,14 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // AGENT-spoken quote). Feeds the gated caller_not_authorized fail-open in
 // canAutoRoute (GATE_CALL_AGENT_COMMIT_BOOKING). Optional/nullable: older
 // payloads still validate.
-const SCHEMA_VERSION = '1.8.0';
+// 1.9.0: additive — property-role classification (owner directive 2026-08-15,
+// a multi-property call misclassified a customer's portfolio): property.service_address_occupancy
+// (same enum as additional_properties[].occupancy),
+// property.service_address_is_primary_residence, and
+// additional_properties[].is_primary_residence. All optional/nullable: older
+// payloads still validate. Consumed by property-role-proposals (gated,
+// GATE_CALL_PROPERTY_ROLE) — fill-or-park, never a silent primary flip.
+const SCHEMA_VERSION = '1.9.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

@@ -67,6 +67,12 @@ router.get('/', async (req, res) => {
       .leftJoin('customers', 'call_log.customer_id', 'customers.id')
       .leftJoin('route_feedback', 'triage_items.call_log_id', 'route_feedback.call_log_id')
       .where('triage_items.status', status)
+      // property_role_confirm payloads embed the customer's OTHER property
+      // addresses — the same data admin-customers gates behind requireAdmin —
+      // and only an admin can apply them; hide the cards from tech users.
+      .modify((q) => {
+        if (req.techRole !== 'admin') q.whereNot('triage_items.reason_code', 'property_role_confirm');
+      })
       .orderBy('triage_items.created_at', 'desc')
       .limit(limit)
       .select(
@@ -82,6 +88,7 @@ router.get('/', async (req, res) => {
         'triage_items.resolution_note',
         'triage_items.resolved_at',
         'triage_items.created_at',
+        'triage_items.updated_at',
         'call_log.lead_synopsis',
         'call_log.call_summary',
         'call_log.from_phone',
@@ -102,6 +109,9 @@ router.get('/', async (req, res) => {
     const countRows = await db('triage_items')
       .select('status')
       .count('* as n')
+      .modify((q) => {
+        if (req.techRole !== 'admin') q.whereNot('reason_code', 'property_role_confirm');
+      })
       .groupBy('status');
     const counts = { open: 0, in_progress: 0, resolved: 0, dismissed: 0 };
     for (const r of countRows) {
@@ -118,7 +128,7 @@ router.get('/', async (req, res) => {
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
-async function transitionCore({ id, nextStatus, note, assignedTo }) {
+async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdatedAt }) {
   const item = await db('triage_items').where({ id }).first();
   if (!item) return { outcome: 'not_found' };
   if (!OPEN_STATES.includes(item.status)) return { outcome: 'already', current: item.status };
@@ -159,6 +169,18 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
         .where({ call_log_id: item.call_log_id })
         .forUpdate()
         .select('id');
+    }
+    // Version-bind property-role transitions (codex #3418 r22): a
+    // force-reprocess merges refreshed proposals into this same open row,
+    // so a dismissal/resolve judged on the OLD payload must not close the
+    // newer one. Same rule as Apply — required (the lane is dark, no
+    // legacy clients); checked under the lock.
+    if (item.reason_code === 'property_role_confirm') {
+      const live = await trx('triage_items').where({ id }).first('updated_at');
+      if (!live || !expectedUpdatedAt
+        || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
+        return { outcome: 'stale_version' };
+      }
     }
     const updated = await trx('triage_items')
       .where({ id })
@@ -257,6 +279,7 @@ function sendTransitionResult(res, result, id, nextStatus) {
     case 'not_found': return res.status(404).json({ error: 'Triage item not found' });
     case 'already': return res.status(409).json({ error: `Item already ${result.current}` });
     case 'conflict': return res.status(409).json({ error: 'Item was just actioned by someone else' });
+    case 'stale_version': return res.status(409).json({ error: 'Card proposals changed since they were displayed — reload and review the latest' });
     default: return res.json({ ok: true, id, status: nextStatus });
   }
 }
@@ -264,7 +287,20 @@ function sendTransitionResult(res, result, id, nextStatus) {
 async function transition(req, res, nextStatus) {
   const { id } = req.params;
   const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null;
-  const result = await transitionCore({ id, nextStatus, note, assignedTo: req.technicianId });
+  // property_role_confirm cards are admin-territory end to end (codex
+  // #3418 r5): hiding them from the tech list is not enforcement — a tech
+  // holding the UUID must not be able to resolve/dismiss a pending admin
+  // property correction through these shared transitions either.
+  if (req.techRole !== 'admin') {
+    const guarded = await db('triage_items').where({ id }).first('reason_code');
+    if (guarded && guarded.reason_code === 'property_role_confirm') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+  }
+  const result = await transitionCore({
+    id, nextStatus, note, assignedTo: req.technicianId,
+    expectedUpdatedAt: req.body?.expected_updated_at || null,
+  });
   return sendTransitionResult(res, result, id, nextStatus);
 }
 
@@ -285,6 +321,168 @@ router.put('/:id/dismiss', async (req, res) => {
   } catch (err) {
     logger.error(`[admin-triage] dismiss failed: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to dismiss item' });
+  }
+});
+
+// POST /api/admin/triage/:id/apply-property-roles   {}
+// One-click apply for a property_role_confirm card: executes the parked
+// property-role proposals (occupancy changes, a primary-residence flip with
+// visit pinning + mirror re-sync) inside one transaction and resolves the
+// card. Proposals are re-validated against CURRENT rows — anything stale is
+// skipped and reported, never guessed at. Gated with the staging side
+// (GATE_CALL_PROPERTY_ROLE); cards parked before a gate-off can still be
+// dismissed. No customer communications fire from these writes.
+router.post('/:id/apply-property-roles', async (req, res) => {
+  try {
+    // Property writes are admin-territory (admin-customers property routes
+    // are requireAdmin) — the shared triage router is tech-or-admin.
+    if (req.techRole !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    const { gateEnvValue } = require('../config/feature-gates');
+    if (!gateEnvValue('GATE_CALL_PROPERTY_ROLE')) {
+      return res.status(403).json({ error: 'Property-role apply is gated off (GATE_CALL_PROPERTY_ROLE)' });
+    }
+    const { REASON_CODE, applyPropertyRoleProposals } = require('../services/property-role-proposals');
+    const item = await db('triage_items').where({ id: req.params.id }).first();
+    if (!item) return res.status(404).json({ error: 'Triage item not found' });
+    if (item.reason_code !== REASON_CODE) {
+      return res.status(400).json({ error: 'Not a property-role card' });
+    }
+    if (!OPEN_STATES.includes(item.status)) {
+      return res.status(409).json({ error: `Item already ${item.status}` });
+    }
+
+    let outcome;
+    await db.transaction(async (trx) => {
+      // Lock ORDER: customers row FIRST, then the call advisory lock (codex
+      // #3418 r7). The Customer 360 PATCH holds the customer row lock while
+      // its email fanout takes lockTriageCall for the customer's calls —
+      // taking the call lock first here is the AB-BA half of that deadlock.
+      // The card's customer never changes across refreshes (staging always
+      // derives it from the same call), so the pre-lock read's customer_id
+      // is safe to lock on; the post-lock re-read verifies it anyway.
+      const prePayload = typeof item.payload === 'string' ? JSON.parse(item.payload) : (item.payload || {});
+      const preCustomerId = prePayload.customer_id || null;
+      if (preCustomerId) {
+        // Comms lock BEFORE the customers row (its documented order —
+        // codex #3418 r11): every scheduled_services INSERT holds it, so
+        // the flip's visit pin serializes with appointment creators and
+        // the recurring auto-extension.
+        await require('../utils/customer-comms-lock').lockCustomerComms(trx, preCustomerId);
+        await trx('customers').where({ id: preCustomerId }).forUpdate().first();
+      }
+      await lockTriageCall(trx, item.call_log_id);
+      // Re-read the card UNDER the lock (codex #3418 r2): a force-reprocess
+      // merges refreshed proposals into the open card, and the pre-lock read
+      // could otherwise apply a superseded payload and then resolve the
+      // newer card.
+      const live = await trx('triage_items').where({ id: item.id }).first();
+      if (!live || !OPEN_STATES.includes(live.status)) {
+        const lost = new Error('card resolved concurrently');
+        lost.conflict = true;
+        throw lost;
+      }
+      const payload = typeof live.payload === 'string' ? JSON.parse(live.payload) : (live.payload || {});
+      const proposals = Array.isArray(payload.property_role_proposals) ? payload.property_role_proposals : [];
+      const customerId = payload.customer_id || null;
+      if (customerId !== preCustomerId) {
+        // Never proceed holding the WRONG customer's lock — surface as a
+        // concurrent-refresh conflict and let the reviewer re-click.
+        const lost = new Error('card customer changed concurrently');
+        lost.conflict = true;
+        throw lost;
+      }
+      // A customer-dedupe merge repoints call_log.customer_id and the
+      // property rows to the WINNER while this card's payload keeps the
+      // loser id (codex #3418 r14) — applying under the stale id would
+      // find none of the moved rows, skip every proposal, and still
+      // resolve the card. Surface as a conflict (card stays open) so a
+      // reprocess can re-stage against the merged profile.
+      const liveCall = item.call_log_id
+        ? await trx('call_log').where({ id: item.call_log_id }).first('customer_id')
+        : null;
+      if (liveCall && liveCall.customer_id && String(liveCall.customer_id) !== String(customerId)) {
+        const lost = new Error('card customer was merged — proposals need re-staging');
+        lost.conflict = true;
+        throw lost;
+      }
+      // Version binding (codex #3418 r17): a force-reprocess merges a
+      // REFRESHED payload into this same open row, so the click must be
+      // bound to the proposal version the admin actually saw — the card's
+      // updated_at as the list served it. Required (the lane is dark; no
+      // legacy clients): mismatch or absence = 409, card stays open, the
+      // reviewer reloads and re-reads the current proposals.
+      const expectedUpdatedAt = req.body?.expected_updated_at || null;
+      if (!expectedUpdatedAt
+        || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
+        const lost = new Error('card proposals changed since they were displayed — reload and review the latest');
+        lost.conflict = true;
+        throw lost;
+      }
+      if (!customerId || !proposals.length) {
+        const empty = new Error('no applicable proposals');
+        empty.noProposals = true;
+        throw empty;
+      }
+      outcome = await applyPropertyRoleProposals(trx, { customerId, proposals });
+      // Applied-count zero means every proposal went stale — still resolve
+      // (nothing left to confirm) but say so in the note.
+      const updated = await trx('triage_items')
+        .where({ id: item.id })
+        .whereIn('status', OPEN_STATES)
+        .update({
+          status: 'resolved',
+          resolution_note: `Property roles applied (${outcome.applied} applied, ${outcome.skipped} skipped)`,
+          assigned_to: req.technicianId,
+          resolved_at: new Date(),
+          updated_at: new Date(),
+        });
+      if (updated === 0) {
+        const lost = new Error('card resolved concurrently');
+        lost.conflict = true;
+        throw lost;
+      }
+      // The second_service_address advisory raised for this SAME call is
+      // the same decision (codex #3418 r25): the property addition's roles
+      // were just reviewed and applied, so retire the sibling atomically
+      // instead of forcing the office to review the addition twice (it
+      // would also hold call_log.review_status open forever).
+      // Only when the role review covered EVERY stated address (codex
+      // #3418 r30): an unmatched/incomplete additional address still
+      // needs the office's eyes — retiring the call-wide address card
+      // would hide it. Absent field (older payloads) = NOT proven.
+      if (item.call_log_id && payload.property_role_unmatched === 0) {
+        await trx('triage_items')
+          .where({ call_log_id: item.call_log_id, reason_code: 'second_service_address' })
+          .whereIn('status', OPEN_STATES)
+          .update({
+            status: 'resolved',
+            resolution_note: 'Superseded — property roles reviewed and applied from the property_role_confirm card.',
+            resolved_at: new Date(),
+            updated_at: new Date(),
+          });
+      }
+      // Same call_log.review_status bookkeeping as transitionCore — inside
+      // the locked transaction so the remaining-open count can't race.
+      if (item.call_log_id) {
+        const stillOpen = await trx('triage_items')
+          .where({ call_log_id: item.call_log_id })
+          .whereIn('status', OPEN_STATES)
+          .count('* as n')
+          .first();
+        const remaining = parseInt(stillOpen?.n || 0, 10);
+        await trx('call_log')
+          .where({ id: item.call_log_id })
+          .update({ review_status: remaining > 0 ? 'open' : 'resolved', updated_at: new Date() });
+      }
+    });
+    return res.json({ ok: true, ...outcome });
+  } catch (err) {
+    if (err.conflict) return res.status(409).json({ error: err.message || 'Item changed concurrently' });
+    if (err.noProposals) return res.status(400).json({ error: 'Card carries no applicable proposals' });
+    logger.error(`[admin-triage] apply-property-roles failed: ${err.message}`);
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to apply property roles' });
   }
 });
 
@@ -316,6 +514,11 @@ router.post('/:id/verdict', async (req, res) => {
     // accept/deny on one would pollute route_feedback calibration.
     if (item.reason_code === 'email_bounce_reverify') {
       return res.status(400).json({ error: 'This card is a bounced-email follow-up, not a call verdict — use Resolve instead.' });
+    }
+    // Property-role cards are pending DATA changes, not call-routing
+    // judgments — they apply via /apply-property-roles or dismiss.
+    if (item.reason_code === 'property_role_confirm') {
+      return res.status(400).json({ error: 'This card is a pending property-role confirmation, not a call verdict — use Apply or Dismiss instead.' });
     }
 
     // Call-level compare-and-swap: resolve ALL open triage rows for this call in
@@ -367,7 +570,9 @@ router.post('/:id/verdict', async (req, res) => {
       }
       const resolvedRows = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
-        .whereNot('reason_code', 'email_bounce_reverify')
+        // Bounce follow-ups AND pending property-role confirmations survive a
+        // call verdict — both carry work of their own (see the guards above).
+        .whereNotIn('reason_code', ['email_bounce_reverify', 'property_role_confirm'])
         .whereIn('status', OPEN_STATES)
         .update({
           status: 'resolved',

@@ -277,3 +277,30 @@ describe('normalizeCallExtraction — URL-shaped transcript email garble', () =>
     expect(out.email_raw).toBe('brandon.post00@gmail');
   });
 });
+
+describe('property-role fields (schema 1.9.0)', () => {
+  const { normalizeCallExtraction } = require('../utils/intake-normalize');
+
+  test('occupancy allowlisted, tri-state primary-residence preserved', () => {
+    const out = normalizeCallExtraction({
+      address_line1: '1 Main St',
+      service_address_occupancy: 'Rental-Investment',
+      service_address_is_primary_residence: false,
+      additional_properties: [
+        { address_line1: '2 Oak Ave', occupancy: 'seasonal', is_primary_residence: true },
+        { address_line1: '3 Elm Rd', occupancy: 'penthouse', is_primary_residence: 'maybe' },
+      ],
+    });
+    expect(out.service_address_occupancy).toBe('rental_investment');
+    expect(out.service_address_is_primary_residence).toBe(false);
+    expect(out.additional_properties[0]).toMatchObject({ occupancy: 'seasonal', is_primary_residence: true });
+    // Out-of-vocabulary occupancy and non-boolean flags fall to null — never invented.
+    expect(out.additional_properties[1]).toMatchObject({ occupancy: null, is_primary_residence: null });
+  });
+
+  test('absent fields stay null (older payloads unaffected)', () => {
+    const out = normalizeCallExtraction({ address_line1: '1 Main St' });
+    expect(out.service_address_occupancy).toBeNull();
+    expect(out.service_address_is_primary_residence).toBeNull();
+  });
+});

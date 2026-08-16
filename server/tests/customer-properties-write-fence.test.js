@@ -7,12 +7,16 @@
 // Fixture identities are INVENTED (never copied from live payloads).
 
 jest.mock('../models/db', () => {
-  const state = { ops: [], failFirstPrimaryInsert: false };
+  const state = { ops: [], failFirstPrimaryInsert: false, claimRow: { id: 'call-1' } };
   const builderFor = (table, runner) => {
     const b = { _table: table };
     for (const m of ['where', 'andWhere', 'whereNull', 'orWhere']) b[m] = jest.fn(() => b);
     b.forUpdate = jest.fn(() => { state.ops.push({ op: 'lock', table }); return b; });
-    b.first = jest.fn(async () => { state.ops.push({ op: 'first', table }); return { id: 'cust-77' }; });
+    b.first = jest.fn(async () => {
+      state.ops.push({ op: 'first', table });
+      if (table === 'call_log') return state.claimRow;
+      return { id: 'cust-77' };
+    });
     b.then = (resolve, reject) => {
       state.ops.push({ op: 'select', table });
       return Promise.resolve([]).then(resolve, reject);
@@ -56,6 +60,7 @@ const { recordCallProperty } = require('../services/customer-properties');
 beforeEach(() => {
   db._state.ops.length = 0;
   db._state.failFirstPrimaryInsert = false;
+  db._state.claimRow = { id: 'call-1' };
 });
 
 describe('recordCallProperty customer-lock fence', () => {
@@ -75,6 +80,38 @@ describe('recordCallProperty customer-lock fence', () => {
     // transaction (savepoint), never bare against the outer one.
     expect(ops.some((o) => o.op === 'txn-begin' && o.label === 'root')).toBe(true);
     expect(ops.find((o) => o.op === 'insert').runner).toMatch(/>sp$/);
+  });
+
+  // Processing-claim fence (#3418 r16): a call-pipeline caller conditions
+  // the durable insert on the LIVE claim, atomically — FOR UPDATE on the
+  // call_log row inside the same fence transaction.
+  test('claimFence: a lost processing claim aborts BEFORE any property read or write', async () => {
+    db._state.claimRow = null; // reclaim rotated the token
+    const out = await recordCallProperty({
+      customerId: 'cust-77', address_line1: '44 Invented Loop', city: 'Parrish', zip: '34219',
+      claimFence: { callLogId: 'call-1', procToken: 'tok-a' },
+    });
+    expect(out).toMatchObject({ created: false, propertyId: null, claimLost: true });
+    const ops = db._state.ops;
+    expect(ops.some((o) => o.op === 'insert')).toBe(false);
+    expect(ops.some((o) => o.op === 'select' && o.table === 'customer_properties')).toBe(false);
+    // The claim check LOCKS the call_log row (atomic with the fence trx),
+    // and runs after the customers lock (customers → call_log order).
+    const custLock = ops.findIndex((o) => o.op === 'lock' && o.table === 'customers');
+    const callLock = ops.findIndex((o) => o.op === 'lock' && o.table === 'call_log');
+    expect(callLock).toBeGreaterThan(custLock);
+  });
+
+  test('claimFence: a held claim locks the call_log row and proceeds to insert', async () => {
+    const out = await recordCallProperty({
+      customerId: 'cust-77', address_line1: '44 Invented Loop', city: 'Parrish', zip: '34219',
+      claimFence: { callLogId: 'call-1', procToken: 'tok-a' },
+    });
+    expect(out.created).toBe(true);
+    expect(out.claimLost).toBeUndefined();
+    const ops = db._state.ops;
+    expect(ops.some((o) => o.op === 'lock' && o.table === 'call_log')).toBe(true);
+    expect(ops.some((o) => o.op === 'insert' && o.table === 'customer_properties')).toBe(true);
   });
 
   test('losing the one-primary race retries as secondary inside a fresh savepoint — the fence transaction survives the 23505', async () => {

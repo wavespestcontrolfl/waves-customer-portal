@@ -45,6 +45,10 @@ function flatView(extraction) {
     quote_requested: svc.quote_requested === true,
     quote_promised: svc.quote_promised === true,
     additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties),
+    service_address_occupancy: property.service_address_occupancy || null,
+    service_address_is_primary_residence: typeof property.service_address_is_primary_residence === 'boolean'
+      ? property.service_address_is_primary_residence
+      : null,
     secondary_contact: mapSecondaryContactToLegacy(extraction.secondary_contact),
     secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts),
 
@@ -81,6 +85,10 @@ function mapAdditionalPropertiesToLegacy(entries) {
       state: p.state || null,
       zip: p.postal_code || null,
       is_rental: p.occupancy === 'rental_investment',
+      // Full role classification (1.9.0) — is_rental above stays for legacy
+      // consumers; property-role staging reads these two.
+      occupancy: p.occupancy || null,
+      is_primary_residence: typeof p.is_primary_residence === 'boolean' ? p.is_primary_residence : null,
       property_type: p.property_type || null,
       notes: p.notes || null,
     }));

@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const modelOutputSchema = require('../../schemas/call-extraction.model-output.schema.json');
 
-const PROMPT_VERSION = 'v4';
+const PROMPT_VERSION = 'v5';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -130,6 +130,12 @@ MULTIPLE PROPERTIES (service_address vs additional_properties):
 - When the caller says a second property shares the first one's city/ZIP/community ("same zip and everything", "both in Calusa Country Club"), RESOLVE it: copy the stated city/postal_code/subdivision onto that entry.
 - occupancy: "rental_investment" when the caller says a property is a rental, investment property, tenant-occupied, or short-term rental; "owner_occupied" when they live there; else "unknown".
 - additional_properties is [] when only one property is discussed. Never invent a second property from a mailing address or a passing mention of a neighbor's home. Set the multi_property_call triage flag whenever additional_properties is non-empty.
+
+PROPERTY ROLES (service_address_occupancy / is_primary_residence):
+- Classify the MAIN service_address too: property.service_address_occupancy uses the SAME occupancy enum and the SAME evidence bar — stated or strongly implied, else null. "We rent that house out", "the tenant will let you in" → rental_investment; "our winter place", "we're only down January–April" → seasonal; "we live here" → owner_occupied.
+- For EVERY property discussed, decide whether it is the caller's PRIMARY RESIDENCE — the home they LIVE in as their main one: property.service_address_is_primary_residence for the main address, is_primary_residence on each additional_properties entry. true ONLY on clear evidence ("our new house", "we just moved in", "my personal residence", "where we live"); false when the caller marks it as NOT their home (a rental, tenant-occupied, seasonal, a property they're buying to rent); null when the call never says.
+- At most ONE property can be the primary residence. A caller who bought a NEW home while an existing serviced property becomes a rental ("we're keeping the old place as a rental, we live at the new one now") is the classic case: new property is_primary_residence=true, old property occupancy=rental_investment + is_primary_residence=false.
+- These classifications feed an office review card, so a wrong true is worse than a null — when in doubt, null.
 
 SECONDARY CONTACT (a SECOND person who is a party to the service):
 - Set secondary_contact when the caller names ANOTHER person as a party to the service being arranged AND gives at least their name or contact info — a realtor booking an inspection names the home buyer, a landlord names the tenant, a spouse names the account holder, an adult child books for a parent. Otherwise secondary_contact is null.
