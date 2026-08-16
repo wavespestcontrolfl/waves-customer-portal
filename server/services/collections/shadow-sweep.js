@@ -211,9 +211,18 @@ async function runShadowSweep({ now = new Date() } = {}) {
       if (liveShadow.length) {
         existing = await db('collection_cases').where({ id: liveShadow[0].id }).first();
       } else {
+        // ANY settled prior case is rotation material (PR C / codex gh-r2):
+        // limiting this to shadow/lapsed made cancelled (dial-time policy
+        // denial, snapshot drift) and post-call proposed rows invisible —
+        // the sweep then attempted a version-1 insert whose globally unique
+        // idempotency key collided with the old row, permanently blocking
+        // regeneration for that customer. Only the LIVE pipeline states
+        // (approved, dialing) are excluded; the version bump below mints a
+        // fresh key and the unchanged-check's state==='shadow' requirement
+        // guarantees non-shadow rows always rotate rather than reuse.
         existing = await db('collection_cases')
           .where({ customer_id: customerId })
-          .whereIn('current_state', ['shadow', 'lapsed'])
+          .whereNotIn('current_state', ['approved', 'dialing'])
           .orderBy('case_version', 'desc')
           .first();
       }

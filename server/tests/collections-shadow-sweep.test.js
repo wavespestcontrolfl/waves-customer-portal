@@ -497,3 +497,15 @@ test('rotating the case version retires the previous version card', async () => 
   expect(retireOld.update).toHaveBeenCalledWith(expect.objectContaining({ read_at: expect.anything() }));
   expect(result.cardsFiled).toBe(1);
 });
+
+// codex gh-r2 (PR C): the existing-case lookup must see EVERY settled state
+// — a cancelled (dial-time policy denial) or post-call proposed row left
+// invisible made the sweep attempt a version-1 insert whose globally
+// unique idempotency key collided, permanently blocking regeneration.
+test('the rotation lookup excludes only the live pipeline states', async () => {
+  const grepSrc = require('fs').readFileSync(
+    require.resolve('../services/collections/shadow-sweep'), 'utf8',
+  );
+  expect(grepSrc).toContain("whereNotIn('current_state', ['approved', 'dialing'])");
+  expect(grepSrc).not.toContain("whereIn('current_state', ['shadow', 'lapsed'])\n          .orderBy('case_version', 'desc')");
+});

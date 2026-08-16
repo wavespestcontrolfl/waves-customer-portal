@@ -2229,9 +2229,14 @@ router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) 
     if (!isVoiceLatePaymentEnabled()) {
       return res.status(409).json({ error: 'lane_dark', detail: 'GATE_VOICE_LATE_PAYMENT is off' });
     }
+    // UUID guard (codex gh-r2): a malformed id would make Postgres throw a
+    // 22P02 cast error and turn a bad identifier into a 500.
+    if (!UUID_RE.test(String(req.params.id || ''))) {
+      return res.status(400).json({ error: 'invalid_case_id' });
+    }
     const caseRow = await db('collection_cases')
       .where({ id: req.params.id })
-      .first('id', 'current_state', 'case_version');
+      .first('id', 'current_state', 'case_version', 'idempotency_key');
     if (!caseRow) return res.status(404).json({ error: 'case_not_found' });
 
     if (caseRow.current_state === 'shadow' || caseRow.current_state === 'proposed') {
@@ -2249,6 +2254,10 @@ router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) 
       if (!promoted) {
         return res.status(409).json({ error: 'case_moved', detail: 'the case changed state while approving — reload and retry' });
       }
+      // The shadow proposal card says "no call will be placed" — no longer
+      // true once the promotion holds (codex gh-r2). Best-effort retire.
+      const { retireProposalCard } = require('../services/collections/outbound-voice/dial-sweep');
+      await retireProposalCard(caseRow.idempotency_key);
     } else if (caseRow.current_state !== 'approved') {
       // held / cancelled / expired / dialing — never dialable from here.
       return res.status(409).json({ error: 'case_not_dialable', state: caseRow.current_state });

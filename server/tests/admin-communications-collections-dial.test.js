@@ -75,7 +75,9 @@ async function withServer(fn) {
   try { return await fn(baseUrl); } finally { await new Promise((r) => { server.close(r); }); }
 }
 
-function dial(baseUrl, { token = 'admin', id = 'case-1' } = {}) {
+const CASE_UUID = 'a1b2c3d4-0000-4000-8000-000000000001';
+
+function dial(baseUrl, { token = 'admin', id = CASE_UUID } = {}) {
   return fetch(`${baseUrl}/admin/communications/collections-cases/${id}/dial`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -110,7 +112,7 @@ test('a tech token is refused — this endpoint places a phone call', async () =
 });
 
 test('a shadow case is promoted (guarded, admin-stamped, 24h expiry) and dialed', async () => {
-  const readChain = chain({ first: { id: 'case-1', current_state: 'shadow', case_version: 3 } });
+  const readChain = chain({ first: { id: CASE_UUID, current_state: 'shadow', case_version: 3 } });
   const promote = chain({ updateResult: 1 });
   const queues = [readChain, promote];
   db.mockImplementation(() => queues.shift());
@@ -119,17 +121,17 @@ test('a shadow case is promoted (guarded, admin-stamped, 24h expiry) and dialed'
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ dialed: true, reason: 'dialed' });
   });
-  expect(promote._wheres[0][0]).toEqual({ id: 'case-1', current_state: 'shadow', case_version: 3 });
+  expect(promote._wheres[0][0]).toEqual({ id: CASE_UUID, current_state: 'shadow', case_version: 3 });
   const patch = promote._patches[0];
   expect(patch.current_state).toBe('approved');
   expect(patch.approved_by).toBe('admin:admin@waves.test');
   expect(patch.approval_expires_at.getTime() - patch.approved_at.getTime()).toBe(24 * 60 * 60 * 1000);
-  expect(originateCollectionCall).toHaveBeenCalledWith('case-1');
+  expect(originateCollectionCall).toHaveBeenCalledWith(CASE_UUID);
 });
 
 test('a LOST promote fence ⇒ 409 case_moved, no dial', async () => {
   const queues = [
-    chain({ first: { id: 'case-1', current_state: 'proposed', case_version: 3 } }),
+    chain({ first: { id: CASE_UUID, current_state: 'proposed', case_version: 3 } }),
     chain({ updateResult: 0 }),
   ];
   db.mockImplementation(() => queues.shift());
@@ -145,7 +147,7 @@ test('held/dialing/cancelled states are never dialable from here', async () => {
   for (const state of ['held', 'dialing', 'cancelled', 'expired', 'lapsed']) {
     jest.clearAllMocks();
     originateCollectionCall.mockResolvedValue({ dialed: true, reason: 'dialed' });
-    db.mockImplementation(() => chain({ first: { id: 'case-1', current_state: state, case_version: 1 } }));
+    db.mockImplementation(() => chain({ first: { id: CASE_UUID, current_state: state, case_version: 1 } }));
     await withServer(async (baseUrl) => {
       const res = await dial(baseUrl);
       expect(res.status).toBe(409);
@@ -156,20 +158,20 @@ test('held/dialing/cancelled states are never dialable from here', async () => {
 });
 
 test('an already-approved case dials without a second promote', async () => {
-  const readChain = chain({ first: { id: 'case-1', current_state: 'approved', case_version: 2 } });
+  const readChain = chain({ first: { id: CASE_UUID, current_state: 'approved', case_version: 2 } });
   db.mockImplementation(() => readChain);
   await withServer(async (baseUrl) => {
     const res = await dial(baseUrl);
     expect(res.status).toBe(200);
   });
   expect(readChain.update).not.toHaveBeenCalled();
-  expect(originateCollectionCall).toHaveBeenCalledWith('case-1');
+  expect(originateCollectionCall).toHaveBeenCalledWith(CASE_UUID);
 });
 
 test('a policy refusal returns 200 with origination\'s verdict verbatim', async () => {
   originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'policy_denied', denialReasons: ['voice_contact_within_7d'] });
   const queues = [
-    chain({ first: { id: 'case-1', current_state: 'proposed', case_version: 1 } }),
+    chain({ first: { id: CASE_UUID, current_state: 'proposed', case_version: 1 } }),
     chain({ updateResult: 1 }),
   ];
   db.mockImplementation(() => queues.shift());
@@ -214,4 +216,33 @@ test('collections-voice-status reports GATE_VOICE_LATE_PAYMENT_AUTODIAL (effecti
   });
   delete process.env.GATE_VOICE_LATE_PAYMENT_AUTODIAL;
   delete process.env.GATE_COLLECTIONS_POLICY;
+});
+
+
+// codex gh-r2 pins.
+test('a malformed case id ⇒ 400 before any db read (no 22P02 500s)', async () => {
+  await withServer(async (baseUrl) => {
+    const res = await dial(baseUrl, { id: 'not-a-uuid' });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('invalid_case_id');
+  });
+  expect(db).not.toHaveBeenCalled();
+});
+
+test('a successful supervised promote retires the shadow proposal card', async () => {
+  const readChain = chain({ first: { id: CASE_UUID, current_state: 'shadow', case_version: 1, idempotency_key: 'collections:c1:1:14' } });
+  const promote = chain({ updateResult: 1 });
+  const cardChain = chain({ updateResult: 1 });
+  cardChain.whereNull = jest.fn(() => cardChain);
+  cardChain.whereRaw = jest.fn(() => cardChain);
+  const queues = [readChain, promote, cardChain];
+  db.mockImplementation(() => queues.shift());
+  db.raw = jest.fn((sql, b) => ({ sql, b }));
+  db.fn = { now: jest.fn(() => 'NOW()') };
+  await withServer(async (baseUrl) => {
+    const res = await dial(baseUrl);
+    expect(res.status).toBe(200);
+  });
+  expect(cardChain.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['collections:c1:1:14']);
+  expect(cardChain.update).toHaveBeenCalled();
 });

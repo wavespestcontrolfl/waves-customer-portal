@@ -38,7 +38,7 @@ function candidateChain(rows) {
 
 function promoteChain(result = 1) {
   const q = {};
-  q.where = jest.fn(() => q);
+  ['where', 'whereNull', 'whereRaw'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.update = jest.fn(async () => result);
   return q;
 }
@@ -151,7 +151,8 @@ test('COLLECTIONS_AUTODIAL_MAX_PER_RUN respects the hard ceiling and bad values 
 test('an unexpected originate THROW is treated as an attempt (conservative pace) and the sweep survives', async () => {
   armGates();
   const rows = [caseRow('c1'), caseRow('c2')];
-  const queues = [candidateChain(rows), promoteChain(1), promoteChain(1)];
+  // c1: promote, (throw), revert; c2: promote — the throw path reverts too.
+  const queues = [candidateChain(rows), promoteChain(1), promoteChain(1), promoteChain(1)];
   db.mockImplementation(() => queues.shift());
   originateCollectionCall
     .mockRejectedValueOnce(new Error('unexpected'))
@@ -188,5 +189,45 @@ describe('gh-r1', () => {
     expect(res).toMatchObject({ dialed: 1, refused: 0 });
     // Only two db calls happened: candidates + promote — no revert query.
     expect(db).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+// codex gh-r2 pins.
+describe('gh-r2', () => {
+  test('already_dialed reverts to LAPSED (one call per version) — every other refusal to proposed', async () => {
+    armGates();
+    const revert = promoteChain(1);
+    // queues: candidates, promote, revert (no idempotency_key ⇒ no card query)
+    const queues = [candidateChain([caseRow('c1')]), promoteChain(1), revert];
+    db.mockImplementation(() => queues.shift());
+    originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'already_dialed' });
+    await runCollectionsDialSweep({ now: NOW });
+    expect(revert.update.mock.calls[0][0].current_state).toBe('lapsed');
+  });
+
+  test('an originate THROW also reverts our promotion (guarded)', async () => {
+    armGates();
+    const revert = promoteChain(1);
+    const queues = [candidateChain([caseRow('c1')]), promoteChain(1), revert];
+    db.mockImplementation(() => queues.shift());
+    originateCollectionCall.mockRejectedValue(new Error('infra blip'));
+    const res = await runCollectionsDialSweep({ now: NOW });
+    expect(res).toMatchObject({ dialed: 1 });
+    expect(revert.where).toHaveBeenCalledWith(expect.objectContaining({ approved_by: 'system:autodial' }));
+    expect(revert.update.mock.calls[0][0].current_state).toBe('proposed');
+  });
+
+  test('a held promotion retires the shadow proposal card by dedupe key', async () => {
+    armGates();
+    const card = promoteChain(1);
+    const queues = [
+      candidateChain([{ ...caseRow('c1'), idempotency_key: 'collections:cust:1:14' }]),
+      promoteChain(1), card,
+    ];
+    db.mockImplementation(() => queues.shift());
+    originateCollectionCall.mockResolvedValue({ dialed: true, reason: 'dialed' });
+    await runCollectionsDialSweep({ now: NOW });
+    expect(card.whereRaw).toHaveBeenCalledWith("metadata->>'dedupeKey' = ?", ['collections:cust:1:14']);
   });
 });

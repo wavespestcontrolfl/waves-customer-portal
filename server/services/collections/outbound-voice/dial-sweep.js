@@ -61,6 +61,49 @@ async function promoteForAutoDial(caseRow, now) {
   return updated > 0;
 }
 
+/**
+ * Guarded revert of OUR promotion (codex gh-r2): fenced on state, version,
+ * and the autodial actor — rows origination moved, and admin approvals,
+ * are never touched. `toState` is 'proposed' for transient refusals (retry
+ * next run) and 'lapsed' for already_dialed (this version consumed its one
+ * call — the shadow sweep rotates it at the next tier; leaving it
+ * 'proposed' made the sweep re-promote the same row daily until it starved
+ * fresh candidates out of the query window).
+ */
+async function revertAutoPromotion(caseRow, toState) {
+  await db('collection_cases')
+    .where({
+      id: caseRow.id,
+      current_state: 'approved',
+      case_version: caseRow.case_version,
+      approved_by: 'system:autodial',
+    })
+    .update({
+      current_state: toState,
+      approved_by: null,
+      approved_at: null,
+      approval_expires_at: null,
+      updated_at: db.fn.now(),
+    })
+    .catch((err) => logger.warn(`[collections-autodial] revert failed for case ${caseRow.id}: ${err.message} — approval expiry (24h) is the backstop`));
+}
+
+/**
+ * A promoted case is no longer a proposal (codex gh-r2): its shadow card
+ * says "no call will be placed", which stops being true the moment the
+ * promotion holds. Same read_at mechanism the shadow sweep uses for
+ * lapsed/superseded cards; best-effort.
+ */
+async function retireProposalCard(idempotencyKey) {
+  if (!idempotencyKey) return;
+  await db('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereNull('read_at')
+    .whereRaw("metadata->>'dedupeKey' = ?", [idempotencyKey])
+    .update({ read_at: db.fn.now() })
+    .catch((err) => logger.warn(`[collections-autodial] proposal-card retirement failed: ${err.message}`));
+}
+
 async function runCollectionsDialSweep({ now = new Date() } = {}) {
   // Gate FIRST — zero reads while dark (pinned).
   if (!isAutoDialEnabled()) return { skipped: true, reason: 'autodial_gate_off' };
@@ -74,7 +117,7 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
     .orderBy('created_at', 'asc')
     // Read a few more than the cap: policy refusals shouldn't starve a run.
     .limit(cap * 5)
-    .select('id', 'current_state', 'case_version');
+    .select('id', 'current_state', 'case_version', 'idempotency_key');
 
   let dialed = 0;
   let refused = 0;
@@ -91,6 +134,7 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
     }
     if (!holds) continue; // someone else moved it — stand down
     promoted++;
+    await retireProposalCard(caseRow.idempotency_key);
     try {
       const result = await originateCollectionCall(caseRow.id, { now });
       if (result.dialed || result.reason === 'dial_failed') {
@@ -99,35 +143,28 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
       } else {
         // Refusal — the cap is untouched. Origination moves the case
         // itself for terminal refusals (cancelled/expired/proposed), but
-        // TRANSIENT pre-dial refusals (relay_unavailable, a feature gate,
-        // suppressed_until_next_eligible, a lost claim) return with the
-        // row still 'approved' — which this sweep never selects, so the
-        // candidate would be stranded outside the automatic queue forever
-        // (codex gh-r1). The guarded revert below fires ONLY when the row
-        // still carries OUR promotion (state, version, and the autodial
-        // actor); anything origination moved is untouched by the fence.
+        // pre-dial refusals return with the row still 'approved' — which
+        // this sweep never selects, so the candidate would be stranded
+        // outside the automatic queue forever (codex gh-r1). already_dialed
+        // means THIS version's one call already happened (post-call rows
+        // come back 'proposed' at the same version): it goes to 'lapsed'
+        // so the sweep stops re-selecting it and the shadow sweep rotates
+        // it at the next tier; every other refusal is transient and goes
+        // back to 'proposed' for the next run (codex gh-r2).
         refused++;
-        await db('collection_cases')
-          .where({
-            id: caseRow.id,
-            current_state: 'approved',
-            case_version: caseRow.case_version,
-            approved_by: 'system:autodial',
-          })
-          .update({
-            current_state: 'proposed',
-            approved_by: null,
-            approved_at: null,
-            approval_expires_at: null,
-            updated_at: db.fn.now(),
-          })
-          .catch((err) => logger.warn(`[collections-autodial] revert failed for case ${caseRow.id}: ${err.message} — approval expiry (24h) is the backstop`));
+        await revertAutoPromotion(caseRow, result.reason === 'already_dialed' ? 'lapsed' : 'proposed');
       }
     } catch (err) {
       // originateCollectionCall throws only for genuinely unexpected
       // errors; treat as an attempt (conservative pace) and log loudly.
+      // The guarded revert applies here too (codex gh-r2): a throw before
+      // the provider dial can leave the row on OUR approval — without the
+      // revert a transient infrastructure failure would strand it outside
+      // the automatic queue. Rows the claim/release ladder already moved
+      // are untouched by the fence.
       logger.error(`[collections-autodial] originate threw for case ${caseRow.id}: ${err.message}`);
       dialed++;
+      await revertAutoPromotion(caseRow, 'proposed');
     }
   }
   if (candidates.length) {
@@ -136,4 +173,4 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
   return { skipped: false, candidates: candidates.length, promoted, dialed, refused, cap };
 }
 
-module.exports = { runCollectionsDialSweep, promoteForAutoDial, DEFAULT_MAX_PER_RUN };
+module.exports = { runCollectionsDialSweep, promoteForAutoDial, retireProposalCard, DEFAULT_MAX_PER_RUN };
