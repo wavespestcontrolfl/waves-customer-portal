@@ -3034,12 +3034,16 @@ const LEVEL_ABSENCE_CLAIM_RE = new RegExp(
   + `|\\bno\\s+signs?\\s+of\\s+${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`,
   'gi',
 );
+// finalBand semantics: 1..3 = the recorded level band (adjacent claims
+// tolerated, 2-band gaps contradict); an EXPLICIT 0 = a zero-score gauge,
+// where ANY positive level claim contradicts (codex r60) and absence
+// claims are truthful. null/undefined = no gauge, screens nothing.
 function activityLevelContradictions(text, finalBand) {
-  if (!finalBand) return [];
+  if (finalBand !== 0 && !finalBand) return [];
   const found = [];
   for (const clause of clauses(String(text || ''))) {
     if (LEVEL_CLAIM_CONDITIONAL_OPEN_RE.test(clause)) continue;
-    {
+    if (finalBand >= 1) {
       for (const match of clause.matchAll(new RegExp(LEVEL_ABSENCE_CLAIM_RE.source, 'gi'))) {
         const before = clause.slice(0, match.index);
         const afterClause = clause.slice(match.index + match[0].length);
@@ -3060,7 +3064,10 @@ function activityLevelContradictions(text, finalBand) {
     for (const claim of claims) {
       const word = claim.word.toLowerCase().replace(/\s+/g, ' ');
       const claimBand = LEVEL_CLAIM_BANDS[word];
-      if (!claimBand || Math.abs(claimBand - finalBand) < 2) continue;
+      if (!claimBand) continue;
+      // beside an explicit zero, ANY positive claim contradicts; beside a
+      // recorded band, adjacent claims are tolerated (codex r60)
+      if (finalBand !== 0 && Math.abs(claimBand - finalBand) < 2) continue;
       const before = clause.slice(0, claim.index);
       const afterClause = clause.slice(claim.index + claim.length);
       const after = afterClause.slice(0, LEVEL_CLAIM_PRIOR_VISIT_WINDOW);
@@ -3857,8 +3864,13 @@ function typedBodyContradictions(projectType, values = {}, score = null, body = 
   }
   found.push(...countContradictions(text, vals));
   const numericScore = Number.isInteger(score) ? score : Number.parseInt(score, 10);
-  const band = levelBandForScore(Number.isInteger(numericScore) ? numericScore : null);
-  if (band) found.push(...activityLevelContradictions(text, band));
+  // an explicit zero screens positive level claims (codex r60) — a
+  // primary-carried body must not claim activity a zero-score companion's
+  // fixed card denies
+  const band = numericScore === 0
+    ? 0
+    : levelBandForScore(Number.isInteger(numericScore) ? numericScore : null);
+  if (band !== null && band !== undefined) found.push(...activityLevelContradictions(text, band));
   return found;
 }
 

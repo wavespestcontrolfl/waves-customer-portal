@@ -594,6 +594,23 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     )).toEqual([]);
   });
 
+  // r60 (#3420): a zero-score companion refuses positive level claims.
+  test('typedBodyContradictions flags a positive claim beside a zero score, absence stays legal', () => {
+    const { typedBodyContradictions } = require('../services/service-report/activity-indicators');
+    expect(typedBodyContradictions(
+      'termite_bait_station',
+      {},
+      0,
+      'Heavy activity was observed at the stations today.',
+    ).length).toBeGreaterThan(0);
+    expect(typedBodyContradictions(
+      'termite_bait_station',
+      {},
+      0,
+      'No activity was observed at the stations today.',
+    )).toEqual([]);
+  });
+
   // r50 (#3420): the body must agree with the recorded Ganoderma answer.
   test('tree_shrub refuses "No Ganoderma conks were observed" beside a recorded Yes', () => {
     const r = buildTodaysResult({

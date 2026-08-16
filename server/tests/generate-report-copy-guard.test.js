@@ -327,6 +327,8 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // adverbs inside perfect-tense credential copulas (r60)
+    expect(reportCopyRejection('The gate code has always been BLUE.')).toBe('access_code');
     // direct play/sit-on forms + perfect-tense credential copulas (r59)
     expect(reportCopyRejection('Children can play on the treated lawn after thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Sit on the treated lawn after 4 PM.')).toMatch(/^banned:/);
