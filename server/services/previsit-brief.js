@@ -1036,7 +1036,16 @@ const ACCESS_STATE_RE = /\baccess\s+(?:code|card|key|granted|provided|given|arra
 
 // 'key' as an access credential ("door key", "key under the mat") must
 // ground; 'key' as emphasis ("key concern") is prose (codex #3423 r29).
-const KEY_CREDENTIAL_RE = /\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\s+(?:keys?|pins?|codes?)\b|\b(?:keys?|pins?)\s+(?:under|hidden|inside|behind|left|beneath|provided)\b|\b(?:keys?|pins?|codes?)\s+(?:numbers?|on\s+file)\b|\b(?:provided?|leave|left|gave|give|has|have|keeps?)\s+(?:the\s+|a\s+)?(?:keys?|pins?)\b/i;
+// Built per credential type (r48): a PIN fact must not ground a KEY
+// claim — the technician would look for the wrong thing.
+const credentialReFor = (nouns) => new RegExp(
+  `\\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\\s+(?:${nouns})\\b`
+  + `|\\b(?:${nouns})\\s+(?:under|hidden|inside|behind|left|beneath|provided)\\b`
+  + `|\\b(?:${nouns})\\s+(?:numbers?|on\\s+file)\\b`
+  + `|\\b(?:provided?|leave|left|gave|give|has|have|keeps?)\\s+(?:the\\s+|a\\s+)?(?:${nouns})\\b`, 'i');
+const KEY_ONLY_RE = credentialReFor('keys?');
+const PIN_ONLY_RE = credentialReFor('pins?|codes?');
+const KEY_CREDENTIAL_RE = credentialReFor('keys?|pins?|codes?');
 
 // Instruction objects carrying these words direct real business actions
 // ("Provide estimate", "Discuss payment", "Perform treatment") — inside
@@ -1228,6 +1237,8 @@ function findUngroundedClaim(body, grounding) {
   // visit.isRecurring === true is the ONLY cadence fact an ordinary
   // recurring visit carries; excluding booleans (r9) must not strip it or
   // every truthful "recurring" brief re-templates (codex #3423 r10).
+  // Values join with ' ; ' so cross-fact adjacency cannot manufacture
+  // evidence bigrams ('accepted' + 'payment reminder…' — r48).
   const groundedValueText = [
     ...collectFactValues(grounding.llmFacts),
     ...(grounding.llmFacts?.visit?.isRecurring === true ? ['recurring'] : []),
@@ -1242,7 +1253,7 @@ function findUngroundedClaim(body, grounding) {
     // The overdue_balance flag IS billing evidence — its detail ('$100.00
     // outstanding') doesn't carry the words (r27 P2).
     ...((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance') ? ['billing', 'invoice', 'payment', 'balance'] : []),
-  ].join(' ').toLowerCase();
+  ].join(' ; ').toLowerCase();
   const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const kind of ['names', 'targets']) {
     for (const term of vocab[kind] || []) {
@@ -1417,7 +1428,7 @@ function findUngroundedClaim(body, grounding) {
   // "previous appointment cancelled" must not ground the active visit
   // (r41), but a recent-call fact "appointment confirmed" does.
   const visitValueText = grounding.llmFacts?.visit
-    ? collectFactValues(grounding.llmFacts.visit).join(' ').toLowerCase()
+    ? collectFactValues(grounding.llmFacts.visit).join(' ; ').toLowerCase()
     : '';
   for (const m of outputText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
@@ -1453,7 +1464,11 @@ function findUngroundedClaim(body, grounding) {
     const negatedNearChannel = new RegExp(`\\b(?:not?|no|never|don't|doesn't|does\\s+not|do\\s+not|declined?|refused?|opt(?:ed)?\\s*out|stop)\\b(?:(?!\\b(?:call|text|sms|email|update)s?\\b)[^.;!?]){0,40}\\b${bareChannel}`).test(groundedValueText);
     // Polarity must MATCH: a negative claim needs a negated fact; a
     // positive claim needs a non-negated one (r41+r43).
-    const factSupports = hasRequestVerb && groundedValueText.includes(bareChannel);
+    // The request verb and claimed channel must share a CLAUSE, with no
+    // other channel word between them (r48) — "wants email; previous call
+    // disconnected" must not ground a call request.
+    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?)\\b(?:(?!\\b(?:call|text|sms|email|update)s?\\b)[^.;!?]){0,50}\\b${bareChannel}`);
+    const factSupports = clauseRe.test(groundedValueText);
     if (negatedClaim ? !(factSupports && negatedNearChannel) : (!factSupports || negatedNearChannel)) {
       return { kind: 'contact_request', term: channel };
     }
@@ -1484,7 +1499,9 @@ function findUngroundedClaim(body, grounding) {
   // reassigned to an unrelated noun ("Customer accepted renewal") — the
   // acceptance bigram itself must appear in the fact values unless the
   // object is the estimate/quote/tier the status genuinely describes.
-  const ACCEPT_OBJECT_OK = new Set(['estimate', 'estimates', 'quote', 'quotes', 'bronze', 'silver', 'gold', 'platinum', 'payment']);
+  // 'payment' is NOT exempt (r48): payment acceptance needs a payment-
+  // status phrase, never acceptance borrowed from an estimate.
+  const ACCEPT_OBJECT_OK = new Set(['estimate', 'estimates', 'quote', 'quotes', 'bronze', 'silver', 'gold', 'platinum']);
   // The trailing form is a lookahead so "customer accepted renewal" yields
   // BOTH matches — a consuming second branch swallowed 'accepted' and hid
   // the reassigned object.
@@ -1699,7 +1716,8 @@ function findUngroundedClaim(body, grounding) {
         // Credential claims ground only on credential-PHRASED facts —
         // an unrelated "key concern" value must not authorize a
         // credential (r47).
-        if ((word === 'key' || word === 'pin') && KEY_CREDENTIAL_RE.test(String(field)) && !KEY_CREDENTIAL_RE.test(groundedValueText)) {
+        const typeRe = word === 'key' ? KEY_ONLY_RE : PIN_ONLY_RE;
+        if ((word === 'key' || word === 'pin') && typeRe.test(String(field)) && !typeRe.test(groundedValueText)) {
           return { kind: 'novel_term', term: word };
         }
         continue;
@@ -1766,7 +1784,7 @@ function validateBriefJson(json, grounding) {
   // Grounded-only words in a self-reported term must match fact VALUES —
   // the serialized form contains null keys like openScope.sourceEstimate,
   // which must never ground 'estimate' (codex #3423 r26).
-  const selfReportValueText = collectFactValues(grounding.llmFacts).join(' ').toLowerCase();
+  const selfReportValueText = collectFactValues(grounding.llmFacts).join(' ; ').toLowerCase();
   for (const term of json.mentioned_terms) {
     if (typeof term !== 'string') return { reason: 'mentioned_terms_not_string' };
     if (FORBIDDEN_TARGET_RE.test(term)) return { reason: 'forbidden_genus' };

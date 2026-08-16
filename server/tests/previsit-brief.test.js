@@ -3016,3 +3016,36 @@ describe('codex #3423 r47 — geographic suffix, copular tiers, credential-phras
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r48 — credential type, payment acceptance, contact clause binding', () => {
+  test('r48 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const pinFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has a PIN for the gate' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Door key provided' },
+      pinFact,
+    ).reason).toBeTruthy();
+    const reminder = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } }, flags: [{ detail: 'payment reminder scheduled' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment accepted' },
+      reminder,
+    ).reason).toBeTruthy();
+    const crossClause = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'Customer wants email; previous call disconnected' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer wants a phone call' },
+      crossClause,
+    ).reason).toMatch(/contact_request/);
+  });
+
+  test('matching-type credential and real payment facts still ground', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'door key provided by customer; card payment accepted 08-13' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Door key provided. Payment accepted.' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
