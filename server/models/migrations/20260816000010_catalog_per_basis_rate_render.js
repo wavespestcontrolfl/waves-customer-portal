@@ -216,8 +216,13 @@ const DATA = [
     note: 'rate-render: residential turfgrass is a flat 1.2 fl oz/1,000 sq ft for all listed diseases (max 1.2/application, 13.8/year; non-residential turf allows 0.5-2.4) from the Atticus Gravex 20 EW specimen label (EPA 91234-283).' },
   { name: 'Quali-Pro T-Nex Plant Growth Regulator', basis: 'per_1000_sqft', rate: null, min: 0.1, max: 0.25, unit: 'fl_oz',
     note: 'rate-render: St. Augustinegrass 0.10-0.15 fl oz/1,000 sq ft (zoysiagrass 0.25; annual max 7.0 fl oz/1,000 sq ft) from the Control Solutions T-Nex specimen label (EPA 53883-353).' },
-  { name: 'Badge SC Bactericide/Fungicide', basis: 'per_1000_sqft', rate: null, min: 1.47, max: 2.2, unit: 'fl_oz',
-    note: 'rate-render: turfgrass ALGAE control 4-6 pints/A (1.47-2.2 fl oz/1,000 sq ft, minimum 100 gal water/A) from the Gowan Badge SC turfgrass table (EPA 80289-3-10163) — algae is the label\'s only turf claim.' },
+  // Badge SC Bactericide/Fungicide is deliberately NOT seeded (codex P1,
+  // PR #3419 r5): the catalog classifies it as an ornamental/tree-and-shrub
+  // fungicide (server/data/pricing.csv), so a global per-1,000 default drawn
+  // from the label's turfgrass-ALGAE table (1.47-2.2 fl oz/1,000 sq ft, EPA
+  // 80289-3-10163) would prefill a turf-algae rate onto ornamental
+  // applications. Needs a service/site gate (owner ruling) before it can
+  // carry a default rate.
 ];
 
 function emptyText(v) { return v == null || String(v).trim() === '' || String(v).trim().toUpperCase() === 'N/A'; }

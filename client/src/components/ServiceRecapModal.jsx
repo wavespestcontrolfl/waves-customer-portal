@@ -44,6 +44,25 @@ const TIMELINE_LABELS = {
   skipped: { label: 'Skipped', icon: '⏭️' },
 };
 
+// Catalog rate prefill for a selected product — the same computation
+// CompletionPanel uses: the verified per-1,000 rate in its verified unit
+// first, else a per-basis display default's LOW bound in its label-native
+// unit (e.g. "0.1 g/spot"). Bare-unit and "/1000sf" display defaults don't
+// prefill here. The value is only a STARTING point: the tech edits/confirms
+// it before submit, and only the submitted value is recorded.
+function catalogRatePrefill(p) {
+  const per1000 = parseFloat(String(p?.default_rate_per_1000 ?? ''));
+  if (Number.isFinite(per1000) && per1000 > 0) {
+    return { rate: String(per1000), unit: p.rate_unit || p.default_unit || '' };
+  }
+  const unit = String(p?.default_unit || '');
+  const low = parseFloat(String(p?.default_rate ?? ''));
+  if (unit.includes('/') && !unit.endsWith('/1000sf') && Number.isFinite(low) && low > 0) {
+    return { rate: String(low), unit };
+  }
+  return null;
+}
+
 function fmtTime(ts) {
   if (!ts) return '';
   try {
@@ -70,6 +89,10 @@ export default function ServiceRecapModal({
 
   const [note, setNote] = useState('');
   const [selected, setSelected] = useState(() => new Set());
+  // productId -> { rate: string, unit: string }. Seeded from the rate
+  // already recorded on the visit (reopen) or the catalog prefill
+  // (fresh selection); the tech edits it before submit.
+  const [rates, setRates] = useState(() => ({}));
   const [message, setMessage] = useState('');
   const [sendText, setSendText] = useState(true);
 
@@ -96,15 +119,29 @@ export default function ServiceRecapModal({
         // instead of starting empty (which would wipe the product history).
         const recorded = data?.existingRecord?.products || [];
         if (recorded.length && Array.isArray(data?.products)) {
-          const idByName = new Map(
-            data.products.map((p) => [String(p.name || '').trim().toLowerCase(), p.id]),
+          const byName = new Map(
+            data.products.map((p) => [String(p.name || '').trim().toLowerCase(), p]),
           );
           const preselect = new Set();
+          const seededRates = {};
           recorded.forEach((rp) => {
-            const id = idByName.get(String(rp.product_name || '').trim().toLowerCase());
-            if (id != null) preselect.add(id);
+            const cat = byName.get(String(rp.product_name || '').trim().toLowerCase());
+            if (!cat) return;
+            preselect.add(cat.id);
+            // The rate RECORDED on the visit outranks the catalog prefill —
+            // reopening a recap must show (and re-submit) what was applied,
+            // not rewrite it to the current catalog default.
+            if (rp.application_rate != null && Number(rp.application_rate) > 0) {
+              seededRates[cat.id] = { rate: String(rp.application_rate), unit: rp.rate_unit || '' };
+            } else {
+              const prefill = catalogRatePrefill(cat);
+              if (prefill) seededRates[cat.id] = prefill;
+            }
           });
-          if (preselect.size) setSelected(preselect);
+          if (preselect.size) {
+            setSelected(preselect);
+            setRates(seededRates);
+          }
         }
         if (!data?.service?.hasPhone) setSendText(false);
       } catch (err) {
@@ -126,9 +163,24 @@ export default function ServiceRecapModal({
   const toggleProduct = useCallback((id) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+        // Seed the editable rate on first selection only — a re-toggle
+        // keeps whatever the tech already typed.
+        setRates((prevRates) => {
+          if (prevRates[id]) return prevRates;
+          const prefill = catalogRatePrefill(productById.get(id));
+          return prefill ? { ...prevRates, [id]: prefill } : prevRates;
+        });
+      }
       return next;
     });
+  }, [productById]);
+
+  const setRateValue = useCallback((id, value) => {
+    setRates((prev) => ({ ...prev, [id]: { ...(prev[id] || { unit: '' }), rate: value } }));
   }, []);
 
   const handleDraft = useCallback(async () => {
@@ -172,12 +224,21 @@ export default function ServiceRecapModal({
       const productPayload = [...selected]
         .map((id) => productById.get(id))
         .filter(Boolean)
-        .map((p) => ({
-          product_name: p.name,
-          product_category: p.category,
-          active_ingredient: p.active_ingredient,
-          moa_group: p.moa_group,
-        }));
+        .map((p) => {
+          // Technician-confirmed rate from the editable field. Cleared or
+          // unresolvable -> no rate submitted; the server then preserves a
+          // previously recorded rate (reopen) or records none.
+          const entry = rates[p.id];
+          const rate = entry ? parseFloat(entry.rate) : NaN;
+          const hasRate = Number.isFinite(rate) && rate > 0 && !!entry?.unit;
+          return {
+            product_name: p.name,
+            product_category: p.category,
+            active_ingredient: p.active_ingredient,
+            moa_group: p.moa_group,
+            ...(hasRate ? { application_rate: rate, rate_unit: entry.unit } : {}),
+          };
+        });
       const result = await request(base, {
         method: 'POST',
         body: JSON.stringify({
@@ -193,7 +254,7 @@ export default function ServiceRecapModal({
       setSubmitting(false);
       submitInFlight.current = false;
     }
-  }, [base, ctx, message, note, onCompleted, productById, request, selected, sendText]);
+  }, [base, ctx, message, note, onCompleted, productById, rates, request, selected, sendText]);
 
   const timeline = (ctx?.timeline || []).filter((t) => t.to_status !== 'pending');
 
@@ -313,6 +374,49 @@ export default function ServiceRecapModal({
                     </button>
                   );
                 })}
+              </div>
+            )}
+
+            {/* Application rates for the selected products — editable so the
+                recorded rate is what the tech actually applied, not the
+                catalog default it starts from. Products with no known unit
+                (no catalog default, nothing recorded) record no rate. */}
+            {[...selected].some((id) => rates[id]?.unit) && (
+              <div style={{
+                background: P.card, border: `1px solid ${P.border}`, borderRadius: 12,
+                padding: '10px 12px', marginBottom: 16,
+              }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: P.muted, marginBottom: 6 }}>
+                  Application rates (adjust to what you applied)
+                </div>
+                {[...selected]
+                  .map((id) => ({ id, p: productById.get(id), entry: rates[id] }))
+                  .filter((row) => row.p && row.entry?.unit)
+                  .map(({ id, p, entry }) => (
+                    <div key={id} style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '4px 0', fontSize: 13, color: P.text,
+                    }}>
+                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {p.name}
+                      </span>
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        min="0"
+                        step="any"
+                        value={entry.rate}
+                        onChange={(e) => setRateValue(id, e.target.value)}
+                        aria-label={`Application rate for ${p.name}`}
+                        style={{
+                          width: 72, boxSizing: 'border-box', textAlign: 'right',
+                          background: P.bg, color: P.text, border: `1px solid ${P.border}`,
+                          borderRadius: 8, padding: '5px 8px', fontSize: 13, fontFamily: P.bodyFont,
+                        }}
+                      />
+                      <span style={{ color: P.muted, fontSize: 12, minWidth: 56 }}>{entry.unit}</span>
+                    </div>
+                  ))}
               </div>
             )}
 

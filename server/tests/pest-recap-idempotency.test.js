@@ -65,7 +65,11 @@ function makeKnex(store) {
       whereRaw: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
       leftJoin: jest.fn().mockReturnThis(),
-      select: jest.fn().mockReturnThis(),
+      // The preserve-prior-rate lookup reads the existing service_products
+      // rows; a test opts in by seeding store.priorProductRows.
+      select: table === 'service_products'
+        ? jest.fn(() => Promise.resolve(store.priorProductRows || []))
+        : jest.fn().mockReturnThis(),
       forUpdate: jest.fn().mockReturnThis(),
       del: jest.fn(() => {
         if (table === 'service_products') store.productDeletes = (store.productDeletes || 0) + 1;
@@ -75,9 +79,6 @@ function makeKnex(store) {
 
     q.first = jest.fn(async () => {
       if (table === 'scheduled_services') return { id: SERVICE_ID, status: store.serviceStatus };
-      // The recap rate fill looks catalog rows up by name; a test opts in
-      // by seeding store.catalogRow (name-insensitive single-row store).
-      if (table === 'products_catalog') return store.catalogRow;
       if (table === 'service_records') {
         const latest = store.records[store.records.length - 1];
         return latest
@@ -437,15 +438,12 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(updates.some((patch) => patch && Object.prototype.hasOwnProperty.call(patch, 'pdf_storage_key'))).toBe(false);
   });
 
-  // Recap-completed visits used to store a null rate and render "—" on the
-  // customer report (codex P1, PR #3419) — the commit now carries the
-  // catalog's label default onto each service_products row.
-  test('recap products carry the catalog per-basis label rate (gel: 0.1 g/spot)', async () => {
-    const store = {
-      serviceStatus: 'scheduled',
-      records: [],
-      catalogRow: { default_rate: '0.1-1', default_unit: 'g/spot', rate_unit: null, default_rate_per_1000: null },
-    };
+  // Recap rates are TECHNICIAN-CONFIRMED (codex P1, PR #3419 r5): the modal
+  // collects the rate in an editable prefilled field; the server records
+  // only a submitted rate, preserves a previously recorded one when a
+  // re-submit omits it, and never writes a catalog default as observed.
+  test('a submitted rate is recorded as the applied rate', async () => {
+    const store = { serviceStatus: 'scheduled', records: [] };
     const knex = makeKnex(store);
 
     const result = await submitRecap({
@@ -453,22 +451,24 @@ describe('pest recap idempotency (Codex P1)', () => {
       actorType: 'tech',
       actorId: 'tech-1',
       technicianNotes: 'Baited kitchen and bath.',
-      products: [{ product_name: 'Advion Ant Bait Gel' }],
+      products: [{ product_name: 'Advion Ant Bait Gel', application_rate: 0.5, rate_unit: 'g/spot' }],
       sendSms: false,
       knex,
     });
 
     expect(result.ok).toBe(true);
     expect(store.productRows).toHaveLength(1);
-    expect(store.productRows[0].application_rate).toBe(0.1);
+    expect(store.productRows[0].application_rate).toBe(0.5);
     expect(store.productRows[0].rate_unit).toBe('g/spot');
   });
 
-  test('recap products prefer the per-1,000 rate in its verified unit', async () => {
+  test('a rate-less re-submit preserves the rate recorded on the visit', async () => {
     const store = {
-      serviceStatus: 'scheduled',
-      records: [],
-      catalogRow: { default_rate: null, default_unit: 'oz', rate_unit: 'lb', default_rate_per_1000: '2.3' },
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-1', recap_sms_sent_at: null }],
+      priorProductRows: [
+        { product_name: 'Advion Ant Bait Gel', application_rate: 0.5, rate_unit: 'g/spot' },
+      ],
     };
     const knex = makeKnex(store);
 
@@ -476,19 +476,44 @@ describe('pest recap idempotency (Codex P1)', () => {
       serviceId: SERVICE_ID,
       actorType: 'tech',
       actorId: 'tech-1',
-      technicianNotes: 'Granular broadcast.',
-      products: [{ product_name: 'Talstar XTRA Granular Insecticide (Verge)' }],
+      technicianNotes: 'Re-sent recap.',
+      products: [{ product_name: 'Advion Ant Bait Gel' }],
       sendSms: false,
       knex,
     });
 
     expect(result.ok).toBe(true);
-    expect(store.productRows[0].application_rate).toBe(2.3);
-    expect(store.productRows[0].rate_unit).toBe('lb');
+    expect(store.productRows).toHaveLength(1);
+    expect(store.productRows[0].application_rate).toBe(0.5);
+    expect(store.productRows[0].rate_unit).toBe('g/spot');
   });
 
-  test('products with no resolvable catalog default keep a null rate', async () => {
-    const store = { serviceStatus: 'scheduled', records: [], catalogRow: undefined };
+  test('a submitted rate outranks the previously recorded one', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-1', recap_sms_sent_at: null }],
+      priorProductRows: [
+        { product_name: 'Advion Ant Bait Gel', application_rate: 0.5, rate_unit: 'g/spot' },
+      ],
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Corrected the applied rate.',
+      products: [{ product_name: 'Advion Ant Bait Gel', application_rate: 0.7, rate_unit: 'g/spot' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productRows[0].application_rate).toBe(0.7);
+  });
+
+  test('no submitted rate and no prior record keeps a null rate — a catalog default is never fabricated', async () => {
+    const store = { serviceStatus: 'scheduled', records: [] };
     const knex = makeKnex(store);
 
     const result = await submitRecap({
@@ -497,6 +522,25 @@ describe('pest recap idempotency (Codex P1)', () => {
       actorId: 'tech-1',
       technicianNotes: 'Foam application.',
       products: [{ product_name: 'Termidor Foam' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productRows[0].application_rate).toBeUndefined();
+    expect(store.productRows[0].rate_unit).toBeUndefined();
+  });
+
+  test('a zero/invalid submitted rate is not recorded', async () => {
+    const store = { serviceStatus: 'scheduled', records: [] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Cleared the rate field.',
+      products: [{ product_name: 'Advion Ant Bait Gel', application_rate: 0, rate_unit: 'g/spot' }],
       sendSms: false,
       knex,
     });

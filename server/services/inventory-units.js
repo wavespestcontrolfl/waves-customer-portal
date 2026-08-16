@@ -2,12 +2,19 @@ function normalizeInventoryUnit(unit) {
   return String(unit || '').trim().toLowerCase().replace(/\s+/g, '_').replace(/s$/, '');
 }
 
-// A "/gal" unit (oz/gal, fl_oz/gal, g/gal) is a mix concentration, not a
-// quantity — an amount recorded against it is the amount of concentrate.
-// Strip the dilution suffix so inventory math runs on the base unit.
+// A per-basis unit is a rate, not a quantity: "/gal" mix concentrations
+// (oz/gal), and the label-native bases the rate-render backfill added
+// (g/spot, fl_oz/100gal, ml/inch dbh, each/station, …). An amount recorded
+// against one is the amount of PRODUCT in the base unit, so strip the basis
+// suffix so inventory deduction and the compliance quantity run on a
+// convertible base unit. "/1000sf" units are the one exception: bare
+// per-1,000 handling is a catalog-wide preexisting convention and they pass
+// through unchanged, as before.
 function baseQuantityUnit(unit) {
   const raw = String(unit || '').trim();
-  return raw.toLowerCase().endsWith('/gal') ? raw.slice(0, -'/gal'.length) : unit;
+  const slash = raw.indexOf('/');
+  if (slash <= 0 || raw.toLowerCase().endsWith('/1000sf')) return unit;
+  return raw.slice(0, slash);
 }
 
 const INVENTORY_UNITS = {

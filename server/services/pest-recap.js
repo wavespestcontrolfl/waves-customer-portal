@@ -119,7 +119,14 @@ async function buildRecapContext(serviceId, knex = db) {
     .where({ active: true })
     .orderBy('category')
     .orderBy('name')
-    .select('id', 'name', 'category', 'active_ingredient', 'moa_group', 'default_rate', 'default_unit')
+    .select(
+      'id', 'name', 'category', 'active_ingredient', 'moa_group',
+      // Rate-prefill inputs: the modal computes the same prefill as
+      // CompletionPanel (per-1,000 verified rate first, else the per-basis
+      // display default's low bound) and shows it as an EDITABLE field —
+      // the persisted rate is technician-confirmed, never a silent default.
+      'default_rate', 'default_unit', 'rate_unit', 'default_rate_per_1000',
+    )
     .catch(() => []);
 
   const existingRecord = await knex('service_records')
@@ -134,7 +141,7 @@ async function buildRecapContext(serviceId, knex = db) {
   const existingProducts = existingRecord
     ? await knex('service_products')
       .where({ service_record_id: existingRecord.id })
-      .select('product_name', 'product_category', 'active_ingredient', 'moa_group')
+      .select('product_name', 'product_category', 'active_ingredient', 'moa_group', 'application_rate', 'rate_unit')
       .catch(() => [])
     : [];
 
@@ -452,48 +459,62 @@ async function submitRecap({
       createdRecord = true;
     }
 
-    // 3. service_products for the chemicals the tech selected.
+    // 3. service_products for the chemicals the tech selected. The rate is
+    // TECHNICIAN-CONFIRMED: the recap modal collects it in an editable field
+    // (prefilled from the catalog default, same computation as
+    // CompletionPanel) and submits it per product. The server records only a
+    // submitted rate — it never writes a catalog default as an observed
+    // application (codex P1 r5): application_rate feeds the compliance
+    // ledger and application-limit math, which read it as ground truth.
     const productRows = (Array.isArray(products) ? products : [])
-      .map((p) => ({
-        service_record_id: recordId,
-        product_name: String(p.product_name || p.name || '').slice(0, 150),
-        product_category: p.product_category || p.category || null,
-        active_ingredient: p.active_ingredient || null,
-        moa_group: p.moa_group || null,
-        notes: p.notes || null,
-      }))
+      .map((p) => {
+        const rate = p.application_rate != null && p.application_rate !== ''
+          ? Number(p.application_rate)
+          : null;
+        const unit = String(p.rate_unit || '').trim();
+        return {
+          service_record_id: recordId,
+          product_name: String(p.product_name || p.name || '').slice(0, 150),
+          product_category: p.product_category || p.category || null,
+          active_ingredient: p.active_ingredient || null,
+          moa_group: p.moa_group || null,
+          notes: p.notes || null,
+          ...(Number.isFinite(rate) && rate > 0 && unit
+            ? { application_rate: rate, rate_unit: unit.slice(0, 50) }
+            : {}),
+        };
+      })
       .filter((r) => r.product_name);
-    // The recap modal has no rate inputs, so recap-completed visits used to
-    // store a null rate and render "—" on the customer report. Carry the
-    // catalog's verified label default onto each row — the same value
-    // CompletionPanel prefills: the per-1,000 rate in its verified unit
-    // first, else a per-basis display rate (default_rate's LOW bound in
-    // default_unit, e.g. "0.1 g/spot"). Products without a resolvable
-    // default keep a null rate, as before.
-    for (const productRow of productRows) {
-      const catalog = await trx('products_catalog')
-        .whereRaw('LOWER(name) = LOWER(?)', [productRow.product_name])
-        .first('default_rate', 'default_unit', 'rate_unit', 'default_rate_per_1000')
-        .catch(() => null);
-      if (!catalog) continue;
-      if (catalog.default_rate_per_1000 != null) {
-        productRow.application_rate = Number(catalog.default_rate_per_1000);
-        productRow.rate_unit = catalog.rate_unit || catalog.default_unit || null;
-        continue;
-      }
-      const unit = String(catalog.default_unit || '');
-      const lowBound = parseFloat(String(catalog.default_rate ?? ''));
-      if (unit.includes('/') && !unit.endsWith('/1000sf') && Number.isFinite(lowBound)) {
-        productRow.application_rate = lowBound;
-        productRow.rate_unit = unit;
-      }
-    }
     // Replace product rows only when this submit specifies a set, so an
     // explicit re-selection isn't additive. An EMPTY submission must not
     // wipe the recorded applications: reopening a completed recap to
     // re-send (the modal starts with no products selected) would otherwise
     // delete the service's chemical history. Empty = leave existing rows.
     if (productRows.length) {
+      // A re-submitted product with NO rate (older client, API caller)
+      // keeps the rate already recorded for it: the previously observed
+      // value outranks absence and must survive the replace-not-merge
+      // delete below — a reopen must never erase or rewrite what was
+      // recorded at application time.
+      const rateless = productRows.filter((r) => r.application_rate == null);
+      if (rateless.length && !createdRecord) {
+        const priorRows = await trx('service_products')
+          .where({ service_record_id: recordId })
+          .select('product_name', 'application_rate', 'rate_unit')
+          .catch(() => []);
+        const priorByName = new Map(
+          (Array.isArray(priorRows) ? priorRows : [])
+            .filter((r) => r.application_rate != null)
+            .map((r) => [String(r.product_name || '').trim().toLowerCase(), r]),
+        );
+        for (const row of rateless) {
+          const prior = priorByName.get(String(row.product_name).trim().toLowerCase());
+          if (prior) {
+            row.application_rate = prior.application_rate;
+            row.rate_unit = prior.rate_unit;
+          }
+        }
+      }
       await trx('service_products').where({ service_record_id: recordId }).del();
       await trx('service_products').insert(productRows);
     }
