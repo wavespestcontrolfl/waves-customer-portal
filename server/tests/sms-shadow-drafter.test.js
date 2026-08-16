@@ -15,7 +15,7 @@ const {
 const { CUSTOMER_SMS_HOUSE_VOICE, AGENT_CONFIG } = require('../services/ai-assistant/managed-agent-config');
 
 describe('few-shot voice grounding (v7)', () => {
-  test('prompt version stays v10 — sealed budget rides SEALED_EXAM_VERSION, not the live cohort', () => {
+  test('prompt version stays v10', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v10');
   });
 
@@ -750,9 +750,6 @@ describe('sms shadow drafter — structural unsendability', () => {
   test('telemetry identity constants are stable for the judge pass', () => {
     expect(DRAFTER).toBe('house_voice');
     expect(PROMPT_VERSION).toBe('house_voice_v10');
-    const { SEALED_EXAM_VERSION, SEALED_EXAM_MAX_TOKENS } = require('../services/sms-shadow-drafter');
-    expect(SEALED_EXAM_MAX_TOKENS).toBe(1000);
-    expect(SEALED_EXAM_VERSION).toBe('house_voice_v10+mt1000');
     expect(INTENDED_ACTION_TYPES).toContain('escalate');
     expect(INTENDED_ACTION_TYPES).toContain('none');
   });
@@ -776,7 +773,8 @@ describe('sealed-lane dispatch budget (08-15 tuning)', () => {
     await drafter.generateDraftOnce({}, 'sys', 'user', MODELS.ROUTES.smsDraftDefault, { pinned: true });
     jest.dontMock('../services/llm/call');
     expect(dispatched).toHaveLength(1);
-    expect(dispatched[0].payload.maxTokens).toBe(1000);
+    // r46: sealed legs measure the LIVE cap — the exam gates live behavior.
+    expect(dispatched[0].payload.maxTokens).toBe(600);
     expect(dispatched[0].policy.name).toMatch(/^smsShadow:[a-z]+:sealed$/);
     expect(dispatched[0].policy.fallback).toBeUndefined();
   });

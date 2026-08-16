@@ -200,7 +200,7 @@ const CLEAN_LLM_JSON = {
   priorities: ['Ant activity near the garage'],
   mentioned_terms: ['ants'],
   watch_items: ['Note on file from the office'],
-  last_visit_summary: 'Routine pest service in July.',
+  last_visit_summary: null,
   open_scope: '',
   customer_context: 'Prefers a knock before entry.',
 };
@@ -695,6 +695,7 @@ describe('grounded allowlist validation of LLM output', () => {
       catalogVocabulary: { names: [], targets: [] },
       llmFacts: {
         servicePreferences: { interiorSpray: false },
+        lastVisit: { recap: 'Interior baseboards treated in March' },
         flags: [{ detail: 'EXTERIOR ONLY — no interior treatment' }],
         recentCalls: ['Asked about ants in garage'],
       },
@@ -763,7 +764,7 @@ describe('grounded allowlist validation of LLM output', () => {
     // strict instructional check must NOT apply to descriptive fields.
     const grounding = {
       catalogVocabulary: { names: [], targets: [] },
-      llmFacts: { recentCalls: ['Asked about ants in garage'] },
+      llmFacts: { lastVisit: { recap: 'exterior service' }, recentCalls: ['Asked about ants in garage'] },
     };
     const verdict = validateBriefJson(
       { ...CLEAN_LLM_JSON, mentioned_terms: [], last_visit_summary: 'Treated front walk during the last visit.' },
@@ -2064,7 +2065,7 @@ describe('codex #3423 r17 — waves as product, ALL-CAPS directives, account sta
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
     const verdict = validateBriefJson(
-      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Waves Pest Control serviced the yard in July.', open_scope: null, customer_context: null },
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control serviced the yard in July.' },
       grounding,
     );
     expect(verdict.body).toBeTruthy();
@@ -2137,7 +2138,7 @@ describe('codex #3423 r21 — scheduling statuses, punctuation after canonical n
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
     const verdict = validateBriefJson(
-      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Waves Pest Control - routine service in July.', open_scope: null, customer_context: null },
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control - routine service in July.' },
       grounding,
     );
     expect(verdict.body).toBeTruthy();
@@ -2942,6 +2943,41 @@ describe('codex #3423 r45 — tier binding, contact imperatives, outstanding, vi
     expect(validateBriefJson(
       { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Gold member. Customer is sensitive to chemicals.' },
       grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r46 — generalized history, drafted, multi-contact, trailing historical, HOA repeat', () => {
+  test('r46 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Basement vacuumed', open_scope: null, customer_context: null },
+      empty,
+    ).reason).toMatch(/fabricated_history/);
+    const oneChannel = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer asked for a phone call' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer asked for a phone call. Customer asked for text update.' },
+      oneChannel,
+    ).reason).toMatch(/contact_request/);
+    const histCancel = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'appointment was cancelled last week and rebooked' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment cancelled' },
+      histCancel,
+    ).reason).toMatch(/appointment_state/);
+  });
+
+  test('r46 truthful cases pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const draftEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { pendingEstimate: { status: 'draft' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate drafted', customer_context: null },
+      draftEst,
+    ).body).toBeTruthy();
+    const hoa = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { propertyProfile: { hoaName: 'Gold Tree HOA' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Property is in Gold Tree HOA.' },
+      hoa,
     ).body).toBeTruthy();
   });
 });

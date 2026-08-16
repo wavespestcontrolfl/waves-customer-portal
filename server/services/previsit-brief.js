@@ -1385,8 +1385,9 @@ function findUngroundedClaim(body, grounding) {
   // Completed-service wording in last_visit_summary requires an actual
   // prior visit — "Service performed" for a customer with no lastVisit
   // fact is a fabricated service record (r38).
-  if (!grounding.llmFacts?.lastVisit && body.last_visit_summary
-    && /\bservice\s+(?:performed|provided|completed|rendered)\b|\b(?:performed|provided|completed|rendered)\s+service\b/i.test(String(body.last_visit_summary))) {
+  // The FIELD is the last-visit summary — any nonempty content without a
+  // lastVisit fact fabricates prior work (r46 generalizes the r38 guard).
+  if (!grounding.llmFacts?.lastVisit && body.last_visit_summary) {
     return { kind: 'fabricated_history', term: 'no prior visit on file' };
   }
   // "History of <condition>" asserts recorded history — the word must
@@ -1426,7 +1427,7 @@ function findUngroundedClaim(body, grounding) {
     // Lookbehind blocks the historical qualifier PER PHRASE — a separate
     // current "appointment confirmed" fact grounds even when a historical
     // one also exists (r44 P2).
-    const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\bappointments?\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})\\b|\\b(?:${statusForms.join('|')})\\s+appointments?\\b(?!\\s)`);
+    const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\bappointments?\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})\\b(?!\\s+(?:last|yesterday|earlier|previously|back|weeks?|months?|days?|in\\s+\\w+)\\b)|\\b(?:${statusForms.join('|')})\\s+appointments?\\b(?!\\s)`);
     const inGlobalPhrase = phraseRe.test(groundedValueText);
     if (!inVisit && !inGlobalPhrase) {
       return { kind: 'appointment_state', term: status };
@@ -1435,11 +1436,12 @@ function findUngroundedClaim(body, grounding) {
   // Claimed customer CONTACT REQUESTS ("asked for a phone call") are
   // factual asks — the channel and a request verb must both appear in the
   // fact values, or the technician contacts someone who never asked (r39).
-  const contactReq = outputText.match(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:for\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?)\b/)
-    // Direct channel imperatives ("Call customer", "Do not text customer")
-    // are the same claim class (r45).
-    || (() => { const m = outputText.match(/\b(do\s+not\s+|don't\s+)?(call|text|email)\s+(?:the\s+)?customer\b/); return m ? [m[0], m[1], m[2]] : null; })();
-  if (contactReq) {
+  // EVERY contact claim is validated, not just the first (r46).
+  const contactClaims = [
+    ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:for\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?)\b/g),
+    ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email)\s+(?:the\s+)?customer\b/g)],
+  ];
+  for (const contactReq of contactClaims) {
     const negatedClaim = Boolean(contactReq[1]);
     const channel = contactReq[2].replace(/s$/, '');
     const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred)\b/.test(groundedValueText);
@@ -1470,8 +1472,11 @@ function findUngroundedClaim(body, grounding) {
     grounding.llmFacts?.openScope?.sourceEstimate?.tier,
     grounding.llmFacts?.openScope?.pendingEstimate?.tier,
   ].filter(Boolean).join(' ').toLowerCase();
-  for (const tier of ['bronze', 'silver', 'gold', 'platinum']) {
-    if (new RegExp(`\\b${tier}\\b`).test(outputText) && !new RegExp(`\\b${tier}\\b`).test(tierText)) {
+  // Only tier CLAIMS bind to tier fields (r46 P2) — a grounded HOA or
+  // product name containing a tier word is not a membership assertion.
+  for (const m of outputText.matchAll(/\b(bronze|silver|gold|platinum)\s+(?:member(?:ship)?|tier|plan|level)\b|\b(?:member(?:ship)?|tier|plan|level)\s*[:\-]?\s*(bronze|silver|gold|platinum)\b|\baccepted\s+(bronze|silver|gold|platinum)\b/g)) {
+    const tier = m[1] || m[2] || m[3];
+    if (!new RegExp(`\\b${tier}\\b`).test(tierText)) {
       return { kind: 'novel_term', term: tier };
     }
   }
@@ -1483,7 +1488,10 @@ function findUngroundedClaim(body, grounding) {
   // The trailing form is a lookahead so "customer accepted renewal" yields
   // BOTH matches — a consuming second branch swallowed 'accepted' and hid
   // the reassigned object.
-  for (const m of outputText.matchAll(/\baccepted\s+(?:the\s+|a\s+|an\s+|his\s+|her\s+|their\s+|our\s+)?([a-z][a-z'-]{2,})\b|\b([a-z][a-z'-]{2,})(?=\s+accepted\b)/g)) {
+  // Per-FIELD scan — joined output text manufactured phantom bigrams
+  // across field boundaries (r46 fix during the r37 guard).
+  for (const fieldText of outputFields.map((f) => String(f).toLowerCase()))
+  for (const m of fieldText.matchAll(/\baccepted\s+(?:the\s+|a\s+|an\s+|his\s+|her\s+|their\s+|our\s+)?([a-z][a-z'-]{2,})\b|\b([a-z][a-z'-]{2,})(?=\s+accepted\b)/g)) {
     const noun = m[1] || m[2];
     if (ACCEPT_OBJECT_OK.has(noun) || noun === 'customer') continue;
     const bigram1 = `accepted ${noun}`;
@@ -1505,8 +1513,8 @@ function findUngroundedClaim(body, grounding) {
   // A pendingEstimate object IS the pending state, status field or not.
   if (grounding.llmFacts?.openScope?.pendingEstimate) estimateStatuses.push('pending');
   if (estimateStatuses.length) {
-    for (const m of outputText.matchAll(/\b(?:estimates?|quotes?)\s+(?:was\s+|is\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|drafted?)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|drafted?)\s+(?:estimates?|quotes?)\b/g)) {
-      const claimed = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled');
+    for (const m of outputText.matchAll(/\b(?:estimates?|quotes?)\s+(?:was\s+|is\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\s+(?:estimates?|quotes?)\b/g)) {
+      const claimed = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled').replace(/^drafted$/, 'draft');
       if (!estimateStatuses.includes(claimed)) {
         return { kind: 'estimate_state_conflict', term: claimed };
       }

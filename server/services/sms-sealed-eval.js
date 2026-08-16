@@ -487,7 +487,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
     // the first run under a new model IS the new baseline.
     const prior = await dbi('sms_sealed_eval_runs')
       .where({ provider_leg: providerLeg, status: 'complete', model: EXAM_LEG_ROUTES[providerLeg].model })
-      .whereNot('prompt_version', drafter.SEALED_EXAM_VERSION)
+      .whereNot('prompt_version', drafter.PROMPT_VERSION)
       .orderBy('started_at', 'desc')
       .first('id');
     baseline = prior?.id || null;
@@ -513,7 +513,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   try {
     const [run] = await dbi('sms_sealed_eval_runs')
       .insert({
-        prompt_version: drafter.SEALED_EXAM_VERSION,
+        prompt_version: drafter.PROMPT_VERSION,
         provider_leg: providerLeg,
         status: 'running',
         items_total: Number(activeCount),
@@ -662,7 +662,7 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
     // A run only ever contains ONE drafter version. Resuming after a prompt
     // bump would draft the remaining items under the NEW code and record
     // them beneath the old label — refuse and start a fresh run instead.
-    const currentVersion = require('./sms-shadow-drafter').SEALED_EXAM_VERSION;
+    const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
     if (run.prompt_version !== currentVersion) {
       // A run stranded 'running' across the prompt-bump deploy must be
       // retired here, not just refused: the one-running unique index blocks
@@ -876,7 +876,7 @@ function shapeRun(run) {
  */
 async function getSealedExamSummary({ dbi = db } = {}) {
   const drafter = require('./sms-shadow-drafter');
-  const currentVersion = drafter.SEALED_EXAM_VERSION;
+  const currentVersion = drafter.PROMPT_VERSION;
   // Voice-profile pin (Codex r2): a leg's HEADLINE run — the one
   // evaluateExamGate accepts and the auto-sweep short-circuits on — must
   // have been drafted under the CURRENTLY effective profile, not merely the
@@ -986,7 +986,7 @@ const AUTO_EXAM_MAX_ITEMS = envNum('SEALED_EXAM_AUTO_MAX_ITEMS', 150);
  */
 async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryFn = getSealedExamSummary } = {}) {
   const drafterMod = require('./sms-shadow-drafter');
-  const currentVersion = drafterMod.SEALED_EXAM_VERSION;
+  const currentVersion = drafterMod.PROMPT_VERSION;
   // Profile-aware coverage (Codex r2): "already examined" means a complete
   // run under the current (version, effective-profile) pair — after a weekly
   // profile approval the sweep re-baselines both legs under the new profile,
