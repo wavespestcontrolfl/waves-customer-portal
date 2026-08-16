@@ -90,7 +90,8 @@ const FORBIDDEN_TARGET_RE = /ganoderma|thielaviopsis/i;
 const RETIRED_NAME_RE = /waves\W+(?:lawn\W*(?:and\W+)?\W*pest|pest\W*(?:and\W+)?\W*lawn)/i;
 // The APPROVED company name, as a whole normalized phrase — prose, not a
 // product reference (r17: bare 'waves' is no longer common prose).
-const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control(?:\s*(?:&|and)\s*lawn\s+care)?$/;
+// Canonical name ONLY per AGENTS.md — no blessed variants (codex r19).
+const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1007,6 +1008,8 @@ const INSTRUCTION_EVIDENCE_WORDS = new Set([
   // r15: access-security objects ("Retrieve gate key/access card") are
   // fabricatable from common words — the access noun must be evidenced.
   'gate', 'gates', 'access', 'card', 'cards', 'keys',
+  // r19: scheduling directives ("Discuss scheduling") assert a real action.
+  'schedule', 'schedules', 'scheduling', 'reschedule', 'rescheduling', 'scheduled',
 ]);
 
 // Word-level grounding for one candidate word ACROSS its stem variants.
@@ -1301,7 +1304,8 @@ function findUngroundedClaim(body, grounding) {
   if (svcPrefFlags?.interiorSpray === false) {
     // Interior room nouns included (codex #3423 r1+r13): "Vacuum basement" /
     // "Check kitchen" IS an interior instruction regardless of verb.
-    prefConflicts.push({ re: /\b(?:interior|inside|indoors?|rooms?|basements?|attics?|closets?|bedrooms?|bathrooms?|kitchens?)\b/, term: 'interior' });
+    // plural 'rooms' only — singular is the spacing idiom ("leave room"), r19 P2.
+    prefConflicts.push({ re: /\b(?:interior|inside|indoors?|rooms|basements?|attics?|closets?|bedrooms?|bathrooms?|kitchens?)\b/, term: 'interior' });
   }
   if (svcPrefFlags?.exteriorSweep === false) {
     prefConflicts.push({ re: /\b(?:eaves?|cobwebs?)\b/, term: 'eave sweep' });
@@ -1422,7 +1426,7 @@ function findUngroundedClaim(body, grounding) {
   // The approved company name self-grounds as a PHRASE only — a bare
   // 'waves' outside it is a rare word ("Apply Waves" is a nonexistent
   // product, codex #3423 r17).
-  const APPROVED_NAME_RE = /waves\s+pest\s+control(?:\s*(?:&|and)\s*lawn\s+care)?/gi;
+  const APPROVED_NAME_RE = /waves\s+pest\s+control/gi;
   for (const rawField of outputFields) {
     const field = String(rawField).replace(APPROVED_NAME_RE, ' ');
     // 4+ characters: 'mice'/'rats'/'tick'/'flea'-length organisms must

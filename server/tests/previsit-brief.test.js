@@ -2070,3 +2070,28 @@ describe('codex #3423 r17 — waves as product, ALL-CAPS directives, account sta
     expect(verdict.body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r19 — scheduling evidence, room-as-spacing, canonical name only', () => {
+  test('"Discuss scheduling" rejects without a scheduling fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { priorities: ['Discuss scheduling'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+
+  test('singular "room" as spacing does not trip the interior conflict', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { servicePreferences: { interiorSpray: false }, flags: [{ detail: 'leave room around the exterior gate for the trailer' }] },
+    };
+    const verdict = validateBriefJson(
+      { priorities: ['Leave room around the exterior gate'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).not.toBe('ungrounded_preference_conflict:interior');
+  });
+});
