@@ -105,7 +105,7 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Strong connectors (& + /) always denote a name suffix; weak ones
 // (- ,) and bare/and brand words need the end-of-name lookahead —
 // "- pest activity reviewed" is a clause, "- Lawn Care" a suffix (r49).
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*\w+|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:group|groups|solutions|enterprises|holdings|partners|brands)\b|\s+of\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|swfl|america|tampa)\b|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)\b)/i;
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*\w+|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b(?!\s+(?:was|is|were|are|has|have|had|will|would|being)\b))|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b(?!\s+(?:was|is|were|are|has|have|had|will|would|being)\b))|\s+(?:and\s+)?(?:group|groups|solutions|enterprises|holdings|partners|brands)\b|\s+of\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|swfl|america|tampa)\b|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)(?!\s+(?:was|is|were|are|has|have|had|will|would|being)\b))/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1314,6 +1314,15 @@ function findUngroundedClaim(body, grounding) {
     for (const head of heads) {
       if (COMMON_PROSE_WORDS.has(head) || catalogNorm.includes(head) || legacyNames.includes(head)) continue;
       if (!new RegExp(`\\b${escapeRe(head)}\\b`).test(outputText)) continue;
+      // Only PRODUCT-SHAPED uses count (r73) — a catalog head that is an
+      // ordinary English word ("Suspend service") stays prose unless used
+      // like a product.
+      const productShaped = new RegExp(
+        `\\b(?:appl(?:y|ied|ying)|spray(?:ed|ing)?|us(?:e|ed|ing)|treat(?:ed|ing)?\\s+with|with)\\s+(?:the\\s+)?${escapeRe(head)}\\b`
+        + `|\\b${escapeRe(head)}\\s+(?:was|is|will\\s+be)\\s+(?:used|applied|sprayed)\\b`
+        + `|\\b${escapeRe(head)}\\s+(?:product|label|application)\\b`,
+      ).test(outputText);
+      if (!productShaped) continue;
       const fullPresent = catalogNorm.some((n) => n.split(' ')[0] === head && new RegExp(`\\b${escapeRe(n)}\\b`).test(outputText));
       if (!fullPresent) return { kind: 'novel_product', term: head };
     }
@@ -1614,7 +1623,10 @@ function findUngroundedClaim(body, grounding) {
     // qualifiers may intervene ("requested an estimate during the phone
     // call" is not a call request, r49).
     const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?|expect(?:s|ed)?|need(?:s|ed)?)\\s+(?:(?:for|to|be|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening|(?:calls?|texts?|sms|emails?)\\s+and)\\s+){0,4}${bareChannel}`);
-    const factSupports = clauseRe.test(groundedValueText);
+    // Passive evidence forms ("a phone call was requested") support the
+    // claim exactly like verb-first forms (r73).
+    const passiveEvidenceRe = new RegExp(`\\b(?:phone\\s+)?${bareChannel}\\w*\\s+(?:was|is|has\\s+been|had\\s+been)\\s+requested\\b`);
+    const factSupports = clauseRe.test(groundedValueText) || passiveEvidenceRe.test(groundedValueText);
     if (negatedClaim ? !(factSupports && negatedNearChannel) : (!factSupports || negatedNearChannel)) {
       return { kind: 'contact_request', term: channel };
     }
@@ -1680,7 +1692,10 @@ function findUngroundedClaim(body, grounding) {
     const precedingText = currentClaimTextForTier.slice(0, m.index);
     const membershipShaped = (Boolean(m[1] && /member|customer|client|account|status/.test(m[0])) || Boolean(m[4])
       || /\b(?:customer|client|resident)\b[^.;!?]{0,20}$/.test(precedingText))
-      && !/\b(?:estimate|quote|proposal)s?\b[^.;!?]{0,15}$/.test(precedingText);
+      && !/\b(?:estimate|quote|proposal)s?\b[^.;!?]{0,15}$/.test(precedingText)
+      // A tier followed by the estimate noun is estimate-scoped even with
+      // a customer subject — "Customer accepted Gold estimate" (r73 P2).
+      && !/^\s*(?:estimates?|quotes?|proposals?)\b/.test(outputText.slice(m.index + m[0].length));
     const scope = membershipShaped ? membershipTierText : tierText;
     const claimNeg = negNear(outputText, tier);
     if (!new RegExp(`\\b${tier}\\b`).test(scope) || (claimNeg && membershipShaped)) {
@@ -1964,9 +1979,12 @@ function findUngroundedClaim(body, grounding) {
   }
   for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability', 'sensitivity', 'sensitivities', 'sensitive', 'recurring', 'initial']) {
     if (!new RegExp(`\\b${pw}\\b`).test(outputText)) continue;
-    const factHasWord = wordVariants(pw).some((v) => new RegExp(`\\b${v}`).test(groundedValueText));
-    if (!factHasWord) continue; // ungrounded handling stays with the word passes
-    const factNeg = negNear(groundedValueText, pw);
+    const matchedVariants = wordVariants(pw).filter((v) => new RegExp(`\\b${v}`).test(groundedValueText));
+    if (!matchedVariants.length) continue; // ungrounded handling stays with the word passes
+    // Negation must be checked against the SAME variants that establish
+    // grounding — "no chemical sensitivity" must not positively ground
+    // "sensitivities" (r73).
+    const factNeg = matchedVariants.some((v) => negNear(groundedValueText, v));
     // EVERY sentence mentioning the word must match fact polarity — a
     // supported negative sentence must not mask a contradictory positive
     // one (r52).

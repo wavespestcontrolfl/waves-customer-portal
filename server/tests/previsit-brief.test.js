@@ -3972,3 +3972,43 @@ describe('codex #3423 r72 — split auxiliaries, payment determiners, photo poss
     expect(validateBriefJson({ ...BASE, open_scope: 'Customer did not decline the estimate' }, declined).reason).toBeTruthy();
   });
 });
+
+describe('codex #3423 r73 — passive evidence, variant polarity, brand clause continuation, tier estimate scoping, product-shaped heads', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('passive contact evidence grounds the matching claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const passiveFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'a phone call was requested before arrival' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'A phone call was requested before arrival' }, passiveFact).body).toBeTruthy();
+  });
+
+  test('negation is checked against the grounding variant', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const noSens = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has no chemical sensitivity' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has chemical sensitivities' }, noSens).reason).toBeTruthy();
+    const noAvail = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has no availability monday' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer is available Monday' }, noAvail).reason).toBeTruthy();
+  });
+
+  test('a service clause after the canonical name is not a brand suffix', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const callFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { recentCalls: ['customer called waves pest control and lawn service was discussed'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer called Waves Pest Control and lawn service was discussed' }, callFact).body).toBeTruthy();
+    const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Serviced by Waves Pest Control and Lawn Care.' }, EMPTY).reason).toBeTruthy();
+  });
+
+  test('article-less accepted tier estimates validate against the estimate scope', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const goldAccepted = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted', tier: 'Gold' } } } };
+    expect(validateBriefJson({ ...BASE, open_scope: 'Customer accepted Gold estimate' }, goldAccepted).body).toBeTruthy();
+  });
+
+  test('ordinary uses of English-word catalog heads stay prose', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const suspendCatalog = { catalogVocabulary: { names: ['Suspend SC', 'Suspend Polyzone'], targets: [] }, llmFacts: { recentCalls: ['customer asked to suspend service'] } };
+    expect(validateBriefJson({ ...BASE, priorities: ['Suspend service'] }, suspendCatalog).body).toBeTruthy();
+    const bifen = { catalogVocabulary: { names: ['Bifen IT'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen IT'] } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Bifen was used previously', mentioned_terms: [] }, bifen).reason).toBeTruthy();
+  });
+});
