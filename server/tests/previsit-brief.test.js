@@ -3292,3 +3292,31 @@ describe('codex #3423 r55 — generic requests, bare dates, adverbs, access conf
     ).reason).toBe('noncanonical_company_name');
   });
 });
+
+describe('codex #3423 r56 — weekday qualifiers, implicit contact, membership scope, activity evidence', () => {
+  test('r56 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment next Monday is cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: ['Please contact before arrival'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toMatch(/contact_request/);
+    const estTier = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { pendingEstimate: { tier: 'Gold' } } } };
+    for (const claim of ['Gold member', 'Customer is Gold']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        estTier,
+      ).reason).toMatch(/gold/);
+    }
+    const history = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { lastVisit: { recap: 'routine exterior service' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['Customer reported pest activity'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      history,
+    ).reason).toMatch(/activity/);
+  });
+});

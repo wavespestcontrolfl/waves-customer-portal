@@ -1470,7 +1470,7 @@ function findUngroundedClaim(body, grounding) {
     body.open_scope,
     body.customer_context,
   ].filter(Boolean).join(' ').toLowerCase();
-  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+\w+\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
+  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
     // Multi-word statuses ('en route', 'on site') match underscore forms too.
     const statusForms = [...new Set([...wordVariants(status.replace(/\s/g, '')), status, status.replace(/\s/g, '_'), status.replace(/\s/g, '')])];
@@ -1494,7 +1494,7 @@ function findUngroundedClaim(body, grounding) {
     ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email|contact)\s+(?:the\s+)?customer\b/g)],
     // Imperative channel verbs with implicit customer ("Please call
     // before arrival") in INSTRUCTION fields (r51).
-    ...[...instructionalText.matchAll(/(?:^|[.;!?]\s*)(?:please\s+)?(do\s+not\s+|don't\s+)?(call|text|email)\s+(?:before|after|prior|when|upon|on\s+arrival|ahead)\b/g)],
+    ...[...instructionalText.matchAll(/(?:^|[.;!?]\s*)(?:please\s+)?(do\s+not\s+|don't\s+)?(call|text|email|contact)\s+(?:before|after|prior|when|upon|on\s+arrival|ahead)\b/g)],
   ];
   for (const contactReq of contactClaims) {
     const negatedClaim = Boolean(contactReq[1]);
@@ -1529,6 +1529,9 @@ function findUngroundedClaim(body, grounding) {
   }
   // Tier words bind to ACTUAL tier facts — an HOA or product name
   // containing 'gold' must not assign a WaveGuard tier (r45).
+  // Membership-shaped claims bind ONLY to the actual membership tier — a
+  // pending estimate's tier is a proposal, not account status (r56).
+  const membershipTierText = String(grounding.llmFacts?.membership?.tier || '').toLowerCase();
   const tierText = [
     grounding.llmFacts?.membership?.tier,
     grounding.llmFacts?.openScope?.sourceEstimate?.tier,
@@ -1538,7 +1541,11 @@ function findUngroundedClaim(body, grounding) {
   // product name containing a tier word is not a membership assertion.
   for (const m of outputText.matchAll(/\b(bronze|silver|gold|platinum)\s+(?:member(?:ship)?|tier|plan|level|customer|client|account|status)\b|\b(?:member(?:ship)?|tier|plan|level)\s*[:\-]?\s*(bronze|silver|gold|platinum)\b|\baccepted\s+(bronze|silver|gold|platinum)\b|\b(?:is|was|as)\s+(?:a\s+|an\s+)?(bronze|silver|gold|platinum)\b/g)) {
     const tier = m[1] || m[2] || m[3] || m[4];
-    if (!new RegExp(`\\b${tier}\\b`).test(tierText)) {
+    // member/customer/copular shapes = MEMBERSHIP claims; accepted/tier/
+    // plan shapes may also describe the estimate.
+    const membershipShaped = Boolean(m[1] && /member|customer|client|account|status/.test(m[0])) || Boolean(m[4]);
+    const scope = membershipShaped ? membershipTierText : tierText;
+    if (!new RegExp(`\\b${tier}\\b`).test(scope)) {
       return { kind: 'novel_term', term: tier };
     }
   }
@@ -1721,7 +1728,7 @@ function findUngroundedClaim(body, grounding) {
   // conditions — grounded when the values mention activity, real history
   // exists, or the qualifying subject itself is value-grounded ("ant
   // activity" over an ants fact — the fact IS the activity) (r44).
-  if (!groundedValueText.includes('activit') && !hasRealHistory) {
+  if (!groundedValueText.includes('activit')) {
     for (const m of outputText.matchAll(/(?:\b([a-z][a-z'-]*)\s+)?\bactivity\b/g)) {
       const subject = m[1];
       const subjectGrounded = subject && !REFERENCE_STOP_WORDS.has(subject)
