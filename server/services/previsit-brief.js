@@ -88,6 +88,9 @@ const FORBIDDEN_TARGET_RE = /ganoderma|thielaviopsis/i;
 // The real brand ("Waves Pest Control & Lawn Care") stays safe: 'control'
 // is a word, so \W-only separators never bridge pest→lawn across it.
 const RETIRED_NAME_RE = /waves\W+(?:lawn\W*(?:and\W+)?\W*pest|pest\W*(?:and\W+)?\W*lawn)/i;
+// The APPROVED company name, as a whole normalized phrase — prose, not a
+// product reference (r17: bare 'waves' is no longer common prose).
+const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control(?:\s*(?:&|and)\s*lawn\s+care)?$/;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -968,9 +971,8 @@ const COMMON_PROSE_WORDS = new Set([
   'perform', 'performs', 'performed', 'performing', 'provide', 'provides', 'provided', 'providing',
   'context', 'account', 'accounts',
   'information', 'scheduling',
-  'waves', 'retrieve',
+  'retrieve',
   'transition', 'transitions',
-  'state', 'stated', 'states',
   'introduction', 'discuss', 'discussing', 'relevant', 'mindful',
   'vacuum', 'vacuuming', 'follow-up', 'walk-through',
 ]);
@@ -1111,14 +1113,14 @@ function extractOutputReferences(text) {
   // seen, not just "Apply Bifen SC"); the all-words-common skip in the
   // validator keeps ordinary prose objects ("use caution") from
   // over-rejecting.
-  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(instructed, m[1]);
+  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/gi)) push(instructed, m[1]);
   // NON-treatment imperatives ("Inspect interior", "Check attic",
   // "Monitor bait stations"): instruction fields must ground these
   // objects too — the treatment-verb capture above covers only
   // apply/spray/use/treat, and an ungrounded "Inspect interior" on an
   // exterior-only visit is exactly as contradictory as "Treat interior".
   // Same connector skip and follower-stop as the treatment capture.
-  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?|[Pp]erform(?:ed|ing|s)?|[Pp]rovid(?:e|es|ed|ing)|[Rr]etriev(?:e|es|ed|ing)|[Vv]acuum(?:ed|ing|s)?|[Dd]ocument(?:ed|ing|s)?|[Dd]iscuss(?:ed|ing|es)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/g)) push(directives, m[1]);
+  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?|[Pp]erform(?:ed|ing|s)?|[Pp]rovid(?:e|es|ed|ing)|[Rr]etriev(?:e|es|ed|ing)|[Vv]acuum(?:ed|ing|s)?|[Dd]ocument(?:ed|ing|s)?|[Dd]iscuss(?:ed|ing|es)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/gi)) push(directives, m[1]);
   for (const m of text.matchAll(/\b(?:for|targeting|against)\s+((?:[a-z][a-z'-]*\s+){0,3}[a-z][a-z'-]*)/g)) push(targets, m[1]);
   // Organism references that never pass a preposition: "<X> activity/
   // damage/infestation" and "signs/evidence of <X>" ("Emerald ash borer
@@ -1324,6 +1326,7 @@ function findUngroundedClaim(body, grounding) {
     }
     const refs = extractOutputReferences(String(field.text));
     for (const term of refs.products) {
+      if (APPROVED_NAME_TERM_RE.test(term)) continue;
       if (commonOrGroundedProse(term)) continue;
       // A sentence-case application verb rides into the capitalized-run
       // capture ("Applied Prodiamine") — the verb is not part of the
@@ -1415,7 +1418,12 @@ function findUngroundedClaim(body, grounding) {
     || COMMON_PROSE_WORDS.has(v)
     || selfReported.has(v)
   )) || groundedWordOk(word, groundedText, groundedValueText);
-  for (const field of outputFields) {
+  // The approved company name self-grounds as a PHRASE only — a bare
+  // 'waves' outside it is a rare word ("Apply Waves" is a nonexistent
+  // product, codex #3423 r17).
+  const APPROVED_NAME_RE = /waves\s+pest\s+control(?:\s*(?:&|and)\s*lawn\s+care)?/gi;
+  for (const rawField of outputFields) {
+    const field = String(rawField).replace(APPROVED_NAME_RE, ' ');
     // 4+ characters: 'mice'/'rats'/'tick'/'flea'-length organisms must
     // not slip under the scan (3-letter singulars are covered in practice
     // by substring grounding — 'ant' grounds on 'ants').

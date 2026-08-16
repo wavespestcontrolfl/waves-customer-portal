@@ -2040,3 +2040,31 @@ describe('codex #3423 r16 — short organisms, indirect objects, do-not-call cla
     expect(verdict.body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r17 — waves as product, ALL-CAPS directives, account state', () => {
+  test('ungrounded claims reject: Apply Waves, PERFORM TREATMENT, Account state: paid', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { priorities: ['Apply Waves'] },
+      { priorities: ['PERFORM TREATMENT'] },
+      { priorities: [], customer_context: 'Account state: paid' },
+    ]) {
+      const verdict = validateBriefJson(
+        { watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null, ...body },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('the approved company name still reads as prose', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Waves Pest Control serviced the yard in July.', open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});
