@@ -3296,15 +3296,30 @@ function buildTodaysResult({
     const urgency = String(values.urgency || '');
     // Reviewed Generate-AI copy replaces the inspection narrative (owner
     // 2026-08-11 rule); the service recommendation and next step are
-    // mandated and carry in EVERY body (codex r24 #3420).
+    // mandated and carry in EVERY body (codex r24 #3420). The body must
+    // agree with the boolean finding — a draft claiming "no activity" on a
+    // found=Yes visit (or vice versa) keeps the deterministic copy, with
+    // the reconciliation override honored (codex r39).
+    const NO_ACTIVITY_CLAIM_RE = /\bno\s+(?:current\s+|visible\s+|active\s+)*(?:rodent\s+)?activity\b|\bno\s+(?:signs?|evidence)\s+of\s+rodents?\b|\bfree\s+of\s+rodents?\b/i;
+    const ACTIVITY_FOUND_CLAIM_RE = /\b(?:rodent\s+)?activity\s+(?:was|were|is)\s+(?:found|observed|confirmed|noted|present)\b|\bactive\s+rodent\b|\bevidence\s+of\s+rodents?\s+(?:was|were)\s+(?:found|observed|noted)\b/i;
+    const inspectionBodyText = String(technicianReportBody || '');
+    const inspectionContradiction = found
+      ? NO_ACTIVITY_CLAIM_RE.test(inspectionBodyText)
+      // strip negated phrases first so "no activity was observed" never
+      // reads as a positive claim
+      : ACTIVITY_FOUND_CLAIM_RE.test(inspectionBodyText.replace(new RegExp(NO_ACTIVITY_CLAIM_RE.source, 'gi'), ''));
+    const inspectionReportBody = technicianReportBody
+      && (reconcileConfirmed || !inspectionContradiction)
+      ? technicianReportBody
+      : null;
     const inspectionMandated = [
       service && service !== 'No service needed at this time'
         ? `Based on today's findings, we recommend ${service.charAt(0).toLowerCase()}${service.slice(1)}${urgency === 'High' ? ' — scheduling soon is recommended' : ''}.`
         : 'No service is needed at this time based on today’s findings.',
       nextStep,
     ].filter(Boolean);
-    const inspectionDescriptive = technicianReportBody
-      ? [technicianReportBody]
+    const inspectionDescriptive = inspectionReportBody
+      ? [inspectionReportBody]
       : [
         areas.length
           ? `We inspected the ${joinPhrases(areas)}.`
@@ -3319,7 +3334,7 @@ function buildTodaysResult({
         : 'No current rodent activity was observed during today’s inspection.',
       body: [...inspectionDescriptive, ...inspectionMandated].join(' ').replace(/\s+/g, ' ').trim(),
       nextStep,
-      ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
+      ...(inspectionReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 

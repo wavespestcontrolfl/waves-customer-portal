@@ -12220,11 +12220,25 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // (codex r34)
       'green', 'blue', 'red', 'black', 'white', 'gold', 'silver',
     ]);
+    // Typed guards lead and names dedupe — safeProducts caps at 10 entries,
+    // and duplicate selected/fallback names must not push a typed
+    // products_used value past the cap unscreened (codex r39). Chunked
+    // evaluation keeps every survivor screened regardless of count.
+    const guardSeenNames = new Set();
     const guardedProducts = [
+      ...typedProductNameGuards.map((name) => ({ name })),
       ...(Array.isArray(products) ? products : []),
       ...fallbackProductNames.map((name) => ({ name })),
-      ...typedProductNameGuards.map((name) => ({ name })),
-    ];
+    ].filter((p) => {
+      const key = String(p?.name || '').toLowerCase().trim();
+      if (!key || guardSeenNames.has(key)) return false;
+      guardSeenNames.add(key);
+      return true;
+    });
+    const guardedProductChunks = [];
+    for (let i = 0; i < guardedProducts.length; i += 10) {
+      guardedProductChunks.push(guardedProducts.slice(i, i + 10));
+    }
     // Active ingredients are PERMITTED report wording (constraint #4) even
     // when the trade name IS the active ("Prodiamine 65 WDG") — derive the
     // exemption from the visit's own catalog rows, not a fixed noun list
@@ -12250,7 +12264,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       systemPrompt,
       userMessage: fullUserMessage,
       extraRejection: (text) => (
-        CompletionRecap.containsProductName(text, guardedProducts, { extraGenericTokens: guardGenericTokens, wholeWord: true }) ? 'trade_name' : null
+        guardedProductChunks.some((chunk) => CompletionRecap.containsProductName(text, chunk, { extraGenericTokens: guardGenericTokens, wholeWord: true })) ? 'trade_name' : null
       ),
     });
     if (!generated.ok) {
@@ -12283,7 +12297,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      const fallbackReport = report && CompletionRecap.containsProductName(report, guardedProducts, { extraGenericTokens: guardGenericTokens, wholeWord: true })
+      const fallbackReport = report && guardedProductChunks.some((chunk) => CompletionRecap.containsProductName(report, chunk, { extraGenericTokens: guardGenericTokens, wholeWord: true }))
         ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {

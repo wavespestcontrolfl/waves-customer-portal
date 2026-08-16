@@ -13193,6 +13193,9 @@ export function CompletionPanel({
     // is value="" so it stays on the placeholder; nothing to reset.)
     if (generating) return;
     if (!protocolActions.length) {
+      // Legacy label path never reaches applyProtocolAction — same
+      // invalidation contract applies (codex r39).
+      invalidateGeneratedReportOnTypedEdit();
       appendUniqueLabel(setSelectedProtocolActionLabels, value);
       const chip = CHIP_ACTION_BY_LABEL[value];
       if (chip) recordActionScope(value, chip.scope, chip.treatmentApplied);

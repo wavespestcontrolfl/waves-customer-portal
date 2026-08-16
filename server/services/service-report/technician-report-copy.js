@@ -53,7 +53,7 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 // lowercase word codes behind an explicit is/:/= linker (codex r37).
 const REPORT_ACCESS_CODE_RES = [
   /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}\b[a-z]?\d{2,8}\b/i,
-  /\b[a-z]?\d{2,8}\b[^\n.!?]{0,15}\b(?:code|pin|combo|combination|passcode|password|passphrase)\b/i,
+  /\b[a-z]?\d{2,8}\b[^\n.!?]{0,15}\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
   /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b\s*(?:is|:|=|-)?\s*(?:["'][A-Za-z0-9#*]{2,12}["']|[A-Za-z]*\d[A-Za-z0-9#*]*\b)/i,
   /\b(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase)\b\s*(?:is|:|=|-)?\s*[A-Z0-9#*]{2,12}\b/,
   /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b\s*(?:is|:|=)\s*["']?[a-z][a-z0-9#*]{1,11}["']?(?=[\s.,!?]|$)/i,
