@@ -80,6 +80,9 @@ function classifiedPropertiesFromExtraction(extracted = {}, additionalProps = []
       is_primary_residence: typeof extracted.service_address_is_primary_residence === 'boolean'
         ? extracted.service_address_is_primary_residence
         : null,
+      // Extracted type rides along as a FAIL-CLOSED commercial veto only
+      // (codex #3418 r27) — never persisted as an authoritative fact.
+      property_type: extracted.property_type || null,
       evidence: null,
     });
   }
@@ -92,6 +95,7 @@ function classifiedPropertiesFromExtraction(extracted = {}, additionalProps = []
       zip: extra.zip || null,
       occupancy: knownOccupancy(extra.occupancy) || (extra.is_rental === true ? 'rental_investment' : null),
       is_primary_residence: typeof extra.is_primary_residence === 'boolean' ? extra.is_primary_residence : null,
+      property_type: extra.property_type || null,
       evidence: extra.notes || null,
     });
   }
@@ -250,7 +254,7 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
     // rejected "this is my home" must not fill owner_occupied (or park a
     // change) onto the commercial row it was rejected against.
     const commercialResidenceClaim = entry.is_primary_residence === true
-      && isCommercialType(row.property_type);
+      && (isCommercialType(row.property_type) || isCommercialType(entry.property_type));
     if (commercialResidenceClaim && entry.occupancy) {
       logger.warn('[property-role] occupancy signal dropped — it rides a residence claim rejected against a commercial-typed property');
     }
@@ -308,7 +312,7 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
     logger.warn(`[property-role] ${claimedPrimaryTotal} properties classified as primary residence on one call — skipping flip proposal (contradiction)`);
   } else if (primaryClaims.length === 1) {
     const { entry, row } = primaryClaims[0];
-    if (isCommercialType(row.property_type)) {
+    if (isCommercialType(row.property_type) || isCommercialType(entry.property_type)) {
       // A primary-RESIDENCE claim on a commercial-typed row is contradictory,
       // and the flip's mirror would copy that classification onto
       // customers.property_type, which feeds service_taxability — the
@@ -785,7 +789,12 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
           estQuery = hasOngoing
             ? estQuery.where((qb) => qb
               .whereNotIn('status', TERMINAL_VISIT_STATUSES)
-              .orWhere({ is_recurring: true, recurring_ongoing: true }))
+              // ROOT rows only (codex #3418 r27): recurring_ongoing
+              // propagates to every series row, but auto-extension copies
+              // the ROOT's stamp — completed children are closed history.
+              .orWhere((qb2) => qb2
+                .where({ is_recurring: true, recurring_ongoing: true })
+                .whereNull('recurring_parent_id')))
             : estQuery.whereNotIn('status', TERMINAL_VISIT_STATUSES);
           const estRows = await estQuery.select('id', 'source_estimate_id');
           if (estRows.length) {
@@ -852,6 +861,8 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         if (hasOngoing) {
           await trx('scheduled_services')
             .where({ customer_id: customerId, is_recurring: true, recurring_ongoing: true })
+            // ROOT rows only (codex #3418 r27) — see the estimate pass.
+            .whereNull('recurring_parent_id')
             .whereNull('property_id')
             .whereNull('service_address_line1')
             .whereNull('source_estimate_id')
@@ -888,6 +899,7 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         // inserts serialize behind it, so the candidate set is stable.
         {
           const candidateCols = ['id', 'status', 'property_id', 'is_recurring',
+            'recurring_parent_id',
             'service_address_line1', 'service_address_line2', 'service_address_city',
             'service_address_state', 'service_address_zip', 'lat', 'lng'];
           if (hasOngoing) candidateCols.push('recurring_ongoing');
@@ -900,7 +912,10 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
           const oldCityN = String(oldPrimary.city || '').trim().toLowerCase();
           const oldStateN = String(oldPrimary.state || 'FL').trim().toLowerCase();
           const liveRow = (r) => !TERMINAL_VISIT_STATUSES.includes(r.status)
-            || (hasOngoing && r.is_recurring && r.recurring_ongoing);
+            // ROOT rows only (codex #3418 r27): completed children of an
+            // ongoing series are closed history — only the root templates
+            // future extensions.
+            || (hasOngoing && r.is_recurring && r.recurring_ongoing && r.recurring_parent_id == null);
           const matchesOldPremise = (r) => {
             if (r.property_id === oldPrimary.id) return true;
             if (!String(r.service_address_line1 || '').trim()) return false;
