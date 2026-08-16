@@ -2100,7 +2100,7 @@ describe('codex #3423 r20 — noncanonical suffix, field-wide evidence', () => {
   test('a suffixed canonical name rejects', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
-    for (const name of ['Waves Pest Control & Lawn', 'Waves Pest Control and Lawn Care']) {
+    for (const name of ['Waves Pest Control & Lawn', 'Waves Pest Control and Lawn Care', 'Waves Pest Control Pest Services']) {
       expect(validateBriefJson(
         { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: `${name} visited.` },
         grounding,

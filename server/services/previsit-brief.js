@@ -96,7 +96,10 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // variant ("Waves Pest Control & Lawn") — reject it outright (r20).
 // …followed by an actual brand term — bare punctuation after the name
 // ("Waves Pest Control - scheduled service") is ordinary prose (r21 P2).
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control\s*(?:&|\+|\/|-|\band\b)\s*(?:lawn|pest|care|control)\b/i;
+// Connector optional (r22): "Waves Pest Control Pest Services" is a
+// suffixed variant too — a brand word directly after the name rejects;
+// ordinary prose ("- routine service", "serviced the yard") does not.
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control\s*(?:(?:&|\+|\/|-|\band\b)\s*)?(?:lawn|pest|care|control)\b/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
