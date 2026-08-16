@@ -7,6 +7,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ mocked: true })));
 jest.mock('../services/sms-shadow-drafter', () => ({
   PROMPT_VERSION: 'house_voice_v9_test',
+  // sealed runs are stamped with the sealed identity, not the live cohort
+  SEALED_EXAM_VERSION: 'house_voice_v9_test',
   generateGroundedDraft: jest.fn(),
   // effective profile = none unless a test overrides — keeps the pin inert
   resolveEffectiveVoiceProfile: jest.fn(async () => null),

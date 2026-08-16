@@ -143,7 +143,9 @@ function makeSummaryDb({ active = 0, total = 0, runs = [] } = {}) {
   return dbi;
 }
 
-const CURRENT = require('../services/sms-shadow-drafter').PROMPT_VERSION;
+// Exam runs carry the SEALED identity (prompt version + sealed budget),
+// not the live prompt cohort version.
+const CURRENT = require('../services/sms-shadow-drafter').SEALED_EXAM_VERSION;
 const completeRun = (leg, over = {}) => ({
   id: `run-${leg}`,
   prompt_version: CURRENT,

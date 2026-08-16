@@ -73,10 +73,15 @@ const DRAFTER = 'house_voice';
 // retired; auto-send alone still refuses amounts). Access-code values never
 // appear in prompts or replies. The verifier shares the block, so every
 // added fact also becomes checkable ground truth.
-// v11 (codex #3423 r5): sealed-exam generation budget 600 -> 1000 —
-// version-bumped so completed v10 runs stay attributed to the old cap
-// and no run mixes both budgets under one version identity.
-const PROMPT_VERSION = 'house_voice_v11';
+const PROMPT_VERSION = 'house_voice_v10';
+// Sealed-exam run identity (codex #3423 r5+r7): the exam's generation
+// budget is part of what the exam measures, so the 600->1000 sealed cap
+// rides the RUN identity — bumping the shared PROMPT_VERSION instead
+// would evict all v10 readiness evidence from the graduation cohort and
+// block auto-send intents while live behavior (600 cap) is unchanged.
+// Derived, so a real prompt bump rolls both.
+const SEALED_EXAM_MAX_TOKENS = 1000;
+const SEALED_EXAM_VERSION = `${PROMPT_VERSION}+mt${SEALED_EXAM_MAX_TOKENS}`;
 const SHADOW_STATUS = 'shadow';
 
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
@@ -725,7 +730,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
       // 08-14/15) — the leg then read as a provider failure in the digest.
       // Sealed legs ONLY (codex #3423 r2): the live cap is the last length
       // guard for the composer card, and live truncations weren't observed.
-      { system, text: userContent, jsonMode: false, maxTokens: pinned ? 1000 : 600, anthropicClient: client },
+      { system, text: userContent, jsonMode: false, maxTokens: pinned ? SEALED_EXAM_MAX_TOKENS : 600, anthropicClient: client },
       { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
     );
     if (routed.ok) return { parsed: parseShadowResponse(routed.text), model: routed.model };
@@ -1244,6 +1249,8 @@ module.exports = {
   resolveEffectiveVoiceProfile,
   DRAFTER,
   PROMPT_VERSION,
+  SEALED_EXAM_MAX_TOKENS,
+  SEALED_EXAM_VERSION,
   SHADOW_STATUS,
   INTENDED_ACTION_TYPES,
   EXEMPLAR_INJECTION_RE,

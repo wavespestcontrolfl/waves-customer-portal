@@ -1744,7 +1744,7 @@ describe('grounded-only words require WORD-BOUNDARY grounding (codex #3423 r5)',
   test('fabricated preference and account-state prose rejects (codex #3423 r6)', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
-    for (const claim of ['Customer requests quiet arrival', 'Account in good standing']) {
+    for (const claim of ['Customer requests quiet arrival', 'Account in good standing', 'Resident will be onsite', 'Interior service included', 'Customer prefers phone communication']) {
       const verdict = validateBriefJson(
         { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
         grounding,
