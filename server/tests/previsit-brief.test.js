@@ -3049,3 +3049,40 @@ describe('codex #3423 r48 — credential type, payment acceptance, contact claus
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r49 — paid phrasing, object channels, prepositioned temporal, copulas, weak connectors', () => {
+  test('r49 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const overdue = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] } };
+    for (const claim of ['Invoice has been paid', 'No invoice outstanding', 'Outstanding balance resolved']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        overdue,
+      ).reason).toMatch(/payment_state_conflict/);
+    }
+    const estCall = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'Customer requested an estimate during the phone call' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer wants a phone call' },
+      estCall,
+    ).reason).toMatch(/contact_request/);
+    const histConf = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'appointment confirmed for last week' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment confirmed' },
+      histConf,
+    ).reason).toMatch(/appointment_state/);
+  });
+
+  test('r49 truthful cases pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const acceptedEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate was accepted', customer_context: null },
+      acceptedEst,
+    ).body).toBeTruthy();
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'pest activity reviewed at fence' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control - pest activity reviewed.' },
+      empty,
+    ).reason).not.toBe('noncanonical_company_name');
+  });
+});

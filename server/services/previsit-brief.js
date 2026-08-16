@@ -102,7 +102,10 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // The suffix must END the name (lookahead: punctuation/end or another
 // brand-continuation word) — "…Control and pest activity can be
 // reviewed" is a new clause, not a name suffix (r36 P2).
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/|-|,)\s*(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+of\s+\w+)/i;
+// Strong connectors (& + /) always denote a name suffix; weak ones
+// (- ,) and bare/and brand words need the end-of-name lookahead —
+// "- pest activity reviewed" is a clause, "- Lawn Care" a suffix (r49).
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+of\s+\w+)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1438,7 +1441,7 @@ function findUngroundedClaim(body, grounding) {
     // Lookbehind blocks the historical qualifier PER PHRASE — a separate
     // current "appointment confirmed" fact grounds even when a historical
     // one also exists (r44 P2).
-    const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\bappointments?\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})\\b(?!\\s+(?:last|yesterday|earlier|previously|back|weeks?|months?|days?|in\\s+\\w+)\\b)|\\b(?:${statusForms.join('|')})\\s+appointments?\\b(?!\\s)`);
+    const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\bappointments?\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})\\b(?!\\s+(?:(?:for|on|from|back)\\s+)?(?:last|yesterday|earlier|previously|weeks?|months?|days?|in\\s+\\w+)\\b)|\\b(?:${statusForms.join('|')})\\s+appointments?\\b(?!\\s)`);
     const inGlobalPhrase = phraseRe.test(groundedValueText);
     if (!inVisit && !inGlobalPhrase) {
       return { kind: 'appointment_state', term: status };
@@ -1467,7 +1470,10 @@ function findUngroundedClaim(body, grounding) {
     // The request verb and claimed channel must share a CLAUSE, with no
     // other channel word between them (r48) — "wants email; previous call
     // disconnected" must not ground a call request.
-    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?)\\b(?:(?!\\b(?:call|text|sms|email|update)s?\\b)[^.;!?]){0,50}\\b${bareChannel}`);
+    // The channel must be the OBJECT of the request — only determiners/
+    // qualifiers may intervene ("requested an estimate during the phone
+    // call" is not a call request, r49).
+    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?)\\s+(?:(?:for|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening)\\s+){0,3}${bareChannel}`);
     const factSupports = clauseRe.test(groundedValueText);
     if (negatedClaim ? !(factSupports && negatedNearChannel) : (!factSupports || negatedNearChannel)) {
       return { kind: 'contact_request', term: channel };
@@ -1477,7 +1483,7 @@ function findUngroundedClaim(body, grounding) {
   // the OPPOSITE of the customer's billing state — flattened token pools
   // cannot see the contradiction, so it is checked as a phrase (r32).
   if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
-    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due|outstanding)\b|\bno\s+outstanding\s+(?:balance|invoices?|payments?)?\b|\bzero\s+balance\b/i.test(outputText)) {
+    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance|bill)\s+(?:has\s+been\s+|was\s+|is\s+)?paid\b|\bno\s+invoices?\s+outstanding\b|\boutstanding\s+(?:balance|invoice)s?\s+(?:resolved|cleared|paid|settled)\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due|outstanding)\b|\bno\s+outstanding\s+(?:balance|invoices?|payments?)?\b|\bzero\s+balance\b/i.test(outputText)) {
     return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
   }
   // Tier words bind to ACTUAL tier facts — an HOA or product name
@@ -1507,7 +1513,9 @@ function findUngroundedClaim(body, grounding) {
   // the reassigned object.
   // Per-FIELD scan — joined output text manufactured phantom bigrams
   // across field boundaries (r46 fix during the r37 guard).
-  for (const fieldText of outputFields.map((f) => String(f).toLowerCase()))
+  // Copulas stripped so "Estimate was accepted" binds 'estimate', not
+  // 'was' (r49 P2) — and "Renewal was accepted" still binds 'renewal'.
+  for (const fieldText of outputFields.map((f) => String(f).toLowerCase().replace(/\b(?:was|is|were|are|has\s+been|been)\s+(?=accepted\b)/g, '')))
   for (const m of fieldText.matchAll(/\baccepted\s+(?:the\s+|a\s+|an\s+|his\s+|her\s+|their\s+|our\s+)?([a-z][a-z'-]{2,})\b|\b([a-z][a-z'-]{2,})(?=\s+accepted\b)/g)) {
     const noun = m[1] || m[2];
     if (ACCEPT_OBJECT_OK.has(noun) || noun === 'customer') continue;
