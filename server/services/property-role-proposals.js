@@ -890,7 +890,11 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
             .whereRaw('lower(service_address_line1) = lower(?)', [oldPrimary.address_line1 || ''])
             .andWhere((qb3) => qb3
               .whereNull('service_address_zip')
-              .orWhere('service_address_zip', oldPrimary.zip))
+              // ZIP5-normalized (codex #3418 r25): a ZIP+4 stamp and a
+              // 5-digit property row identify the same premise — the
+              // canonical dispatch predicate normalizes, so this repair
+              // predicate must too or same-premise rows go unrepaired.
+              .orWhereRaw("substring(regexp_replace(service_address_zip, '[^0-9]', '', 'g') from 1 for 5) = ?", [normalizeZip(oldPrimary.zip)]))
             .andWhere((qb4) => qb4
               .whereNull('service_address_city')
               .orWhereRaw('lower(service_address_city) = lower(?)', [oldPrimary.city || '']))

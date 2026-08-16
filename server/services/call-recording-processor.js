@@ -11537,7 +11537,10 @@ const CallRecordingProcessor = {
                     address_line1: bookingSvcAddr?.street_line_1 || null,
                     address_line2: bookingSvcAddr?.street_line_2 || null,
                     city: bookingSvcAddr?.city || null,
-                    state: bookingSvcAddr?.state || extracted.state || null,
+                    // State exclusively from V2 (codex #3418 r25) — FL
+                    // default matches the persistence path; never V1's
+                    // disagreeing state onto the V2 premise.
+                    state: bookingSvcAddr?.state || 'FL',
                     zip: bookingSvcAddr?.postal_code || null,
                   }
                   : {

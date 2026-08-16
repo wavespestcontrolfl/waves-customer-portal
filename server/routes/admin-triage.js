@@ -443,6 +443,22 @@ router.post('/:id/apply-property-roles', async (req, res) => {
         lost.conflict = true;
         throw lost;
       }
+      // The second_service_address advisory raised for this SAME call is
+      // the same decision (codex #3418 r25): the property addition's roles
+      // were just reviewed and applied, so retire the sibling atomically
+      // instead of forcing the office to review the addition twice (it
+      // would also hold call_log.review_status open forever).
+      if (item.call_log_id) {
+        await trx('triage_items')
+          .where({ call_log_id: item.call_log_id, reason_code: 'second_service_address' })
+          .whereIn('status', OPEN_STATES)
+          .update({
+            status: 'resolved',
+            resolution_note: 'Superseded — property roles reviewed and applied from the property_role_confirm card.',
+            resolved_at: new Date(),
+            updated_at: new Date(),
+          });
+      }
       // Same call_log.review_status bookkeeping as transitionCore — inside
       // the locked transaction so the remaining-open count can't race.
       if (item.call_log_id) {
