@@ -6485,6 +6485,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // visit for the same indicator, then persist the immutable
           // customer-copy snapshot (typedReportSnapshot). The report renders
           // from this snapshot forever — labels/copy are resolved HERE.
+          // The reviewed body describes the WHOLE visit, so it must not
+          // contradict a CUSTOMER-FACING companion's recorded findings just
+          // because the primary snapshot carries it (codex r52 #3420): a
+          // termite primary could otherwise publish "8 stations were
+          // checked" beside a bait companion recording 6. Same value-driven
+          // guards the companion applies when it carries the body itself;
+          // the confirmed reconciliation prompt overrides as usual. Applies
+          // to BOTH carrier paths below.
+          const companionBodyConflict = Boolean(technicianReportBody)
+            && reportReconcileConfirmed !== true
+            && validatedCompanions.some((companion) => (
+              (companionDeliveryByType.get(companion.type) || 'internal_only') === 'auto_send'
+              && ActivityIndicators.typedBodyContradictions(
+                companion.type,
+                companion.values,
+                companion.activityScore,
+                technicianReportBody,
+              ).length > 0
+            ));
+          const sectionScreenedReportBody = companionBodyConflict ? null : technicianReportBody;
+          if (companionBodyConflict) {
+            logger.warn('[completion] technician AI report copy dropped (companion_contradiction)');
+          }
           let typedActivity = null;
           let typedVisitSequence = 1;
           if (typedFindings) {
@@ -6535,7 +6558,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               photoSummary: photoSummaryText || null,
               // Primary section only — the AI report describes this visit's
               // primary work; companion sections keep their own typed copy.
-              technicianReportBody,
+              technicianReportBody: sectionScreenedReportBody,
               // The tech confirmed the reconciliation prompt: the frozen
               // snapshot carries the decision so neither the snapshot's own
               // screens nor the render-time summary screen silently discard
@@ -6597,7 +6620,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 technicianReportBody: !serviceData.typedReportSnapshot
                   && !companionBodyCarried
                   && (companionDeliveryByType.get(companion.type) || 'internal_only') === 'auto_send'
-                  ? technicianReportBody
+                  ? sectionScreenedReportBody
                   : null,
                 // A standard primary with a trapping COMPANION has no typed
                 // primary snapshot to carry the confirmed override — freeze

@@ -479,6 +479,51 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.bodySource).toBeUndefined();
   });
 
+  // r52 (#3420): absence contradicts EVERY nonzero gauge, not just band 2+.
+  test('flea refuses "No flea activity was observed" beside a low score too', () => {
+    const r = buildTodaysResult({
+      projectType: 'flea',
+      values: { evidence_level: 'Light' },
+      activity: { score: 2 },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'No flea activity was observed today.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
+  // r52 (#3420): existential Ganoderma presence claims.
+  test('tree_shrub refuses "There was a Ganoderma conk" beside a recorded No', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Good', plant_groups: 'Palms', ganoderma_conk_observed: 'No', palm_trunk_concern: 'No' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'There was a Ganoderma conk at the base of the palm.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
+  // r52 (#3420): the body screens against a section's recorded findings
+  // regardless of which snapshot carries it.
+  test('typedBodyContradictions flags a station-count mismatch and passes agreement', () => {
+    const { typedBodyContradictions } = require('../services/service-report/activity-indicators');
+    expect(typedBodyContradictions(
+      'termite_bait_station',
+      { stations_checked: 6 },
+      2,
+      'We checked 8 bait stations today.',
+    ).length).toBeGreaterThan(0);
+    expect(typedBodyContradictions(
+      'termite_bait_station',
+      { stations_checked: 6 },
+      2,
+      'We checked 6 bait stations today.',
+    )).toEqual([]);
+  });
+
   // r50 (#3420): the body must agree with the recorded Ganoderma answer.
   test('tree_shrub refuses "No Ganoderma conks were observed" beside a recorded Yes', () => {
     const r = buildTodaysResult({

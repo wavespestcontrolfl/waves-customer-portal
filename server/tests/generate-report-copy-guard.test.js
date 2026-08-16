@@ -327,6 +327,13 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // keep-out / stay-off instructions state the same window (r52)
+    expect(reportCopyRejection('Keep people and pets out of the treated area for thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Stay off the treated lawn for two hours.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Keep an eye out for activity over the next 24 hours.')).toBeNull();
+    expect(reportCopyRejection('Avoid mowing for 48 hours after the application.')).toBeNull();
+    // continuing-state credential linkers (r52)
+    expect(reportCopyRejection('The gate code remains BLUE this season.')).toBe('access_code');
     // direct enter-time instructions reject too (r51)
     expect(reportCopyRejection('Enter the treated area after thirty minutes.')).toMatch(/^banned:/);
     // was/were link a bounded UPPERCASE credential (r51)

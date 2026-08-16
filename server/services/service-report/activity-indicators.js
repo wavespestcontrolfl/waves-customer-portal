@@ -3019,11 +3019,18 @@ const LEVEL_CLAIM_NEGATED_AFTER_RE = /^\s+(?:was|were|is|are|has\s+been|had\s+be
 // though it carries no level word (codex r51): "No flea activity was
 // observed" never enters the banded claims above. Bound to the same noun
 // set; "new/additional" absences stay legal ("no new activity" can sit
-// truthfully beside persisting pressure). Treated as a band-0 claim under
-// the same ±1-band tolerance, so only moderate-and-up gauges refuse it.
+// truthfully beside persisting pressure). An explicit absence claim
+// contradicts EVERY nonzero gauge — unlike adjacent level words, "none"
+// vs "some" is not a judgment call a band tolerance should absorb
+// (codex r52).
+// Predicative/existential shapes only: a banded denial ("No HEAVY
+// activity was observed" — denies the level word, frozen legal in the
+// round-6 #3358 semantics) and compound-noun subsets ("stations had no
+// activity signs") must not read as whole-visit absence.
 const LEVEL_ABSENCE_CLAIM_RE = new RegExp(
-  `\\bno\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
-  + `|\\b${LEVEL_NOUN_SRC}\\s+(?:was|were|is|are)\\s+not\\s+(?:observed|found|noted|seen|detected|present)\\b`
+  `\\bno\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\s+(?:was|were|is|are)\\s+(?:observed|found|noted|seen|detected|present)\\b`
+  + `|(?<!${LEVEL_WORD_SRC}\\s)\\b${LEVEL_NOUN_SRC}\\s+(?:was|were|is|are)\\s+not\\s+(?:observed|found|noted|seen|detected|present)\\b`
+  + `|\\bthere\\s+(?:was|were|is|are)\\s+no\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b(?!\\s+(?:signs?|levels?))`
   + `|\\bno\\s+signs?\\s+of\\s+${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`,
   'gi',
 );
@@ -3032,7 +3039,7 @@ function activityLevelContradictions(text, finalBand) {
   const found = [];
   for (const clause of clauses(String(text || ''))) {
     if (LEVEL_CLAIM_CONDITIONAL_OPEN_RE.test(clause)) continue;
-    if (finalBand >= 2) {
+    {
       for (const match of clause.matchAll(new RegExp(LEVEL_ABSENCE_CLAIM_RE.source, 'gi'))) {
         const before = clause.slice(0, match.index);
         const afterClause = clause.slice(match.index + match[0].length);
@@ -3278,7 +3285,7 @@ function buildTodaysResult({
       // presence-state phrasing ("was present", "the palm had a conk",
       // "is showing a conk") claims presence like observed/found do
       // (codex r51)
-      const GANODERMA_PRESENT_RE = /\b(?:observed|found|noted|saw|spotted|possible|suspected)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were|is|are)\s+(?:observed|found|noted|seen|present|visible|evident|developing|growing|forming)\b|\b(?:has|have|had|showing|shows?|showed|developed|revealed)\b[^.!?]{0,30}\b(?:ganoderma|conks?)\b/i;
+      const GANODERMA_PRESENT_RE = /\b(?:observed|found|noted|saw|spotted|possible|suspected)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were|is|are)\s+(?:observed|found|noted|seen|present|visible|evident|developing|growing|forming)\b|\b(?:has|have|had|showing|shows?|showed|developed|revealed)\b[^.!?]{0,30}\b(?:ganoderma|conks?)\b|\bthere\s+(?:was|were|is|are|appeared?\s+to\s+be)\s+(?:a\s+|an\s+|one\s+|some\s+)?(?:possible\s+|suspected\s+)*(?:ganoderma|conks?)\b/i;
       const gRecorded = String(values.ganoderma_conk_observed || '');
       const gAbsentClaim = GANODERMA_ABSENT_RE.test(tsBodyText);
       // strip absence phrasing first so "no conks were observed" never
@@ -3783,6 +3790,28 @@ function buildTodaysResult({
  * Zero-state rule: only null/undefined/'' are skipped when building items.
  * 0, false, and "none"-class select values are results and are included.
  */
+// Screens a reviewed report body against ONE section's recorded findings
+// regardless of which snapshot carries the body (codex r52 #3420): a
+// primary-carried body must not contradict a customer-facing companion's
+// card. Runs the value-driven guards the branches apply when they consume
+// the body themselves — trap setup, trap/station counts, and the
+// level-band screen for a gauge score. Value-driven means sections
+// without those fields screen nothing.
+function typedBodyContradictions(projectType, values = {}, score = null, body = '') {
+  const text = String(body || '');
+  if (!text.trim()) return [];
+  const vals = values && typeof values === 'object' && !Array.isArray(values) ? values : {};
+  const found = [];
+  if (projectType === 'rodent_trapping' && isInitialRodentTrapSetup(projectType, 1, vals)) {
+    found.push(...setupContradictions(text));
+  }
+  found.push(...countContradictions(text, vals));
+  const numericScore = Number.isInteger(score) ? score : Number.parseInt(score, 10);
+  const band = levelBandForScore(Number.isInteger(numericScore) ? numericScore : null);
+  if (band) found.push(...activityLevelContradictions(text, band));
+  return found;
+}
+
 function buildTypedReportSnapshot({
   projectType,
   values = {},
@@ -4027,8 +4056,13 @@ const BANNED_CUSTOMER_COPY = [
   // direct enter/occupancy instructions state the same timing without a
   // "re-" prefix ("Enter the treated area after thirty minutes") —
   // codex r51
-  new RegExp(`\\b(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|dry(?:ing|s)?|dried)\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}\\s*(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
-  new RegExp(`\\b${TIME_FIGURE_SRC}\\s*${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|dry(?:ing)?|dried)\\b`, 'i'),
+  // keep-out / stay-off / avoid-the-treated-area instructions state the
+  // same fixed re-entry window from the exclusion side (codex r52);
+  // "keep an eye out" carries no of/off/away-from and stays legal, and
+  // "avoid" is scoped to treated-surface nouns so agronomic aftercare
+  // ("avoid mowing for 48 hours") stays legal too
+  new RegExp(`\\b(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|dry(?:ing|s)?|dried)\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}\\s*(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
+  new RegExp(`\\b${TIME_FIGURE_SRC}\\s*${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|dry(?:ing)?|dried)\\b`, 'i'),
 ];
 
 function findBannedCustomerCopy(text) {
@@ -4065,6 +4099,7 @@ module.exports = {
   trendDirection,
   buildTodaysResult,
   buildTypedReportSnapshot,
+  typedBodyContradictions,
   isInitialRodentTrapSetup,
   setupContradictions,
   countContradictions,
