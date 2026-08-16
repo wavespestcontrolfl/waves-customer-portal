@@ -47,9 +47,14 @@ function sortedIds(value) {
   return arr.map(String).sort();
 }
 
-async function setCaseState(caseRow, patch) {
+async function setCaseState(caseRow, patch, { fromState = 'approved' } = {}) {
+  // State-fenced (codex gh-r8): pre-claim transitions run while the row
+  // should still be 'approved' — a concurrent invocation that WON the
+  // approved→dialing claim must not have its live 'dialing' state
+  // clobbered by this loser's expired/cancelled verdict. The post-dial
+  // failure path passes fromState 'dialing' (it holds the claim).
   const [updated] = await db('collection_cases')
-    .where({ id: caseRow.id, case_version: caseRow.case_version })
+    .where({ id: caseRow.id, case_version: caseRow.case_version, current_state: fromState })
     .update({ ...patch, updated_at: db.fn.now() })
     .returning('*');
   return updated || null;
@@ -339,7 +344,7 @@ async function originateCollectionCall(caseId, { now = new Date() } = {}) {
       approved_at: null,
       approval_expires_at: null,
       hold_reason: 'dial_failed',
-    }).catch(() => {});
+    }, { fromState: 'dialing' }).catch(() => {});
     return { dialed: false, reason: 'dial_failed' };
   }
 }

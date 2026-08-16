@@ -2236,7 +2236,7 @@ router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) 
     }
     const caseRow = await db('collection_cases')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'current_state', 'case_version', 'idempotency_key');
+      .first('id', 'customer_id', 'current_state', 'case_version', 'idempotency_key', 'hold_reason');
     if (!caseRow) return res.status(404).json({ error: 'case_not_found' });
 
     const actor = `admin:${req.technician?.email || req.technicianId || 'unknown'}`;
@@ -2249,6 +2249,13 @@ router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) 
       // for this customer refuses (two pipelines / dispute-hold bypass).
       const { withCaseLock } = require('../services/collections/case-lock');
       const promoted = await withCaseLock(caseRow.customer_id, async (trx) => {
+        // Owner re-read IN the lock (codex gh-r8): a merge committed since
+        // our read may have repointed the row — locking the stale owner
+        // would govern the wrong customer. Update fences customer_id too.
+        const current = await trx('collection_cases')
+          .where({ id: caseRow.id })
+          .first('customer_id');
+        if (!current || String(current.customer_id) !== String(caseRow.customer_id)) return false;
         const liveElsewhere = await trx('collection_cases')
           .where({ customer_id: caseRow.customer_id })
           .whereIn('current_state', ['approved', 'dialing', 'held'])
@@ -2256,7 +2263,7 @@ router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) 
           .first('id');
         if (liveElsewhere) return 'live_elsewhere';
         const updated = await trx('collection_cases')
-          .where({ id: caseRow.id, current_state: caseRow.current_state, case_version: caseRow.case_version })
+          .where({ id: caseRow.id, customer_id: caseRow.customer_id, current_state: caseRow.current_state, case_version: caseRow.case_version })
           .update({
             current_state: 'approved',
             approved_by: actor,
@@ -2293,6 +2300,10 @@ router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) 
           approved_by: null,
           approved_at: null,
           approval_expires_at: null,
+          // Restore the pre-promotion hold_reason (codex gh-r8): promotion
+          // nulls it, and a dial_failed park that loses its marker through
+          // promote+revert would re-enter the automatic queue silently.
+          hold_reason: caseRow.hold_reason ?? null,
           updated_at: db.fn.now(),
         })
         .catch((err) => logger.warn(`[collections-dial] admin-promotion revert failed for case ${caseRow.id}: ${err.message} — approval expiry (24h) is the backstop`));

@@ -311,6 +311,14 @@ async function runShadowSweep({ now = new Date() } = {}) {
         // The concurrent promotion wins cleanly; the unique idempotency_key
         // backstops the race either way.
         const updated = await withCaseLock(customerId, async (trx) => {
+          // Owner re-read IN the lock (codex gh-r8): a merge committed
+          // since our read may have repointed this row to another
+          // customer — rotating it under the stale owner's lock would
+          // bypass the real owner's live/held check.
+          const currentOwner = await trx('collection_cases')
+            .where({ id: existing.id })
+            .first('customer_id');
+          if (!currentOwner || String(currentOwner.customer_id) !== String(customerId)) return null;
           // In-lock live re-check (codex gh-r5): the promote paths take
           // this same customer lock, so a live/held row seen here is
           // committed truth — a 'proposed' row promoted between our reads
@@ -321,7 +329,7 @@ async function runShadowSweep({ now = new Date() } = {}) {
             .first('id');
           if (live) return null;
           const [row] = await trx('collection_cases')
-            .where({ id: existing.id, case_version: existing.case_version, current_state: existing.current_state })
+            .where({ id: existing.id, customer_id: customerId, case_version: existing.case_version, current_state: existing.current_state })
             .update({ ...patch, updated_at: trx.fn.now() })
             .returning('*');
           return row || null;

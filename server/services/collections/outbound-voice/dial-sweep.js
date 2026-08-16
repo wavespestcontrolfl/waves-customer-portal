@@ -54,6 +54,15 @@ async function promoteForAutoDial(caseRow, now) {
   // customer, promoting this one would run two pipelines (or bypass a
   // dispute hold). The shadow sweep's rotation takes the same lock.
   return withCaseLock(caseRow.customer_id, async (trx) => {
+    // Owner re-read IN the lock (codex gh-r8): a customer merge committed
+    // between the candidate read and this lock can have repointed the row —
+    // the snapshot's lock and sibling check would then govern the WRONG
+    // customer. A moved row stands down; it re-enters next run under its
+    // real owner. The update also fences customer_id as the belt.
+    const current = await trx('collection_cases')
+      .where({ id: caseRow.id })
+      .first('customer_id');
+    if (!current || String(current.customer_id) !== String(caseRow.customer_id)) return false;
     const liveElsewhere = await trx('collection_cases')
       .where({ customer_id: caseRow.customer_id })
       .whereIn('current_state', ['approved', 'dialing', 'held'])
@@ -61,7 +70,7 @@ async function promoteForAutoDial(caseRow, now) {
       .first('id');
     if (liveElsewhere) return false;
     const updated = await trx('collection_cases')
-      .where({ id: caseRow.id, current_state: caseRow.current_state, case_version: caseRow.case_version })
+      .where({ id: caseRow.id, customer_id: caseRow.customer_id, current_state: caseRow.current_state, case_version: caseRow.case_version })
       .update({
         current_state: 'approved',
         approved_by: 'system:autodial',
@@ -96,6 +105,10 @@ async function revertAutoPromotion(caseRow, toState) {
       approved_by: null,
       approved_at: null,
       approval_expires_at: null,
+      // Restore the pre-promotion hold_reason (codex gh-r8): promotion
+      // nulls it, and losing a 'dial_failed' park through promote+revert
+      // would silently re-admit the case to the automatic queue.
+      hold_reason: caseRow.hold_reason ?? null,
       updated_at: db.fn.now(),
     })
     .catch((err) => logger.warn(`[collections-autodial] revert failed for case ${caseRow.id}: ${err.message} — approval expiry (24h) is the backstop`));
@@ -179,7 +192,7 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
     .orderBy('created_at', 'asc')
     // Read a few more than the cap: policy refusals shouldn't starve a run.
     .limit(cap * 5)
-    .select('id', 'customer_id', 'current_state', 'case_version', 'idempotency_key');
+    .select('id', 'customer_id', 'current_state', 'case_version', 'idempotency_key', 'hold_reason');
 
   let dialed = 0;
   let refused = 0;
@@ -201,12 +214,15 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
     }
     if (!holds) continue; // someone else moved it — stand down
     promoted++;
-    await retireProposalCard(caseRow.idempotency_key);
     try {
       const result = await originateCollectionCall(caseRow.id, { now });
       if (result.dialed || result.reason === 'dial_failed') {
         // A real dial attempt (even a failed one) consumes pilot pace.
         dialed++;
+        // Retire the proposal card only once a call actually went out
+        // (codex gh-r8): dial_failed parks the case for SUPERVISED
+        // reapproval, and the card is the operator's retry surface.
+        if (result.dialed) await retireProposalCard(caseRow.idempotency_key);
       } else {
         // Refusal — the cap is untouched. Origination moves the case
         // itself for terminal refusals (cancelled/expired/proposed), but

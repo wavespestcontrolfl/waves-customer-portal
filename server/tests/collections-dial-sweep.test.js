@@ -56,7 +56,12 @@ function armTransaction() {
 }
 
 function caseRow(id, state = 'shadow') {
-  return { id, current_state: state, case_version: 1 };
+  return { id, customer_id: 'cust-1', current_state: state, case_version: 1 };
+}
+
+// In-lock owner re-read chain (gh-r8): returns the matching owner.
+function ownerChain() {
+  return promoteChain(0, { first: { customer_id: 'cust-1' } });
 }
 
 beforeEach(() => {
@@ -108,14 +113,14 @@ test('promotes a shadow candidate with the guarded fence and dials it', async ()
   armGates();
   const cChain = candidateChain([caseRow('case-1')]);
   const pChain = promoteChain(1);
-  const queues = [promoteChain(0), /* reclaim */ cChain, promoteChain(0, {}), pChain]; // live-check then promote
+  const queues = [promoteChain(0), /* reclaim */ cChain, ownerChain(), promoteChain(0, {}), pChain]; // live-check then promote
   db.mockImplementation(() => queues.shift());
   const res = await runCollectionsDialSweep({ now: NOW });
   expect(res).toMatchObject({ skipped: false, promoted: 1, dialed: 1, refused: 0 });
   // Candidate query shape.
   expect(cChain.whereIn).toHaveBeenCalledWith('current_state', ['shadow', 'proposed']);
   // Guarded promote: state + version fence, system stamp, 24h expiry.
-  expect(pChain.where).toHaveBeenCalledWith({ id: 'case-1', current_state: 'shadow', case_version: 1 });
+  expect(pChain.where).toHaveBeenCalledWith({ id: 'case-1', customer_id: 'cust-1', current_state: 'shadow', case_version: 1 });
   const patch = pChain.update.mock.calls[0][0];
   expect(patch.current_state).toBe('approved');
   expect(patch.approved_by).toBe('system:autodial');
@@ -125,7 +130,7 @@ test('promotes a shadow candidate with the guarded fence and dials it', async ()
 
 test('a LOST promote stands down — no dial for that case', async () => {
   armGates();
-  const queues = [promoteChain(0), /* reclaim */ candidateChain([caseRow('case-1')]), promoteChain(0, {}), promoteChain(0)];
+  const queues = [promoteChain(0), /* reclaim */ candidateChain([caseRow('case-1')]), ownerChain(), promoteChain(0, {}), promoteChain(0)];
   db.mockImplementation(() => queues.shift());
   const res = await runCollectionsDialSweep({ now: NOW });
   expect(res).toMatchObject({ promoted: 0, dialed: 0 });
@@ -139,9 +144,9 @@ test('the cap counts dial ATTEMPTS; policy refusals pass through without consumi
   const queues = [
     promoteChain(0), // reclaim
     candidateChain(rows),
-    promoteChain(0, {}), promoteChain(1), promoteChain(1), // c1: live, promote, revert
-    promoteChain(0, {}), promoteChain(1), // c2: live, promote
-    promoteChain(0, {}), promoteChain(1), // c3: live, promote
+    ownerChain(), promoteChain(0, {}), promoteChain(1), promoteChain(1), // c1: live, promote, revert
+    ownerChain(), promoteChain(0, {}), promoteChain(1), // c2: live, promote
+    ownerChain(), promoteChain(0, {}), promoteChain(1), // c3: live, promote
   ];
   db.mockImplementation(() => queues.shift());
   originateCollectionCall
@@ -172,7 +177,7 @@ test('an unexpected originate THROW is treated as an attempt (conservative pace)
   armGates();
   const rows = [caseRow('c1'), caseRow('c2')];
   // c1: promote, (throw), revert; c2: promote — the throw path reverts too.
-  const queues = [promoteChain(0), /* reclaim */ candidateChain(rows), promoteChain(0,{}), promoteChain(1), promoteChain(1), promoteChain(0,{}), promoteChain(1)];
+  const queues = [promoteChain(0), /* reclaim */ candidateChain(rows), ownerChain(), promoteChain(0,{}), promoteChain(1), promoteChain(1), ownerChain(), promoteChain(0,{}), promoteChain(1)];
   db.mockImplementation(() => queues.shift());
   originateCollectionCall
     .mockRejectedValueOnce(new Error('unexpected'))
@@ -186,7 +191,7 @@ describe('gh-r1', () => {
   test('a TRANSIENT pre-dial refusal reverts OUR promotion back to proposed (guarded on the autodial actor)', async () => {
     armGates();
     const revert = promoteChain(1);
-    const queues = [promoteChain(0), /* reclaim */ candidateChain([caseRow('c1')]), promoteChain(0,{}), promoteChain(1), revert];
+    const queues = [promoteChain(0), /* reclaim */ candidateChain([caseRow('c1')]), ownerChain(), promoteChain(0,{}), promoteChain(1), revert];
     db.mockImplementation(() => queues.shift());
     originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'relay_unavailable' });
     const res = await runCollectionsDialSweep({ now: NOW });
@@ -202,13 +207,13 @@ describe('gh-r1', () => {
 
   test('a refusal origination already resolved (dial_failed path) never triggers the revert', async () => {
     armGates();
-    const queues = [promoteChain(0), /* reclaim */ candidateChain([caseRow('c1')]), promoteChain(0, {}), promoteChain(1)];
+    const queues = [promoteChain(0), /* reclaim */ candidateChain([caseRow('c1')]), ownerChain(), promoteChain(0, {}), promoteChain(1)];
     db.mockImplementation(() => queues.shift());
     originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'dial_failed' });
     const res = await runCollectionsDialSweep({ now: NOW });
     expect(res).toMatchObject({ dialed: 1, refused: 0 });
     // db calls: candidates + in-lock live-check + promote — no revert query.
-    expect(db).toHaveBeenCalledTimes(4); // reclaim + candidates + live-check + promote
+    expect(db).toHaveBeenCalledTimes(5); // reclaim + candidates + owner + live-check + promote
   });
 });
 
@@ -219,7 +224,7 @@ describe('gh-r2', () => {
     armGates();
     const revert = promoteChain(1);
     // queues: candidates, promote, revert (no idempotency_key ⇒ no card query)
-    const queues = [promoteChain(0), /* reclaim */ candidateChain([caseRow('c1')]), promoteChain(0,{}), promoteChain(1), revert];
+    const queues = [promoteChain(0), /* reclaim */ candidateChain([caseRow('c1')]), ownerChain(), promoteChain(0,{}), promoteChain(1), revert];
     db.mockImplementation(() => queues.shift());
     originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'already_dialed' });
     await runCollectionsDialSweep({ now: NOW });
@@ -229,7 +234,7 @@ describe('gh-r2', () => {
   test('an originate THROW also reverts our promotion (guarded)', async () => {
     armGates();
     const revert = promoteChain(1);
-    const queues = [promoteChain(0), /* reclaim */ candidateChain([caseRow('c1')]), promoteChain(0,{}), promoteChain(1), revert];
+    const queues = [promoteChain(0), /* reclaim */ candidateChain([caseRow('c1')]), ownerChain(), promoteChain(0,{}), promoteChain(1), revert];
     db.mockImplementation(() => queues.shift());
     originateCollectionCall.mockRejectedValue(new Error('infra blip'));
     const res = await runCollectionsDialSweep({ now: NOW });
@@ -244,7 +249,7 @@ describe('gh-r2', () => {
     const queues = [
       promoteChain(0), // reclaim
       candidateChain([{ ...caseRow('c1'), idempotency_key: 'collections:cust:1:14' }]),
-      promoteChain(0, {}), promoteChain(1), card,
+      ownerChain(), promoteChain(0, {}), promoteChain(1), card,
     ];
     db.mockImplementation(() => queues.shift());
     originateCollectionCall.mockResolvedValue({ dialed: true, reason: 'dialed' });
@@ -295,7 +300,7 @@ describe('gh-r7', () => {
   test('flipping the autodial gate MID-RUN stops before the next promotion', async () => {
     armGates();
     const rows = [caseRow('c1'), caseRow('c2')];
-    const queues = [promoteChain(0), candidateChain(rows), promoteChain(0, {}), promoteChain(1)];
+    const queues = [promoteChain(0), candidateChain(rows), ownerChain(), promoteChain(0, {}), promoteChain(1)];
     db.mockImplementation(() => queues.shift());
     originateCollectionCall.mockImplementation(async () => {
       delete process.env.GATE_VOICE_LATE_PAYMENT_AUTODIAL; // incident flip during c1's dial

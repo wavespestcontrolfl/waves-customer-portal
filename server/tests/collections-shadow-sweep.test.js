@@ -229,12 +229,12 @@ describe('idempotency + versioning', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
+      collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), chain({ first: { customer_id: 'cust-1' } }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
 
-    expect(caseUpdate.where).toHaveBeenCalledWith({ id: 'case-1', case_version: 1, current_state: 'shadow' });
+    expect(caseUpdate.where).toHaveBeenCalledWith({ id: 'case-1', customer_id: 'cust-1', case_version: 1, current_state: 'shadow' });
     expect(caseUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       case_version: 2,
       eligible_balance_snapshot: 15300,
@@ -389,7 +389,7 @@ describe('retirement + tier rotation', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: { ...INVOICE, due_date: '2026-07-08' } })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ result: [] }), chain({ first: existing }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
+      collection_cases: [chain({ result: [] }), chain({ first: existing }), chain({ first: { customer_id: 'cust-1' } }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
@@ -421,7 +421,7 @@ describe('r4: unpaid candidates + lapsed reactivation', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ result: [] }), chain({ first: lapsed }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
+      collection_cases: [chain({ result: [] }), chain({ first: lapsed }), chain({ first: { customer_id: 'cust-1' } }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
@@ -494,6 +494,7 @@ test('rotating the case version retires the previous version card', async () => 
     collection_cases: [
       chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] }), // self-heal read (single row)
       chain({ first: existing }),
+      chain({ first: { customer_id: 'cust-1' } }), // in-lock owner re-read
       chain({ first: undefined }), // in-lock live-check
       chain({ returning: [{ id: 'case-1', case_version: 2, eligible_balance_snapshot: 12800 }] }),
       chain({ result: [] }),
@@ -525,7 +526,7 @@ test('the rotation update fences on the originally read current_state', () => {
   const grepSrc = require('fs').readFileSync(
     require.resolve('../services/collections/shadow-sweep'), 'utf8',
   );
-  expect(grepSrc).toContain("{ id: existing.id, case_version: existing.case_version, current_state: existing.current_state }");
+  expect(grepSrc).toContain("{ id: existing.id, customer_id: customerId, case_version: existing.case_version, current_state: existing.current_state }");
 });
 
 

@@ -121,16 +121,21 @@ test('a tech token is refused — this endpoint places a phone call', async () =
 });
 
 test('a shadow case is promoted (guarded, admin-stamped, 24h expiry) and dialed', async () => {
-  const readChain = chain({ first: { id: CASE_UUID, current_state: 'shadow', case_version: 3 } });
+  const readChain = chain({ first: { id: CASE_UUID, customer_id: 'cust-1', current_state: 'shadow', case_version: 3 } });
   const promote = chain({ updateResult: 1 });
-  const queues = [readChain, chain({ first: undefined }), promote]; // live-check then promote
+  const queues = [
+    readChain,
+    chain({ first: { customer_id: 'cust-1' } }), // owner re-read
+    chain({ first: undefined }), // live-check
+    promote,
+  ];
   db.mockImplementation(() => queues.shift());
   await withServer(async (baseUrl) => {
     const res = await dial(baseUrl);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ dialed: true, reason: 'dialed' });
   });
-  expect(promote._wheres[0][0]).toEqual({ id: CASE_UUID, current_state: 'shadow', case_version: 3 });
+  expect(promote._wheres[0][0]).toEqual({ id: CASE_UUID, customer_id: 'cust-1', current_state: 'shadow', case_version: 3 });
   const patch = promote._patches[0];
   expect(patch.current_state).toBe('approved');
   expect(patch.approved_by).toBe('admin:admin@waves.test');
@@ -140,7 +145,8 @@ test('a shadow case is promoted (guarded, admin-stamped, 24h expiry) and dialed'
 
 test('a LOST promote fence ⇒ 409 case_moved, no dial', async () => {
   const queues = [
-    chain({ first: { id: CASE_UUID, current_state: 'proposed', case_version: 3 } }),
+    chain({ first: { id: CASE_UUID, customer_id: 'cust-1', current_state: 'proposed', case_version: 3 } }),
+    chain({ first: { customer_id: 'cust-1' } }), // owner re-read
     chain({ first: undefined }), // in-lock live-check
     chain({ updateResult: 0 }),
   ];
@@ -181,7 +187,8 @@ test('an already-approved case dials without a second promote', async () => {
 test('a policy refusal returns 200 with origination\'s verdict verbatim', async () => {
   originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'policy_denied', denialReasons: ['voice_contact_within_7d'] });
   const queues = [
-    chain({ first: { id: CASE_UUID, current_state: 'proposed', case_version: 1 } }),
+    chain({ first: { id: CASE_UUID, customer_id: 'cust-1', current_state: 'proposed', case_version: 1 } }),
+    chain({ first: { customer_id: 'cust-1' } }), // owner re-read
     chain({ first: undefined }), // in-lock live-check
     chain({ updateResult: 1 }),
     chain({ updateResult: 1 }), // revert after the policy refusal
@@ -242,12 +249,18 @@ test('a malformed case id ⇒ 400 before any db read (no 22P02 500s)', async () 
 });
 
 test('a successful supervised promote retires the shadow proposal card', async () => {
-  const readChain = chain({ first: { id: CASE_UUID, current_state: 'shadow', case_version: 1, idempotency_key: 'collections:c1:1:14' } });
+  const readChain = chain({ first: { id: CASE_UUID, customer_id: 'cust-1', current_state: 'shadow', case_version: 1, idempotency_key: 'collections:c1:1:14' } });
   const promote = chain({ updateResult: 1 });
   const cardChain = chain({ updateResult: 1 });
   cardChain.whereNull = jest.fn(() => cardChain);
   cardChain.whereRaw = jest.fn(() => cardChain);
-  const queues = [readChain, chain({ first: undefined }), promote, cardChain];
+  const queues = [
+    readChain,
+    chain({ first: { customer_id: 'cust-1' } }), // owner re-read
+    chain({ first: undefined }), // live-check
+    promote,
+    cardChain,
+  ];
   db.mockImplementation(() => queues.shift());
   db.raw = jest.fn((sql, b) => ({ sql, b }));
   db.fn = { now: jest.fn(() => 'NOW()') };
@@ -263,7 +276,8 @@ test('a successful supervised promote retires the shadow proposal card', async (
 // codex gh-r5 pins.
 test('promotion refuses when the customer already has a live/held case (one pipeline per customer)', async () => {
   const queues = [
-    chain({ first: { id: CASE_UUID, current_state: 'shadow', case_version: 1 } }),
+    chain({ first: { id: CASE_UUID, customer_id: 'cust-1', current_state: 'shadow', case_version: 1 } }),
+    chain({ first: { customer_id: 'cust-1' } }), // owner re-read
     chain({ first: { id: 'other-live' } }), // in-lock live-check finds one
   ];
   db.mockImplementation(() => queues.shift());
@@ -279,7 +293,8 @@ test('a pre-dial refusal reverts OUR promotion (fenced on the admin actor)', asy
   originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'relay_unavailable' });
   const revert = chain({ updateResult: 1 });
   const queues = [
-    chain({ first: { id: CASE_UUID, current_state: 'shadow', case_version: 2 } }),
+    chain({ first: { id: CASE_UUID, customer_id: 'cust-1', current_state: 'shadow', case_version: 2 } }),
+    chain({ first: { customer_id: 'cust-1' } }), // owner re-read
     chain({ first: undefined }), // live-check
     chain({ updateResult: 1 }), // promote
     revert,
@@ -302,7 +317,8 @@ test('a pre-dial refusal reverts OUR promotion (fenced on the admin actor)', asy
 test('a transient refusal leaves the proposal card standing; a real attempt retires it', async () => {
   originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'relay_unavailable' });
   const queues = [
-    chain({ first: { id: CASE_UUID, current_state: 'shadow', case_version: 1, idempotency_key: 'collections:c1:1:14' } }),
+    chain({ first: { id: CASE_UUID, customer_id: 'cust-1', current_state: 'shadow', case_version: 1, idempotency_key: 'collections:c1:1:14' } }),
+    chain({ first: { customer_id: 'cust-1' } }), // owner re-read
     chain({ first: undefined }), // live-check
     chain({ updateResult: 1 }), // promote
     chain({ updateResult: 1 }), // revert (NOT the card — no whereRaw assertion)
@@ -313,8 +329,8 @@ test('a transient refusal leaves the proposal card standing; a real attempt reti
     const res = await dial(baseUrl);
     expect(res.status).toBe(200);
   });
-  // Exactly four db calls: read, live-check, promote, revert — no card query.
-  expect(consumed).toHaveLength(4);
+  // read, owner, live-check, promote, revert — no card query.
+  expect(consumed).toHaveLength(5);
   expect(queues).toHaveLength(0);
 });
 
@@ -323,7 +339,8 @@ test('a transient refusal leaves the proposal card standing; a real attempt reti
 test('a dial_failed attempt keeps the proposal card (no card query issued)', async () => {
   originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'dial_failed' });
   const queues = [
-    chain({ first: { id: CASE_UUID, current_state: 'shadow', case_version: 1, idempotency_key: 'collections:c1:1:14' } }),
+    chain({ first: { id: CASE_UUID, customer_id: 'cust-1', current_state: 'shadow', case_version: 1, idempotency_key: 'collections:c1:1:14' } }),
+    chain({ first: { customer_id: 'cust-1' } }), // owner re-read
     chain({ first: undefined }), // live-check
     chain({ updateResult: 1 }), // promote
   ];
@@ -333,6 +350,6 @@ test('a dial_failed attempt keeps the proposal card (no card query issued)', asy
     const res = await dial(baseUrl);
     expect(res.status).toBe(200);
   });
-  expect(consumed).toHaveLength(3); // read, live-check, promote — no card, no revert
+  expect(consumed).toHaveLength(4); // read, owner, live-check, promote — no card, no revert
   expect(queues).toHaveLength(0);
 });
