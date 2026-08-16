@@ -1004,6 +1004,10 @@ const COMMON_PROSE_WORDS = new Set([
 const GROUNDED_ONLY_WORDS = new Set([
   'bronze', 'silver', 'gold', 'platinum',
   'accepted', 'accepting', 'initial', 'initially', 'recurring',
+  // r77: ALL cadence wording binds to visit facts, not just initial/
+  // recurring — 'Weekly service' on a quarterly visit contradicts the
+  // authoritative cadence.
+  'annual', 'annually', 'weekly', 'monthly', 'quarterly', 'biweekly', 'bimonthly',
   // r5: "Customer available Monday" is a scheduling fact, not prose.
   'available', 'availability',
   // r10: money words require a money fact VALUE in every field — an
@@ -1283,6 +1287,9 @@ function findUngroundedClaim(body, grounding) {
     // the completed-work guard still rejects history phrasing without a
     // lastVisit.
     ...(grounding.llmFacts?.visit ? ['treatment'] : []),
+    // An estimate's monthlyTotal IS the monthly-cadence fact (r77) —
+    // the amount lives under a key, and keys never join the value pool.
+    ...((grounding.llmFacts?.openScope?.pendingEstimate?.monthlyTotal ?? grounding.llmFacts?.openScope?.sourceEstimate?.monthlyTotal) != null ? ['monthly'] : []),
     // A present membership object IS the membership fact (r29).
     ...(grounding.llmFacts?.membership ? ['membership', 'member'] : []),
     // The overdue_balance flag IS billing evidence — its detail ('$100.00
@@ -1479,7 +1486,7 @@ function findUngroundedClaim(body, grounding) {
   }
   // Completed-work phrasing in ANY field needs a prior visit (r55).
   if (!grounding.llmFacts?.lastVisit
-    && /\b(?:service|work|treatment|visit|inspection|maintenance|application|spray(?:ing)?)\s+(?:was\s+|ha[sd]\s+(?:(?:now|since|recently|already|just)\s+)?been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:an?\s+|the\s+)?(?:(?!of\b)\w+\s+){0,2}(?:service|work|treatment|inspection|maintenance|application|spray(?:ing)?)\b|\bprior\s+(?:inspection|maintenance|application)\b/.test(outputText)) {
+    && /\b(?:service|work|treatment|visit|inspection|maintenance|application|spray(?:ing)?)\s+(?:was\s+|ha[sd]\s+(?:(?:now|since|recently|already|just)\s+)?been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:an?\s+|the\s+)?(?:(?!of\b)\w+\s+){0,2}(?:service|work|treatment|inspection|maintenance|application|spray(?:ing)?)\b|\bprior\s+(?:inspection|maintenance|application)\b|\b(?:was|were|ha[sd]\s+been)\s+(?:sprayed|treated|serviced)\b|\btech(?:nician)?\s+(?:sprayed|treated|serviced)\b|\b(?:sprayed|treated|serviced)\s+(?:the\s+)?\w+(?:\s+\w+)?\s+(?:yesterday|previously|earlier|last\s+(?:week|month|visit|time))\b/.test(outputText)) {
     return { kind: 'fabricated_history', term: 'no prior visit on file' };
   }
   // Spelled-out short quantities before time units are numeric claims —
@@ -1589,6 +1596,44 @@ function findUngroundedClaim(body, grounding) {
     if (!inVisit && !inGlobalPhrase) {
       return { kind: 'appointment_state', term: status };
     }
+  }
+  // Active-voice status claims ("Customer confirmed the appointment")
+  // assert the same current state as the noun-first forms (r77).
+  for (const m of currentClaimText.matchAll(/\b(?:customer|client|resident|office|tech(?:nician)?)\s+(?:ha[sd]\s+)?(?:(never|not)\s+)?(confirmed|cancelled|canceled|rescheduled|moved|skipped|missed|completed)\s+(?:the\s+|an?\s+|their\s+|his\s+|her\s+)?(?:appointments?|visits?)\b/g)) {
+    const avNegated = Boolean(m[1]);
+    const avStatus = m[2].replace(/^canceled$/, 'cancelled');
+    const avForms = [...new Set([...wordVariants(avStatus), avStatus])];
+    const avFactNeg = avForms.some((v) => negNear(currentFactValueText, v));
+    if (avNegated !== avFactNeg && (avNegated || avFactNeg)) return { kind: 'appointment_state', term: avStatus };
+    if (avNegated && avFactNeg) continue;
+    const avInVisit = avForms.some((v) => visitValueText.includes(v));
+    const avInPhrase = avForms.some((v) => new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\b${v}\\b[^.;!?]{0,30}\\b(?:appointments?|visits?)\\b|\\b(?:appointments?|visits?)\\b[^.;!?]{0,30}\\b${v}\\b`).test(currentFactValueText));
+    if (!avInVisit && !avInPhrase) return { kind: 'appointment_state', term: avStatus };
+  }
+  // First-visit synonyms bind to the new-customer fact (r77) — a
+  // returning customer must not be cached as a first-time stop, and an
+  // unreadable-history outage must fail closed.
+  if (/\bnew\s+customer\b|\bfirst\s+(?:visit|service|appointment)\b|\bno\s+prior\s+(?:visits?|services?)\b|\bno\s+service\s+history\b|\bnever\s+(?:been\s+)?serviced\b/.test(outputText)
+    && grounding.llmFacts?.visit?.newCustomer !== true) {
+    return { kind: 'novel_term', term: 'new customer' };
+  }
+  // Balance-state claims need financial evidence in EITHER polarity —
+  // the balance vocabulary is common prose (r77).
+  if (/\b(?:owes?|owed)\b|\bbalance\s+(?:is\s+)?(?:due|owed|outstanding|zero|paid|clear(?:ed)?)\b|\b(?:has|have)\s+(?:a\s+|an\s+|no\s+)?(?:outstanding\s+)?balance\b|\bno\s+balance\b/.test(outputText)
+    && !/\b(?:balance|owes?|owed|outstanding|overdue|past\s+due|amount\s+due)\b/.test(groundedValueText)
+    && !(grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')) {
+    return { kind: 'novel_term', term: 'balance' };
+  }
+  // 'one-time' cadence is hyphen-split by the word scans — checked as a
+  // phrase (r77).
+  if (/\bone[-\s]?time\b/.test(outputText) && !/\bone[-\s]?time\b/.test(groundedValueText)) {
+    return { kind: 'novel_term', term: 'one-time' };
+  }
+  // Implicit customer-presence claims ("will be home Monday") are
+  // availability claims (r77).
+  if (/\b(?:customer|client|resident)\b[^.;!?]{0,15}\b(?:will\s+be\s+(?:home|there|present)|can\s+meet|will\s+meet|plans?\s+to\s+be\s+(?:home|there))\b/.test(outputText)
+    && !/\bavailab|\b(?:will\s+be|is|are)\s+(?:home|there|present)\b|\bcan\s+meet\b|\bworks?\s+for\b/.test(groundedValueText)) {
+    return { kind: 'novel_term', term: 'availability' };
   }
   // Claimed customer CONTACT REQUESTS ("asked for a phone call") are
   // factual asks — the channel and a request verb must both appear in the
@@ -1986,7 +2031,10 @@ function findUngroundedClaim(body, grounding) {
       && /\b(?:customer|client|resident|owner|their|has|have)\b|\b(?:at|on|in)\s+(?:the\s+|this\s+)?(?:property|premises|site|home|house|yard)\b/.test(s));
     if (!petEvidence) return { kind: 'novel_term', term: 'pet' };
   }
-  for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability', 'sensitivity', 'sensitivities', 'sensitive', 'recurring', 'initial']) {
+  for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability', 'sensitivity', 'sensitivities', 'sensitive', 'recurring', 'initial',
+    // r77: pest-presence polarity — 'reports no termites' must not
+    // ground 'has termites'.
+    'ant', 'ants', 'termite', 'termites', 'roach', 'roaches', 'spider', 'spiders', 'rodent', 'rodents', 'mouse', 'mice', 'rat', 'rats', 'wasp', 'wasps', 'flea', 'fleas', 'tick', 'ticks', 'mosquito', 'mosquitoes', 'bee', 'bees']) {
     if (!new RegExp(`\\b${pw}\\b`).test(outputText)) continue;
     const matchedVariants = wordVariants(pw).filter((v) => new RegExp(`\\b${v}`).test(groundedValueText));
     if (!matchedVariants.length) continue; // ungrounded handling stays with the word passes

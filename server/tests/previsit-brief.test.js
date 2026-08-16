@@ -4145,3 +4145,66 @@ describe('codex #3423 r76 — modifier treatments, photo modifiers, technician c
     expect(validateBriefJson({ ...BASE, customer_context: 'Interior service planned' }, optOut).reason).toBeTruthy();
   });
 });
+
+describe('codex #3423 r77 — active-voice statuses, verb-form history, balance state, cadence, pest polarity, implicit availability, first-visit identity', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+
+  test('active-voice status claims bind to the visit state', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const cancelledFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, recentCalls: ['the appointment was cancelled'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer confirmed the appointment' }, cancelledFact).reason).toBeTruthy();
+    const confirmedFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, recentCalls: ['customer confirmed the appointment'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer confirmed the appointment' }, confirmedFact).body).toBeTruthy();
+  });
+
+  test('verb-form completed treatments need history', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Interior was sprayed yesterday', 'Technician sprayed the interior yesterday', 'Exterior was treated yesterday']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } }).reason).toBeTruthy();
+    }
+  });
+
+  test('balance-state claims need financial evidence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer owes a balance', 'Customer has no balance']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const owed = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer owes a balance of $86.60' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer owes a balance' }, owed).body).toBeTruthy();
+  });
+
+  test('cadence wording binds to visit facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const quarterly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Quarterly Pest Control', isRecurring: true } } };
+    for (const s of ['Weekly service is scheduled', 'Service is annual', 'Customer prefers one-time service']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, quarterly).reason).toBeTruthy();
+    }
+    expect(validateBriefJson({ ...BASE, customer_context: 'Quarterly service is scheduled' }, quarterly).body).toBeTruthy();
+  });
+
+  test('negated pest facts cannot ground affirmative presence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const noTermites = { catalogVocabulary: { names: [], targets: ['termites'] }, llmFacts: { flags: [{ detail: 'customer reports no termites' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has termites' }, noTermites).reason).toBeTruthy();
+    const termitesSeen = { catalogVocabulary: { names: [], targets: ['termites'] }, llmFacts: { flags: [{ detail: 'customer reports termites in the garage' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has termites in the garage' }, termitesSeen).body).toBeTruthy();
+  });
+
+  test('implicit presence claims are availability claims', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer will be home Monday' }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { scheduledDate: '2026-08-17' } } }).reason).toBeTruthy();
+    const homeFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer will be home monday' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer will be home Monday' }, homeFact).body).toBeTruthy();
+  });
+
+  test('first-visit synonyms bind to the new-customer fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const returning = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { newCustomer: false }, lastVisit: { recap: 'serviced in july' } } };
+    for (const s of ['New customer', 'First visit', 'Customer has no prior visits', 'No service history']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, returning).reason).toBeTruthy();
+    }
+    const fresh = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { newCustomer: true } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'First visit for a new customer' }, fresh).body).toBeTruthy();
+  });
+});
