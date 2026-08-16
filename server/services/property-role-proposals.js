@@ -40,7 +40,9 @@ const REASON_CODE = 'property_role_confirm';
 // 'rescheduled' (codex #3418 r7): a rescheduled row is a superseded
 // historical appointment — the scheduling/conflict/reminder predicates all
 // exclude it alongside cancelled; only its live replacement should be pinned.
-const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'rescheduled'];
+// 'no_show' (codex #3418 r22) is settled history too — the repo's other
+// terminal sets (e.g. dispatch-assignment) include it.
+const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'rescheduled', 'no_show'];
 // Occupancies that earn a human-readable label suggestion on a flip/change.
 const LABEL_BY_OCCUPANCY = { rental_investment: 'Rental', seasonal: 'Seasonal' };
 
@@ -856,6 +858,40 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         // stampedDivergesSql disables that fallback and the stop goes
         // coordless. Stamp the old primary's own coords onto exactly those
         // rows; real coordinates are never overwritten (NULL-only fence).
+        const oldPrimaryLinkedOrStamped = (qb) => qb
+          .where({ property_id: oldPrimary.id })
+          .orWhere((qb2) => qb2
+            .whereRaw('lower(service_address_line1) = lower(?)', [oldPrimary.address_line1 || ''])
+            .andWhere((qb3) => qb3
+              .whereNull('service_address_zip')
+              .orWhere('service_address_zip', oldPrimary.zip)));
+        // PARTIALLY stamped visits (codex #3418 r22): a row carrying the
+        // old primary's street but missing city/state/ZIP/unit used to be
+        // completed by dispatch's per-column customer-mirror fallback —
+        // post-flip that fallback would graft the NEW primary's locality
+        // onto the old street. Fill each missing component from the old
+        // primary itself (COALESCE = never overwrites a present value).
+        {
+          const stampCompletion = {
+            service_address_line2: trx.raw('COALESCE(service_address_line2, ?)', [oldPrimary.address_line2 ?? null]),
+            service_address_city: trx.raw('COALESCE(service_address_city, ?)', [oldPrimary.city ?? null]),
+            service_address_state: trx.raw('COALESCE(service_address_state, ?)', [oldPrimary.state || 'FL']),
+            service_address_zip: trx.raw('COALESCE(service_address_zip, ?)', [oldPrimary.zip ?? null]),
+            updated_at: new Date(),
+          };
+          await trx('scheduled_services')
+            .where({ customer_id: customerId })
+            .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+            .where(oldPrimaryLinkedOrStamped)
+            .update(stampCompletion);
+          if (hasOngoing) {
+            await trx('scheduled_services')
+              .where({ customer_id: customerId, is_recurring: true, recurring_ongoing: true })
+              .where(oldPrimaryLinkedOrStamped)
+              .update(stampCompletion);
+          }
+        }
+
         if (oldPrimary.latitude != null && oldPrimary.longitude != null) {
           // Per-column COALESCE and an OR-null predicate (codex #3418
           // r13): dispatch's per-column customer-mirror fallback dies for
@@ -867,13 +903,7 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
             lng: trx.raw('COALESCE(lng, ?)', [oldPrimary.longitude]),
             updated_at: new Date(),
           };
-          const oldPrimaryStampMatch = (qb) => qb
-            .where({ property_id: oldPrimary.id })
-            .orWhere((qb2) => qb2
-              .whereRaw('lower(service_address_line1) = lower(?)', [oldPrimary.address_line1 || ''])
-              .andWhere((qb3) => qb3
-                .whereNull('service_address_zip')
-                .orWhere('service_address_zip', oldPrimary.zip)));
+          const oldPrimaryStampMatch = oldPrimaryLinkedOrStamped;
           const anyCoordMissing = (qb) => qb.whereNull('lat').orWhereNull('lng');
           await trx('scheduled_services')
             .where({ customer_id: customerId })

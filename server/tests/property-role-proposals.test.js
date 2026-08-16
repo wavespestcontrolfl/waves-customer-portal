@@ -360,7 +360,7 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     const pin = u.find((x) => x.table === 'scheduled_services');
     expect(pin.patch).toMatchObject({ property_id: 'prop-old', service_address_line1: '8380 Sea Breeze Ct', service_address_zip: '34212' });
     expect(pin.whereNulls).toEqual(expect.arrayContaining(['property_id', 'service_address_line1']));
-    expect(pin.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped', 'rescheduled']]);
+    expect(pin.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped', 'rescheduled', 'no_show']]);
     // 2/3. demote before promote (one_primary partial unique)
     const propUpdates = u.filter((x) => x.table === 'customer_properties');
     // The demote deliberately does NOT write occupancy — the reclassification
@@ -396,16 +396,16 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     // rows stamped to the old primary — the second scheduled_services update
     // stamps the old primary's own coords, fenced to NULL-coord rows only.
     const ssUpdates = trx._updates.filter((x) => x.table === 'scheduled_services');
-    // pin + live-series parent stamp + coord backfill (live rows) +
-    // coord backfill (live recurring template parents, r13)
-    expect(ssUpdates).toHaveLength(4);
-    const backfill = ssUpdates[2];
+    // pin + parent stamp + stamp completion (live + recurring, r22) +
+    // coord backfill (live rows + live recurring template parents)
+    expect(ssUpdates).toHaveLength(6);
+    const backfill = ssUpdates[4];
     // Per-column COALESCE fill (r13): whichever coordinate is missing is
     // filled independently — never a bare overwrite, never both-null-only.
     expect(backfill.patch.lat).toMatchObject({ __raw: expect.stringContaining('COALESCE(lat'), bindings: [27.4] });
     expect(backfill.patch.lng).toMatchObject({ __raw: expect.stringContaining('COALESCE(lng'), bindings: [-82.4] });
-    expect(backfill.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped', 'rescheduled']]);
-    const recurringBackfill = ssUpdates[3];
+    expect(backfill.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped', 'rescheduled', 'no_show']]);
+    const recurringBackfill = ssUpdates[5];
     expect(recurringBackfill.wheres[0]).toMatchObject({ is_recurring: true, recurring_ongoing: true });
   });
 
@@ -452,8 +452,9 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
       customerId: 'cust-1',
       proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
     });
-    // Pin + parent stamp only — never a backfill stamping NULL over NULL.
-    expect(trx._updates.filter((x) => x.table === 'scheduled_services')).toHaveLength(2);
+    // Pin + parent stamp + stamp completion (x2) — never a coord backfill
+    // stamping NULL over NULL.
+    expect(trx._updates.filter((x) => x.table === 'scheduled_services')).toHaveLength(4);
   });
 
   test('a COMPLETED-but-live recurring template parent is stamped to the old primary (codex r10)', async () => {

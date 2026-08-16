@@ -128,7 +128,7 @@ router.get('/', async (req, res) => {
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
-async function transitionCore({ id, nextStatus, note, assignedTo }) {
+async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdatedAt }) {
   const item = await db('triage_items').where({ id }).first();
   if (!item) return { outcome: 'not_found' };
   if (!OPEN_STATES.includes(item.status)) return { outcome: 'already', current: item.status };
@@ -169,6 +169,18 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
         .where({ call_log_id: item.call_log_id })
         .forUpdate()
         .select('id');
+    }
+    // Version-bind property-role transitions (codex #3418 r22): a
+    // force-reprocess merges refreshed proposals into this same open row,
+    // so a dismissal/resolve judged on the OLD payload must not close the
+    // newer one. Same rule as Apply — required (the lane is dark, no
+    // legacy clients); checked under the lock.
+    if (item.reason_code === 'property_role_confirm') {
+      const live = await trx('triage_items').where({ id }).first('updated_at');
+      if (!live || !expectedUpdatedAt
+        || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
+        return { outcome: 'stale_version' };
+      }
     }
     const updated = await trx('triage_items')
       .where({ id })
@@ -267,6 +279,7 @@ function sendTransitionResult(res, result, id, nextStatus) {
     case 'not_found': return res.status(404).json({ error: 'Triage item not found' });
     case 'already': return res.status(409).json({ error: `Item already ${result.current}` });
     case 'conflict': return res.status(409).json({ error: 'Item was just actioned by someone else' });
+    case 'stale_version': return res.status(409).json({ error: 'Card proposals changed since they were displayed — reload and review the latest' });
     default: return res.json({ ok: true, id, status: nextStatus });
   }
 }
@@ -284,7 +297,10 @@ async function transition(req, res, nextStatus) {
       return res.status(403).json({ error: 'Admin access required' });
     }
   }
-  const result = await transitionCore({ id, nextStatus, note, assignedTo: req.technicianId });
+  const result = await transitionCore({
+    id, nextStatus, note, assignedTo: req.technicianId,
+    expectedUpdatedAt: req.body?.expected_updated_at || null,
+  });
   return sendTransitionResult(res, result, id, nextStatus);
 }
 

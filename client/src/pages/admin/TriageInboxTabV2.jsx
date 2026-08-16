@@ -388,7 +388,9 @@ export default function TriageInboxTabV2() {
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/dismiss`, {
       method: "PUT",
-      body: JSON.stringify({ note: note || null }),
+      // expected_updated_at: version binding for property-role cards — the
+      // server 409s a dismissal judged on a since-refreshed payload.
+      body: JSON.stringify({ note: note || null, expected_updated_at: item.updated_at }),
     })
       .then(() => {
         setActioning(null);
@@ -403,6 +405,12 @@ export default function TriageInboxTabV2() {
       })
       .catch((err) => {
         setActioning(null);
+        setDismissFor(null);
+        if (err?.status === 409) {
+          load(mode, status);
+          setError("This card changed since it loaded — review the refreshed proposals before dismissing.");
+          return;
+        }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
       });
   };
@@ -414,7 +422,7 @@ export default function TriageInboxTabV2() {
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/resolve`, {
       method: "PUT",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ expected_updated_at: item.updated_at }),
     })
       .then(() => {
         setActioning(null);

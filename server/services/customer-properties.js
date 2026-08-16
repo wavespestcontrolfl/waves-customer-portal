@@ -124,6 +124,10 @@ async function ensurePrimaryProperty(customerOrId, opts = {}) {
   const { claimFence = null } = opts;
   if (claimFence && claimFence.callLogId && claimFence.procToken) {
     return db.transaction(async (trx) => {
+      // LOCK ORDER: customers row FIRST, then call_log (codex #3418 r22)
+      // — same reasoning and order as completePrimaryFromCall's fence.
+      const custId = typeof customerOrId === 'string' ? customerOrId : customerOrId?.id;
+      if (custId) await trx('customers').where({ id: custId }).forUpdate().first('id');
       const owned = await trx('call_log')
         .where({ id: claimFence.callLogId, processing_token: claimFence.procToken })
         .forUpdate()
@@ -338,6 +342,11 @@ async function completePrimaryFromCall(customerId, call = {}, { claimFence = nul
   // errors).
   if (claimFence && claimFence.callLogId && claimFence.procToken) {
     return db.transaction(async (trx) => {
+      // LOCK ORDER: customers row FIRST, then call_log (codex #3418 r22)
+      // — Apply holds the customer row before updating the same call_log
+      // row, so taking call_log first here was an AB-BA half. Same order
+      // recordCallProperty and role staging use.
+      await trx('customers').where({ id: customerId }).forUpdate().first('id');
       const owned = await trx('call_log')
         .where({ id: claimFence.callLogId, processing_token: claimFence.procToken })
         .forUpdate()
