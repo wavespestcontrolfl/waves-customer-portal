@@ -553,6 +553,17 @@ async function submitRecap({
               : {}),
           });
       }
+      // A first-time recap completion (never through /complete) has NO
+      // ledger rows for the update above to hit — the recap was the only
+      // completion path that skipped the FDACS writer entirely (codex P1
+      // r8). Run the shared idempotent writer after the sync, in the same
+      // trx: rows the loop just re-linked are already ledgered (unique
+      // service_product_id / stable record+product identity) and are
+      // skipped; anything new — a fresh recap completion, a product added
+      // on an edit — gets its compliance row with the recap's
+      // technician-confirmed rate.
+      const ComplianceService = require('./compliance');
+      await ComplianceService.createComplianceRecords(recordId, { trx });
     }
 
     // Re-completing an EXISTING record rewrites its notes / rating / products —

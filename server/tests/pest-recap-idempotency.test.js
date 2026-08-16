@@ -32,6 +32,11 @@ jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn().mockResolvedValue({ category: 'pest_control' }),
 }));
 jest.mock('../utils/datetime-et', () => ({ etDateString: () => '2026-05-29' }));
+// The FDACS writer is its own unit (compliance-ledger.test.js) — here we
+// only assert the recap invokes it in-trx after the product replace.
+jest.mock('../services/compliance', () => ({
+  createComplianceRecords: jest.fn().mockResolvedValue([]),
+}));
 
 const { transitionJobStatus } = require('../services/job-status');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -497,6 +502,48 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(patch.service_product_id).toBe('sp-1');
     expect(patch).not.toHaveProperty('application_rate');
     expect(patch).not.toHaveProperty('rate_unit');
+  });
+
+  test('a fresh recap completion runs the FDACS writer so its applications get ledgered (codex P1 r8)', async () => {
+    // No prior /complete: there are no ledger rows for the sync UPDATE to
+    // hit, so the recap must invoke the shared idempotent writer or the
+    // application never reaches the FDACS ledger / application-limit caps.
+    const { createComplianceRecords } = require('../services/compliance');
+    const store = { serviceStatus: 'scheduled', records: [] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'First-time recap completion.',
+      products: [{ product_name: 'Termidor', application_rate: '0.8', rate_unit: 'fl_oz/gal' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(createComplianceRecords).toHaveBeenCalledTimes(1);
+    expect(createComplianceRecords).toHaveBeenCalledWith(result.recordId, { trx: knex });
+  });
+
+  test('an empty product submit does not invoke the FDACS writer', async () => {
+    const { createComplianceRecords } = require('../services/compliance');
+    const store = { serviceStatus: 'completed', records: [{ id: 'rec-old', recap_sms_sent_at: null }] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Re-send only.',
+      products: [],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(createComplianceRecords).not.toHaveBeenCalled();
   });
 
   test('a product with no catalog match skips the ledger sync', async () => {
