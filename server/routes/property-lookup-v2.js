@@ -2685,12 +2685,44 @@ function commercialSignalRecord(rc) {
   };
 }
 
+// Owner ruling (2026-08-11): fewer than five units is RESIDENTIAL. Florida
+// PAOs file duplex/triplex/guest-house parcels under DOR 08xx and the parcel
+// parsers map every 08xx string to "Multifamily", so the bare multifamily
+// TEXT vote in detectCategory must not commercial-classify a parcel the
+// county itself counts at ≤4 units. Only county-attested counts may suppress
+// the vote: _parcel.residentialUnits is county GIS by construction
+// (attachParcelMeta), and rc.unitCount only when the record is authoritative
+// (county/cadastral merge, or authoritative unitCount field evidence).
+// Synthetic caller defaults (unitCount: 1 with no provenance — see
+// hasCommercialSignalText) and web-sourced counts keep the text vote:
+// suppressing on those would reopen the Gateway Ave hole in the other
+// direction. When BOTH counts exist the larger wins — the association
+// aggregate shape carries unitCount 1 beside _parcel.residentialUnits 30–48.
+function countyAttestedSmallResidential(rc) {
+  if (!rc) return false;
+  const counts = [];
+  const parcelUnits = Number(rc._parcel?.residentialUnits);
+  if (Number.isFinite(parcelUnits) && parcelUnits > 0) counts.push(parcelUnits);
+  const evidence = rc._fieldEvidence?.unitCount;
+  const evidenceSource = String(evidence?.sourceType || '').toLowerCase();
+  const countAuthoritative = rc._source === 'county' || rc._source === 'cadastral'
+    || AUTHORITATIVE_PROPERTY_TYPE_SOURCES.has(evidenceSource);
+  const recordUnits = Number(rc.unitCount);
+  if (countAuthoritative && Number.isFinite(recordUnits) && recordUnits > 0) counts.push(recordUnits);
+  return counts.length > 0 && Math.max(...counts) <= 4;
+}
+
 function detectCategory(rc, ai = {}) {
   if (!rc && !ai) return 'RESIDENTIAL';
   const signalRc = commercialSignalRecord(rc);
   const text = commercialSignalText(signalRc, ai);
   if (/(commercial|office|retail|industrial|warehouse|restaurant|food\s*service|medical|clinic|school|daycare|business|plaza|storefront|shop|government|municipal)/.test(text)) return 'COMMERCIAL';
-  if (/(apartment|apartments|multi\s*family|multifamily|hoa\s*common|common\s*area)/.test(text)) return 'COMMERCIAL';
+  // Common-area parcels are association-owned regardless of unit count; the
+  // multifamily-flavored strings alone defer to a county-attested small
+  // residential count (≥5-unit ruling — duplex/guest house = residential).
+  if (/(hoa\s*common|common\s*area)/.test(text)) return 'COMMERCIAL';
+  if (/(apartment|apartments|multi\s*family|multifamily)/.test(text)
+    && !countyAttestedSmallResidential(signalRc)) return 'COMMERCIAL';
   if (hasStructuredCommercialAiSignal(ai)) return 'COMMERCIAL';
   if (signalRc?.unitCount && signalRc.unitCount > 4)
     return 'COMMERCIAL';

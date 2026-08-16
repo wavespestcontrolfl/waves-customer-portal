@@ -1693,8 +1693,9 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // residential intent quoting a property the lookup typed COMMERCIAL
       // must still conflict (codex r8 P1: the unconditional null let a
       // residential intent survive for a secondary office/warehouse).
-      // detectCategory types EVERY apartment/multifamily record COMMERCIAL
-      // (it answers the whole-property question), so a residential-unit
+      // detectCategory types apartment/multifamily records COMMERCIAL
+      // (it answers the whole-property question; county-attested ≤4-unit
+      // parcels are the ruling's exception), so a residential-unit
       // scope must be exempt or a valid second-property apartment quote
       // would always red-lane (codex r13 P2) — the exact conflation this
       // lane exists to end: a unit tenant is a residential customer.
