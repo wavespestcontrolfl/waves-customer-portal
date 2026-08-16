@@ -30,6 +30,10 @@
  *     IS a clearance decision and stamps it (runOutboundReviewConfirmHook);
  *     a lazily-activated legacy row (silent reschedule) is NOT and never
  *     re-admits on status alone (Codex #3361 r27 P1);
+ *   - never a customer with a LIVE RECURRING series (owner ruling
+ *     2026-08-15): a recurring plan is an established relationship even
+ *     when pre-portal history left no completed visit rows for the
+ *     first-time predicate to see — the backstop is for one-time bookings;
  *   - one visit per customer per run (the soonest), and ONLY for customers
  *     the funnel has never invited anywhere (no appointment_card_requests
  *     row, no card_link_sent_at stamp on any visit) — repeat nudges are a
@@ -74,12 +78,14 @@ function previsitCardInviteEligible({
   outboundReviewUncleared = false,
   cardLinkSentAt = null,
   customerEverInvited = false,
+  existingRecurringCustomer = false,
 } = {}) {
   if (!LIVE_VISIT_STATUSES.includes(String(status || ''))) return { send: false, reason: 'not_live' };
   if (isCallback || reServiceLabel) return { send: false, reason: 'callback_visit' };
   if (outboundReviewUncleared) return { send: false, reason: 'outbound_review_uncleared' };
   if (cardLinkSentAt) return { send: false, reason: 'already_texted' };
   if (customerEverInvited) return { send: false, reason: 'customer_already_invited' };
+  if (existingRecurringCustomer) return { send: false, reason: 'existing_recurring_customer' };
   return { send: true };
 }
 
@@ -186,6 +192,22 @@ async function runSweep(dbh = db) {
         .whereRaw('done.customer_id = s.customer_id')
         .where('done.status', 'completed');
     })
+    // Existing RECURRING customers are never backstopped (owner ruling
+    // 2026-08-15). The completed-history predicate above misses members
+    // whose service history predates the portal's visit rows (pre-portal
+    // imports carry no completed scheduled_services), so a 16-month member
+    // read as first-time and got a "finish booking" + cancel-fee text on a
+    // plan visit he'd already confirmed. A live recurring series — the
+    // candidate visit itself included — is its own proof of an established
+    // relationship; new plan conversions still get their card invite at
+    // booking time from the funnel's primary trigger.
+    .whereNotExists(function recurringPlan() {
+      this.select(dbh.raw('1'))
+        .from('scheduled_services as rec')
+        .whereRaw('rec.customer_id = s.customer_id')
+        .whereIn('rec.status', LIVE_VISIT_STATUSES)
+        .where((qb) => qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id'));
+    })
     // Never-invited is part of the QUERY (codex r1 P2): applying it after a
     // LIMIT let already-invited customers' visits starve eligible first-time
     // customers out of the window entirely.
@@ -233,6 +255,7 @@ async function runSweep(dbh = db) {
       outboundReviewUncleared: OFFICE_REVIEW_SOURCE_ACTIONS.includes(visit.source_action) && !visit.call_sms_cleared_at,
       cardLinkSentAt: visit.card_link_sent_at,
       customerEverInvited: false, // query-level NOT EXISTS owns the fast path; the locked recheck below owns the race
+      existingRecurringCustomer: false, // same split: the recurringPlan NOT EXISTS owns the fast path, the locked recheck owns the race
     });
     if (!verdict.send) { skipped += 1; continue; }
 
@@ -246,7 +269,7 @@ async function runSweep(dbh = db) {
     try {
       await dbh.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['previsit-card-invite', String(visit.customer_id)]);
-        const [reqRow, stampRow, liveCustomer] = await Promise.all([
+        const [reqRow, stampRow, liveCustomer, recurringRow] = await Promise.all([
           trx('appointment_card_requests as r')
             .join('scheduled_services as v', 'r.scheduled_service_id', 'v.id')
             .where('v.customer_id', visit.customer_id)
@@ -262,8 +285,17 @@ async function runSweep(dbh = db) {
             .where({ id: visit.customer_id })
             .whereNull('deleted_at')
             .first('id'),
+          // Recurring-plan race (owner ruling 2026-08-15): a booking
+          // converted to a plan between the candidate query and this send
+          // makes the customer an existing recurring customer — recheck
+          // under the lock, fail toward not texting.
+          trx('scheduled_services as rec')
+            .where('rec.customer_id', visit.customer_id)
+            .whereIn('rec.status', LIVE_VISIT_STATUSES)
+            .where((qb) => qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id'))
+            .first('rec.id'),
         ]);
-        if (reqRow || stampRow || !liveCustomer) { skipped += 1; return; }
+        if (reqRow || stampRow || !liveCustomer || recurringRow) { skipped += 1; return; }
         const result = await requestCardForAppointment({
           scheduledServiceId: visit.id,
           trigger: 'previsit_backstop',

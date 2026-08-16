@@ -69,6 +69,25 @@ describe('previsitCardInviteEligible', () => {
     expect(previsitCardInviteEligible({ ...base, customerEverInvited: true }))
       .toEqual({ send: false, reason: 'customer_already_invited' });
   });
+
+  test('an existing recurring customer is never backstopped (owner ruling 2026-08-15)', () => {
+    expect(previsitCardInviteEligible({ ...base, existingRecurringCustomer: true }))
+      .toEqual({ send: false, reason: 'existing_recurring_customer' });
+  });
+
+  test('the recurring exclusion is in the QUERY and rechecked under the lock — not only completed history', () => {
+    const sweep = require('fs').readFileSync(
+      require.resolve('../services/previsit-card-request-sweep'), 'utf8',
+    );
+    // Pre-portal members carry no completed scheduled_services rows, so the
+    // first-time predicate alone read a 16-month member as new (2026-08-15
+    // incident): a live recurring series must exclude on its own.
+    expect(sweep).toContain('.whereNotExists(function recurringPlan()');
+    expect(sweep).toContain("qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id')");
+    // Fail-closed race recheck inside the advisory lock, same as the
+    // invited-history rechecks.
+    expect(sweep).toContain('if (reqRow || stampRow || !liveCustomer || recurringRow)');
+  });
 });
 
 describe('sweep gating', () => {
