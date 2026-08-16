@@ -3124,3 +3124,34 @@ describe('codex #3423 r50 — geo suffix, polarity, completed summaries, photo b
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r51 — access-state scope, paid-up, qualifiers, implicit imperatives, code credentials', () => {
+  test('r51 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const accessibility = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'Website accessibility request was granted' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Access granted' },
+      accessibility,
+    ).reason).toBeTruthy();
+    const overdue = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Account is paid up' },
+      overdue,
+    ).reason).toMatch(/payment_state_conflict/);
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment for today is cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: ['Please call before arrival'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toMatch(/contact_request/);
+    const promo = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'promo code redeemed on signup' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Door code on file' },
+      promo,
+    ).reason).toBeTruthy();
+  });
+});

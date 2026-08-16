@@ -1411,7 +1411,7 @@ function findUngroundedClaim(body, grounding) {
   if (/\bhistory\s+of\b/.test(outputText) && !hasRealHistory) {
     return { kind: 'novel_term', term: 'history' };
   }
-  if (ACCESS_STATE_RE.test(outputText) && !groundedValueText.includes('access')) {
+  if (ACCESS_STATE_RE.test(outputText) && !(/\baccess\b/.test(groundedValueText) && ACCESS_STATE_RE.test(groundedValueText))) {
     return { kind: 'novel_term', term: 'access' };
   }
   // Photo-availability claims need a photo fact (r41 P2).
@@ -1442,7 +1442,7 @@ function findUngroundedClaim(body, grounding) {
     body.open_scope,
     body.customer_context,
   ].filter(Boolean).join(' ').toLowerCase();
-  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
+  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:for|on)\s+\w+\s+)?(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
     // Multi-word statuses ('en route', 'on site') match underscore forms too.
     const statusForms = [...new Set([...wordVariants(status.replace(/\s/g, '')), status, status.replace(/\s/g, '_'), status.replace(/\s/g, '')])];
@@ -1459,10 +1459,14 @@ function findUngroundedClaim(body, grounding) {
   // Claimed customer CONTACT REQUESTS ("asked for a phone call") are
   // factual asks — the channel and a request verb must both appear in the
   // fact values, or the technician contacts someone who never asked (r39).
+  const instructionalText = [...(body.priorities || []), ...(body.watch_items || [])].join('. ').toLowerCase();
   // EVERY contact claim is validated, not just the first (r46).
   const contactClaims = [
     ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:for\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?)\b/g),
     ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email)\s+(?:the\s+)?customer\b/g)],
+    // Imperative channel verbs with implicit customer ("Please call
+    // before arrival") in INSTRUCTION fields (r51).
+    ...[...instructionalText.matchAll(/(?:^|[.;!?]\s*)(?:please\s+)?(do\s+not\s+|don't\s+)?(call|text|email)\s+(?:before|after|prior|when|upon|on\s+arrival|ahead)\b/g)],
   ];
   for (const contactReq of contactClaims) {
     const negatedClaim = Boolean(contactReq[1]);
@@ -1492,7 +1496,7 @@ function findUngroundedClaim(body, grounding) {
   // the OPPOSITE of the customer's billing state — flattened token pools
   // cannot see the contradiction, so it is checked as a phrase (r32).
   if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
-    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance|bill)\s+(?:has\s+been\s+|was\s+|is\s+)?paid\b|\bno\s+invoices?\s+outstanding\b|\boutstanding\s+(?:balance|invoice)s?\s+(?:resolved|cleared|paid|settled)\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due|outstanding)\b|\bno\s+outstanding\s+(?:balance|invoices?|payments?)?\b|\bzero\s+balance\b/i.test(outputText)) {
+    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance|bill)\s+(?:has\s+been\s+|was\s+|is\s+)?paid\b|\bno\s+invoices?\s+outstanding\b|\boutstanding\s+(?:balance|invoice)s?\s+(?:resolved|cleared|paid|settled)\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due|outstanding)\b|\bno\s+outstanding\s+(?:balance|invoices?|payments?)?\b|\bzero\s+balance\b|\b(?:account|balance)\s+(?:is\s+)?paid\s*(?:up|off)\b/i.test(outputText)) {
     return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
   }
   // Tier words bind to ACTUAL tier facts — an HOA or product name
@@ -1750,6 +1754,13 @@ function findUngroundedClaim(body, grounding) {
           return { kind: 'novel_term', term: word };
         }
         continue;
+      }
+      if (word === 'code' || word === 'codes') {
+        // Credential-phrased 'code' needs code/pin-specific evidence — a
+        // promo code cannot ground "Door code on file" (r51).
+        if (PIN_ONLY_RE.test(String(field)) && !PIN_ONLY_RE.test(groundedValueText)) {
+          return { kind: 'novel_term', term: word };
+        }
       }
       // Hyphenated prose ("re-check", "walk-through"): known when every
       // part is known; short parts are below the rare-word threshold.
