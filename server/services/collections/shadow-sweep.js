@@ -21,6 +21,7 @@ const logger = require('../logger');
 const ContactPolicy = require('./contact-policy');
 const { invoiceAmountDue } = require('../invoice-helpers');
 const { etCalendarDayOf, etDateString } = require('../../utils/datetime-et');
+const { withCaseLock } = require('./case-lock');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -197,8 +198,12 @@ async function runShadowSweep({ now = new Date() } = {}) {
       const liveShadow = liveRows;
       if (liveShadow.length > 1) {
         const extras = liveShadow.slice(1);
+        // Fenced to still-shadow rows (codex gh-r5): a dial surface can
+        // promote one of these extras after the snapshot read — a promoted
+        // or dialing row must escape the lapse untouched.
         await db('collection_cases')
           .whereIn('id', extras.map((c) => c.id))
+          .where({ current_state: 'shadow' })
           .update({ current_state: 'lapsed', updated_at: db.fn.now() });
         const extraKeys = extras.map((c) => c.idempotency_key).filter(Boolean);
         if (extraKeys.length) {
@@ -305,10 +310,22 @@ async function runShadowSweep({ now = new Date() } = {}) {
         // claimed origination's callbacks could no longer update the case.
         // The concurrent promotion wins cleanly; the unique idempotency_key
         // backstops the race either way.
-        const [updated] = await db('collection_cases')
-          .where({ id: existing.id, case_version: existing.case_version, current_state: existing.current_state })
-          .update({ ...patch, updated_at: db.fn.now() })
-          .returning('*');
+        const updated = await withCaseLock(customerId, async (trx) => {
+          // In-lock live re-check (codex gh-r5): the promote paths take
+          // this same customer lock, so a live/held row seen here is
+          // committed truth — a 'proposed' row promoted between our reads
+          // can no longer slip past the customer-level decision.
+          const live = await trx('collection_cases')
+            .where({ customer_id: customerId })
+            .whereIn('current_state', ['approved', 'dialing', 'held'])
+            .first('id');
+          if (live) return null;
+          const [row] = await trx('collection_cases')
+            .where({ id: existing.id, case_version: existing.case_version, current_state: existing.current_state })
+            .update({ ...patch, updated_at: trx.fn.now() })
+            .returning('*');
+          return row || null;
+        });
         if (!updated) continue;
         // The SUPERSEDED version's card retires with the rotation (codex
         // r8): its copy shows the old amount/tier and its collectionCaseId

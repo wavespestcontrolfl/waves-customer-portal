@@ -90,6 +90,13 @@ afterAll(() => {
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_COLLECTIONS_SHADOW = 'true';
+  db.fn = { now: jest.fn(() => 'NOW()') };
+  db.transaction = jest.fn(async (fn) => {
+    const trx = (t) => db(t);
+    trx.raw = jest.fn(async () => ({}));
+    trx.fn = db.fn;
+    return fn(trx);
+  });
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   db.raw = jest.fn((expr) => expr);
   ContactPolicy.evaluate.mockResolvedValue(ALLOWED_VERDICT);
@@ -222,7 +229,7 @@ describe('idempotency + versioning', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), caseUpdate, chain({ result: [] })],
+      collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
@@ -382,7 +389,7 @@ describe('retirement + tier rotation', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: { ...INVOICE, due_date: '2026-07-08' } })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ result: [] }), chain({ first: existing }), caseUpdate, chain({ result: [] })],
+      collection_cases: [chain({ result: [] }), chain({ first: existing }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
@@ -414,7 +421,7 @@ describe('r4: unpaid candidates + lapsed reactivation', () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ result: [] }), chain({ first: lapsed }), caseUpdate, chain({ result: [] })],
+      collection_cases: [chain({ result: [] }), chain({ first: lapsed }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
@@ -487,6 +494,7 @@ test('rotating the case version retires the previous version card', async () => 
     collection_cases: [
       chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] }), // self-heal read (single row)
       chain({ first: existing }),
+      chain({ first: undefined }), // in-lock live-check
       chain({ returning: [{ id: 'case-1', case_version: 2, eligible_balance_snapshot: 12800 }] }),
       chain({ result: [] }),
     ],

@@ -2236,24 +2236,44 @@ router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) 
     }
     const caseRow = await db('collection_cases')
       .where({ id: req.params.id })
-      .first('id', 'current_state', 'case_version', 'idempotency_key');
+      .first('id', 'customer_id', 'current_state', 'case_version', 'idempotency_key');
     if (!caseRow) return res.status(404).json({ error: 'case_not_found' });
 
+    const actor = `admin:${req.technician?.email || req.technicianId || 'unknown'}`;
+    let promotedByUs = false;
     if (caseRow.current_state === 'shadow' || caseRow.current_state === 'proposed') {
       const now = new Date();
-      const promoted = await db('collection_cases')
-        .where({ id: caseRow.id, current_state: caseRow.current_state, case_version: caseRow.case_version })
-        .update({
-          current_state: 'approved',
-          approved_by: `admin:${req.technician?.email || req.technicianId || 'unknown'}`,
-          approved_at: now,
-          approval_expires_at: new Date(now.getTime() + 24 * 60 * 60 * 1000),
-          hold_reason: null,
-          updated_at: db.fn.now(),
-        });
+      // Under the customer case lock (codex gh-r5): promotion is a
+      // customer-level decision — the shadow sweep's rotation and the
+      // auto-dial promote take the same lock, and another live/held case
+      // for this customer refuses (two pipelines / dispute-hold bypass).
+      const { withCaseLock } = require('../services/collections/case-lock');
+      const promoted = await withCaseLock(caseRow.customer_id, async (trx) => {
+        const liveElsewhere = await trx('collection_cases')
+          .where({ customer_id: caseRow.customer_id })
+          .whereIn('current_state', ['approved', 'dialing', 'held'])
+          .whereNot('id', caseRow.id)
+          .first('id');
+        if (liveElsewhere) return 'live_elsewhere';
+        const updated = await trx('collection_cases')
+          .where({ id: caseRow.id, current_state: caseRow.current_state, case_version: caseRow.case_version })
+          .update({
+            current_state: 'approved',
+            approved_by: actor,
+            approved_at: now,
+            approval_expires_at: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+            hold_reason: null,
+            updated_at: trx.fn.now(),
+          });
+        return updated > 0;
+      });
+      if (promoted === 'live_elsewhere') {
+        return res.status(409).json({ error: 'another_case_live', detail: 'this customer already has an approved/dialing/held case' });
+      }
       if (!promoted) {
         return res.status(409).json({ error: 'case_moved', detail: 'the case changed state while approving — reload and retry' });
       }
+      promotedByUs = true;
       // The shadow proposal card says "no call will be placed" — no longer
       // true once the promotion holds (codex gh-r2). Best-effort retire.
       const { retireProposalCard } = require('../services/collections/outbound-voice/dial-sweep');
@@ -2263,8 +2283,36 @@ router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) 
       return res.status(409).json({ error: 'case_not_dialable', state: caseRow.current_state });
     }
 
+    // Mirror of the sweep's revert (codex gh-r5): a pre-dial refusal or
+    // throw leaves the row 'approved' — invisible to both sweeps and with
+    // its card already retired — so OUR promotion is returned to the
+    // queue. Fenced on state, version, and this request's actor; rows
+    // origination moved are untouched.
+    const revertOurPromotion = async () => {
+      if (!promotedByUs) return;
+      await db('collection_cases')
+        .where({ id: caseRow.id, current_state: 'approved', case_version: caseRow.case_version, approved_by: actor })
+        .update({
+          current_state: 'proposed',
+          approved_by: null,
+          approved_at: null,
+          approval_expires_at: null,
+          updated_at: db.fn.now(),
+        })
+        .catch((err) => logger.warn(`[collections-dial] admin-promotion revert failed for case ${caseRow.id}: ${err.message} — approval expiry (24h) is the backstop`));
+    };
+
     const { originateCollectionCall } = require('../services/collections/outbound-voice/origination');
-    const result = await originateCollectionCall(caseRow.id);
+    let result;
+    try {
+      result = await originateCollectionCall(caseRow.id);
+    } catch (err) {
+      await revertOurPromotion();
+      throw err;
+    }
+    if (!result.dialed && result.reason !== 'dial_failed') {
+      await revertOurPromotion(); // the fence no-ops when origination moved the row
+    }
     // Refusals are the policy speaking — return them verbatim, 200: the
     // admin asked "try to dial", and "policy said no, case re-queued" is a
     // successful answer to that question.

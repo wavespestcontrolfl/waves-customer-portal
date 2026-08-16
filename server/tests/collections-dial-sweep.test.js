@@ -36,11 +36,23 @@ function candidateChain(rows) {
   return q;
 }
 
-function promoteChain(result = 1) {
+function promoteChain(result = 1, { first } = {}) {
   const q = {};
-  ['where', 'whereNull', 'whereRaw'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereIn', 'whereNot', 'whereNull', 'whereRaw'].forEach((m) => { q[m] = jest.fn(() => q); });
+  q.first = jest.fn(async () => first);
   q.update = jest.fn(async () => result);
   return q;
+}
+
+// The case lock runs inside db.transaction; the trx dispatches to the same
+// table queues and its raw() is the advisory-lock call.
+function armTransaction() {
+  db.transaction = jest.fn(async (fn) => {
+    const trx = (t) => db(t);
+    trx.raw = jest.fn(async () => ({}));
+    trx.fn = db.fn;
+    return fn(trx);
+  });
 }
 
 function caseRow(id, state = 'shadow') {
@@ -57,6 +69,7 @@ beforeEach(() => {
   delete process.env.GATE_COLLECTIONS_POLICY;
   delete process.env.COLLECTIONS_AUTODIAL_MAX_PER_RUN;
   originateCollectionCall.mockResolvedValue({ dialed: true, reason: 'dialed' });
+  armTransaction();
 });
 
 afterAll(() => {
@@ -95,7 +108,7 @@ test('promotes a shadow candidate with the guarded fence and dials it', async ()
   armGates();
   const cChain = candidateChain([caseRow('case-1')]);
   const pChain = promoteChain(1);
-  const queues = [cChain, pChain];
+  const queues = [cChain, promoteChain(0, {}), pChain]; // live-check then promote
   db.mockImplementation(() => queues.shift());
   const res = await runCollectionsDialSweep({ now: NOW });
   expect(res).toMatchObject({ skipped: false, promoted: 1, dialed: 1, refused: 0 });
@@ -112,7 +125,7 @@ test('promotes a shadow candidate with the guarded fence and dials it', async ()
 
 test('a LOST promote stands down — no dial for that case', async () => {
   armGates();
-  const queues = [candidateChain([caseRow('case-1')]), promoteChain(0)];
+  const queues = [candidateChain([caseRow('case-1')]), promoteChain(0, {}), promoteChain(0)];
   db.mockImplementation(() => queues.shift());
   const res = await runCollectionsDialSweep({ now: NOW });
   expect(res).toMatchObject({ promoted: 0, dialed: 0 });
@@ -122,7 +135,13 @@ test('a LOST promote stands down — no dial for that case', async () => {
 test('the cap counts dial ATTEMPTS; policy refusals pass through without consuming it', async () => {
   armGates();
   const rows = [caseRow('c1'), caseRow('c2'), caseRow('c3'), caseRow('c4')];
-  const queues = [candidateChain(rows), promoteChain(1), promoteChain(1), promoteChain(1), promoteChain(1)];
+  // per candidate: in-lock live-check + promote; the refusal adds a revert.
+  const queues = [
+    candidateChain(rows),
+    promoteChain(0, {}), promoteChain(1), promoteChain(1), // c1: live, promote, revert
+    promoteChain(0, {}), promoteChain(1), // c2: live, promote
+    promoteChain(0, {}), promoteChain(1), // c3: live, promote
+  ];
   db.mockImplementation(() => queues.shift());
   originateCollectionCall
     .mockResolvedValueOnce({ dialed: false, reason: 'policy_denied' }) // refusal — no cap
@@ -152,7 +171,7 @@ test('an unexpected originate THROW is treated as an attempt (conservative pace)
   armGates();
   const rows = [caseRow('c1'), caseRow('c2')];
   // c1: promote, (throw), revert; c2: promote — the throw path reverts too.
-  const queues = [candidateChain(rows), promoteChain(1), promoteChain(1), promoteChain(1)];
+  const queues = [candidateChain(rows), promoteChain(0,{}), promoteChain(1), promoteChain(1), promoteChain(0,{}), promoteChain(1)];
   db.mockImplementation(() => queues.shift());
   originateCollectionCall
     .mockRejectedValueOnce(new Error('unexpected'))
@@ -166,7 +185,7 @@ describe('gh-r1', () => {
   test('a TRANSIENT pre-dial refusal reverts OUR promotion back to proposed (guarded on the autodial actor)', async () => {
     armGates();
     const revert = promoteChain(1);
-    const queues = [candidateChain([caseRow('c1')]), promoteChain(1), revert];
+    const queues = [candidateChain([caseRow('c1')]), promoteChain(0,{}), promoteChain(1), revert];
     db.mockImplementation(() => queues.shift());
     originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'relay_unavailable' });
     const res = await runCollectionsDialSweep({ now: NOW });
@@ -182,13 +201,13 @@ describe('gh-r1', () => {
 
   test('a refusal origination already resolved (dial_failed path) never triggers the revert', async () => {
     armGates();
-    const queues = [candidateChain([caseRow('c1')]), promoteChain(1)];
+    const queues = [candidateChain([caseRow('c1')]), promoteChain(0, {}), promoteChain(1)];
     db.mockImplementation(() => queues.shift());
     originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'dial_failed' });
     const res = await runCollectionsDialSweep({ now: NOW });
     expect(res).toMatchObject({ dialed: 1, refused: 0 });
-    // Only two db calls happened: candidates + promote — no revert query.
-    expect(db).toHaveBeenCalledTimes(2);
+    // db calls: candidates + in-lock live-check + promote — no revert query.
+    expect(db).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -199,7 +218,7 @@ describe('gh-r2', () => {
     armGates();
     const revert = promoteChain(1);
     // queues: candidates, promote, revert (no idempotency_key ⇒ no card query)
-    const queues = [candidateChain([caseRow('c1')]), promoteChain(1), revert];
+    const queues = [candidateChain([caseRow('c1')]), promoteChain(0,{}), promoteChain(1), revert];
     db.mockImplementation(() => queues.shift());
     originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'already_dialed' });
     await runCollectionsDialSweep({ now: NOW });
@@ -209,7 +228,7 @@ describe('gh-r2', () => {
   test('an originate THROW also reverts our promotion (guarded)', async () => {
     armGates();
     const revert = promoteChain(1);
-    const queues = [candidateChain([caseRow('c1')]), promoteChain(1), revert];
+    const queues = [candidateChain([caseRow('c1')]), promoteChain(0,{}), promoteChain(1), revert];
     db.mockImplementation(() => queues.shift());
     originateCollectionCall.mockRejectedValue(new Error('infra blip'));
     const res = await runCollectionsDialSweep({ now: NOW });
@@ -223,7 +242,7 @@ describe('gh-r2', () => {
     const card = promoteChain(1);
     const queues = [
       candidateChain([{ ...caseRow('c1'), idempotency_key: 'collections:cust:1:14' }]),
-      promoteChain(1), card,
+      promoteChain(0, {}), promoteChain(1), card,
     ];
     db.mockImplementation(() => queues.shift());
     originateCollectionCall.mockResolvedValue({ dialed: true, reason: 'dialed' });

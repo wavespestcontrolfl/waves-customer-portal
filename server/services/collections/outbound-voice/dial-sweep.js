@@ -32,6 +32,7 @@
 const db = require('../../../models/db');
 const logger = require('../../logger');
 const { isAutoDialEnabled } = require('./gates');
+const { withCaseLock } = require('../case-lock');
 
 const DEFAULT_MAX_PER_RUN = 2;
 const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
@@ -48,17 +49,29 @@ function maxDialsPerRun() {
  * loses cleanly. Returns true when THIS caller holds the approval.
  */
 async function promoteForAutoDial(caseRow, now) {
-  const updated = await db('collection_cases')
-    .where({ id: caseRow.id, current_state: caseRow.current_state, case_version: caseRow.case_version })
-    .update({
-      current_state: 'approved',
-      approved_by: 'system:autodial',
-      approved_at: now,
-      approval_expires_at: new Date(now.getTime() + APPROVAL_TTL_MS),
-      hold_reason: null,
-      updated_at: db.fn.now(),
-    });
-  return updated > 0;
+  // Under the customer case lock (codex gh-r5): promotion is a
+  // customer-level decision — with another case already live/held for the
+  // customer, promoting this one would run two pipelines (or bypass a
+  // dispute hold). The shadow sweep's rotation takes the same lock.
+  return withCaseLock(caseRow.customer_id, async (trx) => {
+    const liveElsewhere = await trx('collection_cases')
+      .where({ customer_id: caseRow.customer_id })
+      .whereIn('current_state', ['approved', 'dialing', 'held'])
+      .whereNot('id', caseRow.id)
+      .first('id');
+    if (liveElsewhere) return false;
+    const updated = await trx('collection_cases')
+      .where({ id: caseRow.id, current_state: caseRow.current_state, case_version: caseRow.case_version })
+      .update({
+        current_state: 'approved',
+        approved_by: 'system:autodial',
+        approved_at: now,
+        approval_expires_at: new Date(now.getTime() + APPROVAL_TTL_MS),
+        hold_reason: null,
+        updated_at: trx.fn.now(),
+      });
+    return updated > 0;
+  });
 }
 
 /**
@@ -123,7 +136,7 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
     .orderBy('created_at', 'asc')
     // Read a few more than the cap: policy refusals shouldn't starve a run.
     .limit(cap * 5)
-    .select('id', 'current_state', 'case_version', 'idempotency_key');
+    .select('id', 'customer_id', 'current_state', 'case_version', 'idempotency_key');
 
   let dialed = 0;
   let refused = 0;
