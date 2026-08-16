@@ -263,6 +263,9 @@ const ComplianceService = {
       .leftJoin('technicians as t', 'pah.technician_id', 't.id')
       .where('pah.application_date', '>=', start)
       .where('pah.application_date', '<=', end)
+      // Retracted rows (recap deselection corrections) never reach the
+      // DACS export (codex P1 r11).
+      .whereNull('pah.retracted_at')
       .select(
         'pah.*',
         'pc.name as product_name',

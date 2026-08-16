@@ -646,6 +646,93 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(sweeps[0].patch.retracted_at).toBeInstanceOf(Date);
   });
 
+  test('a submitted catalog id that does not resolve is REJECTED, not name-matched (codex P1 r11)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: undefined, // the id resolves to nothing
+    };
+    const knex = makeKnex(store);
+
+    await expect(submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Stale id.',
+      products: [{ product_id: 'gone-id', product_name: 'Ghost Product', rate_confirmed: true }],
+      sendSms: false,
+      knex,
+    })).rejects.toThrow('Product not found: gone-id');
+    // The trx rolled back — nothing was replaced.
+    expect(store.productInserts || 0).toBe(0);
+  });
+
+  test('an unsupported rate unit is rejected before it reaches the ledger (codex P1 r11)', async () => {
+    const store = { serviceStatus: 'completed', records: [{ id: 'rec-old', recap_sms_sent_at: null }] };
+    const knex = makeKnex(store);
+
+    await expect(submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Typo unit.',
+      products: [{ product_name: 'Termidor', application_rate: '4', rate_unit: 'fl-oz/gallon', rate_confirmed: true }],
+      sendSms: false,
+      knex,
+    })).rejects.toThrow('Invalid product unit for Termidor');
+    expect(store.productInserts || 0).toBe(0);
+  });
+
+  test('a CONFIRMED empty set clears recorded products and retracts their ledger rows (codex P1 r11)', async () => {
+    const { createComplianceRecords } = require('../services/compliance');
+    const store = { serviceStatus: 'completed', records: [{ id: 'rec-old', recap_sms_sent_at: null }] };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Deselected everything.',
+      products: [],
+      productsConfirmed: true,
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // The replace ran: rows deleted, nothing inserted, every attributable
+    // ledger row swept into retraction (no whereNotIn — nothing linked).
+    expect(store.productDeletes).toBe(1);
+    expect(store.productInserts || 0).toBe(0);
+    const sweeps = retractionSweeps(store);
+    expect(sweeps).toHaveLength(1);
+    expect(sweeps[0].notIn).toBeNull();
+    expect(createComplianceRecords).not.toHaveBeenCalled();
+  });
+
+  test('an UNCONFIRMED empty set still preserves recorded products (legacy resend)', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      productDeletes: 0,
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Resend only.',
+      products: [],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.productDeletes).toBe(0);
+    expect(retractionSweeps(store)).toHaveLength(0);
+  });
+
   test('a fresh recap completion runs the FDACS writer so its applications get ledgered (codex P1 r8)', async () => {
     // No prior /complete: there are no ledger rows for the sync UPDATE to
     // hit, so the recap must invoke the shared idempotent writer or the

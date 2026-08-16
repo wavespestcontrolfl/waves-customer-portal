@@ -29,6 +29,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { generateRecap, smsRecap } = require('./completion-recap');
 const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
 const { invalidateServiceReportPdfCache } = require('./service-report/pdf-storage');
+const { isValidRateUnit } = require('./inventory-units');
 const { etDateString } = require('../utils/datetime-et');
 
 const PEST_CONTROL_CATEGORY = 'pest_control';
@@ -229,6 +230,10 @@ async function submitRecap({
   actorId,
   technicianNotes,
   products = [],
+  // Modern clients set true: the submitted product SET is deliberate, so
+  // an empty set is a full deselection (clear the recorded applications),
+  // not a legacy resend-only omission (codex P1 r11).
+  productsConfirmed = false,
   customerRecap,
   sendSms = false,
   clientPestRating = null,
@@ -500,11 +505,17 @@ async function submitRecap({
       .filter((e) => e.row.product_name);
     const productRows = productEntries.map((e) => e.row);
     // Replace product rows only when this submit specifies a set, so an
-    // explicit re-selection isn't additive. An EMPTY submission must not
-    // wipe the recorded applications: reopening a completed recap to
-    // re-send (the modal starts with no products selected) would otherwise
-    // delete the service's chemical history. Empty = leave existing rows.
-    if (productRows.length) {
+    // explicit re-selection isn't additive. An EMPTY submission from a
+    // legacy client must not wipe the recorded applications (resend-only
+    // reopen). A modern client marks its set deliberate with
+    // productsConfirmed, so a CONFIRMED empty set is a full deselection
+    // (codex P1 r11): the recorded rows are cleared and every attributable
+    // ledger row retracted, same as deselecting them one by one.
+    const confirmedEmptyReplace = productsConfirmed === true
+      && productRows.length === 0
+      && Array.isArray(products)
+      && !createdRecord;
+    if (productRows.length || confirmedEmptyReplace) {
       // Resolve each submitted catalog id to a REAL catalog row before
       // anything is persisted (codex P1 r9): the exact id keys the
       // compliance ledger identity, so a name-pattern fallback ("Advion
@@ -518,12 +529,36 @@ async function submitRecap({
         .hasColumn('service_products', 'application_method')
         .catch(() => false);
       for (const entry of productEntries) {
+        // Rate units share the /complete allowlist (codex P1 r11): a
+        // typo'd or unsupported unit from a stale client or direct API
+        // caller must not reach service_products or the FDACS ledger.
+        if (entry.row.rate_unit && !isValidRateUnit(entry.row.rate_unit)) {
+          const err = new Error(`Invalid product unit for ${entry.row.product_name}`);
+          err.isOperational = true;
+          err.statusCode = 400;
+          throw err;
+        }
         if (entry.submittedProductId == null) continue;
         const catalog = await trx('products_catalog')
           .whereRaw('id::text = ?', [entry.submittedProductId])
-          .first('id', 'name', 'category', 'active_ingredient', 'moa_group', 'application_method');
-        entry.catalogId = catalog?.id ?? null;
-        if (entry.catalogId == null) continue;
+          .first('id', 'name', 'category', 'active_ingredient', 'moa_group', 'application_method', 'active');
+        // A supplied id that doesn't resolve is REJECTED, not silently
+        // demoted to the name path (codex P1 r11) — same contract as the
+        // /complete validation; the id-less legacy path stays for
+        // payloads that never sent one. The throw rolls the trx back.
+        if (!catalog) {
+          const err = new Error(`Product not found: ${entry.submittedProductId}`);
+          err.isOperational = true;
+          err.statusCode = 400;
+          throw err;
+        }
+        if (catalog.active === false) {
+          const err = new Error(`Product is inactive: ${catalog.name}`);
+          err.isOperational = true;
+          err.statusCode = 400;
+          throw err;
+        }
+        entry.catalogId = catalog.id;
         if (hasProductIdCol) entry.row.product_id = entry.catalogId;
         // Bind the persisted row's metadata to the VALIDATED catalog row
         // (codex P1 r10) — the compliance writer resolves EPA/AI facts
@@ -570,9 +605,11 @@ async function submitRecap({
         }
       }
       await trx('service_products').where({ service_record_id: recordId }).del();
-      const insertedProducts = await trx('service_products')
-        .insert(productRows)
-        .returning(['id', 'product_name', 'application_rate', 'rate_unit']);
+      const insertedProducts = productRows.length
+        ? await trx('service_products')
+          .insert(productRows)
+          .returning(['id', 'product_name', 'application_rate', 'rate_unit'])
+        : [];
       // The delete above SET-NULLs the compliance ledger's
       // (property_application_history) service_product_id link, and the
       // ledger's stable (service_record_id, product_id) identity makes
@@ -651,8 +688,10 @@ async function submitRecap({
       // skipped; anything new — a fresh recap completion, a product added
       // on an edit — gets its compliance row with the recap's
       // technician-confirmed rate.
-      const ComplianceService = require('./compliance');
-      await ComplianceService.createComplianceRecords(recordId, { trx });
+      if (productRows.length) {
+        const ComplianceService = require('./compliance');
+        await ComplianceService.createComplianceRecords(recordId, { trx });
+      }
     }
 
     // Re-completing an EXISTING record rewrites its notes / rating / products —

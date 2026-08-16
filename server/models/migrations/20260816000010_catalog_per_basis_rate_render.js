@@ -199,7 +199,11 @@ const DATA = [
     note: 'rate-render: stations installed so the maximum interval between any two does not exceed 20 ft per the Trelona ATBS label (EPA 499-557, EPA PPLS 000499-00557-20190909.pdf).' },
   { name: 'Trelona Compressed Termite Bait Cartridges', basis: 'display', rate: '2', unit: 'each/station',
     note: 'rate-render: 2 cartridges (two 124 g) per station, REQUIRED in Florida for annual service — the only interval this operation runs — per the Trelona label (EPA 499-557); 90/120-day service intervals use 1, adjust down only for those.' },
-  { name: 'Contrac Blox', basis: 'display', rate: '1-16', unit: 'each/placement',
+  // Contrac Blox seeds bait_placement (codex P1 r11): its catalog
+  // category is rodenticide, so a pest-line completion otherwise falls
+  // through to perimeter_spray — a spray method (demanding irrelevant
+  // linear footage) on a tamper-resistant station bait.
+  { name: 'Contrac Blox', basis: 'display', method: 'bait_placement', rate: '1-16', unit: 'each/placement',
     note: 'rate-render: mice 1 blox per placement (8-12 ft apart); rats 3-16 blox per placement (15-30 ft apart) from the Contrac Blox label (EPA 12455-79, EPA PPLS 012455-00079-20200213.pdf). Band low end is the mouse rate so the prefill is safe for either species; adjust up for rat placements.' },
 
   // ── Bed bug barrier ─────────────────────────────────────────────────

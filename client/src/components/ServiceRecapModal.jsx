@@ -104,6 +104,12 @@ export default function ServiceRecapModal({
   // twice before `submitting` re-renders the disabled button. The server is
   // idempotent regardless, but this avoids the redundant second request.
   const submitInFlight = useRef(false);
+  // True when the checkbox list fully represents the recorded state — every
+  // previously recorded product matched an active catalog row and was
+  // pre-selected. Only then is the submitted set authoritative
+  // (productsConfirmed): if a recorded product could not be shown, an
+  // empty/partial submit must not read as deselecting it (codex P1 r11).
+  const selectionAuthoritative = useRef(true);
 
   useEffect(() => {
     let active = true;
@@ -117,6 +123,9 @@ export default function ServiceRecapModal({
         // catalog by name, so re-sending/editing a recap preserves them
         // instead of starting empty (which would wipe the product history).
         const recorded = data?.existingRecord?.products || [];
+        if (recorded.length && !Array.isArray(data?.products)) {
+          selectionAuthoritative.current = false;
+        }
         if (recorded.length && Array.isArray(data?.products)) {
           const byName = new Map(
             data.products.map((p) => [String(p.name || '').trim().toLowerCase(), p]),
@@ -125,13 +134,26 @@ export default function ServiceRecapModal({
           const seededRates = {};
           recorded.forEach((rp) => {
             const cat = byName.get(String(rp.product_name || '').trim().toLowerCase());
-            if (!cat) return;
+            if (!cat) {
+              // Recorded product not representable in the picker — the
+              // selection can no longer speak for the full recorded set.
+              selectionAuthoritative.current = false;
+              return;
+            }
             preselect.add(cat.id);
             // The rate RECORDED on the visit outranks the catalog prefill —
             // reopening a recap must show (and re-submit) what was applied,
             // not rewrite it to the current catalog default.
             if (rp.application_rate != null && Number(rp.application_rate) > 0) {
-              seededRates[cat.id] = { rate: String(rp.application_rate), unit: rp.rate_unit || '' };
+              // A recorded rate missing its unit (legacy rows) falls back
+              // to the catalog unit — an empty unit would hide the rate
+              // editor while rate_confirmed still marked the field
+              // deliberate, and the server would read that as a clear
+              // (codex P1 r11).
+              const unit = rp.rate_unit
+                || catalogRatePrefill(cat, data?.service?.serviceType)?.unit
+                || '';
+              seededRates[cat.id] = { rate: String(rp.application_rate), unit };
             } else {
               const prefill = catalogRatePrefill(cat, data?.service?.serviceType);
               if (prefill) seededRates[cat.id] = prefill;
@@ -242,7 +264,12 @@ export default function ServiceRecapModal({
             product_category: p.category,
             active_ingredient: p.active_ingredient,
             moa_group: p.moa_group,
-            rate_confirmed: true,
+            // Confirm the rate field only when it was actually shown (the
+            // editor renders per-unit) or a rate is being sent — never
+            // vouch for a field the technician couldn't see (codex P1
+            // r11); unconfirmed omission keeps the server's
+            // preserve-prior behavior.
+            rate_confirmed: hasRate || !!entry?.unit,
             ...(hasRate ? { application_rate: rate, rate_unit: entry.unit } : {}),
           };
         });
@@ -251,6 +278,12 @@ export default function ServiceRecapModal({
         body: JSON.stringify({
           technicianNotes: note,
           products: productPayload,
+          // The selection state is deliberate (recorded products are
+          // pre-selected on open), so an empty set is a full deselection,
+          // not a resend-only omission — unless a recorded product could
+          // not be represented, in which case the server keeps its
+          // preserve-on-omission behavior (codex P1 r11).
+          productsConfirmed: selectionAuthoritative.current,
           customerRecap: message,
           sendSms: willSend,
         }),
