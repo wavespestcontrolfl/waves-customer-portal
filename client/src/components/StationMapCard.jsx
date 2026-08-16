@@ -279,6 +279,14 @@ const STATION_PIN_STYLES = `
     .station-pin-pop, .station-pulse { animation: none; }
     .station-pulse { display: none; }
   }
+  @media print {
+    /* a Print invoked before the stagger finished would freeze undelayed
+       pins at the animation's backwards fill (scale(0)) and omit them from
+       the printed record — force every pin to its final visible transform
+       (codex r62 #3420) */
+    .station-pin-pop { animation: none; transform: scale(1); }
+    .station-pulse { display: none; }
+  }
 `;
 
 const TRAP_PIN_STYLES = `

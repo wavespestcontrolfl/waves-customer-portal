@@ -209,6 +209,11 @@ describe('StationMapCard — termite station pin animation', () => {
     const texts = [...container.querySelectorAll('svg text')].map((node) => node.textContent);
     expect(texts).toEqual(expect.arrayContaining(['1', '2']));
     expect(container.querySelector('title').textContent).toContain('Station 1');
+    // r62 (#3420): a Print during the stagger must not freeze undelayed
+    // pins at scale(0) — the print override forces the final transform.
+    const styleText = container.querySelector('style')?.textContent || '';
+    expect(styleText).toContain('@media print');
+    expect(styleText).toMatch(/@media print[\s\S]*\.station-pin-pop\s*\{\s*animation:\s*none;\s*transform:\s*scale\(1\)/);
   });
 
   it('keeps static pins when stationPins is off', () => {

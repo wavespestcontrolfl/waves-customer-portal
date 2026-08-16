@@ -4158,12 +4158,12 @@ const BANNED_CUSTOMER_COPY = [
   // reverse at-time INSTRUCTIONS (codex r56): "At 4 PM, you can enter the
   // treated area" — gated on a modal/permission marker before the entry
   // verb so arrival prose ("we arrived at 2 PM and entered…") stays legal
-  new RegExp(`\\b(?:at|around|after)\\s+${CLOCK_TIME_SRC}\\b[^.!?]{0,40}\\b(?:can|may|could|free\\s+to|safe\\s+to|able\\s+to|allowed\\s+to)\\s+(?:safely\\s+)?(?:re-?)?(?:enter|occupy|return|access|go\\s+back|come\\s+back|walk\\s+on)\\b`, 'i'),
+  new RegExp(`\\b(?:at|around|after)\\s+${CLOCK_TIME_SRC}\\b[^.!?]{0,40}\\b(?:can|may|could|free\\s+to|safe\\s+to|able\\s+to|allowed\\s+to)\\s+(?:safely\\s+)?(?:re-?)?(?:enter|occupy|return|access|use|go\\s+back|come\\s+back|walk\\s+on|play\\s+on|sit\\s+on)\\b`, 'i'),
   // ... and reverse IMPERATIVES (codex r57): "After 4 PM, enter the
   // treated area" — the base-form verb must sit right after the clock
   // phrase, so past-tense arrival narration ("at 2 PM and entered") still
   // never matches
-  new RegExp(`\\b(?:at|around|after)\\s+${CLOCK_TIME_SRC}\\s*[,;—–-]?\\s*(?:and\\s+)?(?:then\\s+)?(?:please\\s+)?(?:feel\\s+free\\s+to\\s+)?(?:safely\\s+)?(?:re-?)?(?:enter|occupy|return|access|go\\s+back|come\\s+back|walk\\s+on)\\b`, 'i'),
+  new RegExp(`\\b(?:at|around|after)\\s+${CLOCK_TIME_SRC}\\s*[,;—–-]?\\s*(?:and\\s+)?(?:then\\s+)?(?:please\\s+)?(?:feel\\s+free\\s+to\\s+)?(?:safely\\s+)?(?:re-?)?(?:enter|occupy|return|access|use|go\\s+back|come\\s+back|walk\\s+on|play\\s+on|sit\\s+on)\\b`, 'i'),
 ];
 
 function findBannedCustomerCopy(text) {

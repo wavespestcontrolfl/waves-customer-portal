@@ -227,6 +227,17 @@ const FORMULATION_SUFFIX_TOKENS = new Set([
   'se', 'sc', 'ec', 'wp', 'wdg', 'wsp', 'me', 'ew', 'cs', 'sg', 'df', 'gr',
   'xl', 'ii', 'iii', 'iv', 'lo', 'hi', 'g', 'l', 'd', 'f', 't', 'e',
 ]);
+// Ordinary English words and functional/form vocabulary inside brand names
+// ("Drive XLR8 Post Emergent Liquid Herbicide") reject legitimate prose
+// ("help drive crabgrass pressure down") — they step aside ONLY when the
+// name still keeps at least one genuinely distinctive long token, so
+// protection never vanishes (codex r62 #3420).
+const COMMON_PRODUCT_NAME_WORDS = new Set([
+  'drive', 'post', 'emergent', 'liquid', 'herbicide', 'insecticide',
+  'fungicide', 'concentrate', 'granule', 'granular', 'spray', 'plus',
+  'turf', 'lawn', 'weed', 'grass', 'power', 'rapid', 'quick', 'control',
+  'brush', 'clean', 'clear', 'fresh', 'first', 'final', 'dual', 'triple',
+]);
 function containsProductName(text, products, { extraGenericTokens = null, wholeWord = false } = {}) {
   const hay = String(text || '').toLowerCase();
   if (!hay) return false;
@@ -243,7 +254,11 @@ function containsProductName(text, products, { extraGenericTokens = null, wholeW
       // ignores pest-target nouns like "cockroach" that appear in catalog
       // names but legitimately belong in report copy — codex r21 on #3420).
       || (extraGenericTokens && extraGenericTokens.has(token));
-    const longDistinctive = nameTokens.filter((token) => token.length >= 4 && !isGeneric(token));
+    const longCandidates = nameTokens.filter((token) => token.length >= 4 && !isGeneric(token));
+    const trulyDistinctive = longCandidates.filter((token) => !COMMON_PRODUCT_NAME_WORDS.has(token));
+    // common words step aside only while a genuinely distinctive token
+    // still protects the name (codex r62)
+    const longDistinctive = trulyDistinctive.length ? trulyDistinctive : longCandidates;
     if (longDistinctive.some((token) => (wholeWord ? wordSet.has(token) : hay.includes(token)))) {
       return true;
     }

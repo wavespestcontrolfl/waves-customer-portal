@@ -327,6 +327,9 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // reverse-clock play/sit/use + adverbs inside modal linkers (r62)
+    expect(reportCopyRejection('After 4 PM, children can play on the treated lawn.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The gate code should now be BLUE.')).toBe('access_code');
     // perfect continuing-state linkers + direct use forms (r61)
     expect(reportCopyRejection('The gate code has remained BLUE.')).toBe('access_code');
     expect(reportCopyRejection('Children can use the treated lawn after thirty minutes.')).toMatch(/^banned:/);
@@ -392,6 +395,11 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     const o = { wholeWord: true, extraGenericTokens: new Set(['zone', 'zones']) };
     expect(containsProductName('We applied T-Zone along the walkway edges.', [{ name: 'T-Zone SE' }], o)).toBe(true);
     expect(containsProductName('We treated the affected zone today.', [{ name: 'T-Zone SE' }], o)).toBe(false);
+    // r62: common words step aside while a distinctive token protects
+    const drive = [{ name: 'Drive XLR8 Post Emergent Liquid Herbicide' }];
+    expect(containsProductName('This will help drive crabgrass pressure down.', drive, { wholeWord: true })).toBe(false);
+    expect(containsProductName('We applied XLR8 to the treated areas.', drive, { wholeWord: true })).toBe(true);
+    expect(containsProductName('We applied Drive XLR8 today.', drive, { wholeWord: true })).toBe(true);
   });
 
   // r49 (#3420): the shared builder screens extraNames and fails CLOSED
