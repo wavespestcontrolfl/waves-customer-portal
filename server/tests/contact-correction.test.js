@@ -2141,3 +2141,60 @@ describe('round-19 hardening', () => {
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 });
+
+describe('round-20 hardening', () => {
+  it('a short LABELED property adjacent to a move never rides the move license', async () => {
+    // "Rental:" leaves only the label as residue — a length threshold let
+    // it pass as "essentially bare address"; the closed introduction
+    // vocabulary does not.
+    const body = 'We moved to Sarasota. Rental: 99 Pine Ave, Sarasota 34231';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'city', new_value: 'Sarasota', quote: 'we moved to sarasota', confidence: 'high' },
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'Rental: 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'Rental: 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['city']);
+  });
+
+  it('a lost queue lock rolls the customer write back inside the apply transaction', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({
+      customer: { id: CUSTOMER_ID },
+      body: 'You spelled my last name wrong, it is Rivers',
+      knex,
+      ownerFence: async () => { throw new Error('queue_lock_lost'); },
+    });
+    expect(res.reason).toBe('error');
+    expect(res.applied).toEqual([]);
+    // Transaction rolled back — the stale worker committed nothing.
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+  });
+
+  it('the owner fence passes through silently while the lock is held', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
+    });
+    const fence = jest.fn().mockResolvedValue(undefined);
+    const res = await runSmsContactCorrection({
+      customer: { id: CUSTOMER_ID },
+      body: 'You spelled my last name wrong, it is Rivers',
+      knex,
+      ownerFence: fence,
+    });
+    expect(res.applied.map((a) => a.field)).toEqual(['last_name']);
+    expect(knex._data.customers[0].last_name).toBe('Rivers');
+    expect(fence).toHaveBeenCalledTimes(1);
+  });
+});

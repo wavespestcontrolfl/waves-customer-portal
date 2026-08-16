@@ -497,3 +497,26 @@ describe('round-19 hardening', () => {
     expect(owners[0]).not.toBe(owners[1]);
   });
 });
+
+describe('round-20 hardening', () => {
+  it('the worker hands the runner an owner fence bound to its own claim', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 1, status: 'queued', customer_id: CUSTOMER_ID })],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    let fenceWhileOwned;
+    let fenceAfterReclaim;
+    mockRunSms.mockImplementation(async (args) => {
+      // While this pass still owns the lock the fence passes…
+      fenceWhileOwned = await args.ownerFence(knex).then(() => 'ok', (e) => e.message);
+      // …and after a peer reclaims (rewrites locked_by) it throws, rolling
+      // back the apply transaction it runs inside.
+      knex._data.contact_correction_jobs[0].locked_by = 'replacement:9';
+      fenceAfterReclaim = await args.ownerFence(knex).then(() => 'ok', (e) => e.message);
+      return { applied: [], skipped: [], reason: 'no_corrections' };
+    });
+    await queue.processDueContactCorrectionJobs({ limit: 1, knex });
+    expect(fenceWhileOwned).toBe('ok');
+    expect(fenceAfterReclaim).toBe('queue_lock_lost');
+  });
+});

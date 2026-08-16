@@ -413,6 +413,21 @@ async function runContactCorrectionJob(job, knex, wid) {
     smsLogId: job.sms_log_id || null,
     senderPhone: job.sender_phone || null,
     matchedSnapshot: snapshot,
+    // In-transaction lock-owner fence (codex #3413 r20): the terminal
+    // done/retry marks are owner-conditioned, but a worker whose
+    // extraction outlived the stale-lock threshold could still COMMIT the
+    // customer write and merely fail its mark — the replacement pass then
+    // records an empty result and later jobs cannot rebase over the stale
+    // write. Locking the job row token-conditioned inside the apply
+    // transaction rolls the mutation back with the lost ownership; the
+    // reclaim (which rewrites locked_by) serializes against this lock.
+    ownerFence: async (trx) => {
+      const owned = await trx('contact_correction_jobs')
+        .where({ id: job.id, status: 'running', locked_by: wid })
+        .forUpdate()
+        .first('id');
+      if (!owned) throw new Error('queue_lock_lost');
+    },
   });
   if (result?.reason === 'error') {
     await markJobRetry(job, 'runner reported internal error', knex, wid);

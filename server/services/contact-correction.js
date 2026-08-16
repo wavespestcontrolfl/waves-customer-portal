@@ -360,12 +360,17 @@ async function extractSmsContactCorrections({ body }) {
       .filter((c) => ADDRESS_FIELDS.includes(c.field))
       .map((c) => normValue(c.new_value).replace(/\s+/g, ' ').toLowerCase())
       .filter((v) => v.length >= 2);
+    // After stripping the staged address values, EVERY residual token must
+    // come from a closed address-introduction vocabulary — a length
+    // threshold let short ownership/purpose labels through ("Rental: 99
+    // Pine Ave …" leaves just "rental"), and a labeled property is exactly
+    // the adjacent sentence that must NOT ride the move license
+    // (codex #3413 r20).
     const essentiallyAddress = (s) => {
       let residue = s;
       for (const v of addressValueTexts) residue = residue.split(v).join(' ');
-      residue = residue.replace(/\b(?:new|our|my|the|address|is|now|at|in)\b/g, ' ')
-        .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
-      return residue.length <= 12;
+      const tokens = residue.replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+      return tokens.every((t) => MOVE_INTRO_TOKENS.has(t));
     };
     const moveLicensedFor = (c) => {
       if (!moveIdxs.size) return false;
@@ -436,6 +441,18 @@ function addressGroupComplete(byField) {
 // "are moving to", "new address") is residential-move evidence that may
 // license an address group.
 const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?(?:moved|(?:are|will be)\s+moving)\s+(?:to|into)\b|\bmoving\s+(?:to|into)\b|\bnew address\b/i;
+// The only words allowed to introduce a move's adjacent address fragment
+// (codex #3413 r20): pure connective/address-introduction vocabulary. Any
+// other residual token — "rental", "tenant", "service" — marks the
+// sentence as being about something else and it never rides the move
+// license.
+const MOVE_INTRO_TOKENS = new Set([
+  'it', 'is', 'its', 'now', 'new', 'our', 'my', 'the', 'address', 'at', 'in', 'to', 'we', 'are', 'live', 'here', 'and',
+  // Address field-topic words — "Zip is 34231" is a licensed fragment of
+  // the move statement; ownership/purpose labels (rental, tenant,
+  // service) are deliberately NOT here.
+  'zip', 'zipcode', 'postal', 'code', 'city', 'state', 'street', 'unit', 'apt', 'suite', 'apartment',
+]);
 
 /**
  * Apply validated corrections to a linked customer record.
@@ -892,7 +909,7 @@ async function runSmsContactCorrection(args) {
   return serializePerCustomer(customerId, () => runSmsContactCorrectionInner(args));
 }
 
-async function runSmsContactCorrectionInner({ customer, body, smsLogId = null, knex = db, senderPhone = null, matchedSnapshot = null }) {
+async function runSmsContactCorrectionInner({ customer, body, smsLogId = null, knex = db, senderPhone = null, matchedSnapshot = null, ownerFence = null }) {
   try {
     if (!require('../config/feature-gates').isEnabled('contactCorrection')) return { applied: [], skipped: [], reason: 'gate_off' };
     if (!customer?.id) return { applied: [], skipped: [], reason: 'unlinked' };
@@ -939,6 +956,12 @@ async function runSmsContactCorrectionInner({ customer, body, smsLogId = null, k
       // Message-level move evidence tightens the address-group requirement:
       // a stated move must carry street+city+zip, not locality alone.
       moveContext: MOVE_EVIDENCE_RE.test(String(body || '')),
+      // Queue lock-owner fence (codex #3413 r20): runs INSIDE the apply
+      // transaction, so a worker whose job was reclaimed after the
+      // stale-lock threshold rolls its customer write back instead of
+      // committing a mutation its terminal mark can no longer own — the
+      // same in-trx pattern as the call lane's processing-token fence.
+      postApply: ownerFence ? (trx) => ownerFence(trx) : null,
     });
   } catch (err) {
     logger.warn(`[contact-correction] sms run failed: ${errTag(err)}`);
