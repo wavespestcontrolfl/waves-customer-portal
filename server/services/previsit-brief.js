@@ -76,6 +76,10 @@ const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'rescheduled', 'ski
 // lab confirmation). Deterministic target lists are filtered; LLM list
 // items mentioning them are dropped defensively too.
 const FORBIDDEN_TARGET_RE = /ganoderma|thielaviopsis/i;
+// The retired company name must never appear in generated output — the
+// company is "Waves Pest Control" (AGENTS.md; codex #3423 r9 showed the
+// phrase riding through common words with 'waves' allowlisted).
+const RETIRED_NAME_RE = /waves\s+lawn\s*(?:&|and)?\s*pest/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -961,7 +965,7 @@ const COMMON_PROSE_WORDS = new Set([
   'list', 'lists', 'site', 'sites',
   'state', 'stated', 'states', 'show', 'shows', 'shown',
   'past', 'introduction', 'discuss', 'discussing', 'baseline', 'relevant', 'mindful',
-  'someone', 'documented',
+  'documented',
   'vacuum', 'vacuuming', 'follow-up', 'walk-through',
 ]);
 
@@ -978,6 +982,16 @@ const GROUNDED_ONLY_WORDS = new Set([
   'available', 'availability',
 ]);
 
+// Instruction objects carrying these words direct real business actions
+// ("Provide estimate", "Discuss payment", "Perform treatment") — inside
+// priorities/watch_items the word must be evidenced in the fact VALUES
+// even though it is ordinary prose in descriptive fields (codex #3423 r9).
+const INSTRUCTION_EVIDENCE_WORDS = new Set([
+  'payment', 'payments', 'estimate', 'estimates', 'invoice', 'invoices',
+  'treatment', 'treatments', 'quote', 'quotes', 'credit', 'credits',
+  'balance', 'billing', 'refund', 'refunds', 'discount', 'discounts',
+]);
+
 // Word-level grounding for one candidate word ACROSS its stem variants.
 // Grounded-only vocabulary must match on a WORD BOUNDARY — substring
 // grounding let 'silver' ground on "silverfish" and 'gold' on "marigold"
@@ -987,10 +1001,23 @@ const GROUNDED_ONLY_WORDS = new Set([
 // offer" grounded "Payment accepted" (r6). Every variant of a
 // grounded-only word boundary-matches; ordinary words keep substring
 // matching (the light-stem tiers rely on it).
-function groundedWordOk(word, groundedText) {
+// Leaf VALUES of the grounding facts, without key names — strict grounding
+// must never ride on a field NAME: every payload carries keys like
+// history.available, which grounded "Customer available Monday" even when
+// the value was false (codex #3423 r9). Booleans excluded — true/false
+// carry no vocabulary.
+function collectFactValues(node, out = []) {
+  if (node == null || typeof node === 'boolean') return out;
+  if (typeof node === 'string' || typeof node === 'number') { out.push(String(node)); return out; }
+  if (Array.isArray(node)) { node.forEach((c) => collectFactValues(c, out)); return out; }
+  if (typeof node === 'object') { Object.values(node).forEach((c) => collectFactValues(c, out)); return out; }
+  return out;
+}
+
+function groundedWordOk(word, groundedText, strictText = groundedText) {
   const strict = wordVariants(word).some((v) => GROUNDED_ONLY_WORDS.has(v));
   return wordVariants(word).some((v) => (strict
-    ? new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedText)
+    ? new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(strictText)
     : groundedText.includes(v)));
 }
 
@@ -1002,7 +1029,10 @@ const SHORT_ORGANISM_RE = /\b(rats?|mouse|mice|ants?|bees?|fly|flies|wasps?|tick
 // Ordinary short ALLCAPS abbreviations a brief legitimately uses without
 // grounding (times, zones, business boilerplate) — everything else
 // ALLCAPS-short must ground or reject (bare-product scan below).
-const ACRONYM_PROSE_WORDS = new Set(['am', 'pm', 'et', 'est', 'edt', 'asap', 'hoa', 'ac', 'id', 'ok', 'po', 'llc', 'inc', 'na', 'sms']);
+// 'sms' deliberately NOT here (codex #3423 r9): "Customer prefers SMS" is a
+// contact-preference claim — a grounded payload mentions sms, an invented
+// preference does not, so SMS goes through the normal grounded-ALLCAPS path.
+const ACRONYM_PROSE_WORDS = new Set(['am', 'pm', 'et', 'est', 'edt', 'asap', 'hoa', 'ac', 'id', 'ok', 'po', 'llc', 'inc', 'na']);
 
 // Light stemming for the rare-word pass — plurals/participles of known or
 // grounded words must not read as novel.
@@ -1020,7 +1050,7 @@ function wordVariants(word) {
 // grounding payload, or (fuzzy tier — word order/articles vary in prose)
 // when every significant word of it does. A phrase left with no
 // significant words asserts nothing and passes.
-function isGroundedReference(candidate, groundedText) {
+function isGroundedReference(candidate, groundedText, strictText = groundedText) {
   const phrase = String(candidate || '').toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
   if (!phrase) return true;
   if (groundedText.includes(phrase)) return true;
@@ -1035,7 +1065,7 @@ function isGroundedReference(candidate, groundedText) {
     .filter((w) => /^[a-z][a-z'-]{3,}$/.test(w))
     .filter((w) => !wordVariants(w).some((v) => REFERENCE_STOP_WORDS.has(v) || COMMON_PROSE_WORDS.has(v)));
   if (!words.length) return true;
-  return words.every((w) => groundedWordOk(w, groundedText));
+  return words.every((w) => groundedWordOk(w, groundedText, strictText));
 }
 
 // Allowlist-extraction of product-ish / target-ish references from brief
@@ -1109,6 +1139,9 @@ function findUngroundedClaim(body, grounding) {
   if (!outputFields.length) return null;
   const outputText = outputFields.join(' ').toLowerCase();
   const groundedText = JSON.stringify(grounding.llmFacts).toLowerCase();
+  // Strict (grounded-only / evidence-word) matches scope to fact VALUES —
+  // key names must never ground a business-state claim (codex #3423 r9).
+  const groundedValueText = collectFactValues(grounding.llmFacts).join(' ').toLowerCase();
   const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const kind of ['names', 'targets']) {
     for (const term of vocab[kind] || []) {
@@ -1144,7 +1177,7 @@ function findUngroundedClaim(body, grounding) {
   // pass rejects them in any field). Used by the capitalized-run product
   // path ONLY — application-verb objects keep the strict skip so "Apply
   // Silver Control" still parks as a product.
-  const boundaryGroundedWord = (w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedText);
+  const boundaryGroundedWord = (w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedValueText);
   const commonOrGroundedProse = (term) => String(term).toLowerCase().split(/\s+/).every((w) => (
     w.length < 4 || REFERENCE_STOP_WORDS.has(w) || COMMON_PROSE_WORDS.has(w)
     || (GROUNDED_ONLY_WORDS.has(w) && boundaryGroundedWord(w))
@@ -1202,6 +1235,14 @@ function findUngroundedClaim(body, grounding) {
     // failed, so the claim appears nowhere in the grounding. Fail
     // closed rather than accept it vacuously.
     if (!words.length) return false;
+    // Money/scope-bearing objects require evidence even though their
+    // vocabulary is common (codex #3423 r9): "Provide estimate" /
+    // "Discuss payment" / "Perform treatment" direct real business
+    // actions, so the carrying word must appear in the fact VALUES.
+    const evidence = words.filter((w) => INSTRUCTION_EVIDENCE_WORDS.has(w));
+    if (evidence.length && !evidence.every((w) => wordVariants(w).some(
+      (v) => new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedValueText),
+    ))) return false;
     // Ordinary prose vocabulary self-grounds ("treated", "carefully") —
     // requiring it verbatim would template-fallback normal sentences.
     // Reference STOPWORDS do NOT: they carry the direction of the claim
@@ -1210,7 +1251,7 @@ function findUngroundedClaim(body, grounding) {
     // prose words asserts nothing beyond its verb.
     const significant = words.filter((w) => !COMMON_PROSE_WORDS.has(w));
     if (!significant.length) return true;
-    return significant.every((w) => groundedWordOk(w, groundedText));
+    return significant.every((w) => groundedWordOk(w, groundedText, groundedValueText));
   };
   const labeledFields = [
     ...(body.priorities || []).map((text) => ({ text, instructional: true })),
@@ -1303,7 +1344,7 @@ function findUngroundedClaim(body, grounding) {
       }
     }
     for (const term of refs.targets) {
-      if (!isGroundedReference(term, groundedText)) return { kind: 'novel_target', term };
+      if (!isGroundedReference(term, groundedText, groundedValueText)) return { kind: 'novel_target', term };
     }
   }
   // Rare-word pass — the shape regexes above cannot see every sentence
@@ -1348,7 +1389,7 @@ function findUngroundedClaim(body, grounding) {
     REFERENCE_STOP_WORDS.has(v)
     || COMMON_PROSE_WORDS.has(v)
     || selfReported.has(v)
-  )) || groundedWordOk(word, groundedText);
+  )) || groundedWordOk(word, groundedText, groundedValueText);
   for (const field of outputFields) {
     // 4+ characters: 'mice'/'rats'/'tick'/'flea'-length organisms must
     // not slip under the scan (3-letter singulars are covered in practice
@@ -1406,6 +1447,7 @@ function validateBriefJson(json, grounding) {
     .filter((v) => typeof v === 'string')
     .join(' ');
   if (FORBIDDEN_TARGET_RE.test(rawText)) return { reason: 'forbidden_genus' };
+  if (RETIRED_NAME_RE.test(rawText)) return { reason: 'retired_company_name' };
   // Structured self-report (complement to the prose regexes below, which
   // only see a few sentence shapes): the model must list every product
   // and pest/organism it mentions, and every listed term must be

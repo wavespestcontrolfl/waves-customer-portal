@@ -1744,7 +1744,7 @@ describe('grounded-only words require WORD-BOUNDARY grounding (codex #3423 r5)',
   test('fabricated preference and account-state prose rejects (codex #3423 r6)', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
-    for (const claim of ['Customer requests quiet arrival', 'Account in good standing', 'Resident will be onsite', 'Interior service included', 'Customer prefers phone communication']) {
+    for (const claim of ['Customer requests quiet arrival', 'Account in good standing', 'Resident will be onsite', 'Someone will be onsite', 'Interior service included', 'Customer prefers phone communication', 'Customer prefers SMS']) {
       const verdict = validateBriefJson(
         { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
         grounding,
@@ -1761,6 +1761,69 @@ describe('grounded-only words require WORD-BOUNDARY grounding (codex #3423 r5)',
     };
     const verdict = validateBriefJson(
       { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Silver membership on file' },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r9 — value-scoped strict grounding + retired name + instruction evidence', () => {
+  test('a fact KEY never grounds a business-state claim (history.available)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { history: { available: false } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer available Monday' },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+
+  test('an availability fact VALUE still grounds the claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer said they are available Monday mornings' }] },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer available Monday' },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('the retired company name is rejected outright', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], customer_context: 'Waves Lawn & Pest visited in July.' },
+      grounding,
+    );
+    expect(verdict.reason).toBe('retired_company_name');
+  });
+
+  test('money/treatment directive objects require fact-value evidence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Provide estimate', 'Discuss payment', 'Perform treatment']) {
+      const verdict = validateBriefJson(
+        { priorities: [claim], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('an evidenced money directive passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer asked to discuss payment on arrival' }] },
+    };
+    const verdict = validateBriefJson(
+      { priorities: ['Discuss payment'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
       grounding,
     );
     expect(verdict.body).toBeTruthy();
