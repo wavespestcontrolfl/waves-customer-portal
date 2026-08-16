@@ -2581,3 +2581,27 @@ describe('codex #3423 r35 — rescheduled inflection family', () => {
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r36 — descriptive sensitivity claims, clause-safe suffix regex', () => {
+  test('"Customer provided chemical sensitivity" rejects without a sensitivity fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer provided chemical sensitivity' },
+      empty,
+    ).reason).toBeTruthy();
+  });
+
+  test('canonical-name prose followed by a new clause is not a suffix', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'pest activity reviewed at the fence line' }] },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Contact Waves Pest Control and pest activity can be reviewed.', open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).not.toBe('noncanonical_company_name');
+  });
+});

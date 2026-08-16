@@ -99,7 +99,10 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Connector optional (r22): "Waves Pest Control Pest Services" is a
 // suffixed variant too — a brand word directly after the name rejects;
 // ordinary prose ("- routine service", "serviced the yard") does not.
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:(?:&|\+|\/|-|,|\band\b)\s*)?(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b)/i;
+// The suffix must END the name (lookahead: punctuation/end or another
+// brand-continuation word) — "…Control and pest activity can be
+// reviewed" is a new clause, not a name suffix (r36 P2).
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/|-|,)\s*(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b))/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -937,7 +940,7 @@ const COMMON_PROSE_WORDS = new Set([
   'recheck', 'record', 'records', 'reminder', 'renewal', 'repair', 'report', 'reported', 'request', 'requested',
   'reschedule', 'rescheduled', 'resolve', 'resolved', 'response', 'return', 'review', 'reviewed', 'right', 'roof',
   'route', 'routine', 'schedule', 'scheduled', 'scope', 'screen', 'screened', 'season', 'secure', 'secured',
-  'sensitive', 'sensitivity', 'setup', 'sheet', 'shrubs', 'siding', 'since', 'skip', 'slab', 'small',
+  'sensitive', 'setup', 'sheet', 'shrubs', 'siding', 'since', 'skip', 'slab', 'small',
   'soffit', 'spray', 'sprayed', 'spraying', 'spot', 'staff', 'start', 'started', 'status', 'still',
   'stone', 'stops', 'sweep', 'swept', 'technician', 'texts', 'thorough', 'through', 'times', 'today',
   'touch', 'toward', 'treat', 'treated', 'trees', 'update', 'updated', 'upcoming',
@@ -1010,6 +1013,9 @@ const GROUNDED_ONLY_WORDS = new Set([
   // r24/r25: "Estimate provided" / "Quote provided" are money-delivery
   // claims in ANY field (quotes ARE estimates in this system).
   'estimate', 'estimates', 'quote', 'quotes',
+  // r36: sensitivity claims ("provided chemical sensitivity") are safety
+  // conditions in ANY field.
+  'sensitivity', 'sensitivities',
   // r28: entry/payment-method state ("provided gate access"/"credit card")
   // is claimable in ANY field — and access codes never pass through the
   // LLM by design, so an ungrounded access claim is always invented.
@@ -1038,7 +1044,7 @@ const INSTRUCTION_EVIDENCE_WORDS = new Set([
   'schedule', 'schedules',
   // r27: safety-related directives ("Discuss chemical sensitivity") must
   // derive from a sensitivity fact.
-  'chemical', 'chemicals', 'sensitivity', 'sensitivities',
+  'chemical', 'chemicals',
   // r29: account-lifecycle directives ("Discuss renewal/membership").
   'renewal', 'renewals', 'membership', 'memberships', 'member', 'members',
   // r34: pet guidance is deterministic-block-only by design — an LLM pet
