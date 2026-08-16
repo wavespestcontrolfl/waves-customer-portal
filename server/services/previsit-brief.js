@@ -99,7 +99,7 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Connector optional (r22): "Waves Pest Control Pest Services" is a
 // suffixed variant too — a brand word directly after the name rejects;
 // ordinary prose ("- routine service", "serviced the yard") does not.
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:(?:&|\+|\/|-|\band\b)\s*)?(?:lawn|pest|care|control)\b)/i;
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:(?:&|\+|\/|-|,|\band\b)\s*)?(?:lawn|pest|care|control|llc|inc|corp|co)\b)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1026,6 +1026,9 @@ const INSTRUCTION_EVIDENCE_WORDS = new Set([
   // r19: scheduling directives ("Discuss schedule") assert a real action.
   // 'scheduled' (adjective — "a prior scheduled service") stays prose.
   'schedule', 'schedules',
+  // r27: safety-related directives ("Discuss chemical sensitivity") must
+  // derive from a sensitivity fact.
+  'chemical', 'chemicals', 'sensitivity', 'sensitivities',
 ]);
 
 // Word-level grounding for one candidate word ACROSS its stem variants.
@@ -1196,6 +1199,9 @@ function findUngroundedClaim(body, grounding) {
     // A present estimate object is THE estimate fact (r24) — its values
     // rarely contain the literal word.
     ...(grounding.llmFacts?.openScope?.pendingEstimate || grounding.llmFacts?.openScope?.sourceEstimate ? ['estimate', 'quote'] : []),
+    // The overdue_balance flag IS billing evidence — its detail ('$100.00
+    // outstanding') doesn't carry the words (r27 P2).
+    ...((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance') ? ['billing', 'invoice', 'payment', 'balance'] : []),
   ].join(' ').toLowerCase();
   const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const kind of ['names', 'targets']) {

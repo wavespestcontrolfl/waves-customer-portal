@@ -2271,3 +2271,45 @@ describe('codex #3423 r26 — self-report is not evidence; canonical-name bounda
     }
   });
 });
+
+describe('codex #3423 r27 — sensitivity directives, corporate suffixes, overdue-balance evidence', () => {
+  test('chemical-sensitivity directives need a sensitivity fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: ['Discuss chemical sensitivity'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toBeTruthy();
+    const grounded = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ type: 'chemical_sensitivity', detail: 'customer reports chemical sensitivity — fragrance-free products' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: ['Discuss chemical sensitivity'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+
+  test('corporate suffixes on the canonical name reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const name of ['Waves Pest Control LLC', 'Waves Pest Control, LLC', 'Waves Pest Control Inc']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: `${name} visited.` },
+        grounding,
+      ).reason).toBe('noncanonical_company_name');
+    }
+  });
+
+  test('the overdue_balance flag grounds truthful billing summaries', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ type: 'overdue_balance', severity: 'medium', detail: '$100.00 outstanding' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Invoice balance outstanding' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
