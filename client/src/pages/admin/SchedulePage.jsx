@@ -14550,7 +14550,7 @@ export function CompletionPanel({
                         {sp.displayName || sp.name}
                       </span>{" "}
                       <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
-                        {sp.areaUnit === "sqft" ? "Rate /1k sq ft" : "Rate"}
+                        {isPerBasisUnit(sp.rateUnit) ? "Rate" : sp.areaUnit === "sqft" ? "Rate /1k sq ft" : "Rate"}
                       </span>{" "}
                       <input
                         type="number"
@@ -16749,7 +16749,7 @@ export function CompletionPanel({
                     {sp.displayName || sp.name}
                   </span>{" "}
                   <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
-                    {sp.areaUnit === "sqft" ? "Rate /1k sq ft" : "Rate"}
+                    {isPerBasisUnit(sp.rateUnit) ? "Rate" : sp.areaUnit === "sqft" ? "Rate /1k sq ft" : "Rate"}
                   </span>{" "}
                   <input
                     type="number"

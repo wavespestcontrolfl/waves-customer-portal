@@ -125,8 +125,10 @@ export default function ServiceRecapModal({
         const recorded = data?.existingRecord?.products || [];
         // A failed recorded-products load means the picker cannot speak
         // for what was applied — fail closed, never authoritative
-        // (codex P1 r13).
-        if (data?.existingRecord?.productsLoadFailed) {
+        // (codex P1 r13). Same for a failed service-record lookup (codex
+        // P1 r15): "no record" reported over a transient error must not
+        // authorize an empty replacement of a real completed visit.
+        if (data?.existingRecord?.productsLoadFailed || data?.existingRecordLoadFailed) {
           selectionAuthoritative.current = false;
         }
         if (recorded.length && !Array.isArray(data?.products)) {

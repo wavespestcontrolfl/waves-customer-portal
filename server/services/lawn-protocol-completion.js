@@ -215,6 +215,24 @@ async function recordLawnProtocolCompletion(trx, {
     const protocolProduct = substitution?.originalProductId
       ? protocolProducts.find((row) => String(row.product_id || '') === String(substitution.originalProductId))
       : matchProtocolProduct(protocolProducts, serviceProduct);
+    // actual_rate_per_1000 is a per-1,000 sq ft number — a per-basis
+    // recorded rate must not land in it verbatim (codex P2/P1, PR #3419):
+    // an /acre rate converts EXACTLY (1 acre = 43.56 k sq ft) with its
+    // unit rebased; any other per-basis unit (g/spot, fl_oz/gal, …) has
+    // no honest per-1,000 representation and stores NULL here. The
+    // technician-recorded value+unit stay authoritative on the
+    // service_products row and are preserved in metadata.
+    const recordedRate = Number(serviceProduct.application_rate);
+    const recordedRateUnit = String(serviceProduct.rate_unit || '').trim();
+    let actualRatePer1000 = serviceProduct.application_rate || null;
+    let actualRateUnit = serviceProduct.rate_unit || null;
+    if (Number.isFinite(recordedRate) && /\/acre$/i.test(recordedRateUnit)) {
+      actualRatePer1000 = Number((recordedRate / 43.56).toFixed(4));
+      actualRateUnit = recordedRateUnit.slice(0, recordedRateUnit.indexOf('/'));
+    } else if (recordedRateUnit.includes('/') && !/\/1000sf$/i.test(recordedRateUnit)) {
+      actualRatePer1000 = null;
+      actualRateUnit = null;
+    }
     await trx('lawn_protocol_product_actuals').insert({
       lawn_protocol_service_completion_id: completion.id,
       service_product_id: serviceProduct.id || null,
@@ -225,13 +243,15 @@ async function recordLawnProtocolCompletion(trx, {
       status: substitution ? 'substituted_applied' : (protocolProduct ? 'applied' : 'off_protocol_applied'),
       planned_rate_per_1000: protocolProduct?.rate_per_1000 || null,
       planned_rate_unit: protocolProduct?.rate_unit || null,
-      actual_rate_per_1000: serviceProduct.application_rate || null,
-      actual_rate_unit: serviceProduct.rate_unit || null,
+      actual_rate_per_1000: actualRatePer1000,
+      actual_rate_unit: actualRateUnit,
       actual_amount: serviceProduct.total_amount || null,
       actual_amount_unit: serviceProduct.amount_unit || null,
       metadata: JSON.stringify({
         applicationMethod: serviceProduct.application_method || null,
         substitution: substitution || null,
+        recordedRate: serviceProduct.application_rate || null,
+        recordedRateUnit: serviceProduct.rate_unit || null,
       }),
     });
   }

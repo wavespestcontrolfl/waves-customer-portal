@@ -136,11 +136,20 @@ async function buildRecapContext(serviceId, knex = db) {
     )
     .catch(() => []);
 
+  // A FAILED lookup is not "no record" (codex P1 r15): reporting null on
+  // a transient error would let the modal treat a real completed visit as
+  // fresh and submit an authoritative empty set that erases and retracts
+  // its applications once the error clears. The flag makes the modal fail
+  // closed instead.
+  let existingRecordLoadFailed = false;
   const existingRecord = await knex('service_records')
     .where({ scheduled_service_id: serviceId })
     .orderBy('created_at', 'desc')
     .first('id', 'technician_notes', 'status')
-    .catch(() => null);
+    .catch(() => {
+      existingRecordLoadFailed = true;
+      return null;
+    });
 
   // Products already recorded on the existing record, so reopening a recap
   // shows (and preserves) the chemicals already applied instead of starting
@@ -163,6 +172,7 @@ async function buildRecapContext(serviceId, knex = db) {
   return {
     ok: true,
     eligible,
+    existingRecordLoadFailed,
     service: {
       id: svc.id,
       customerId: svc.customer_id,
