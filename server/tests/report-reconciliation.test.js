@@ -361,6 +361,32 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.bodySource).toBeUndefined();
   });
 
+  // r46 (#3420): past-tense copular claims extract like present-tense ones.
+  test('tree_shrub refuses "The plants appeared healthy" beside a recorded Poor', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Poor', plant_groups: 'Shrubs' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'The plants appeared healthy after today’s application.',
+    });
+    expect(r.bodySource).toBeUndefined();
+    expect(r.body).not.toContain('appeared healthy');
+  });
+
+  test('tree_shrub refuses "seemed to be in good shape" beside a recorded Declining', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Declining', plant_groups: 'Palms' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'The palms seemed healthy overall.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
   test('rodent_exclusion keeps the remaining-concerns disclosure', () => {
     const r = buildTodaysResult({
       projectType: 'rodent_exclusion',
@@ -375,6 +401,32 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.body).toContain('No remaining concerns were observed today.');
   });
 
+  // r46 (#3420): modal/inability denials of recorded exclusion work refuse.
+  test('rodent_exclusion refuses "repairs could not be completed" beside recorded work', () => {
+    const r = buildTodaysResult({
+      projectType: 'rodent_exclusion',
+      values: { exclusion_work_completed: 'Yes', remaining_concerns: 'No remaining concerns observed' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'The exclusion repairs could not be completed today.',
+    });
+    expect(r.bodySource).toBeUndefined();
+    expect(r.body).not.toContain('could not be completed');
+  });
+
+  test('rodent_exclusion refuses "we were unable to complete the repairs"', () => {
+    const r = buildTodaysResult({
+      projectType: 'rodent_exclusion',
+      values: { exclusion_work_completed: 'Yes', remaining_concerns: 'No remaining concerns observed' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'We were unable to complete the repairs due to access.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
   test('rodent_inspection keeps the service recommendation', () => {
     const r = buildTodaysResult({
       projectType: 'rodent_inspection',
@@ -387,5 +439,31 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.bodySource).toBe('technician_report');
     expect(r.body).toContain('attic and garage');
     expect(r.body).toContain('we recommend rodent trapping program');
+  });
+
+  // r46 (#3420): noun-first evidence denials refuse on a found=Yes visit.
+  test('rodent_inspection refuses "No visible rodent evidence was observed" beside found=Yes', () => {
+    const r = buildTodaysResult({
+      projectType: 'rodent_inspection',
+      values: { activity_found: 'Yes', recommended_service: 'Rodent trapping program', urgency: 'High' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'No visible rodent evidence was observed today.',
+    });
+    expect(r.bodySource).toBeUndefined();
+    expect(r.body).not.toContain('No visible rodent evidence');
+  });
+
+  test('rodent_inspection accepts "no rodent signs" on a found=No visit', () => {
+    const r = buildTodaysResult({
+      projectType: 'rodent_inspection',
+      values: { activity_found: 'No', recommended_service: 'No service needed at this time' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'We inspected the attic and found no fresh rodent signs.',
+    });
+    expect(r.bodySource).toBe('technician_report');
   });
 });

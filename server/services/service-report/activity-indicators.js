@@ -3205,7 +3205,10 @@ function buildTodaysResult({
       // contradicts. Reconcile override honored (codex r41).
       const TS_CONDITION_WORD_SRC = '(excellent|healthy|thriving|great|good|strong|fair|average|so[-\\s]?so|okay|ok|moderate|poor|declining|struggling|deteriorating|failing|rough|bad|recovering|improving|rebounding)';
       const TS_CLAIM_RES = [
-        new RegExp(`\\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\\s+condition)\\b[^.!?]{0,30}\\b(?:is|are|was|were|looks?|looked|remains?|appears?)\\s+(?:very\\s+|quite\\s+|overall\\s+)*(?:in\\s+(?:very\\s+|quite\\s+)*)?${TS_CONDITION_WORD_SRC}\\b`, 'gi'),
+        // past-tense/copular forms included — "The plants appeared healthy"
+        // is the common paraphrase the present-tense alternation missed
+        // (codex r46)
+        new RegExp(`\\b(?:landscape|plants?|shrubs?|palms?|ornamentals?|turf|overall\\s+condition)\\b[^.!?]{0,30}\\b(?:is|are|was|were|looks?|looked|remains?|remained|appears?|appeared|seems?|seemed)\\s+(?:very\\s+|quite\\s+|overall\\s+)*(?:in\\s+(?:very\\s+|quite\\s+)*)?${TS_CONDITION_WORD_SRC}\\b`, 'gi'),
         new RegExp(`\\b${TS_CONDITION_WORD_SRC}\\s+(?:overall\\s+)?(?:landscape|plant|shrub|palm|turf)?\\s*(?:condition|health|shape)\\b`, 'gi'),
       ];
       const TS_CLAIM_BANDS = {
@@ -3259,7 +3262,11 @@ function buildTodaysResult({
     // deny the recorded repairs — "no exclusion repairs were completed"
     // beside the fixed repairs-completed headline keeps the deterministic
     // copy; reconcile override honored (codex r43).
-    const NO_REPAIRS_CLAIM_RE = /\bno\s+(?:exclusion\s+)?(?:repairs?|work)\s+(?:was|were)\s+(?:completed|performed|done|made|needed)\b|\b(?:did\s+not|didn['’]t)\s+(?:complete|perform|make)\b[^.!?]{0,25}\b(?:repairs?|exclusion)\b/i;
+    // modal and inability denials included — "repairs could not be
+    // completed" / "we were unable to complete the repairs" deny the
+    // recorded work just as plainly as "no repairs were completed"
+    // (codex r46)
+    const NO_REPAIRS_CLAIM_RE = /\bno\s+(?:exclusion\s+)?(?:repairs?|work)\s+(?:was|were)\s+(?:completed|performed|done|made|needed)\b|\b(?:did\s+not|didn['’]t)\s+(?:complete|perform|make)\b[^.!?]{0,25}\b(?:repairs?|exclusion)\b|\b(?:repairs?|work|exclusion)\b[^.!?]{0,30}\b(?:could\s+not|couldn['’]t|cannot|can['’]t|will\s+not|won['’]t)\s+be\s+(?:completed|performed|done|made|finished)\b|\bunable\s+to\s+(?:complete|perform|finish|make|do)\b[^.!?]{0,30}\b(?:repairs?|exclusion|work)\b/i;
     const exclusionReportBody = technicianReportBody
       && (reconcileConfirmed || !NO_REPAIRS_CLAIM_RE.test(String(technicianReportBody)))
       ? technicianReportBody
@@ -3359,7 +3366,10 @@ function buildTodaysResult({
     // agree with the boolean finding — a draft claiming "no activity" on a
     // found=Yes visit (or vice versa) keeps the deterministic copy, with
     // the reconciliation override honored (codex r39).
-    const NO_ACTIVITY_CLAIM_RE = /\bno\s+(?:current\s+|visible\s+|active\s+)*(?:rodent\s+)?activity\b|\bno\s+(?:signs?|evidence)\s+of\s+rodents?\b|\bfree\s+of\s+rodents?\b|\b(?:did\s+not|didn['’]t|could\s+not|couldn['’]t)\s+(?:find|observe|note|confirm|detect|see)\b[^.!?]{0,40}\b(?:rodents?|activity)\b|\bno\s+rodents?\s+(?:was|were)\s+(?:found|observed|seen|noted)\b/i;
+    // noun-first evidence denials included — "No visible rodent evidence
+    // was observed" is the natural form of "no evidence of rodents"
+    // (codex r46)
+    const NO_ACTIVITY_CLAIM_RE = /\bno\s+(?:current\s+|visible\s+|active\s+)*(?:rodent\s+)?activity\b|\bno\s+(?:signs?|evidence)\s+of\s+rodents?\b|\bno\s+(?:current\s+|visible\s+|active\s+|fresh\s+|new\s+|obvious\s+)*rodent\s+(?:evidence|signs?|droppings|indications?)\b|\bfree\s+of\s+rodents?\b|\b(?:did\s+not|didn['’]t|could\s+not|couldn['’]t)\s+(?:find|observe|note|confirm|detect|see)\b[^.!?]{0,40}\b(?:rodents?|activity)\b|\bno\s+rodents?\s+(?:was|were)\s+(?:found|observed|seen|noted)\b/i;
     const ACTIVITY_FOUND_CLAIM_RE = /\b(?:rodent\s+)?activity\s+(?:was|were|is)\s+(?:found|observed|confirmed|noted|present)\b|\bactive\s+rodent\b|\bevidence\s+of\s+rodents?\s+(?:was|were)\s+(?:found|observed|noted)\b/i;
     const inspectionBodyText = String(technicianReportBody || '');
     const inspectionContradiction = found

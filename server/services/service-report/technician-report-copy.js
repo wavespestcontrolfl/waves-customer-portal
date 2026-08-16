@@ -61,7 +61,12 @@ const REPORT_ACCESS_CODE_RES = [
   /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=)\s*["'‘’“”]?[a-z][a-z0-9#*]{1,11}["'‘’“”]?(?=[\s.,!?‘’“”]|$)/i,
   // reverse order ("blue is the gate password") — a leading stopword
   // ("this is the code") never counts as the credential itself (codex r38)
-  /\b(?!(?:this|that|it|here|there|what|which|below|above)\b)["'‘’“”]?[a-z0-9#*]{2,12}["'‘’“”]?\s+(?:is|=)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase)\b/i,
+  // device nouns join the reverse shape ("WAVES is the lockbox") and
+  // UPPERCASE/quoted tokens get the same short positional window the digit
+  // shapes already have before keypad/lockbox ("Use BLUE at the keypad") —
+  // the uncovered reverse-alphabetic × device-noun intersection (codex r46)
+  /\b(?!(?:this|that|it|here|there|what|which|below|above)\b)["'‘’“”]?[a-z0-9#*]{2,12}["'‘’“”]?\s+(?:is|=)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
+  /(?:["'‘’“”][A-Za-z0-9#*]{2,12}["'‘’“”]|\b[A-Z0-9#*]{2,12})\s+(?:at|for|to|on|in|into|near|by|opens?|unlocks?)\s+(?:the\s+)?(?:[Kk]eypad|[Ll]ock\s?box)\b/,
   // spoken number-word codes ("gate code four five four five") — two or
   // more number words after a code noun, mirroring the canonical scrubber's
   // multi-token shape (codex r41)

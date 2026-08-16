@@ -306,6 +306,11 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     const edited = technicianReportCustomerCopy('WHAT WE DID\n\nWe treated the home. Use gate code 4545 next time.\n\nWHAT WE FOUND\n\nActivity was low.');
     expect(edited.body).toBeNull();
     expect(edited.violations).toContain('access_code');
+    // alphabetic credentials beside a device noun — the reverse and
+    // positional shapes cover keypad/lockbox too (r46)
+    expect(reportCopyRejection('Use BLUE at the keypad to enter the side yard.')).toBe('access_code');
+    expect(reportCopyRejection('WAVES is the lockbox for the garage entry.')).toBe('access_code');
+    expect(reportCopyRejection('We entered at the keypad and treated the lanai.')).toBeNull();
   });
 
   test('abbreviated trade-name echoes still reject; plain vocabulary passes (r36)', () => {
