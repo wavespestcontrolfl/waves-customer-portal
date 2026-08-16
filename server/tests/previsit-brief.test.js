@@ -2016,6 +2016,8 @@ describe('codex #3423 r16 — short organisms, indirect objects, do-not-call cla
     const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
     for (const body of [
       { watch_items: ['Watch for bat damage'], priorities: [] },
+      { watch_items: ['Damage activity'], priorities: [] },
+      { watch_items: [], priorities: ['Provide customer with an estimate'] },
       { watch_items: [], priorities: ['Provide customer an estimate'] },
       { watch_items: [], priorities: [], customer_context: 'Customer is not on do not call list' },
     ]) {
@@ -2031,7 +2033,7 @@ describe('codex #3423 r16 — short organisms, indirect objects, do-not-call cla
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = {
       catalogVocabulary: { names: [], targets: [] },
-      llmFacts: { flags: [{ detail: 'bats in the attic vents reported' }] },
+      llmFacts: { flags: [{ detail: 'bat damage in the attic; bats reported in vents' }] },
     };
     const verdict = validateBriefJson(
       { priorities: [], watch_items: ['Watch for bat damage'], mentioned_terms: ['bats'], last_visit_summary: null, open_scope: null, customer_context: null },

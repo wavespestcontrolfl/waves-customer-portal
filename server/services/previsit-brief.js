@@ -913,7 +913,7 @@ const COMMON_PROSE_WORDS = new Set([
   'cabinet', 'cabinets', 'called', 'calling', 'cancel', 'cancelled', 'carefully', 'caution', 'check', 'checked',
   'checking', 'clear', 'close', 'closet', 'complete', 'completed', 'concern', 'concerns', 'condition', 'conditions',
   'confirm', 'confirmed', 'contact', 'continue', 'continued', 'corner', 'corners', 'coverage', 'covered', 'crawl',
-  'credit', 'current', 'customer', 'cycle', 'damage', 'daytime', 'detail', 'details', 'discussed', 'dispatch',
+  'credit', 'current', 'customer', 'cycle', 'daytime', 'detail', 'details', 'discussed', 'dispatch',
   'document', 'driveway', 'during', 'earlier', 'early', 'entry', 'estimate', 'evening', 'every', 'expect',
   'expects', 'extra', 'family', 'fence', 'fencing', 'first', 'flag', 'flagged', 'focus', 'follow',
   'following', 'front', 'garage', 'garden', 'gate', 'gates', 'gutter', 'gutters', 'heavy', 'hedge',
@@ -968,6 +968,7 @@ const COMMON_PROSE_WORDS = new Set([
   // whenever the claim is true). The action verbs below (perform/provide/
   // retrieve/vacuum/document/discuss) are additionally in the
   // directive-verb capture so their OBJECTS still ground strictly.
+  'with',
   'perform', 'performs', 'performed', 'performing', 'provide', 'provides', 'provided', 'providing',
   'context', 'account', 'accounts',
   'information', 'scheduling',
@@ -1113,14 +1114,14 @@ function extractOutputReferences(text) {
   // seen, not just "Apply Bifen SC"); the all-words-common skip in the
   // validator keeps ordinary prose objects ("use caution") from
   // over-rejecting.
-  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/gi)) push(instructed, m[1]);
+  for (const m of text.matchAll(/\b(?:[Aa]ppl(?:y|ied|ying)|[Ss]pray(?:ed|ing)?|[Uu]s(?:e|ed|ing)|[Tt]reat(?:ed|ing)?)(?:\s+(?:with|the|a|an|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/gi)) push(instructed, m[1]);
   // NON-treatment imperatives ("Inspect interior", "Check attic",
   // "Monitor bait stations"): instruction fields must ground these
   // objects too — the treatment-verb capture above covers only
   // apply/spray/use/treat, and an ungrounded "Inspect interior" on an
   // exterior-only visit is exactly as contradictory as "Treat interior".
   // Same connector skip and follower-stop as the treatment capture.
-  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?|[Pp]erform(?:ed|ing|s)?|[Pp]rovid(?:e|es|ed|ing)|[Rr]etriev(?:e|es|ed|ing)|[Vv]acuum(?:ed|ing|s)?|[Dd]ocument(?:ed|ing|s)?|[Dd]iscuss(?:ed|ing|es)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|with|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/gi)) push(directives, m[1]);
+  for (const m of text.matchAll(/\b(?:[Ii]nspect(?:ed|ing|s)?|[Cc]heck(?:ed|ing|s)?|[Rr]e-?check(?:ed|ing|s)?|[Mm]onitor(?:ed|ing|s)?|[Ee]xamin(?:e|ed|ing|es)|[Vv]erif(?:y|ied|ies|ying)|[Ss]ecur(?:e|ed|ing|es)|[Rr]emov(?:e|ed|ing|es)|[Ii]nstall(?:ed|ing|s)?|[Pp]lac(?:e|ed|ing|es)|[Cc]lean(?:ed|ing|s)?|[Cc]lear(?:ed|ing|s)?|[Ss]weep(?:ing|s)?|[Bb]ait(?:ed|ing|s)?|[Tt]arget(?:ed|ing|s)?|[Aa]ddress(?:ed|ing|es)?|[Ff]ocus(?:ed|ing|es)?(?:\s+on)?|[Pp]erform(?:ed|ing|s)?|[Pp]rovid(?:e|es|ed|ing)|[Rr]etriev(?:e|es|ed|ing)|[Vv]acuum(?:ed|ing|s)?|[Dd]ocument(?:ed|ing|s)?|[Dd]iscuss(?:ed|ing|es)?)(?:\s+(?:the|a|an|all|any|some))*\s+([A-Za-z][\w.-]*(?:\s+(?!(?:for|to|on|in|at|and|or|along|around|near|across|into|onto|over|under|before|after|during|per|by|from)\b)[\w.-]+){0,3})/gi)) push(directives, m[1]);
   for (const m of text.matchAll(/\b(?:for|targeting|against)\s+((?:[a-z][a-z'-]*\s+){0,3}[a-z][a-z'-]*)/g)) push(targets, m[1]);
   // Organism references that never pass a preposition: "<X> activity/
   // damage/infestation" and "signs/evidence of <X>" ("Emerald ash borer
