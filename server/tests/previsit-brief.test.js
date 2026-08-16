@@ -3559,3 +3559,44 @@ describe('codex #3423 r63 — colon states, paid-current inversions, expected co
     ).reason).not.toBe('noncanonical_company_name');
   });
 });
+
+describe('codex #3423 r64 — seven truthful-case fixes', () => {
+  test('grounded natural phrasings pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const dncFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer does not want a call before arrival' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer does not want a call before arrival' },
+      dncFact,
+    ).body).toBeTruthy();
+    const compound = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer requested email and call' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer requested email and call' },
+      compound,
+    ).body).toBeTruthy();
+    const advStatus = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'appointment is currently cancelled per office' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment is currently cancelled' },
+      advStatus,
+    ).body).toBeTruthy();
+    const negActivity = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'pest activity was never reported' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Pest activity was never reported' },
+      negActivity,
+    ).body).toBeTruthy();
+    const pastPerfect = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate had been accepted', customer_context: null },
+      pastPerfect,
+    ).body).toBeTruthy();
+    const digitHours = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'dry time is 5 hours after treatment application' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Dry after five hours' },
+      digitHours,
+    ).body).toBeTruthy();
+    const pluralFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer is sensitive to chemicals' }] } };
+    expect(validateBriefJson(
+      { priorities: ['Discuss chemical sensitivity'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      pluralFact,
+    ).body).toBeTruthy();
+  });
+});

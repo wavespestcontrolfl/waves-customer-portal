@@ -984,6 +984,9 @@ const COMMON_PROSE_WORDS = new Set([
   // retrieve/vacuum/document/discuss) are additionally in the
   // directive-verb capture so their OBJECTS still ground strictly.
   'with',
+  // Spelled numbers are prose — the duration guard owns ungrounded
+  // intervals (r64).
+  'three', 'four', 'five', 'seven', 'eight', 'nine', 'fifteen', 'twenty', 'thirty',
   'perform', 'performs', 'performed', 'performing', 'provide', 'provides', 'provided', 'providing',
   'context', 'account', 'accounts',
   'information',
@@ -1126,6 +1129,8 @@ function negNear(text, word) {
 // grounded words must not read as novel.
 function wordVariants(word) {
   const out = [word];
+  // Singular evidence must match plural fact values (r64).
+  if (!word.endsWith('s')) out.push(`${word}s`);
   if (word.endsWith('es')) out.push(word.slice(0, -2));
   if (word.endsWith('s')) out.push(word.slice(0, -1));
   // 'missing' (state adjective) must not stem to 'missed' (event) — r53.
@@ -1517,7 +1522,7 @@ function findUngroundedClaim(body, grounding) {
     // Lookbehind blocks the historical qualifier PER PHRASE — a separate
     // current "appointment confirmed" fact grounds even when a historical
     // one also exists (r44 P2).
-    const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\b(?:appointments?|visits?|service|technician|tech)\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})\\b(?!\\s+(?:(?:for|on|from|back)\\s+)?(?:last|yesterday|earlier|previously|weeks?|months?|days?|in\\s+\\w+)\\b)|\\b(?:${statusForms.join('|')})\\s+(?:appointments?|visits?)\\b(?!\\s)`);
+    const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\b(?:appointments?|visits?|service|technician|tech)(?:\\s*:\\s*|\\s+)(?:(?:was|is|has\\s+been|will\\s+be)\\s+)?(?:(?:currently|now|still|already|recently)\\s+)?(?:${statusForms.join('|')})\\b(?!\\s+(?:(?:for|on|from|back)\\s+)?(?:last|yesterday|earlier|previously|weeks?|months?|days?|in\\s+\\w+)\\b)|\\b(?:${statusForms.join('|')})\\s+(?:appointments?|visits?)\\b(?!\\s)`);
     const inGlobalPhrase = phraseRe.test(currentFactValueText);
     if (!inVisit && !inGlobalPhrase) {
       return { kind: 'appointment_state', term: status };
@@ -1529,15 +1534,15 @@ function findUngroundedClaim(body, grounding) {
   const instructionalText = [...(body.priorities || []), ...(body.watch_items || [])].join('. ').toLowerCase();
   // EVERY contact claim is validated, not just the first (r46).
   const contactClaims = [
-    ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred|expects?|expected|awaits?)\s+(?:that\s+(?:you|we|the\s+tech(?:nician)?)\s+)?(?:(?:you|us|the\s+tech(?:nician)?)\s+)?(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:be\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back|ed)?|text(?:s|ed)?|sms|email(?:s|ed)?|updates?|contact(?:ed)?)(?:\s+(?:and|or)\s+(call(?:s|back)?|texts?|sms|emails?))?\b/g),
+    ...outputText.matchAll(/\b(?:(does\s+not|doesn't|do\s+not|don't|will\s+not|won't)\s+)?(?:asked|asks|requested|requests|wants?|want|wanted|prefers?|prefer|preferred|expects?|expect|expected|awaits?|await)\s+(?:that\s+(?:you|we|the\s+tech(?:nician)?)\s+)?(?:(?:you|us|the\s+tech(?:nician)?)\s+)?(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:be\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back|ed)?|text(?:s|ed)?|sms|email(?:s|ed)?|updates?|contact(?:ed)?)(?:\s+(?:and|or)\s+(call(?:s|back)?|texts?|sms|emails?))?\b/g),
     ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email|contact|phone)\s+(?:the\s+)?customer\b/g)],
     // Imperative channel verbs with implicit customer ("Please call
     // before arrival") in INSTRUCTION fields (r51).
     ...[...instructionalText.matchAll(/(?:^|[.;!?]\s*)(?:please\s+)?(do\s+not\s+|don't\s+)?(call|text|email|contact|phone)\s+(?:before|after|prior|when|upon|on\s+arrival|ahead)\b/g)],
   ];
   for (const contactReq of contactClaims)
-  for (const channel of [contactReq[2], contactReq[3]].filter(Boolean).map((c) => c.replace(/s$/, '').replace(/ed$/, '').replace(/^phone$/, 'call'))) {
-    const negatedClaim = Boolean(contactReq[1]);
+  for (const channel of [contactReq[3] ?? contactReq[2], contactReq[4]].filter(Boolean).map((c) => c.replace(/s$/, '').replace(/ed$/, '').replace(/^phone$/, 'call'))) {
+    const negatedClaim = Boolean(contactReq[1]) || Boolean(contactReq[2] && /not|no\b/.test(String(contactReq[2])));
     const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred)\b/.test(groundedValueText);
     const bareChannel = channel.replace(/back$/, '').replace(/ed$/, '');
     // Polarity (r41): a NEGATED preference near the channel ("does not
@@ -1553,7 +1558,7 @@ function findUngroundedClaim(body, grounding) {
     // The channel must be the OBJECT of the request — only determiners/
     // qualifiers may intervene ("requested an estimate during the phone
     // call" is not a call request, r49).
-    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?|expect(?:s|ed)?)\\s+(?:(?:for|to|be|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening)\\s+){0,3}${bareChannel}`);
+    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?|expect(?:s|ed)?)\\s+(?:(?:for|to|be|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening|(?:calls?|texts?|sms|emails?)\\s+and)\\s+){0,4}${bareChannel}`);
     const factSupports = clauseRe.test(groundedValueText);
     if (negatedClaim ? !(factSupports && negatedNearChannel) : (!factSupports || negatedNearChannel)) {
       return { kind: 'contact_request', term: channel };
@@ -1608,7 +1613,7 @@ function findUngroundedClaim(body, grounding) {
   // across field boundaries (r46 fix during the r37 guard).
   // Copulas stripped so "Estimate was accepted" binds 'estimate', not
   // 'was' (r49 P2) — and "Renewal was accepted" still binds 'renewal'.
-  for (const fieldText of outputFields.map((f) => String(f).toLowerCase().replace(/\b(?:was|is|were|are|has\s+been|been)\s+(?=accepted\b)/g, '')))
+  for (const fieldText of outputFields.map((f) => String(f).toLowerCase().replace(/\b(?:was|is|were|are|has\s+been|had\s+been|been)\s+(?=accepted\b)/g, '')))
   for (const m of fieldText.matchAll(/\baccepted\s+(?:the\s+|a\s+|an\s+|his\s+|her\s+|their\s+|our\s+)?([a-z][a-z'-]{2,})\b|\b([a-z][a-z'-]{2,})(?=\s+accepted\b)/g)) {
     const noun = m[1] || m[2];
     if (ACCEPT_OBJECT_OK.has(noun) || noun === 'customer') continue;
@@ -1796,7 +1801,7 @@ function findUngroundedClaim(body, grounding) {
   if (pestActivityEvidence) {
     // Polarity: 'reported no pest activity' must not ground the positive
     // claim (r57).
-    const factNegAct = negNear(groundedValueText, 'activit');
+    const factNegAct = negNear(groundedValueText, 'activit[a-z]*');
     for (const sentence of outputText.split(/[.;!?]/)) {
       if (!/\bactivity\b/.test(sentence)) continue;
       const claimNegAct = negNear(sentence, 'activity');
