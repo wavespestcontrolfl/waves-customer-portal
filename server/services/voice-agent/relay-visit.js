@@ -390,7 +390,13 @@ async function serviceReportText(customerId, { visitDate = null, service = null,
       const sd = typeof record.service_data === 'string'
         ? JSON.parse(record.service_data || '{}')
         : (record.service_data || {});
-      return Boolean(sd?.technicianReportBodyRejected);
+      if (sd?.technicianReportBodyRejected) return true;
+      // A governing typed/companion snapshot that REFUSED the body
+      // (zero state, contradiction) leaves no marker — mirror the web
+      // report's acceptance rule so the phone never speaks copy the
+      // permanent report replaced (codex r65).
+      const { typedStoryAcceptsBody } = require('../service-report/activity-indicators');
+      return !typedStoryAcceptsBody(sd);
     } catch { return true; }
   })();
   const reportCopy = visitBodyRejected ? null : technicianReportCustomerCopy(record.technician_notes);

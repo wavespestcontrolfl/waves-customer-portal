@@ -78,7 +78,7 @@ const REPORT_ACCESS_CODE_RES = [
   // ... and the positional window covers the ordinary code nouns too
   // ("Use BLUE for the gate code" / "for the password") — device nouns
   // alone left that intersection open (codex r47)
-  /(?:["'‘’“”][A-Za-z0-9#*]{2,12}(?:\s+[A-Za-z0-9#*]{1,12}){0,3}["'‘’“”]|\b[A-Z0-9#*]{2,12})\s+(?:at|for|to|on|in|into|near|by|opens?|unlocks?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b/,
+  /(?:["'‘’“”][A-Za-z0-9#*]{2,12}(?:\s+[A-Za-z0-9#*]{1,12}){0,3}["'‘’“”]|\b[A-Z0-9#*]{2,12})\s+(?:at|for|to|on|in|into|near|by|as|opens?|unlocks?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b/,
   // spoken number-word codes ("gate code four five four five") — two or
   // more number words after a code noun, mirroring the canonical scrubber's
   // multi-token shape (codex r41)
@@ -148,12 +148,22 @@ function technicianReportCustomerCopy(notes) {
   // Union of every screen the summary slot enforces elsewhere: the shared
   // snapshot ban list, premium-experience's forbidden patterns, and the
   // narrative's extra vocabulary (plural "infestations", "safe", "solved").
+  // The repository's APPROVED conditional re-entry idiom — "safe once
+  // dry" (AGENTS.md compliance-language rule) — is stripped from the text
+  // the vocabulary screens see, so the one sanctioned use of "safe" never
+  // rejects the body while every unconditional safety claim still does
+  // (codex r65). The idiom carries no figure, so the timing screens are
+  // unaffected either way.
+  const screenText = body.replace(
+    /\bsafe\s+(?:once|when|after|as\s+soon\s+as)\s+(?:it\s+is\s+|everything\s+is\s+|the\s+(?:product|application|treatment|area)\s+is\s+)?(?:fully\s+|completely\s+)?dry\b/gi,
+    'once dry',
+  );
   const violations = [
-    ...findBannedCustomerCopy(body),
-    ...EXTRA_FORBIDDEN.map((rx) => body.match(rx)?.[0] || null).filter(Boolean),
-    ...(containsReportAccessCode(body) ? ['access_code'] : []),
+    ...findBannedCustomerCopy(screenText),
+    ...EXTRA_FORBIDDEN.map((rx) => screenText.match(rx)?.[0] || null).filter(Boolean),
+    ...(containsReportAccessCode(screenText) ? ['access_code'] : []),
   ];
-  if (!violations.length && !validateCustomerCopy(body)) violations.push('forbidden_language');
+  if (!violations.length && !validateCustomerCopy(screenText)) violations.push('forbidden_language');
   return {
     whatWeDid,
     whatWeFound,

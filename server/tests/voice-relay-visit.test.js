@@ -360,6 +360,27 @@ describe('get_service_report', () => {
     expect(out).not.toMatch(/report summary/i);
   });
 
+  // r65 (#3420): a governing snapshot that REFUSED the body (no bodySource
+  // stamped) silences the spoken note too — no marker is written for
+  // snapshot-level refusals.
+  test('a governing snapshot without bodySource keeps the reviewed draft unspoken', async () => {
+    primeDb({
+      service_records: [{
+        ...RECORD,
+        technician_notes: REVIEWED_REPORT_NOTES,
+        service_data: JSON.stringify({
+          typedReportSnapshot: {
+            type: 'rodent_trapping',
+            todaysResult: { headline: 'x', body: 'template copy' },
+            activity: { score: 0 },
+          },
+        }),
+      }],
+    });
+    const out = await executeTool('get_service_report', {}, { customerId: CUSTOMER_ID, customerTier: 'full', callerAttested: true });
+    expect(out).not.toContain('We treated the exterior perimeter');
+  });
+
   // ⭐ PARSER-APPROVED IS NOT CODE-FREE: a valid reviewed section carrying a
   // gate code now fails the parse ITSELF (containsReportAccessCode nulls the
   // body — #3420), so the draft never reaches the relay at all. The relay's

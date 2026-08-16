@@ -764,7 +764,11 @@ async function loadCompletedVisits(customerId, limit = 5) {
         const sd = typeof svc.service_data === 'string'
           ? JSON.parse(svc.service_data || '{}')
           : (svc.service_data || {});
-        return Boolean(sd?.technicianReportBodyRejected);
+        if (sd?.technicianReportBodyRejected) return true;
+        // Governing snapshot refusals leave no marker — mirror the web
+        // acceptance rule (codex r65; same as relay-visit).
+        const { typedStoryAcceptsBody } = require('../service-report/activity-indicators');
+        return !typedStoryAcceptsBody(sd);
       } catch { return true; }
     })();
     const reportCopy = (suppressed || svcBodyRejected) ? null : technicianReportCustomerCopy(svc.technician_notes);

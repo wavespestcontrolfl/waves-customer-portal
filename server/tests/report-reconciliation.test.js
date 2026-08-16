@@ -552,6 +552,33 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(denial.bodySource).toBeUndefined();
   });
 
+  // r65 (#3420): evidence-based absence claims + zero-score story trends.
+  test('flea refuses "No evidence of activity was observed" beside a heavy score', () => {
+    const r = buildTodaysResult({
+      projectType: 'flea',
+      values: { evidence_level: 'Heavy — adults observed' },
+      activity: { score: 4 },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'No evidence of activity was observed today.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
+  test('rodent_exclusion zero-score trend visit still consumes screened copy', () => {
+    const r = buildTodaysResult({
+      projectType: 'rodent_exclusion',
+      values: { exclusion_work_completed: 'Yes', remaining_concerns: 'No remaining concerns observed' },
+      visitSequence: 2,
+      activity: { score: 0, trendWord: 'improving', trend: 'improving' },
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'We rechecked the sealed openings; everything remains intact.',
+    });
+    expect(r.bodySource).toBe('technician_report');
+  });
+
   // r52 (#3420): absence contradicts EVERY nonzero gauge, not just band 2+.
   test('flea refuses "No flea activity was observed" beside a low score too', () => {
     const r = buildTodaysResult({

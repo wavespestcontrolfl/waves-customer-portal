@@ -301,6 +301,13 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('We entered using the gate code BLUE and treated the perimeter.')).toBe('access_code');
     expect(reportCopyRejection('The keypad code is "sunset7" for the side door.')).toBe('access_code');
     expect(reportCopyRejection('The billing code was updated in our office records.')).toBeNull();
+    // the APPROVED safe-once-dry idiom parses; unconditional "safe" still
+    // rejects (r65)
+    const { technicianReportCustomerCopy: parseCopy } = require('../services/service-report/technician-report-copy');
+    const idiom = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and your technician confirms timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(idiom.body).toBeTruthy();
+    const unconditional = parseCopy('WHAT WE DID\n\nWe treated the lawn and it is now safe for pets.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(unconditional.body).toBeNull();
     // the shared parser screens post-generation inline edits too (r36)
     const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
     const edited = technicianReportCustomerCopy('WHAT WE DID\n\nWe treated the home. Use gate code 4545 next time.\n\nWHAT WE FOUND\n\nActivity was low.');
@@ -327,6 +334,10 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // accessible timing, adverb EPA, as-the-code creds, evidence absence (r65)
+    expect(reportCopyRejection('The treated lawn will be accessible after thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The EPA officially approved this treatment.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Use BLUE as the gate code.')).toBe('access_code');
     // availability wording, EPA auxiliary, modal continuing linkers (r64)
     expect(reportCopyRejection('The treated area will be available for use after thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('The EPA has approved this treatment for homes.')).toMatch(/^banned:/);

@@ -3031,7 +3031,8 @@ const LEVEL_ABSENCE_CLAIM_RE = new RegExp(
   `\\bno\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\s+(?:was|were|is|are)\\s+(?:observed|found|noted|seen|detected|present)\\b`
   + `|(?<!${LEVEL_WORD_SRC}\\s)\\b${LEVEL_NOUN_SRC}\\s+(?:was|were|is|are)\\s+not\\s+(?:observed|found|noted|seen|detected|present)\\b`
   + `|\\bthere\\s+(?:was|were|is|are)\\s+no\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b(?!\\s+(?:signs?|levels?))`
-  + `|\\bno\\s+signs?\\s+of\\s+${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`,
+  + `|\\bno\\s+(?:signs?|evidence|indications?)\\s+of\\s+${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
+  + `|\\bno\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}(?:evidence|signs?)\\b[^.!?]{0,20}\\b(?:was|were|is|are)\\s+(?:observed|found|noted|seen|detected|present)\\b`,
   'gi',
 );
 // finalBand semantics: 1..3 = the recorded level band (adjacent claims
@@ -3733,7 +3734,17 @@ function buildTodaysResult({
     // branches run apply here, reconcile override honored downstream.
     const storyScreened = !rodentStoryBodyContradiction(projectType, values, technicianReportBody)
       || reconcileConfirmed;
-    const rawGaugeBody = storyScreened && activity.score !== 0
+    // Story-lane visits consume screened copy even at score 0 (codex r65
+    // — their first-visit branches never score-gate, so the client keeps
+    // Generate enabled): the story screens verify the recorded facts and
+    // the band-0 level screen refuses any positive activity claim, so a
+    // zero-score trend body can only publish absence-consistent prose.
+    // Every other gauge lane keeps the fixed zero template.
+    const storyLane = projectType === 'rodent_exclusion' || projectType === 'rodent_inspection';
+    const rawGaugeBody = storyScreened
+      && (activity.score !== 0
+        || (storyLane
+          && activityLevelContradictions(String(technicianReportBody || ''), 0).length === 0))
       ? technicianReportBody
       : null;
     // Stage guard (setup only) AND count guard (both stages): the draft is
@@ -3892,6 +3903,27 @@ function typedBodyContradictions(projectType, values = {}, score = null, body = 
     : levelBandForScore(Number.isInteger(numericScore) ? numericScore : null);
   if (band !== null && band !== undefined) found.push(...activityLevelContradictions(text, band));
   return found;
+}
+
+// True when the frozen snapshots in a parsed service_data ACCEPT the
+// reviewed body for customer surfaces (codex r65 #3420): mirrors
+// report-data's governing-snapshot rule so voice consumers refuse exactly
+// what the web report refuses. Customer viewers see auto_send companions
+// only; a zero-score snapshot's reconcile flag never means acceptance.
+// No governing snapshot (untyped visit) accepts by default — the
+// request-context rejection marker covers that path separately.
+function typedStoryAcceptsBody(serviceData = {}) {
+  const sd = serviceData && typeof serviceData === 'object' ? serviceData : {};
+  const typedSnapshot = sd.typedReportSnapshot && typeof sd.typedReportSnapshot === 'object'
+    && sd.typedReportSnapshot.type ? sd.typedReportSnapshot : null;
+  const companions = Array.isArray(sd.companionReportSnapshots) ? sd.companionReportSnapshots : [];
+  const governing = [
+    typedSnapshot,
+    ...(typedSnapshot ? [] : companions.filter((snap) => snap?.delivery === 'auto_send')),
+  ].filter((snap) => snap?.todaysResult);
+  if (!governing.length) return true;
+  return governing.some((snap) => snap.todaysResult?.bodySource === 'technician_report'
+    || (snap.todaysResult?.reconcileConfirmed === true && snap.activity?.score !== 0));
 }
 
 function buildTypedReportSnapshot({
@@ -4106,7 +4138,7 @@ const TIME_UNIT_SRC = '(?:minutes?|mins?|hours?|hrs?|half[-\\s]?hours?)';
 // aftercare ("avoid mowing for 48 hours") stays legal too.
 // Passive occupancy forms are anchored on be/been/being so completed-action
 // prose ("we entered through the side gate") never matches (codex r54).
-const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|play(?:ing)?\\s+on|sit(?:ting)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|access(?:ing)?\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|us(?:e|ing)\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|(?:be|been|being)\\s+(?:safely\\s+)?(?:(?:re-?)?(?:entered|occupied|reoccupied|used|accessed)|walked\\s+on|played\\s+on|sat\\s+on|returned\\s+to)|occupancy[^.!?]{0,25}\\b(?:may|can|will|could|should)\\s+(?:safely\\s+)?resume|resum(?:e|es|ing)\\s+(?:normal\\s+)?(?:occupancy|use)|ready\\s+for\\s+(?:use|occupancy)|available\\s+for\\s+(?:use|occupancy)|dry(?:ing|s)?|dried)';
+const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|play(?:ing)?\\s+on|sit(?:ting)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|access(?:ing)?\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|us(?:e|ing)\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|(?:be|been|being)\\s+(?:safely\\s+)?(?:(?:re-?)?(?:entered|occupied|reoccupied|used|accessed)|walked\\s+on|played\\s+on|sat\\s+on|returned\\s+to)|occupancy[^.!?]{0,25}\\b(?:may|can|will|could|should)\\s+(?:safely\\s+)?resume|resum(?:e|es|ing)\\s+(?:normal\\s+)?(?:occupancy|use)|ready\\s+for\\s+(?:use|occupancy)|available\\s+for\\s+(?:use|occupancy)|(?:be|is|are|being|been)\\s+(?:safely\\s+)?accessible|dry(?:ing|s)?|dried)';
 // Clock times state the same fixed re-entry window as durations
 // (codex r53): "Enter the treated area at 4:30 PM", "Stay off until 6 PM".
 const CLOCK_TIME_SRC = '(?:\\d{1,2}:\\d{2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?|\\d{1,2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight)';
@@ -4138,7 +4170,7 @@ const BANNED_CUSTOMER_COPY = [
   // is; a fixed re-entry/drying minute-or-hour figure is never stated — the
   // idiom is "safe once dry" with the technician confirming timing, and
   // that idiom carries no number so it stays legal here.
-  /\bEPA\s+(?:has|have|had)\s+(?:(?:now|also|already|officially)\s+)?approved\b|\bEPA[-\s]?approv(?:ed|al)\b|\bapprov(?:ed|al)\b[^.!?]{0,20}\b(?:by|from|of)\s+(?:the\s+)?EPA\b/i,
+  /\bEPA\s+(?:(?:has|have|had)\s+)?(?:(?:now|also|already|officially|recently|just|formally)\s+)?approv(?:ed|es)\b|\bEPA[-\s]?approv(?:ed|al)\b|\bapprov(?:ed|al)\b[^.!?]{0,20}\b(?:by|from|of)\s+(?:the\s+)?EPA\b/i,
   // spelled-out quantities ("thirty minutes", "two hours", "half an hour",
   // "a few minutes") state the same prohibited fixed timing as digits
   // (codex r48)
@@ -4201,6 +4233,7 @@ module.exports = {
   buildTodaysResult,
   buildTypedReportSnapshot,
   typedBodyContradictions,
+  typedStoryAcceptsBody,
   isInitialRodentTrapSetup,
   setupContradictions,
   countContradictions,
