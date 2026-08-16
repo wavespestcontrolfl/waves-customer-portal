@@ -3176,3 +3176,46 @@ describe('codex #3423 r52 — per-sentence polarity, perfect tense, generic cont
     ).reason).toMatch(/contact_request/);
   });
 });
+
+describe('codex #3423 r53 — infinitive requests, perfect estimates, post-noun negation, missing/missed, tier products, tech evidence', () => {
+  test('r53 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer asked to call before arrival' },
+      empty,
+    ).reason).toMatch(/contact_request/);
+    const acceptedEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate has been cancelled', customer_context: null },
+      acceptedEst,
+    ).reason).toMatch(/estimate_state_conflict/);
+    const petsAbsent = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'pets are not present at this property' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has pets' },
+      petsAbsent,
+    ).reason).toMatch(/polarity_conflict/);
+    const missed = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'missed application last week rescheduled' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Missing unit number' },
+      missed,
+    ).reason).toBeTruthy();
+    const goldMember = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { membership: { tier: 'Gold' } } };
+    expect(validateBriefJson(
+      { priorities: ['Apply Gold Chemical to the perimeter'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      goldMember,
+    ).reason).toBeTruthy();
+  });
+
+  test('technician-form status evidence grounds the claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'technician is en route per dispatch' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Technician is en route' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});

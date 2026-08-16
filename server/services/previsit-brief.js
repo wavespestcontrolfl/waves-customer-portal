@@ -1118,7 +1118,8 @@ function wordVariants(word) {
   const out = [word];
   if (word.endsWith('es')) out.push(word.slice(0, -2));
   if (word.endsWith('s')) out.push(word.slice(0, -1));
-  if (word.endsWith('ing')) out.push(word.slice(0, -3), `${word.slice(0, -3)}e`, `${word.slice(0, -3)}ed`);
+  // 'missing' (state adjective) must not stem to 'missed' (event) — r53.
+  if (word.endsWith('ing') && word !== 'missing') out.push(word.slice(0, -3), `${word.slice(0, -3)}e`, `${word.slice(0, -3)}ed`);
   if (word.endsWith('ed')) out.push(word.slice(0, -2), word.slice(0, -1));
   if (word.endsWith('ly')) out.push(word.slice(0, -2));
   // sensitive <-> sensitivity are one family (r45).
@@ -1293,10 +1294,22 @@ function findUngroundedClaim(body, grounding) {
   // path ONLY — application-verb objects keep the strict skip so "Apply
   // Silver Control" still parks as a product.
   const boundaryGroundedWord = (w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedValueText);
-  const commonOrGroundedProse = (term) => String(term).toLowerCase().split(/\s+/).every((w) => (
-    w.length < 4 || REFERENCE_STOP_WORDS.has(w) || COMMON_PROSE_WORDS.has(w)
-    || (wordVariants(w).some((v) => GROUNDED_ONLY_WORDS.has(v)) && groundedWordOk(w, groundedText, groundedValueText))
-  ));
+  // Tier/grounded-only words exempt a capitalized run ONLY in claim-like
+  // shapes — "Gold Chemical" must park as a product even for a real Gold
+  // member (r53): the grounded-only skip excludes runs where the
+  // grounded-only word is followed by a non-claim noun.
+  const TIER_WORD_RE = /^(?:bronze|silver|gold|platinum)$/;
+  const commonOrGroundedProse = (term) => {
+    const words = String(term).toLowerCase().split(/\s+/);
+    return words.every((w, i) => {
+      if (w.length < 4 || REFERENCE_STOP_WORDS.has(w) || COMMON_PROSE_WORDS.has(w)) return true;
+      if (!wordVariants(w).some((v) => GROUNDED_ONLY_WORDS.has(v))) return false;
+      if (!groundedWordOk(w, groundedText, groundedValueText)) return false;
+      // A tier word followed by more product-shaped words is a product name.
+      if (TIER_WORD_RE.test(w) && i < words.length - 1 && !/^(?:member(?:ship)?|tier|plan|level|customer|client|account|status)$/.test(words[i + 1])) return false;
+      return true;
+    });
+  };
   // Instruction fields (priorities, watch_items) direct the technician —
   // an application-verb product reference there must name a product on
   // the CURRENT visit's fixed list, not merely anything in the grounding:
@@ -1450,7 +1463,7 @@ function findUngroundedClaim(body, grounding) {
     // Lookbehind blocks the historical qualifier PER PHRASE — a separate
     // current "appointment confirmed" fact grounds even when a historical
     // one also exists (r44 P2).
-    const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\bappointments?\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})\\b(?!\\s+(?:(?:for|on|from|back)\\s+)?(?:last|yesterday|earlier|previously|weeks?|months?|days?|in\\s+\\w+)\\b)|\\b(?:${statusForms.join('|')})\\s+appointments?\\b(?!\\s)`);
+    const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\b(?:appointments?|visits?|service|technician|tech)\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})\\b(?!\\s+(?:(?:for|on|from|back)\\s+)?(?:last|yesterday|earlier|previously|weeks?|months?|days?|in\\s+\\w+)\\b)|\\b(?:${statusForms.join('|')})\\s+(?:appointments?|visits?)\\b(?!\\s)`);
     const inGlobalPhrase = phraseRe.test(groundedValueText);
     if (!inVisit && !inGlobalPhrase) {
       return { kind: 'appointment_state', term: status };
@@ -1462,7 +1475,7 @@ function findUngroundedClaim(body, grounding) {
   const instructionalText = [...(body.priorities || []), ...(body.watch_items || [])].join('. ').toLowerCase();
   // EVERY contact claim is validated, not just the first (r46).
   const contactClaims = [
-    ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:for\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?)\b/g),
+    ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?)\b/g),
     ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email|contact)\s+(?:the\s+)?customer\b/g)],
     // Imperative channel verbs with implicit customer ("Please call
     // before arrival") in INSTRUCTION fields (r51).
@@ -1486,7 +1499,7 @@ function findUngroundedClaim(body, grounding) {
     // The channel must be the OBJECT of the request — only determiners/
     // qualifiers may intervene ("requested an estimate during the phone
     // call" is not a call request, r49).
-    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?)\\s+(?:(?:for|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening)\\s+){0,3}${bareChannel}`);
+    const clauseRe = new RegExp(`\\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:s|ed)?|prefer(?:s|red)?)\\s+(?:(?:for|to|not\\s+to|no|a|an|the|another|quick|brief|phone|morning|evening)\\s+){0,3}${bareChannel}`);
     const factSupports = clauseRe.test(groundedValueText);
     if (negatedClaim ? !(factSupports && negatedNearChannel) : (!factSupports || negatedNearChannel)) {
       return { kind: 'contact_request', term: channel };
@@ -1551,7 +1564,7 @@ function findUngroundedClaim(body, grounding) {
   // A pendingEstimate object IS the pending state, status field or not.
   if (grounding.llmFacts?.openScope?.pendingEstimate) estimateStatuses.push('pending');
   if (estimateStatuses.length) {
-    for (const m of outputText.matchAll(/\b(?:estimates?|quotes?)\s+(?:was\s+|is\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\s+(?:estimates?|quotes?)\b/g)) {
+    for (const m of outputText.matchAll(/\b(?:estimates?|quotes?)\s+(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\s+(?:estimates?|quotes?)\b/g)) {
       const claimed = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled').replace(/^drafted$/, 'draft');
       if (!estimateStatuses.includes(claimed)) {
         return { kind: 'estimate_state_conflict', term: claimed };
@@ -1706,7 +1719,7 @@ function findUngroundedClaim(body, grounding) {
   // availability context is safety-relevant.
   for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability']) {
     if (!new RegExp(`\\b${pw}\\b`).test(outputText)) continue;
-    const negRe = new RegExp(`\\b(?:no|not|never|without)\\b[^.;!?]{0,20}\\b${pw}\\b`);
+    const negRe = new RegExp(`\\b(?:no|not|never|without)\\b[^.;!?]{0,20}\\b${pw}\\b|\\b${pw}\\b[^.;!?]{0,20}\\b(?:not|never|absent|gone)\\b`);
     const factHasWord = wordVariants(pw).some((v) => new RegExp(`\\b${v}`).test(groundedValueText));
     if (!factHasWord) continue; // ungrounded handling stays with the word passes
     const factNeg = negRe.test(groundedValueText);
