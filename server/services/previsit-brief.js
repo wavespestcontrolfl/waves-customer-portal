@@ -94,7 +94,9 @@ const RETIRED_NAME_RE = /waves\W+(?:lawn\W*(?:and\W+)?\W*pest|pest\W*(?:and\W+)?
 const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // The canonical phrase followed by a brand-connector is a suffixed
 // variant ("Waves Pest Control & Lawn") — reject it outright (r20).
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control\s*(?:&|\+|\/|-|\band\b)/i;
+// …followed by an actual brand term — bare punctuation after the name
+// ("Waves Pest Control - scheduled service") is ordinary prose (r21 P2).
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control\s*(?:&|\+|\/|-|\band\b)\s*(?:lawn|pest|care|control)\b/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -975,7 +977,7 @@ const COMMON_PROSE_WORDS = new Set([
   'with',
   'perform', 'performs', 'performed', 'performing', 'provide', 'provides', 'provided', 'providing',
   'context', 'account', 'accounts',
-  'information', 'scheduling',
+  'information',
   'retrieve',
   'transition', 'transitions',
   'introduction', 'discuss', 'discussing', 'relevant', 'mindful',
@@ -997,6 +999,9 @@ const GROUNDED_ONLY_WORDS = new Set([
   // estimate-status 'accepted' must not let "Payment accepted" through
   // when no payment fact exists.
   'payment', 'payments', 'invoice', 'invoices', 'refund', 'refunds', 'billing',
+  // r21: scheduling STATUSES ("Scheduling confirmed/cancelled") are
+  // appointment-state claims in ANY field, not just instructions.
+  'scheduling', 'reschedule', 'rescheduling',
 ]);
 
 // Instruction objects carrying these words direct real business actions
@@ -1011,9 +1016,9 @@ const INSTRUCTION_EVIDENCE_WORDS = new Set([
   // r15: access-security objects ("Retrieve gate key/access card") are
   // fabricatable from common words — the access noun must be evidenced.
   'gate', 'gates', 'access', 'card', 'cards', 'keys',
-  // r19: scheduling directives ("Discuss scheduling") assert a real action.
+  // r19: scheduling directives ("Discuss schedule") assert a real action.
   // 'scheduled' (adjective — "a prior scheduled service") stays prose.
-  'schedule', 'schedules', 'scheduling', 'reschedule', 'rescheduling',
+  'schedule', 'schedules',
 ]);
 
 // Word-level grounding for one candidate word ACROSS its stem variants.
@@ -1087,7 +1092,8 @@ function isGroundedReference(candidate, groundedText, strictText = groundedText)
   // product names are never in the prose sets, so they still must ground.
   const words = phrase.split(' ')
     .filter((w) => /^[a-z][a-z'-]{3,}$/.test(w))
-    .filter((w) => !wordVariants(w).some((v) => REFERENCE_STOP_WORDS.has(v) || COMMON_PROSE_WORDS.has(v)));
+    .filter((w) => wordVariants(w).some((v) => GROUNDED_ONLY_WORDS.has(v))
+      || !wordVariants(w).some((v) => REFERENCE_STOP_WORDS.has(v) || COMMON_PROSE_WORDS.has(v)));
   if (!words.length) return true;
   return words.every((w) => groundedWordOk(w, groundedText, strictText));
 }
@@ -1435,11 +1441,19 @@ function findUngroundedClaim(body, grounding) {
       return { kind: 'novel_product', term: m[0] };
     }
   }
-  const wordKnown = (word) => wordVariants(word).some((v) => (
-    REFERENCE_STOP_WORDS.has(v)
-    || COMMON_PROSE_WORDS.has(v)
-    || selfReported.has(v)
-  )) || groundedWordOk(word, groundedText, groundedValueText);
+  const wordKnown = (word) => {
+    // Grounded-only status (on ANY stem variant) outranks prose-set
+    // membership — 'scheduling' stems to common 'schedule', which must not
+    // launder an appointment-state claim past the evidence check (r21).
+    if (wordVariants(word).some((v) => GROUNDED_ONLY_WORDS.has(v))) {
+      return selfReported.has(word) || groundedWordOk(word, groundedText, groundedValueText);
+    }
+    return wordVariants(word).some((v) => (
+      REFERENCE_STOP_WORDS.has(v)
+      || COMMON_PROSE_WORDS.has(v)
+      || selfReported.has(v)
+    )) || groundedWordOk(word, groundedText, groundedValueText);
+  };
   // The approved company name self-grounds as a PHRASE only — a bare
   // 'waves' outside it is a rare word ("Apply Waves" is a nonexistent
   // product, codex #3423 r17).

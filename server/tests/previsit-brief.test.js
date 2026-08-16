@@ -2118,3 +2118,26 @@ describe('codex #3423 r20 — noncanonical suffix, field-wide evidence', () => {
     expect(verdict.reason).toBe('ungrounded_instruction:estimate');
   });
 });
+
+describe('codex #3423 r21 — scheduling statuses, punctuation after canonical name', () => {
+  test('"Scheduling confirmed" rejects in descriptive fields without a scheduling fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Scheduling confirmed', 'Scheduling cancelled']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('bare punctuation after the canonical name is ordinary prose', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Waves Pest Control - routine service in July.', open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});
