@@ -2825,3 +2825,40 @@ describe('codex #3423 r42 — production visit status, possession keys, payment-
     ).reason).toMatch(/payment_state_conflict/);
   });
 });
+
+describe('codex #3423 r43 — negative contact prefs, scheduled estimates, en-route states', () => {
+  test('invented negative preferences and mismatched states reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer prefers no calls', 'Customer asked not to call']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        empty,
+      ).reason).toMatch(/contact_request/);
+    }
+    const acceptedEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate scheduled', customer_context: null },
+      acceptedEst,
+    ).reason).toMatch(/estimate_state_conflict/);
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'General Pest Control', scheduledDate: '2026-08-20' } } };
+    for (const claim of ['Appointment en route', 'Appointment onsite']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        prodVisit,
+      ).reason).toMatch(/appointment_state/);
+    }
+  });
+
+  test('a grounded negative preference passes with matching polarity', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer asked not to call before 9am' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer asked not to call' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});

@@ -1404,11 +1404,13 @@ function findUngroundedClaim(body, grounding) {
   const visitValueText = grounding.llmFacts?.visit
     ? collectFactValues(grounding.llmFacts.visit).join(' ').toLowerCase()
     : '';
-  for (const m of outputText.matchAll(/\bappointments?\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+appointments?\b/g)) {
-    const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled');
-    const inVisit = wordVariants(status).some((v) => visitValueText.includes(v));
-    const phraseRe = new RegExp(`\\b(?!(?:previous|prior|last|old|earlier)\\s+)appointments?\\s+(?:was\\s+|is\\s+)?(?:${wordVariants(status).join('|')})\\b|\\b(?:${wordVariants(status).join('|')})\\s+appointments?\\b`);
-    const historically = new RegExp(`\\b(?:previous|prior|last|old|earlier)\\s+appointments?[^.;!?]{0,30}\\b(?:${wordVariants(status).join('|')})|\\b(?:previous|prior|last|old|earlier)[^.;!?]{0,20}appointments?\\s+(?:was\\s+|is\\s+)?(?:${wordVariants(status).join('|')})`);
+  for (const m of outputText.matchAll(/\bappointments?\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+appointments?\b/g)) {
+    const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
+    // Multi-word statuses ('en route', 'on site') match underscore forms too.
+    const statusForms = [...new Set([...wordVariants(status.replace(/\s/g, '')), status, status.replace(/\s/g, '_'), status.replace(/\s/g, '')])];
+    const inVisit = statusForms.some((v) => visitValueText.includes(v));
+    const phraseRe = new RegExp(`\\b(?!(?:previous|prior|last|old|earlier)\\s+)appointments?\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})\\b|\\b(?:${statusForms.join('|')})\\s+appointments?\\b`);
+    const historically = new RegExp(`\\b(?:previous|prior|last|old|earlier)\\s+appointments?[^.;!?]{0,30}\\b(?:${statusForms.join('|')})|\\b(?:previous|prior|last|old|earlier)[^.;!?]{0,20}appointments?\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})`);
     const inGlobalPhrase = phraseRe.test(groundedValueText) && !historically.test(groundedValueText);
     if (!inVisit && !inGlobalPhrase) {
       return { kind: 'appointment_state', term: status };
@@ -1417,15 +1419,19 @@ function findUngroundedClaim(body, grounding) {
   // Claimed customer CONTACT REQUESTS ("asked for a phone call") are
   // factual asks — the channel and a request verb must both appear in the
   // fact values, or the technician contacts someone who never asked (r39).
-  const contactReq = outputText.match(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:for\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:back)?|text|sms|email|update)\b/);
+  const contactReq = outputText.match(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:for\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?)\b/);
   if (contactReq) {
-    const channel = contactReq[1];
+    const negatedClaim = Boolean(contactReq[1]);
+    const channel = contactReq[2].replace(/s$/, '');
     const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred)\b/.test(groundedValueText);
     const bareChannel = channel.replace(/back$/, '');
     // Polarity (r41): a NEGATED preference near the channel ("does not
     // want email") must not ground the positive claim.
     const negatedNearChannel = new RegExp(`\\b(?:not?|no|never|don't|doesn't|does\\s+not|do\\s+not|declined?|refused?|opt(?:ed)?\\s*out|stop)\\b[^.;!?]{0,40}\\b${bareChannel}`).test(groundedValueText);
-    if (!(hasRequestVerb && groundedValueText.includes(bareChannel)) || negatedNearChannel) {
+    // Polarity must MATCH: a negative claim needs a negated fact; a
+    // positive claim needs a non-negated one (r41+r43).
+    const factSupports = hasRequestVerb && groundedValueText.includes(bareChannel);
+    if (negatedClaim ? !(factSupports && negatedNearChannel) : (!factSupports || negatedNearChannel)) {
       return { kind: 'contact_request', term: channel };
     }
   }
@@ -1466,7 +1472,7 @@ function findUngroundedClaim(body, grounding) {
   // A pendingEstimate object IS the pending state, status field or not.
   if (grounding.llmFacts?.openScope?.pendingEstimate) estimateStatuses.push('pending');
   if (estimateStatuses.length) {
-    for (const m of outputText.matchAll(/\b(?:estimates?|quotes?)\s+(?:was\s+|is\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided)\s+(?:estimates?|quotes?)\b/g)) {
+    for (const m of outputText.matchAll(/\b(?:estimates?|quotes?)\s+(?:was\s+|is\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|drafted?)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|drafted?)\s+(?:estimates?|quotes?)\b/g)) {
       const claimed = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled');
       if (!estimateStatuses.includes(claimed)) {
         return { kind: 'estimate_state_conflict', term: claimed };
