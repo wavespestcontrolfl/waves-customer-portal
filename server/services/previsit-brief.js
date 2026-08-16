@@ -962,9 +962,9 @@ const COMMON_PROSE_WORDS = new Set([
   'information', 'scheduling',
   'waves', 'retrieve',
   'transition', 'transitions', 'minute', 'minutes',
-  'list', 'lists', 'site', 'sites',
-  'state', 'stated', 'states', 'show', 'shows', 'shown',
-  'past', 'introduction', 'discuss', 'discussing', 'baseline', 'relevant', 'mindful',
+  'list', 'lists',
+  'state', 'stated', 'states',
+  'introduction', 'discuss', 'discussing', 'baseline', 'relevant', 'mindful',
   'documented',
   'vacuum', 'vacuuming', 'follow-up', 'walk-through',
 ]);
