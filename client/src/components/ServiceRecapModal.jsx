@@ -123,6 +123,12 @@ export default function ServiceRecapModal({
         // catalog by name, so re-sending/editing a recap preserves them
         // instead of starting empty (which would wipe the product history).
         const recorded = data?.existingRecord?.products || [];
+        // A failed recorded-products load means the picker cannot speak
+        // for what was applied — fail closed, never authoritative
+        // (codex P1 r13).
+        if (data?.existingRecord?.productsLoadFailed) {
+          selectionAuthoritative.current = false;
+        }
         if (recorded.length && !Array.isArray(data?.products)) {
           selectionAuthoritative.current = false;
         }

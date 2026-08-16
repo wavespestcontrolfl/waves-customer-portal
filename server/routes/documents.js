@@ -903,9 +903,13 @@ router.get('/service-report/:serviceRecordId', authenticate, async (req, res, ne
         'pc.restricted_use as catalog_restricted_use',
       );
 
-    // Get compliance records for EPA reg numbers and target pests
+    // Get compliance records for EPA reg numbers and target pests.
+    // Retracted rows (recap deselection corrections) never reach the
+    // customer report (codex P1, PR #3419): the report must not claim
+    // treatment that was corrected away.
     const compliance = await db('property_application_history')
       .where({ service_record_id: service.id })
+      .whereNull('retracted_at')
       .select('product_id', 'epa_registration_number', 'target_pest', 'application_method',
         'dilution_rate', 'area_treated_sqft', 'wind_speed_mph', 'weather_conditions', 'application_site')
       .catch(() => []);
@@ -1096,8 +1100,11 @@ router.get('/shared/:token', sharedDocLimiter, async (req, res, next) => {
           'pc.restricted_use as catalog_restricted_use',
         );
 
+      // Same active-row predicate as the authenticated report reader:
+      // retracted applications stay out of the tokenized customer report.
       const compliance = await db('property_application_history')
         .where({ service_record_id: service.id })
+        .whereNull('retracted_at')
         .catch(() => []);
 
       const credentialText = await getServiceReportCredentialText();

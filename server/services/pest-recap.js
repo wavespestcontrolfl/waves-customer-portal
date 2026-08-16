@@ -144,12 +144,20 @@ async function buildRecapContext(serviceId, knex = db) {
 
   // Products already recorded on the existing record, so reopening a recap
   // shows (and preserves) the chemicals already applied instead of starting
-  // from an empty selection.
+  // from an empty selection. A FAILED load is not an empty list (codex P1,
+  // PR #3419 r13): the flag tells the modal its picker cannot speak for
+  // the recorded set, so it must not submit an authoritative
+  // (productsConfirmed) replacement that would erase and retract real
+  // applications over a transient error.
+  let productsLoadFailed = false;
   const existingProducts = existingRecord
     ? await knex('service_products')
       .where({ service_record_id: existingRecord.id })
       .select('product_name', 'product_category', 'active_ingredient', 'moa_group', 'application_rate', 'rate_unit')
-      .catch(() => [])
+      .catch(() => {
+        productsLoadFailed = true;
+        return [];
+      })
     : [];
 
   return {
@@ -167,7 +175,9 @@ async function buildRecapContext(serviceId, knex = db) {
     },
     timeline,
     products,
-    existingRecord: existingRecord ? { ...existingRecord, products: existingProducts } : null,
+    existingRecord: existingRecord
+      ? { ...existingRecord, products: existingProducts, productsLoadFailed }
+      : null,
   };
 }
 
