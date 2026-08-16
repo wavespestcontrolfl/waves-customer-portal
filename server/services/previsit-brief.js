@@ -105,7 +105,7 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Strong connectors (& + /) always denote a name suffix; weak ones
 // (- ,) and bare/and brand words need the end-of-name lookahead —
 // "- pest activity reviewed" is a clause, "- Lawn Care" a suffix (r49).
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+of\s+\w+|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+\w+\s+(?:control|care|services?)\b)/i;
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+of\s+\w+|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)\b)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1115,8 +1115,11 @@ const ACRONYM_PROSE_WORDS = new Set(['am', 'pm', 'et', 'est', 'edt', 'asap', 'ho
 // Negation within a clause window of a word — shared by the polarity
 // guards (codex #3423 r57).
 function negNear(text, word) {
-  return new RegExp(`\\b(?:no|not|never|without|denied|isn't|wasn't)\\b[^.;!?]{0,25}\\b${word}`, 'i').test(text)
-    || new RegExp(`\\b${word}\\b[^.;!?]{0,20}\\b(?:not|never|denied)\\b`, 'i').test(text);
+  // The window stops at contrast conjunctions — "no dogs but does have
+  // cats" negates dogs only (r60).
+  const gap = "(?:(?!\\b(?:but|however|though|although)\\b)[^.;!?]){0,25}";
+  return new RegExp(`\\b(?:no|not|never|without|denied|isn't|wasn't)\\b${gap}\\b${word}`, 'i').test(text)
+    || new RegExp(`\\b${word}\\b(?:(?!\\b(?:but|however)\\b)[^.;!?]){0,20}\\b(?:not|never|denied)\\b`, 'i').test(text);
 }
 
 // Light stemming for the rare-word pass — plurals/participles of known or
@@ -1483,6 +1486,18 @@ function findUngroundedClaim(body, grounding) {
   ].filter(Boolean).join(' ').toLowerCase();
   for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:status\s*:?\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const claimNegated = Boolean(m[1]);
+    // Trailing coordinated statuses ("confirmed but later cancelled") are
+    // separate claims (r60).
+    const trailing = currentClaimText.slice(m.index + m[0].length).match(/^\s*(?:,?\s*(?:but|then|and)\s+(?:later\s+|now\s+)?)(cancelled|canceled|rescheduled|moved|completed?|skipped|missed)\b/);
+    if (trailing) {
+      const tStatus = trailing[1].replace(/^canceled$/, 'cancelled');
+      const tForms = [...new Set([...wordVariants(tStatus), tStatus])];
+      const tInVisit = tForms.some((v) => visitValueText.includes(v));
+      const tPhrase = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\b(?:appointments?|visits?|service)\\s+[^.;!?]{0,30}(?:${tForms.join('|')})\\b`);
+      if (!tInVisit && !tPhrase.test(groundedValueText)) {
+        return { kind: 'appointment_state', term: tStatus };
+      }
+    }
     const status = String(m[2] || m[3]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
     // Multi-word statuses ('en route', 'on site') match underscore forms too.
     const statusForms = [...new Set([...wordVariants(status.replace(/\s/g, '')), status, status.replace(/\s/g, '_'), status.replace(/\s/g, '')])];
@@ -1507,15 +1522,15 @@ function findUngroundedClaim(body, grounding) {
   const instructionalText = [...(body.priorities || []), ...(body.watch_items || [])].join('. ').toLowerCase();
   // EVERY contact claim is validated, not just the first (r46).
   const contactClaims = [
-    ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:that\s+(?:you|we|the\s+tech(?:nician)?)\s+)?(?:(?:you|us|the\s+tech(?:nician)?)\s+)?(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?|contact)\b/g),
+    ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:that\s+(?:you|we|the\s+tech(?:nician)?)\s+)?(?:(?:you|us|the\s+tech(?:nician)?)\s+)?(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?|contact)(?:\s+(?:and|or)\s+(call(?:s|back)?|texts?|sms|emails?))?\b/g),
     ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email|contact)\s+(?:the\s+)?customer\b/g)],
     // Imperative channel verbs with implicit customer ("Please call
     // before arrival") in INSTRUCTION fields (r51).
     ...[...instructionalText.matchAll(/(?:^|[.;!?]\s*)(?:please\s+)?(do\s+not\s+|don't\s+)?(call|text|email|contact)\s+(?:before|after|prior|when|upon|on\s+arrival|ahead)\b/g)],
   ];
-  for (const contactReq of contactClaims) {
+  for (const contactReq of contactClaims)
+  for (const channel of [contactReq[2], contactReq[3]].filter(Boolean).map((c) => c.replace(/s$/, ''))) {
     const negatedClaim = Boolean(contactReq[1]);
-    const channel = contactReq[2].replace(/s$/, '');
     const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred)\b/.test(groundedValueText);
     const bareChannel = channel.replace(/back$/, '');
     // Polarity (r41): a NEGATED preference near the channel ("does not
@@ -1556,11 +1571,13 @@ function findUngroundedClaim(body, grounding) {
   ].filter(Boolean).join(' ').toLowerCase();
   // Only tier CLAIMS bind to tier fields (r46 P2) — a grounded HOA or
   // product name containing a tier word is not a membership assertion.
+  const currentClaimTextForTier = outputText;
   for (const m of outputText.matchAll(/\b(bronze|silver|gold|platinum)\s+(?:member(?:ship)?|tier|plan|level|customer|client|account|status)\b|\b(?:member(?:ship)?|tier|plan|level)\s*[:\-]?\s*(bronze|silver|gold|platinum)\b|\baccepted\s+(bronze|silver|gold|platinum)\b|\b(?:is|was|as)\s+(?:not\s+)?(?:a\s+|an\s+)?(bronze|silver|gold|platinum)\b/g)) {
     const tier = m[1] || m[2] || m[3] || m[4];
     // member/customer/copular shapes = MEMBERSHIP claims; accepted/tier/
     // plan shapes may also describe the estimate.
-    const membershipShaped = Boolean(m[1] && /member|customer|client|account|status/.test(m[0])) || Boolean(m[4]);
+    const membershipShaped = (Boolean(m[1] && /member|customer|client|account|status/.test(m[0])) || Boolean(m[4]))
+      && !/\b(?:estimate|quote|proposal)s?\b[^.;!?]{0,15}$/.test(currentClaimTextForTier.slice(0, m.index));
     const scope = membershipShaped ? membershipTierText : tierText;
     const claimNeg = negNear(outputText, tier);
     if (!new RegExp(`\\b${tier}\\b`).test(scope) || (claimNeg && membershipShaped)) {
@@ -1780,16 +1797,15 @@ function findUngroundedClaim(body, grounding) {
   }
   for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability', 'sensitivity', 'sensitivities', 'sensitive', 'recurring', 'initial']) {
     if (!new RegExp(`\\b${pw}\\b`).test(outputText)) continue;
-    const negRe = new RegExp(`\\b(?:no|not|never|without)\\b[^.;!?]{0,20}\\b${pw}\\b|\\b${pw}\\b[^.;!?]{0,20}\\b(?:not|never|absent|gone)\\b`);
     const factHasWord = wordVariants(pw).some((v) => new RegExp(`\\b${v}`).test(groundedValueText));
     if (!factHasWord) continue; // ungrounded handling stays with the word passes
-    const factNeg = negRe.test(groundedValueText);
+    const factNeg = negNear(groundedValueText, pw);
     // EVERY sentence mentioning the word must match fact polarity — a
     // supported negative sentence must not mask a contradictory positive
     // one (r52).
     for (const sentence of outputText.split(/[.;!?]/)) {
       if (!new RegExp(`\\b${pw}\\b`).test(sentence)) continue;
-      const outNeg = negRe.test(sentence);
+      const outNeg = negNear(sentence, pw);
       if (outNeg !== factNeg) return { kind: 'polarity_conflict', term: pw };
     }
   }

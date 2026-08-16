@@ -3414,3 +3414,38 @@ describe('codex #3423 r59 — eight precision extensions', () => {
     }
   });
 });
+
+describe('codex #3423 r60 — compound channels, trailing statuses, clause suffixes, contrast negation, estimate tiers', () => {
+  test('r60 rejection cases', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const emailOnly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer requested email' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer requested email and call' },
+      emailOnly,
+    ).reason).toMatch(/contact_request/);
+    const confirmedOnly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'appointment confirmed for Thursday' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment confirmed but later cancelled' },
+      confirmedOnly,
+    ).reason).toMatch(/appointment_state/);
+  });
+
+  test('r60 truthful cases pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer called and requested service for ants' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: ['ants'], last_visit_summary: null, open_scope: null, customer_context: 'Customer called Waves Pest Control and requested service.' },
+      grounded,
+    ).reason).not.toBe('noncanonical_company_name');
+    const mixedPets = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has no dogs but does have cats' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has cats' },
+      mixedPets,
+    ).body).toBeTruthy();
+    const estGold = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { pendingEstimate: { tier: 'Gold' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate is Gold', customer_context: null },
+      estGold,
+    ).body).toBeTruthy();
+  });
+});
