@@ -2862,3 +2862,38 @@ describe('codex #3423 r43 — negative contact prefs, scheduled estimates, en-ro
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r44 — activity evidence, real history, access verb, scoped negation/history', () => {
+  test('r44 rejection and truthful cases', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['Recent pest activity noted'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toMatch(/activity/);
+    // source label 'service_history' is not history evidence
+    const labelOnly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { productGuidance: { source: 'service_history' }, serviceHistory: [] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['History of activity'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      labelOnly,
+    ).reason).toMatch(/history/);
+    // access as a verb over a grounded route passes
+    const route = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'enter backyard through side yard gate is unlocked' }] } };
+    expect(validateBriefJson(
+      { priorities: ['Access backyard through side yard'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      route,
+    ).body).toBeTruthy();
+    // mixed-channel negation: positive call claim grounds despite negated email
+    const mixed = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer does not want email but wants a phone call' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer wants a phone call' },
+      mixed,
+    ).body).toBeTruthy();
+    // historical + current status facts: current grounds
+    const both = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'previous appointment confirmed in May; appointment confirmed for Thursday' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment confirmed' },
+      both,
+    ).body).toBeTruthy();
+  });
+});

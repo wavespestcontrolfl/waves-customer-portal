@@ -918,7 +918,7 @@ const REFERENCE_STOP_WORDS = new Set([
 // organism, so an unrecognized rare word fails the leg to the template
 // (safe degradation; the brief must never carry invented guidance).
 const COMMON_PROSE_WORDS = new Set([
-  'about', 'above', 'account', 'action', 'address', 'after', 'again', 'ahead', 'alert',
+  'about', 'above', 'access', 'account', 'action', 'address', 'after', 'again', 'ahead', 'alert',
   'along', 'amount', 'annual', 'apply', 'applied', 'applying', 'appointment', 'approach', 'arrival', 'arrive',
   'arriving', 'asked', 'attention', 'avoid', 'balance', 'baseboard', 'baseboards', 'basement', 'bathroom', 'bedroom',
   'before', 'begin', 'behind', 'below', 'between', 'booked', 'booking', 'bring', 'building',
@@ -1025,8 +1025,14 @@ const GROUNDED_ONLY_WORDS = new Set([
   // 'key'/'keys' are NOT here (r29 P2): "Key concern" is ordinary
   // emphasis — credential usage is detected contextually via
   // KEY_CREDENTIAL_RE instead.
-  'gate', 'gates', 'access', 'card', 'cards', 'fob', 'fobs', 'credit', 'credits',
+  // 'access' is NOT globally grounded-only (r44 P2): "Access backyard" is
+  // a verb — ACCESS_STATE_RE below guards credential/state usage.
+  'gate', 'gates', 'card', 'cards', 'fob', 'fobs', 'credit', 'credits',
 ]);
+
+// 'access' as a credential or claimed access STATE must ground; as a verb
+// for reaching a grounded area it is prose (codex #3423 r44).
+const ACCESS_STATE_RE = /\baccess\s+(?:code|card|key|granted|provided|given|arranged|available|on\s+file)\b|\b(?:gate|door|garage|provided?|granted|has|have|gave|given)\s+access\b/i;
 
 // 'key' as an access credential ("door key", "key under the mat") must
 // ground; 'key' as emphasis ("key concern") is prose (codex #3423 r29).
@@ -1382,8 +1388,13 @@ function findUngroundedClaim(body, grounding) {
   }
   // "History of <condition>" asserts recorded history — the word must
   // appear in the fact values (r38).
-  if (/\bhistory\s+of\b/.test(outputText) && !groundedValueText.includes('history')) {
+  const hasRealHistory = Boolean(grounding.llmFacts?.lastVisit)
+    || (Array.isArray(grounding.llmFacts?.serviceHistory) && grounding.llmFacts.serviceHistory.length > 0);
+  if (/\bhistory\s+of\b/.test(outputText) && !hasRealHistory) {
     return { kind: 'novel_term', term: 'history' };
+  }
+  if (ACCESS_STATE_RE.test(outputText) && !groundedValueText.includes('access')) {
+    return { kind: 'novel_term', term: 'access' };
   }
   // Photo-availability claims need a photo fact (r41 P2).
   if (/\b(?:provided?|supplied|sent|shared)\s+(?:a\s+|the\s+)?photos?\b|\bphotos?\s+(?:provided|supplied|sent|shared|attached|on\s+file)\b/.test(outputText)
@@ -1409,9 +1420,11 @@ function findUngroundedClaim(body, grounding) {
     // Multi-word statuses ('en route', 'on site') match underscore forms too.
     const statusForms = [...new Set([...wordVariants(status.replace(/\s/g, '')), status, status.replace(/\s/g, '_'), status.replace(/\s/g, '')])];
     const inVisit = statusForms.some((v) => visitValueText.includes(v));
-    const phraseRe = new RegExp(`\\b(?!(?:previous|prior|last|old|earlier)\\s+)appointments?\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})\\b|\\b(?:${statusForms.join('|')})\\s+appointments?\\b`);
-    const historically = new RegExp(`\\b(?:previous|prior|last|old|earlier)\\s+appointments?[^.;!?]{0,30}\\b(?:${statusForms.join('|')})|\\b(?:previous|prior|last|old|earlier)[^.;!?]{0,20}appointments?\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})`);
-    const inGlobalPhrase = phraseRe.test(groundedValueText) && !historically.test(groundedValueText);
+    // Lookbehind blocks the historical qualifier PER PHRASE — a separate
+    // current "appointment confirmed" fact grounds even when a historical
+    // one also exists (r44 P2).
+    const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\bappointments?\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})\\b|\\b(?:${statusForms.join('|')})\\s+appointments?\\b(?!\\s)`);
+    const inGlobalPhrase = phraseRe.test(groundedValueText);
     if (!inVisit && !inGlobalPhrase) {
       return { kind: 'appointment_state', term: status };
     }
@@ -1427,7 +1440,9 @@ function findUngroundedClaim(body, grounding) {
     const bareChannel = channel.replace(/back$/, '');
     // Polarity (r41): a NEGATED preference near the channel ("does not
     // want email") must not ground the positive claim.
-    const negatedNearChannel = new RegExp(`\\b(?:not?|no|never|don't|doesn't|does\\s+not|do\\s+not|declined?|refused?|opt(?:ed)?\\s*out|stop)\\b[^.;!?]{0,40}\\b${bareChannel}`).test(groundedValueText);
+    // The negation window must not cross ANOTHER channel word — "not …
+    // email but wants a call" negates email only (r44 P2).
+    const negatedNearChannel = new RegExp(`\\b(?:not?|no|never|don't|doesn't|does\\s+not|do\\s+not|declined?|refused?|opt(?:ed)?\\s*out|stop)\\b(?:(?!\\b(?:call|text|sms|email|update)s?\\b)[^.;!?]){0,40}\\b${bareChannel}`).test(groundedValueText);
     // Polarity must MATCH: a negative claim needs a negated fact; a
     // positive claim needs a non-negated one (r41+r43).
     const factSupports = hasRequestVerb && groundedValueText.includes(bareChannel);
@@ -1608,6 +1623,18 @@ function findUngroundedClaim(body, grounding) {
       if (selfReported.has(token)) continue;
       if (new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(groundedText)) continue;
       return { kind: 'novel_product', term: m[0] };
+    }
+  }
+  // Activity assertions ("Customer reported pest activity") are field
+  // conditions — grounded when the values mention activity, real history
+  // exists, or the qualifying subject itself is value-grounded ("ant
+  // activity" over an ants fact — the fact IS the activity) (r44).
+  if (!groundedValueText.includes('activit') && !hasRealHistory) {
+    for (const m of outputText.matchAll(/(?:\b([a-z][a-z'-]*)\s+)?\bactivity\b/g)) {
+      const subject = m[1];
+      const subjectGrounded = subject && !REFERENCE_STOP_WORDS.has(subject)
+        && wordVariants(subject).some((v) => groundedValueText.includes(v));
+      if (!subjectGrounded) return { kind: 'novel_term', term: 'activity' };
     }
   }
   const wordKnown = (word) => {
