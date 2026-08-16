@@ -61,7 +61,10 @@ function makeKnex(store) {
   function tableApi(table) {
     const q = {
       _table: table,
-      where: jest.fn().mockReturnThis(),
+      where: jest.fn(function where(...args) {
+        q._where = args;
+        return q;
+      }),
       whereRaw: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
       leftJoin: jest.fn().mockReturnThis(),
@@ -79,6 +82,9 @@ function makeKnex(store) {
 
     q.first = jest.fn(async () => {
       if (table === 'scheduled_services') return { id: SERVICE_ID, status: store.serviceStatus };
+      // The ledger-sync catalog resolution (name ilike) — a test opts in
+      // by seeding store.catalogRow.
+      if (table === 'products_catalog') return store.catalogRow;
       if (table === 'service_records') {
         const latest = store.records[store.records.length - 1];
         return latest
@@ -100,12 +106,25 @@ function makeKnex(store) {
       }
       if (table === 'service_products') {
         store.productInserts = (store.productInserts || 0) + 1;
-        store.productRows = (store.productRows || []).concat(row);
+        const rows = Array.isArray(row) ? row : [row];
+        store.productRows = (store.productRows || []).concat(rows);
+        // The ledger sync reads the inserted rows back (with ids).
+        const returned = rows.map((r, i) => ({
+          id: `sp-${(store.productRows || []).length - rows.length + i + 1}`,
+          product_name: r.product_name,
+          application_rate: r.application_rate ?? null,
+          rate_unit: r.rate_unit ?? null,
+        }));
+        return { returning: jest.fn().mockResolvedValue(returned) };
       }
       return { returning: jest.fn().mockResolvedValue([]) };
     });
 
     q.update = jest.fn((patch) => {
+      if (table === 'property_application_history') {
+        store.ledgerUpdates = store.ledgerUpdates || [];
+        store.ledgerUpdates.push({ where: q._where?.[0], patch });
+      }
       if (table === 'service_records') {
         store.recordUpdates = store.recordUpdates || [];
         store.recordUpdates.push(patch);
@@ -417,6 +436,89 @@ describe('pest recap idempotency (Codex P1)', () => {
 
     expect(result.ok).toBe(true);
     expect((store.recordUpdates || []).some((patch) => patch.pdf_storage_key === null)).toBe(true);
+  });
+
+  test('an edited rate syncs the compliance ledger row and re-links it (codex P1 r7)', async () => {
+    // The visit was previously completed through /complete, which ledgered
+    // its applications in property_application_history. The recap replace
+    // (delete + insert) SET-NULLs the ledger's service_product_id link, so
+    // the sync must re-link the replacement row AND carry the edited rate
+    // into the ledger — the DACS export and application-limit caps read
+    // the ledger, not service_products.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-termidor' },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Corrected the recorded rate.',
+      products: [{ product_name: 'Termidor', application_rate: '0.8', rate_unit: 'fl_oz/gal' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.ledgerUpdates).toHaveLength(1);
+    const { where, patch } = store.ledgerUpdates[0];
+    expect(where).toEqual({ service_record_id: 'rec-old', product_id: 'cat-termidor' });
+    expect(patch.application_rate).toBe(0.8);
+    expect(patch.rate_unit).toBe('fl_oz/gal');
+    expect(patch.service_product_id).toBe('sp-1');
+  });
+
+  test('a rate-less replacement row re-links the ledger without touching its rate', async () => {
+    // Older client / API caller re-submitting with no rate and no prior
+    // recorded rate: absence must never erase the ledger's observed value.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-termidor' },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'admin',
+      actorId: 'admin-1',
+      technicianNotes: 'Re-saved without a rate.',
+      products: [{ product_name: 'Termidor' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.ledgerUpdates).toHaveLength(1);
+    const { patch } = store.ledgerUpdates[0];
+    expect(patch.service_product_id).toBe('sp-1');
+    expect(patch).not.toHaveProperty('application_rate');
+    expect(patch).not.toHaveProperty('rate_unit');
+  });
+
+  test('a product with no catalog match skips the ledger sync', async () => {
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: undefined,
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Unmatched product.',
+      products: [{ product_name: 'One-off borrowed product', application_rate: '2', rate_unit: 'oz' }],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.ledgerUpdates || []).toHaveLength(0);
   });
 
   test('a brand-new recap record issues no pdf cache invalidation (nothing cached yet)', async () => {

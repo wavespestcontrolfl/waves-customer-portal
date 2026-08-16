@@ -61,12 +61,33 @@ function baseRow(overrides) {
   };
 }
 
+// The parsed entries carry the field name plus the replaced pre-migration
+// value for OVERWRITTEN fields (null for filled-when-empty fields).
+const fieldsOf = (owned) => owned && owned.map((o) => o.field);
+
 describe('ownedFields marker parsing', () => {
   test('round-trips the fields up() wrote', () => {
     const note = appendedNote(GEL.note, ['default_rate', 'default_unit']);
-    expect(ownedFields(note, GEL.note)).toEqual(['default_rate', 'default_unit']);
-    expect(ownedFields(`earlier batch note | ${note}`, GEL.note)).toEqual([
+    expect(fieldsOf(ownedFields(note, GEL.note))).toEqual(['default_rate', 'default_unit']);
+    expect(fieldsOf(ownedFields(`earlier batch note | ${note}`, GEL.note))).toEqual([
       'default_rate', 'default_unit',
+    ]);
+  });
+
+  test('round-trips a replaced prior value (overwritten placeholder unit)', () => {
+    const note = appendedNote(GEL.note, ['default_rate', 'default_unit'], { default_unit: 'oz' });
+    expect(note).toContain('default_unit(was=oz)');
+    expect(ownedFields(note, GEL.note)).toEqual([
+      { field: 'default_rate', was: null, token: 'default_rate' },
+      { field: 'default_unit', was: 'oz', token: 'default_unit(was=oz)' },
+    ]);
+  });
+
+  test('a prior value the token format cannot encode falls back to a plain token', () => {
+    const note = appendedNote(GEL.note, ['default_unit'], { default_unit: 'a,b)' });
+    expect(note).toContain('[wrote: default_unit]');
+    expect(ownedFields(note, GEL.note)).toEqual([
+      { field: 'default_unit', was: null, token: 'default_unit' },
     ]);
   });
 
@@ -84,7 +105,7 @@ describe('up() fill-only + provenance', () => {
     await migration.up(fakeKnex(rows));
     expect(rows[0].default_rate).toBe(GEL.rate);
     expect(rows[0].default_unit).toBe(GEL.unit);
-    expect(ownedFields(rows[0].label_source_note, GEL.note)).toEqual([
+    expect(fieldsOf(ownedFields(rows[0].label_source_note, GEL.note))).toEqual([
       'default_rate', 'default_unit',
     ]);
     expect(rows[0].label_verified_by).toBe('rate-render-backfill-2026-08-14');
@@ -102,12 +123,20 @@ describe('up() fill-only + provenance', () => {
 
   test('unit-only placeholder ("oz" with no rate) is replaced by the label pair', async () => {
     const rows = [baseRow({ name: GEL.name, default_unit: 'oz' })];
-    await migration.up(fakeKnex(rows));
+    const knex = fakeKnex(rows);
+    await migration.up(knex);
     expect(rows[0].default_rate).toBe(GEL.rate);
     expect(rows[0].default_unit).toBe(GEL.unit);
     expect(ownedFields(rows[0].label_source_note, GEL.note)).toEqual([
-      'default_rate', 'default_unit',
+      { field: 'default_rate', was: null, token: 'default_rate' },
+      { field: 'default_unit', was: 'oz', token: 'default_unit(was=oz)' },
     ]);
+    // Rollback RESTORES the pre-migration placeholder instead of clearing
+    // it (codex P2 r7): up() overwrote a non-null value here.
+    await migration.down(knex);
+    expect(rows[0].default_rate).toBeNull();
+    expect(rows[0].default_unit).toBe('oz');
+    expect(rows[0].label_source_note).toBeNull();
   });
 
   test('injection entries fill application_method only where empty', async () => {
@@ -191,9 +220,11 @@ describe('down() reverts only migration-owned fields', () => {
     // (the completion prefill reads default_unit before rate_unit).
     expect(rows[0].default_unit).toBe(PER1K.unit);
     expect(rows[0].rate_unit).toBe(PER1K.unit);
-    expect(ownedFields(rows[0].label_source_note, PER1K.note)).toContain('default_unit');
+    expect(fieldsOf(ownedFields(rows[0].label_source_note, PER1K.note))).toContain('default_unit');
     await migration.down(knex);
-    expect(rows[0].default_unit).toBeNull();
+    // The overwritten placeholder is RESTORED (codex P2 r7); the fields
+    // up() merely filled revert to empty.
+    expect(rows[0].default_unit).toBe('oz');
     expect(rows[0].rate_unit).toBeNull();
     expect(rows[0].default_rate_per_1000).toBeNull();
   });

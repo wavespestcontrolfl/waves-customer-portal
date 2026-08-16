@@ -125,7 +125,13 @@ async function buildRecapContext(serviceId, knex = db) {
       // CompletionPanel (per-1,000 verified rate first, else the per-basis
       // display default's low bound) and shows it as an EDITABLE field —
       // the persisted rate is technician-confirmed, never a silent default.
+      // application_method is a prefill INPUT too (codex P1 r7): an
+      // explicit catalog method (e.g. foliar_spray) suppresses the pest
+      // perimeter-spray inference and with it the 4-oz house default —
+      // omitting it here would feed the shared resolver different inputs
+      // than CompletionPanel receives.
       'default_rate', 'default_unit', 'rate_unit', 'default_rate_per_1000',
+      'application_method',
     )
     .catch(() => []);
 
@@ -516,7 +522,37 @@ async function submitRecap({
         }
       }
       await trx('service_products').where({ service_record_id: recordId }).del();
-      await trx('service_products').insert(productRows);
+      const insertedProducts = await trx('service_products')
+        .insert(productRows)
+        .returning(['id', 'product_name', 'application_rate', 'rate_unit']);
+      // The delete above SET-NULLs the compliance ledger's
+      // (property_application_history) service_product_id link, and the
+      // ledger's stable (service_record_id, product_id) identity makes
+      // createComplianceRecords skip — not replace — these applications on
+      // any later run. A recap that edits a recorded rate must not leave
+      // the ledger (the DACS inspector export and application-limit caps
+      // read it as ground truth) holding the stale value (codex P1 r7):
+      // re-link each replacement row to its ledger row and sync the
+      // recorded rate, in the same trx as the replace so the report and
+      // the ledger can never diverge. Resolves the catalog product the
+      // same way the ledger writer does. No rate on the replacement row
+      // (rate-less legacy submit with no prior) leaves the ledger rate
+      // standing — absence never erases an observed value.
+      for (const sp of (Array.isArray(insertedProducts) ? insertedProducts : [])) {
+        if (!sp?.id || !sp.product_name) continue;
+        const catalog = await trx('products_catalog')
+          .where('name', 'ilike', `%${sp.product_name}%`)
+          .first('id');
+        if (!catalog?.id) continue;
+        await trx('property_application_history')
+          .where({ service_record_id: recordId, product_id: catalog.id })
+          .update({
+            service_product_id: sp.id,
+            ...(sp.application_rate != null
+              ? { application_rate: sp.application_rate, rate_unit: sp.rate_unit || null }
+              : {}),
+          });
+      }
     }
 
     // Re-completing an EXISTING record rewrites its notes / rating / products —

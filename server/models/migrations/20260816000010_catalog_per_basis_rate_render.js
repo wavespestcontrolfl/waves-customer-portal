@@ -153,20 +153,22 @@ const DATA = [
     note: 'rate-render: 1 gal/acre per application (light/sandy soils, 4-6 applications at 8-12 week intervals) from the SiteOne label PDF cited in the prior note.' },
 
   // ── Ornamental-bed fertilizers: pounds per 100 sq ft of bed ─────────
-  { name: 'LESCO 13-24-6 Landscape Starter', basis: 'display', rate: '1', unit: 'lb/100sf',
-    note: 'rate-render: 1 lb per 100 sq ft of ornamental bed/flower bed/planting area, 2-4x per year, from the SiteOne label (item 510018).' },
-  { name: 'LESCO 13-0-13 60% PolyPlus Landscape', basis: 'display', rate: '1-1.5', unit: 'lb/100sf',
-    note: 'rate-render: 1-1.5 lb per 100 sq ft of bed area, 2x per year, from the LESCO Palm & Tropical Ornamental 13-0-13 label (SiteOne item 510245WB).' },
-  { name: 'LESCO 8-0-10 100% PolyPlus Landscape', basis: 'display', rate: '1-1.5', unit: 'lb/100sf',
-    note: 'rate-render: 1-1.5 lb per 100 sq ft to flower beds and planting areas (trees/large shrubs 0.5-1 lb per inch trunk diameter) from the LESCO 8-0-10 Palm & Tropical label cited in the prior note.' },
-  { name: 'LESCO 8-0-10 50% PolyPlus OPTI45 Spar-TECH 1% Fe 1% Mg 1% Mn 0.1% B KMAG Palm & Tropical Ornamental Granular Fertilizer', basis: 'display', rate: '1-1.5', unit: 'lb/100sf',
-    note: 'rate-render: 1-1.5 lb per 100 sq ft to flower beds and planting areas from the LESCO 8-0-10 Palm & Tropical label cited in the prior note.' },
-  { name: 'LESCO 8-0-10 Palm & Tropical', basis: 'display', rate: '1-1.5', unit: 'lb/100sf',
-    note: 'rate-render: 1-1.5 lb per 100 sq ft to flower beds and planting areas from the LESCO 8-0-10 Palm & Tropical label cited in the prior note.' },
-  { name: 'LESCO 8-2-12 100% Poly Plus OPTI Kieserite 4% Mg 9.26% S 0.15% B 0.05% Cu 0.15% Fe 2% Mn 0.15% Zn Palm & Tropical Ornamental Granular Fertilizer', basis: 'display', rate: '1-1.5', unit: 'lb/100sf',
-    note: 'rate-render: 1-1.5 lb per 100 sq ft to flower beds and planting areas from the LESCO 8-2-12 Palm & Tropical label cited in the prior note.' },
-  { name: 'Espoma Organic Alfalfa Meal 2-0-2', basis: 'display', rate: '5', unit: 'lb/100sf',
-    note: 'rate-render: 5 lb per 100 sq ft worked into the top 4 inches of soil (new beds; established plants 1/2-1 cup per plant) from the Espoma Alfalfa Meal label directions (espoma.com).' },
+  // The lb/100sf ornamental-bed fertilizers are deliberately NOT seeded
+  // (codex P1, PR #3419 r7): the catalog classifies them as Tree & Shrub /
+  // ornamental products, defaultApplicationMethodForLine classifies a
+  // granular fertilizer as granular_broadcast, and the global name-only
+  // picker would present their per-100-sq-ft BED rates as normal lawn
+  // prefills on lawn completions. They need the same service/site gate
+  // (owner ruling) as the other withheld entries before any of them can
+  // carry a default rate. Their verified label rates stay recorded here
+  // for that follow-up: LESCO 13-24-6 Landscape Starter 1 lb/100sf
+  // (SiteOne item 510018) · LESCO 13-0-13 60% PolyPlus Landscape 1-1.5
+  // lb/100sf (SiteOne item 510245WB) · LESCO 8-0-10 100% PolyPlus
+  // Landscape, 8-0-10 50% PolyPlus OPTI45 Spar-TECH, and 8-0-10 Palm &
+  // Tropical 1-1.5 lb/100sf (LESCO 8-0-10 Palm & Tropical label) · LESCO
+  // 8-2-12 100% Poly Plus OPTI Kieserite 1-1.5 lb/100sf (LESCO 8-2-12
+  // Palm & Tropical label) · Espoma Organic Alfalfa Meal 2-0-2 5 lb/100sf
+  // new beds (espoma.com label directions).
 
   // ── Diluted supplements: per gallon of water ────────────────────────
   { name: 'SUPERthrive Foliage-Pro 9-3-6', basis: 'display', rate: '1.25-5', unit: 'ml/gal',
@@ -236,21 +238,40 @@ function emptyText(v) { return v == null || String(v).trim() === '' || String(v)
 // default_unit]" — so down() reverts only migration-owned fields. Without
 // the marker, a preexisting value that merely equals the backfill value
 // (up() skipped it as fill-only) would be deleted on rollback.
-function appendedNote(note, wroteFields) {
-  return `${note} [wrote: ${wroteFields.join(', ')}]`;
+//
+// default_unit is the one field up() may OVERWRITE rather than fill (a
+// unit-only placeholder like the inventory form's 'oz'); its token then
+// carries the replaced value — "default_unit(was=oz)" — so down() can
+// RESTORE the pre-migration unit instead of clearing it (codex P2 r7).
+function appendedNote(note, wroteFields, priorValues = {}) {
+  const tokens = wroteFields.map((f) => {
+    const prior = priorValues[f];
+    // A prior value containing the token delimiters can't be encoded —
+    // fall back to the plain token (down() then reverts to null, the
+    // pre-annotation behavior). No real unit contains ',' or ')'.
+    return prior != null && !/[,)\]]/.test(String(prior)) ? `${f}(was=${prior})` : f;
+  });
+  return `${note} [wrote: ${tokens.join(', ')}]`;
 }
 
-// Returns the field list from OUR provenance segment on this row, or null
-// when the row carries no segment for this entry (up() wrote nothing here).
-// The segment is only recognized in the positions up() leaves it: as the
-// whole note, or as the final " | "-appended segment.
+// Returns [{ field, was, token }] parsed from OUR provenance segment on
+// this row, or null when the row carries no segment for this entry (up()
+// wrote nothing here). The segment is only recognized in the positions
+// up() leaves it: as the whole note, or as the final " | "-appended
+// segment. `was` is the replaced pre-migration value when the token
+// carries one, else null (the field was empty before up()).
 function ownedFields(labelSourceNote, note) {
   const s = String(labelSourceNote || '');
   const m = s.match(/ \[wrote: ([^\]]*)\]$/);
   if (!m) return null;
   const segment = `${note} [wrote: ${m[1]}]`;
   if (s !== segment && !s.endsWith(` | ${segment}`)) return null;
-  return m[1].split(',').map((f) => f.trim()).filter(Boolean);
+  return m[1].split(',').map((t) => t.trim()).filter(Boolean).map((token) => {
+    const annotated = token.match(/^([a-z0-9_]+)\(was=(.*)\)$/);
+    return annotated
+      ? { field: annotated[1], was: annotated[2], token }
+      : { field: token, was: null, token };
+  });
 }
 
 exports.up = async function up(knex) {
@@ -263,13 +284,19 @@ exports.up = async function up(knex) {
       .first();
     if (!row) continue;
     const updates = {};
+    // Pre-migration values of fields up() OVERWRITES (vs fills) — encoded
+    // into the provenance token so down() restores them (codex P2 r7).
+    const priorValues = {};
     if (d.basis === 'display') {
       // Atomic pair: write both only when the rate is empty; replace a
       // unit-only placeholder with the label unit; never touch a row that
       // already carries a rate (see header).
       if (emptyText(row.default_rate)) {
         updates.default_rate = d.rate;
-        if (row.default_unit !== d.unit) updates.default_unit = d.unit;
+        if (row.default_unit !== d.unit) {
+          updates.default_unit = d.unit;
+          if (!emptyText(row.default_unit)) priorValues.default_unit = row.default_unit;
+        }
       }
     } else if (d.basis === 'per_1000_sqft') {
       const rate = d.rate != null ? d.rate : d.min;
@@ -285,6 +312,7 @@ exports.up = async function up(knex) {
       // preexisting default_rate keep their display pair untouched.
       if (d.unit && emptyText(row.default_rate) && !emptyText(row.default_unit) && row.default_unit !== d.unit) {
         updates.default_unit = d.unit;
+        priorValues.default_unit = row.default_unit;
       }
     }
     if (d.method && hasMethodCol && emptyText(row.application_method)) {
@@ -293,11 +321,11 @@ exports.up = async function up(knex) {
     const wroteFields = Object.keys(updates);
     if (wroteFields.length && d.note && !String(row.label_source_note || '').includes(d.note)) {
       if (emptyText(row.label_source_note)) {
-        updates.label_source_note = appendedNote(d.note, wroteFields);
+        updates.label_source_note = appendedNote(d.note, wroteFields, priorValues);
       } else {
         // The earlier batch's note (with its verbatim label quote) stays;
         // the values written above get their own appended provenance.
-        updates.label_source_note = `${row.label_source_note} | ${appendedNote(d.note, wroteFields)}`;
+        updates.label_source_note = `${row.label_source_note} | ${appendedNote(d.note, wroteFields, priorValues)}`;
       }
     }
     // Stamp only rows this migration actually wrote to.
@@ -344,10 +372,13 @@ exports.down = async function down(knex) {
     // (and its provenance) standing — reverting just the untouched member
     // would orphan the edited one (codex P2 r4: an edited gel rate must
     // not lose its g/spot unit on rollback).
-    if (!owned.every(valueUnchanged)) continue;
+    if (!owned.every((o) => valueUnchanged(o.field))) continue;
     const reverts = {};
-    for (const field of owned) reverts[field] = null;
-    const segment = appendedNote(d.note, owned);
+    // A field up() OVERWROTE (annotated token) reverts to the recorded
+    // pre-migration value — clearing it would lose e.g. the inventory
+    // form's 'oz' placeholder (codex P2 r7). Filled fields revert to null.
+    for (const o of owned) reverts[o.field] = o.was;
+    const segment = `${d.note} [wrote: ${owned.map((o) => o.token).join(', ')}]`;
     if (row.label_source_note === segment) {
       reverts.label_source_note = null;
     } else if (String(row.label_source_note || '').endsWith(` | ${segment}`)) {
