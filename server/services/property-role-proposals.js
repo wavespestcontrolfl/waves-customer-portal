@@ -28,6 +28,10 @@ const {
   OCCUPANCY_TYPES,
   addressKey,
   normalizeOccupancy,
+  streetKey,
+  unitKey,
+  streetEmbeddedUnitKey,
+  normalizeZip,
 } = require('./customer-properties');
 const { resolveLocation } = require('../config/locations');
 
@@ -133,6 +137,36 @@ function dedupeClassified(classified) {
 }
 
 /**
+ * PARTIAL-address fallback (codex #3418 r19): a known customer often names a
+ * property by street (or street + unit) without restating city/ZIP, so the
+ * exact full-key lookup misses. Match the entry against the stored rows on
+ * every component the caller DID supply — street key, unit when stated, city
+ * when stated, ZIP when stated — and return the row only when EXACTLY ONE is
+ * compatible (no-guess retained for zero or multiple). Entries that stated a
+ * full city+ZIP never fall through here: a full address that failed the exact
+ * key names a DIFFERENT address, not a partial one.
+ */
+function uniqueCompatibleRow(entry, properties) {
+  const cityStated = !!String(entry.city || '').trim();
+  const zipStated = !!String(entry.zip || '').trim();
+  if (cityStated && zipStated) return null;
+  const eStreet = streetKey(entry.address_line1);
+  if (!eStreet) return null;
+  const eUnit = unitKey(entry.address_line2 || '') || streetEmbeddedUnitKey(entry.address_line1);
+  const candidates = properties.filter((r) => {
+    if (streetKey(r.address_line1) !== eStreet) return false;
+    if (eUnit) {
+      const rUnit = unitKey(r.address_line2 || '') || streetEmbeddedUnitKey(r.address_line1);
+      if (rUnit !== eUnit) return false;
+    }
+    if (cityStated && String(entry.city).trim().toLowerCase() !== String(r.city || '').trim().toLowerCase()) return false;
+    if (zipStated && normalizeZip(entry.zip) !== normalizeZip(r.zip)) return false;
+    return true;
+  });
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+/**
  * Pure core: match classified properties to the customer's current rows and
  * split into direct fills vs parked proposals.
  *
@@ -164,7 +198,7 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
   const primaryClaims = [];
   for (const entry of classified) {
     const key = addressKey(entry);
-    const row = key ? rowsByKey.get(key) : null;
+    const row = (key ? rowsByKey.get(key) : null) || uniqueCompatibleRow(entry, properties);
     if (!row) continue; // nothing durable to label — the persistence step records rows first
 
     // A residence claim on a commercial-typed row is rejected wholesale
@@ -185,6 +219,7 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
         proposals.push({
           kind: 'occupancy_change',
           property_id: row.id,
+          address_key: addressKey(row),
           address: shortAddress(row),
           current_occupancy: stored,
           proposed_occupancy: entry.occupancy,
@@ -239,6 +274,7 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
         proposals.push({
           kind: 'occupancy_change',
           property_id: row.id,
+          address_key: addressKey(row),
           address: shortAddress(row),
           current_occupancy: storedNewPrimary,
           proposed_occupancy: 'owner_occupied',
@@ -249,7 +285,9 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
       proposals.push({
         kind: 'primary_flip',
         new_primary_property_id: row.id,
+        new_primary_address_key: addressKey(row),
         new_primary_address: shortAddress(row),
+        old_primary_address_key: oldRow ? addressKey(oldRow) : null,
         old_primary_property_id: oldRow ? oldRow.id : null,
         old_primary_address: oldRow ? shortAddress(oldRow) : null,
         old_primary_occupancy: oldOccupancy,
@@ -275,6 +313,7 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
         proposals.push({
           kind: 'occupancy_change',
           property_id: row.id,
+          address_key: addressKey(row),
           address: shortAddress(row),
           current_occupancy: stored,
           proposed_occupancy: 'owner_occupied',
@@ -509,6 +548,12 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
     let viable = !!target;
     if (viable && !target.is_primary) { // already-primary = idempotent, always viable
       if (String(target.property_type || '').trim().toLowerCase() === 'commercial') viable = false;
+      // Address fence (codex #3418 r19): the flip was reviewed against
+      // the staged addresses — a Customer 360 rewrite of either row's
+      // address under the same id makes the click apply to a property
+      // the reviewer never saw.
+      if (viable && flipP.new_primary_address_key
+        && addressKey(target) !== flipP.new_primary_address_key) viable = false;
       const targetOcc = knownOccupancy(target.occupancy_type);
       if (viable && targetOcc && targetOcc !== 'owner_occupied') {
         // Only viable if a companion in THIS batch corrects it and that
@@ -521,8 +566,14 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       if (viable) {
         const livePrimary = await trx('customer_properties')
           .where({ customer_id: customerId, is_primary: true, active: true })
-          .first('id');
+          .forUpdate()
+          .first();
         if ((livePrimary ? livePrimary.id : null) !== (flipP.old_primary_property_id || null)) viable = false;
+        // Same address fence on the OLD primary: a re-addressed current
+        // primary means the pin would stamp visits to an address the
+        // reviewer never saw.
+        if (viable && livePrimary && flipP.old_primary_address_key
+          && addressKey(livePrimary) !== flipP.old_primary_address_key) viable = false;
       }
     }
     if (!viable) return { applied: 0, skipped: proposals.length };
@@ -532,6 +583,19 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
     if (p.kind === 'occupancy_change') {
       const occupancy = normalizeOccupancy(p.proposed_occupancy);
       if (!OCCUPANCY_TYPES.includes(occupancy) || occupancy === 'unknown') { skipped += 1; continue; }
+      // Address fence (codex #3418 r19): a Customer 360 address edit
+      // rewrites the SAME row id, so the occupancy CAS alone would apply
+      // the proposal to an address the reviewer never saw. Lock the row
+      // and require its CURRENT address key to equal the staged one; the
+      // held row lock makes the following CAS race-free against further
+      // address edits.
+      if (p.address_key) {
+        const liveRow = await trx('customer_properties')
+          .where({ id: p.property_id, customer_id: customerId, active: true })
+          .forUpdate()
+          .first();
+        if (!liveRow || addressKey(liveRow) !== p.address_key) { skipped += 1; continue; }
+      }
       // Compare-and-swap on the occupancy the card was judged against — an
       // admin edit that landed after the card was parked wins; the stale
       // proposal skips rather than overwriting the newer human fact.
@@ -632,6 +696,63 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
             lng: trx.raw('COALESCE(lng, ?)', [oldPrimary.longitude ?? null]),
             updated_at: new Date(),
           });
+
+        // Estimate-born UNSTAMPED visits (codex #3418 r19): r4 excluded
+        // them from the pin because the estimate lane owns their address —
+        // but that linkage is best-effort by contract (and some rows
+        // predate it), so a fully unstamped estimate visit would follow
+        // the flipped mirror to the NEW primary. Pin every one NOT PROVEN
+        // to target another property: excluded only when its estimate
+        // links a different property_id, or its parsed address clearly
+        // names a different address/street than the old primary.
+        {
+          const estRows = await trx('scheduled_services')
+            .where({ customer_id: customerId })
+            .whereNull('property_id')
+            .whereNull('service_address_line1')
+            .whereNotNull('source_estimate_id')
+            .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+            .select('id', 'source_estimate_id');
+          if (estRows.length) {
+            const { parseEstimateAddress } = require('./estimate-property-linkage');
+            const estIds = [...new Set(estRows.map((r) => r.source_estimate_id))];
+            const ests = await trx('estimates').whereIn('id', estIds).select('id', 'address', 'property_id');
+            const estById = new Map(ests.map((e) => [String(e.id), e]));
+            const oldKey = addressKey(oldPrimary);
+            const oldStreet = streetKey(oldPrimary.address_line1);
+            const pinIds = estRows.filter((r) => {
+              const est = estById.get(String(r.source_estimate_id));
+              if (!est) return true; // estimate row gone — not proven other
+              if (est.property_id) return String(est.property_id) === String(oldPrimary.id);
+              const parsed = parseEstimateAddress(est.address);
+              if (!parsed) return true; // no estimate address — not proven other
+              if (parsed.partial) {
+                // Partial parse: a clearly DIFFERENT street is proof of
+                // another property; an unparseable/matching street is not.
+                const pStreet = streetKey(parsed.address_line1);
+                return !pStreet || pStreet === oldStreet;
+              }
+              return addressKey(parsed) === oldKey;
+            }).map((r) => r.id);
+            if (pinIds.length) {
+              await trx('scheduled_services')
+                .whereIn('id', pinIds)
+                .whereNull('property_id')
+                .whereNull('service_address_line1')
+                .update({
+                  property_id: oldPrimary.id,
+                  service_address_line1: oldPrimary.address_line1,
+                  service_address_line2: oldPrimary.address_line2 || null,
+                  service_address_city: oldPrimary.city,
+                  service_address_state: oldPrimary.state || 'FL',
+                  service_address_zip: oldPrimary.zip,
+                  lat: trx.raw('COALESCE(lat, ?)', [oldPrimary.latitude ?? null]),
+                  lng: trx.raw('COALESCE(lng, ?)', [oldPrimary.longitude ?? null]),
+                  updated_at: new Date(),
+                });
+            }
+          }
+        }
 
         // A COMPLETED-but-LIVE recurring template parent still creates
         // every future visit by copying its own property/address stamp

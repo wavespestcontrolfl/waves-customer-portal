@@ -186,6 +186,46 @@ describe('buildPropertyRoleProposals', () => {
     expect(proposals).toHaveLength(0);
   });
 
+  test('a partial street-only address matches a UNIQUE stored property; ambiguous streets stay dropped (codex r19)', () => {
+    const unique = buildPropertyRoleProposals({
+      classified: [{ address_line1: '660 Shell Cove', city: null, zip: null, occupancy: 'seasonal', is_primary_residence: null }],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    // NEW_HOME is the only Shell Cove row — the partial entry resolves to
+    // it and its unknown occupancy takes the fill.
+    expect(unique.fills).toEqual([{ property_id: 'prop-new', occupancy: 'seasonal' }]);
+    const twin = { ...NEW_HOME, id: 'prop-twin', city: 'Venice', zip: '34285' };
+    const ambiguous = buildPropertyRoleProposals({
+      classified: [{ address_line1: '660 Shell Cove', city: null, zip: null, occupancy: 'seasonal', is_primary_residence: null }],
+      properties: [OLD_HOME, NEW_HOME, twin],
+    });
+    expect(ambiguous.fills).toHaveLength(0);
+    expect(ambiguous.proposals).toHaveLength(0);
+    // A FULL address that failed the exact key names a DIFFERENT property —
+    // never fuzzy-matched.
+    const fullMiss = buildPropertyRoleProposals({
+      classified: [{ address_line1: '660 Shell Cove', city: 'Venice', zip: '34293', occupancy: 'seasonal', is_primary_residence: null }],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    expect(fullMiss.fills).toHaveLength(0);
+    expect(fullMiss.proposals).toHaveLength(0);
+  });
+
+  test('proposals carry the staged address_key (codex r19)', () => {
+    const { proposals } = buildPropertyRoleProposals({
+      classified: [
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true },
+        { address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: 'rental_investment', is_primary_residence: false },
+      ],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    const occ = proposals.find((p) => p.kind === 'occupancy_change');
+    const flip = proposals.find((p) => p.kind === 'primary_flip');
+    expect(occ.address_key).toBeTruthy();
+    expect(flip.new_primary_address_key).toBeTruthy();
+    expect(flip.old_primary_address_key).toBeTruthy();
+  });
+
   test('matching stored occupancy produces neither fill nor proposal', () => {
     const { fills, proposals } = buildPropertyRoleProposals({
       classified: [{ address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: 'owner_occupied', is_primary_residence: null }],
@@ -205,9 +245,22 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
         _table: table, _wheres: [], _whereNulls: [], _whereNotIn: null,
         where(w) { this._wheres.push(w); return this; },
         whereNull(c) { this._whereNulls.push(c); return this; },
+        whereNotNull(c) { this._whereNotNulls = (this._whereNotNulls || []).concat(c); return this; },
         forUpdate() { return this; },
+        select() { return this; },
         whereNotIn(c, v) { this._whereNotIn = [c, v]; return this; },
         whereIn(c, v) { this._whereIns = (this._whereIns || []).concat([[c, v]]); return this; },
+        // Awaiting a bare builder (a SELECT list) resolves the rows that
+        // match the recorded predicates — same honoring as update().
+        then(resolve, reject) {
+          const preds = Object.assign({}, ...this._wheres.filter((w) => typeof w === 'object'));
+          const hits = (rows[table] || []).filter((r) => Object.entries(preds).every(([k, v]) => r[k] === v)
+            && this._whereNulls.every((c) => r[c] == null)
+            && (this._whereNotNulls || []).every((c) => r[c] != null)
+            && (this._whereIns || []).every(([c, v]) => v.includes(r[c]))
+            && (!this._whereNotIn || !this._whereNotIn[1].includes(r[this._whereNotIn[0]])));
+          return Promise.resolve(hits).then(resolve, reject);
+        },
         async first() {
           const preds = Object.assign({}, ...this._wheres);
           return (rows[table] || []).find((r) => Object.entries(preds).every(([k, v]) => r[k] === v)) || null;
@@ -486,6 +539,59 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     expect({ applied, skipped }).toEqual({ applied: 0, skipped: 1 });
     // Never mirrors a commercial classification onto customers (taxability).
     expect(trx._updates.filter((x) => x.table === 'customers')).toHaveLength(0);
+  });
+
+  test('a re-addressed row fails the staged address_key fence — occupancy skips, flip batch skips (codex r19)', async () => {
+    const { addressKey } = require('../services/customer-properties');
+    // Admin re-addressed prop-old after staging: same id, different address.
+    const old = { ...OLD_HOME, address_line1: '77 Relocated Way', state: 'FL', active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, state: 'FL', active: true, customer_id: 'cust-1' };
+    const stagedOldKey = addressKey(OLD_HOME); // key of the address the reviewer SAW
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    const occOut = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{
+        kind: 'occupancy_change', property_id: 'prop-old', address_key: stagedOldKey,
+        current_occupancy: 'owner_occupied', proposed_occupancy: 'rental_investment',
+      }],
+    });
+    expect(occOut).toEqual({ applied: 0, skipped: 1 });
+    expect(old.occupancy_type).toBe('owner_occupied');
+    const flipOut = await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{
+        kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old',
+        new_primary_address_key: addressKey(NEW_HOME), old_primary_address_key: stagedOldKey,
+      }],
+    });
+    expect(flipOut).toEqual({ applied: 0, skipped: 1 });
+    expect(neu.is_primary).toBe(false);
+  });
+
+  test('estimate-born unstamped visits pin unless PROVEN to target another property (codex r19)', async () => {
+    const old = { ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1' };
+    const unresolved = { id: 'v-est-1', customer_id: 'cust-1', status: 'pending', property_id: null, service_address_line1: null, source_estimate_id: 'est-1', lat: null, lng: null };
+    const provenOther = { id: 'v-est-2', customer_id: 'cust-1', status: 'pending', property_id: null, service_address_line1: null, source_estimate_id: 'est-2', lat: null, lng: null };
+    const trx = makeTrx({
+      rows: {
+        customer_properties: [old, neu],
+        customers: [{ id: 'cust-1' }],
+        scheduled_services: [unresolved, provenOther],
+        estimates: [
+          { id: 'est-1', address: null, property_id: null }, // no address — not proven other
+          { id: 'est-2', address: null, property_id: 'prop-new' }, // linked elsewhere — proven
+        ],
+      },
+    });
+    await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
+    });
+    expect(unresolved.property_id).toBe('prop-old');
+    expect(unresolved.service_address_line1).toBe('8380 Sea Breeze Ct');
+    expect(provenOther.property_id).toBeNull();
+    expect(provenOther.service_address_line1).toBeNull();
   });
 
   test('re-click on an already-flipped card is idempotent (applied, no writes)', async () => {
