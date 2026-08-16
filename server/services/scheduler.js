@@ -2708,10 +2708,16 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('23 11 * * 1-5', async () => {
     try {
+      // Gate BEFORE the lock (codex gh-r1): runExclusive itself takes a DB
+      // connection, an advisory lock, and a job_health write — a dark tick
+      // must touch NOTHING, and the sweep's own gate check can't deliver
+      // that from inside the wrapper.
+      const { isAutoDialEnabled } = require('./collections/outbound-voice/gates');
+      if (!isAutoDialEnabled()) return;
       await runExclusive('collections-dial-sweep', async () => {
         const DialSweep = require('./collections/outbound-voice/dial-sweep');
         const result = await DialSweep.runCollectionsDialSweep();
-        if (result.skipped) return; // dark — stay silent
+        if (result.skipped) return; // gate flipped mid-tick — stay silent
         logger.info(`Collections auto-dial sweep: ${result.candidates} candidates, ${result.promoted} promoted, ${result.dialed} dial attempts, ${result.refused} refusals`);
       });
     } catch (err) {

@@ -2160,7 +2160,7 @@ router.post('/contact-compliance-checks', async (req, res, next) => {
 router.get('/collections-voice-status', async (req, res, next) => {
     let queryFailed = null;
   try {
-    const { isVoiceLatePaymentEnabled, isPayLinkEnabled } = require('../services/collections/outbound-voice/gates');
+    const { isVoiceLatePaymentEnabled, isPayLinkEnabled, isAutoDialEnabled } = require('../services/collections/outbound-voice/gates');
     const { retentionDays } = require('../services/collections/outbound-voice/retention');
 
     const caseRows = await db('collection_cases')
@@ -2203,6 +2203,9 @@ router.get('/collections-voice-status', async (req, res, next) => {
         GATE_VOICE_LATE_PAYMENT_PAYLINK: isPayLinkEnabled(),
         GATE_COLLECTIONS_POLICY: process.env.GATE_COLLECTIONS_POLICY === 'true',
         GATE_COLLECTIONS_SHADOW: process.env.GATE_COLLECTIONS_SHADOW === 'true',
+        // Effective state (codex gh-r1 P2): an armed auto-dial and a
+        // disabled sweep must never look identical on the kill-switch view.
+        GATE_VOICE_LATE_PAYMENT_AUTODIAL: isAutoDialEnabled(),
       },
       retentionDays: retentionDays(),
       caseCounts,

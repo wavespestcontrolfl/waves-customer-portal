@@ -187,3 +187,31 @@ test('unknown case ⇒ 404', async () => {
     expect(res.status).toBe(404);
   });
 });
+
+// codex gh-r1 P2: the kill-switch view surfaces the autodial gate's
+// EFFECTIVE state.
+test('collections-voice-status reports GATE_VOICE_LATE_PAYMENT_AUTODIAL (effective, chained)', async () => {
+  process.env.GATE_VOICE_LATE_PAYMENT_AUTODIAL = 'true'; // alone — chain unsatisfied
+  delete process.env.GATE_COLLECTIONS_POLICY;
+  db.mockImplementation(() => {
+    const q = {};
+    ['select', 'count', 'groupBy', 'where', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.catch = jest.fn(async () => []);
+    return q;
+  });
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/admin/communications/collections-voice-status`, {
+      headers: { Authorization: 'Bearer admin' },
+    });
+    const body = await res.json();
+    expect(body.gates.GATE_VOICE_LATE_PAYMENT_AUTODIAL).toBe(false); // chain, not the raw env
+
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const res2 = await fetch(`${baseUrl}/admin/communications/collections-voice-status`, {
+      headers: { Authorization: 'Bearer admin' },
+    });
+    expect((await res2.json()).gates.GATE_VOICE_LATE_PAYMENT_AUTODIAL).toBe(true);
+  });
+  delete process.env.GATE_VOICE_LATE_PAYMENT_AUTODIAL;
+  delete process.env.GATE_COLLECTIONS_POLICY;
+});

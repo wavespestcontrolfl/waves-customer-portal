@@ -97,9 +97,31 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
         // A real dial attempt (even a failed one) consumes pilot pace.
         dialed++;
       } else {
-        // Policy/gate refusal — origination already re-queued or cancelled
-        // the case with its reason; the cap is untouched.
+        // Refusal — the cap is untouched. Origination moves the case
+        // itself for terminal refusals (cancelled/expired/proposed), but
+        // TRANSIENT pre-dial refusals (relay_unavailable, a feature gate,
+        // suppressed_until_next_eligible, a lost claim) return with the
+        // row still 'approved' — which this sweep never selects, so the
+        // candidate would be stranded outside the automatic queue forever
+        // (codex gh-r1). The guarded revert below fires ONLY when the row
+        // still carries OUR promotion (state, version, and the autodial
+        // actor); anything origination moved is untouched by the fence.
         refused++;
+        await db('collection_cases')
+          .where({
+            id: caseRow.id,
+            current_state: 'approved',
+            case_version: caseRow.case_version,
+            approved_by: 'system:autodial',
+          })
+          .update({
+            current_state: 'proposed',
+            approved_by: null,
+            approved_at: null,
+            approval_expires_at: null,
+            updated_at: db.fn.now(),
+          })
+          .catch((err) => logger.warn(`[collections-autodial] revert failed for case ${caseRow.id}: ${err.message} — approval expiry (24h) is the backstop`));
       }
     } catch (err) {
       // originateCollectionCall throws only for genuinely unexpected

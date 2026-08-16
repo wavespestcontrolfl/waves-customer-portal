@@ -49,6 +49,9 @@ function caseRow(id, state = 'shadow') {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // mockReset, not just clear: leftover mockResolvedValueOnce queue entries
+  // survive clearAllMocks and would fire FIRST in the next test.
+  originateCollectionCall.mockReset();
   delete process.env.GATE_VOICE_LATE_PAYMENT;
   delete process.env.GATE_VOICE_LATE_PAYMENT_AUTODIAL;
   delete process.env.GATE_COLLECTIONS_POLICY;
@@ -155,4 +158,35 @@ test('an unexpected originate THROW is treated as an attempt (conservative pace)
     .mockResolvedValueOnce({ dialed: true, reason: 'dialed' });
   const res = await runCollectionsDialSweep({ now: NOW });
   expect(res).toMatchObject({ dialed: 2 }); // throw counted as an attempt
+});
+
+// codex gh-r1 pins.
+describe('gh-r1', () => {
+  test('a TRANSIENT pre-dial refusal reverts OUR promotion back to proposed (guarded on the autodial actor)', async () => {
+    armGates();
+    const revert = promoteChain(1);
+    const queues = [candidateChain([caseRow('c1')]), promoteChain(1), revert];
+    db.mockImplementation(() => queues.shift());
+    originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'relay_unavailable' });
+    const res = await runCollectionsDialSweep({ now: NOW });
+    expect(res).toMatchObject({ refused: 1, dialed: 0 });
+    // The revert fence: still-approved, same version, OUR actor only.
+    expect(revert.where).toHaveBeenCalledWith({
+      id: 'c1', current_state: 'approved', case_version: 1, approved_by: 'system:autodial',
+    });
+    const patch = revert.update.mock.calls[0][0];
+    expect(patch.current_state).toBe('proposed');
+    expect(patch.approved_by).toBeNull();
+  });
+
+  test('a refusal origination already resolved (dial_failed path) never triggers the revert', async () => {
+    armGates();
+    const queues = [candidateChain([caseRow('c1')]), promoteChain(1)];
+    db.mockImplementation(() => queues.shift());
+    originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'dial_failed' });
+    const res = await runCollectionsDialSweep({ now: NOW });
+    expect(res).toMatchObject({ dialed: 1, refused: 0 });
+    // Only two db calls happened: candidates + promote — no revert query.
+    expect(db).toHaveBeenCalledTimes(2);
+  });
 });
