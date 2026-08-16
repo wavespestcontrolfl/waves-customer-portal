@@ -237,6 +237,24 @@ describe('buildPropertyRoleProposals', () => {
     expect(merged.proposals.filter((p) => p.kind === 'primary_flip')).toHaveLength(1);
   });
 
+  test('a non-owner classification on the UNKNOWN current primary parks instead of filling (codex r21)', () => {
+    const unknownPrimary = { ...OLD_HOME, occupancy_type: 'unknown' };
+    const { fills, proposals } = buildPropertyRoleProposals({
+      classified: [
+        { address_line1: '8380 Sea Breeze Ct', city: 'Bradenton', zip: '34212', occupancy: 'rental_investment', is_primary_residence: false },
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: 'owner_occupied', is_primary_residence: true },
+      ],
+      properties: [unknownPrimary, NEW_HOME],
+    });
+    // The rental classification of the CURRENT primary must ride the card,
+    // not commit during staging — a dismissed card must leave no inverted
+    // state. The non-primary unknown row still fills directly.
+    expect(fills).toEqual([{ property_id: 'prop-new', occupancy: 'owner_occupied' }]);
+    const parked = proposals.find((p) => p.kind === 'occupancy_change' && p.property_id === 'prop-old');
+    expect(parked).toMatchObject({ current_occupancy: 'unknown', proposed_occupancy: 'rental_investment' });
+    expect(proposals.filter((p) => p.kind === 'primary_flip')).toHaveLength(1);
+  });
+
   test('proposals carry the staged address_key (codex r19)', () => {
     const { proposals } = buildPropertyRoleProposals({
       classified: [
@@ -644,6 +662,33 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     });
     expect(anchor.property_id).toBe('prop-old');
     expect(anchor.service_address_line1).toBe('8380 Sea Breeze Ct');
+  });
+
+  test('a partial estimate address stating a DIFFERENT unit is proven-other — not pinned (codex r21)', async () => {
+    const old = {
+      ...OLD_HOME, address_line2: 'Unit 4', state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1',
+    };
+    const neu = { ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1' };
+    const otherUnit = { id: 'v-est-u5', customer_id: 'cust-1', status: 'pending', property_id: null, service_address_line1: null, source_estimate_id: 'est-u5', lat: null, lng: null };
+    const sameUnit = { id: 'v-est-u4', customer_id: 'cust-1', status: 'pending', property_id: null, service_address_line1: null, source_estimate_id: 'est-u4', lat: null, lng: null };
+    const trx = makeTrx({
+      rows: {
+        customer_properties: [old, neu],
+        customers: [{ id: 'cust-1' }],
+        scheduled_services: [otherUnit, sameUnit],
+        estimates: [
+          // Partial parses (no ", City, ST zip" shape) with explicit units.
+          { id: 'est-u5', address: '8380 Sea Breeze Ct Unit 5', property_id: null },
+          { id: 'est-u4', address: '8380 Sea Breeze Ct Unit 4', property_id: null },
+        ],
+      },
+    });
+    await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
+    });
+    expect(otherUnit.property_id).toBeNull(); // Unit 5 ≠ Unit 4 — proven other
+    expect(sameUnit.property_id).toBe('prop-old'); // matching unit pins
   });
 
   test('re-click on an already-flipped card is idempotent (applied, no writes)', async () => {

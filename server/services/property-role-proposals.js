@@ -237,7 +237,27 @@ function buildPropertyRoleProposals({ classified: rawClassified = [], properties
     if (entry.occupancy && !commercialResidenceClaim) {
       const stored = knownOccupancy(row.occupancy_type);
       if (!stored) {
-        fills.push({ property_id: row.id, occupancy: entry.occupancy });
+        if (row.is_primary && entry.occupancy !== 'owner_occupied') {
+          // A non-owner occupancy on the CURRENT PRIMARY is never a "safe
+          // fill" (codex #3418 r21): it asserts the exact inverted state
+          // this lane exists to prevent — committing it during staging,
+          // before the admin reviews the (usually accompanying) flip,
+          // would leave a rental/seasonal row marked primary if the card
+          // is dismissed. Park it as a reviewed change instead; its CAS
+          // base is the row's current 'unknown'.
+          proposals.push({
+            kind: 'occupancy_change',
+            property_id: row.id,
+            address_key: addressKey(row),
+            address: shortAddress(row),
+            current_occupancy: 'unknown',
+            proposed_occupancy: entry.occupancy,
+            proposed_label: !row.label ? (LABEL_BY_OCCUPANCY[entry.occupancy] || null) : null,
+            evidence: entry.evidence || null,
+          });
+        } else {
+          fills.push({ property_id: row.id, occupancy: entry.occupancy });
+        }
       } else if (stored !== entry.occupancy) {
         proposals.push({
           kind: 'occupancy_change',
@@ -765,7 +785,17 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
                 // Partial parse: a clearly DIFFERENT street is proof of
                 // another property; an unparseable/matching street is not.
                 const pStreet = streetKey(parsed.address_line1);
-                return !pStreet || pStreet === oldStreet;
+                if (pStreet && pStreet !== oldStreet) return false;
+                // A DIFFERING stated unit is proof too (codex #3418 r21):
+                // parseEstimateAddress preserves unit designators, and an
+                // estimate for Unit 5 must not pin (and dispatch) as the
+                // old primary's Unit 4. An unstated unit stays unproven.
+                const parsedUnit = unitKey(parsed.address_line2 || '') || streetEmbeddedUnitKey(parsed.address_line1);
+                if (parsedUnit) {
+                  const oldUnit = unitKey(oldPrimary.address_line2 || '') || streetEmbeddedUnitKey(oldPrimary.address_line1);
+                  if (parsedUnit !== oldUnit) return false;
+                }
+                return true;
               }
               return addressKey(parsed) === oldKey;
             }).map((r) => r.id);
