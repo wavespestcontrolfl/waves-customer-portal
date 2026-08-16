@@ -79,7 +79,9 @@ const FORBIDDEN_TARGET_RE = /ganoderma|thielaviopsis/i;
 // The retired company name must never appear in generated output — the
 // company is "Waves Pest Control" (AGENTS.md; codex #3423 r9 showed the
 // phrase riding through common words with 'waves' allowlisted).
-const RETIRED_NAME_RE = /waves\s+lawn\s*(?:&|and)?\s*pest/i;
+// \W+ separators cover space, hyphen, slash, plus, comma, ampersand —
+// "Waves Lawn-Pest" and "Waves Lawn/Pest" are the same retired name (r14).
+const RETIRED_NAME_RE = /waves\W+lawn\W*(?:and\W+)?\W*pest/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -964,8 +966,7 @@ const COMMON_PROSE_WORDS = new Set([
   'transition', 'transitions', 'minute', 'minutes',
   'list', 'lists',
   'state', 'stated', 'states',
-  'introduction', 'discuss', 'discussing', 'baseline', 'relevant', 'mindful',
-  'documented',
+  'introduction', 'discuss', 'discussing', 'relevant', 'mindful',
   'vacuum', 'vacuuming', 'follow-up', 'walk-through',
 ]);
 
@@ -1152,6 +1153,9 @@ function findUngroundedClaim(body, grounding) {
   const groundedValueText = [
     ...collectFactValues(grounding.llmFacts),
     ...(grounding.llmFacts?.visit?.isRecurring === true ? ['recurring'] : []),
+    // visit.newCustomer === true is likewise the only first-visit fact —
+    // without this token every truthful "Initial visit" re-templates (r14).
+    ...(grounding.llmFacts?.visit?.newCustomer === true ? ['initial'] : []),
   ].join(' ').toLowerCase();
   const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const kind of ['names', 'targets']) {

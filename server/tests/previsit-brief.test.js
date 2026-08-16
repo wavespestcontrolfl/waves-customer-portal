@@ -1927,3 +1927,41 @@ describe('codex #3423 r13 — interior room nouns trip the interior opt-out for 
     }
   });
 });
+
+describe('codex #3423 r14 — punctuated retired name, first-visit token, condition words', () => {
+  test('punctuation-separated retired names reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const name of ['Waves Lawn-Pest', 'Waves Lawn/Pest', 'Waves Lawn + Pest', 'Waves Lawn and Pest']) {
+      const verdict = validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: `${name} visited.` },
+        grounding,
+      );
+      expect(verdict.reason).toBe('retired_company_name');
+    }
+  });
+
+  test('visit.newCustomer:true grounds a truthful initial-visit claim; absent it rejects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const groundedNew = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { newCustomer: true } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Initial visit.', customer_context: null },
+      groundedNew,
+    ).body).toBeTruthy();
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { newCustomer: false } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Initial visit.', customer_context: null },
+      empty,
+    ).reason).toBeTruthy();
+  });
+
+  test('"Baseline damage documented" rejects on empty facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: ['Baseline damage documented'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+});
