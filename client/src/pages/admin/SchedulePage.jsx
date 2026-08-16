@@ -6561,6 +6561,11 @@ function typedZeroStateRefusesBody(type, values, score) {
   // reuse the shared cleared-boundary map instead of re-listing the lanes.
   const rule = TYPED_SCORE_CLEARED_SELECT[type];
   if (rule && score == null) return String(values?.[rule.field] ?? "") === rule.cleared;
+  // Non-gauge cleared states keep the fixed template in buildTodaysResult's
+  // zeroSeverity branch (severity / activity_level "None observed" or
+  // "No activity") — Generate must hold for them too (codex r66).
+  const clearedSelect = String(values?.severity ?? values?.activity_level ?? "").trim();
+  if (clearedSelect === "None observed" || clearedSelect === "No activity") return true;
   return false;
 }
 

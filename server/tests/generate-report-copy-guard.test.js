@@ -306,6 +306,12 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     const { technicianReportCustomerCopy: parseCopy } = require('../services/service-report/technician-report-copy');
     const idiom = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and your technician confirms timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(idiom.body).toBeTruthy();
+    // a bare "safe once dry" WITHOUT the timing-confirmation clause still
+    // rejects (r66)
+    const bare = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(bare.body).toBeNull();
+    // perfect-continuous credential linkers (r66)
+    expect(reportCopyRejection('The gate code has continued to be BLUE.')).toBe('access_code');
     const unconditional = parseCopy('WHAT WE DID\n\nWe treated the lawn and it is now safe for pets.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(unconditional.body).toBeNull();
     // the shared parser screens post-generation inline edits too (r36)
