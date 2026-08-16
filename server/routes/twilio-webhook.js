@@ -316,15 +316,25 @@ router.post('/sms', async (req, res) => {
         logger.info(`[sms-optout] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} opted out of SMS via ${optCommand.detectionMethod}`);
       } catch (e) { logger.error(`[sms-optout] Failed to update prefs: ${e.message}`); }
 
-      await db('sms_log').insert({
-        customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
-        message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_out',
-        metadata: JSON.stringify({
-          opt_out_reason: optCommand.reason,
-          detection_method: optCommand.detectionMethod,
-          source_keyword: optCommand.sourceKeyword,
-        }),
-      }).catch(() => {});
+      let optOutSmsLogId = null;
+      try {
+        const inserted = await db('sms_log').insert({
+          customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
+          message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_out',
+          metadata: JSON.stringify({
+            opt_out_reason: optCommand.reason,
+            detection_method: optCommand.detectionMethod,
+            source_keyword: optCommand.sourceKeyword,
+          }),
+        }).returning('id');
+        optOutSmsLogId = inserted?.[0]?.id ?? inserted?.[0] ?? null;
+      } catch { /* logging is best-effort, as before */ }
+      // A natural-language opt-out can still CONTAIN an explicit contact
+      // correction ("Please stop texting me; my email is wrong, use …") —
+      // this return is unreachable by the correction block below, so it
+      // enqueues here too (codex #3413 r23). The opt-out governs comms;
+      // it does not void a stated data fix. Linked customers only, as
+      // everywhere (fireContactCorrection no-ops for unmatched senders).
 
       if (customer) {
         await db('activity_log').insert({
@@ -386,6 +396,8 @@ router.post('/sms', async (req, res) => {
           }
         }
       }
+
+      await fireContactCorrection(optOutSmsLogId);
 
       return res.type('text/xml').send(
         `<Response><Message>You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.</Message></Response>`

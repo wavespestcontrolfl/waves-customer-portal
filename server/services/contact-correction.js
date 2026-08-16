@@ -643,7 +643,7 @@ async function applyContactCorrections({ customerId, corrections, source, source
     // it; a same-state move skips as 'unchanged', an unresolvable ZIP
     // fails the whole group closed.
     if ((hadNewStreet || moveContext) && byField.has('zip')) {
-      const { stateForZip } = require('../utils/zip-state');
+      const { stateForZip } = require('./data-hygiene/normalizers');
       const derived = stateForZip(byField.get('zip').newValue);
       if (!derived) {
         rejectAddressGroup('state_unresolved');
@@ -1021,7 +1021,10 @@ async function runSmsContactCorrectionInner({ customer, body, smsLogId = null, k
       // stale-lock threshold rolls its customer write back instead of
       // committing a mutation its terminal mark can no longer own — the
       // same in-trx pattern as the call lane's processing-token fence.
-      postApply: ownerFence ? (trx) => ownerFence(trx) : null,
+      // BOTH callback arguments forward (r23): the fence seals the job
+      // done with the applied chain, and a wrapper that dropped `applied`
+      // reduced it to a lease refresh — losing the atomic seal entirely.
+      postApply: ownerFence || null,
     });
   } catch (err) {
     logger.warn(`[contact-correction] sms run failed: ${errTag(err)}`);
@@ -1239,6 +1242,16 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
           && !NAME_OWNERSHIP_DISCLAIMER_RE.test(String(c.evidence_quote || '')))
         : quoteCarriesFieldIntent(c.field_name, c.evidence_quote);
       if (!intentOk) return false;
+      // Third-party ownership doctrine, same as the SMS extractor (r22
+      // SMS / r23 calls): "my wife's name is wrong, it is Janet Smith" on
+      // a primary-number call passes every intent/grounding/pair check —
+      // but the name belongs to a third party and must neither rename the
+      // customer nor ring a proposal bell.
+      const tpQuote = String(c.evidence_quote || '');
+      const thirdParty = (c.field_name === 'email' || CALL_AUTO_FIELDS[c.field_name])
+        ? THIRD_PARTY_CONTACT_RE.test(tpQuote)
+        : THIRD_PARTY_ADDRESS_RE.test(tpQuote);
+      if (thirdParty) return false;
       if (!quoteGrounded(c.evidence_quote)) return false;
       if (seenFields.has(c.field_name)) return false;
       seenFields.add(c.field_name);

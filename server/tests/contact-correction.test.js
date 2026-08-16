@@ -2398,3 +2398,77 @@ describe('round-22 hardening', () => {
     expect(knex._data.customers[0].last_name).toBe('Riverz');
   });
 });
+
+describe('round-23 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('the SMS runner forwards BOTH fence arguments so the queue can seal atomically', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'last_name', new_value: 'Rivers', quote: 'you spelled my last name wrong, it is Rivers', confidence: 'high' }] },
+    });
+    const fence = jest.fn().mockResolvedValue(undefined);
+    const res = await runSmsContactCorrection({
+      customer: { id: CUSTOMER_ID },
+      body: 'You spelled my last name wrong, it is Rivers',
+      knex,
+      ownerFence: fence,
+    });
+    expect(res.applied).toHaveLength(1);
+    expect(fence).toHaveBeenCalledTimes(1);
+    const [trxArg, appliedArg] = fence.mock.calls[0];
+    expect(trxArg).toBeTruthy();
+    expect(appliedArg).toEqual(res.applied);
+  });
+
+  it("a third party's name on a primary-number call neither renames nor bells", async () => {
+    const quote = "my wife's name is wrong, it is Janet Smith";
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [
+        candidate({ id: 'n1', field_name: 'first_name', final_recommended_value: 'Janet', evidence_quote: quote }),
+        candidate({ id: 'n2', field_name: 'last_name', final_recommended_value: 'Smith', evidence_quote: quote }),
+      ],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.applied || []).toEqual([]);
+    expect(knex._data.customers[0].first_name).toBe('Jordan');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it("a third party's email on a call never rings a proposal bell", async () => {
+    const quote = "my accountant's email is wrong, it is bookkeeper at example dot com";
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: `Caller: ${quote}` })],
+      customer_field_candidates: [
+        candidate({ id: 'em', field_name: 'email', final_recommended_value: 'bookkeeper@example.com', evidence_quote: quote }),
+      ],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('no_candidates');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('state derivation flows through the shared data-hygiene allocation table', () => {
+    const { stateForZip, zipMatchesState } = require('../services/data-hygiene/normalizers');
+    expect(stateForZip('31401')).toBe('GA');
+    expect(stateForZip('34231')).toBe('FL');
+    expect(stateForZip('00100')).toBeNull();
+    // The two directions agree by construction — same table.
+    expect(zipMatchesState('31401', stateForZip('31401'))).toBe(true);
+  });
+});

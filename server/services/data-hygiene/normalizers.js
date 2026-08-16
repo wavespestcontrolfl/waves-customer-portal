@@ -318,6 +318,20 @@ function zipMatchesState(zip, state) {
   return ranges.some(([min, max]) => zip3 >= min && zip3 <= max);
 }
 
+// Inverse lookup over the SAME allocation table (codex #3413 r23 — one
+// shared ZIP/state authority; the contact-correction lane derives a
+// new-address group's state from its ZIP through this). Returns null for
+// prefixes the table does not allocate — callers fail closed.
+function stateForZip(zip) {
+  const digits = String(zip || '').replace(/\D/g, '');
+  if (digits.length < 5) return null;
+  const zip3 = Number(digits.slice(0, 3));
+  for (const [state, ranges] of Object.entries(ZIP3_RANGES)) {
+    if (ranges.some(([min, max]) => zip3 >= min && zip3 <= max)) return state;
+  }
+  return null;
+}
+
 function normalizationCandidatesForCustomer(row) {
   const candidates = [];
   add(candidates, nameWhitespaceTrim('first_name', row.first_name));
@@ -364,6 +378,7 @@ module.exports = {
   RULE_VERSION,
   normalizeUsState,
   zipMatchesState,
+  stateForZip,
   normalizationCandidatesForCustomer,
   normalizationCandidatesForCustomerAccount,
   _private: {
