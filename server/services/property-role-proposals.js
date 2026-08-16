@@ -858,13 +858,27 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         // stampedDivergesSql disables that fallback and the stop goes
         // coordless. Stamp the old primary's own coords onto exactly those
         // rows; real coordinates are never overwritten (NULL-only fence).
+        // Address-stamp match = COMPATIBLE FULL PREMISE (codex #3418
+        // r23): every stated component must agree — a visit with the old
+        // street but an explicitly different city, ZIP, or unit belongs
+        // to another premise and must not be repaired into a hybrid
+        // stamp. Null components stay compatible (they're what the
+        // completion pass fills). Literal lower() compares are the safe
+        // direction: a designator-spelling mismatch under-repairs, never
+        // mis-repairs.
         const oldPrimaryLinkedOrStamped = (qb) => qb
           .where({ property_id: oldPrimary.id })
           .orWhere((qb2) => qb2
             .whereRaw('lower(service_address_line1) = lower(?)', [oldPrimary.address_line1 || ''])
             .andWhere((qb3) => qb3
               .whereNull('service_address_zip')
-              .orWhere('service_address_zip', oldPrimary.zip)));
+              .orWhere('service_address_zip', oldPrimary.zip))
+            .andWhere((qb4) => qb4
+              .whereNull('service_address_city')
+              .orWhereRaw('lower(service_address_city) = lower(?)', [oldPrimary.city || '']))
+            .andWhere((qb5) => qb5
+              .whereNull('service_address_line2')
+              .orWhereRaw('lower(service_address_line2) = lower(?)', [oldPrimary.address_line2 || ''])));
         // PARTIALLY stamped visits (codex #3418 r22): a row carrying the
         // old primary's street but missing city/state/ZIP/unit used to be
         // completed by dispatch's per-column customer-mirror fallback —
