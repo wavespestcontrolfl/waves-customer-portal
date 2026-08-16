@@ -1043,7 +1043,7 @@ const ACCESS_STATE_RE = /\baccess\s+(?:(?:has\s+been|was|is)\s+)?(?:code|card|ke
 // claim — the technician would look for the wrong thing.
 const credentialReFor = (nouns) => new RegExp(
   `\\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\\s+(?:${nouns})\\b`
-  + `|\\b(?:${nouns})\\s+(?:(?:is|are|was|were)\\s+)?(?:under|hidden|inside|behind|left|beneath|provided|ready|available|at\\s+(?:the\\s+)?\\w+)\\b`
+  + `|\\b(?:${nouns})\\s+(?:(?:is|are|was|were|will\\s+be)\\s+)?(?:under|hidden|inside|behind|left|beneath|provided|ready|available|at\\s+(?:the\\s+)?\\w+)\\b`
   + `|\\b(?:${nouns})\\s+(?:(?:is|are|was|were)\\s+)?(?:numbers?|on\\s+file)\\b`
   + `|\\b(?:provided?|leave|left|gave|give|has|have|keeps?)\\s+(?:the\\s+|a\\s+)?(?:${nouns})\\b`, 'i');
 const KEY_ONLY_RE = credentialReFor('keys?');
@@ -1491,7 +1491,7 @@ function findUngroundedClaim(body, grounding) {
     body.open_scope,
     body.customer_context,
   ].filter(Boolean).join(' ').toLowerCase();
-  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:status\s*:?\s+)?(?:(?:was|is|will\s+be|has\s+been|had\s+been|got)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
+  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:status\s*:?\s+)?(?:(?:was|is|will\s+be|has\s+been|had\s+been|got)\s+)?(?:(?:currently|now|still|recently|already)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const claimNegated = Boolean(m[1]);
     // Trailing coordinated statuses ("confirmed but later cancelled") are
     // separate claims (r60).
@@ -1530,13 +1530,13 @@ function findUngroundedClaim(body, grounding) {
   // EVERY contact claim is validated, not just the first (r46).
   const contactClaims = [
     ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:that\s+(?:you|we|the\s+tech(?:nician)?)\s+)?(?:(?:you|us|the\s+tech(?:nician)?)\s+)?(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:be\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back|ed)?|text(?:s|ed)?|sms|email(?:s|ed)?|updates?|contact(?:ed)?)(?:\s+(?:and|or)\s+(call(?:s|back)?|texts?|sms|emails?))?\b/g),
-    ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email|contact)\s+(?:the\s+)?customer\b/g)],
+    ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email|contact|phone)\s+(?:the\s+)?customer\b/g)],
     // Imperative channel verbs with implicit customer ("Please call
     // before arrival") in INSTRUCTION fields (r51).
-    ...[...instructionalText.matchAll(/(?:^|[.;!?]\s*)(?:please\s+)?(do\s+not\s+|don't\s+)?(call|text|email|contact)\s+(?:before|after|prior|when|upon|on\s+arrival|ahead)\b/g)],
+    ...[...instructionalText.matchAll(/(?:^|[.;!?]\s*)(?:please\s+)?(do\s+not\s+|don't\s+)?(call|text|email|contact|phone)\s+(?:before|after|prior|when|upon|on\s+arrival|ahead)\b/g)],
   ];
   for (const contactReq of contactClaims)
-  for (const channel of [contactReq[2], contactReq[3]].filter(Boolean).map((c) => c.replace(/s$/, '').replace(/ed$/, ''))) {
+  for (const channel of [contactReq[2], contactReq[3]].filter(Boolean).map((c) => c.replace(/s$/, '').replace(/ed$/, '').replace(/^phone$/, 'call'))) {
     const negatedClaim = Boolean(contactReq[1]);
     const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred)\b/.test(groundedValueText);
     const bareChannel = channel.replace(/back$/, '').replace(/ed$/, '');
@@ -1583,8 +1583,10 @@ function findUngroundedClaim(body, grounding) {
     const tier = m[1] || m[2] || m[3] || m[4];
     // member/customer/copular shapes = MEMBERSHIP claims; accepted/tier/
     // plan shapes may also describe the estimate.
-    const membershipShaped = (Boolean(m[1] && /member|customer|client|account|status/.test(m[0])) || Boolean(m[4]))
-      && !/\b(?:estimate|quote|proposal)s?\b[^.;!?]{0,15}$/.test(currentClaimTextForTier.slice(0, m.index));
+    const precedingText = currentClaimTextForTier.slice(0, m.index);
+    const membershipShaped = (Boolean(m[1] && /member|customer|client|account|status/.test(m[0])) || Boolean(m[4])
+      || /\b(?:customer|client|resident)\b[^.;!?]{0,20}$/.test(precedingText))
+      && !/\b(?:estimate|quote|proposal)s?\b[^.;!?]{0,15}$/.test(precedingText);
     const scope = membershipShaped ? membershipTierText : tierText;
     const claimNeg = negNear(outputText, tier);
     if (!new RegExp(`\\b${tier}\\b`).test(scope) || (claimNeg && membershipShaped)) {
@@ -1629,8 +1631,14 @@ function findUngroundedClaim(body, grounding) {
   // A pendingEstimate object IS the pending state, status field or not.
   if (grounding.llmFacts?.openScope?.pendingEstimate) estimateStatuses.push('pending');
   if (estimateStatuses.length) {
-    for (const m of outputText.matchAll(/\b(?:estimates?|quotes?)\s+(?:(?:currently|now|still|recently)\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(?:(?:currently|now|still|recently)\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\s+(?:estimates?|quotes?)\b/g)) {
-      const claimed = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled').replace(/^drafted$/, 'draft');
+    for (const m of outputText.matchAll(/\b(?:estimates?|quotes?)\s+(?:(?:currently|now|still|recently)\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(?:(?:currently|now|still|recently)\s+)?(?:(not)\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\s+(?:estimates?|quotes?)\b/g)) {
+      const negatedLifecycle = Boolean(m[1]);
+      const claimed = String(m[2] || m[3]).replace(/^canceled$/, 'cancelled').replace(/^drafted$/, 'draft');
+      // A NEGATED lifecycle claim contradicts a matching status (r62).
+      if (negatedLifecycle && estimateStatuses.includes(claimed)) {
+        return { kind: 'estimate_state_conflict', term: `not ${claimed}` };
+      }
+      if (negatedLifecycle) continue;
       if (!estimateStatuses.includes(claimed)) {
         return { kind: 'estimate_state_conflict', term: claimed };
       }
@@ -1801,6 +1809,12 @@ function findUngroundedClaim(body, grounding) {
     if (!/\b(?:customer|client|resident)\b[^.;!?]{0,40}sensitiv|sensitiv[^.;!?]{0,40}\bchemicals?\b|\bchemicals?\b[^.;!?]{0,40}sensitiv/.test(groundedValueText)) {
       return { kind: 'novel_term', term: 'sensitivity' };
     }
+  }
+  // Customer-availability claims bind to customer-subject evidence — a
+  // technician-availability fact is not customer availability (r62).
+  if (/\bcustomer\b[^.;!?]{0,20}\bavailab/.test(outputText)
+    && !/\b(?:customer|client|resident|they|she|he)\b[^.;!?]{0,25}\bavailab/.test(groundedValueText)) {
+    return { kind: 'novel_term', term: 'availability' };
   }
   for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability', 'sensitivity', 'sensitivities', 'sensitive', 'recurring', 'initial']) {
     if (!new RegExp(`\\b${pw}\\b`).test(outputText)) continue;

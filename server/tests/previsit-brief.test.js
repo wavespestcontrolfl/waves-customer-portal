@@ -3484,3 +3484,39 @@ describe('codex #3423 r61 — historical fields, future tense, passive requests,
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r62 — six precision extensions', () => {
+  test('r62 rejection cases', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'The appointment is currently cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const estGold = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { pendingEstimate: { tier: 'Gold' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has Gold tier' },
+      estGold,
+    ).reason).toMatch(/gold/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { priorities: ['Please phone the customer before arrival'] },
+      { priorities: [], customer_context: 'Key will be at office' },
+    ]) {
+      expect(validateBriefJson(
+        { watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null, ...body },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const pendingEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { pendingEstimate: { status: 'pending' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate is not pending', customer_context: null },
+      pendingEst,
+    ).reason).toMatch(/estimate_state_conflict/);
+    const techAvail = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'technician is available Monday' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer is available Monday' },
+      techAvail,
+    ).reason).toBeTruthy();
+  });
+});
