@@ -5869,6 +5869,23 @@ const CallRecordingProcessor = {
     // the retry path instead of wedging the row at 'processing'.
     const claimedRow = await db('call_log').where({ id: call.id }).first('metadata');
     if (claimedRow) call.metadata = claimedRow.metadata;
+    // Claim-time contact CAS baseline (codex #3413 r19): the correction
+    // lane's compare-and-set must baseline on the contact values as they
+    // stood BEFORE this pass's long transcription/extraction — a read
+    // taken at apply time would adopt an admin edit made DURING
+    // processing as the baseline, and the older call-stated candidate
+    // would then overwrite that newer edit. Only meaningful when the call
+    // is already linked at claim; a customer linked or created
+    // mid-processing gets its baseline at that (near-apply) moment via
+    // the lane's fallback read.
+    let contactCasBaselineAtClaim = null;
+    if (call.customer_id) {
+      contactCasBaselineAtClaim = await db('customers')
+        .where({ id: call.customer_id })
+        .whereNull('deleted_at')
+        .first('first_name', 'last_name', 'phone')
+        .catch(() => null) || null;
+    }
     const contactPhone = resolveCallContactPhone(call);
     // Forwarding-masked call: the inbound leg recorded one of our own internal
     // numbers (a tracking number, or the staff cell it forwarded to) as the caller,
@@ -8393,6 +8410,13 @@ const CallRecordingProcessor = {
       // than opening the scope to older pending rows a previous pass
       // deliberately left behind.
       candidateIds: candidateStaging?.stagedIds || [],
+      // Claim-time CAS baseline — valid only when the customer being
+      // corrected IS the one linked at claim; a customer linked or
+      // created during this pass falls back to the lane's own read.
+      expectedValuesSnapshot: (contactCasBaselineAtClaim
+        && String(customerId || call.customer_id) === String(call.customer_id))
+        ? contactCasBaselineAtClaim
+        : null,
     }).catch((err) => {
       logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);
     });

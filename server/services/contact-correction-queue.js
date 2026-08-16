@@ -36,8 +36,14 @@ const STALE_RESERVATION_MINUTES = 10;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const ACTIVE_STATUSES = ['reserved', 'queued', 'running'];
 
+// Unique per processing PASS, not per process (codex #3413 r19): the
+// interval and the post-enqueue kicks overlap inside one process, and a
+// shared hostname:pid owner would let a pass whose lock went stale mark
+// done/retry over the state of the sibling pass that reclaimed the job.
+let passSeq = 0;
 function workerId() {
-  return `${os.hostname()}:${process.pid}`;
+  passSeq += 1;
+  return `${os.hostname()}:${process.pid}:${passSeq}`;
 }
 
 function tail10(p) {
@@ -113,6 +119,33 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
   }
 }
 
+/**
+ * Stamp the SOURCE-TIME context on a reservation as soon as the route
+ * matches the sender to a customer (codex #3413 r19): linkage + the
+ * match-time CAS baseline. Promotion of a crash-orphaned reservation
+ * requires this context — without it the stale sweep would have to
+ * re-derive eligibility from CURRENT state, which a phone reassignment
+ * or a failed cancel on a pre-match exit path could exploit. Status is
+ * untouched; the row remains 'reserved' until a branch fires (enqueue)
+ * or the route releases it (cancel).
+ */
+async function attachContactCorrectionContext(jobId, { customerId, expectedValues = null, knex = db } = {}) {
+  if (!jobId || !customerId) return false;
+  try {
+    const updated = await knex('contact_correction_jobs')
+      .where({ id: jobId, status: 'reserved' })
+      .update({
+        customer_id: customerId,
+        expected_values: expectedValues ? JSON.stringify(expectedValues) : null,
+        updated_at: knex.fn.now(),
+      });
+    return updated > 0;
+  } catch (err) {
+    logger.warn(`[contact-correction-queue] context attach failed for job ${jobId}: ${err.message}`);
+    return false;
+  }
+}
+
 /** Release an un-run reservation (route exit, unlinked sender). */
 async function cancelContactCorrectionJob(jobId, reason = 'cancelled', { knex = db } = {}) {
   if (!jobId) return false;
@@ -158,11 +191,15 @@ async function recoverStaleLocks(knex) {
 /**
  * Rows a dead instance left 'reserved': the route never reached its
  * finally, so the message may have been acked-and-lost (Twilio's retry
- * is ignored once the MessageSid claim is durable). Re-derive what the
- * live route would have done: intent regex still passes AND the sender
- * maps to a single customer → promote to queued (no match-time CAS
- * snapshot exists any more — expected_values stays null and the runner
- * falls back to its run-start read); otherwise cancel.
+ * is ignored once the MessageSid claim is durable). Promotion requires
+ * the SOURCE-TIME context the route stamped at customer match
+ * (codex #3413 r19): re-deriving eligibility from current state let a
+ * phone reassignment attach an old SMS to the number's new owner, let a
+ * spam-blocked or unmanaged-number delivery be promoted when its
+ * fire-and-forget cancel failed, and left the CAS to baseline on a
+ * run-start read. A reservation with stored linkage + baseline replays
+ * exactly what the route matched; one without context died before the
+ * match (or on a pre-context exit path) and is cancelled — fail closed.
  */
 async function promoteStaleReservations(knex) {
   const stale = await knex('contact_correction_jobs')
@@ -201,10 +238,8 @@ async function promoteStaleReservations(knex) {
         await cancelContactCorrectionJob(job.id, 'stale_no_intent', { knex });
         continue;
       }
-      const { findSingleCustomerByPhone } = require('../routes/twilio-webhook');
-      const customer = await findSingleCustomerByPhone(job.sender_phone || job.sender_key);
-      if (!customer?.id) {
-        await cancelContactCorrectionJob(job.id, 'stale_unlinked', { knex });
+      if (!job.customer_id) {
+        await cancelContactCorrectionJob(job.id, 'stale_no_context', { knex });
         continue;
       }
       const smsLog = job.message_sid
@@ -213,12 +248,18 @@ async function promoteStaleReservations(knex) {
           .orderBy('created_at', 'desc')
           .first('id')
         : null;
-      const enqueued = await enqueueContactCorrectionJob(job.id, {
-        customerId: customer.id,
-        smsLogId: smsLog?.id || null,
-        knex,
-      });
-      if (enqueued) promoted += 1;
+      // Flip to queued preserving the stored match-time context (linkage +
+      // CAS baseline) — enqueueContactCorrectionJob would overwrite the
+      // baseline, and the route already attached the authoritative one.
+      const flipped = await knex('contact_correction_jobs')
+        .where({ id: job.id, status: 'reserved' })
+        .update({
+          status: 'queued',
+          sms_log_id: smsLog?.id || null,
+          next_attempt_at: knex.fn.now(),
+          updated_at: knex.fn.now(),
+        });
+      if (flipped) promoted += 1;
     } catch (err) {
       logger.warn(`[contact-correction-queue] stale promotion failed for job ${job.id}: ${err.message}`);
     }
@@ -429,6 +470,7 @@ async function processDueContactCorrectionJobs({ limit = 3, knex = db } = {}) {
 
 module.exports = {
   reserveContactCorrectionJob,
+  attachContactCorrectionContext,
   enqueueContactCorrectionJob,
   cancelContactCorrectionJob,
   kickContactCorrectionQueue,

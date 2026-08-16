@@ -273,7 +273,12 @@ function detectContactCorrectionIntent(body) {
 
 /**
  * LLM extraction for an inbound SMS. Returns [{field, newValue, quote}] —
- * high-confidence, format-valid corrections only. Never throws.
+ * high-confidence, format-valid corrections only — or NULL when the
+ * provider call itself failed (unavailable, malformed output): the
+ * durable queue retries only a distinguishable extraction failure, and
+ * collapsing it into "no corrections" would permanently drop an explicit
+ * customer correction on a transient LLM outage (codex #3413 r19).
+ * Never throws.
  */
 async function extractSmsContactCorrections({ body }) {
   try {
@@ -286,7 +291,11 @@ async function extractSmsContactCorrections({ body }) {
       jsonMode: true,
       maxTokens: 500,
     });
-    const list = res?.ok && Array.isArray(res.json?.corrections) ? res.json.corrections : [];
+    if (!res?.ok || !Array.isArray(res.json?.corrections)) {
+      logger.warn('[contact-correction] sms extraction provider failure (retryable)');
+      return null;
+    }
+    const list = res.json.corrections;
     // Evidence check: the quote must actually appear in the customer's
     // message (whitespace/case-normalized). A model output with an omitted
     // or fabricated quote is not transcript-backed and never applies —
@@ -328,16 +337,42 @@ async function extractSmsContactCorrections({ body }) {
     // Statement scoping (round-14): a licensed address correction only
     // covers fragments of ITS OWN sentence — "my city is wrong; it should
     // be Sarasota" must not license a rental address mentioned in the next
-    // sentence. Message-level MOVE evidence still licenses the whole
-    // message (a stated move IS one statement about where the customer
-    // lives).
-    const moveLicensed = MOVE_EVIDENCE_RE.test(text);
+    // sentence.
     const sentences = text.split(CLAUSE_SPLIT_RE)
       .map((s) => s.replace(/\s+/g, ' ').trim().toLowerCase())
       .filter(Boolean);
     const sentenceIdxOf = (q) => {
       const needle = normValue(q).replace(/\s+/g, ' ').toLowerCase();
       return needle ? sentences.findIndex((s) => s.includes(needle)) : -1;
+    };
+    // MOVE licensing is scoped to the move STATEMENT, not the message
+    // (codex #3413 r19): "We moved to Sarasota. Please service my tenant's
+    // rental at 99 Pine Ave …" must not let the rental replace the
+    // customer's primary address. A move licenses (a) address fragments in
+    // the move sentence itself and (b) an IMMEDIATELY adjacent sentence
+    // that is essentially nothing but the address — the natural "We moved.
+    // New address is 12 Oak St, Sarasota 34299." split — measured by
+    // stripping the staged address values and requiring only trivial
+    // residue, so a sentence carrying its own business ("service my
+    // tenant's rental at …") never rides the move license.
+    const moveIdxs = new Set(sentences.map((s, i) => (MOVE_EVIDENCE_RE.test(s) ? i : -1)).filter((i) => i >= 0));
+    const addressValueTexts = base
+      .filter((c) => ADDRESS_FIELDS.includes(c.field))
+      .map((c) => normValue(c.new_value).replace(/\s+/g, ' ').toLowerCase())
+      .filter((v) => v.length >= 2);
+    const essentiallyAddress = (s) => {
+      let residue = s;
+      for (const v of addressValueTexts) residue = residue.split(v).join(' ');
+      residue = residue.replace(/\b(?:new|our|my|the|address|is|now|at|in)\b/g, ' ')
+        .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+      return residue.length <= 12;
+    };
+    const moveLicensedFor = (c) => {
+      if (!moveIdxs.size) return false;
+      const idx = sentenceIdxOf(c.quote);
+      if (idx < 0) return false;
+      if (moveIdxs.has(idx)) return true;
+      return [...moveIdxs].some((m) => Math.abs(m - idx) === 1) && essentiallyAddress(sentences[idx]);
     };
     const licensedSentences = new Set();
     for (const c of base) {
@@ -347,7 +382,7 @@ async function extractSmsContactCorrections({ body }) {
       }
     }
     const addressLicensed = (c) => {
-      if (moveLicensed) return true;
+      if (moveLicensedFor(c)) return true;
       if (quoteCarriesFieldIntent(c.field, c.quote)) return true;
       const idx = sentenceIdxOf(c.quote);
       return idx >= 0 && licensedSentences.has(idx);
@@ -379,7 +414,7 @@ async function extractSmsContactCorrections({ body }) {
       .map((c) => ({ field: c.field, newValue: normValue(c.new_value), quote: normValue(c.quote) }));
   } catch (err) {
     logger.warn(`[contact-correction] sms extraction failed: ${errTag(err)}`);
-    return [];
+    return null;
   }
 }
 
@@ -519,6 +554,7 @@ async function applyContactCorrections({ customerId, corrections, source, source
     // Per-field canonicalization for the rest, then validate every
     // CANONICAL value — "Georgia" must become GA before STATE_RE sees it,
     // not be discarded raw.
+    const namesBeforeValidation = ['first_name', 'last_name'].filter((f) => byField.has(f));
     for (const entry of Array.from(byField.values())) {
       if (!ADDRESS_FIELDS.includes(entry.field)) {
         entry.newValue = entry.newValue === '' ? '' : normValue(canonicalizeValue(entry.field, entry.newValue));
@@ -526,6 +562,21 @@ async function applyContactCorrections({ customerId, corrections, source, source
       if (!FIELD_VALIDATORS[entry.field](entry.newValue)) {
         skipped.push({ field: entry.field, reason: 'invalid' });
         byField.delete(entry.field);
+      }
+    }
+    // Whole-name pair re-check AFTER validation (codex #3413 r19): the
+    // extractor's pair guard runs pre-validation, so an unqualified
+    // whole-name correction ("you have my name wrong, it is Jane Smith")
+    // whose surname later dies here (invalid/overlong) would apply the
+    // surviving component against the stored counterpart — the exact
+    // hybrid name the pair rule exists to prevent. A survivor under an
+    // explicitly first-/last-scoped quote stands on its own and stays.
+    if (namesBeforeValidation.length === 2 && byField.has('first_name') !== byField.has('last_name')) {
+      const survivor = byField.has('first_name') ? 'first_name' : 'last_name';
+      const q = String(byField.get(survivor).quote || '');
+      if (!(/\bfirst name\b/i.test(q) || /\b(?:last name|surname)\b/i.test(q))) {
+        skipped.push({ field: survivor, reason: 'name_pair_incomplete' });
+        byField.delete(survivor);
       }
     }
     // Post-normalization group re-check (round-8): a component that passed
@@ -869,6 +920,10 @@ async function runSmsContactCorrectionInner({ customer, body, smsLogId = null, k
       ? Object.fromEntries(casFields.map((f) => [f, snapshotRow[f]]))
       : null;
     const corrections = await extractSmsContactCorrections({ body });
+    // null = provider failure, not "no corrections" — surfaced as the
+    // retryable 'error' shape so the durable queue re-runs the extraction
+    // instead of marking the job done (codex #3413 r19).
+    if (corrections === null) return { applied: [], skipped: [], reason: 'error' };
     if (!corrections.length) return { applied: [], skipped: [], reason: 'none_detected' };
     return await applyContactCorrections({
       customerId: customer.id,
@@ -960,7 +1015,7 @@ function quoteBindsNameField(field, quote) {
   return true;
 }
 
-async function runCallContactCorrection({ callId, customerId, knex = db, procToken = null, candidateIds = null }) {
+async function runCallContactCorrection({ callId, customerId, knex = db, procToken = null, candidateIds = null, expectedValuesSnapshot = null }) {
   try {
     if (!require('../config/feature-gates').isEnabled('contactCorrection')) return { applied: [], skipped: [], reason: 'gate_off' };
     if (!callId || !customerId) return { applied: [], skipped: [], reason: 'unlinked' };
@@ -1008,16 +1063,37 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
     try {
       let owner = null;
       [call, owner] = await Promise.all([
-        knex('call_log').where({ id: callId }).first('from_phone', 'transcription', 'processing_token'),
+        knex('call_log').where({ id: callId }).first('from_phone', 'to_phone', 'direction', 'transcription', 'processing_token'),
         knex('customers').where({ id: customerId }).first('phone', 'first_name', 'last_name'),
       ]);
-      const callerTail = tail10(call?.from_phone);
+      // The EXTERNAL leg is the caller identity (codex #3413 r19): on a
+      // recorded outbound callback from_phone is a Waves number and the
+      // customer is to_phone — reading only from_phone made
+      // callerIsPrimary always false on outbound calls, silently dropping
+      // genuine name corrections. Same external-leg doctrine as the
+      // processor's resolveCallContactPhone.
+      const externalPhone = String(call?.direction || '').toLowerCase().startsWith('outbound')
+        ? call?.to_phone
+        : call?.from_phone;
+      if (call) call.external_phone = externalPhone || null;
+      const callerTail = tail10(externalPhone);
       callerIsPrimary = Boolean(callerTail) && callerTail === tail10(owner?.phone);
       // Snapshot for the compare-and-set in the apply transaction — a name
-      // an admin corrected between this read and the commit must not be
-      // overwritten by this pass's staged (older) extraction; the phone is
-      // the identity anchor and stales the whole batch if reassigned.
-      if (owner) expectedValues = { first_name: owner.first_name, last_name: owner.last_name, phone: owner.phone };
+      // an admin corrected must not be overwritten by this pass's staged
+      // (older) extraction; the phone is the identity anchor and stales the
+      // whole batch if reassigned. Baseline preference (codex #3413 r19):
+      // the CLAIM-TIME snapshot the processor captured before its long
+      // transcription/extraction — a read taken here would adopt an admin
+      // edit made DURING processing as the baseline and let the older
+      // call-stated value overwrite it. The late read remains only for
+      // callers with no early snapshot (customer linked mid-processing,
+      // where the window is negligible).
+      const casKeys = ['first_name', 'last_name', 'phone'];
+      if (expectedValuesSnapshot && casKeys.every((f) => f in expectedValuesSnapshot)) {
+        expectedValues = Object.fromEntries(casKeys.map((f) => [f, expectedValuesSnapshot[f] ?? null]));
+      } else if (owner) {
+        expectedValues = { first_name: owner.first_name, last_name: owner.last_name, phone: owner.phone };
+      }
     } catch { callerIsPrimary = false; call = null; }
 
     // Processing-pass fence: the call processor lets a peer reclaim a stuck
@@ -1086,7 +1162,29 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
 
     // Email/address: propose, never write. One bell for the batch; the
     // candidate rows stay pending for review on the customer page.
-    const proposals = candidates.filter((c) => CALL_PROPOSE_FIELDS.includes(c.field_name));
+    // Proposed VALUES take the same value/quote co-location bar as name
+    // auto-writes (codex #3413 r19): "my email is wrong" grounded on one
+    // caller line must not pair with an accountant's address spoken in
+    // unrelated caller speech — a bell presenting that value as the
+    // customer-stated correction is a false proposal even though nothing
+    // auto-applies. Spoken values are DERIVED ("jordan dot rivers at
+    // example dot com" → jordan.rivers@example.com), so the line is also
+    // compared in spoken-form normalization — the co-location requirement
+    // (same caller line as the quote) is what the check enforces.
+    const spokenNormalize = (s) => String(s || '').toLowerCase()
+      .replace(/\s+dot\s+/g, '.')
+      .replace(/\s+at\s+/g, '@')
+      .replace(/\s+dash\s+/g, '-')
+      .replace(/\s+underscore\s+/g, '_');
+    const valueGroundedForProposal = (c) => {
+      const needle = normValue(c.evidence_quote).replace(/\s+/g, ' ').toLowerCase();
+      const v = normValue(c.final_recommended_value).replace(/\s+/g, ' ').toLowerCase();
+      if (needle.length < 4 || !v) return false;
+      return callerLines.some((line) => line.includes(needle)
+        && (tokenBoundedIncludes(line, v) || spokenNormalize(line).includes(v)));
+    };
+    const proposals = candidates.filter((c) => CALL_PROPOSE_FIELDS.includes(c.field_name)
+      && valueGroundedForProposal(c));
     // One proposal bell per call, ever — force-reprocessing a call (or a
     // pipeline retry) leaves the candidates pending by design and must not
     // re-ring. The bell row itself is the dedupe anchor.
@@ -1171,9 +1269,9 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       sourceId: callId,
       knex,
       expectedValues,
-      // The number the call actually came FROM (captured at processing time)
-      // — same original-sender batch binding as the SMS lane.
-      senderPhone: call?.from_phone || null,
+      // The caller's EXTERNAL number (to_phone on outbound callbacks) —
+      // same original-sender batch binding as the SMS lane.
+      senderPhone: call?.external_phone || null,
       // Same-transaction stamp of exactly the candidate rows whose VALUE was
       // applied — two pending candidates for one field with different values
       // must not both read as auto_applied, and an applied field can never

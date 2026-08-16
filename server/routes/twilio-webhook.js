@@ -238,6 +238,20 @@ router.post('/sms', async (req, res) => {
       void correctionQueue.cancelContactCorrectionJob(correctionJobId, 'unlinked');
       correctionJobId = null;
     }
+    // Stamp the reservation with its SOURCE-TIME context the moment the
+    // sender matches (codex #3413 r19): linkage + the match-time CAS
+    // baseline. If this process dies before a branch fires, the stale
+    // sweep replays exactly what was matched here — it never re-derives
+    // linkage from current phone ownership, and a reservation that died
+    // before this stamp (or on a pre-match exit path like spam-block) is
+    // cancelled instead of promoted. Awaited: an unstamped crash window
+    // fails closed, a stamped one replays faithfully.
+    if (correctionJobId && customer?.id) {
+      await correctionQueue.attachContactCorrectionContext(correctionJobId, {
+        customerId: customer.id,
+        expectedValues: contactCorrection.snapshotContactCasFields(customer),
+      });
+    }
     const fireContactCorrection = async (smsLogId) => {
       if (!correctionJobId || !customer?.id) return;
       // Marked synchronously so the route-level finally never cancels a
@@ -1330,7 +1344,3 @@ router._internals = {
 };
 
 module.exports = router;
-// The contact-correction queue's stale-reservation sweep re-derives the
-// SMS linking decision a dead instance never finished — same matcher, same
-// single-active-customer doctrine (round-17).
-module.exports.findSingleCustomerByPhone = findSingleCustomerByPhone;

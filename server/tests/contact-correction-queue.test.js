@@ -39,11 +39,6 @@ jest.mock('../services/contact-correction', () => ({
   runSmsContactCorrection: (...args) => mockRunSms(...args),
 }));
 
-const mockFindByPhone = jest.fn();
-jest.mock('../routes/twilio-webhook', () => ({
-  findSingleCustomerByPhone: (...args) => mockFindByPhone(...args),
-}));
-
 const queue = require('../services/contact-correction-queue');
 
 // ---------------------------------------------------------------------------
@@ -275,10 +270,13 @@ describe('crash recovery', () => {
     expect(knex._data.contact_correction_jobs[0].status).toBe('done');
   });
 
-  it('promotes a stale reservation whose message still shows intent and links to a customer', async () => {
-    mockFindByPhone.mockResolvedValue({ id: CUSTOMER_ID });
+  it('promotes a stale reservation carrying its source-time context (linkage + CAS baseline)', async () => {
+    // (round-19) The route stamped linkage + match-time baseline before
+    // dying — promotion replays exactly that context, never re-deriving
+    // linkage from current phone ownership.
+    const snapshot = { last_name: 'Riverz', phone: '+15550001111' };
     const knex = makeStubKnex({
-      contact_correction_jobs: [jobRow({ id: 1, created_at: Date.now() - 11 * 60_000 })],
+      contact_correction_jobs: [jobRow({ id: 1, customer_id: CUSTOMER_ID, expected_values: snapshot, created_at: Date.now() - 11 * 60_000 })],
       customers: [{ id: CUSTOMER_ID, deleted_at: null }],
       sms_log: [{ id: 'sms-9', twilio_sid: 'SM-test-1', direction: 'inbound', created_at: Date.now() }],
     });
@@ -289,18 +287,20 @@ describe('crash recovery', () => {
     expect(job.status).toBe('done');
     expect(job.customer_id).toBe(CUSTOMER_ID);
     expect(job.sms_log_id).toBe('sms-9');
-    // No match-time snapshot survives a crash — the runner falls back to
-    // its run-start read.
-    expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toBeNull();
+    // The stored match-time baseline rides into the runner.
+    expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toEqual(snapshot);
   });
 
-  it('cancels stale reservations with no intent or no linked customer', async () => {
+  it('cancels stale reservations with no intent or no source-time context', async () => {
+    // (round-19) A reservation that died before the route's context stamp
+    // (or on a pre-match exit path like spam-block whose cancel failed)
+    // fails closed — re-deriving linkage from current phone ownership
+    // could attach an old SMS to a number's new owner.
     mockDetectIntent.mockReturnValueOnce(false);
-    mockFindByPhone.mockResolvedValue(null);
     const knex = makeStubKnex({
       contact_correction_jobs: [
-        jobRow({ id: 1, created_at: Date.now() - 11 * 60_000 }),
-        jobRow({ id: 2, sender_key: '5550002222', sender_phone: '+15550002222', created_at: Date.now() - 11 * 60_000 }),
+        jobRow({ id: 1, customer_id: CUSTOMER_ID, created_at: Date.now() - 11 * 60_000 }),
+        jobRow({ id: 2, sender_key: '5550002222', sender_phone: '+15550002222', message_sid: 'SM-test-2', created_at: Date.now() - 11 * 60_000 }),
       ],
     });
     const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
@@ -308,7 +308,7 @@ describe('crash recovery', () => {
     expect(knex._data.contact_correction_jobs[0].status).toBe('cancelled');
     expect(knex._data.contact_correction_jobs[0].cancel_reason).toBe('stale_no_intent');
     expect(knex._data.contact_correction_jobs[1].status).toBe('cancelled');
-    expect(knex._data.contact_correction_jobs[1].cancel_reason).toBe('stale_unlinked');
+    expect(knex._data.contact_correction_jobs[1].cancel_reason).toBe('stale_no_context');
   });
 
   it('a fresh reservation is left alone by the stale sweep', async () => {
@@ -415,7 +415,6 @@ describe('round-18 hardening', () => {
   it('cancels a stale duplicate-sid reservation instead of replaying it', async () => {
     // Twilio redelivery reserved before the idempotency claim, then the
     // route died — the original delivery's job already owns this message.
-    mockFindByPhone.mockResolvedValue({ id: CUSTOMER_ID });
     const knex = makeStubKnex({
       contact_correction_jobs: [
         jobRow({ id: 1, status: 'done', customer_id: CUSTOMER_ID }),
@@ -430,11 +429,10 @@ describe('round-18 hardening', () => {
   });
 
   it('with both same-sid deliveries dead-reserved, promotes the oldest and cancels the rest', async () => {
-    mockFindByPhone.mockResolvedValue({ id: CUSTOMER_ID });
     const knex = makeStubKnex({
       contact_correction_jobs: [
-        jobRow({ id: 1, created_at: Date.now() - 12 * 60_000 }),
-        jobRow({ id: 2, created_at: Date.now() - 11 * 60_000 }),
+        jobRow({ id: 1, customer_id: CUSTOMER_ID, created_at: Date.now() - 12 * 60_000 }),
+        jobRow({ id: 2, customer_id: CUSTOMER_ID, created_at: Date.now() - 11 * 60_000 }),
       ],
       customers: [{ id: CUSTOMER_ID, deleted_at: null }],
       sms_log: [],
@@ -457,5 +455,45 @@ describe('round-18 hardening', () => {
     await queue._internals.runContactCorrectionJob(job, knex, 'stale:1');
     expect(knex._data.contact_correction_jobs[0].status).toBe('running');
     expect(knex._data.contact_correction_jobs[0].locked_by).toBe('replacement:2');
+  });
+});
+
+describe('round-19 hardening', () => {
+  it('context attach stamps linkage + baseline on a reservation without changing status', async () => {
+    const knex = makeStubKnex({ contact_correction_jobs: [jobRow(), jobRow({ id: 2, status: 'queued' })] });
+    const ok = await queue.attachContactCorrectionContext(1, {
+      customerId: CUSTOMER_ID, expectedValues: { last_name: 'Riverz' }, knex,
+    });
+    expect(ok).toBe(true);
+    expect(knex._data.contact_correction_jobs[0].status).toBe('reserved');
+    expect(knex._data.contact_correction_jobs[0].customer_id).toBe(CUSTOMER_ID);
+    // Only reserved rows accept context — a fired job's payload is settled.
+    expect(await queue.attachContactCorrectionContext(2, { customerId: CUSTOMER_ID, knex })).toBe(false);
+  });
+
+  it('each processing pass claims under a distinct lock owner', async () => {
+    // (round-19) A shared hostname:pid owner let a pass whose lock went
+    // stale overwrite the state of the in-process sibling that reclaimed
+    // the job.
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 1, status: 'queued', customer_id: CUSTOMER_ID }),
+        jobRow({ id: 2, status: 'queued', customer_id: CUSTOMER_ID }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    // The done mark clears locked_by, so capture the owner mid-run.
+    const owners = [];
+    mockRunSms.mockImplementation(async () => {
+      const running = knex._data.contact_correction_jobs.find((r) => r.status === 'running');
+      owners.push(running?.locked_by);
+      return { applied: [], skipped: [], reason: 'no_corrections' };
+    });
+    await queue.processDueContactCorrectionJobs({ limit: 1, knex });
+    await queue.processDueContactCorrectionJobs({ limit: 1, knex });
+    expect(owners).toHaveLength(2);
+    expect(owners[0]).toBeTruthy();
+    expect(owners[1]).toBeTruthy();
+    expect(owners[0]).not.toBe(owners[1]);
   });
 });
