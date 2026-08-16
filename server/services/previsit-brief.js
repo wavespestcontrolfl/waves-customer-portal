@@ -105,7 +105,7 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Strong connectors (& + /) always denote a name suffix; weak ones
 // (- ,) and bare/and brand words need the end-of-name lookahead —
 // "- pest activity reviewed" is a clause, "- Lawn Care" a suffix (r49).
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+of\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|swfl|america|tampa)\b|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)\b)/i;
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*\w+|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+of\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|swfl|america|tampa)\b|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)\b)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1105,7 +1105,7 @@ function groundedWordOk(word, groundedText, strictText = groundedText) {
 // Short/common organism names — too short (or too domain-loaded) for the
 // rare-word scan and unsound to substring-ground ('rat' matches inside
 // 'operator'). Every occurrence must be WORD-BOUNDARY grounded.
-const SHORT_ORGANISM_RE = /\b(rats?|bats?|bugs?|mouse|mice|ants?|bees?|fly|flies|wasps?|ticks?|fleas?|moths?|slugs?|grubs?|mites?|voles?|moles?|gnats?|weeds?|aphids?)\b/g;
+const SHORT_ORGANISM_RE = /\b(rats?|bats?|bugs?|mouse|mice|ants?|bees?|fly|flies|wasps?|ticks?|fleas?|moths?|slugs?|grubs?|mites?|voles?|moles?|gnats?|weeds?|aphids?|roach(?:es)?|cockroach(?:es)?)\b/g;
 
 // Ordinary short ALLCAPS abbreviations a brief legitimately uses without
 // grounding (times, zones, business boilerplate) — everything else
@@ -1434,14 +1434,16 @@ function findUngroundedClaim(body, grounding) {
   }
   // Completed-work phrasing in ANY field needs a prior visit (r55).
   if (!grounding.llmFacts?.lastVisit
-    && /\b(?:service|work|treatment|visit|inspection|maintenance)\s+(?:was\s+|has\s+been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:service|work|treatment|inspection|maintenance)\b|\bprior\s+(?:inspection|maintenance)\b/.test(outputText)) {
+    && /\b(?:service|work|treatment|visit|inspection|maintenance)\s+(?:was\s+|has\s+been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:an?\s+|the\s+)?(?:service|work|treatment|inspection|maintenance)\b|\bprior\s+(?:inspection|maintenance)\b/.test(outputText)) {
     return { kind: 'fabricated_history', term: 'no prior visit on file' };
   }
   // Spelled-out short quantities before time units are numeric claims —
   // "two hours"/"ten days" must ground like digits (r54).
   // r66 extends the unit set beyond durations: spelled counts of visits/
   // bookings fabricate service history exactly like spelled durations.
-  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?)\b/g)) {
+  // …and communication volumes ("five calls") fabricate interaction
+  // history the same way (r67 P2).
+  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?)\b/g)) {
     const phrase = `${m[1]} ${m[2]}`;
     const digitMap = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', fifteen: '15', twenty: '20', thirty: '30' };
     if (!groundedValueText.includes(phrase)
@@ -1498,7 +1500,7 @@ function findUngroundedClaim(body, grounding) {
     body.open_scope,
     body.customer_context,
   ].filter(Boolean).join(' ').toLowerCase();
-  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)(?:\s*:\s*|\s+)(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:status\s*)?(?:\s*:\s*)?(?:(?:was|is|will\s+be|has\s+been|had\s+been|got)\s+)?(?:(?:currently|now|still|recently|already)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
+  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)(?:\s*:\s*|\s+)(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:status\s*)?(?:\s*:\s*)?(?:(?:was|is|will\s+be|ha[sd]\s+(?:(?:now|since|recently|already|just|apparently|reportedly)\s+)?been|got)\s+)?(?:(?:currently|now|still|recently|already)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const claimNegated = Boolean(m[1]);
     // Trailing coordinated statuses ("confirmed but later cancelled") are
     // separate claims (r60).
@@ -1541,6 +1543,14 @@ function findUngroundedClaim(body, grounding) {
     // Imperative channel verbs with implicit customer ("Please call
     // before arrival") in INSTRUCTION fields (r51).
     ...[...instructionalText.matchAll(/(?:^|[.;!?]\s*)(?:please\s+)?(do\s+not\s+|don't\s+)?(call|text|email|contact|phone)\s+(?:before|after|prior|when|upon|on\s+arrival|ahead)\b/g)],
+    // Passive/modal contact instructions ("Customer must be called",
+    // "needs to be contacted") claim a contact requirement (r67).
+    ...[...outputText.matchAll(/\bcustomer\s+(?:(must\s+not|should\s+not|shouldn't|is\s+not\s+to|does\s+not\s+need\s+to)\s+|(?:must|needs?\s+to|should|has\s+to|is\s+to|will)\s+)(?:not\s+)?be\s+(call(?:ed)?|text(?:ed)?|email(?:ed)?|contact(?:ed)?|phoned?)\b/g)],
+    // Passive request with the channel as subject — "A phone call was
+    // requested before arrival" (r67).
+    // Negation trails the channel here, so a lookahead captures it into
+    // the tuple's group-1 negation slot.
+    ...[...outputText.matchAll(/\b(?:a|an|the)\s+(?:(?:phone|text)\s+)?(?=(?:call(?:back)?|text|sms|email|contact)\s+(?:was|is|has\s+been|had\s+been)\s+(not\s+)?request)(call(?:back)?|text|sms|email|contact)\b/g)],
   ];
   for (const contactReq of contactClaims)
   for (const channel of [contactReq[3] ?? contactReq[2], contactReq[4]].filter(Boolean).map((c) => c.replace(/s$/, '').replace(/ed$/, '').replace(/^phone$/, 'call'))) {
@@ -1977,6 +1987,13 @@ function validateBriefJson(json, grounding) {
     const phrase = String(term).toLowerCase().replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
     if (phrase && !selfReportGrounding.includes(phrase)) {
       return { reason: `ungrounded_term:${cleanText(term, 60)}` };
+    }
+    // A term that prefix-truncates a catalog product name renames the
+    // authoritative product ("Bifen" for "Bifen IT") — the whole name is
+    // required (codex #3423 r67).
+    const catalogNames = (grounding.catalogVocabulary?.names || []).map((n) => String(n).toLowerCase().replace(/\s+/g, ' ').trim());
+    if (phrase && !catalogNames.includes(phrase) && catalogNames.some((n) => n.startsWith(`${phrase} `))) {
+      return { reason: `truncated_product_term:${cleanText(term, 60)}` };
     }
     const strictWords = phrase.split(/\s+/).filter((w) => wordVariants(w).some((v) => GROUNDED_ONLY_WORDS.has(v)));
     if (strictWords.some((w) => !groundedWordOk(w, selfReportGrounding, selfReportValueText))) {

@@ -3662,3 +3662,70 @@ describe('codex #3423 r66 — availability paraphrase, spelled counts, inspectio
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r67 — perfect-tense adverbs, passive contact, organism boundaries, product truncation, brand suffixes, determiners, comm counts', () => {
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('adverbs inside has/had been do not hide a false cancellation', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const noCancel = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest', scheduledDate: '2026-08-20' } } };
+    for (const s of ['The appointment has now been cancelled', 'The visit has since been cancelled', 'The appointment had recently been cancelled']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, noCancel).reason).toBeTruthy();
+    }
+    const cancelled = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest', status: 'cancelled' } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'The appointment has now been cancelled' }, cancelled).body).toBeTruthy();
+  });
+
+  test('passive/modal contact instructions require a contact-request fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer must be called before arrival', 'Customer needs to be called before arrival', 'A phone call was requested before arrival']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer requested a call before arrival' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer must be called before arrival' }, grounded).body).toBeTruthy();
+  });
+
+  test('roach must ground on a word boundary, not inside approach', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const approachFact = { catalogVocabulary: { names: [], targets: ['roaches'] }, llmFacts: { flags: [{ detail: 'use a cautious approach around the entry' }] } };
+    expect(validateBriefJson(
+      { ...BASE, priorities: ['Inspect roach near garage'], mentioned_terms: ['roach'] }, approachFact,
+    ).reason).toBeTruthy();
+    const roachFact = { catalogVocabulary: { names: [], targets: ['roaches'] }, llmFacts: { flags: [{ detail: 'roach sighting reported near garage' }] } };
+    expect(validateBriefJson(
+      { ...BASE, priorities: ['Inspect roach sighting near garage'], mentioned_terms: ['roach'] }, roachFact,
+    ).body).toBeTruthy();
+  });
+
+  test('a term truncating a catalog product name is rejected', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const bifen = { catalogVocabulary: { names: ['Bifen IT'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen IT'] } } };
+    const verdict = validateBriefJson({ ...BASE, priorities: ['Apply Bifen IT'], mentioned_terms: ['bifen'] }, bifen);
+    expect(verdict.reason).toMatch(/^truncated_product_term:/);
+    expect(validateBriefJson({ ...BASE, priorities: ['Apply Bifen IT'], mentioned_terms: ['bifen it'] }, bifen).body).toBeTruthy();
+  });
+
+  test('any strong-connector continuation of the company name is noncanonical', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Waves Pest Control & Turf Service will handle it' }, EMPTY,
+    ).reason).toBeTruthy();
+  });
+
+  test('determiners do not hide completed-work claims', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Technician performed an inspection', 'Performed the maintenance']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+  });
+
+  test('spelled counts of communications must ground', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer called five times', 'Five calls today', 'Five messages today']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer called 5 times about ants' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer called five times' }, grounded).body).toBeTruthy();
+  });
+});
