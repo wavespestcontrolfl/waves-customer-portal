@@ -72,6 +72,21 @@ describe('pay-combined allocation codec', () => {
     expect(() => parseCombinedAllocation({ combined_allocation: `${anchor.id}:1.5` })).toThrow();
     expect(() => parseCombinedAllocation({ combined_allocation: ':100' })).toThrow();
   });
+
+  test('zero-cent shares fail closed — no invoice may "settle" on money that never covered it', () => {
+    expect(() => parseCombinedAllocation({ combined_allocation: `${anchor.id}:0` })).toThrow();
+  });
+
+  test('duplicate invoice ids fail closed — one invoice must never absorb two shares', () => {
+    expect(() => parseCombinedAllocation({
+      combined_allocation: `${anchor.id}:100,${anchor.id}:200`,
+    })).toThrow(/Duplicate invoice/);
+  });
+
+  test('allocations above the anchor+cap bound fail closed', () => {
+    const over = Array.from({ length: MAX_COMBINED_SIBLINGS + 2 }, (_, i) => `id-${i}:100`).join(',');
+    expect(() => parseCombinedAllocation({ combined_allocation: over })).toThrow(/bound/);
+  });
 });
 
 describe('paymentIntentOwnsInvoice', () => {

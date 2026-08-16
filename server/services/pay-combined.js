@@ -120,18 +120,32 @@ function encodeAllocation(allocation) {
 /**
  * Parse a PI's combined allocation. Returns null for non-combined PIs;
  * throws on a PRESENT-but-malformed allocation (a combined PI whose
- * allocation can't be read must never settle as single-invoice).
+ * allocation can't be read must never settle as single-invoice). Fails
+ * closed on every ambiguous shape: zero/negative/unsafe cent values (a
+ * zero-cent share would "settle" an invoice no money covered), duplicate
+ * invoice ids (one invoice must never absorb two shares of the charge),
+ * and more entries than the mint could legitimately produce (anchor +
+ * MAX_COMBINED_SIBLINGS bounds the processing loop).
  */
 function parseCombinedAllocation(piMetadata) {
   const raw = piMetadata?.combined_allocation;
   if (!raw) return null;
-  const entries = String(raw).split(',').map((part) => {
+  const parts = String(raw).split(',');
+  if (parts.length > MAX_COMBINED_SIBLINGS + 1) {
+    throw new Error(`Combined allocation names ${parts.length} invoices — above the ${MAX_COMBINED_SIBLINGS + 1}-entry bound`);
+  }
+  const seen = new Set();
+  const entries = parts.map((part) => {
     const idx = part.lastIndexOf(':');
     const invoiceId = part.slice(0, idx);
     const cents = Number(part.slice(idx + 1));
-    if (!invoiceId || !Number.isInteger(cents) || cents < 0) {
+    if (!invoiceId || !Number.isSafeInteger(cents) || cents <= 0) {
       throw new Error(`Malformed combined allocation entry: ${part}`);
     }
+    if (seen.has(invoiceId)) {
+      throw new Error(`Duplicate invoice in combined allocation: ${invoiceId}`);
+    }
+    seen.add(invoiceId);
     return { invoiceId, cents };
   });
   if (!entries.length) throw new Error('Empty combined allocation');
