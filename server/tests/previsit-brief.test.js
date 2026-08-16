@@ -3367,3 +3367,50 @@ describe('codex #3423 r58 — that-clause requests', () => {
     ).reason).toMatch(/contact_request/);
   });
 });
+
+describe('codex #3423 r59 — eight precision extensions', () => {
+  test('r59 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const fivePets = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has five pets' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Dry after five hours' },
+      fivePets,
+    ).reason).toBeTruthy();
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment status: cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer asked you to call before arrival', 'Key is at office', 'Key is ready']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const overdue = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] } };
+    for (const claim of ['Payments are up to date', 'Invoice is current']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        overdue,
+      ).reason).toMatch(/payment_state_conflict/);
+    }
+    const acctActivity = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'recent account activity reviewed' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer reported pest activity' },
+      acctActivity,
+    ).reason).toBeTruthy();
+    const turf = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'protect sensitive turf near beds' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer is sensitive to chemicals' },
+      turf,
+    ).reason).toBeTruthy();
+    const noSweep = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { servicePreferences: { exteriorSweep: false } } };
+    for (const claim of ['Sweep exterior', 'Perform exterior sweep']) {
+      expect(validateBriefJson(
+        { priorities: [claim], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        noSweep,
+      ).reason).toMatch(/preference_conflict/);
+    }
+  });
+});

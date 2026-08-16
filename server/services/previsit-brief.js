@@ -1043,7 +1043,7 @@ const ACCESS_STATE_RE = /\baccess\s+(?:(?:has\s+been|was|is)\s+)?(?:code|card|ke
 // claim — the technician would look for the wrong thing.
 const credentialReFor = (nouns) => new RegExp(
   `\\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\\s+(?:${nouns})\\b`
-  + `|\\b(?:${nouns})\\s+(?:under|hidden|inside|behind|left|beneath|provided)\\b`
+  + `|\\b(?:${nouns})\\s+(?:(?:is|are|was|were)\\s+)?(?:under|hidden|inside|behind|left|beneath|provided|ready|available|at\\s+(?:the\\s+)?\\w+)\\b`
   + `|\\b(?:${nouns})\\s+(?:(?:is|are|was|were)\\s+)?(?:numbers?|on\\s+file)\\b`
   + `|\\b(?:provided?|leave|left|gave|give|has|have|keeps?)\\s+(?:the\\s+|a\\s+)?(?:${nouns})\\b`, 'i');
 const KEY_ONLY_RE = credentialReFor('keys?');
@@ -1414,7 +1414,7 @@ function findUngroundedClaim(body, grounding) {
     prefConflicts.push({ re: /\b(?:interior|inside|indoors?|rooms|basements?|attics?|closets?|bedrooms?|bathrooms?|kitchens?)\b|\b(?:in|within)\s+the\s+(?:home|house)\b/, term: 'interior' });
   }
   if (svcPrefFlags?.exteriorSweep === false) {
-    prefConflicts.push({ re: /\b(?:eaves?|cobwebs?)\b/, term: 'eave sweep' });
+    prefConflicts.push({ re: /\b(?:eaves?|cobwebs?)\b|\bexterior\s+sweep\b|\bsweep\s+(?:the\s+)?exterior\b/, term: 'eave sweep' });
   }
   // Completed-service wording in last_visit_summary requires an actual
   // prior visit — "Service performed" for a customer with no lastVisit
@@ -1431,9 +1431,9 @@ function findUngroundedClaim(body, grounding) {
   }
   // Spelled-out short quantities before time units are numeric claims —
   // "two hours"/"ten days" must ground like digits (r54).
-  for (const m of outputText.matchAll(/\b(one|two|six|ten)\s+(minutes?|hours?|days?|weeks?)\b/g)) {
+  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(minutes?|hours?|days?|weeks?)\b/g)) {
     const phrase = `${m[1]} ${m[2]}`;
-    const digitMap = { one: '1', two: '2', six: '6', ten: '10' };
+    const digitMap = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', fifteen: '15', twenty: '20', thirty: '30' };
     if (!groundedValueText.includes(phrase)
       && !new RegExp(`(?<!\\d)${digitMap[m[1]]}(?![\\d.])[^.;!?]{0,10}${m[2].replace(/s$/, '')}`).test(groundedValueText)) {
       return { kind: 'numeric', term: phrase };
@@ -1481,7 +1481,7 @@ function findUngroundedClaim(body, grounding) {
     body.open_scope,
     body.customer_context,
   ].filter(Boolean).join(' ').toLowerCase();
-  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
+  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:status\s*:?\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const claimNegated = Boolean(m[1]);
     const status = String(m[2] || m[3]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
     // Multi-word statuses ('en route', 'on site') match underscore forms too.
@@ -1507,7 +1507,7 @@ function findUngroundedClaim(body, grounding) {
   const instructionalText = [...(body.priorities || []), ...(body.watch_items || [])].join('. ').toLowerCase();
   // EVERY contact claim is validated, not just the first (r46).
   const contactClaims = [
-    ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:that\s+(?:you|we|the\s+tech(?:nician)?)\s+)?(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?|contact)\b/g),
+    ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:that\s+(?:you|we|the\s+tech(?:nician)?)\s+)?(?:(?:you|us|the\s+tech(?:nician)?)\s+)?(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?|contact)\b/g),
     ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email|contact)\s+(?:the\s+)?customer\b/g)],
     // Imperative channel verbs with implicit customer ("Please call
     // before arrival") in INSTRUCTION fields (r51).
@@ -1541,7 +1541,7 @@ function findUngroundedClaim(body, grounding) {
   // the OPPOSITE of the customer's billing state — flattened token pools
   // cannot see the contradiction, so it is checked as a phrase (r32).
   if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
-    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance|bill)\s+(?:has\s+been\s+|was\s+|is\s+)?paid\b|\bno\s+invoices?\s+outstanding\b|\boutstanding\s+(?:balance|invoice)s?\s+(?:resolved|cleared|paid|settled)\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due|outstanding)\b|\bno\s+outstanding\s+(?:balance|invoices?|payments?)?\b|\bzero\s+balance\b|\b(?:account|balance)\s+(?:is\s+)?paid\s*(?:up|off)\b/i.test(outputText)) {
+    && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\b(?:accepted|received|collected)\s+payment\b|\bpaid\s+(?:in\s+full|the\s+(?:balance|invoice|bill))\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b|\b(?:balance|account)\s+(?:is\s+)?current\b|\bno\s+(?:balance|payment)\s+due\b|\b(?:payment|invoice|balance|bill)\s+(?:has\s+been\s+|was\s+|is\s+)?paid\b|\bno\s+invoices?\s+outstanding\b|\boutstanding\s+(?:balance|invoice)s?\s+(?:resolved|cleared|paid|settled)\b|\b(?:payment|invoice|balance)\s+(?:is\s+)?not\s+due\b|\bnothing\s+(?:owed|due|outstanding)\b|\bno\s+outstanding\s+(?:balance|invoices?|payments?)?\b|\bzero\s+balance\b|\b(?:account|balance)\s+(?:is\s+)?paid\s*(?:up|off)\b|\bpayments?\s+(?:are|is)\s+up\s+to\s+date\b|\b(?:invoice|account|balance)\s+(?:is\s+)?current\b|\b(?:invoice|account)\s+has\s+no\s+(?:amount|balance)\s+due\b/i.test(outputText)) {
     return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
   }
   // Tier words bind to ACTUAL tier facts — an HOA or product name
@@ -1747,7 +1747,10 @@ function findUngroundedClaim(body, grounding) {
   // conditions — grounded when the values mention activity, real history
   // exists, or the qualifying subject itself is value-grounded ("ant
   // activity" over an ants fact — the fact IS the activity) (r44).
-  if (groundedValueText.includes('activit')) {
+  // Only PEST-context activity counts as field-condition evidence —
+  // 'recent account activity' is not (r59).
+  const pestActivityEvidence = /\b(?:pest|insect|ant|termite|rodent|roach|spider|mosquito|flea|tick|wasp|bug)s?[^.;!?]{0,20}activit|activit[^.;!?]{0,20}\b(?:pest|insect|ant|termite|rodent)s?\b/.test(groundedValueText);
+  if (pestActivityEvidence) {
     // Polarity: 'reported no pest activity' must not ground the positive
     // claim (r57).
     const factNegAct = negNear(groundedValueText, 'activit');
@@ -1757,7 +1760,7 @@ function findUngroundedClaim(body, grounding) {
       if (claimNegAct !== factNegAct) return { kind: 'polarity_conflict', term: 'activity' };
     }
   }
-  if (!groundedValueText.includes('activit')) {
+  if (!pestActivityEvidence) {
     for (const m of outputText.matchAll(/(?:\b([a-z][a-z'-]*)\s+)?\bactivity\b/g)) {
       const subject = m[1];
       const subjectGrounded = subject && !REFERENCE_STOP_WORDS.has(subject)
@@ -1768,6 +1771,13 @@ function findUngroundedClaim(body, grounding) {
   // Polarity for pet/availability STATE words (r50): a negated fact must
   // not ground the positive claim, nor the reverse — inverted pet or
   // availability context is safety-relevant.
+  // Sensitivity evidence must be customer/chemical-scoped — 'sensitive
+  // turf' protocol guidance is not a medical fact (r59).
+  if (/\bsensitiv/.test(outputText) && /\bcustomer\b[^.;!?]{0,30}sensitiv|sensitiv[^.;!?]{0,30}\bchemicals?\b/.test(outputText)) {
+    if (!/\b(?:customer|client|resident)\b[^.;!?]{0,40}sensitiv|sensitiv[^.;!?]{0,40}\bchemicals?\b|\bchemicals?\b[^.;!?]{0,40}sensitiv/.test(groundedValueText)) {
+      return { kind: 'novel_term', term: 'sensitivity' };
+    }
+  }
   for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability', 'sensitivity', 'sensitivities', 'sensitive', 'recurring', 'initial']) {
     if (!new RegExp(`\\b${pw}\\b`).test(outputText)) continue;
     const negRe = new RegExp(`\\b(?:no|not|never|without)\\b[^.;!?]{0,20}\\b${pw}\\b|\\b${pw}\\b[^.;!?]{0,20}\\b(?:not|never|absent|gone)\\b`);
