@@ -3356,3 +3356,14 @@ describe('codex #3423 r57 — polarity everywhere', () => {
     ).reason).toMatch(/fabricated_history/);
   });
 });
+
+describe('codex #3423 r58 — that-clause requests', () => {
+  test('"asked that you call" rejects without a request fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer asked that you call before arrival' },
+      empty,
+    ).reason).toMatch(/contact_request/);
+  });
+});
