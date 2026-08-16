@@ -520,3 +520,75 @@ describe('round-20 hardening', () => {
     expect(fenceAfterReclaim).toBe('queue_lock_lost');
   });
 });
+
+describe('round-21 hardening', () => {
+  it('rebase skips a write whose oldValue does not chain off the baseline (admin restored in between)', async () => {
+    // Job 1 wrote Riverz→Riverson AFTER this job's snapshot, but an admin
+    // then restored Riverz — the snapshot legitimately holds Riverz via a
+    // fresh capture; overlaying Riverson would resurrect the queue's older
+    // value over the admin's newer one. oldValue (Riverz) matches here, so
+    // the guard alone can't distinguish — the context-time cut does.
+    const snapAt = Date.now() - 500;
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({
+          id: 1, status: 'done', customer_id: CUSTOMER_ID,
+          result: { applied: [{ field: 'last_name', oldValue: 'Riverz', newValue: 'Riverson' }], skipped: [] },
+          completed_at: snapAt - 200, // BEFORE the snapshot was captured
+        }),
+        jobRow({
+          id: 2, status: 'queued', customer_id: CUSTOMER_ID,
+          expected_values: { last_name: 'Riverz', phone: '+15550001111' },
+          created_at: snapAt - 400, // reservation predates the earlier write…
+          context_attached_at: snapAt, // …but the snapshot does not
+        }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverz' }],
+    });
+    await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toEqual({ last_name: 'Riverz', phone: '+15550001111' });
+  });
+
+  it('rebase skips a post-snapshot write whose oldValue mismatches the baseline', async () => {
+    // Earlier queue write AdminX→Riverson post-dates the snapshot, but the
+    // snapshot holds Riverz — some other write sits between them, and
+    // overlaying would fabricate a chain that never existed.
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({
+          id: 1, status: 'done', customer_id: CUSTOMER_ID,
+          result: { applied: [{ field: 'last_name', oldValue: 'AdminX', newValue: 'Riverson' }], skipped: [] },
+          completed_at: Date.now() - 100,
+        }),
+        jobRow({
+          id: 2, status: 'queued', customer_id: CUSTOMER_ID,
+          expected_values: { last_name: 'Riverz', phone: '+15550001111' },
+          created_at: Date.now() - 1000,
+          context_attached_at: Date.now() - 900,
+        }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverson' }],
+    });
+    await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toEqual({ last_name: 'Riverz', phone: '+15550001111' });
+  });
+
+  it('the owner fence refreshes the lease while holding the row', async () => {
+    const staleLockedAt = Date.now() - 9 * 60_000;
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 1, status: 'queued', customer_id: CUSTOMER_ID })],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    mockRunSms.mockImplementation(async (args) => {
+      // Simulate a long extraction: age the lock, then run the fence the
+      // apply transaction would run — the lease must come back fresh so a
+      // recovery pass waiting on the row lock re-evaluates to NOT stale.
+      knex._data.contact_correction_jobs[0].locked_at = staleLockedAt;
+      await args.ownerFence(knex);
+      return { applied: [{ field: 'last_name', oldValue: 'Riverz', newValue: 'Rivers' }], skipped: [] };
+    });
+    await queue.processDueContactCorrectionJobs({ limit: 1, knex });
+    const job = knex._data.contact_correction_jobs[0];
+    expect(job.status).toBe('done');
+  });
+});

@@ -323,3 +323,36 @@ describe('round-18 hardening', () => {
     expect(data[0].customer_id).toBe(CUSTOMER_ID);
   });
 });
+
+describe('round-21 evidence binding', () => {
+  const CALL_ID = '11111111-1111-4111-8111-111111111111';
+  const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
+
+  test('a same-value pending row with DIFFERENT evidence is refreshed to this pass', async () => {
+    const data = installDbStub(
+      [{
+        id: 'cand-1', call_log_id: CALL_ID, customer_id: CUSTOMER_ID, field_name: 'last_name',
+        final_recommended_value: 'Rodriguez', source: 'gemini_v2', status: 'pending',
+        evidence_quote: 'this is maria rodriguez calling about my lawn', confidence: '0.6',
+      }],
+      { callLog: [{ id: CALL_ID, processing_token: 'owner-token' }] },
+    );
+    const res = await stageCustomerFieldCandidates({
+      callId: CALL_ID,
+      customerId: CUSTOMER_ID,
+      extraction: {},
+      procToken: 'owner-token',
+      v2Extraction: validV2Extraction({
+        caller: { name_full: null, first_name: null, email: null, phone_e164: null },
+        property: { service_address: null },
+        service_request: { primary_service_category: null },
+        evidence: [{ field_path: '/caller/last_name', quote: 'you spelled my last name wrong, it is Rodriguez', speaker: 'caller' }],
+      }),
+    });
+    expect(res.stagedIds).toEqual(['cand-1']);
+    // The row now carries THIS pass's evidence — the runner authorizes on
+    // the quote, and a stale routine quote must not suppress a genuine
+    // correction.
+    expect(data[0].evidence_quote).toBe('you spelled my last name wrong, it is Rodriguez');
+  });
+});

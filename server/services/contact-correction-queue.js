@@ -109,6 +109,7 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
         customer_id: customerId,
         sms_log_id: smsLogId || null,
         expected_values: expectedValues ? JSON.stringify(expectedValues) : null,
+        context_attached_at: knex.fn.now(),
         next_attempt_at: knex.fn.now(),
         updated_at: knex.fn.now(),
       });
@@ -137,6 +138,7 @@ async function attachContactCorrectionContext(jobId, { customerId, expectedValue
       .update({
         customer_id: customerId,
         expected_values: expectedValues ? JSON.stringify(expectedValues) : null,
+        context_attached_at: knex.fn.now(),
         updated_at: knex.fn.now(),
       });
     return updated > 0;
@@ -370,20 +372,39 @@ async function markJobRetry(job, errMessage, knex, wid) {
  * closed. applied.newValue is the canonical value the apply wrote, so the
  * field-aware CAS compare matches exactly.
  */
+function casEquals(field, a, b) {
+  const na = String(a == null ? '' : a).trim();
+  const nb = String(b == null ? '' : b).trim();
+  return field === 'email' ? na.toLowerCase() === nb.toLowerCase() : na === nb;
+}
+
 async function rebaseSnapshot(job, snapshot, knex) {
   if (!snapshot || !job.customer_id) return snapshot;
+  // Cut on the SNAPSHOT time, not the reservation time (codex #3413 r21):
+  // the baseline is captured at context attach, which can trail the
+  // reservation by the route's media/lookup awaits — a queue write landing
+  // in that gap is already reflected in the snapshot (or superseded by an
+  // admin edit the snapshot correctly holds) and must not be overlaid.
+  const snapshotAt = job.context_attached_at || job.created_at;
   const earlier = await knex('contact_correction_jobs')
     .where('customer_id', job.customer_id)
     .where('id', '<', job.id)
     .where('status', 'done')
-    .where('completed_at', '>', job.created_at)
+    .where('completed_at', '>', snapshotAt)
     .orderBy('id', 'asc');
   const rebased = { ...snapshot };
   for (const e of earlier) {
     let result = e.result;
     if (typeof result === 'string') { try { result = JSON.parse(result); } catch { result = null; } }
     for (const a of (result?.applied || [])) {
-      if (a && a.field && Object.prototype.hasOwnProperty.call(rebased, a.field)) {
+      // Overlay only when the write CHAINS off the value being rebased
+      // (its oldValue matches) — an applied write whose oldValue differs
+      // means an admin edit (or another lane) sits between it and this
+      // baseline, and overlaying would resurrect the queue's older value
+      // over the admin's newer one. Fail conservative: the CAS then
+      // stales rather than overwrites.
+      if (a && a.field && Object.prototype.hasOwnProperty.call(rebased, a.field)
+        && casEquals(a.field, rebased[a.field], a.oldValue)) {
         rebased[a.field] = a.newValue ?? null;
       }
     }
@@ -421,12 +442,16 @@ async function runContactCorrectionJob(job, knex, wid) {
     // write. Locking the job row token-conditioned inside the apply
     // transaction rolls the mutation back with the lost ownership; the
     // reclaim (which rewrites locked_by) serializes against this lock.
+    // The fence is an UPDATE, not a SELECT (codex #3413 r21): it refreshes
+    // locked_at while holding the row, so a recovery pass that queued up
+    // behind this lock re-evaluates its stale predicate after our commit
+    // and finds a FRESH lease — closing the post-fence gap where the row
+    // was requeued the instant the customer write committed.
     ownerFence: async (trx) => {
-      const owned = await trx('contact_correction_jobs')
+      const refreshed = await trx('contact_correction_jobs')
         .where({ id: job.id, status: 'running', locked_by: wid })
-        .forUpdate()
-        .first('id');
-      if (!owned) throw new Error('queue_lock_lost');
+        .update({ locked_at: trx.fn.now(), updated_at: trx.fn.now() });
+      if (!refreshed) throw new Error('queue_lock_lost');
     },
   });
   if (result?.reason === 'error') {

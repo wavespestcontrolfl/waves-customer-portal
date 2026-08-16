@@ -2198,3 +2198,117 @@ describe('round-20 hardening', () => {
     expect(fence).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('round-21 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it("a third party's 'new address' never move-licenses the address group", async () => {
+    const body = "My email is wrong; use me@example.com. Mail the invoice to my accountants new address: 99 Pine Ave, Sarasota 34231";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'email', new_value: 'me@example.com', quote: 'my email is wrong; use me@example.com', confidence: 'high' },
+          { field: 'address_line1', new_value: '99 Pine Ave', quote: 'my accountants new address: 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'city', new_value: 'Sarasota', quote: 'my accountants new address: 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+          { field: 'zip', new_value: '34231', quote: 'my accountants new address: 99 Pine Ave, Sarasota 34231', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field)).toEqual(['email']);
+  });
+
+  it('a cross-state move without a stated state derives it from the ZIP', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '123 Main St', quote: 'we moved to 123 Main St, Savannah 31401' },
+        { field: 'city', newValue: 'Savannah', quote: 'we moved' },
+        { field: 'zip', newValue: '31401', quote: 'we moved' },
+      ],
+      source: 'sms',
+      knex,
+      moveContext: true,
+    });
+    expect(res.applied.map((a) => a.field).sort()).toEqual(['address_line1', 'address_line2', 'city', 'state', 'zip']);
+    expect(knex._data.customers[0].state).toBe('GA');
+    expect(knex._data.customers[0].city).toBe('Savannah');
+  });
+
+  it('an unresolvable ZIP fails the new-address group closed', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '123 Main St', quote: 'we moved to 123 Main St' },
+        { field: 'city', newValue: 'Somewhere', quote: 'we moved' },
+        { field: 'zip', newValue: '00100', quote: 'we moved' },
+      ],
+      source: 'sms',
+      knex,
+      moveContext: true,
+    });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'zip', reason: 'state_unresolved' });
+    expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
+  });
+
+  it('whole-address REPLACEMENT language clears the old unit without move vocabulary', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '99 Pine Ave', quote: 'you have the wrong address, it should be 99 Pine Ave, Sarasota 34231' },
+        { field: 'city', newValue: 'Sarasota', quote: 'you have the wrong address' },
+        { field: 'zip', newValue: '34231', quote: 'you have the wrong address' },
+      ],
+      source: 'sms',
+      knex,
+      moveContext: false,
+    });
+    expect(res.applied.map((a) => a.field)).toContain('address_line2');
+    expect(knex._data.customers[0].address_line2).toBeNull();
+    expect(knex._data.customers[0].address_line1).toBe('99 Pine Ave');
+  });
+
+  it('a component spelling fix still preserves the unit (no replacement language)', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '12 Oakes St', quote: 'my street is spelled wrong, it is 12 Oakes St' },
+        { field: 'city', newValue: 'Testville', quote: 'my street is spelled wrong' },
+        { field: 'zip', newValue: '34200', quote: 'my street is spelled wrong' },
+      ],
+      source: 'sms',
+      knex,
+      moveContext: false,
+    });
+    expect(knex._data.customers[0].address_line2).toBe('Unit 4');
+  });
+
+  it('a hallucinated short value cannot ground inside a longer word on the normalized line', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: 'Caller: my state is incorrect, please fix it' })],
+      customer_field_candidates: [
+        candidate({ id: 'st', field_name: 'state', final_recommended_value: 'IN', evidence_quote: 'my state is incorrect, please fix it' }),
+      ],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    expect(res.reason).toBe('no_candidates');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+});

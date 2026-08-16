@@ -322,7 +322,10 @@ async function extractSmsContactCorrections({ body }) {
     const clearEvidenceOk = (c) => !(c.field === 'address_line2' && normValue(c.new_value) === '')
       || UNIT_REMOVAL_RE.test(text);
     const base = list.filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field)
-      && quoteInBody(c.quote) && valueEvidenceOk(c) && clearEvidenceOk(c));
+      && quoteInBody(c.quote) && valueEvidenceOk(c) && clearEvidenceOk(c)
+      // A third party's address is never the customer's correction, no
+      // matter how much correction vocabulary surrounds it (r21).
+      && !(ADDRESS_FIELDS.includes(c.field) && THIRD_PARTY_ADDRESS_RE.test(String(c.quote || ''))));
     // Each candidate's own quote must carry correction intent bound to its
     // field category — the message-level prefilter is not per-field
     // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
@@ -440,12 +443,30 @@ function addressGroupComplete(byField) {
 // "I moved the traps" — only a move WITH a destination ("moved to/into",
 // "are moving to", "new address") is residential-move evidence that may
 // license an address group.
-const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?(?:moved|(?:are|will be)\s+moving)\s+(?:to|into)\b|\bmoving\s+(?:to|into)\b|\bnew address\b/i;
+// The bare "new address" alternative requires customer ownership
+// (codex #3413 r21): sentence-start or a first-person/definite determiner
+// DIRECTLY before it — "my accountant's new address" has a third-party
+// possessive in between and licenses nothing.
+const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?(?:moved|(?:are|will be)\s+moving)\s+(?:to|into)\b|\bmoving\s+(?:to|into)\b|(?:^|[.!?;\n]\s*|\b(?:my|our|the)\s+)new\s+address\b/i;
 // The only words allowed to introduce a move's adjacent address fragment
 // (codex #3413 r20): pure connective/address-introduction vocabulary. Any
 // other residual token — "rental", "tenant", "service" — marks the
 // sentence as being about something else and it never rides the move
 // license.
+// Third-party address possession (codex #3413 r21): "mail the invoice to
+// my accountant's new address …" carries the address topic AND the "new"
+// correction word, so the field-intent path would license it — but the
+// address belongs to a third party, not the customer. His/her/their, an
+// apostrophe-possessive noun, or a bare plural noun directly before
+// "new address" (transcribed possessives drop the apostrophe) all mark
+// the statement third-party; "previous/prior address" stays first-person.
+const THIRD_PARTY_ADDRESS_RE = /\b(?:his|her|their)\s+(?:\w+\s+)?address\b|\b(?!(?:previous|prior)\b)[a-z]+(?:'s|s')\s+(?:\w+\s+)?address\b|\b(?!(?:previous|prior|business)\b)[a-z]{4,}s\s+new\s+address\b/i;
+
+// Whole-ADDRESS replacement language (codex #3413 r21) — the quote must
+// call the ADDRESS wrong, not a component ("my street is spelled wrong"
+// is a spelling fix and keeps the unit).
+const ADDRESS_REPLACEMENT_RE = /\b(?:wrong|incorrect|bad|old)\s+address\b|\baddress\s+(?:is|was|'?s)?\s*(?:wrong|incorrect|not\s+(?:the\s+)?right)\b/i;
+
 const MOVE_INTRO_TOKENS = new Set([
   'it', 'is', 'its', 'now', 'new', 'our', 'my', 'the', 'address', 'at', 'in', 'to', 'we', 'are', 'live', 'here', 'and',
   // Address field-topic words — "Zip is 34231" is a licensed fragment of
@@ -605,6 +626,21 @@ async function applyContactCorrections({ customerId, corrections, source, source
       && !(byField.has('address_line1') && byField.has('city') && byField.has('zip'))) {
       rejectAddressGroup('incomplete_address');
     }
+    // State agreement for new-address groups (codex #3413 r21): a stated
+    // move that omits the state would keep the STORED state and commit a
+    // cross-state hybrid ("Savannah, FL 31401"). The ZIP determines the
+    // state deterministically (USPS prefix allocation) — derive and stage
+    // it; a same-state move skips as 'unchanged', an unresolvable ZIP
+    // fails the whole group closed.
+    if ((hadNewStreet || moveContext) && byField.has('zip') && !byField.has('state')) {
+      const { stateForZip } = require('../utils/zip-state');
+      const derived = stateForZip(byField.get('zip').newValue);
+      if (!derived) {
+        rejectAddressGroup('state_unresolved');
+      } else {
+        byField.set('state', { field: 'state', newValue: derived, quote: byField.get('zip').quote || null });
+      }
+    }
     if (!byField.size) return { applied, skipped, reason: 'nothing_valid' };
 
     let customerName = null;
@@ -725,7 +761,16 @@ async function applyContactCorrections({ customerId, corrections, source, source
       // where the new street text happens to equal the old one ("123 Main
       // St" in a different city) skips the street as unchanged, but the old
       // unit is still gone.
-      if (moveContext && byField.has('address_line1') && !byField.has('address_line2') && normValue(before.address_line2)) {
+      // Whole-address REPLACEMENT language counts like a move
+      // (codex #3413 r21): "you have the wrong address, it should be 99
+      // Pine Ave, Sarasota 34231" is a complete replacement with no unit —
+      // leaving the old property's Unit attached would commit the same
+      // hybrid a move would. Component spelling fixes ("my street is
+      // spelled wrong") name the component, not the address, and still
+      // preserve the unit.
+      const addressReplacementContext = byField.has('address_line1') && byField.has('city') && byField.has('zip')
+        && ['address_line1', 'city', 'zip'].some((f) => ADDRESS_REPLACEMENT_RE.test(String(byField.get(f)?.quote || '')));
+      if ((moveContext || addressReplacementContext) && byField.has('address_line1') && !byField.has('address_line2') && normValue(before.address_line2)) {
         updates.address_line2 = null;
         applied.push({ field: 'address_line2', oldValue: normValue(before.address_line2), newValue: null, quote: byField.get('address_line1')?.quote || null });
       }
@@ -1203,8 +1248,11 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       const needle = normValue(c.evidence_quote).replace(/\s+/g, ' ').toLowerCase();
       const v = normValue(c.final_recommended_value).replace(/\s+/g, ' ').toLowerCase();
       if (needle.length < 4 || !v) return false;
+      // Token-bounded on BOTH forms (codex #3413 r21): a bare substring on
+      // the normalized line let a hallucinated short value ground inside a
+      // longer word ("IN" inside "incorrect").
       return callerLines.some((line) => line.includes(needle)
-        && (tokenBoundedIncludes(line, v) || spokenNormalize(line).includes(v)));
+        && (tokenBoundedIncludes(line, v) || tokenBoundedIncludes(spokenNormalize(line), v)));
     };
     const proposals = candidates.filter((c) => CALL_PROPOSE_FIELDS.includes(c.field_name)
       && valueGroundedForProposal(c));

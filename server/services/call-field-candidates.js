@@ -125,30 +125,38 @@ async function stageCustomerFieldCandidates(args = {}) {
           source: row.source,
         })
         .where('final_recommended_value', row.final_recommended_value)
-        .first('id', 'customer_id', 'status');
+        .first('id', 'customer_id', 'status', 'evidence_quote', 'confidence');
       if (existing) {
         // Linkage can change between passes (an unlinked call later linked
         // and force-reprocessed): a same-value row carrying the old/null
         // customer_id would be returned as this pass's provenance and then
         // filtered out by the runner's customer scope, silently dropping
-        // the correction (codex #3413 r17). Relink a still-pending row to
-        // the current linkage; a row already resolved under the OLD
-        // linkage is history — stage a fresh row instead.
-        if ((existing.customer_id || null) === (row.customer_id || null)) {
+        // the correction (codex #3413 r17). Evidence must be THIS pass's
+        // too (r21): the runner authorizes on evidence_quote/confidence,
+        // so reusing a row whose quote came from an older extraction would
+        // let a stale routine quote suppress a genuine correction — or a
+        // stale pass's quote be consumed under the owning token. A
+        // still-pending row is relinked AND refreshed under the fence; a
+        // row already resolved under the OLD linkage is history — stage a
+        // fresh row instead.
+        const sameEvidence = String(existing.evidence_quote || '') === String(row.evidence_quote || '')
+          && String(existing.confidence ?? '') === String(row.confidence ?? '');
+        if ((existing.customer_id || null) === (row.customer_id || null) && sameEvidence) {
           stagedIds.push(existing.id);
           continue;
         }
         if (existing.status === 'pending') {
-          // The relink is fenced to the pass that owns the call's
+          // The relink/refresh is fenced to the pass that owns the call's
           // processing token (codex #3413 r18): a timed-out processor
           // overlapping the worker that reclaimed its claim must not move
-          // the row back to the stale linkage after the owner relinked it
-          // — the call_log row is locked token-conditioned in the same
-          // transaction, so a reclaim (which rewrites processing_token)
-          // serializes against this write. A pass whose token is gone
-          // skips the relink AND the provenance id: it fails closed, same
-          // as its own downstream token check.
-          const relinked = await db.transaction(async (trx) => {
+          // the row back to the stale linkage (or stamp its older
+          // evidence) after the owner updated it — the call_log row is
+          // locked token-conditioned in the same transaction, so a reclaim
+          // (which rewrites processing_token) serializes against this
+          // write. A pass whose token is gone skips the write AND the
+          // provenance id: it fails closed, same as its downstream token
+          // check.
+          const refreshed = await db.transaction(async (trx) => {
             if (procToken) {
               const held = await trx('call_log')
                 .where({ id: row.call_log_id })
@@ -159,11 +167,17 @@ async function stageCustomerFieldCandidates(args = {}) {
             }
             await trx('customer_field_candidates')
               .where({ id: existing.id, status: 'pending' })
-              .update({ customer_id: row.customer_id || null, updated_at: trx.fn.now() });
+              .update({
+                customer_id: row.customer_id || null,
+                evidence_quote: row.evidence_quote,
+                confidence: row.confidence,
+                reason_code: row.reason_code,
+                updated_at: trx.fn.now(),
+              });
             return true;
           });
-          if (relinked) stagedIds.push(existing.id);
-          else logger.warn(`[call-candidates] relink fenced out for call ${row.call_log_id} (processing token lost)`);
+          if (refreshed) stagedIds.push(existing.id);
+          else logger.warn(`[call-candidates] candidate refresh fenced out for call ${row.call_log_id} (processing token lost)`);
           continue;
         }
       }
