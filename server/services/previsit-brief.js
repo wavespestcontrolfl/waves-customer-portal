@@ -1284,8 +1284,9 @@ function findUngroundedClaim(body, grounding) {
   const prefConflicts = [];
   const svcPrefFlags = grounding.llmFacts?.servicePreferences || null;
   if (svcPrefFlags?.interiorSpray === false) {
-    // rooms? included (codex #3423 r1): a room instruction IS interior scope.
-    prefConflicts.push({ re: /\b(?:interior|inside|indoors?|rooms?)\b/, term: 'interior' });
+    // Interior room nouns included (codex #3423 r1+r13): "Vacuum basement" /
+    // "Check kitchen" IS an interior instruction regardless of verb.
+    prefConflicts.push({ re: /\b(?:interior|inside|indoors?|rooms?|basements?|attics?|closets?|bedrooms?|bathrooms?|kitchens?)\b/, term: 'interior' });
   }
   if (svcPrefFlags?.exteriorSweep === false) {
     prefConflicts.push({ re: /\b(?:eaves?|cobwebs?)\b/, term: 'eave sweep' });

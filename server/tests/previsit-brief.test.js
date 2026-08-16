@@ -1910,3 +1910,20 @@ describe('codex #3423 r12 — evidence check precedes the whole-phrase fast path
     expect(verdict.body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r13 — interior room nouns trip the interior opt-out for any verb', () => {
+  test('"Vacuum basement" violates an interiorSpray=false preference', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { servicePreferences: { interiorSpray: false } },
+    };
+    for (const claim of ['Vacuum basement', 'Check kitchen']) {
+      const verdict = validateBriefJson(
+        { priorities: [claim], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        grounding,
+      );
+      expect(verdict.reason).toBe('ungrounded_preference_conflict:interior');
+    }
+  });
+});
