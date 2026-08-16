@@ -933,7 +933,7 @@ const COMMON_PROSE_WORDS = new Set([
   'notify', 'number', 'office', 'onsite', 'orders', 'other', 'outdoor', 'owner', 'panel', 'parking',
   'patio', 'pending', 'perimeter', 'phone', 'photo', 'photos', 'place', 'placed', 'planned',
   'plans', 'plants', 'please', 'pool', 'porch', 'prefer', 'preference', 'preferences', 'prefers', 'pressure',
-  'previous', 'prior', 'program', 'progress', 'quote', 'rate', 'ready', 'recap', 'recent', 'recently',
+  'previous', 'prior', 'program', 'progress', 'rate', 'ready', 'recap', 'recent', 'recently',
   'recheck', 'record', 'records', 'reminder', 'renewal', 'repair', 'report', 'reported', 'request', 'requested',
   'reschedule', 'rescheduled', 'resolve', 'resolved', 'response', 'return', 'review', 'reviewed', 'right', 'roof',
   'route', 'routine', 'schedule', 'scheduled', 'scope', 'screen', 'screened', 'season', 'secure', 'secured',
@@ -1007,8 +1007,9 @@ const GROUNDED_ONLY_WORDS = new Set([
   // r23: treatment claims ("Performed treatment") assert service history
   // in ANY field — a brief may only claim treatment a fact evidences.
   'treatment', 'treatments',
-  // r24: "Estimate provided" is an estimate-delivery claim in ANY field.
-  'estimate', 'estimates',
+  // r24/r25: "Estimate provided" / "Quote provided" are money-delivery
+  // claims in ANY field (quotes ARE estimates in this system).
+  'estimate', 'estimates', 'quote', 'quotes',
 ]);
 
 // Instruction objects carrying these words direct real business actions
@@ -1018,11 +1019,10 @@ const GROUNDED_ONLY_WORDS = new Set([
 // (payment/invoice/refund/billing graduated to GROUNDED_ONLY_WORDS in r10
 // — they require evidence in EVERY field, not just instructions.)
 const INSTRUCTION_EVIDENCE_WORDS = new Set([
-  'quote', 'quotes',
   'credit', 'credits', 'balance', 'discount', 'discounts',
   // r15: access-security objects ("Retrieve gate key/access card") are
   // fabricatable from common words — the access noun must be evidenced.
-  'gate', 'gates', 'access', 'card', 'cards', 'keys',
+  'gate', 'gates', 'access', 'card', 'cards', 'key', 'keys', 'fob', 'fobs',
   // r19: scheduling directives ("Discuss schedule") assert a real action.
   // 'scheduled' (adjective — "a prior scheduled service") stays prose.
   'schedule', 'schedules',
@@ -1195,7 +1195,7 @@ function findUngroundedClaim(body, grounding) {
     ...(grounding.llmFacts?.visit?.newCustomer === true ? ['initial'] : []),
     // A present estimate object is THE estimate fact (r24) — its values
     // rarely contain the literal word.
-    ...(grounding.llmFacts?.openScope?.pendingEstimate || grounding.llmFacts?.openScope?.sourceEstimate ? ['estimate'] : []),
+    ...(grounding.llmFacts?.openScope?.pendingEstimate || grounding.llmFacts?.openScope?.sourceEstimate ? ['estimate', 'quote'] : []),
   ].join(' ').toLowerCase();
   const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const kind of ['names', 'targets']) {
@@ -1344,7 +1344,8 @@ function findUngroundedClaim(body, grounding) {
   );
   for (const field of labeledFields) {
     if (field.instructional) {
-      for (const w of (String(field.text).toLowerCase().match(/[a-z][a-z'-]{3,}/g) || [])) {
+      // {2,} so 3-letter credential nouns ('key', 'fob') reach the set (r25).
+      for (const w of (String(field.text).toLowerCase().match(/[a-z][a-z'-]{2,}/g) || [])) {
         if (INSTRUCTION_EVIDENCE_WORDS.has(w) && !evidenceWordGrounded(w)) {
           return { kind: 'instruction', term: w };
         }
@@ -1370,7 +1371,12 @@ function findUngroundedClaim(body, grounding) {
     }
     const refs = extractOutputReferences(String(field.text));
     for (const term of refs.products) {
-      if (APPROVED_NAME_TERM_RE.test(term)) continue;
+      // The canonical name inside a prose run ("Call Waves Pest Control"):
+      // strip it and skip when the remainder is ordinary prose (r25 P2) —
+      // a novel token beside it ("PhantomGuard Waves Pest Control") still
+      // parks, and NONCANONICAL_SUFFIX_RE already rejected brand suffixes.
+      const withoutName = String(term).replace(/waves\s+pest\s+control/g, ' ').replace(/\s+/g, ' ').trim();
+      if (withoutName !== String(term).trim() && (withoutName === '' || allWordsCommon(withoutName))) continue;
       if (commonOrGroundedProse(term)) continue;
       // A sentence-case application verb rides into the capitalized-run
       // capture ("Applied Prodiamine") — the verb is not part of the

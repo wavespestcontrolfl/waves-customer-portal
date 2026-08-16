@@ -2202,3 +2202,46 @@ describe('codex #3423 r24 — estimate claims, treatment inflections, transition
     ).reason).toBeTruthy();
   });
 });
+
+describe('codex #3423 r25 — singular keys, canonical name in prose, quote claims', () => {
+  test('"Retrieve door key" rejects without an access fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Retrieve door key', 'Retrieve office key']) {
+      expect(validateBriefJson(
+        { priorities: [claim], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('the canonical name inside ordinary prose passes; beside a novel token it parks', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Call Waves Pest Control before arrival.' },
+      grounding,
+    ).body).toBeTruthy();
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'PhantomGuard Waves Pest Control formula.' },
+      grounding,
+    ).reason).toBeTruthy();
+  });
+
+  test('"Quote provided" rejects without an estimate; passes with one', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Quote provided', open_scope: null, customer_context: null },
+      empty,
+    ).reason).toBeTruthy();
+    const grounded = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { pendingEstimate: { tier: 'Bronze' } } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Quote provided', customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+});
