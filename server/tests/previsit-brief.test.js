@@ -3086,3 +3086,41 @@ describe('codex #3423 r49 — paid phrasing, object channels, prepositioned temp
     ).reason).not.toBe('noncanonical_company_name');
   });
 });
+
+describe('codex #3423 r50 — geo suffix, polarity, completed summaries, photo boundary', () => {
+  test('r50 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const flFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'serviced by Waves Pest Control Florida branch' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control Florida visited.' },
+      flFact,
+    ).reason).toBe('noncanonical_company_name');
+    const noPets = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has no pets' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has pets' },
+      noPets,
+    ).reason).toMatch(/polarity_conflict/);
+    const hasDog = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'dog on property' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'No dogs on property' },
+      hasDog,
+    ).reason).toMatch(/polarity_conflict/);
+    const photog = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer is a photographer by trade' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Photos provided' },
+      photog,
+    ).reason).toBeTruthy();
+  });
+
+  test('a completed last-visit summary is not an upcoming-visit status claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { visit: { serviceType: 'Pest' }, lastVisit: { recap: 'exterior treated August 1' } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Service completed on August 1.', open_scope: null, customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});

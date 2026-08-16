@@ -105,7 +105,7 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Strong connectors (& + /) always denote a name suffix; weak ones
 // (- ,) and bare/and brand words need the end-of-name lookahead —
 // "- pest activity reviewed" is a clause, "- Lawn Care" a suffix (r49).
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+of\s+\w+)/i;
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+of\s+\w+|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1416,7 +1416,7 @@ function findUngroundedClaim(body, grounding) {
   }
   // Photo-availability claims need a photo fact (r41 P2).
   if (/\b(?:provided?|supplied|sent|shared)\s+(?:a\s+|the\s+)?photos?\b|\bphotos?\s+(?:provided|supplied|sent|shared|attached|on\s+file)\b/.test(outputText)
-    && !groundedValueText.includes('photo')) {
+    && !/\bphotos?\b/.test(groundedValueText)) {
     return { kind: 'novel_term', term: 'photos' };
   }
   // Appointment-status claims bind to fact values — the brief exists FOR a
@@ -1433,7 +1433,16 @@ function findUngroundedClaim(body, grounding) {
   const visitValueText = grounding.llmFacts?.visit
     ? collectFactValues(grounding.llmFacts.visit).join(' ; ').toLowerCase()
     : '';
-  for (const m of outputText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
+  // The last-visit summary is historical BY DEFINITION (production
+  // lastVisit is built from completed records) — status wording there is
+  // not a claim about the upcoming visit (r50 P2).
+  const currentClaimText = [
+    ...(body.priorities || []),
+    ...(body.watch_items || []),
+    body.open_scope,
+    body.customer_context,
+  ].filter(Boolean).join(' ').toLowerCase();
+  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
     // Multi-word statuses ('en route', 'on site') match underscore forms too.
     const statusForms = [...new Set([...wordVariants(status.replace(/\s/g, '')), status, status.replace(/\s/g, '_'), status.replace(/\s/g, '')])];
@@ -1687,6 +1696,18 @@ function findUngroundedClaim(body, grounding) {
         && wordVariants(subject).some((v) => groundedValueText.includes(v));
       if (!subjectGrounded) return { kind: 'novel_term', term: 'activity' };
     }
+  }
+  // Polarity for pet/availability STATE words (r50): a negated fact must
+  // not ground the positive claim, nor the reverse — inverted pet or
+  // availability context is safety-relevant.
+  for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability']) {
+    if (!new RegExp(`\\b${pw}\\b`).test(outputText)) continue;
+    const negRe = new RegExp(`\\b(?:no|not|never|without)\\b[^.;!?]{0,20}\\b${pw}\\b`);
+    const outNeg = negRe.test(outputText);
+    const factHasWord = wordVariants(pw).some((v) => new RegExp(`\\b${v}`).test(groundedValueText));
+    if (!factHasWord) continue; // ungrounded handling stays with the word passes
+    const factNeg = negRe.test(groundedValueText);
+    if (outNeg !== factNeg) return { kind: 'polarity_conflict', term: pw };
   }
   const wordKnown = (word) => {
     // Grounded-only status (on ANY stem variant) outranks prose-set
