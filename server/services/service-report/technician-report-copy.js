@@ -158,7 +158,11 @@ function technicianReportCustomerCopy(notes) {
   // clause must be present too, or a bare "safe once dry" would publish
   // without the required technician confirmation (codex r66).
   const SAFE_IDIOM_RE = /\bsafe\s+(?:once|when|after|as\s+soon\s+as)\s+(?:it\s+is\s+|everything\s+is\s+|the\s+(?:product|application|treatment|area)\s+is\s+)?(?:fully\s+|completely\s+)?dry\b/gi;
-  const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b[^.!?]{0,40}\bconfirm(?:s|ed|ing)?\b[^.!?]{0,25}\btiming\b|\bconfirm(?:s|ed)?\s+(?:the\s+)?(?:exact\s+|drying\s+)?timing\b/i;
+  // AFFIRMATIVE technician confirmation only (codex r66/r67): the subject
+  // must be the technician and the tempered gaps refuse to cross a
+  // negation, so "the technician did not confirm timing" (and a homeowner
+  // claiming to confirm) never unlock the exemption.
+  const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['’]t|doesn['’]t|don['’]t|won['’]t|cannot|can['’]t|couldn['’]t)\b)[^.!?]){0,40}\bconfirm(?:s|ed|ing)?\b(?:(?!\bnot\b)[^.!?]){0,25}\btiming\b/i;
   const screenText = TIMING_CONFIRM_RE.test(body)
     ? body.replace(SAFE_IDIOM_RE, 'once dry')
     : body;

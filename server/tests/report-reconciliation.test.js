@@ -566,6 +566,20 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.bodySource).toBeUndefined();
   });
 
+  // r67 (#3420): active-voice absence claims refuse on nonzero gauges.
+  test('flea refuses "We found no activity today" beside a heavy score', () => {
+    const r = buildTodaysResult({
+      projectType: 'flea',
+      values: { evidence_level: 'Heavy — adults observed' },
+      activity: { score: 4 },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'We found no activity today.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
   test('rodent_exclusion zero-score trend visit still consumes screened copy', () => {
     const r = buildTodaysResult({
       projectType: 'rodent_exclusion',

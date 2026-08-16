@@ -3032,6 +3032,8 @@ const LEVEL_ABSENCE_CLAIM_RE = new RegExp(
   + `|(?<!${LEVEL_WORD_SRC}\\s)\\b${LEVEL_NOUN_SRC}\\s+(?:was|were|is|are)\\s+not\\s+(?:observed|found|noted|seen|detected|present)\\b`
   + `|\\bthere\\s+(?:was|were|is|are)\\s+no\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b(?!\\s+(?:signs?|levels?))`
   + `|\\bno\\s+(?:signs?|evidence|indications?)\\s+of\\s+${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
+  + `|\\b(?:found|observed|noted|detected|saw|identified)\\s+no\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
+  + `|\\b(?:did\\s+not|didn['’]t)\\s+(?:find|observe|note|detect|see)\\b[^.!?]{0,30}\\b${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
   + `|\\bno\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}(?:evidence|signs?)\\b[^.!?]{0,20}\\b(?:was|were|is|are)\\s+(?:observed|found|noted|seen|detected|present)\\b`,
   'gi',
 );
