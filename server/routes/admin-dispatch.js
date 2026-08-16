@@ -11517,7 +11517,7 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
     if (!(await assertRecapOwnership(req, res))) return;
     const { actorType, actorId } = recapActor(req);
     const {
-      technicianNotes, products, productsConfirmed, customerRecap, sendSms, clientPestRating,
+      technicianNotes, products, productsConfirmed, productsPreserve, customerRecap, sendSms, clientPestRating,
     } = req.body || {};
     const result = await PestRecap.submitRecap({
       serviceId: req.params.serviceId,
@@ -11526,6 +11526,7 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       technicianNotes,
       products,
       productsConfirmed: productsConfirmed === true,
+      productsPreserve: Array.isArray(productsPreserve) ? productsPreserve : [],
       customerRecap,
       sendSms: !!sendSms,
       clientPestRating: clientPestRating == null ? null : clientPestRating,

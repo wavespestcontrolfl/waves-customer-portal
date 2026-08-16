@@ -104,12 +104,16 @@ export default function ServiceRecapModal({
   // twice before `submitting` re-renders the disabled button. The server is
   // idempotent regardless, but this avoids the redundant second request.
   const submitInFlight = useRef(false);
-  // True when the checkbox list fully represents the recorded state — every
-  // previously recorded product matched an active catalog row and was
-  // pre-selected. Only then is the submitted set authoritative
-  // (productsConfirmed): if a recorded product could not be shown, an
-  // empty/partial submit must not read as deselecting it (codex P1 r11).
+  // True unless a context load failure means the checkbox list cannot
+  // enumerate the recorded state at all — only then does the submission
+  // drop authority (productsConfirmed) entirely (codex P1 r11/r13/r15).
   const selectionAuthoritative = useRef(true);
+  // Recorded products that matched NO active catalog row (renamed or
+  // deactivated since the visit). The submission stays authoritative and
+  // names these for the server to PRESERVE — dropping authority for the
+  // whole set would let a deselected VISIBLE product survive the partial
+  // path (codex P1 r16).
+  const unrepresentedProducts = useRef([]);
 
   useEffect(() => {
     let active = true;
@@ -135,17 +139,25 @@ export default function ServiceRecapModal({
           selectionAuthoritative.current = false;
         }
         if (recorded.length && Array.isArray(data?.products)) {
+          // Stable catalog id first (codex P2 r16: a rename between
+          // visits must not read as a different product), name fallback
+          // for rows recorded before product_id was captured.
+          const byId = new Map(
+            data.products.map((p) => [String(p.id), p]),
+          );
           const byName = new Map(
             data.products.map((p) => [String(p.name || '').trim().toLowerCase(), p]),
           );
           const preselect = new Set();
           const seededRates = {};
           recorded.forEach((rp) => {
-            const cat = byName.get(String(rp.product_name || '').trim().toLowerCase());
+            const cat = (rp.product_id != null ? byId.get(String(rp.product_id)) : null)
+              || byName.get(String(rp.product_name || '').trim().toLowerCase());
             if (!cat) {
-              // Recorded product not representable in the picker — the
-              // selection can no longer speak for the full recorded set.
-              selectionAuthoritative.current = false;
+              // Recorded product not representable in the picker — name
+              // it for server-side preservation; the rest of the
+              // selection stays authoritative.
+              if (rp.product_name) unrepresentedProducts.current.push(rp.product_name);
               return;
             }
             preselect.add(cat.id);
@@ -288,10 +300,15 @@ export default function ServiceRecapModal({
           products: productPayload,
           // The selection state is deliberate (recorded products are
           // pre-selected on open), so an empty set is a full deselection,
-          // not a resend-only omission — unless a recorded product could
-          // not be represented, in which case the server keeps its
-          // preserve-on-omission behavior (codex P1 r11).
+          // not a resend-only omission — unless the context load failed,
+          // in which case the server keeps its preserve-on-omission
+          // behavior (codex P1 r11). Recorded products the picker could
+          // not represent are named for preservation instead of dropping
+          // authority for the whole set (codex P1 r16).
           productsConfirmed: selectionAuthoritative.current,
+          ...(selectionAuthoritative.current && unrepresentedProducts.current.length
+            ? { productsPreserve: unrepresentedProducts.current }
+            : {}),
           customerRecap: message,
           sendSms: willSend,
         }),

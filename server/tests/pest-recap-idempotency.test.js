@@ -813,6 +813,37 @@ describe('pest recap idempotency (Codex P1)', () => {
     expect(leftover.patch.retraction_reason).toBe('recap_deselected');
   });
 
+  test('an authoritative set preserves NAMED unrepresentable rows and clears the rest (codex P1 r16)', async () => {
+    // Mixed record: one product the picker could not represent (named in
+    // productsPreserve) + visible products. Deselecting a visible product
+    // must clear it — only the named rows survive the replace.
+    const store = {
+      serviceStatus: 'completed',
+      records: [{ id: 'rec-old', recap_sms_sent_at: null }],
+      catalogRow: { id: 'cat-c' },
+    };
+    const knex = makeKnex(store);
+
+    const result = await submitRecap({
+      serviceId: SERVICE_ID,
+      actorType: 'tech',
+      actorId: 'tech-1',
+      technicianNotes: 'Kept C, deselected B; Ghost preserved.',
+      products: [{ product_name: 'Product C', application_rate: '1', rate_unit: 'oz', rate_confirmed: true }],
+      productsConfirmed: true,
+      productsPreserve: ['Ghost Product'],
+      sendSms: false,
+      knex,
+    });
+
+    expect(result.ok).toBe(true);
+    // The delete excluded ONLY the preserved names — deselected visible
+    // rows (Product B) are cleared with everything else.
+    expect(store.productDeleteScopes).toEqual([{ partial: true, names: [['ghost product']] }]);
+    // The set is authoritative, so the retraction sweep still runs.
+    expect(retractionSweeps(store)).toHaveLength(1);
+  });
+
   test('an UNCONFIRMED empty set still preserves recorded products (legacy resend)', async () => {
     const store = {
       serviceStatus: 'completed',

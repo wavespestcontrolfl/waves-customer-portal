@@ -159,10 +159,20 @@ async function buildRecapContext(serviceId, knex = db) {
   // (productsConfirmed) replacement that would erase and retract real
   // applications over a transient error.
   let productsLoadFailed = false;
+  // product_id lets the modal match a recorded row to its catalog entry
+  // by stable id (codex P2 r16) — a rename between visits would otherwise
+  // duplicate the product on resubmit. Column-guarded like the writers.
+  const hasProductIdCol = existingRecord
+    ? await knex.schema.hasColumn('service_products', 'product_id').catch(() => false)
+    : false;
   const existingProducts = existingRecord
     ? await knex('service_products')
       .where({ service_record_id: existingRecord.id })
-      .select('product_name', 'product_category', 'active_ingredient', 'moa_group', 'application_rate', 'rate_unit')
+      .select([
+        'product_name', 'product_category', 'active_ingredient', 'moa_group',
+        'application_rate', 'rate_unit',
+        ...(hasProductIdCol ? ['product_id'] : []),
+      ])
       .catch(() => {
         productsLoadFailed = true;
         return [];
@@ -254,6 +264,12 @@ async function submitRecap({
   // an empty set is a full deselection (clear the recorded applications),
   // not a legacy resend-only omission (codex P1 r11).
   productsConfirmed = false,
+  // Recorded products the client could NOT represent in its picker
+  // (renamed/inactive catalog rows). An authoritative set preserves these
+  // by name instead of dropping authority for the whole submission —
+  // otherwise deselecting a VISIBLE product alongside one unrepresentable
+  // row would silently survive the partial path (codex P1 r16).
+  productsPreserve = [],
   customerRecap,
   sendSms = false,
   clientPestRating = null,
@@ -531,6 +547,10 @@ async function submitRecap({
     // productsConfirmed, so a CONFIRMED empty set is a full deselection
     // (codex P1 r11): the recorded rows are cleared and every attributable
     // ledger row retracted, same as deselecting them one by one.
+    const preserveNames = (Array.isArray(productsPreserve) ? productsPreserve : [])
+      .map((n) => String(n || '').trim().toLowerCase())
+      .filter(Boolean)
+      .slice(0, 100);
     const confirmedEmptyReplace = productsConfirmed === true
       && productRows.length === 0
       && Array.isArray(products)
@@ -653,7 +673,16 @@ async function submitRecap({
       // (codex P1 r12), keeping both its service_products row and its
       // live ledger link.
       if (productsConfirmed === true) {
-        await trx('service_products').where({ service_record_id: recordId }).del();
+        let clearQuery = trx('service_products').where({ service_record_id: recordId });
+        if (preserveNames.length) {
+          // The named unrepresentable rows (and their live ledger links)
+          // survive an otherwise-authoritative replace (codex P1 r16).
+          clearQuery = clearQuery.whereRaw(
+            'LOWER(TRIM(product_name)) != ALL(?::text[])',
+            [preserveNames],
+          );
+        }
+        await clearQuery.del();
       } else {
         await trx('service_products')
           .where({ service_record_id: recordId })

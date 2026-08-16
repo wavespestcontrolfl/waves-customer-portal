@@ -232,8 +232,13 @@ const DATA = [
   // a default rate.
   { name: 'Gravex 20 EW', basis: 'per_1000_sqft', rate: 1.2, min: 1.2, max: 1.2, unit: 'fl_oz',
     note: 'rate-render: residential turfgrass is a flat 1.2 fl oz/1,000 sq ft for all listed diseases (max 1.2/application, 13.8/year; non-residential turf allows 0.5-2.4) from the Atticus Gravex 20 EW specimen label (EPA 91234-283).' },
-  { name: 'Quali-Pro T-Nex Plant Growth Regulator', basis: 'per_1000_sqft', rate: null, min: 0.1, max: 0.25, unit: 'fl_oz',
-    note: 'rate-render: St. Augustinegrass 0.10-0.15 fl oz/1,000 sq ft (zoysiagrass 0.25; annual max 7.0 fl oz/1,000 sq ft) from the Control Solutions T-Nex specimen label (EPA 53883-353).' },
+  // T-Nex max is the CONSERVATIVE St. Augustine ceiling (codex P1 r16):
+  // the label allows zoysiagrass up to 0.25, but seeding that as the
+  // catalog max would let 0.16-0.25 pass the high-rate check on the
+  // dominant local turf as if label-compliant. Raising it for zoysia
+  // belongs to the operating-layer grass-type gate (owner follow-up).
+  { name: 'Quali-Pro T-Nex Plant Growth Regulator', basis: 'per_1000_sqft', rate: null, min: 0.1, max: 0.15, unit: 'fl_oz',
+    note: 'rate-render: St. Augustinegrass 0.10-0.15 fl oz/1,000 sq ft — catalog max is the conservative St. Augustine ceiling; zoysiagrass alone permits 0.25 (annual max 7.0 fl oz/1,000 sq ft) per the Control Solutions T-Nex specimen label (EPA 53883-353).' },
   // Badge SC Bactericide/Fungicide is deliberately NOT seeded (codex P1,
   // PR #3419 r5): the catalog classifies it as an ornamental/tree-and-shrub
   // fungicide (server/data/pricing.csv), so a global per-1,000 default drawn
