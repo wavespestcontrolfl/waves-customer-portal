@@ -156,6 +156,15 @@ function dedupeClassified(classified) {
       }
     }
     if (!prev.evidence && entry.evidence) prev.evidence = entry.evidence;
+    // Commercial vetoes merge CONSERVATIVELY (codex #3418 r29): any
+    // duplicate carrying a commercial type taints the merged entry —
+    // the veto is fail-closed, so it must survive whichever entry came
+    // first. A non-commercial type only fills an empty slot.
+    if (entry.property_type) {
+      if (isCommercialType(entry.property_type) || !prev.property_type) {
+        prev.property_type = entry.property_type;
+      }
+    }
   }
   return out;
 }

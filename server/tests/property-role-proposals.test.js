@@ -255,6 +255,20 @@ describe('buildPropertyRoleProposals', () => {
     expect(proposals.filter((p) => p.kind === 'primary_flip')).toHaveLength(1);
   });
 
+  test('a commercial type on ANY duplicate entry survives the merge and vetoes the residence claim (codex r29)', () => {
+    const { fills, proposals } = buildPropertyRoleProposals({
+      classified: [
+        // Main entry first: type-less residence claim on the unknown row…
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: true, property_type: null },
+        // …duplicated in additional_properties WITH the commercial type.
+        { address_line1: '660 Shell Cove', city: 'Bradenton', zip: '34212', occupancy: null, is_primary_residence: null, property_type: 'office' },
+      ],
+      properties: [OLD_HOME, NEW_HOME],
+    });
+    expect(fills).toHaveLength(0);
+    expect(proposals.filter((p) => p.kind === 'primary_flip')).toHaveLength(0);
+  });
+
   test('proposals carry the staged address_key (codex r19)', () => {
     const { proposals } = buildPropertyRoleProposals({
       classified: [
