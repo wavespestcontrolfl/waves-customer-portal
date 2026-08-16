@@ -35,6 +35,12 @@ import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
+import {
+  defaultApplicationMethodForLine,
+  isPerBasisUnit,
+  normalizeApplicationMethod,
+  resolveRatePrefill,
+} from "../../lib/product-rate-prefill";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
@@ -176,16 +182,20 @@ export function catalogUnitOption(unit, standardOptions) {
   if (!unit || standardOptions.includes(unit)) return null;
   return <option value={unit}>{unit.replace(/_/g, " ")}</option>;
 }
-// A "/"-suffixed display unit is a label rate in the label's own basis — mix
-// concentration ("fl_oz/gal", "fl_oz/100gal"), spot placement ("g/spot"),
-// trunk dose ("ml/inch dbh"), per-acre broadcast ("oz/acre"), bed rate
-// ("lb/100sf"), station density ("each/20ft") — everything except the
-// per-1,000 area units, whose rates live in default_rate_per_1000 instead.
-// Rate × sqft derivations and 1:1 amount units don't apply to these.
-export function isPerBasisUnit(unit) {
+// Base quantity unit of a per-basis catalog unit ("g/spot" -> "g"). The
+// selects render their extra options from the STABLE catalog unit (plus the
+// row's current value) rather than the current value alone, so temporarily
+// choosing a standard unit can't remove the catalog-native option from the
+// dropdown (codex P2 r6).
+function baseUnitOf(unit) {
   const u = String(unit || "");
-  return u.includes("/") && !u.endsWith("/1000sf");
+  return u.includes("/") ? u.split("/")[0] : u;
 }
+// The rate-prefill decision (isPerBasisUnit, the pest 4-oz house default,
+// per-basis low bounds) lives in lib/product-rate-prefill.js — shared with
+// ServiceRecapModal so both completion paths prefill identically (codex P1
+// r6). Re-exported here for the existing importers.
+export { isPerBasisUnit, resolveRatePrefill };
 const AREAS_BY_SERVICE = {
   pest: [
     "Perimeter",
@@ -7498,69 +7508,13 @@ function serviceLineFromType(serviceType = "") {
   return "pest";
 }
 
-function normalizeApplicationMethod(value = "") {
-  const normalized = String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  if (!normalized) return "";
-  if (
-    [
-      "perimeter_spray",
-      "broadcast_spray",
-      "spot_treatment",
-      "granular_broadcast",
-      "soil_drench",
-      "bait_placement",
-      "station_check",
-      "fog_ulv",
-      "foliar_spray",
-      "trunk_injection",
-      "pin_stream",
-    ].includes(normalized)
-  ) return normalized;
-  if (normalized.includes("trunk") || normalized.includes("inject")) return "trunk_injection";
-  if (normalized.includes("foliar")) return "foliar_spray";
-  if (normalized.includes("pin")) return "pin_stream";
-  if (normalized.includes("granular")) return "granular_broadcast";
-  if (normalized.includes("bait") || normalized.includes("gel") || normalized.includes("glue")) return "bait_placement";
-  if (normalized.includes("station")) return "station_check";
-  if (normalized.includes("fog") || normalized.includes("ulv")) return "fog_ulv";
-  if (normalized.includes("spot")) return "spot_treatment";
-  if (normalized.includes("broadcast")) return "broadcast_spray";
-  if (normalized.includes("perimeter") || normalized.includes("band")) return "perimeter_spray";
-  return normalized;
-}
-
+// Method inference lives in lib/product-rate-prefill.js (shared with the
+// recap modal); this wrapper only resolves the service LINE from the type.
 export function defaultApplicationMethod(product = {}, serviceType = "", { interiorLane = false } = {}) {
-  const category = String(product.category || product.product_category || "").toLowerCase();
-  const explicit = product.application_method || product.method;
-  if (explicit) return normalizeApplicationMethod(explicit);
-  if (category.includes("bait") || category.includes("gel") || category.includes("glue")) return "bait_placement";
-  // Liquid fertilizers (K-Flow, Green Flo, chelated micros — catalog rate
-  // unit fl_oz/gal or "Liquid" in the name) go down as a spray, not granular.
-  const rateUnit = String(
-    product.rate_unit || product.rateUnit || product.default_unit || product.defaultUnit || "",
-  ).toLowerCase();
-  const liquidProduct =
-    rateUnit.includes("fl") || rateUnit.includes("gal") ||
-    /\b(liquid|flow?)\b/i.test(String(product.name || ""));
-  if (category.includes("fert") && liquidProduct) return "broadcast_spray";
-  if (category.includes("fert") || category.includes("granular")) return "granular_broadcast";
-  const serviceLine = serviceLineFromType(serviceType);
-  if (serviceLine === "mosquito") return "fog_ulv";
-  if (serviceLine === "lawn") return category.includes("herb") ? "spot_treatment" : "broadcast_spray";
-  if (serviceLine === "palm" || serviceLine === "tree_shrub") return "foliar_spray";
-  if (serviceLine === "termite" || serviceLine === "rodent") return "station_check";
-  // Bed bug is an interior treatment: the pest perimeter_spray fallback
-  // recorded interior work as exterior AND demanded perimeter footage the
-  // (hidden) zone tracer would have prefilled, blocking a routine closeout
-  // — default methodless products to an interior spot application instead
-  // (codex P1 on the bed-bug untype). interiorLane comes from the STABLE
-  // profile key; the name regex is the fallback for callers without it.
-  if (interiorLane || /\bbed\s*bugs?\b/i.test(String(serviceType || ""))) return "spot_treatment";
-  return "perimeter_spray";
+  return defaultApplicationMethodForLine(product, serviceLineFromType(serviceType), {
+    serviceType,
+    interiorLane,
+  });
 }
 
 // Whether a product controls something a tech would list as a target.
@@ -11790,51 +11744,19 @@ export function CompletionPanel({
       applicationMethod,
       serviceTypeForArea,
     );
-    const defaultUnit =
-      product.defaultUnit ||
-      product.default_unit ||
-      product.rateUnit ||
-      product.rate_unit ||
-      "oz";
-    const catalogRate =
-      product.defaultRatePer1000 ?? product.default_rate_per_1000 ?? product.ratePer1000 ?? "";
-    // Generic "insecticide" categories cover dry/bait/packet forms too (e.g.
-    // Advion WDG Granular, Delta Dust, Alpine WSG), whose inferred method
-    // still falls through to perimeter_spray — a 4 oz liquid default would be
-    // a wrong compliance record for those, so screen the name/category for
-    // dry-form and dry-formulation markers (WSG/WDG/WG/WP/DF).
-    const dryFormProduct =
-      /\b(granul\w*|dust|bait|gel|station|trap|briquet|tablet|blox|dunk|packet|wsg|wdg|wg|wp|df)\b/i.test(
-        `${product.name || ""} ${product.category || product.product_category || ""}`,
-      );
-    // General-pest perimeter sprays: when the catalog carries no rate, start
-    // at the house default of 4 oz (rate/total units move together with it so
-    // a catalog unit like "oz/1000sf" can't pair with the fallback value).
-    // Editable as before; catalog rates still win when present.
-    const usePestSprayDefault =
-      catalogRate === "" &&
-      !dryFormProduct &&
-      applicationMethod === "perimeter_spray" &&
-      serviceLineFromType(serviceTypeForArea) === "pest";
-    // Per-basis products carry their verified label rate in the legacy
-    // display fields (default_rate "0.2-0.8" + default_unit "fl_oz/gal" —
-    // see isPerBasisUnit for the unit families). When there is no per-1k
-    // rate and the pest 4-oz house default doesn't apply, start the tech at
-    // the label band's LOW end in the label's own unit — parseFloat reads
-    // the low bound out of an "X-Y" band.
-    const perBasisUnit = isPerBasisUnit(defaultUnit);
-    const labelDisplayRate = perBasisUnit
-      ? parseFloat(String(product.default_rate ?? product.defaultRate ?? ""))
-      : NaN;
-    // DB numerics arrive as strings with trailing zeros ("0.5000") — show the
-    // tech a clean number.
-    const prefillRate = usePestSprayDefault
-      ? 4
-      : catalogRate !== "" && Number.isFinite(Number(catalogRate))
-        ? Number(catalogRate)
-        : Number.isFinite(labelDisplayRate)
-          ? labelDisplayRate
-          : catalogRate;
+    // Shared rate-prefill decision (lib/product-rate-prefill.js) — the same
+    // resolver ServiceRecapModal uses, so both completion paths prefill
+    // identically (codex P1 r6).
+    const {
+      rate: prefillRate,
+      rateUnit: prefillRateUnit,
+      amountUnit: prefillAmountUnit,
+      perBasisUnit,
+      defaultUnit,
+    } = resolveRatePrefill(product, {
+      applicationMethod,
+      serviceLine: serviceLineFromType(serviceTypeForArea),
+    });
     // Lawn broadcast/granular products treat the whole measured lawn: start
     // the Sq ft field at the turf profile's treatable area and derive Total =
     // rate × area / 1,000 in the rate's own unit. Both stay editable; a
@@ -11884,17 +11806,13 @@ export function CompletionPanel({
           (products || []).find((p) => String(p.id) === String(product.id))?.active_ingredient ??
           null,
         rate: prefillRate,
-        rateUnit: usePestSprayDefault ? "oz" : defaultUnit,
+        rateUnit: prefillRateUnit,
         catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
         // A per-basis unit is a concentration/placement rate — fine as the
         // rate, but "Total used" records a real quantity (and inventory
-        // deduction can't convert a concentration), so default the amount
-        // unit to the base unit before the "/" instead.
-        amountUnit: usePestSprayDefault
-          ? "oz"
-          : perBasisUnit
-            ? defaultUnit.split("/")[0]
-            : defaultUnit,
+        // deduction can't convert a concentration), so the resolver defaults
+        // the amount unit to the base unit before the "/" instead.
+        amountUnit: prefillAmountUnit,
         maxLabelRatePer1000:
           product.maxLabelRatePer1000 ??
           product.max_label_rate_per_1000 ??
@@ -14679,7 +14597,10 @@ export function CompletionPanel({
                         <option value="oz/gal">oz/gal</option>{" "}
                         <option value="fl_oz/gal">fl oz/gal</option>{" "}
                         <option value="g/gal">g/gal</option>{" "}
-                        {catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)}{" "}
+                        {catalogUnitOption(sp.catalogRateUnit, STANDARD_RATE_UNIT_OPTIONS)}{" "}
+                        {sp.rateUnit !== sp.catalogRateUnit
+                          ? catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)
+                          : null}{" "}
                       </select>{" "}
                       <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
                         Total used
@@ -14725,7 +14646,10 @@ export function CompletionPanel({
                         <option value="g">g</option>{" "}
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
-                        {catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)}{" "}
+                        {catalogUnitOption(baseUnitOf(sp.catalogRateUnit), STANDARD_AMOUNT_UNIT_OPTIONS)}{" "}
+                        {sp.amountUnit !== baseUnitOf(sp.catalogRateUnit)
+                          ? catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)
+                          : null}{" "}
                       </select>{" "}
                       {areasServiced.length > 0 && (() => {
                         const selectedAreas = parseApplicationAreas(
@@ -16857,7 +16781,10 @@ export function CompletionPanel({
                     <option value="oz/gal">oz/gal</option>{" "}
                     <option value="fl_oz/gal">fl oz/gal</option>{" "}
                     <option value="g/gal">g/gal</option>{" "}
-                    {catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)}{" "}
+                    {catalogUnitOption(sp.catalogRateUnit, STANDARD_RATE_UNIT_OPTIONS)}{" "}
+                        {sp.rateUnit !== sp.catalogRateUnit
+                          ? catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)
+                          : null}{" "}
                   </select>{" "}
                   <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
                     Total used
@@ -16884,7 +16811,10 @@ export function CompletionPanel({
                     <option value="ml">ml</option> <option value="g">g</option>{" "}
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
-                    {catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)}{" "}
+                    {catalogUnitOption(baseUnitOf(sp.catalogRateUnit), STANDARD_AMOUNT_UNIT_OPTIONS)}{" "}
+                        {sp.amountUnit !== baseUnitOf(sp.catalogRateUnit)
+                          ? catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)
+                          : null}{" "}
                   </select>{" "}
                   {areasServiced.length > 0 && (() => {
                     const selectedAreas = parseApplicationAreas(

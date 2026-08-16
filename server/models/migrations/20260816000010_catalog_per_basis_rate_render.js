@@ -79,20 +79,18 @@ const DATA = [
     note: 'rate-render: 1:1 dilution — 1 gal Bora-Care per 1 gal water for remedial/preventative termite treatments per the Nisus label (EPA 64405-1, EPA PPLS 064405-00001-20210518.pdf).' },
 
   // ── Ornamental sprays: per 100 gallons of spray dilution ────────────
-  { name: 'Avid Insecticide', basis: 'display', rate: '4-8', unit: 'fl_oz/100gal',
-    note: 'rate-render: 4 fl oz/100 gal for mites, up to 8 fl oz/100 gal for leafminers per the label (EPA 100-896, EPA PPLS 000100-00896-20111220.pdf).' },
-  { name: 'Floramite Miticide 1 qt', basis: 'display', rate: '4-8', unit: 'fl_oz/100gal',
-    note: 'rate-render: 4-8 fl oz/100 gal of water from the Floramite SC label (EPA 70506-537, EPA PPLS 070506-00537-20240208.pdf): 4 preventative/light, up to 8 heavy.' },
-  { name: 'Floramite SC/LS 8 oz', basis: 'display', rate: '4-8', unit: 'fl_oz/100gal',
-    note: 'rate-render: 4-8 fl oz/100 gal of water from the Floramite SC label (EPA 70506-537, EPA PPLS 070506-00537-20240208.pdf): 4 preventative/light, up to 8 heavy.' },
-  { name: 'Forbid 4F', basis: 'display', rate: '1-4', unit: 'fl_oz/100gal',
-    note: 'rate-render: 1-4 fl oz/100 gal spray solution for spider mites from the label (EPA 432-1279, EPA PPLS 000432-01279-20070504.pdf).' },
-  { name: 'Hexygon IQ Miticide', basis: 'display', rate: '4-8', unit: 'oz/100gal',
-    note: 'rate-render: 4-8 oz/100 gal (or 12-24 oz/acre) for ornamental mites from the Gowan Hexygon label (EPA 10163-365).' },
-  { name: 'Kontos Insecticide/Miticide', basis: 'display', rate: '1.7-3.4', unit: 'fl_oz/100gal',
-    note: 'rate-render: 1.7-3.4 fl oz (50-100 mL) per 100 gal of water for ornamental foliar applications from the OHP Kontos specimen label (EPA 432-1471-59807).' },
-  { name: 'Zylam Insecticide', basis: 'display', rate: '7.25-16', unit: 'fl_oz/100gal',
-    note: 'rate-render: 7.25-16 fl oz/100 gal of water for foliar applications to landscape ornamentals from the PBI-Gordon Zylam Liquid specimen label (EPA 2217-937).' },
+  // Avid, Floramite (both SKUs), Forbid 4F, Hexygon IQ, Kontos, and Zylam
+  // are deliberately NOT seeded (codex P1, PR #3419 r6): the catalog
+  // classifies them as Tree & Shrub / ornamental-only products, and the
+  // global name-only picker would prefill their ornamental dilution rates
+  // as lawn broadcast applications on lawn completions. They need the same
+  // service/site gate (owner ruling) as the other withheld entries before
+  // any of them can carry a default rate. Their verified label rates stay
+  // recorded here for that follow-up: Avid 4-8 fl_oz/100gal (EPA 100-896) ·
+  // Floramite 4-8 fl_oz/100gal (EPA 70506-537) · Forbid 4F 1-4 fl_oz/100gal
+  // (EPA 432-1279) · Hexygon IQ 4-8 oz/100gal, fl_oz per the 20260712
+  // verified entry (EPA 10163-365) · Kontos 1.7-3.4 fl_oz/100gal (EPA
+  // 432-1471-59807) · Zylam 7.25-16 fl_oz/100gal (EPA 2217-937).
   // ADORN is deliberately NOT seeded (codex P1 r3): its current label has
   // ORNAMENTAL sites only — no turfgrass directions — and a global catalog
   // rate would prefill as a normal broadcast on lawn closeouts through the
@@ -114,8 +112,14 @@ const DATA = [
     note: 'rate-render: 0.28 g product per inch DBH — the label mixing table dissolves 2.8 g (0.1 oz) in 25 mL water to treat 10 DBH inches (Arbor-OTC label, EPA 74578-7).' },
   { name: 'Arborjet Arbor OTC Fungicide 5 oz', basis: 'display', method: 'trunk_injection', rate: '0.28', unit: 'g/inch dbh',
     note: 'rate-render: 0.28 g product per inch DBH — the label mixing table dissolves 2.8 g (0.1 oz) in 25 mL water to treat 10 DBH inches (Arbor-OTC label, EPA 74578-7).' },
-  { name: 'Shortstop 2SC Plant Growth Regulator for Trees & Shrubs', basis: 'display', method: 'soil_drench', rate: '0.75-4', unit: 'g/inch dbh',
-    note: 'rate-render: 0.75-4 g a.i. per inch trunk DBH (species-dependent tier; applied as a 1:11 diluted basal drench/soil injection; do not treat trees under 1.5 in DBH) from the Shortstop 2SC label (EPA 62097-34).' },
+  // Shortstop 2SC is deliberately NOT seeded (codex P1, PR #3419 r6): its
+  // label expresses the dose in grams of ACTIVE INGREDIENT per inch DBH
+  // (0.75-4 g a.i./inch, EPA 62097-34), but the catalog product is a liquid
+  // packaged by the gallon — a g-based rate defaults the amount unit to a
+  // weight the inventory unit can't convert, and the compliance quantity
+  // would describe a.i. rather than product applied. Needs the label's
+  // concentrate-VOLUME dosage (or a separate a.i.-rate representation)
+  // before it can carry a default.
 
   // ── Per-acre broadcast (fractional-ounce turf products) ─────────────
   { name: 'Certainty Turf Herbicide', basis: 'display', rate: '1.25-2', unit: 'oz/acre',
@@ -183,8 +187,8 @@ const DATA = [
     note: 'rate-render: stations installed so the interval between any two does not exceed 20 ft (10-20 ft practice) per the Advance Termite Bait System label cited in the prior note.' },
   { name: 'Trelona ATBS Bait Station', basis: 'display', rate: '1', unit: 'each/20ft',
     note: 'rate-render: stations installed so the maximum interval between any two does not exceed 20 ft per the Trelona ATBS label (EPA 499-557, EPA PPLS 000499-00557-20190909.pdf).' },
-  { name: 'Trelona Compressed Termite Bait Cartridges', basis: 'display', rate: '1-2', unit: 'each/station',
-    note: 'rate-render: 1 cartridge per station for 90/120-day service intervals; 2 cartridges (two 124 g, required in Florida for annual service) per the Trelona label (EPA 499-557).' },
+  { name: 'Trelona Compressed Termite Bait Cartridges', basis: 'display', rate: '2', unit: 'each/station',
+    note: 'rate-render: 2 cartridges (two 124 g) per station, REQUIRED in Florida for annual service — the only interval this operation runs — per the Trelona label (EPA 499-557); 90/120-day service intervals use 1, adjust down only for those.' },
   { name: 'Contrac Blox', basis: 'display', rate: '1-16', unit: 'each/placement',
     note: 'rate-render: mice 1 blox per placement (8-12 ft apart); rats 3-16 blox per placement (15-30 ft apart) from the Contrac Blox label (EPA 12455-79, EPA PPLS 012455-00079-20200213.pdf). Band low end is the mouse rate so the prefill is safe for either species; adjust up for rat placements.' },
 

@@ -24,12 +24,23 @@ const CATALOG = [
   },
   {
     id: 2,
-    name: 'Termidor Foam',
-    category: 'Insecticide',
-    active_ingredient: 'Fipronil',
-    moa_group: '2B',
+    name: 'Victor Rat Trap',
+    category: 'Trap',
+    active_ingredient: null,
+    moa_group: null,
     default_rate: null,
     default_unit: null,
+    rate_unit: null,
+    default_rate_per_1000: null,
+  },
+  {
+    id: 3,
+    name: 'Adjourn SC',
+    category: 'Insecticide',
+    active_ingredient: 'Esfenvalerate',
+    moa_group: '3A',
+    default_rate: '0.33-0.65',
+    default_unit: 'fl_oz/gal',
     rate_unit: null,
     default_rate_per_1000: null,
   },
@@ -69,13 +80,28 @@ describe('ServiceRecapModal application rates', () => {
     expect(screen.getByText('g/spot')).toBeTruthy();
   });
 
-  test('a product with no catalog default gets no rate row', async () => {
+  test('a product with no resolvable prefill (mechanical trap) gets no rate row', async () => {
     const request = makeRequest();
     render(<ServiceRecapModal service={{ id: 'svc-1' }} request={request} onClose={() => {}} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Termidor Foam' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Victor Rat Trap' }));
 
-    expect(screen.queryByLabelText('Application rate for Termidor Foam')).toBeNull();
+    expect(screen.queryByLabelText('Application rate for Victor Rat Trap')).toBeNull();
+  });
+
+  // The pest 4-oz perimeter house default outranks the dilution band's low
+  // bound — same precedence as CompletionPanel, via the shared resolver
+  // (codex P1 r6): the same visit and product prefill the same rate on
+  // either completion path.
+  test('a liquid perimeter-spray product prefills the 4 oz pest house default, not the dilution low bound', async () => {
+    const request = makeRequest();
+    render(<ServiceRecapModal service={{ id: 'svc-1' }} request={request} onClose={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Adjourn SC' }));
+
+    const input = screen.getByLabelText('Application rate for Adjourn SC');
+    expect(input.value).toBe('4');
+    expect(screen.getByText('oz')).toBeTruthy();
   });
 
   test('reopening a recap prefills the RECORDED rate, not the catalog default', async () => {
@@ -95,7 +121,7 @@ describe('ServiceRecapModal application rates', () => {
     render(<ServiceRecapModal service={{ id: 'svc-1' }} request={request} onClose={() => {}} />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Advion Ant Bait Gel' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Termidor Foam' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Victor Rat Trap' }));
     fireEvent.change(
       screen.getByLabelText('Application rate for Advion Ant Bait Gel'),
       { target: { value: '0.7' } },
@@ -108,10 +134,10 @@ describe('ServiceRecapModal application rates', () => {
     const submit = request.calls.find((c) => c.options?.method === 'POST' && !c.path.endsWith('/draft'));
     const body = JSON.parse(submit.options.body);
     const gel = body.products.find((p) => p.product_name === 'Advion Ant Bait Gel');
-    const foam = body.products.find((p) => p.product_name === 'Termidor Foam');
+    const trap = body.products.find((p) => p.product_name === 'Victor Rat Trap');
     expect(gel.application_rate).toBe(0.7);
     expect(gel.rate_unit).toBe('g/spot');
-    expect(foam.application_rate).toBeUndefined();
-    expect(foam.rate_unit).toBeUndefined();
+    expect(trap.application_rate).toBeUndefined();
+    expect(trap.rate_unit).toBeUndefined();
   });
 });

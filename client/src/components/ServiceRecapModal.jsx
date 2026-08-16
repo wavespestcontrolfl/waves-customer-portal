@@ -14,6 +14,7 @@
 // (adminFetch on admin; a bearer-token wrapper on tech). It must resolve
 // to parsed JSON and throw on non-2xx — matching adminFetch's contract.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { defaultApplicationMethodForLine, resolveRatePrefill } from '../lib/product-rate-prefill';
 
 const PALETTES = {
   dark: {
@@ -44,23 +45,21 @@ const TIMELINE_LABELS = {
   skipped: { label: 'Skipped', icon: '⏭️' },
 };
 
-// Catalog rate prefill for a selected product — the same computation
-// CompletionPanel uses: the verified per-1,000 rate in its verified unit
-// first, else a per-basis display default's LOW bound in its label-native
-// unit (e.g. "0.1 g/spot"). Bare-unit and "/1000sf" display defaults don't
-// prefill here. The value is only a STARTING point: the tech edits/confirms
-// it before submit, and only the submitted value is recorded.
-function catalogRatePrefill(p) {
-  const per1000 = parseFloat(String(p?.default_rate_per_1000 ?? ''));
-  if (Number.isFinite(per1000) && per1000 > 0) {
-    return { rate: String(per1000), unit: p.rate_unit || p.default_unit || '' };
-  }
-  const unit = String(p?.default_unit || '');
-  const low = parseFloat(String(p?.default_rate ?? ''));
-  if (unit.includes('/') && !unit.endsWith('/1000sf') && Number.isFinite(low) && low > 0) {
-    return { rate: String(low), unit };
-  }
-  return null;
+// Catalog rate prefill for a selected product — the SHARED resolver
+// CompletionPanel uses (lib/product-rate-prefill.js), so the same visit and
+// product prefill the same rate on either completion path: verified per-1k
+// rate first, then the pest 4-oz perimeter house default, then a per-basis
+// display default's LOW bound in its label-native unit ("0.1 g/spot"). The
+// recap path is server-gated to pest control, so the service line is fixed.
+// The value is only a STARTING point: the tech edits/confirms it before
+// submit, and only the submitted value is recorded.
+function catalogRatePrefill(p, serviceType) {
+  if (!p) return null;
+  const applicationMethod = defaultApplicationMethodForLine(p, 'pest', { serviceType });
+  const resolved = resolveRatePrefill(p, { applicationMethod, serviceLine: 'pest' });
+  const rate = Number(resolved.rate);
+  if (!Number.isFinite(rate) || rate <= 0 || !resolved.rateUnit) return null;
+  return { rate: String(rate), unit: resolved.rateUnit };
 }
 
 function fmtTime(ts) {
@@ -134,7 +133,7 @@ export default function ServiceRecapModal({
             if (rp.application_rate != null && Number(rp.application_rate) > 0) {
               seededRates[cat.id] = { rate: String(rp.application_rate), unit: rp.rate_unit || '' };
             } else {
-              const prefill = catalogRatePrefill(cat);
+              const prefill = catalogRatePrefill(cat, data?.service?.serviceType);
               if (prefill) seededRates[cat.id] = prefill;
             }
           });
@@ -171,13 +170,13 @@ export default function ServiceRecapModal({
         // keeps whatever the tech already typed.
         setRates((prevRates) => {
           if (prevRates[id]) return prevRates;
-          const prefill = catalogRatePrefill(productById.get(id));
+          const prefill = catalogRatePrefill(productById.get(id), ctx?.service?.serviceType);
           return prefill ? { ...prevRates, [id]: prefill } : prevRates;
         });
       }
       return next;
     });
-  }, [productById]);
+  }, [ctx, productById]);
 
   const setRateValue = useCallback((id, value) => {
     setRates((prev) => ({ ...prev, [id]: { ...(prev[id] || { unit: '' }), rate: value } }));
