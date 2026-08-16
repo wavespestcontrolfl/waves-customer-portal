@@ -102,7 +102,7 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // The suffix must END the name (lookahead: punctuation/end or another
 // brand-continuation word) — "…Control and pest activity can be
 // reviewed" is a new clause, not a name suffix (r36 P2).
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/|-|,)\s*(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b))/i;
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/|-|,)\s*(?:lawn|pest|care|control|l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+of\s+\w+)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1474,8 +1474,8 @@ function findUngroundedClaim(body, grounding) {
   ].filter(Boolean).join(' ').toLowerCase();
   // Only tier CLAIMS bind to tier fields (r46 P2) — a grounded HOA or
   // product name containing a tier word is not a membership assertion.
-  for (const m of outputText.matchAll(/\b(bronze|silver|gold|platinum)\s+(?:member(?:ship)?|tier|plan|level)\b|\b(?:member(?:ship)?|tier|plan|level)\s*[:\-]?\s*(bronze|silver|gold|platinum)\b|\baccepted\s+(bronze|silver|gold|platinum)\b/g)) {
-    const tier = m[1] || m[2] || m[3];
+  for (const m of outputText.matchAll(/\b(bronze|silver|gold|platinum)\s+(?:member(?:ship)?|tier|plan|level|customer|client|account|status)\b|\b(?:member(?:ship)?|tier|plan|level)\s*[:\-]?\s*(bronze|silver|gold|platinum)\b|\baccepted\s+(bronze|silver|gold|platinum)\b|\b(?:is|was|as)\s+(?:a\s+|an\s+)?(bronze|silver|gold|platinum)\b/g)) {
+    const tier = m[1] || m[2] || m[3] || m[4];
     if (!new RegExp(`\\b${tier}\\b`).test(tierText)) {
       return { kind: 'novel_term', term: tier };
     }
@@ -1696,7 +1696,10 @@ function findUngroundedClaim(body, grounding) {
         if (GROUNDED_ONLY_WORDS.has(word) && !groundedWordOk(word, groundedText, groundedValueText)) {
           return { kind: 'novel_term', term: word };
         }
-        if ((word === 'key' || word === 'pin') && KEY_CREDENTIAL_RE.test(String(field)) && !groundedWordOk(word, groundedText, groundedValueText)) {
+        // Credential claims ground only on credential-PHRASED facts —
+        // an unrelated "key concern" value must not authorize a
+        // credential (r47).
+        if ((word === 'key' || word === 'pin') && KEY_CREDENTIAL_RE.test(String(field)) && !KEY_CREDENTIAL_RE.test(groundedValueText)) {
           return { kind: 'novel_term', term: word };
         }
         continue;

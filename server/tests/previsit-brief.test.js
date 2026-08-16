@@ -2981,3 +2981,38 @@ describe('codex #3423 r46 — generalized history, drafted, multi-contact, trail
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r47 — geographic suffix, copular tiers, credential-phrased grounding', () => {
+  test('r47 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const fl = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'Florida summer pressure typical' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control of Florida visited.' },
+      fl,
+    ).reason).toBe('noncanonical_company_name');
+    const hoa = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { propertyProfile: { hoaName: 'Gold Tree HOA' } } };
+    for (const claim of ['Customer is Gold', 'Gold customer']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        hoa,
+      ).reason).toMatch(/gold/);
+    }
+    const keyConcern = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'the key concern is ant activity near patio' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Key on file' },
+      keyConcern,
+    ).reason).toBeTruthy();
+  });
+
+  test('a credential-phrased fact still grounds a credential claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'gate key hidden under the planter' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Gate key hidden under the planter' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
