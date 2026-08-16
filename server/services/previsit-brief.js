@@ -940,7 +940,7 @@ const COMMON_PROSE_WORDS = new Set([
   'sensitive', 'sensitivity', 'setup', 'sheet', 'shrubs', 'siding', 'since', 'skip', 'slab', 'small',
   'soffit', 'spray', 'sprayed', 'spraying', 'spot', 'staff', 'start', 'started', 'status', 'still',
   'stone', 'stops', 'sweep', 'swept', 'technician', 'texts', 'thorough', 'through', 'times', 'today',
-  'touch', 'toward', 'treat', 'treated', 'treatment', 'treatments', 'trees', 'update', 'updated', 'upcoming',
+  'touch', 'toward', 'treat', 'treated', 'trees', 'update', 'updated', 'upcoming',
   'verify', 'visit', 'visits', 'walk', 'walkthrough', 'warrant', 'warrants', 'watch', 'water', 'weather',
   'weeks', 'weekly', 'window', 'windows', 'within', 'worth', 'yesterday', 'trail', 'trails', 'chemical', 'chemicals', 'across', 'during', 'under', 'beside', 'beneath', 'against',
   'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november',
@@ -1005,6 +1005,9 @@ const GROUNDED_ONLY_WORDS = new Set([
   // r21: scheduling STATUSES ("Scheduling confirmed/cancelled") are
   // appointment-state claims in ANY field, not just instructions.
   'scheduling', 'reschedule', 'rescheduling',
+  // r23: treatment claims ("Performed treatment") assert service history
+  // in ANY field — a brief may only claim treatment a fact evidences.
+  'treatment', 'treatments',
 ]);
 
 // Instruction objects carrying these words direct real business actions
@@ -1014,7 +1017,7 @@ const GROUNDED_ONLY_WORDS = new Set([
 // (payment/invoice/refund/billing graduated to GROUNDED_ONLY_WORDS in r10
 // — they require evidence in EVERY field, not just instructions.)
 const INSTRUCTION_EVIDENCE_WORDS = new Set([
-  'estimate', 'estimates', 'treatment', 'treatments', 'quote', 'quotes',
+  'estimate', 'estimates', 'quote', 'quotes',
   'credit', 'credits', 'balance', 'discount', 'discounts',
   // r15: access-security objects ("Retrieve gate key/access card") are
   // fabricatable from common words — the access noun must be evidenced.

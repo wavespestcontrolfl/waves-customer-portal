@@ -2141,3 +2141,22 @@ describe('codex #3423 r21 — scheduling statuses, punctuation after canonical n
     expect(verdict.body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r23 — treatment claims ground in descriptive fields too', () => {
+  test('"Performed treatment" rejects without a treatment fact; grounded passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Performed treatment', open_scope: null, customer_context: null },
+      empty,
+    ).reason).toBeTruthy();
+    const grounded = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { lastVisit: { recap: 'perimeter treatment completed 07-14' } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Performed treatment', open_scope: null, customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+});
