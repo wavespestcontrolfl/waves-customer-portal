@@ -327,6 +327,10 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // return/go-back wording states the same re-entry timing (r50)
+    expect(reportCopyRejection('Return to the treated area after thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('You can go back inside in 45 minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Contact us if activity returns.')).toBeNull();
     // the sanctioned idiom carries no figure and stays legal
     expect(reportCopyRejection('Keep pets off the treated areas until dry.')).toBeNull();
     expect(reportCopyRejection('We applied an EPA-registered product along the perimeter.')).toBeNull();

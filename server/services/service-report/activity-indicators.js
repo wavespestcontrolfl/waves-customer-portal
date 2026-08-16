@@ -3232,8 +3232,23 @@ function buildTodaysResult({
         .filter(Boolean);
       const tsContradiction = Boolean(tsRecordedBand)
         && tsClaimedBands.some((band) => band !== tsRecordedBand);
+      // The body must also agree with the recorded Ganoderma answer — the
+      // mandated palm sentence is appended either way, so a body claiming
+      // "no Ganoderma conks were observed" beside a recorded Yes (or the
+      // reverse) would contradict its own report one sentence later
+      // (codex r50).
+      const GANODERMA_ABSENT_RE = /\bno\s+(?:visible\s+|possible\s+|suspected\s+)*(?:ganoderma\s*)?conks?\b|\bno\s+ganoderma\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were)\s+not\s+(?:observed|found|seen|noted)\b|\b(?:did\s+not|didn['’]t)\s+(?:observe|find|see|note)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b/i;
+      const GANODERMA_PRESENT_RE = /\b(?:observed|found|noted|saw|spotted|possible|suspected)\b[^.!?]{0,40}\b(?:ganoderma|conks?)\b|\b(?:ganoderma|conks?)\b[^.!?]{0,40}\b(?:was|were)\s+(?:observed|found|noted|seen)\b/i;
+      const gRecorded = String(values.ganoderma_conk_observed || '');
+      const gAbsentClaim = GANODERMA_ABSENT_RE.test(tsBodyText);
+      // strip absence phrasing first so "no conks were observed" never
+      // reads as a presence claim
+      const gPresentClaim = GANODERMA_PRESENT_RE
+        .test(tsBodyText.replace(new RegExp(GANODERMA_ABSENT_RE.source, 'gi'), ''));
+      const gContradiction = (gRecorded === 'Yes' && gAbsentClaim)
+        || (gRecorded === 'No' && gPresentClaim);
       const tsReportBody = technicianReportBody
-        && (reconcileConfirmed || !tsContradiction)
+        && (reconcileConfirmed || (!tsContradiction && !gContradiction))
         ? technicianReportBody
         : null;
       return {
@@ -3373,10 +3388,15 @@ function buildTodaysResult({
     // noun-first evidence denials included — "No visible rodent evidence
     // was observed" is the natural form of "no evidence of rodents"
     // (codex r46)
-    const NO_ACTIVITY_CLAIM_RE = /\bno\s+(?:current\s+|visible\s+|active\s+)*(?:rodent\s+)?activity\b|\bno\s+(?:signs?|evidence)\s+of\s+rodents?\b|\bno\s+(?:current\s+|visible\s+|active\s+|fresh\s+|new\s+|obvious\s+)*rodent\s+(?:evidence|signs?|droppings|indications?)\b|\bfree\s+of\s+rodents?\b|\b(?:did\s+not|didn['’]t|could\s+not|couldn['’]t|have\s+not|haven['’]t|has\s+not|hasn['’]t|never)\s+(?:find|found|observe[d]?|note[d]?|confirm(?:ed)?|detect(?:ed)?|see|seen|saw|spot(?:ted)?)\b[^.!?]{0,40}\b(?:rodents?|activity)\b|\bno\s+rodents?\s+(?:was|were)\s+(?:found|observed|seen|noted)\b/i;
+    // rat/mouse species nouns claim (and deny) the same finding as
+    // "rodent" (codex r50)
+    const RODENT_NOUN_SRC = '(?:rodents?|rats?|mice|mouse)';
+    const NO_ACTIVITY_CLAIM_RE = new RegExp(`\\bno\\s+(?:current\\s+|visible\\s+|active\\s+)*(?:${RODENT_NOUN_SRC}\\s+)?activity\\b|\\bno\\s+(?:signs?|evidence)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\bno\\s+(?:current\\s+|visible\\s+|active\\s+|fresh\\s+|new\\s+|obvious\\s+)*${RODENT_NOUN_SRC}\\s+(?:evidence|signs?|droppings|indications?)\\b|\\bfree\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b(?:did\\s+not|didn['’]t|could\\s+not|couldn['’]t|have\\s+not|haven['’]t|has\\s+not|hasn['’]t|never)\\s+(?:find|found|observe[d]?|note[d]?|confirm(?:ed)?|detect(?:ed)?|see|seen|saw|spot(?:ted)?)\\b[^.!?]{0,40}\\b(?:${RODENT_NOUN_SRC}|activity)\\b|\\bno\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|seen|noted)\\b`, 'i');
     // active-voice findings included — "The technician observed rodent
-    // activity" carries the claim without any passive shape (codex r47)
-    const ACTIVITY_FOUND_CLAIM_RE = /\b(?:rodent\s+)?activity\s+(?:was|were|is)\s+(?:found|observed|confirmed|noted|present)\b|\bactive\s+rodent\b|\bevidence\s+of\s+rodents?\s+(?:was|were)\s+(?:found|observed|noted)\b|\b(?:found|observed|noted|detected|confirmed|spotted|saw)\s+(?:fresh\s+|new\s+|active\s+|visible\s+|recent\s+|significant\s+|some\s+|clear\s+)*rodents?\b|\b(?:found|observed|noted|detected|confirmed|spotted|saw)\s+(?:signs?|evidence|droppings)\s+of\s+rodents?\b/i;
+    // activity" carries the claim without any passive shape (codex r47);
+    // species nouns with optional articles claim it too — "saw a rat",
+    // "spotted mice" (codex r50)
+    const ACTIVITY_FOUND_CLAIM_RE = new RegExp(`\\b(?:${RODENT_NOUN_SRC}\\s+)?activity\\s+(?:was|were|is)\\s+(?:found|observed|confirmed|noted|present)\\b|\\bactive\\s+${RODENT_NOUN_SRC}\\b|\\bevidence\\s+of\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|noted)\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:a\\s+|an\\s+|the\\s+|some\\s+|several\\s+|multiple\\s+|two\\s+|three\\s+|a\\s+few\\s+)?(?:fresh\\s+|new\\s+|active\\s+|visible\\s+|recent\\s+|significant\\s+|clear\\s+|live\\s+|dead\\s+)*${RODENT_NOUN_SRC}\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:signs?|evidence|droppings)\\s+of\\s+${RODENT_NOUN_SRC}\\b`, 'i');
     const inspectionBodyText = String(technicianReportBody || '');
     const inspectionContradiction = found
       ? NO_ACTIVITY_CLAIM_RE.test(inspectionBodyText)
@@ -3961,8 +3981,11 @@ const BANNED_CUSTOMER_COPY = [
   // spelled-out quantities ("thirty minutes", "two hours", "half an hour",
   // "a few minutes") state the same prohibited fixed timing as digits
   // (codex r48)
-  new RegExp(`\\b(?:re-?ent(?:er|ry)|dry(?:ing|s)?|dried)\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}\\s*(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
-  new RegExp(`\\b${TIME_FIGURE_SRC}\\s*${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b(?:re-?ent(?:er|ry)|dry(?:ing)?|dried)\\b`, 'i'),
+  // "return"/"go back"/"come back" state the same re-entry timing without
+  // the re-entry word (codex r50): "Return to the treated area after
+  // thirty minutes"
+  new RegExp(`\\b(?:re-?ent(?:er|ry)|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|dry(?:ing|s)?|dried)\\b[^.!?]{0,40}\\b${TIME_FIGURE_SRC}\\s*(?:more\\s+)?${TIME_UNIT_SRC}\\b`, 'i'),
+  new RegExp(`\\b${TIME_FIGURE_SRC}\\s*${TIME_UNIT_SRC}\\b[^.!?]{0,40}\\b(?:re-?ent(?:er|ry)|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|dry(?:ing)?|dried)\\b`, 'i'),
 ];
 
 function findBannedCustomerCopy(text) {

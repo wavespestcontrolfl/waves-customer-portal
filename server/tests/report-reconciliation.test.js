@@ -414,6 +414,32 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.body).toContain('No remaining concerns were observed today.');
   });
 
+  // r50 (#3420): the body must agree with the recorded Ganoderma answer.
+  test('tree_shrub refuses "No Ganoderma conks were observed" beside a recorded Yes', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Fair', plant_groups: 'Palms', ganoderma_conk_observed: 'Yes' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'Overall condition is fair. No Ganoderma conks were observed on the palms.',
+    });
+    expect(r.bodySource).toBeUndefined();
+    expect(r.body).toContain('possible Ganoderma conk was observed');
+  });
+
+  test('tree_shrub refuses a conk-observed claim beside a recorded No', () => {
+    const r = buildTodaysResult({
+      projectType: 'tree_shrub',
+      values: { landscape_condition: 'Good', plant_groups: 'Palms', ganoderma_conk_observed: 'No', palm_trunk_concern: 'No' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'We observed a possible Ganoderma conk at the base of one palm.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
   // r46 (#3420): modal/inability denials of recorded exclusion work refuse.
   test('rodent_exclusion refuses "repairs could not be completed" beside recorded work', () => {
     const r = buildTodaysResult({
@@ -479,6 +505,40 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
       technicianReportBody: 'The technician observed rodent activity in the attic today.',
     });
     expect(r.bodySource).toBeUndefined();
+  });
+
+  // r50 (#3420): species nouns claim the finding too.
+  test('rodent_inspection refuses "The technician saw a rat" beside found=No', () => {
+    const r = buildTodaysResult({
+      projectType: 'rodent_inspection',
+      values: { activity_found: 'No', recommended_service: 'No service needed at this time' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'The technician saw a rat in the attic during the inspection.',
+    });
+    expect(r.bodySource).toBeUndefined();
+  });
+
+  test('rodent_inspection refuses "We spotted mice" beside found=No but accepts "no fresh rat droppings"', () => {
+    const spotted = buildTodaysResult({
+      projectType: 'rodent_inspection',
+      values: { activity_found: 'No', recommended_service: 'No service needed at this time' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'We spotted mice near the water heater.',
+    });
+    expect(spotted.bodySource).toBeUndefined();
+    const clean = buildTodaysResult({
+      projectType: 'rodent_inspection',
+      values: { activity_found: 'No', recommended_service: 'No service needed at this time' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'We checked the attic and found no fresh rat droppings.',
+    });
+    expect(clean.bodySource).toBe('technician_report');
   });
 
   test('rodent_inspection accepts "we have not observed rodents" on a found=No visit', () => {
