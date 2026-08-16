@@ -8417,6 +8417,13 @@ const CallRecordingProcessor = {
         && String(customerId || call.customer_id) === String(call.customer_id))
         ? contactCasBaselineAtClaim
         : null,
+      // Historical/forced passes never auto-apply names (codex #3413 r22):
+      // the claim-time baseline of a force-reprocess (or a retry reaching
+      // an old call) reflects TODAY's values, so an admin edit made since
+      // the call would pass the CAS and be overwritten by the old
+      // transcript. 24h bounds the normal pipeline's retry ladder.
+      allowNameAutoApply: !opts.force
+        && (Date.now() - new Date(call.created_at || processingStartedAt).getTime()) < 24 * 60 * 60 * 1000,
     }).catch((err) => {
       logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);
     });

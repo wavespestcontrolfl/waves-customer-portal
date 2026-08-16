@@ -592,3 +592,57 @@ describe('round-21 hardening', () => {
     expect(job.status).toBe('done');
   });
 });
+
+describe('round-22 hardening', () => {
+  it('an applied run is sealed done WITH its applied chain inside the apply transaction', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 1, status: 'queued', customer_id: CUSTOMER_ID })],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    let sealedMidRun = null;
+    mockRunSms.mockImplementation(async (args) => {
+      const applied = [{ field: 'last_name', oldValue: 'Riverz', newValue: 'Rivers' }];
+      // The apply transaction invokes the fence with the applied set — the
+      // job must be done+result-bearing the moment that transaction
+      // commits, so a crash before any post-return mark cannot orphan the
+      // applied chain.
+      await args.ownerFence(knex, applied);
+      sealedMidRun = { ...knex._data.contact_correction_jobs[0] };
+      return { applied, skipped: [], reason: undefined };
+    });
+    await queue.processDueContactCorrectionJobs({ limit: 1, knex });
+    expect(sealedMidRun.status).toBe('done');
+    expect(JSON.parse(sealedMidRun.result).applied).toHaveLength(1);
+    const job = knex._data.contact_correction_jobs[0];
+    expect(job.status).toBe('done');
+    expect(JSON.parse(job.result).applied).toHaveLength(1);
+  });
+
+  it('enqueue preserves the original context timestamp and baseline', async () => {
+    const attachedAt = Date.now() - 5000;
+    const snapshot = { last_name: 'Riverz' };
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 1, customer_id: CUSTOMER_ID, expected_values: snapshot, context_attached_at: attachedAt })],
+    });
+    const ok = await queue.enqueueContactCorrectionJob(1, {
+      customerId: CUSTOMER_ID, smsLogId: 'sms-1', expectedValues: { last_name: 'Riverz' }, knex,
+    });
+    expect(ok).toBe(true);
+    const job = knex._data.contact_correction_jobs[0];
+    expect(job.status).toBe('queued');
+    // The rebase cut must stay at the ORIGINAL capture time — advancing it
+    // at fire time would exclude queue writes the baseline predates.
+    expect(job.context_attached_at).toBe(attachedAt);
+    expect(job.expected_values).toEqual(snapshot);
+  });
+
+  it('enqueue still stamps context for callers with no prior attach', async () => {
+    const knex = makeStubKnex({ contact_correction_jobs: [jobRow({ id: 1 })] });
+    await queue.enqueueContactCorrectionJob(1, {
+      customerId: CUSTOMER_ID, expectedValues: { last_name: 'Riverz' }, knex,
+    });
+    const job = knex._data.contact_correction_jobs[0];
+    expect(job.context_attached_at).toBeTruthy();
+    expect(typeof job.expected_values).toBe('string');
+  });
+});

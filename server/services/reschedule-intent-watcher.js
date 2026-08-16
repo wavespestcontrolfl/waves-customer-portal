@@ -121,8 +121,25 @@ async function replayPendingBells() {
   try {
     // Owner ruling 2026-08-15: the flagger lane gated off silences its
     // bells — leftover bell_pending flags from before the flip must not
-    // keep replaying them here.
-    if (!require('../config/feature-gates').isEnabled('rescheduleIntentFlags')) return;
+    // keep replaying them here. RETIRE the markers while disabled
+    // (codex #3413 r22): the 24h replay horizon alone still bursts after
+    // a gate-off period SHORTER than the horizon (flags an hour old
+    // survive a two-hour mute), so a mute actively clears pending bell
+    // markers — the flags themselves stay pending_review for the queue,
+    // only the un-rung bell marker is dropped.
+    if (!require('../config/feature-gates').isEnabled('rescheduleIntentFlags')) {
+      await db('agent_decisions')
+        .where('workflow', 'comms_guards')
+        .where('detected_intent', 'reschedule_or_away_needs_review')
+        .where('status', 'pending_review')
+        .whereRaw("input_snapshot->>'bell_pending' = 'true'")
+        .update({
+          input_snapshot: db.raw("jsonb_set(COALESCE(input_snapshot, '{}'::jsonb), '{bell_pending}', 'false'::jsonb)"),
+          updated_at: new Date(),
+        })
+        .catch((err) => logger.warn(`[reschedule-intent-watcher] mute-retire failed: ${err.message}`));
+      return;
+    }
     const stale = await db('agent_decisions as ad')
       .leftJoin('customers as cu', 'ad.customer_id', 'cu.id')
       .where('ad.workflow', 'comms_guards')

@@ -2108,10 +2108,11 @@ describe('round-19 hardening', () => {
     expect(knex._data.customers[0].last_name).toBe('AdminFixed');
   });
 
-  it('an outbound callback resolves the caller from the external leg (to_phone)', async () => {
-    // from_phone is a Waves number on outbound calls — reading only
-    // from_phone made callerIsPrimary always false and silently dropped
-    // genuine name corrections.
+  it('an outbound callback NEVER auto-applies — labels are not speaker-reliable there (r22)', async () => {
+    // Live outbound recordings can label the WAVES AGENT as "Caller:"
+    // (see the inbound-only guard in call-recording-processor), so an
+    // agent read-back could ground a rewrite. The external leg still
+    // resolves for binding/proposals, but names stay out of auto-apply.
     const knex = makeStubKnex({
       customers: [baseCustomer()],
       call_log: [callLogRow({ direction: 'outbound-api', from_phone: '+19415557777', to_phone: PRIMARY_PHONE })],
@@ -2119,8 +2120,9 @@ describe('round-19 hardening', () => {
       agent_decisions: [],
     });
     const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
-    expect(res.applied.map((a) => a.field)).toEqual(['last_name']);
-    expect(knex._data.customers[0].last_name).toBe('Rivers');
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'name', reason: 'caller_not_primary' });
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
   });
 
   it('a proposal value spoken in UNRELATED caller speech never reaches the bell', async () => {
@@ -2310,5 +2312,89 @@ describe('round-21 hardening', () => {
     const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
     expect(res.reason).toBe('no_candidates');
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+});
+
+describe('round-22 hardening', () => {
+  const candidate = (over = {}) => ({
+    id: `cand-${Math.random().toString(36).slice(2, 8)}`,
+    call_log_id: CALL_ID,
+    customer_id: CUSTOMER_ID,
+    status: 'pending',
+    field_name: 'last_name',
+    final_recommended_value: 'Rivers',
+    evidence_quote: 'my last name is spelled wrong, it is Rivers',
+    confidence: 0.95,
+    ...over,
+  });
+
+  it('the entry prefilter recognizes surname corrections', () => {
+    expect(detectContactCorrectionIntent('My surname is wrong; it should be Rivers')).toBe(true);
+    expect(detectContactCorrectionIntent('You misspelled my surname')).toBe(true);
+  });
+
+  it('an explicitly stated state contradicting the ZIP fails the group closed', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '123 Main St', quote: 'we moved to 123 Main St, Savannah, FL 31401' },
+        { field: 'city', newValue: 'Savannah', quote: 'we moved' },
+        { field: 'state', newValue: 'FL', quote: 'we moved' },
+        { field: 'zip', newValue: '31401', quote: 'we moved' },
+      ],
+      source: 'sms',
+      knex,
+      moveContext: true,
+    });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'state', reason: 'state_mismatch' });
+    expect(knex._data.customers[0].city).toBe('Testville');
+  });
+
+  it("a third party's email correction never replaces the customer's email", async () => {
+    const body = "My accountant's email is wrong; change it to bookkeeper@example.com";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'bookkeeper@example.com', quote: "my accountant's email is wrong; change it to bookkeeper@example.com", confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("a third party's name never renames the account holder", async () => {
+    const body = "My wife's name is spelled wrong, it is Janet";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'first_name', new_value: 'Janet', quote: "my wife's name is spelled wrong, it is Janet", confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("the customer's own name correction still passes the ownership filter", async () => {
+    const body = 'My name is spelled wrong, it is Jordan Rivers';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: {
+        corrections: [
+          { field: 'first_name', new_value: 'Jordan', quote: 'my name is spelled wrong, it is Jordan Rivers', confidence: 'high' },
+          { field: 'last_name', new_value: 'Rivers', quote: 'my name is spelled wrong, it is Jordan Rivers', confidence: 'high' },
+        ],
+      },
+    });
+    const res = await extractSmsContactCorrections({ body });
+    expect(res.map((c) => c.field).sort()).toEqual(['first_name', 'last_name']);
+  });
+
+  it('a historical/forced pass keeps a primary-caller name correction out of auto-apply', async () => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow()],
+      customer_field_candidates: [candidate({ id: 'n1' })],
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex, allowNameAutoApply: false });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped).toContainEqual({ field: 'name', reason: 'historical_pass' });
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
   });
 });

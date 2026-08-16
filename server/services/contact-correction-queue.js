@@ -102,14 +102,29 @@ async function reserveContactCorrectionJob({ senderPhone, messageSid = null, bod
 async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null, expectedValues = null, knex = db } = {}) {
   if (!jobId || !customerId) return false;
   try {
+    // Keep the ORIGINAL baseline timestamp when context was already
+    // attached (codex #3413 r22): the expectedValues passed here come
+    // from the SAME customer row the route captured at webhook matching —
+    // re-stamping context_attached_at at fire time would advance the
+    // rebase cut past queue writes that landed between the match and this
+    // enqueue, excluding exactly the writes the baseline predates.
+    const existing = await knex('contact_correction_jobs')
+      .where({ id: jobId, status: 'reserved' })
+      .first('context_attached_at', 'expected_values');
+    if (!existing) return false;
+    const contextFields = existing.context_attached_at
+      ? {}
+      : {
+        expected_values: expectedValues ? JSON.stringify(expectedValues) : null,
+        context_attached_at: knex.fn.now(),
+      };
     const updated = await knex('contact_correction_jobs')
       .where({ id: jobId, status: 'reserved' })
       .update({
         status: 'queued',
         customer_id: customerId,
         sms_log_id: smsLogId || null,
-        expected_values: expectedValues ? JSON.stringify(expectedValues) : null,
-        context_attached_at: knex.fn.now(),
+        ...contextFields,
         next_attempt_at: knex.fn.now(),
         updated_at: knex.fn.now(),
       });
@@ -333,8 +348,20 @@ async function markJobDone(job, result, knex, wid) {
       last_error: null,
       updated_at: knex.fn.now(),
     });
-  if (!updated) logger.warn(`[contact-correction-queue] job ${job.id} lock lost before done mark (reclaimed by a peer)`);
-  return updated > 0;
+  if (updated) return true;
+  // The in-transaction fence seals applied runs 'done' with the customer
+  // write (r22) — finish by attaching the full result to the sealed row.
+  // ONLY for a run that actually applied: an applied result proves OUR
+  // fence did the sealing (a lost lock throws before anything applies), so
+  // this can never overwrite a replacement pass's completed result.
+  if (result?.applied?.length) {
+    const sealed = await knex('contact_correction_jobs')
+      .where({ id: job.id, status: 'done' })
+      .update({ result: JSON.stringify(result), updated_at: knex.fn.now() });
+    if (sealed) return true;
+  }
+  logger.warn(`[contact-correction-queue] job ${job.id} lock lost before done mark (reclaimed by a peer)`);
+  return false;
 }
 
 async function markJobRetry(job, errMessage, knex, wid) {
@@ -445,12 +472,27 @@ async function runContactCorrectionJob(job, knex, wid) {
     // The fence is an UPDATE, not a SELECT (codex #3413 r21): it refreshes
     // locked_at while holding the row, so a recovery pass that queued up
     // behind this lock re-evaluates its stale predicate after our commit
-    // and finds a FRESH lease — closing the post-fence gap where the row
-    // was requeued the instant the customer write committed.
-    ownerFence: async (trx) => {
+    // and finds a FRESH lease. When the pass APPLIED fields, the fence
+    // seals the job 'done' with its applied chain IN THE SAME TRANSACTION
+    // as the customer write (r22): a crash between the apply commit and a
+    // separate terminal mark would leave the job 'running' — recovery
+    // would rerun it, read its own committed value as a CAS miss, record
+    // an empty result, and later corrections could no longer rebase over
+    // the first write. Atomic seal = the applied chain survives exactly
+    // when the write does.
+    ownerFence: async (trx, applied) => {
+      const sealing = Array.isArray(applied) && applied.length > 0;
       const refreshed = await trx('contact_correction_jobs')
         .where({ id: job.id, status: 'running', locked_by: wid })
-        .update({ locked_at: trx.fn.now(), updated_at: trx.fn.now() });
+        .update(sealing ? {
+          status: 'done',
+          result: JSON.stringify({ applied }),
+          completed_at: trx.fn.now(),
+          locked_at: null,
+          locked_by: null,
+          last_error: null,
+          updated_at: trx.fn.now(),
+        } : { locked_at: trx.fn.now(), updated_at: trx.fn.now() });
       if (!refreshed) throw new Error('queue_lock_lost');
     },
   });

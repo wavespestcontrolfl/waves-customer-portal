@@ -56,7 +56,7 @@ const ADDRESS_FIELDS = Object.freeze(['address_line1', 'address_line2', 'city', 
 // correction language — ordinary calls state identity fields all the time
 // (a spouse booking, a different property) and none of that is a mandate
 // to rewrite the profile.
-const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
+const CORRECTION_HINT_RE = /\b(wrong|incorrect|misspell\w*|spell\w*|typo|not my|isn'?t my|fix (?:my|the)|correct(?:ion)?|update (?:my|the)|change (?:my|the)|actually|new (?:address|email))\b[\s\S]{0,80}\b(name|surname|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b|\b(name|surname|email|e-?mail|address|street|city|zip|unit|apt|apartment)\b[\s\S]{0,40}\b(wrong|incorrect|misspell\w*|is\b)|\b(?:we|i)(?:'ve| have)?\s+(?:just\s+)?moved\b|\bnew (?:e-?mail|email|address)\s*(?:\bis\b|:)|\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,30}\bshould be\b|\b(?:update|change)\b[\s\S]{0,25}\b(?:name|surname|email|e-?mail|address)\b[\s\S]{0,10}\bto\b|\b(?:my|our|the|your)\s+old\s+(?:e-?mail|email|address|apartment|unit)\b|\bno\s+(?:unit|apt|apartment)\b[\s\S]{0,40}\bold\b|\b(?:remove|drop|delete)\b[\s\S]{0,30}\b(?:unit|apt|apartment|suite)\b|\b(?:unit|apt|apartment|suite)\b[\s\S]{0,30}\b(?:no longer|removed|gone)\b/i;
 
 // Ownership disclaimers are NOT name corrections: "the account is not in my
 // name — my name is Jane Smith" is a caller explaining the account belongs
@@ -323,9 +323,12 @@ async function extractSmsContactCorrections({ body }) {
       || UNIT_REMOVAL_RE.test(text);
     const base = list.filter((c) => c && c.confidence === 'high' && APPLYABLE_FIELDS.includes(c.field)
       && quoteInBody(c.quote) && valueEvidenceOk(c) && clearEvidenceOk(c)
-      // A third party's address is never the customer's correction, no
-      // matter how much correction vocabulary surrounds it (r21).
-      && !(ADDRESS_FIELDS.includes(c.field) && THIRD_PARTY_ADDRESS_RE.test(String(c.quote || ''))));
+      // A third party's contact info is never the customer's correction,
+      // no matter how much correction vocabulary surrounds it (r21
+      // addresses; r22 extends the same doctrine to email and name).
+      && !(ADDRESS_FIELDS.includes(c.field) && THIRD_PARTY_ADDRESS_RE.test(String(c.quote || '')))
+      && !((c.field === 'email' || c.field === 'first_name' || c.field === 'last_name')
+        && THIRD_PARTY_CONTACT_RE.test(String(c.quote || ''))));
     // Each candidate's own quote must carry correction intent bound to its
     // field category — the message-level prefilter is not per-field
     // evidence (see quoteCarriesFieldIntent). ADDRESS fields are one
@@ -461,6 +464,13 @@ const MOVE_EVIDENCE_RE = /\b(?:we|i)(?:'ve| have)?\s+(?:just\s+|recently\s+)?(?:
 // "new address" (transcribed possessives drop the apostrophe) all mark
 // the statement third-party; "previous/prior address" stays first-person.
 const THIRD_PARTY_ADDRESS_RE = /\b(?:his|her|their)\s+(?:\w+\s+)?address\b|\b(?!(?:previous|prior)\b)[a-z]+(?:'s|s')\s+(?:\w+\s+)?address\b|\b(?!(?:previous|prior|business)\b)[a-z]{4,}s\s+new\s+address\b/i;
+// Same ownership doctrine for email and name (codex #3413 r22): "my
+// accountant's email is wrong; change it to …" is grounded, co-located,
+// and field-intent-bearing — but the mailbox belongs to a third party,
+// and auto-replacing the CUSTOMER's email (plus its fan-out) with it is
+// the exact poisoning the lane exists to prevent. Spouse/child name
+// statements likewise never rename the account holder.
+const THIRD_PARTY_CONTACT_RE = /\b(?:his|her|their)\s+(?:\w+\s+)?(?:e-?mail|name|surname)\b|\b(?!(?:previous|prior)\b)[a-z]+(?:'s|s')\s+(?:\w+\s+)?(?:e-?mail|name|surname)\b/i;
 
 // Whole-ADDRESS replacement language (codex #3413 r21) — the quote must
 // call the ADDRESS wrong, not a component ("my street is spelled wrong"
@@ -632,12 +642,17 @@ async function applyContactCorrections({ customerId, corrections, source, source
     // state deterministically (USPS prefix allocation) — derive and stage
     // it; a same-state move skips as 'unchanged', an unresolvable ZIP
     // fails the whole group closed.
-    if ((hadNewStreet || moveContext) && byField.has('zip') && !byField.has('state')) {
+    if ((hadNewStreet || moveContext) && byField.has('zip')) {
       const { stateForZip } = require('../utils/zip-state');
       const derived = stateForZip(byField.get('zip').newValue);
       if (!derived) {
         rejectAddressGroup('state_unresolved');
-      } else {
+      } else if (byField.has('state') && byField.get('state').newValue !== derived) {
+        // An explicitly stated state that CONTRADICTS the ZIP (codex
+        // #3413 r22): "Savannah, FL 31401" — one of them is wrong and
+        // there is no deterministic winner; the whole group fails closed.
+        rejectAddressGroup('state_mismatch');
+      } else if (!byField.has('state')) {
         byField.set('state', { field: 'state', newValue: derived, quote: byField.get('zip').quote || null });
       }
     }
@@ -1083,7 +1098,7 @@ function quoteBindsNameField(field, quote) {
   return true;
 }
 
-async function runCallContactCorrection({ callId, customerId, knex = db, procToken = null, candidateIds = null, expectedValuesSnapshot = null }) {
+async function runCallContactCorrection({ callId, customerId, knex = db, procToken = null, candidateIds = null, expectedValuesSnapshot = null, allowNameAutoApply = true }) {
   try {
     if (!require('../config/feature-gates').isEnabled('contactCorrection')) return { applied: [], skipped: [], reason: 'gate_off' };
     if (!callId || !customerId) return { applied: [], skipped: [], reason: 'unlinked' };
@@ -1136,16 +1151,19 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       ]);
       // The EXTERNAL leg is the caller identity (codex #3413 r19): on a
       // recorded outbound callback from_phone is a Waves number and the
-      // customer is to_phone — reading only from_phone made
-      // callerIsPrimary always false on outbound calls, silently dropping
-      // genuine name corrections. Same external-leg doctrine as the
-      // processor's resolveCallContactPhone.
-      const externalPhone = String(call?.direction || '').toLowerCase().startsWith('outbound')
-        ? call?.to_phone
-        : call?.from_phone;
+      // customer is to_phone. Same external-leg doctrine as the
+      // processor's resolveCallContactPhone — used for batch binding and
+      // proposals. Outbound calls NEVER auto-apply (r22): live outbound
+      // recordings can label the WAVES AGENT as "Caller:" (see the
+      // inbound-only guard in call-recording-processor), so the
+      // Caller-line grounding this lane trusts is not speaker-reliable
+      // there — an agent's read-back of the old value could ground a
+      // rewrite. Outbound corrections stay proposal-only.
+      const isOutbound = String(call?.direction || '').toLowerCase().startsWith('outbound');
+      const externalPhone = isOutbound ? call?.to_phone : call?.from_phone;
       if (call) call.external_phone = externalPhone || null;
       const callerTail = tail10(externalPhone);
-      callerIsPrimary = Boolean(callerTail) && callerTail === tail10(owner?.phone);
+      callerIsPrimary = !isOutbound && Boolean(callerTail) && callerTail === tail10(owner?.phone);
       // Snapshot for the compare-and-set in the apply transaction — a name
       // an admin corrected must not be overwritten by this pass's staged
       // (older) extraction; the phone is the identity anchor and stales the
@@ -1305,7 +1323,13 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       }
     }
 
-    const nameCandidates = (callerIsPrimary
+    // Historical/forced passes never auto-apply (codex #3413 r22): a
+    // force-reprocess of an old call captures TODAY's customer values as
+    // its claim-time baseline, so an admin edit made since the call would
+    // pass the CAS and be overwritten by the old transcript. Without a
+    // source-time baseline the write cannot be proven non-stale — names
+    // stay in the review lane.
+    const nameCandidates = (callerIsPrimary && allowNameAutoApply
       ? candidates.filter((c) => CALL_AUTO_FIELDS[c.field_name]
         && quoteBindsNameField(c.field_name, c.evidence_quote)
         && valueGroundedWithQuote(c))
@@ -1323,6 +1347,9 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
         return arr.some((o) => o.field_name === other);
       });
     if (!nameCandidates.length) {
+      if (callerIsPrimary && !allowNameAutoApply && candidates.some((c) => CALL_AUTO_FIELDS[c.field_name])) {
+        return { applied: [], skipped: [{ field: 'name', reason: 'historical_pass' }], reason: proposals.length ? 'proposed_only' : 'historical_pass' };
+      }
       if (!callerIsPrimary && candidates.some((c) => CALL_AUTO_FIELDS[c.field_name])) {
         return { applied: [], skipped: [{ field: 'name', reason: 'caller_not_primary' }], reason: proposals.length ? 'proposed_only' : 'caller_not_primary' };
       }
