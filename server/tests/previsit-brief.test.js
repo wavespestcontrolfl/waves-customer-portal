@@ -3849,3 +3849,55 @@ describe('codex #3423 r70 — access numbers, full payment lifecycle, pet counts
     expect(validateBriefJson({ ...BASE, customer_context: 'Customer has one dog' }, oneDog).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r71 — brand suffix nouns, completed applications, estimate counts, photo inflections, headless truncation, reversed payment states', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('name-shaped suffixes reject even when the facts contain them', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const staleName = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'caller mentioned waves pest control group' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Waves Pest Control Group will visit' }, staleName).reason).toBeTruthy();
+  });
+
+  test('completed application claims need visit history', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const lawnApp = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Lawn Application' } } };
+    for (const s of ['Application was performed', 'Performed the application']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, lawnApp).reason).toBeTruthy();
+    }
+  });
+
+  test('spelled estimate counts bind to the facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const oneEstimate = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { pendingEstimate: { status: 'pending' } } } };
+    for (const s of ['Customer has five estimates', 'Five estimates pending']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, oneEstimate).reason).toBeTruthy();
+    }
+  });
+
+  test('inflected photo claims need a photo fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const s of ['Customer provides photos', 'Customer provides a photo', 'Photos have been provided']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const photoFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer provided photos of the damage' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Photos have been provided' }, photoFact).body).toBeTruthy();
+  });
+
+  test('a branded head without the full catalog name rejects even with no self-report', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const bifen = { catalogVocabulary: { names: ['Bifen IT'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen IT'] } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Bifen was used previously', mentioned_terms: [] }, bifen).reason).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, priorities: ['Apply Bifen IT'], mentioned_terms: ['bifen it'] }, bifen).body).toBeTruthy();
+    const legacy = { catalogVocabulary: { names: ['Bifen IT'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen'] } } };
+    expect(validateBriefJson({ ...BASE, priorities: ['Apply Bifen'], mentioned_terms: ['bifen'] }, legacy).body).toBeTruthy();
+  });
+
+  test('state-before-noun payment forms bind to the recorded state', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const failed = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment failed on the account' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Completed payment' }, failed).reason).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Failed payment on the account' }, failed).body).toBeTruthy();
+  });
+});

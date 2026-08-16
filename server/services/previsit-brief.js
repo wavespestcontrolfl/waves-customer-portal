@@ -105,7 +105,7 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 // Strong connectors (& + /) always denote a name suffix; weak ones
 // (- ,) and bare/and brand words need the end-of-name lookahead —
 // "- pest activity reviewed" is a clause, "- Lawn Care" a suffix (r49).
-const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*\w+|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+of\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|swfl|america|tampa)\b|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)\b)/i;
+const NONCANONICAL_SUFFIX_RE = /waves\s+pest\s+control(?:\w|\s*(?:&|\+|\/)\s*\w+|\s*(?:-|,)\s*(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s*(?:-|,)\s*(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:l\.?l\.?c|l\.?l\.?p|l\.?p|inc|corp|co|ltd)\.?\b|\s+(?:and\s+)?(?:lawn|pest|care|control)(?=\s*(?:[.,;:!?)]|$)|\s+(?:care|control|services?|company)\b)|\s+(?:and\s+)?(?:group|groups|solutions|enterprises|holdings|partners|brands)\b|\s+of\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|swfl|america|tampa)\b|\s+(?:florida|sarasota|bradenton|venice|parrish|palmetto|north\s+port)\b|\s+and\s+(?:termite|lawn|pest|mosquito|rodent|wildlife|turf|shrub|tree|bed\s*bug)\s+(?:control|care|services?)\b)/i;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
@@ -1298,6 +1298,26 @@ function findUngroundedClaim(body, grounding) {
       }
     }
   }
+  // A branded catalog-name HEAD in the output without any full catalog
+  // name it starts renames the product ("Bifen was used" for "Bifen IT")
+  // — caught here independently of the self-report list (r71). Common-
+  // prose heads ("Termite Bait…") and exact legacy grounded names
+  // ("Bifen" as an unlinked snapshot) are exempt.
+  {
+    const normName = (n) => String(n).toLowerCase().replace(/\s+/g, ' ').trim();
+    const catalogNorm = (vocab.names || []).map(normName);
+    const legacyNames = [
+      ...(grounding.llmFacts?.productGuidance?.productNames || []),
+      ...(grounding.llmFacts?.productGuidance?.companions || []).flatMap((c) => c.productNames || []),
+    ].map(normName);
+    const heads = new Set(catalogNorm.filter((n) => n.includes(' ')).map((n) => n.split(' ')[0]));
+    for (const head of heads) {
+      if (COMMON_PROSE_WORDS.has(head) || catalogNorm.includes(head) || legacyNames.includes(head)) continue;
+      if (!new RegExp(`\\b${escapeRe(head)}\\b`).test(outputText)) continue;
+      const fullPresent = catalogNorm.some((n) => n.split(' ')[0] === head && new RegExp(`\\b${escapeRe(n)}\\b`).test(outputText));
+      if (!fullPresent) return { kind: 'novel_product', term: head };
+    }
+  }
   // Extraction runs PER FIELD — joined text lets the capitalized-run and
   // verb-object regexes span a field boundary and manufacture phantom
   // references ("... Bifen IT" + "Chemical-sensitivity ..." is not a
@@ -1450,7 +1470,7 @@ function findUngroundedClaim(body, grounding) {
   }
   // Completed-work phrasing in ANY field needs a prior visit (r55).
   if (!grounding.llmFacts?.lastVisit
-    && /\b(?:service|work|treatment|visit|inspection|maintenance)\s+(?:was\s+|has\s+been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:an?\s+|the\s+)?(?:service|work|treatment|inspection|maintenance)\b|\bprior\s+(?:inspection|maintenance)\b/.test(outputText)) {
+    && /\b(?:service|work|treatment|visit|inspection|maintenance|application)\s+(?:was\s+|has\s+been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:an?\s+|the\s+)?(?:service|work|treatment|inspection|maintenance|application)\b|\bprior\s+(?:inspection|maintenance|application)\b/.test(outputText)) {
     return { kind: 'fabricated_history', term: 'no prior visit on file' };
   }
   // Spelled-out short quantities before time units are numeric claims —
@@ -1462,7 +1482,7 @@ function findUngroundedClaim(body, grounding) {
   // Bounded modifiers between the quantity and unit ("five active
   // services", "five more times") are still count claims (r68 P2);
   // 'of' is excluded so partitives ("one of the services") stay prose.
-  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:(?!of\b)\w+\s+){0,2}(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?|pets?|dogs?|cats?)\b/g)) {
+  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:(?!of\b)\w+\s+){0,2}(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?|pets?|dogs?|cats?|estimates?|quotes?)\b/g)) {
     const phrase = `${m[1]} ${m[2]}`;
     const digitMap = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', fifteen: '15', twenty: '20', thirty: '30' };
     const unit = m[2].replace(/s$/, '');
@@ -1487,7 +1507,7 @@ function findUngroundedClaim(body, grounding) {
   }
   // Photo-availability claims need a photo fact (r41 P2).
   {
-    const photoClaim = /\b(?:provided?|supplied|sent|shared)\s+(?:a\s+|the\s+)?photos?\b|\bphotos?\s+(?:(?:were|are|was|is)\s+)?(?:not\s+)?(?:provided|supplied|sent|shared|attached|on\s+file)\b|\bno\s+photos?\b/.test(outputText);
+    const photoClaim = /\b(?:provide[sd]?|supplied|supplies|sent|sends|shared|shares)\s+(?:a\s+|the\s+)?photos?\b|\bphotos?\s+(?:(?:were|are|was|is|(?:have|has|had)\s+been|will\s+be)\s+)?(?:not\s+)?(?:provided|supplied|sent|shared|attached|on\s+file)\b|\bno\s+photos?\b/.test(outputText);
     if (photoClaim) {
       const claimNeg = negNear(outputText, 'photos?');
       const factHas = /\bphotos?\b/.test(groundedValueText);
@@ -1624,7 +1644,7 @@ function findUngroundedClaim(body, grounding) {
   if (/\bpaid\b/.test(groundedValueText)) factPayStates.add('completed');
   if (factPayStates.size > 0) {
     for (const [state, src] of PAY_STATES) {
-      if (new RegExp(`\\bpayment\\s+(?:was\\s+|has\\s+been\\s+|had\\s+been\\s+|is\\s+)?${src}\\b`).test(outputText)
+      if (new RegExp(`\\bpayment\\s+(?:was\\s+|has\\s+been\\s+|had\\s+been\\s+|is\\s+)?${src}\\b|\\b${src}\\s+payments?\\b`).test(outputText)
         && !factPayStates.has(state)) {
         return { kind: 'payment_state_conflict', term: `payment ${state} not on file` };
       }
