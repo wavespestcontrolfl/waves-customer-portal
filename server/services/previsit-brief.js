@@ -1385,12 +1385,24 @@ function findUngroundedClaim(body, grounding) {
   if (/\bhistory\s+of\b/.test(outputText) && !groundedValueText.includes('history')) {
     return { kind: 'novel_term', term: 'history' };
   }
+  // Photo-availability claims need a photo fact (r41 P2).
+  if (/\b(?:provided?|supplied|sent|shared)\s+(?:a\s+|the\s+)?photos?\b|\bphotos?\s+(?:provided|supplied|sent|shared|attached|on\s+file)\b/.test(outputText)
+    && !groundedValueText.includes('photo')) {
+    return { kind: 'novel_term', term: 'photos' };
+  }
   // Appointment-status claims bind to fact values — the brief exists FOR a
   // scheduled visit, so "Appointment cancelled/confirmed" must be stated
   // by a fact, not inferred (r39).
+  // Scoped to the CURRENT visit's facts when present — a historical
+  // "previous appointment cancelled" in a call summary must not ground a
+  // claim about the active upcoming visit (r41).
+  const visitValueText = grounding.llmFacts?.visit
+    ? collectFactValues(grounding.llmFacts.visit).join(' ').toLowerCase()
+    : null;
   for (const m of outputText.matchAll(/\bappointments?\s+(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+appointments?\b/g)) {
     const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled');
-    if (!wordVariants(status).some((v) => groundedValueText.includes(v))) {
+    const scopeText = visitValueText !== null ? visitValueText : groundedValueText;
+    if (!wordVariants(status).some((v) => scopeText.includes(v))) {
       return { kind: 'appointment_state', term: status };
     }
   }
@@ -1401,7 +1413,11 @@ function findUngroundedClaim(body, grounding) {
   if (contactReq) {
     const channel = contactReq[1];
     const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred)\b/.test(groundedValueText);
-    if (!(hasRequestVerb && groundedValueText.includes(channel.replace(/back$/, '')))) {
+    const bareChannel = channel.replace(/back$/, '');
+    // Polarity (r41): a NEGATED preference near the channel ("does not
+    // want email") must not ground the positive claim.
+    const negatedNearChannel = new RegExp(`\\b(?:not?|no|never|don't|doesn't|does\\s+not|do\\s+not|declined?|refused?|opt(?:ed)?\\s*out|stop)\\b[^.;!?]{0,40}\\b${bareChannel}`).test(groundedValueText);
+    if (!(hasRequestVerb && groundedValueText.includes(bareChannel)) || negatedNearChannel) {
       return { kind: 'contact_request', term: channel };
     }
   }

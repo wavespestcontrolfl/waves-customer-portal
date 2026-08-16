@@ -2757,3 +2757,42 @@ describe('codex #3423 r40 — key on file, appointment lifecycle, contact verbs,
     }
   });
 });
+
+describe('codex #3423 r41 — photo claims, contact polarity, visit-scoped appointment state', () => {
+  test('photo claims, negated preferences, and historical statuses reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer provided photos' },
+      empty,
+    ).reason).toBeTruthy();
+    const negated = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'Customer does not want email contact' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer wants email' },
+      negated,
+    ).reason).toMatch(/contact_request/);
+    const historical = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { visit: { status: 'confirmed' }, flags: [{ detail: 'previous appointment cancelled in June' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment cancelled' },
+      historical,
+    ).reason).toMatch(/appointment_state/);
+  });
+
+  test('grounded photo and current-visit status pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { visit: { status: 'confirmed' }, flags: [{ detail: 'customer shared photo of ant trail' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: ['ant'], last_visit_summary: null, open_scope: null, customer_context: 'Photos provided. Appointment confirmed.' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
