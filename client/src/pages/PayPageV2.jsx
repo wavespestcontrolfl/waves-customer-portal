@@ -492,6 +492,13 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        // Combined balance drift (a sibling invoice changed under the
+        // server's locked re-verification): reload to live amounts — same
+        // contract as the /setup staleBalance path.
+        if (data.staleBalance) {
+          window.location.reload();
+          return new Promise(() => {});
+        }
         throw serverReportedError(data.error || 'Could not update payment total');
       }
       // The server minted a fresh PaymentIntent for this tender (the old one
@@ -2457,7 +2464,12 @@ export default function PayPageV2() {
                       combinedTotal: combinedSetup.total,
                     };
                   })()
-                  : data.previousBalance;
+                  // Once /setup has answered, ITS verdict is authoritative
+                  // (codex r3 P0): a setup with no combined allocation
+                  // (required-save capture hold, siblings became
+                  // ineligible) charges the anchor alone — falling back to
+                  // the GET preview would show a total Stripe won't charge.
+                  : (stripeSetup ? null : data.previousBalance);
                 if (!prev || !prev.invoices?.length) return null;
                 return (
                   <>
@@ -2497,10 +2509,12 @@ export default function PayPageV2() {
               <div>
                 <div style={{ ...eyebrow, marginBottom: 6 }}>Pay securely</div>
                 <div style={{ fontSize: FS.h2, fontWeight: FW.heavy, color: DOC.ink, lineHeight: LH.solid }}>
-                  {fmtCurrency(stripeSetup?.combined?.total
-                    ?? data.previousBalance?.combinedTotal
-                    ?? invoice.amountDue
-                    ?? invoice.total)}
+                  {fmtCurrency(stripeSetup
+                    // Post-setup the PI is authoritative: combined total when
+                    // the allocation exists, the anchor alone when setup
+                    // declined to combine (codex r3 P0 — never the preview).
+                    ? (stripeSetup.combined?.total ?? invoice.amountDue ?? invoice.total)
+                    : (data.previousBalance?.combinedTotal ?? invoice.amountDue ?? invoice.total))}
                 </div>
                 <div style={{ marginTop: 6, fontSize: FS.body, color: DOC.muted }}>
                   {invoiceStatusLabel}

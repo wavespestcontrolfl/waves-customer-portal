@@ -3852,7 +3852,29 @@ const StripeService = {
     }
 
     try {
-      const paymentIntent = await stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
+      let paymentIntent;
+      if (combinedCtx) {
+        // The ACH tender switch is the LAST server seam before the client
+        // confirms directly with Stripe (codex r3 P1) — re-verify the
+        // allocation against LOCKED rows (stopped-dunning included) with
+        // the same per-customer serialization as mint/finalize, and only
+        // then reprice the PI. Any drift refuses as staleBalance 409 so
+        // the page reloads instead of the customer confirming a total a
+        // sibling change invalidated.
+        paymentIntent = await db.transaction(async (updateTrx) => {
+          await updateTrx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['pay.combined.customer', String(invoice.customer_id)],
+          );
+          await PayCombined.verifyAllocationLocked(updateTrx, combinedCtx.allocation, {
+            anchorInvoiceId: invoiceId,
+            expectPaymentIntentId: effectivePaymentIntentId,
+          });
+          return stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
+        });
+      } else {
+        paymentIntent = await stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
+      }
       logger.info(`[stripe] PI ${effectivePaymentIntentId} updated → base=$${base} surcharge=0 total=$${base} (method=${selectedMethodCategory})`);
       // Keep the DB stamps and the PI's allocation in lockstep (codex r2
       // P1): when this update DROPPED a previously-combined allocation
@@ -3889,8 +3911,10 @@ const StripeService = {
       };
     } catch (err) {
       // The retarget recheck's session-changed 409 must reach the route
-      // as-is, not wrapped as a generic update failure.
-      if (err && err.sessionChanged) throw err;
+      // as-is, not wrapped as a generic update failure — and so must the
+      // combined allocation's staleBalance 409 (the page reloads to live
+      // amounts).
+      if (err && (err.sessionChanged || err.staleBalance)) throw err;
       // A prior confirm attempt (e.g. an abandoned ACH entry) can leave an
       // incompatible PaymentMethod attached to the PI, so narrowing
       // payment_method_types to the newly selected tender is rejected. Recover

@@ -663,9 +663,11 @@ router.post('/:token/update-amount', async (req, res, next) => {
   } catch (err) {
     // 409 = expected race/in-flight state (e.g. trying to switch tender while
     // a payment is already processing). Surface it to the customer without
-    // raising an admin bill-payment-error alert.
+    // raising an admin bill-payment-error alert. staleBalance = a combined
+    // allocation drifted under the locked re-verification — same
+    // reload-and-retry contract as /setup.
     if (err.statusCode === 409) {
-      return res.status(409).json({ error: err.message });
+      return res.status(409).json({ error: err.message, staleBalance: !!err.staleBalance });
     }
     logger.error(
       `[pay-v2] Update-amount error `

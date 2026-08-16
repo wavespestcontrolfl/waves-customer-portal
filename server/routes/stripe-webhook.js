@@ -1202,6 +1202,13 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
   // parity).
   await resolveOrphanSucceededPaymentIntentIfSettled(piId);
 
+  // ACH failure-state reset BEFORE the mirror (codex r3 P1, same ordering
+  // contract as the single path): a combined ACH debit clearing from a
+  // previously blocked account must reset ach_status first, or the
+  // enrollment below refuses the bank method the debit just proved
+  // collectible.
+  await resetAchFailureStateForSucceededIntent(paymentIntent);
+
   // Same post-settlement save/consent/enroll mirror as the single path
   // (codex r2 P1): a combined ACH signup's /consent deferred enrollment
   // to THIS event — skipping it would leave the consented method
@@ -1835,41 +1842,12 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     }
   }
 
-  // If ACH payment succeeded, resolve any pending ACH failures for this
-  // customer. ORDER MATTERS: this reset must run BEFORE the save-card
-  // mirror below — a required-save customer paying by bank from a
-  // previously blocked account (ach_status needs_verification/suspended)
-  // has just proven the account collects, and enrollConsentedMethod
-  // refuses bank targets while ach_status is unhealthy. Resetting first
-  // means the enrollment attempt sees the healthy state; the old
-  // reset-after ordering left the debit cleared but the method
-  // saved-only with no second enrollment attempt (Codex #2507 round-6).
-  const pmType = paymentIntent.payment_method_types?.[0] || paymentIntent.last_payment_error?.payment_method?.type;
-  if (pmType === 'us_bank_account') {
-    try {
-      const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
-      if (payment?.customer_id) {
-        // Third-party Bill-To: a payer/AP bank transfer clearing must not
-        // reactivate the homeowner's suspended/needs-verification ACH state —
-        // the payer's payment row sits under the service customer's id but is
-        // not the homeowner's bank account. (Symmetric to the handleAchFailure
-        // guard.)
-        const achInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null);
-        if (achInvoice?.payer_id) {
-          logger.info(`[stripe-webhook] ACH success on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — not resetting homeowner ACH state`);
-        } else {
-          await db('ach_failure_log')
-            .where({ customer_id: payment.customer_id, resolved: false })
-            .update({ resolved: true, resolution: 'retry_success' })
-            .catch(() => {});
-          await db('customers').where({ id: payment.customer_id })
-            .update({ ach_status: 'active', ach_failure_count: 0 })
-            .catch(() => {});
-          logger.info(`[stripe-webhook] ACH success — reset failure state for customer ${payment.customer_id}`);
-        }
-      }
-    } catch { /* non-critical */ }
-  }
+  // ACH-success failure-state reset — extracted to
+  // resetAchFailureStateForSucceededIntent so the combined succeeded
+  // handler runs it too (codex #3427 r3 P1): the reset must precede the
+  // save-card mirror or enrollConsentedMethod refuses a bank method the
+  // clearing debit just proved collectible.
+  await resetAchFailureStateForSucceededIntent(paymentIntent);
 
   // ── Save payment method on the customer if they opted in ─────
   // Extracted to mirrorSavedMethodForSucceededIntent so the combined
@@ -1916,6 +1894,51 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   notifyPaymentSuccess(paymentIntent).catch((err) => {
     logger.warn(`[stripe-webhook] payment_succeeded notify failed: ${err.message}`);
   });
+}
+
+/**
+ * ACH-success failure-state reset for a succeeded PaymentIntent —
+ * shared by the single-invoice and combined succeeded handlers. Body
+ * moved verbatim from handlePaymentIntentSucceeded; must run BEFORE
+ * the save-card mirror (see the inline ordering comment).
+ */
+async function resetAchFailureStateForSucceededIntent(paymentIntent) {
+  const piId = paymentIntent.id;
+  // If ACH payment succeeded, resolve any pending ACH failures for this
+  // customer. ORDER MATTERS: this reset must run BEFORE the save-card
+  // mirror below — a required-save customer paying by bank from a
+  // previously blocked account (ach_status needs_verification/suspended)
+  // has just proven the account collects, and enrollConsentedMethod
+  // refuses bank targets while ach_status is unhealthy. Resetting first
+  // means the enrollment attempt sees the healthy state; the old
+  // reset-after ordering left the debit cleared but the method
+  // saved-only with no second enrollment attempt (Codex #2507 round-6).
+  const pmType = paymentIntent.payment_method_types?.[0] || paymentIntent.last_payment_error?.payment_method?.type;
+  if (pmType === 'us_bank_account') {
+    try {
+      const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
+      if (payment?.customer_id) {
+        // Third-party Bill-To: a payer/AP bank transfer clearing must not
+        // reactivate the homeowner's suspended/needs-verification ACH state —
+        // the payer's payment row sits under the service customer's id but is
+        // not the homeowner's bank account. (Symmetric to the handleAchFailure
+        // guard.)
+        const achInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null);
+        if (achInvoice?.payer_id) {
+          logger.info(`[stripe-webhook] ACH success on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — not resetting homeowner ACH state`);
+        } else {
+          await db('ach_failure_log')
+            .where({ customer_id: payment.customer_id, resolved: false })
+            .update({ resolved: true, resolution: 'retry_success' })
+            .catch(() => {});
+          await db('customers').where({ id: payment.customer_id })
+            .update({ ach_status: 'active', ach_failure_count: 0 })
+            .catch(() => {});
+          logger.info(`[stripe-webhook] ACH success — reset failure state for customer ${payment.customer_id}`);
+        }
+      }
+    } catch { /* non-critical */ }
+  }
 }
 
 /**
@@ -3217,6 +3240,72 @@ async function handleRefundFailed(refund) {
     });
     if (!notif) throw new Error('refund-failure notification insert failed');
   };
+
+  // Combined full-balance charge (payIncludeBalance): the full-refund
+  // handler stamped this refund onto EVERY allocation row, so its bounce
+  // must unwind every row and restore every invoice — the single-row path
+  // below would restore only .first() and leave the siblings 'refunded'
+  // with their credit returned while Stripe kept the whole charge (codex
+  // r3 P1). Partial refunds never stamp combined rows (they park for the
+  // operator), so a stamped refund here is by construction the full one:
+  // the unwind is a clean full reversal per row.
+  {
+    let combinedRefundMeta = {};
+    try {
+      combinedRefundMeta = payment?.metadata
+        ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata)
+        : {};
+    } catch { combinedRefundMeta = {}; }
+    if (payment && combinedRefundMeta.combined_payment) {
+      const rowChargeId = chargeId || payment.stripe_charge_id || null;
+      const rowPiId = piId || payment.stripe_payment_intent_id || null;
+      await db.transaction(async (trx) => {
+        const rows = rowChargeId
+          ? await trx('payments').where({ stripe_charge_id: rowChargeId }).forUpdate()
+          : await trx('payments').where({ stripe_payment_intent_id: rowPiId }).forUpdate();
+        const restored = [];
+        let alreadyRecorded = false;
+        for (const row of rows) {
+          let meta = {};
+          try {
+            meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {};
+          } catch { meta = {}; }
+          const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
+          if (refundId && failedIds.includes(refundId)) { alreadyRecorded = true; continue; }
+          const stampedIds = Array.isArray(meta.stamped_refund_ids) ? meta.stamped_refund_ids : [];
+          const wasStamped = !!refundId && (row.stripe_refund_id === refundId || stampedIds.includes(refundId));
+          const nextMeta = {
+            ...meta,
+            failed_refund_ids: refundId ? [...failedIds, refundId] : failedIds,
+            ...(refundId && stampedIds.includes(refundId)
+              ? { stamped_refund_ids: stampedIds.filter((id) => id !== refundId) }
+              : {}),
+          };
+          if (!wasStamped) {
+            await trx('payments').where({ id: row.id }).update({ metadata: JSON.stringify(nextMeta) });
+            continue;
+          }
+          await trx('payments').where({ id: row.id }).update({
+            refund_amount: 0,
+            refund_status: null,
+            stripe_refund_id: null,
+            ...(row.status === 'refunded' ? { status: 'paid' } : {}),
+            metadata: JSON.stringify(nextMeta),
+          });
+          const invId = meta.invoice_id || null;
+          if (invId) {
+            const flipped = await trx('invoices')
+              .where({ id: invId, status: 'refunded' })
+              .update({ status: 'paid', updated_at: new Date() });
+            if (flipped > 0) restored.push(invId);
+          }
+        }
+        if (alreadyRecorded && !restored.length) return; // replay
+        await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: the full refund bounced — ${rows.length} allocation rows unwound to paid and ${restored.length} invoices restored. Account credit that returnAppliedCreditOnRefund restored per invoice may need manual claw-back (it is deliberately not auto-reversed).`);
+      });
+      return;
+    }
+  }
 
   if (!payment) {
     // Estimate-deposit refunds have no payments row — record the failed id
@@ -5526,6 +5615,70 @@ async function handleDisputeClosed(dispute) {
         logger.warn(`[stripe-webhook] statement S-${stmtByPi.id} dispute.closed (${status}) before settlement via PI ${dispute.payment_intent}`);
         return;
       }
+    }
+  }
+
+  // Combined full-balance charge (payIncludeBalance): dispute.created
+  // flipped EVERY allocation row disputed and reopened every invoice — the
+  // closure must apply the final outcome across the same set (codex r3
+  // P1); the single-row path below would restore only .first() and leave
+  // the sibling invoices overdue after Stripe reinstated the whole charge.
+  {
+    const combinedClosedRows = await db('payments').where({ stripe_charge_id: chargeId });
+    const rowMetaOf = (row) => {
+      try { return row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch { return {}; }
+    };
+    if (combinedClosedRows.length && combinedClosedRows.some((r) => rowMetaOf(r).combined_payment)) {
+      let restoredCount = 0;
+      for (const row of combinedClosedRows) {
+        const meta = rowMetaOf(row);
+        const finalRowMeta = JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status });
+        const invId = meta.invoice_id || meta.dispute_invoice_id || null;
+        if (status === 'won' || status === 'warning_closed') {
+          await db('payments').where({ id: row.id }).update({ status: 'paid', metadata: finalRowMeta });
+          if (invId) {
+            const invoice = await db('invoices').where({ id: invId }).first('id', 'status', 'stripe_payment_intent_id');
+            const invoicePi = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
+            const disputedPiId = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
+            // Same replacement guard as the single path: the reopen cleared
+            // the PI, so a non-null different PI means a replacement payment
+            // owns this invoice — never double-settle it.
+            if (invoice && invoice.status !== 'paid'
+              && (!invoicePi || (disputedPiId && invoicePi === disputedPiId))) {
+              await db('invoices').where({ id: invoice.id }).update({
+                status: 'paid',
+                paid_at: new Date().toISOString(),
+                stripe_payment_intent_id: row.stripe_payment_intent_id || null,
+                stripe_charge_id: row.stripe_charge_id || null,
+              });
+              restoredCount += 1;
+            }
+          }
+        } else if (status === 'lost') {
+          await db('payments').where({ id: row.id }).update({
+            status: 'disputed',
+            failure_reason: `Dispute lost — $${amount} returned to customer`,
+            metadata: finalRowMeta,
+          });
+          if (invId) {
+            await db('invoices')
+              .where({ id: invId })
+              .whereIn('status', ['paid', 'processing'])
+              .update({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: db.fn.now() });
+          }
+        } else {
+          await db('payments').where({ id: row.id }).update({ metadata: finalRowMeta });
+        }
+      }
+      try {
+        await NotificationService.notifyAdmin(
+          'dispute',
+          `Combined-payment dispute ${status}: $${amount}`,
+          `Dispute on combined balance charge ${chargeId} closed as ${status} — ${combinedClosedRows.length} rows finalized${status === 'won' || status === 'warning_closed' ? `, ${restoredCount} invoices restored to paid` : ''}.`,
+          { icon: status === 'won' ? '✅' : '❌', link: '/admin/invoices' },
+        );
+      } catch { /* non-critical */ }
+      return;
     }
   }
 
