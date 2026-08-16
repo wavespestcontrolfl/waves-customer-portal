@@ -1457,9 +1457,14 @@ function findUngroundedClaim(body, grounding) {
     if (!evid || claimNeg !== factNeg) return { kind: 'novel_term', term: 'access' };
   }
   // Photo-availability claims need a photo fact (r41 P2).
-  if (/\b(?:provided?|supplied|sent|shared)\s+(?:a\s+|the\s+)?photos?\b|\bphotos?\s+(?:provided|supplied|sent|shared|attached|on\s+file)\b/.test(outputText)
-    && (!/\bphotos?\b/.test(groundedValueText) || negNear(groundedValueText, 'photos?'))) {
-    return { kind: 'novel_term', term: 'photos' };
+  {
+    const photoClaim = /\b(?:provided?|supplied|sent|shared)\s+(?:a\s+|the\s+)?photos?\b|\bphotos?\s+(?:(?:were|are|was|is)\s+)?(?:not\s+)?(?:provided|supplied|sent|shared|attached|on\s+file)\b|\bno\s+photos?\b/.test(outputText);
+    if (photoClaim) {
+      const claimNeg = negNear(outputText, 'photos?');
+      const factHas = /\bphotos?\b/.test(groundedValueText);
+      const factNeg = negNear(groundedValueText, 'photos?');
+      if (!factHas || claimNeg !== factNeg) return { kind: 'novel_term', term: 'photos' };
+    }
   }
   // Appointment-status claims bind to fact values — the brief exists FOR a
   // scheduled visit, so "Appointment cancelled/confirmed" must be stated
@@ -1472,6 +1477,8 @@ function findUngroundedClaim(body, grounding) {
   // phrase in the wider facts that is NOT historically qualified —
   // "previous appointment cancelled" must not ground the active visit
   // (r41), but a recent-call fact "appointment confirmed" does.
+  const { lastVisit: _lvx, serviceHistory: _shx, ...currentFacts } = grounding.llmFacts || {};
+  const currentFactValueText = collectFactValues(currentFacts).join(' ; ').toLowerCase();
   const visitValueText = grounding.llmFacts?.visit
     ? collectFactValues(grounding.llmFacts.visit).join(' ; ').toLowerCase()
     : '';
@@ -1484,7 +1491,7 @@ function findUngroundedClaim(body, grounding) {
     body.open_scope,
     body.customer_context,
   ].filter(Boolean).join(' ').toLowerCase();
-  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:status\s*:?\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
+  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:status\s*:?\s+)?(?:(?:was|is|will\s+be|has\s+been|had\s+been|got)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const claimNegated = Boolean(m[1]);
     // Trailing coordinated statuses ("confirmed but later cancelled") are
     // separate claims (r60).
@@ -1494,14 +1501,14 @@ function findUngroundedClaim(body, grounding) {
       const tForms = [...new Set([...wordVariants(tStatus), tStatus])];
       const tInVisit = tForms.some((v) => visitValueText.includes(v));
       const tPhrase = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\b(?:appointments?|visits?|service)\\s+[^.;!?]{0,30}(?:${tForms.join('|')})\\b`);
-      if (!tInVisit && !tPhrase.test(groundedValueText)) {
+      if (!tInVisit && !tPhrase.test(currentFactValueText)) {
         return { kind: 'appointment_state', term: tStatus };
       }
     }
     const status = String(m[2] || m[3]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
     // Multi-word statuses ('en route', 'on site') match underscore forms too.
     const statusForms = [...new Set([...wordVariants(status.replace(/\s/g, '')), status, status.replace(/\s/g, '_'), status.replace(/\s/g, '')])];
-    const factNegated = statusForms.some((v) => negNear(groundedValueText, v));
+    const factNegated = statusForms.some((v) => negNear(currentFactValueText, v));
     if (claimNegated !== factNegated && (claimNegated || factNegated)) {
       return { kind: 'appointment_state', term: status };
     }
@@ -1511,7 +1518,7 @@ function findUngroundedClaim(body, grounding) {
     // current "appointment confirmed" fact grounds even when a historical
     // one also exists (r44 P2).
     const phraseRe = new RegExp(`(?<!\\b(?:previous|prior|last|old|earlier)\\s)\\b(?:appointments?|visits?|service|technician|tech)\\s+(?:was\\s+|is\\s+)?(?:${statusForms.join('|')})\\b(?!\\s+(?:(?:for|on|from|back)\\s+)?(?:last|yesterday|earlier|previously|weeks?|months?|days?|in\\s+\\w+)\\b)|\\b(?:${statusForms.join('|')})\\s+(?:appointments?|visits?)\\b(?!\\s)`);
-    const inGlobalPhrase = phraseRe.test(groundedValueText);
+    const inGlobalPhrase = phraseRe.test(currentFactValueText);
     if (!inVisit && !inGlobalPhrase) {
       return { kind: 'appointment_state', term: status };
     }
@@ -1522,17 +1529,17 @@ function findUngroundedClaim(body, grounding) {
   const instructionalText = [...(body.priorities || []), ...(body.watch_items || [])].join('. ').toLowerCase();
   // EVERY contact claim is validated, not just the first (r46).
   const contactClaims = [
-    ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:that\s+(?:you|we|the\s+tech(?:nician)?)\s+)?(?:(?:you|us|the\s+tech(?:nician)?)\s+)?(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?|contact)(?:\s+(?:and|or)\s+(call(?:s|back)?|texts?|sms|emails?))?\b/g),
+    ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:that\s+(?:you|we|the\s+tech(?:nician)?)\s+)?(?:(?:you|us|the\s+tech(?:nician)?)\s+)?(?:for\s+|to\s+)?(not\s+to\s+|no\s+)?(?:be\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back|ed)?|text(?:s|ed)?|sms|email(?:s|ed)?|updates?|contact(?:ed)?)(?:\s+(?:and|or)\s+(call(?:s|back)?|texts?|sms|emails?))?\b/g),
     ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email|contact)\s+(?:the\s+)?customer\b/g)],
     // Imperative channel verbs with implicit customer ("Please call
     // before arrival") in INSTRUCTION fields (r51).
     ...[...instructionalText.matchAll(/(?:^|[.;!?]\s*)(?:please\s+)?(do\s+not\s+|don't\s+)?(call|text|email|contact)\s+(?:before|after|prior|when|upon|on\s+arrival|ahead)\b/g)],
   ];
   for (const contactReq of contactClaims)
-  for (const channel of [contactReq[2], contactReq[3]].filter(Boolean).map((c) => c.replace(/s$/, ''))) {
+  for (const channel of [contactReq[2], contactReq[3]].filter(Boolean).map((c) => c.replace(/s$/, '').replace(/ed$/, ''))) {
     const negatedClaim = Boolean(contactReq[1]);
     const hasRequestVerb = /\b(?:ask|asked|asks|request|requested|requests|want|wants|wanted|prefer|prefers|preferred)\b/.test(groundedValueText);
-    const bareChannel = channel.replace(/back$/, '');
+    const bareChannel = channel.replace(/back$/, '').replace(/ed$/, '');
     // Polarity (r41): a NEGATED preference near the channel ("does not
     // want email") must not ground the positive claim.
     // The negation window must not cross ANOTHER channel word — "not …
@@ -1803,7 +1810,8 @@ function findUngroundedClaim(body, grounding) {
     // EVERY sentence mentioning the word must match fact polarity — a
     // supported negative sentence must not mask a contradictory positive
     // one (r52).
-    for (const sentence of outputText.split(/[.;!?]/)) {
+    for (const fieldStr of outputFields.map((f) => String(f).toLowerCase()))
+    for (const sentence of fieldStr.split(/[.;!?]/)) {
       if (!new RegExp(`\\b${pw}\\b`).test(sentence)) continue;
       const outNeg = negNear(sentence, pw);
       if (outNeg !== factNeg) return { kind: 'polarity_conflict', term: pw };

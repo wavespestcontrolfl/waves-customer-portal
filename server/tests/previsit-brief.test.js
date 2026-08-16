@@ -3449,3 +3449,38 @@ describe('codex #3423 r60 — compound channels, trailing statuses, clause suffi
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r61 — historical fields, future tense, passive requests, photo polarity, field-scoped polarity', () => {
+  test('r61 rejection cases', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const histNote = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, lastVisit: { recap: 'ok' }, serviceHistory: [{ notes: 'Appointment cancelled by customer' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment cancelled' },
+      histNote,
+    ).reason).toMatch(/appointment_state/);
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'The visit will be cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer requested to be called before arrival' },
+      empty,
+    ).reason).toMatch(/contact_request/);
+    const photosYes = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'photos provided by customer' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Photos were not provided' },
+      photosYes,
+    ).reason).toBeTruthy();
+  });
+
+  test('cross-field negation does not poison truthful pet claims', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const hasPets = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has pets' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['No action needed'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has pets' },
+      hasPets,
+    ).body).toBeTruthy();
+  });
+});
