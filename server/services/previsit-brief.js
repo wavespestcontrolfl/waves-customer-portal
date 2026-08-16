@@ -923,7 +923,7 @@ const COMMON_PROSE_WORDS = new Set([
   'checking', 'clear', 'close', 'closet', 'complete', 'completed', 'concern', 'concerns', 'condition', 'conditions',
   'confirm', 'confirmed', 'contact', 'continue', 'continued', 'corner', 'corners', 'coverage', 'covered', 'crawl',
   'credit', 'current', 'customer', 'cycle', 'daytime', 'detail', 'details', 'discussed', 'dispatch',
-  'document', 'driveway', 'during', 'earlier', 'early', 'entry', 'estimate', 'evening', 'every', 'expect',
+  'document', 'driveway', 'during', 'earlier', 'early', 'entry', 'evening', 'every', 'expect',
   'expects', 'extra', 'family', 'fence', 'fencing', 'first', 'flag', 'flagged', 'focus', 'follow',
   'following', 'front', 'garage', 'garden', 'gate', 'gates', 'gutter', 'gutters', 'heavy', 'hedge',
   'hedges', 'history', 'home', 'hours', 'inspect', 'inspected', 'inspection', 'inside', 'issue',
@@ -982,7 +982,6 @@ const COMMON_PROSE_WORDS = new Set([
   'context', 'account', 'accounts',
   'information',
   'retrieve',
-  'transition', 'transitions',
   'introduction', 'discuss', 'discussing', 'relevant', 'mindful',
   'vacuum', 'vacuuming', 'follow-up', 'walk-through',
 ]);
@@ -1008,6 +1007,8 @@ const GROUNDED_ONLY_WORDS = new Set([
   // r23: treatment claims ("Performed treatment") assert service history
   // in ANY field — a brief may only claim treatment a fact evidences.
   'treatment', 'treatments',
+  // r24: "Estimate provided" is an estimate-delivery claim in ANY field.
+  'estimate', 'estimates',
 ]);
 
 // Instruction objects carrying these words direct real business actions
@@ -1017,7 +1018,7 @@ const GROUNDED_ONLY_WORDS = new Set([
 // (payment/invoice/refund/billing graduated to GROUNDED_ONLY_WORDS in r10
 // — they require evidence in EVERY field, not just instructions.)
 const INSTRUCTION_EVIDENCE_WORDS = new Set([
-  'estimate', 'estimates', 'quote', 'quotes',
+  'quote', 'quotes',
   'credit', 'credits', 'balance', 'discount', 'discounts',
   // r15: access-security objects ("Retrieve gate key/access card") are
   // fabricatable from common words — the access noun must be evidenced.
@@ -1078,6 +1079,12 @@ function wordVariants(word) {
   if (word.endsWith('ing')) out.push(word.slice(0, -3), `${word.slice(0, -3)}e`);
   if (word.endsWith('ed')) out.push(word.slice(0, -2), word.slice(0, -1));
   if (word.endsWith('ly')) out.push(word.slice(0, -2));
+  // Noun-of-action inflection (r24): 'treatment' must ground on
+  // 'treat'/'treated'/'treating' in the facts.
+  if (word.endsWith('ment') || word.endsWith('ments')) {
+    const stem = word.replace(/ments?$/, '');
+    out.push(stem, `${stem}ed`, `${stem}ing`, `${stem}s`);
+  }
   return out;
 }
 
@@ -1186,6 +1193,9 @@ function findUngroundedClaim(body, grounding) {
     // visit.newCustomer === true is likewise the only first-visit fact —
     // without this token every truthful "Initial visit" re-templates (r14).
     ...(grounding.llmFacts?.visit?.newCustomer === true ? ['initial'] : []),
+    // A present estimate object is THE estimate fact (r24) — its values
+    // rarely contain the literal word.
+    ...(grounding.llmFacts?.openScope?.pendingEstimate || grounding.llmFacts?.openScope?.sourceEstimate ? ['estimate'] : []),
   ].join(' ').toLowerCase();
   const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const kind of ['names', 'targets']) {

@@ -2115,7 +2115,9 @@ describe('codex #3423 r20 — noncanonical suffix, field-wide evidence', () => {
       { priorities: ['Provide customer with more information on estimate'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
       grounding,
     );
-    expect(verdict.reason).toBe('ungrounded_instruction:estimate');
+    // r24: 'estimate' graduated to GROUNDED_ONLY — the rare-word pass now
+    // owns it field-wide; the reason label moved but the rejection stands.
+    expect(verdict.reason).toMatch(/estimate/);
   });
 });
 
@@ -2158,5 +2160,45 @@ describe('codex #3423 r23 — treatment claims ground in descriptive fields too'
       { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Performed treatment', open_scope: null, customer_context: null },
       grounded,
     ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r24 — estimate claims, treatment inflections, transition', () => {
+  test('"Estimate provided" rejects descriptively without an estimate; passes with one', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Estimate provided', open_scope: null, customer_context: null },
+      empty,
+    ).reason).toBeTruthy();
+    const grounded = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { pendingEstimate: { tier: 'Bronze', status: 'sent' } } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate provided', customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+
+  test('"Performed treatment" grounds on treated/treating history wording', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { lastVisit: { recap: 'Treated exterior perimeter with Bifen IT' } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Performed treatment', open_scope: null, customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('"Account transition pending" rejects on empty facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Account transition pending' },
+      grounding,
+    ).reason).toBeTruthy();
   });
 });
