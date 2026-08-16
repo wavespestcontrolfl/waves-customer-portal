@@ -1112,6 +1112,13 @@ const SHORT_ORGANISM_RE = /\b(rats?|bats?|bugs?|mouse|mice|ants?|bees?|fly|flies
 // preference does not, so SMS goes through the normal grounded-ALLCAPS path.
 const ACRONYM_PROSE_WORDS = new Set(['am', 'pm', 'et', 'est', 'edt', 'asap', 'hoa', 'ac', 'id', 'ok', 'po', 'llc', 'inc', 'na']);
 
+// Negation within a clause window of a word — shared by the polarity
+// guards (codex #3423 r57).
+function negNear(text, word) {
+  return new RegExp(`\\b(?:no|not|never|without|denied|isn't|wasn't)\\b[^.;!?]{0,25}\\b${word}`, 'i').test(text)
+    || new RegExp(`\\b${word}\\b[^.;!?]{0,20}\\b(?:not|never|denied)\\b`, 'i').test(text);
+}
+
 // Light stemming for the rare-word pass — plurals/participles of known or
 // grounded words must not read as novel.
 function wordVariants(word) {
@@ -1419,7 +1426,7 @@ function findUngroundedClaim(body, grounding) {
   }
   // Completed-work phrasing in ANY field needs a prior visit (r55).
   if (!grounding.llmFacts?.lastVisit
-    && /\b(?:service|work|treatment|visit)\s+(?:was\s+|has\s+been\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:service|work|treatment)\b/.test(outputText)) {
+    && /\b(?:service|work|treatment|visit)\s+(?:was\s+|has\s+been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:service|work|treatment)\b/.test(outputText)) {
     return { kind: 'fabricated_history', term: 'no prior visit on file' };
   }
   // Spelled-out short quantities before time units are numeric claims —
@@ -1439,12 +1446,16 @@ function findUngroundedClaim(body, grounding) {
   if (/\bhistory\s+of\b/.test(outputText) && !hasRealHistory) {
     return { kind: 'novel_term', term: 'history' };
   }
-  if (ACCESS_STATE_RE.test(outputText) && !(/\baccess\b/.test(groundedValueText) && ACCESS_STATE_RE.test(groundedValueText))) {
-    return { kind: 'novel_term', term: 'access' };
+  const accessClaim = ACCESS_STATE_RE.test(outputText) || /\baccess\s+(?:(?:has\s+been|was|is)\s+)?not\s+(?:granted|provided|given|arranged|available|confirmed|authorized)\b/i.test(outputText);
+  if (accessClaim) {
+    const evid = /\baccess\b/.test(groundedValueText) && (ACCESS_STATE_RE.test(groundedValueText) || negNear(groundedValueText, 'access'));
+    const claimNeg = negNear(outputText, 'access');
+    const factNeg = negNear(groundedValueText, 'access');
+    if (!evid || claimNeg !== factNeg) return { kind: 'novel_term', term: 'access' };
   }
   // Photo-availability claims need a photo fact (r41 P2).
   if (/\b(?:provided?|supplied|sent|shared)\s+(?:a\s+|the\s+)?photos?\b|\bphotos?\s+(?:provided|supplied|sent|shared|attached|on\s+file)\b/.test(outputText)
-    && !/\bphotos?\b/.test(groundedValueText)) {
+    && (!/\bphotos?\b/.test(groundedValueText) || negNear(groundedValueText, 'photos?'))) {
     return { kind: 'novel_term', term: 'photos' };
   }
   // Appointment-status claims bind to fact values — the brief exists FOR a
@@ -1470,10 +1481,16 @@ function findUngroundedClaim(body, grounding) {
     body.open_scope,
     body.customer_context,
   ].filter(Boolean).join(' ').toLowerCase();
-  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
-    const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
+  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:scheduled\s+)?(?:(?:for|on)\s+)?(?:next\s+|this\s+|last\s+)?(?:today|tomorrow|tonight|\w+day)\s+)?(?:(?:scheduled\s+)?(?:for|on)\s+(?:next\s+|this\s+)?\w+\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(?:(not)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
+    const claimNegated = Boolean(m[1]);
+    const status = String(m[2] || m[3]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
     // Multi-word statuses ('en route', 'on site') match underscore forms too.
     const statusForms = [...new Set([...wordVariants(status.replace(/\s/g, '')), status, status.replace(/\s/g, '_'), status.replace(/\s/g, '')])];
+    const factNegated = statusForms.some((v) => negNear(groundedValueText, v));
+    if (claimNegated !== factNegated && (claimNegated || factNegated)) {
+      return { kind: 'appointment_state', term: status };
+    }
+    if (claimNegated && factNegated) continue; // negation grounded
     const inVisit = statusForms.some((v) => visitValueText.includes(v));
     // Lookbehind blocks the historical qualifier PER PHRASE — a separate
     // current "appointment confirmed" fact grounds even when a historical
@@ -1539,13 +1556,15 @@ function findUngroundedClaim(body, grounding) {
   ].filter(Boolean).join(' ').toLowerCase();
   // Only tier CLAIMS bind to tier fields (r46 P2) — a grounded HOA or
   // product name containing a tier word is not a membership assertion.
-  for (const m of outputText.matchAll(/\b(bronze|silver|gold|platinum)\s+(?:member(?:ship)?|tier|plan|level|customer|client|account|status)\b|\b(?:member(?:ship)?|tier|plan|level)\s*[:\-]?\s*(bronze|silver|gold|platinum)\b|\baccepted\s+(bronze|silver|gold|platinum)\b|\b(?:is|was|as)\s+(?:a\s+|an\s+)?(bronze|silver|gold|platinum)\b/g)) {
+  for (const m of outputText.matchAll(/\b(bronze|silver|gold|platinum)\s+(?:member(?:ship)?|tier|plan|level|customer|client|account|status)\b|\b(?:member(?:ship)?|tier|plan|level)\s*[:\-]?\s*(bronze|silver|gold|platinum)\b|\baccepted\s+(bronze|silver|gold|platinum)\b|\b(?:is|was|as)\s+(?:not\s+)?(?:a\s+|an\s+)?(bronze|silver|gold|platinum)\b/g)) {
     const tier = m[1] || m[2] || m[3] || m[4];
     // member/customer/copular shapes = MEMBERSHIP claims; accepted/tier/
     // plan shapes may also describe the estimate.
     const membershipShaped = Boolean(m[1] && /member|customer|client|account|status/.test(m[0])) || Boolean(m[4]);
     const scope = membershipShaped ? membershipTierText : tierText;
-    if (!new RegExp(`\\b${tier}\\b`).test(scope)) {
+    const claimNeg = negNear(outputText, tier);
+    if (!new RegExp(`\\b${tier}\\b`).test(scope) || (claimNeg && membershipShaped)) {
+      // A negated membership claim contradicts the grounded tier itself.
       return { kind: 'novel_term', term: tier };
     }
   }
@@ -1728,6 +1747,16 @@ function findUngroundedClaim(body, grounding) {
   // conditions — grounded when the values mention activity, real history
   // exists, or the qualifying subject itself is value-grounded ("ant
   // activity" over an ants fact — the fact IS the activity) (r44).
+  if (groundedValueText.includes('activit')) {
+    // Polarity: 'reported no pest activity' must not ground the positive
+    // claim (r57).
+    const factNegAct = negNear(groundedValueText, 'activit');
+    for (const sentence of outputText.split(/[.;!?]/)) {
+      if (!/\bactivity\b/.test(sentence)) continue;
+      const claimNegAct = negNear(sentence, 'activity');
+      if (claimNegAct !== factNegAct) return { kind: 'polarity_conflict', term: 'activity' };
+    }
+  }
   if (!groundedValueText.includes('activit')) {
     for (const m of outputText.matchAll(/(?:\b([a-z][a-z'-]*)\s+)?\bactivity\b/g)) {
       const subject = m[1];

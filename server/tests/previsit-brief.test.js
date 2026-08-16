@@ -3320,3 +3320,39 @@ describe('codex #3423 r56 — weekday qualifiers, implicit contact, membership s
     ).reason).toMatch(/activity/);
   });
 });
+
+describe('codex #3423 r57 — polarity everywhere', () => {
+  test('negated inversions reject across guards', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const confirmed = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'appointment confirmed for Thursday' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment is not confirmed' },
+      confirmed,
+    ).reason).toMatch(/appointment_state/);
+    const accessGranted = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'property access was granted by the office' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Property access was not granted' },
+      accessGranted,
+    ).reason).toBeTruthy();
+    const goldMember = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { membership: { tier: 'Gold' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer is not Gold' },
+      goldMember,
+    ).reason).toBeTruthy();
+    const noActivity = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer reported no pest activity' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer reported pest activity' },
+      noActivity,
+    ).reason).toMatch(/polarity_conflict/);
+    const noPhotos = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer said no photos were provided' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Photos provided' },
+      noPhotos,
+    ).reason).toBeTruthy();
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Service was previously performed' },
+      empty,
+    ).reason).toMatch(/fabricated_history/);
+  });
+});
