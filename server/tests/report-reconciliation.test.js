@@ -479,6 +479,29 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.bodySource).toBeUndefined();
   });
 
+  // r54 (#3420): inspection-only exclusion visits recorded no repairs.
+  test('rodent_exclusion inspection-only accepts truthful no-repairs copy, refuses repair claims', () => {
+    const base = {
+      projectType: 'rodent_exclusion',
+      values: { exclusion_work_completed: 'Inspection only', remaining_concerns: 'No remaining concerns observed' },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+    };
+    const truthful = buildTodaysResult({
+      ...base,
+      technicianReportBody: 'No exclusion repairs were completed today; we inspected all accessible entry areas.',
+    });
+    expect(truthful.bodySource).toBe('technician_report');
+    expect(truthful.headline).toBe('An exclusion inspection was completed to identify potential rodent access points.');
+    const claiming = buildTodaysResult({
+      ...base,
+      technicianReportBody: 'We sealed two gaps at the soffit line today.',
+    });
+    expect(claiming.bodySource).toBeUndefined();
+    expect(claiming.headline).toBe('An exclusion inspection was completed to identify potential rodent access points.');
+  });
+
   // r53 (#3420): story-lane TREND visits consume the reviewed body.
   test('rodent_exclusion trend visit consumes a clean body and refuses a repair denial', () => {
     const base = {

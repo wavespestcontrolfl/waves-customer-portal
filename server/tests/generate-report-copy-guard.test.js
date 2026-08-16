@@ -327,6 +327,11 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // passive occupancy forms, clock and duration (r54)
+    expect(reportCopyRejection('The treated area may be entered after 4 PM.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The room may be reoccupied after two hours.')).toMatch(/^banned:/);
+    // reverse credential order with a temporal adverb (r54)
+    expect(reportCopyRejection('BLUE is now the gate code.')).toBe('access_code');
     // clock-time forms state the same fixed window (r53)
     expect(reportCopyRejection('Enter the treated area at 4:30 PM.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Stay off the treated lawn until 6 PM.')).toMatch(/^banned:/);

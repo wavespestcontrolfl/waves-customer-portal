@@ -74,7 +74,7 @@ const REPORT_ACCESS_CODE_RES = [
   // UPPERCASE/quoted tokens get the same short positional window the digit
   // shapes already have before keypad/lockbox ("Use BLUE at the keypad") —
   // the uncovered reverse-alphabetic × device-noun intersection (codex r46)
-  /\b(?!(?:this|that|it|here|there|what|which|below|above)\b)["'‘’“”]?[a-z0-9#*]{2,12}["'‘’“”]?\s+(?:is|=|was|were|remains?|remained|stays?|stayed|became|becomes)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
+  /\b(?!(?:this|that|it|here|there|what|which|below|above)\b)["'‘’“”]?[a-z0-9#*]{2,12}["'‘’“”]?\s+(?:is|=|was|were|remains?|remained|stays?|stayed|became|becomes)\s+(?:(?:now|currently|still|today|temporarily|again)\s+)?(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
   // ... and the positional window covers the ordinary code nouns too
   // ("Use BLUE for the gate code" / "for the password") — device nouns
   // alone left that intersection open (codex r47)

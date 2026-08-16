@@ -11610,7 +11610,15 @@ export function CompletionPanel({
     setAiReportUsed(!deterministic);
     // Capture the tech's own notes the FIRST time a draft replaces them —
     // an untouched installed draft is never the grounding for regeneration.
-    if (notes.trim() !== String(generatedReportTextRef.current || "").trim()) {
+    // An EDITED older draft still carries the two-section report shape and
+    // must not be captured either: invalidation would restore it and
+    // completion would publish stale generated copy that predates the
+    // final findings (codex r54). Only genuinely handwritten notes ground
+    // a regeneration; the previous handwritten capture is kept otherwise.
+    const notesLookGenerated = /^\s*WHAT WE DID:?\s*$/m.test(notes)
+      && /^\s*WHAT WE FOUND:?\s*$/m.test(notes);
+    if (!notesLookGenerated
+      && notes.trim() !== String(generatedReportTextRef.current || "").trim()) {
       preGenerationNotesRef.current = notes;
     }
     generatedReportTextRef.current = String(reportText || "").trim();

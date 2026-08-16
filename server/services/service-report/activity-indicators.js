@@ -3080,6 +3080,19 @@ const NO_REPAIRS_CLAIM_RE = /\bno\s+(?:exclusion\s+)?(?:repairs?|work)\s+(?:was|
 const RODENT_NOUN_SRC = '(?:rodents?|rats?|mice|mouse)';
 const NO_ACTIVITY_CLAIM_RE = new RegExp(`\\bno\\s+(?:current\\s+|visible\\s+|active\\s+)*(?:${RODENT_NOUN_SRC}\\s+)?activity\\b|\\bno\\s+(?:signs?|evidence)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\bno\\s+(?:current\\s+|visible\\s+|active\\s+|fresh\\s+|new\\s+|obvious\\s+)*${RODENT_NOUN_SRC}\\s+(?:evidence|signs?|droppings|indications?)\\b|\\bfree\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b(?:did\\s+not|didn['’]t|could\\s+not|couldn['’]t|have\\s+not|haven['’]t|has\\s+not|hasn['’]t|never)\\s+(?:find|found|observe[d]?|note[d]?|confirm(?:ed)?|detect(?:ed)?|see|seen|saw|spot(?:ted)?)\\b[^.!?]{0,40}\\b(?:${RODENT_NOUN_SRC}|activity)\\b|\\bno\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|seen|noted)\\b`, 'i');
 const ACTIVITY_FOUND_CLAIM_RE = new RegExp(`\\b(?:${RODENT_NOUN_SRC}\\s+)?activity\\s+(?:was|were|is)\\s+(?:found|observed|confirmed|noted|present)\\b|\\bactive\\s+${RODENT_NOUN_SRC}\\b|\\bevidence\\s+of\\s+${RODENT_NOUN_SRC}\\s+(?:was|were)\\s+(?:found|observed|noted)\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:a\\s+|an\\s+|the\\s+|some\\s+|several\\s+|multiple\\s+|two\\s+|three\\s+|a\\s+few\\s+)?(?:fresh\\s+|new\\s+|active\\s+|visible\\s+|recent\\s+|significant\\s+|clear\\s+|live\\s+|dead\\s+)*${RODENT_NOUN_SRC}\\b|\\b(?:found|observed|noted|detected|confirmed|spotted|saw)\\s+(?:signs?|evidence|droppings)\\s+of\\s+${RODENT_NOUN_SRC}\\b|\\b${RODENT_NOUN_SRC}\\s+(?:droppings?|evidence|signs?|tracks?|gnawing|nesting)\\b[^.!?]{0,30}\\b(?:was|were|is|are)\\s+(?:present|found|observed|visible|noted|seen|evident|discovered)\\b`, 'i');
+// "Inspection only" is a valid exclusion_work_completed chip — those
+// visits recorded NO repairs, so the repair-denial screen must not reject
+// truthful copy, and the composition must not claim completed repairs
+// (codex r54). Chips are exclusive by validation, but derive from the
+// recorded values rather than trusting that.
+function exclusionInspectionOnly(values = {}) {
+  const chips = String(values.exclusion_work_completed || '')
+    .split(',').map((s) => s.trim()).filter(Boolean).filter((c) => c !== 'Other');
+  return chips.length > 0 && chips.every((c) => c === 'Inspection only');
+}
+// The reverse contradiction for inspection-only visits: a body claiming
+// repair work was performed.
+const REPAIRS_DONE_CLAIM_RE = /\brepairs?\s+(?:was|were)\s+(?:completed|performed|made|done|finished)\b|\bcompleted\s+(?:the\s+)?(?:permanent\s+)?(?:exclusion\s+)?repairs?\b|\bsealed\s+(?:the\s+|an?\s+|two\s+|three\s+|several\s+)?(?:entry|gaps?|openings?|holes?|points?)\b|\binstalled\s+(?:hardware\s+cloth|mesh|sealant|door\s+sweeps?|screens?)\b|\breinforced\s+(?:the\s+|an?\s+)?openings?\b/i;
 // True when a reviewed body contradicts the recorded story facts of an
 // exclusion/inspection section — used by the first-visit story branches
 // AND the gauge branch their trend visits land in (codex r53).
@@ -3087,7 +3100,12 @@ function rodentStoryBodyContradiction(projectType, values = {}, text = '') {
   const body = String(text || '');
   if (!body.trim()) return false;
   if (projectType === 'rodent_exclusion') {
-    return Boolean(values.exclusion_work_completed) && NO_REPAIRS_CLAIM_RE.test(body);
+    if (!values.exclusion_work_completed) return false;
+    // strip denial phrasing first so "no repairs were completed" never
+    // reads as a repairs-performed claim
+    return exclusionInspectionOnly(values)
+      ? REPAIRS_DONE_CLAIM_RE.test(body.replace(new RegExp(NO_REPAIRS_CLAIM_RE.source, 'gi'), ''))
+      : NO_REPAIRS_CLAIM_RE.test(body);
   }
   if (projectType === 'rodent_inspection') {
     const recorded = String(values.activity_found || '');
@@ -3358,8 +3376,12 @@ function buildTodaysResult({
     // completed" / "we were unable to complete the repairs" deny the
     // recorded work just as plainly as "no repairs were completed"
     // (codex r46; regex hoisted to module scope in r53)
+    // Inspection-only visits recorded NO repairs (codex r54): truthful
+    // no-repairs copy is legal there, a repairs-performed claim is the
+    // contradiction, and the composition must not claim completed repairs.
+    const inspectionOnlyVisit = exclusionInspectionOnly(values);
     const exclusionReportBody = technicianReportBody
-      && (reconcileConfirmed || !NO_REPAIRS_CLAIM_RE.test(String(technicianReportBody)))
+      && (reconcileConfirmed || !rodentStoryBodyContradiction('rodent_exclusion', values, technicianReportBody))
       ? technicianReportBody
       : null;
     const exclusionMandated = [
@@ -3372,14 +3394,18 @@ function buildTodaysResult({
       ? [exclusionReportBody]
       : [
         areas.length
-          ? `Completed rodent exclusion work today around the ${joinPhrases(areas)}.`
-          : 'Completed rodent exclusion work today.',
-        points.length ? `Entry points addressed included the ${joinPhrases(points)}.` : null,
+          ? `Completed ${inspectionOnlyVisit ? 'a rodent exclusion inspection' : 'rodent exclusion work'} today around the ${joinPhrases(areas)}.`
+          : `Completed ${inspectionOnlyVisit ? 'a rodent exclusion inspection' : 'rodent exclusion work'} today.`,
+        points.length
+          ? `${inspectionOnlyVisit ? 'Possible entry points noted' : 'Entry points addressed'} included the ${joinPhrases(points)}.`
+          : null,
         whatWeDid,
         materials.length ? `Materials used included ${joinPhrases(materials)}.` : null,
       ].filter(Boolean);
     return {
-      headline: 'Exclusion repairs were completed to reduce rodent access and help prevent re-entry.',
+      headline: inspectionOnlyVisit
+        ? 'An exclusion inspection was completed to identify potential rodent access points.'
+        : 'Exclusion repairs were completed to reduce rodent access and help prevent re-entry.',
       body: [...exclusionDescriptive, ...exclusionMandated].join(' ').replace(/\s+/g, ' ').trim(),
       nextStep,
       ...(exclusionReportBody ? { bodySource: 'technician_report' } : {}),
@@ -4041,7 +4067,9 @@ const TIME_UNIT_SRC = '(?:minutes?|mins?|hours?|hrs?|half[-\\s]?hours?)';
 // (codex r52/r53). "keep an eye out" carries no of/off/away-from and stays
 // legal; "avoid" is scoped to treated-surface nouns so agronomic
 // aftercare ("avoid mowing for 48 hours") stays legal too.
-const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|dry(?:ing|s)?|dried)';
+// Passive occupancy forms are anchored on be/been/being so completed-action
+// prose ("we entered through the side gate") never matches (codex r54).
+const REENTRY_VERB_SRC = '(?:re-?ent(?:er|ry)|enter(?:ing)?|occupy(?:ing)?|return(?:ing)?|go(?:es|ing)?\\s+back|com(?:e|es|ing)\\s+back|reoccupy(?:ing)?|walk(?:ing)?\\s+on|let\\s+(?:pets|children|kids)\\b|keep[^.!?]{0,25}\\b(?:out\\s+of|off|away\\s+from)\\b|stay(?:ing)?\\s+(?:out\\s+of|off|away\\s+from)|avoid\\s+(?:the\\s+)?(?:treated|sprayed)\\s+(?:areas?|lawn|turf|yard|rooms?|surfaces?)|(?:be|been|being)\\s+(?:safely\\s+)?(?:re-?)?(?:entered|occupied|reoccupied|used|accessed)|dry(?:ing|s)?|dried)';
 // Clock times state the same fixed re-entry window as durations
 // (codex r53): "Enter the treated area at 4:30 PM", "Stay off until 6 PM".
 const CLOCK_TIME_SRC = '(?:\\d{1,2}:\\d{2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?|\\d{1,2}\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight)';
