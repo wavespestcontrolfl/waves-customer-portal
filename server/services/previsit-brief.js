@@ -1013,8 +1013,15 @@ const GROUNDED_ONLY_WORDS = new Set([
   // r28: entry/payment-method state ("provided gate access"/"credit card")
   // is claimable in ANY field — and access codes never pass through the
   // LLM by design, so an ungrounded access claim is always invented.
-  'gate', 'gates', 'access', 'card', 'cards', 'key', 'keys', 'fob', 'fobs', 'credit', 'credits',
+  // 'key'/'keys' are NOT here (r29 P2): "Key concern" is ordinary
+  // emphasis — credential usage is detected contextually via
+  // KEY_CREDENTIAL_RE instead.
+  'gate', 'gates', 'access', 'card', 'cards', 'fob', 'fobs', 'credit', 'credits',
 ]);
+
+// 'key' as an access credential ("door key", "key under the mat") must
+// ground; 'key' as emphasis ("key concern") is prose (codex #3423 r29).
+const KEY_CREDENTIAL_RE = /\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\s+keys?\b|\bkeys?\s+(?:under|hidden|inside|behind|left|beneath)\b/i;
 
 // Instruction objects carrying these words direct real business actions
 // ("Provide estimate", "Discuss payment", "Perform treatment") — inside
@@ -1032,6 +1039,8 @@ const INSTRUCTION_EVIDENCE_WORDS = new Set([
   // r27: safety-related directives ("Discuss chemical sensitivity") must
   // derive from a sensitivity fact.
   'chemical', 'chemicals', 'sensitivity', 'sensitivities',
+  // r29: account-lifecycle directives ("Discuss renewal/membership").
+  'renewal', 'renewals', 'membership', 'memberships',
 ]);
 
 // Word-level grounding for one candidate word ACROSS its stem variants.
@@ -1087,11 +1096,11 @@ function wordVariants(word) {
   if (word.endsWith('ly')) out.push(word.slice(0, -2));
   // -ies plural (r28): 'sensitivities' must reach 'sensitivity'.
   if (word.endsWith('ies')) out.push(`${word.slice(0, -3)}y`);
-  // Noun-of-action inflection (r24): 'treatment' must ground on
-  // 'treat'/'treated'/'treating' in the facts.
-  if (word.endsWith('ment') || word.endsWith('ments')) {
-    const stem = word.replace(/ments?$/, '');
-    out.push(stem, `${stem}ed`, `${stem}ing`, `${stem}s`);
+  // Noun-of-action inflection (r24, narrowed r29): ONLY the intentional
+  // treatment<->treat pair — a generic -ment rule equated department with
+  // depart and settlement with settle, false-grounding invented claims.
+  if (word === 'treatment' || word === 'treatments') {
+    out.push('treat', 'treated', 'treating', 'treats');
   }
   return out;
 }
@@ -1204,6 +1213,8 @@ function findUngroundedClaim(body, grounding) {
     // A present estimate object is THE estimate fact (r24) — its values
     // rarely contain the literal word.
     ...(grounding.llmFacts?.openScope?.pendingEstimate || grounding.llmFacts?.openScope?.sourceEstimate ? ['estimate', 'quote'] : []),
+    // A present membership object IS the membership fact (r29).
+    ...(grounding.llmFacts?.membership ? ['membership'] : []),
     // The overdue_balance flag IS billing evidence — its detail ('$100.00
     // outstanding') doesn't carry the words (r27 P2).
     ...((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance') ? ['billing', 'invoice', 'payment', 'balance'] : []),
@@ -1501,10 +1512,13 @@ function findUngroundedClaim(body, grounding) {
     for (const m of String(field).toLowerCase().matchAll(/[a-z][a-z'-]{2,}/g)) {
       const word = m[0];
       // Short tokens are only examined when they are grounded-only
-      // vocabulary ('key', 'fob') — everything else below 4 letters keeps
-      // the historical exemption (r28).
+      // vocabulary ('fob') or credential 'key' usage — everything else
+      // below 4 letters keeps the historical exemption (r28/r29).
       if (word.length < 4) {
         if (GROUNDED_ONLY_WORDS.has(word) && !groundedWordOk(word, groundedText, groundedValueText)) {
+          return { kind: 'novel_term', term: word };
+        }
+        if (word === 'key' && KEY_CREDENTIAL_RE.test(String(field)) && !groundedWordOk('key', groundedText, groundedValueText)) {
           return { kind: 'novel_term', term: word };
         }
         continue;

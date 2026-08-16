@@ -2347,3 +2347,47 @@ describe('codex #3423 r28 — descriptive access/card claims, Ltd suffix, -ies s
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r29 — key emphasis, -ment stemming, renewal/membership directives', () => {
+  test('"Key concern" emphasis passes while credential keys still ground', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'ant activity near patio' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['Key concern: ant activity'], mentioned_terms: ['ant'], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('the -ment stemmer no longer equates unrelated words', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'Customer departed property; issue settled yesterday' }] },
+    };
+    for (const claim of ['Customer contacted department', 'Settlement completed']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('renewal/membership directives need account-lifecycle facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Discuss renewal', 'Discuss membership', 'Provide renewal information']) {
+      expect(validateBriefJson(
+        { priorities: [claim], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { membership: { tier: 'Bronze' } } };
+    expect(validateBriefJson(
+      { priorities: ['Discuss membership'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+});
