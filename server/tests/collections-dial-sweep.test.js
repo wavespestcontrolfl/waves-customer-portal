@@ -29,7 +29,7 @@ const NOW = new Date('2026-08-12T15:30:00Z'); // Wed 11:30 ET — in window
 
 function candidateChain(rows) {
   const q = { _wheres: [] };
-  ['whereIn', 'where', 'whereRaw', 'whereNull', 'orWhere', 'orderBy', 'limit'].forEach((m) => {
+  ['whereIn', 'where', 'whereRaw', 'whereNotExists', 'whereNull', 'orWhere', 'orderBy', 'limit'].forEach((m) => {
     q[m] = jest.fn(() => q);
   });
   q.select = jest.fn(async () => rows);
@@ -278,5 +278,41 @@ describe('gh-r6', () => {
     const res = await runCollectionsDialSweep({ now: NOW });
     expect(res.skipped).toBe(false);
     expect(res.reclaimed).toBe(0);
+  });
+});
+
+// codex gh-r7 pins.
+describe('gh-r7', () => {
+  test('the candidate query excludes customers with a live/held sibling case (no window starvation)', async () => {
+    armGates();
+    const cChain = candidateChain([]);
+    const queues = [promoteChain(0), cChain];
+    db.mockImplementation(() => queues.shift());
+    await runCollectionsDialSweep({ now: NOW });
+    expect(cChain.whereNotExists).toHaveBeenCalled();
+  });
+
+  test('flipping the autodial gate MID-RUN stops before the next promotion', async () => {
+    armGates();
+    const rows = [caseRow('c1'), caseRow('c2')];
+    const queues = [promoteChain(0), candidateChain(rows), promoteChain(0, {}), promoteChain(1)];
+    db.mockImplementation(() => queues.shift());
+    originateCollectionCall.mockImplementation(async () => {
+      delete process.env.GATE_VOICE_LATE_PAYMENT_AUTODIAL; // incident flip during c1's dial
+      return { dialed: true, reason: 'dialed' };
+    });
+    const res = await runCollectionsDialSweep({ now: NOW });
+    expect(res.dialed).toBe(1);
+    expect(originateCollectionCall).toHaveBeenCalledTimes(1); // c2 never promoted
+  });
+
+  test('source shape: the merge takes the case locks and reconciles surplus approvals; the scheduler runs maintenance reclamation while autodial is dark', () => {
+    const fs = require('fs');
+    const dedupe = fs.readFileSync(require.resolve('../services/customer-dedupe'), 'utf8');
+    expect(dedupe).toContain("['collections_case', custId]");
+    expect(dedupe).toContain("hold_reason: 'merge_reconciled'");
+    const sched = fs.readFileSync(require.resolve('../services/scheduler'), 'utf8');
+    expect(sched).toContain('DialSweep.reclaimExpiredApprovals()');
+    expect(sched).toContain('if (!isVoiceLatePaymentEnabled()) return; // fully dark — zero touches');
   });
 });

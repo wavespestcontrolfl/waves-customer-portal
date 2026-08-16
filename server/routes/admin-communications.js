@@ -2308,11 +2308,12 @@ router.post('/collections-cases/:id/dial', requireAdmin, async (req, res, next) 
     }
     if (!result.dialed && result.reason !== 'dial_failed') {
       await revertOurPromotion(); // the fence no-ops when origination moved the row
-    } else {
-      // Retire the "no call will be placed" card only once a REAL dial
-      // attempt happened (codex gh-r6 P2): during the shakedown the card
-      // is the operator's only surface carrying the case id, and a
-      // transient refusal + revert must leave it standing for the retry.
+    } else if (result.dialed) {
+      // Retire the "no call will be placed" card only once a call actually
+      // went out (codex gh-r6 P2 / gh-r7): during the shakedown the card is
+      // the operator's only surface carrying the case id. dial_failed keeps
+      // it too — origination parks that case for SUPERVISED reapproval (the
+      // auto sweep excludes it), so the card is the retry path.
       const { retireProposalCard } = require('../services/collections/outbound-voice/dial-sweep');
       await retireProposalCard(caseRow.idempotency_key);
     }

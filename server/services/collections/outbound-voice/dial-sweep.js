@@ -117,21 +117,20 @@ async function retireProposalCard(idempotencyKey) {
     .catch((err) => logger.warn(`[collections-autodial] proposal-card retirement failed: ${err.message}`));
 }
 
-async function runCollectionsDialSweep({ now = new Date() } = {}) {
-  // Gate FIRST — zero reads while dark (pinned).
-  if (!isAutoDialEnabled()) return { skipped: true, reason: 'autodial_gate_off' };
-
-  const cap = maxDialsPerRun();
-
-  // Reclaim orphaned approvals (codex gh-r6): a crash after promotion, or
-  // a failed revert, leaves a row in 'approved' that NOTHING revisits —
-  // origination's expiry check only runs when something dials the case,
-  // and neither sweep selects 'approved'. The expiry predicate is the
-  // fence: origination's claim requires approval_expires_at > now, this
-  // requires < now — disjoint, no race with a live dial.
-  let reclaimed = 0;
+/**
+ * Reclaim orphaned approvals (codex gh-r6/gh-r7): a crash after promotion
+ * or a failed revert leaves a row in 'approved' that NOTHING revisits —
+ * origination's expiry check only runs when something dials the case, and
+ * neither sweep selects 'approved'. Runs from the full sweep AND from the
+ * scheduler's master-gated maintenance path (the supervised shakedown
+ * keeps the autodial gate off — exactly the mode that creates admin
+ * orphans). The expiry predicate is the fence: origination's claim
+ * requires approval_expires_at > now, this requires < now — disjoint, no
+ * race with a live dial.
+ */
+async function reclaimExpiredApprovals({ now = new Date() } = {}) {
   try {
-    reclaimed = await db('collection_cases')
+    const reclaimed = await db('collection_cases')
       .where({ current_state: 'approved' })
       .where('approval_expires_at', '<', now)
       .update({
@@ -142,9 +141,19 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
         updated_at: db.fn.now(),
       });
     if (reclaimed) logger.info(`[collections-autodial] reclaimed ${reclaimed} expired orphaned approval(s)`);
+    return reclaimed;
   } catch (err) {
     logger.warn(`[collections-autodial] orphan reclamation failed: ${err.message}`);
+    return 0;
   }
+}
+
+async function runCollectionsDialSweep({ now = new Date() } = {}) {
+  // Gate FIRST — zero reads while dark (pinned).
+  if (!isAutoDialEnabled()) return { skipped: true, reason: 'autodial_gate_off' };
+
+  const cap = maxDialsPerRun();
+  const reclaimed = await reclaimExpiredApprovals({ now });
 
   const candidates = await db('collection_cases')
     .whereIn('current_state', ['shadow', 'proposed'])
@@ -154,6 +163,16 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
     // idempotency probe, so this sweep would re-dial them unaided. The
     // admin endpoint remains their release path.
     .whereRaw("hold_reason IS DISTINCT FROM 'dial_failed'")
+    // Customers with a live/held sibling case are excluded at SELECT time
+    // (codex gh-r7): the in-lock liveElsewhere check refuses them without
+    // changing state, so ten such rows would otherwise occupy the whole
+    // cap*5 window forever and starve every newer customer.
+    .whereNotExists(function liveSibling() {
+      this.select(db.raw('1'))
+        .from('collection_cases as live')
+        .whereRaw('live.customer_id = collection_cases.customer_id')
+        .whereIn('live.current_state', ['approved', 'dialing', 'held']);
+    })
     .where(function nextEligible() {
       this.whereNull('next_eligible_at').orWhere('next_eligible_at', '<=', now);
     })
@@ -168,6 +187,11 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
   const { originateCollectionCall } = require('./origination');
   for (const caseRow of candidates) {
     if (dialed >= cap) break;
+    // The advertised sweep-only kill switch must bite MID-RUN (codex
+    // gh-r7): origination checks the master gate but not this sub-gate,
+    // so an operator flipping GATE_VOICE_LATE_PAYMENT_AUTODIAL during an
+    // incident stops the very next promotion, not just the next tick.
+    if (!isAutoDialEnabled()) break;
     let holds = false;
     try {
       holds = await promoteForAutoDial(caseRow, now);
@@ -216,4 +240,4 @@ async function runCollectionsDialSweep({ now = new Date() } = {}) {
   return { skipped: false, candidates: candidates.length, promoted, dialed, refused, reclaimed, cap };
 }
 
-module.exports = { runCollectionsDialSweep, promoteForAutoDial, retireProposalCard, DEFAULT_MAX_PER_RUN };
+module.exports = { runCollectionsDialSweep, reclaimExpiredApprovals, promoteForAutoDial, retireProposalCard, DEFAULT_MAX_PER_RUN };

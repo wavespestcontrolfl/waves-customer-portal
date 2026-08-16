@@ -317,3 +317,22 @@ test('a transient refusal leaves the proposal card standing; a real attempt reti
   expect(consumed).toHaveLength(4);
   expect(queues).toHaveLength(0);
 });
+
+// codex gh-r7: dial_failed parks the case for SUPERVISED reapproval — the
+// card is the retry path and must survive.
+test('a dial_failed attempt keeps the proposal card (no card query issued)', async () => {
+  originateCollectionCall.mockResolvedValue({ dialed: false, reason: 'dial_failed' });
+  const queues = [
+    chain({ first: { id: CASE_UUID, current_state: 'shadow', case_version: 1, idempotency_key: 'collections:c1:1:14' } }),
+    chain({ first: undefined }), // live-check
+    chain({ updateResult: 1 }), // promote
+  ];
+  const consumed = [];
+  db.mockImplementation(() => { const q = queues.shift(); consumed.push(q); return q; });
+  await withServer(async (baseUrl) => {
+    const res = await dial(baseUrl);
+    expect(res.status).toBe(200);
+  });
+  expect(consumed).toHaveLength(3); // read, live-check, promote — no card, no revert
+  expect(queues).toHaveLength(0);
+});

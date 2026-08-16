@@ -779,6 +779,18 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
   let winnerBeforeMerge = null;
   let mergeLockedAt = null;
   const result = await db.transaction(async (trx) => {
+    // The collections case lock for BOTH parties, before anything moves
+    // (PR C / codex gh-r7): the repoint below rewrites collection_cases FKs
+    // while the dial surfaces promote/rotate under this same customer lock —
+    // without it, either ordering can land an approved case beside the
+    // winner's live one (two pipelines) or beside a held dispute. Two locks,
+    // deterministic order (sorted ids) to avoid lock inversion.
+    for (const custId of [winnerId, loserId].map(String).sort()) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['collections_case', custId],
+      );
+    }
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loser = locked.find((r) => r.id === loserId);
@@ -1063,6 +1075,39 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
           throw new Error(`executeMerge: repoint failed on ${table}.${column}: ${e.message}`);
         }
       }
+    }
+    // Reconcile collection cases after the repoint (PR C / codex gh-r7):
+    // the merge can land two live cases under the winner. Under the case
+    // locks taken above this read is authoritative. dialing/held rows are
+    // NEVER touched (a claimed call, a dispute hold); surplus 'approved'
+    // rows revert to 'proposed' — all of them when a dialing/held row
+    // exists, otherwise all but the newest approval. Savepoint-confined so
+    // a pre-collections environment cannot poison the merge.
+    try {
+      await trx.transaction(async (sp) => {
+        const liveCases = await sp('collection_cases')
+          .where({ customer_id: winnerId })
+          .whereIn('current_state', ['approved', 'dialing', 'held'])
+          .orderBy('approved_at', 'desc')
+          .select('id', 'current_state', 'case_version');
+        const approved = liveCases.filter((c) => c.current_state === 'approved');
+        const hasClaimedOrHeld = liveCases.length > approved.length;
+        const surplus = hasClaimedOrHeld ? approved : approved.slice(1);
+        for (const c of surplus) {
+          await sp('collection_cases')
+            .where({ id: c.id, current_state: 'approved', case_version: c.case_version })
+            .update({
+              current_state: 'proposed',
+              approved_by: null,
+              approved_at: null,
+              approval_expires_at: null,
+              hold_reason: 'merge_reconciled',
+              updated_at: sp.fn.now(),
+            });
+        }
+      });
+    } catch (reconcileErr) {
+      logger.warn(`[customer-dedupe] collection-case reconcile skipped: ${reconcileErr.message}`);
     }
     // The loser's plan-rate components die with the loser (codex #3245 r8
     // — excluded from the FK sweep above): the merge never copies

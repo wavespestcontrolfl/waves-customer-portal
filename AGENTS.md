@@ -618,7 +618,10 @@ violations at the severity noted.
   `POST /api/admin/communications/collections-cases/:id/dial` (supervised
   single dial, requireAdmin, master-gated) and the auto-dial cron sweep
   behind `GATE_VOICE_LATE_PAYMENT_AUTODIAL` (which requires the master AND
-  `GATE_COLLECTIONS_POLICY` gates; gate off = zero reads, pinned; bounded
+  `GATE_COLLECTIONS_POLICY` gates; autodial gate off = zero reads from the
+  SWEEP, pinned — the scheduler tick then runs only the master-gated
+  expired-approval reclamation, and a fully dark master = zero touches;
+  bounded
   by `COLLECTIONS_AUTODIAL_MAX_PER_RUN`, default 2, hard ceiling 10). A
   diff adding any OTHER path to `originateCollectionCall`, weakening the
   guarded promote fences (state + case_version), or letting the sweep make

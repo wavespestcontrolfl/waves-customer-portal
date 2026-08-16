@@ -2709,16 +2709,23 @@ function initScheduledJobs() {
   cron.schedule('23 11 * * 1-5', async () => {
     try {
       // Gate BEFORE the lock (codex gh-r1): runExclusive itself takes a DB
-      // connection, an advisory lock, and a job_health write — a dark tick
-      // must touch NOTHING, and the sweep's own gate check can't deliver
-      // that from inside the wrapper.
-      const { isAutoDialEnabled } = require('./collections/outbound-voice/gates');
-      if (!isAutoDialEnabled()) return;
+      // connection, an advisory lock, and a job_health write — a fully dark
+      // tick must touch NOTHING. Master on + autodial off (the supervised
+      // shakedown mode) runs ONLY the orphan-approval reclamation (codex
+      // gh-r7: that mode is exactly the one that creates admin orphans, and
+      // nothing else ever revisits 'approved' rows).
+      const { isAutoDialEnabled, isVoiceLatePaymentEnabled } = require('./collections/outbound-voice/gates');
+      if (!isVoiceLatePaymentEnabled()) return; // fully dark — zero touches
       await runExclusive('collections-dial-sweep', async () => {
         const DialSweep = require('./collections/outbound-voice/dial-sweep');
+        if (!isAutoDialEnabled()) {
+          const reclaimed = await DialSweep.reclaimExpiredApprovals();
+          if (reclaimed) logger.info(`Collections maintenance: reclaimed ${reclaimed} expired approval(s) (autodial dark)`);
+          return;
+        }
         const result = await DialSweep.runCollectionsDialSweep();
         if (result.skipped) return; // gate flipped mid-tick — stay silent
-        logger.info(`Collections auto-dial sweep: ${result.candidates} candidates, ${result.promoted} promoted, ${result.dialed} dial attempts, ${result.refused} refusals`);
+        logger.info(`Collections auto-dial sweep: ${result.candidates} candidates, ${result.promoted} promoted, ${result.dialed} dial attempts, ${result.refused} refusals, ${result.reclaimed} reclaimed`);
       });
     } catch (err) {
       logger.error(`Collections auto-dial sweep failed: ${err.message}`);
