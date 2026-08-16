@@ -387,33 +387,58 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     expect(mirror.patch.nearest_location_id).toBeTruthy();
   });
 
-  test('backfills coords onto visits ALREADY stamped/linked to the old primary with NULL lat/lng (codex r6)', async () => {
+  test('canonical premise match repairs equivalent-spelling stamps: coords + missing locality (codex r6→r26)', async () => {
     const old = { ...OLD_HOME, state: 'FL', latitude: 27.4, longitude: -82.4, active: true, customer_id: 'cust-1' };
     const neu = { ...NEW_HOME, state: 'FL', latitude: 27.5, longitude: -82.37, active: true, customer_id: 'cust-1' };
-    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
+    // Equivalent spelling ('Court' vs 'Ct'), ZIP+4, missing city/state,
+    // null coords — the JS canonical judgment must still match it.
+    const stamped = {
+      id: 'v-stamped', customer_id: 'cust-1', status: 'pending', property_id: null,
+      service_address_line1: '8380 Sea Breeze Court', service_address_line2: null,
+      service_address_city: null, service_address_state: null, service_address_zip: '34212-1234',
+      lat: null, lng: null, source_estimate_id: null, is_recurring: false,
+    };
+    // Different premise: same street text, explicitly different city.
+    const otherCity = {
+      id: 'v-other', customer_id: 'cust-1', status: 'pending', property_id: null,
+      service_address_line1: '8380 Sea Breeze Ct', service_address_line2: null,
+      service_address_city: 'Venice', service_address_state: null, service_address_zip: null,
+      lat: null, lng: null, source_estimate_id: null, is_recurring: false,
+    };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [stamped, otherCity] } });
     await applyPropertyRoleProposals(trx, {
       customerId: 'cust-1',
-      proposals: [{
-        kind: 'primary_flip',
-        new_primary_property_id: 'prop-new',
-        old_primary_property_id: 'prop-old',
-      }],
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
     });
-    // Post-flip, stampedDivergesSql kills the customer-coord fallback for
-    // rows stamped to the old primary — the second scheduled_services update
-    // stamps the old primary's own coords, fenced to NULL-coord rows only.
-    const ssUpdates = trx._updates.filter((x) => x.table === 'scheduled_services');
-    // pin + parent stamp + stamp completion (live + recurring, r22) +
-    // coord backfill (live rows + live recurring template parents)
-    expect(ssUpdates).toHaveLength(6);
-    const backfill = ssUpdates[4];
-    // Per-column COALESCE fill (r13): whichever coordinate is missing is
-    // filled independently — never a bare overwrite, never both-null-only.
-    expect(backfill.patch.lat).toMatchObject({ __raw: expect.stringContaining('COALESCE(lat'), bindings: [27.4] });
-    expect(backfill.patch.lng).toMatchObject({ __raw: expect.stringContaining('COALESCE(lng'), bindings: [-82.4] });
-    expect(backfill.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped', 'rescheduled', 'no_show']]);
-    const recurringBackfill = ssUpdates[5];
-    expect(recurringBackfill.wheres[0]).toMatchObject({ is_recurring: true, recurring_ongoing: true });
+    // Same premise: coords repaired + missing locality completed from the
+    // old primary (line1 spelling preserved — COALESCE fill-only).
+    expect(stamped.lat).toBe(27.4);
+    expect(stamped.lng).toBe(-82.4);
+    expect(stamped.service_address_city).toBe('Bradenton');
+    expect(stamped.service_address_line1).toBe('8380 Sea Breeze Court');
+    // Different stated city = different premise: untouched.
+    expect(otherCity.lat).toBeNull();
+    expect(otherCity.service_address_state).toBeNull();
+  });
+
+  test('coord repair is skipped when the old primary has no coordinates — completion still runs', async () => {
+    const old = { ...OLD_HOME, state: 'FL', latitude: null, longitude: null, active: true, customer_id: 'cust-1' };
+    const neu = { ...NEW_HOME, state: 'FL', active: true, customer_id: 'cust-1' };
+    const stamped = {
+      id: 'v-stamped', customer_id: 'cust-1', status: 'pending', property_id: null,
+      service_address_line1: '8380 Sea Breeze Ct', service_address_line2: null,
+      service_address_city: null, service_address_state: null, service_address_zip: null,
+      lat: null, lng: null, source_estimate_id: null, is_recurring: false,
+    };
+    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [stamped] } });
+    await applyPropertyRoleProposals(trx, {
+      customerId: 'cust-1',
+      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
+    });
+    // Locality completed; coords never stamped NULL-over-NULL.
+    expect(stamped.service_address_city).toBe('Bradenton');
+    expect(stamped.lat).toBeNull();
+    expect(stamped.lng).toBeNull();
   });
 
   test('pin coords are FILL-ONLY (COALESCE) — existing visit coords survive a coordless old primary (codex r7)', async () => {
@@ -449,19 +474,6 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     // otherwise the list shows two "Primary" properties post-flip.
     expect(old.label).toBeNull();
     expect(neu.label).toBe('Primary');
-  });
-
-  test('coord backfill is skipped entirely when the old primary has no coordinates', async () => {
-    const old = { ...OLD_HOME, state: 'FL', latitude: null, longitude: null, active: true, customer_id: 'cust-1' };
-    const neu = { ...NEW_HOME, state: 'FL', active: true, customer_id: 'cust-1' };
-    const trx = makeTrx({ rows: { customer_properties: [old, neu], customers: [{ id: 'cust-1' }], scheduled_services: [] } });
-    await applyPropertyRoleProposals(trx, {
-      customerId: 'cust-1',
-      proposals: [{ kind: 'primary_flip', new_primary_property_id: 'prop-new', old_primary_property_id: 'prop-old' }],
-    });
-    // Pin + parent stamp + stamp completion (x2) — never a coord backfill
-    // stamping NULL over NULL.
-    expect(trx._updates.filter((x) => x.table === 'scheduled_services')).toHaveLength(4);
   });
 
   test('a COMPLETED-but-live recurring template parent is stamped to the old primary (codex r10)', async () => {

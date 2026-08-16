@@ -876,97 +876,76 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
         // stampedDivergesSql disables that fallback and the stop goes
         // coordless. Stamp the old primary's own coords onto exactly those
         // rows; real coordinates are never overwritten (NULL-only fence).
-        // Address-stamp match = COMPATIBLE FULL PREMISE (codex #3418
-        // r23): every stated component must agree — a visit with the old
-        // street but an explicitly different city, ZIP, or unit belongs
-        // to another premise and must not be repaired into a hybrid
-        // stamp. Null components stay compatible (they're what the
-        // completion pass fills). Literal lower() compares are the safe
-        // direction: a designator-spelling mismatch under-repairs, never
-        // mis-repairs.
-        const oldPrimaryLinkedOrStamped = (qb) => qb
-          .where({ property_id: oldPrimary.id })
-          .orWhere((qb2) => qb2
-            .whereRaw('lower(service_address_line1) = lower(?)', [oldPrimary.address_line1 || ''])
-            .andWhere((qb3) => qb3
-              .whereNull('service_address_zip')
-              // ZIP5-normalized (codex #3418 r25): a ZIP+4 stamp and a
-              // 5-digit property row identify the same premise — the
-              // canonical dispatch predicate normalizes, so this repair
-              // predicate must too or same-premise rows go unrepaired.
-              .orWhereRaw("substring(regexp_replace(service_address_zip, '[^0-9]', '', 'g') from 1 for 5) = ?", [normalizeZip(oldPrimary.zip)]))
-            .andWhere((qb4) => qb4
-              .whereNull('service_address_city')
-              .orWhereRaw('lower(service_address_city) = lower(?)', [oldPrimary.city || '']))
-            .andWhere((qb5) => qb5
-              .whereNull('service_address_line2')
-              .orWhereRaw('lower(service_address_line2) = lower(?)', [oldPrimary.address_line2 || '']))
-            .andWhere((qb6) => qb6
-              .whereNull('service_address_state')
-              .orWhereRaw('lower(service_address_state) = lower(?)', [oldPrimary.state || 'FL'])));
-        // PARTIALLY stamped visits (codex #3418 r22): a row carrying the
-        // old primary's street but missing city/state/ZIP/unit used to be
-        // completed by dispatch's per-column customer-mirror fallback —
-        // post-flip that fallback would graft the NEW primary's locality
-        // onto the old street. Fill each missing component from the old
-        // primary itself (COALESCE = never overwrites a present value).
+        // COMPATIBLE-FULL-PREMISE repair, judged in JS with the SAME
+        // canonical normalizations the dedup key uses (codex #3418
+        // r23+r25+r26): SQL lower() can't see 'Street'=='St' or
+        // 'Apt 4'=='Unit 4', so equivalent spellings were skipped and
+        // dispatch's post-flip fallback grafted the NEW primary's
+        // locality onto them. SELECT candidates, filter with
+        // streetKey/unitKey/normalizeZip, UPDATE by id — the same
+        // select-then-update shape the call-property-lookup visit mirror
+        // uses. Safe under this transaction's comms lock: appointment
+        // inserts serialize behind it, so the candidate set is stable.
         {
-          const stampCompletion = {
-            // Fill-only street too (codex r24): a row LINKED by property_id
-            // with a null line1 was excluded from the pin (it requires a
-            // null property_id) — post-flip dispatch would COALESCE the
-            // NEW primary's street onto the old locality.
-            service_address_line1: trx.raw('COALESCE(service_address_line1, ?)', [oldPrimary.address_line1 ?? null]),
-            service_address_line2: trx.raw('COALESCE(service_address_line2, ?)', [oldPrimary.address_line2 ?? null]),
-            service_address_city: trx.raw('COALESCE(service_address_city, ?)', [oldPrimary.city ?? null]),
-            service_address_state: trx.raw('COALESCE(service_address_state, ?)', [oldPrimary.state || 'FL']),
-            service_address_zip: trx.raw('COALESCE(service_address_zip, ?)', [oldPrimary.zip ?? null]),
-            updated_at: new Date(),
-          };
-          await trx('scheduled_services')
+          const candidateCols = ['id', 'status', 'property_id', 'is_recurring',
+            'service_address_line1', 'service_address_line2', 'service_address_city',
+            'service_address_state', 'service_address_zip', 'lat', 'lng'];
+          if (hasOngoing) candidateCols.push('recurring_ongoing');
+          const candidateRows = await trx('scheduled_services')
             .where({ customer_id: customerId })
-            .whereNotIn('status', TERMINAL_VISIT_STATUSES)
-            .where(oldPrimaryLinkedOrStamped)
-            .update(stampCompletion);
-          if (hasOngoing) {
+            .select(candidateCols);
+          const oldStreetK = streetKey(oldPrimary.address_line1);
+          const oldUnitK = unitKey(oldPrimary.address_line2 || '') || streetEmbeddedUnitKey(oldPrimary.address_line1);
+          const oldZip5 = normalizeZip(oldPrimary.zip);
+          const oldCityN = String(oldPrimary.city || '').trim().toLowerCase();
+          const oldStateN = String(oldPrimary.state || 'FL').trim().toLowerCase();
+          const liveRow = (r) => !TERMINAL_VISIT_STATUSES.includes(r.status)
+            || (hasOngoing && r.is_recurring && r.recurring_ongoing);
+          const matchesOldPremise = (r) => {
+            if (r.property_id === oldPrimary.id) return true;
+            if (!String(r.service_address_line1 || '').trim()) return false;
+            if (streetKey(r.service_address_line1) !== oldStreetK) return false;
+            const rUnit = unitKey(r.service_address_line2 || '') || streetEmbeddedUnitKey(r.service_address_line1);
+            if (rUnit && rUnit !== oldUnitK) return false; // stated unit must agree (incl. old-primary-unitless)
+            const rCity = String(r.service_address_city || '').trim().toLowerCase();
+            if (rCity && rCity !== oldCityN) return false;
+            const rState = String(r.service_address_state || '').trim().toLowerCase();
+            if (rState && rState !== oldStateN) return false;
+            const rZip = normalizeZip(r.service_address_zip);
+            if (rZip && oldZip5 && rZip !== oldZip5) return false;
+            return true;
+          };
+          const premise = candidateRows.filter((r) => liveRow(r) && matchesOldPremise(r));
+          // Completion: fill each missing stamp component from the old
+          // primary itself (COALESCE = never overwrites), incl. the street
+          // on property_id-linked rows the pin's null-property_id
+          // requirement excluded (codex r22+r24).
+          if (premise.length) {
             await trx('scheduled_services')
-              .where({ customer_id: customerId, is_recurring: true, recurring_ongoing: true })
-              .where(oldPrimaryLinkedOrStamped)
-              .update(stampCompletion);
+              .whereIn('id', premise.map((r) => r.id))
+              .update({
+                service_address_line1: trx.raw('COALESCE(service_address_line1, ?)', [oldPrimary.address_line1 ?? null]),
+                service_address_line2: trx.raw('COALESCE(service_address_line2, ?)', [oldPrimary.address_line2 ?? null]),
+                service_address_city: trx.raw('COALESCE(service_address_city, ?)', [oldPrimary.city ?? null]),
+                service_address_state: trx.raw('COALESCE(service_address_state, ?)', [oldPrimary.state || 'FL']),
+                service_address_zip: trx.raw('COALESCE(service_address_zip, ?)', [oldPrimary.zip ?? null]),
+                updated_at: new Date(),
+              });
           }
-        }
-
-        if (oldPrimary.latitude != null && oldPrimary.longitude != null) {
-          // Per-column COALESCE and an OR-null predicate (codex #3418
-          // r13): dispatch's per-column customer-mirror fallback dies for
-          // BOTH columns post-flip, so a row missing only one coordinate
-          // must have that one filled — the both-null requirement skipped
-          // exactly those rows.
-          const coordPatch = {
-            lat: trx.raw('COALESCE(lat, ?)', [oldPrimary.latitude]),
-            lng: trx.raw('COALESCE(lng, ?)', [oldPrimary.longitude]),
-            updated_at: new Date(),
-          };
-          const oldPrimaryStampMatch = oldPrimaryLinkedOrStamped;
-          const anyCoordMissing = (qb) => qb.whereNull('lat').orWhereNull('lng');
-          await trx('scheduled_services')
-            .where({ customer_id: customerId })
-            .whereNotIn('status', TERMINAL_VISIT_STATUSES)
-            .where(anyCoordMissing)
-            .where(oldPrimaryStampMatch)
-            .update(coordPatch);
-          // Live recurring template parents get the SAME coordinate repair
-          // despite completed status (codex #3418 r13): a parent already
-          // stamped to the old primary with null coords is skipped by the
-          // parent-stamp above (it IS stamped) and was excluded here by
-          // the terminal filter — yet auto-extension copies its null
-          // coords into every future child, route-blind post-flip.
-          if (hasOngoing) {
-            await trx('scheduled_services')
-              .where({ customer_id: customerId, is_recurring: true, recurring_ongoing: true })
-              .where(anyCoordMissing)
-              .where(oldPrimaryStampMatch)
-              .update(coordPatch);
+          // Coordinate repair: whichever coordinate is missing is filled
+          // (per-column COALESCE, codex r13) — post-flip stampedDivergesSql
+          // kills the customer-coord fallback for these rows.
+          if (oldPrimary.latitude != null && oldPrimary.longitude != null) {
+            const coordIds = premise.filter((r) => r.lat == null || r.lng == null).map((r) => r.id);
+            if (coordIds.length) {
+              await trx('scheduled_services')
+                .whereIn('id', coordIds)
+                .update({
+                  lat: trx.raw('COALESCE(lat, ?)', [oldPrimary.latitude]),
+                  lng: trx.raw('COALESCE(lng, ?)', [oldPrimary.longitude]),
+                  updated_at: new Date(),
+                });
+            }
           }
         }
 

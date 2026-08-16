@@ -453,13 +453,11 @@ export default function TriageInboxTabV2() {
     })
       .then(() => {
         setActioning(null);
-        setItems((prev) => prev.filter((i) => i.id !== item.id));
-        setCounts((prev) => {
-          const c = { ...prev };
-          if (c[status] != null) c[status] = Math.max(0, c[status] - 1);
-          if (c.resolved != null) c.resolved += 1;
-          return c;
-        });
+        // Full reload rather than optimistic removal: applying roles can
+        // atomically retire the call's second_service_address sibling
+        // server-side too — the list and counts must reflect every row
+        // the server resolved, not just the clicked one.
+        load(mode, status);
       })
       .catch((err) => {
         setActioning(null);
