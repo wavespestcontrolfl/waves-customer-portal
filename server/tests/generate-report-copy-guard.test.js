@@ -310,6 +310,10 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     // rejects (r66)
     const bare = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(bare.body).toBeNull();
+    // negative contractions + hyphenated quoted credentials (r68)
+    const contraction = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician isn’t confirming timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
+    expect(contraction.body).toBeNull();
+    expect(reportCopyRejection('The gate code is "blue-waves" for the side entry.')).toBe('access_code');
     // negated confirmation never unlocks the exemption (r67)
     const negated = parseCopy('WHAT WE DID\n\nWe treated the lawn; the treated area is safe once dry and the technician did not confirm timing.\n\nWHAT WE FOUND\n\nActivity was light along the fence line.');
     expect(negated.body).toBeNull();

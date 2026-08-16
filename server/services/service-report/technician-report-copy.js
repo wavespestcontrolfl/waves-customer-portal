@@ -58,7 +58,7 @@ const REPORT_ACCESS_CODE_RES = [
   // (codex r40)
   // quoted credentials may span up to four tokens ("blue waves",
   // 'open sesame') — the shared scrubber's multi-token posture (codex r48)
-  /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=|-|was|were|remains?|remained|stays?|stayed|became|becomes|(?:(?:will|would|should|shall|must|might|may|can|could|has|have|had)\s+)?continue[ds]?\s+to\s+(?:be|remain|stay)|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always|previously|originally|briefly)\s+)?(?:become|been|remained|stayed)|(?:will|would|should|shall|must|might|may|can|could)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always)\s+)?(?:be|remain|stay)|(?:is|are|was|were)\s+going\s+to\s+(?:be|remain|stay)|(?:(?:was|were|is|are|has|have|had)\s+(?:been\s+)?(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?)?(?:changed|switched|updated|reset|set)\s+to)?\s*(?:(?:now|currently|still|today|temporarily|again)\s+)?(?:["'‘’“”][A-Za-z0-9#*]{2,12}(?:\s+[A-Za-z0-9#*]{1,12}){0,3}["'‘’“”]|[A-Za-z]*\d[A-Za-z0-9#*]*\b)/i,
+  /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b\s*(?:is|:|=|-|was|were|remains?|remained|stays?|stayed|became|becomes|(?:(?:will|would|should|shall|must|might|may|can|could|has|have|had)\s+)?continue[ds]?\s+to\s+(?:be|remain|stay)|(?:has|have|had)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always|previously|originally|briefly)\s+)?(?:become|been|remained|stayed)|(?:will|would|should|shall|must|might|may|can|could)\s+(?:(?:now|currently|still|today|temporarily|again|recently|just|always)\s+)?(?:be|remain|stay)|(?:is|are|was|were)\s+going\s+to\s+(?:be|remain|stay)|(?:(?:was|were|is|are|has|have|had)\s+(?:been\s+)?(?:(?:now|currently|still|today|temporarily|again|recently|just)\s+)?)?(?:changed|switched|updated|reset|set)\s+to)?\s*(?:(?:now|currently|still|today|temporarily|again)\s+)?(?:["'‘’“”][A-Za-z0-9#*][A-Za-z0-9#*-]{1,14}(?:\s+[A-Za-z0-9#*][A-Za-z0-9#*-]{0,11}){0,3}["'‘’“”]|[A-Za-z]*\d[A-Za-z0-9#*]*\b)/i,
   // was/were are credential linkers for a bounded UPPERCASE/quoted token —
   // "The gate code was BLUE" (codex r51); bare lowercase after was/were
   // stays out ("the code was updated" is ordinary copy)
@@ -78,7 +78,7 @@ const REPORT_ACCESS_CODE_RES = [
   // ... and the positional window covers the ordinary code nouns too
   // ("Use BLUE for the gate code" / "for the password") — device nouns
   // alone left that intersection open (codex r47)
-  /(?:["'‘’“”][A-Za-z0-9#*]{2,12}(?:\s+[A-Za-z0-9#*]{1,12}){0,3}["'‘’“”]|\b[A-Z0-9#*]{2,12})\s+(?:at|for|to|on|in|into|near|by|as|opens?|unlocks?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b/,
+  /(?:["'‘’“”][A-Za-z0-9#*][A-Za-z0-9#*-]{1,14}(?:\s+[A-Za-z0-9#*][A-Za-z0-9#*-]{0,11}){0,3}["'‘’“”]|\b[A-Z0-9#*]{2,12})\s+(?:at|for|to|on|in|into|near|by|as|opens?|unlocks?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase|[Kk]eypad|[Ll]ock\s?box)\b/,
   // spoken number-word codes ("gate code four five four five") — two or
   // more number words after a code noun, mirroring the canonical scrubber's
   // multi-token shape (codex r41)
@@ -162,7 +162,7 @@ function technicianReportCustomerCopy(notes) {
   // must be the technician and the tempered gaps refuse to cross a
   // negation, so "the technician did not confirm timing" (and a homeowner
   // claiming to confirm) never unlock the exemption.
-  const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['’]t|doesn['’]t|don['’]t|won['’]t|cannot|can['’]t|couldn['’]t)\b)[^.!?]){0,40}\bconfirm(?:s|ed|ing)?\b(?:(?!\bnot\b)[^.!?]){0,25}\btiming\b/i;
+  const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['’]t|doesn['’]t|don['’]t|won['’]t|cannot|can['’]t|couldn['’]t|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|hasn['’]t|haven['’]t|hadn['’]t|shouldn['’]t|wouldn['’]t)\b)[^.!?]){0,40}\bconfirm(?:s|ed|ing)?\b(?:(?!\bnot\b)[^.!?]){0,25}\btiming\b/i;
   const screenText = TIMING_CONFIRM_RE.test(body)
     ? body.replace(SAFE_IDIOM_RE, 'once dry')
     : body;

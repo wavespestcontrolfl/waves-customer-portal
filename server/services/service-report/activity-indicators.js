@@ -3013,7 +3013,10 @@ const LEVEL_CLAIM_CONDITIONAL_OPEN_RE = /^\s*(?:if|unless|in\s+case|should|when)
 // Directly negated claims assert ABSENCE, not the level (codex r6 on
 // #3358): "NO heavy activity was observed" / "heavy activity was NOT
 // observed" are truthful zero-findings and must not read as heavy claims.
-const LEVEL_CLAIM_NEGATED_BEFORE_RE = /\b(?:no|not|never|without|zero)\s+$/i;
+// Negated-verb context is a denial too (codex r68): "We did NOT FIND
+// heavy activity" asserts absence of the level, exactly like the passive
+// "Heavy activity was not observed" the round-6 freeze exempts.
+const LEVEL_CLAIM_NEGATED_BEFORE_RE = /\b(?:no|not|never|without|zero)\s+$|\b(?:did\s+not|didn['’]t|does\s+not|doesn['’]t|do\s+not|don['’]t|have\s+not|haven['’]t|has\s+not|hasn['’]t|never|could\s+not|couldn['’]t)\s+(?:find|observe|note|detect|see|show|reveal|record)\s+(?:any\s+)?$/i;
 const LEVEL_CLAIM_NEGATED_AFTER_RE = /^\s+(?:was|were|is|are|has\s+been|had\s+been)\s+(?:not|never)\b/i;
 // A zero/absence claim beside a clearly nonzero gauge contradicts even
 // though it carries no level word (codex r51): "No flea activity was
@@ -3033,7 +3036,7 @@ const LEVEL_ABSENCE_CLAIM_RE = new RegExp(
   + `|\\bthere\\s+(?:was|were|is|are)\\s+no\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b(?!\\s+(?:signs?|levels?))`
   + `|\\bno\\s+(?:signs?|evidence|indications?)\\s+of\\s+${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
   + `|\\b(?:found|observed|noted|detected|saw|identified)\\s+no\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
-  + `|\\b(?:did\\s+not|didn['’]t)\\s+(?:find|observe|note|detect|see)\\b[^.!?]{0,30}\\b${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
+  + `|\\b(?:did\\s+not|didn['’]t)\\s+(?:find|observe|note|detect|see)\\b(?:(?!\\b(?:very\\s+low|light|low|minimal|moderate|high|heavy|severe|extreme)\\b)[^.!?]){0,30}\\b${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`
   + `|\\bno\\s+(?:visible\\s+|current\\s+|active\\s+)*${LEVEL_ATTR_MOD_SRC}(?:evidence|signs?)\\b[^.!?]{0,20}\\b(?:was|were|is|are)\\s+(?:observed|found|noted|seen|detected|present)\\b`,
   'gi',
 );

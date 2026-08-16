@@ -580,6 +580,20 @@ describe('typed branches consume the reviewed report body (codex r24 #3420)', ()
     expect(r.bodySource).toBeUndefined();
   });
 
+  // r68 (#3420): level-qualified active denials stay legal.
+  test('flea accepts "We did not find heavy activity" beside a low score', () => {
+    const r = buildTodaysResult({
+      projectType: 'flea',
+      values: { evidence_level: 'Light' },
+      activity: { score: 2 },
+      visitSequence: 1,
+      whatWeDid: 'x',
+      nextStep: 'n.',
+      technicianReportBody: 'We did not find heavy activity today.',
+    });
+    expect(r.bodySource).toBe('technician_report');
+  });
+
   test('rodent_exclusion zero-score trend visit still consumes screened copy', () => {
     const r = buildTodaysResult({
       projectType: 'rodent_exclusion',
