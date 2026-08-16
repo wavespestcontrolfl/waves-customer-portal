@@ -898,7 +898,7 @@ const COMMON_PROSE_WORDS = new Set([
   'about', 'above', 'access', 'account', 'action', 'address', 'after', 'again', 'ahead', 'alert',
   'along', 'amount', 'annual', 'apply', 'applied', 'applying', 'appointment', 'approach', 'arrival', 'arrive',
   'arriving', 'asked', 'attention', 'avoid', 'balance', 'baseboard', 'baseboards', 'basement', 'bathroom', 'bedroom',
-  'before', 'begin', 'behind', 'below', 'between', 'billing', 'booked', 'booking', 'bring', 'building',
+  'before', 'begin', 'behind', 'below', 'between', 'booked', 'booking', 'bring', 'building',
   'cabinet', 'cabinets', 'called', 'calling', 'cancel', 'cancelled', 'carefully', 'caution', 'check', 'checked',
   'checking', 'clear', 'close', 'closet', 'complete', 'completed', 'concern', 'concerns', 'condition', 'conditions',
   'confirm', 'confirmed', 'contact', 'continue', 'continued', 'corner', 'corners', 'coverage', 'covered', 'crawl',
@@ -906,12 +906,12 @@ const COMMON_PROSE_WORDS = new Set([
   'document', 'driveway', 'during', 'earlier', 'early', 'entry', 'estimate', 'evening', 'every', 'expect',
   'expects', 'extra', 'family', 'fence', 'fencing', 'first', 'flag', 'flagged', 'focus', 'follow',
   'following', 'front', 'garage', 'garden', 'gate', 'gates', 'gutter', 'gutters', 'heavy', 'hedge',
-  'hedges', 'history', 'home', 'hours', 'inspect', 'inspected', 'inspection', 'inside', 'invoice', 'issue',
+  'hedges', 'history', 'home', 'hours', 'inspect', 'inspected', 'inspection', 'inside', 'issue',
   'issues', 'items', 'kitchen', 'knock', 'landscape', 'lanai', 'later', 'lawn', 'leave', 'light',
   'listed', 'locked', 'maintain', 'maintenance', 'member', 'membership', 'message', 'meter', 'monitor', 'monitoring',
   'month', 'monthly', 'morning', 'mulch', 'needs', 'nothing', 'note', 'noted', 'notes', 'notice',
   'notify', 'number', 'office', 'onsite', 'orders', 'other', 'outdoor', 'owner', 'panel', 'parking',
-  'patio', 'payment', 'pending', 'perimeter', 'phone', 'photo', 'photos', 'place', 'placed', 'planned',
+  'patio', 'pending', 'perimeter', 'phone', 'photo', 'photos', 'place', 'placed', 'planned',
   'plans', 'plants', 'please', 'pool', 'porch', 'prefer', 'preference', 'preferences', 'prefers', 'pressure',
   'previous', 'prior', 'program', 'progress', 'quote', 'rate', 'ready', 'recap', 'recent', 'recently',
   'recheck', 'record', 'records', 'reminder', 'renewal', 'repair', 'report', 'reported', 'request', 'requested',
@@ -980,16 +980,21 @@ const GROUNDED_ONLY_WORDS = new Set([
   'accepted', 'accepting', 'initial', 'initially', 'recurring',
   // r5: "Customer available Monday" is a scheduling fact, not prose.
   'available', 'availability',
+  // r10: money words require a money fact VALUE in every field — an
+  // estimate-status 'accepted' must not let "Payment accepted" through
+  // when no payment fact exists.
+  'payment', 'payments', 'invoice', 'invoices', 'refund', 'refunds', 'billing',
 ]);
 
 // Instruction objects carrying these words direct real business actions
 // ("Provide estimate", "Discuss payment", "Perform treatment") — inside
 // priorities/watch_items the word must be evidenced in the fact VALUES
 // even though it is ordinary prose in descriptive fields (codex #3423 r9).
+// (payment/invoice/refund/billing graduated to GROUNDED_ONLY_WORDS in r10
+// — they require evidence in EVERY field, not just instructions.)
 const INSTRUCTION_EVIDENCE_WORDS = new Set([
-  'payment', 'payments', 'estimate', 'estimates', 'invoice', 'invoices',
-  'treatment', 'treatments', 'quote', 'quotes', 'credit', 'credits',
-  'balance', 'billing', 'refund', 'refunds', 'discount', 'discounts',
+  'estimate', 'estimates', 'treatment', 'treatments', 'quote', 'quotes',
+  'credit', 'credits', 'balance', 'discount', 'discounts',
 ]);
 
 // Word-level grounding for one candidate word ACROSS its stem variants.
@@ -1141,7 +1146,13 @@ function findUngroundedClaim(body, grounding) {
   const groundedText = JSON.stringify(grounding.llmFacts).toLowerCase();
   // Strict (grounded-only / evidence-word) matches scope to fact VALUES —
   // key names must never ground a business-state claim (codex #3423 r9).
-  const groundedValueText = collectFactValues(grounding.llmFacts).join(' ').toLowerCase();
+  // visit.isRecurring === true is the ONLY cadence fact an ordinary
+  // recurring visit carries; excluding booleans (r9) must not strip it or
+  // every truthful "recurring" brief re-templates (codex #3423 r10).
+  const groundedValueText = [
+    ...collectFactValues(grounding.llmFacts),
+    ...(grounding.llmFacts?.visit?.isRecurring === true ? ['recurring'] : []),
+  ].join(' ').toLowerCase();
   const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const kind of ['names', 'targets']) {
     for (const term of vocab[kind] || []) {

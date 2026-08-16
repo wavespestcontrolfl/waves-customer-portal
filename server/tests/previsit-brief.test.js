@@ -1829,3 +1829,55 @@ describe('codex #3423 r9 — value-scoped strict grounding + retired name + inst
     expect(verdict.body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r10 — recurring boolean evidence + money words grounded everywhere', () => {
+  test('visit.isRecurring:true grounds a truthful recurring claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { visit: { isRecurring: true } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Recurring service.', customer_context: null },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('without the boolean, an ungrounded recurring claim still rejects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { isRecurring: false } } };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Recurring service.', customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+
+  test('an estimate status value cannot ground "Payment accepted" (r10 scoping case)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment accepted' },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+    expect(verdict.reason).toMatch(/payment/i);
+  });
+
+  test('a real payment fact value grounds the same sentence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { billing: { note: 'card payment accepted 08-13' } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment accepted' },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});
