@@ -717,6 +717,10 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
     const laneSuffix = lane === 'live' ? '' : `:${lane}`;
     const routed = await dispatchWithFallback(
       { name: `smsShadow:${route.provider}${laneSuffix}`, primary: route, ...(fallback ? { fallback } : {}) },
+      // 600 caps BOTH live and sealed legs (codex #3423 r46): the sealed
+      // exam gates the live drafter, so it must measure the live cap —
+      // sealed truncation noise belongs to the sealed-eval lane, not a
+      // more permissive harness.
       { system, text: userContent, jsonMode: false, maxTokens: 600, anthropicClient: client },
       { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
     );

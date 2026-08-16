@@ -199,10 +199,10 @@ function baseResponses(overrides = {}) {
 const CLEAN_LLM_JSON = {
   priorities: ['Ant activity near the garage'],
   mentioned_terms: ['ants'],
-  watch_items: ['Chemical-sensitivity note on file'],
-  last_visit_summary: 'Routine pest service in July.',
+  watch_items: ['Note on file from the office'],
+  last_visit_summary: null,
   open_scope: '',
-  customer_context: 'Prefers a text before arrival.',
+  customer_context: 'Prefers a knock before entry.',
 };
 
 beforeEach(() => {
@@ -463,6 +463,184 @@ describe('grounded allowlist validation of LLM output', () => {
     expect(verdict.body).toBeTruthy();
   });
 
+  test('generic business prose self-grounds — no literal grounding demanded (08-15 tuning)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    // Live briefs template-fell ~96% on ordinary vocabulary ("perform",
+    // "provide", "availability") the grounding JSON never spells out.
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: [],
+        priorities: ['Perform a walkthrough and provide an update on arrival'],
+      },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('common-prose target phrases pass the fuzzy tier with stemming (08-15 tuning)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    // "camera" is customer equipment (never common prose) — it grounds here
+    // via the flag detail; "monitors" grounds on stemmed common "monitor".
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'security camera at the front door' }] },
+    };
+    const verdict = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: [],
+        priorities: [],
+        watch_items: ['Ask about a prior scheduled service', 'Customer monitors camera near the driveway'],
+      },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('ungrounded cadence and acceptance claims reject (codex #3423 r4)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Apply Initial Treatment', 'Apply Recurring Treatment', 'Payment accepted', 'Customer available Monday']) {
+      const verdict = validateBriefJson(
+        { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], watch_items: [claim] },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('ungrounded equipment directives and service-history claims reject (codex #3423 r3)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Check cameras', 'Inspect irrigation', 'Missed application']) {
+      const verdict = validateBriefJson(
+        { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], watch_items: [claim] },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('a GROUNDED tier name in descriptive prose is not product-shaped (08-15 tuning)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      // 'accepted' is grounded-only vocabulary (r4) — grounded here via the
+      // estimate status, as real acceptance groundings are.
+      llmFacts: {
+        membership: { tier: 'Bronze' },
+        serviceType: 'Quarterly Pest Control Service',
+        openScope: { pendingEstimate: { status: 'accepted' } },
+      },
+    };
+    const verdict = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: [],
+        priorities: [],
+        customer_context: 'Accepted Bronze pest control after the visit.',
+      },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('product-shaped common phrases park as products in instructions (codex #3423 r2)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Apply Structural Control along the slab'] },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+    expect(verdict.reason).toMatch(/structural|control/i);
+  });
+
+  test('condition-bearing target phrases stay grounded (codex #3423 r2)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], watch_items: ['Watch for severe regrowth'] },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+    expect(verdict.reason).toMatch(/severe|regrowth/i);
+  });
+
+  test('an UNGROUNDED tier claim is an invented account fact — rejected (codex #3423 r1)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: [],
+        priorities: [],
+        customer_context: 'Accepted Bronze pest control after the visit.',
+      },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+    expect(verdict.reason).toMatch(/bronze/i);
+  });
+
+  test('a tier-named verb object still parks as a product even when the tier is grounded (codex #3423 r1)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { membership: { tier: 'Silver' } },
+    };
+    const verdict = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: [],
+        priorities: ['Apply Silver Control along the fence'],
+      },
+      grounding,
+    );
+    expect(verdict.reason).toMatch(/^ungrounded_novel_product:/);
+  });
+
+  test('allowlisted action verbs still ground their objects in instructions (codex #3423 r1)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const instruction of ['Retrieve credentials from the lockbox', 'Vacuum rooms before treating']) {
+      const verdict = validateBriefJson(
+        { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [instruction] },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('room instructions violate an interior opt-out like "interior" does (codex #3423 r1)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { servicePreferences: { interiorSpray: false }, notes: 'vacuum rooms weekly' },
+    };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: ['Vacuum rooms before treating'] },
+      grounding,
+    );
+    expect(verdict.reason).toBe('ungrounded_preference_conflict:interior');
+  });
+
+  test('an ungrounded organism still rejects even inside common prose (08-15 tuning)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      {
+        ...CLEAN_LLM_JSON,
+        mentioned_terms: [],
+        priorities: ['Perform an inspection for chinch bugs'],
+      },
+      grounding,
+    );
+    expect(verdict.reason).toMatch(/^ungrounded_novel_target:chinch/);
+  });
+
   test('an invented dollar amount is rejected; a grounded one passes (codex P1)', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const grounding = {
@@ -517,6 +695,7 @@ describe('grounded allowlist validation of LLM output', () => {
       catalogVocabulary: { names: [], targets: [] },
       llmFacts: {
         servicePreferences: { interiorSpray: false },
+        lastVisit: { recap: 'Interior baseboards treated in March' },
         flags: [{ detail: 'EXTERIOR ONLY — no interior treatment' }],
         recentCalls: ['Asked about ants in garage'],
       },
@@ -585,7 +764,7 @@ describe('grounded allowlist validation of LLM output', () => {
     // strict instructional check must NOT apply to descriptive fields.
     const grounding = {
       catalogVocabulary: { names: [], targets: [] },
-      llmFacts: { recentCalls: ['Asked about ants in garage'] },
+      llmFacts: { lastVisit: { recap: 'exterior service' }, recentCalls: ['Asked about ants in garage'] },
     };
     const verdict = validateBriefJson(
       { ...CLEAN_LLM_JSON, mentioned_terms: [], last_visit_summary: 'Treated front walk during the last visit.' },
@@ -994,6 +1173,12 @@ describe('typed response validation (validateBriefJson + dispatcher validate)', 
   test('the validator is handed to dispatchWithFallback so a bad primary fails over pre-template', async () => {
     useDb(baseResponses());
     await PrevisitBrief.generateVisitBrief('svc-1');
+    // Token budget pinned: 1000 truncated real briefs mid-JSON in prod
+    // (empty_json legs, 08-14/15) — a silent revert would re-break the lane.
+    // reasoningEffort pinned with it: 2000 crosses the OpenAI reasoning
+    // floor, and the raise must never silently enable fallback reasoning.
+    expect(global.__dispatch.mock.calls[0][1].maxTokens).toBe(2000);
+    expect(global.__dispatch.mock.calls[0][1].reasoningEffort).toBe('none');
     const opts = global.__dispatch.mock.calls[0][2];
     expect(typeof opts.validate).toBe('function');
     expect(opts.validate({ json: {} })).toBe('priorities_not_array');
@@ -1523,5 +1708,2503 @@ describe('sweep', () => {
     expect(out.generated).toBe(1);
     expect(out.failed).toBe(1);
     expect(state.updates.scheduled_services).toHaveLength(1);
+  });
+});
+
+describe('grounded-only words require WORD-BOUNDARY grounding (codex #3423 r5)', () => {
+  test('a tier word never grounds on a substring host (silverfish/marigold)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { target: 'silverfish', note: 'marigold bed by the door' },
+    };
+    for (const claim of ['Silver membership on file', 'Gold membership on file']) {
+      const verdict = validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('stem variants of grounded-only words never downgrade to substring (codex #3423 r6)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    // wordVariants('accepted') -> 'accept', which is not itself in the
+    // grounded-only set — the strictness must follow the BASE word.
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { note: 'unaccepted offer, acceptable balance' },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment accepted' },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+
+  test('fabricated preference and account-state prose rejects (codex #3423 r6)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer requests quiet arrival', 'Account in good standing', 'Resident will be onsite', 'Someone will be onsite', 'Interior service included', 'Customer prefers phone communication', 'Customer prefers SMS', 'Past due', 'Site shows damage']) {
+      const verdict = validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('a boundary-grounded tier word still passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { membership: { tier: 'Silver' } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Silver membership on file' },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r9 — value-scoped strict grounding + retired name + instruction evidence', () => {
+  test('a fact KEY never grounds a business-state claim (history.available)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { history: { available: false } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer available Monday' },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+
+  test('an availability fact VALUE still grounds the claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer said they are available Monday mornings' }] },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer available Monday' },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('the retired company name is rejected outright', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { ...CLEAN_LLM_JSON, mentioned_terms: [], priorities: [], customer_context: 'Waves Lawn & Pest visited in July.' },
+      grounding,
+    );
+    expect(verdict.reason).toBe('retired_company_name');
+  });
+
+  test('money/treatment directive objects require fact-value evidence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Provide estimate', 'Discuss payment', 'Perform treatment']) {
+      const verdict = validateBriefJson(
+        { priorities: [claim], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('an evidenced money directive passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer asked to discuss payment on arrival' }] },
+    };
+    const verdict = validateBriefJson(
+      { priorities: ['Discuss payment'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r10 — recurring boolean evidence + money words grounded everywhere', () => {
+  test('visit.isRecurring:true grounds a truthful recurring claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { visit: { isRecurring: true } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Recurring service.', customer_context: null },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+
+  test('without the boolean, an ungrounded recurring claim still rejects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { isRecurring: false } } };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Recurring service.', customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+
+  test('an estimate status value cannot ground "Payment accepted" (r10 scoping case)', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment accepted' },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+    expect(verdict.reason).toMatch(/payment/i);
+  });
+
+  test('a real payment fact value grounds the same sentence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { billing: { note: 'card payment accepted 08-13' } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment accepted' },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r12 — evidence check precedes the whole-phrase fast path', () => {
+  test('null-valued estimate keys never ground "Provide estimate"', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    // Real payloads always carry these keys; the values are null here.
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { sourceEstimate: null, pendingEstimate: null } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: ['Provide estimate'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+
+  test('a real estimate value still grounds the directive', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer asked us to provide estimate for lawn care' }] },
+    };
+    const verdict = validateBriefJson(
+      { priorities: ['Provide estimate'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r13 — interior room nouns trip the interior opt-out for any verb', () => {
+  test('"Vacuum basement" violates an interiorSpray=false preference', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { servicePreferences: { interiorSpray: false } },
+    };
+    for (const claim of ['Vacuum basement', 'Check kitchen']) {
+      const verdict = validateBriefJson(
+        { priorities: [claim], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        grounding,
+      );
+      expect(verdict.reason).toBe('ungrounded_preference_conflict:interior');
+    }
+  });
+});
+
+describe('codex #3423 r14 — punctuated retired name, first-visit token, condition words', () => {
+  test('punctuation-separated retired names reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const name of ['Waves Lawn-Pest', 'Waves Lawn/Pest', 'Waves Lawn + Pest', 'Waves Lawn and Pest']) {
+      const verdict = validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: `${name} visited.` },
+        grounding,
+      );
+      expect(verdict.reason).toBe('retired_company_name');
+    }
+  });
+
+  test('visit.newCustomer:true grounds a truthful initial-visit claim; absent it rejects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const groundedNew = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { newCustomer: true } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Initial visit.', customer_context: null },
+      groundedNew,
+    ).body).toBeTruthy();
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { newCustomer: false } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Initial visit.', customer_context: null },
+      empty,
+    ).reason).toBeTruthy();
+  });
+
+  test('"Baseline damage documented" rejects on empty facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: ['Baseline damage documented'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r15 — cache bump, reversed retired name, access objects, durations', () => {
+  test('reversed and punctuated retired names reject; the real brand does not', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const name of ['Waves Pest & Lawn', 'Waves Pest and Lawn']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: `${name} visited.` },
+        grounding,
+      ).reason).toBe('retired_company_name');
+    }
+    const real = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control and Lawn Care visited.' },
+      grounding,
+    );
+    expect(real.reason).not.toBe('retired_company_name');
+  });
+
+  test('access-object directives require fact-value evidence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Retrieve gate key', 'Retrieve access card']) {
+      expect(validateBriefJson(
+        { priorities: [claim], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'gate key hidden under the planter' }] } };
+    expect(validateBriefJson(
+      { priorities: ['Retrieve gate key'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+
+  test('spelled-out duration claims reject without grounding', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: ['Dry after ten minutes'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r16 — short organisms, indirect objects, do-not-call claims', () => {
+  test('"bat damage" and indirect-object money directives reject on empty facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { watch_items: ['Watch for bat damage'], priorities: [] },
+      { watch_items: ['Damage activity'], priorities: [] },
+      { watch_items: [], priorities: ['Provide customer with an estimate'] },
+      { watch_items: [], priorities: ['Provide customer an estimate'] },
+      { watch_items: [], priorities: [], customer_context: 'Customer is not on do not call list' },
+    ]) {
+      const verdict = validateBriefJson(
+        { mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null, ...body },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('a grounded bat mention still passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'bat damage in the attic; bats reported in vents' }] },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: ['Watch for bat damage'], mentioned_terms: ['bats'], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r17 — waves as product, ALL-CAPS directives, account state', () => {
+  test('ungrounded claims reject: Apply Waves, PERFORM TREATMENT, Account state: paid', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { priorities: ['Apply Waves'] },
+      { priorities: ['PERFORM TREATMENT'] },
+      { priorities: [], customer_context: 'Account state: paid' },
+    ]) {
+      const verdict = validateBriefJson(
+        { watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null, ...body },
+        grounding,
+      );
+      expect(verdict.reason).toBeTruthy();
+    }
+  });
+
+  test('the approved company name still reads as prose', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control serviced the yard in July.' },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r19 — scheduling evidence, room-as-spacing, canonical name only', () => {
+  test('"Discuss scheduling" rejects without a scheduling fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { priorities: ['Discuss scheduling'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+
+  test('singular "room" as spacing does not trip the interior conflict', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { servicePreferences: { interiorSpray: false }, flags: [{ detail: 'leave room around the exterior gate for the trailer' }] },
+    };
+    const verdict = validateBriefJson(
+      { priorities: ['Leave room around the exterior gate'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).not.toBe('ungrounded_preference_conflict:interior');
+  });
+});
+
+describe('codex #3423 r20 — noncanonical suffix, field-wide evidence', () => {
+  test('a suffixed canonical name rejects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const name of ['Waves Pest Control & Lawn', 'Waves Pest Control and Lawn Care', 'Waves Pest Control Pest Services']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: `${name} visited.` },
+        grounding,
+      ).reason).toBe('noncanonical_company_name');
+    }
+  });
+
+  test('evidence words are caught field-wide regardless of capture geometry', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { priorities: ['Provide customer with more information on estimate'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    );
+    // r24: 'estimate' graduated to GROUNDED_ONLY — the rare-word pass now
+    // owns it field-wide; the reason label moved but the rejection stands.
+    expect(verdict.reason).toMatch(/estimate/);
+  });
+});
+
+describe('codex #3423 r21 — scheduling statuses, punctuation after canonical name', () => {
+  test('"Scheduling confirmed" rejects in descriptive fields without a scheduling fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Scheduling confirmed', 'Scheduling cancelled']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('bare punctuation after the canonical name is ordinary prose', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control - routine service in July.' },
+      grounding,
+    );
+    expect(verdict.body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r23 — treatment claims ground in descriptive fields too', () => {
+  test('"Performed treatment" rejects without a treatment fact; grounded passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Performed treatment', open_scope: null, customer_context: null },
+      empty,
+    ).reason).toBeTruthy();
+    const grounded = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { lastVisit: { recap: 'perimeter treatment completed 07-14' } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Performed treatment', open_scope: null, customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r24 — estimate claims, treatment inflections, transition', () => {
+  test('"Estimate provided" rejects descriptively without an estimate; passes with one', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Estimate provided', open_scope: null, customer_context: null },
+      empty,
+    ).reason).toBeTruthy();
+    const grounded = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { pendingEstimate: { tier: 'Bronze', status: 'sent' } } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate provided', customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+
+  test('"Performed treatment" grounds on treated/treating history wording', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { lastVisit: { recap: 'Treated exterior perimeter with Bifen IT' } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Performed treatment', open_scope: null, customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('"Account transition pending" rejects on empty facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Account transition pending' },
+      grounding,
+    ).reason).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r25 — singular keys, canonical name in prose, quote claims', () => {
+  test('"Retrieve door key" rejects without an access fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Retrieve door key', 'Retrieve office key']) {
+      expect(validateBriefJson(
+        { priorities: [claim], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('the canonical name inside ordinary prose passes; beside a novel token it parks', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Call Waves Pest Control before arrival.' },
+      grounding,
+    ).body).toBeTruthy();
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'PhantomGuard Waves Pest Control formula.' },
+      grounding,
+    ).reason).toBeTruthy();
+  });
+
+  test('"Quote provided" rejects without an estimate; passes with one', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Quote provided', open_scope: null, customer_context: null },
+      empty,
+    ).reason).toBeTruthy();
+    const grounded = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { pendingEstimate: { tier: 'Bronze' } } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Quote provided', customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r26 — self-report is not evidence; canonical-name boundaries', () => {
+  test('mentioned_terms cannot launder a grounded-only word past null estimate keys', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { sourceEstimate: null, pendingEstimate: null } },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: ['estimate'], last_visit_summary: 'Estimate provided', open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).toBeTruthy();
+  });
+
+  test('glued canonical-name suffixes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const name of ['Waves Pest Controls', 'Waves Pest Controller']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: `${name} visited.` },
+        grounding,
+      ).reason).toBe('noncanonical_company_name');
+    }
+  });
+});
+
+describe('codex #3423 r27 — sensitivity directives, corporate suffixes, overdue-balance evidence', () => {
+  test('chemical-sensitivity directives need a sensitivity fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: ['Discuss chemical sensitivity'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toBeTruthy();
+    const grounded = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ type: 'chemical_sensitivity', detail: 'customer reports chemical sensitivity — fragrance-free products' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: ['Discuss chemical sensitivity'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+
+  test('corporate suffixes on the canonical name reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const name of ['Waves Pest Control LLC', 'Waves Pest Control, LLC', 'Waves Pest Control Inc']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: `${name} visited.` },
+        grounding,
+      ).reason).toBe('noncanonical_company_name');
+    }
+  });
+
+  test('the overdue_balance flag grounds truthful billing summaries', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ type: 'overdue_balance', severity: 'medium', detail: '$100.00 outstanding' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Invoice balance outstanding' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r28 — descriptive access/card claims, Ltd suffix, -ies stemming', () => {
+  test('descriptive payment-method and entry claims reject on empty facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer provided credit card', 'Customer provided gate access']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('"Waves Pest Control Ltd" rejects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control Ltd visited.' },
+      grounding,
+    ).reason).toBe('noncanonical_company_name');
+  });
+
+  test('a singular sensitivity fact grounds the plural directive', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ type: 'sensitivity', detail: 'chemical sensitivity on file' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: ['Discuss chemical sensitivities'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r29 — key emphasis, -ment stemming, renewal/membership directives', () => {
+  test('"Key concern" emphasis passes while credential keys still ground', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'ant activity near patio' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['Key concern: ant activity'], mentioned_terms: ['ant'], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('the -ment stemmer no longer equates unrelated words', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'Customer departed property; issue settled yesterday' }] },
+    };
+    for (const claim of ['Customer contacted department', 'Settlement completed']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('renewal/membership directives need account-lifecycle facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Discuss renewal', 'Discuss membership', 'Provide renewal information']) {
+      expect(validateBriefJson(
+        { priorities: [claim], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { membership: { tier: 'Bronze' } } };
+    expect(validateBriefJson(
+      { priorities: ['Discuss membership'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r30 — pin credentials, member variants', () => {
+  test('pin credential claims reject; bait-pin prose is untouched by the credential regex', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { priorities: ['Retrieve door pin'], customer_context: null },
+      { priorities: [], customer_context: 'Door pin provided' },
+    ]) {
+      expect(validateBriefJson(
+        { watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, ...body },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('"Discuss member status" needs membership facts; grounded case passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: ['Discuss member status'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toBeTruthy();
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { membership: { tier: 'Silver' } } };
+    expect(validateBriefJson(
+      { priorities: ['Discuss member status'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r31 — pin number, availability family, in-the-home conflict', () => {
+  test('"pin number" credential phrasings reject without grounding', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { priorities: ['Retrieve pin number'], customer_context: null },
+      { priorities: [], customer_context: 'Pin number provided' },
+    ]) {
+      expect(validateBriefJson(
+        { watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, ...body },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('availability paraphrase grounds on an available fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer available Monday mornings' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Availability confirmed Monday' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('"Treat in the home" conflicts with an interior opt-out; "around the home" does not', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { servicePreferences: { interiorSpray: false }, flags: [{ detail: 'treat around the home exterior' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: ['Treat in the home'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    ).reason).toBe('ungrounded_preference_conflict:interior');
+    expect(validateBriefJson(
+      { priorities: ['Treat around the home'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    ).reason).not.toBe('ungrounded_preference_conflict:interior');
+  });
+});
+
+describe('codex #3423 r32 — hyphenated evidence, payment-state contradiction', () => {
+  test('hyphenated compounds cannot hide evidence words', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Chemical-sensitivity note on file', 'Renewal-information pending', 'Membership-status pending']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [claim], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('"Payment accepted" contradicts an overdue balance even with an accepted estimate', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: {
+        openScope: { sourceEstimate: { status: 'accepted' } },
+        flags: [{ type: 'overdue_balance', severity: 'medium', detail: '$100.00 outstanding' }],
+      },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment accepted' },
+      grounding,
+    ).reason).toMatch(/payment_state_conflict/);
+    // A truthful outstanding-balance summary still grounds.
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment outstanding' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r33 — estimate-status binding, initial family', () => {
+  test('estimate lifecycle wording must match the actual status', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } },
+    };
+    for (const claim of ['Estimate cancelled', 'Estimate pending', 'Quote cancelled']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: claim, customer_context: null },
+        grounding,
+      ).reason).toMatch(/estimate_state_conflict/);
+    }
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate accepted', customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('an initially-worded fact grounds initial wording', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'Initially requested Monday morning' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Initial request was Monday morning' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r34 — pets, pest pressure, punctuated suffixes, lifecycle words', () => {
+  test('pet directives, pressure claims, L.P. suffix, and unmatched lifecycle words reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { priorities: ['Discuss pet concerns'] },
+      { priorities: ['Provide pet information'] },
+      { priorities: [], watch_items: ['Signs of pest pressure'] },
+      { priorities: [], customer_context: 'Waves Pest Control L.P. visited.' },
+    ]) {
+      expect(validateBriefJson(
+        { watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null, ...body },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const acceptedEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    for (const claim of ['Estimate completed', 'Estimate closed']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: claim, customer_context: null },
+        acceptedEst,
+      ).reason).toMatch(/estimate_state_conflict/);
+    }
+  });
+
+  test('a pet flag grounds a pet directive; pressure grounds from notes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'dog on property; heavy pest pressure noted at fence line' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: ['Discuss dog concerns'], watch_items: ['Signs of pest pressure'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r35 — rescheduled inflection family', () => {
+  test('a rescheduled fact grounds rescheduling wording', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'appointment rescheduled to Monday per customer call' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Rescheduling confirmed Monday' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r36 — descriptive sensitivity claims, clause-safe suffix regex', () => {
+  test('"Customer provided chemical sensitivity" rejects without a sensitivity fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer provided chemical sensitivity' },
+      empty,
+    ).reason).toBeTruthy();
+  });
+
+  test('canonical-name prose followed by a new clause is not a suffix', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'pest activity reviewed at the fence line' }] },
+    };
+    const verdict = validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Contact Waves Pest Control and pest activity can be reviewed.', open_scope: null, customer_context: null },
+      grounding,
+    );
+    expect(verdict.reason).not.toBe('noncanonical_company_name');
+  });
+});
+
+describe('codex #3423 r37 — capitalized inflections, with-connector, acceptance binding', () => {
+  test('title-cased paraphrase grounds through variants', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer available Monday; appointment rescheduled' }] },
+    };
+    for (const claim of ['Availability Confirmed Monday', 'Rescheduling Confirmed Monday']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      ).body).toBeTruthy();
+    }
+  });
+
+  test('"Treated perimeter with Bifen IT" grounds on product history', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: ['bifen it'], targets: [] },
+      llmFacts: { lastVisit: { productNames: ['Bifen IT'], recap: 'Treated perimeter' } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: ['bifen it'], last_visit_summary: 'Treated perimeter with Bifen IT', open_scope: null, customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('estimate acceptance cannot be reassigned to other objects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } }, membership: { tier: 'Bronze' } },
+    };
+    for (const claim of ['Customer accepted renewal', 'Customer accepted appointment']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      ).reason).toMatch(/acceptance_conflict/);
+    }
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate accepted', customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r38 — determiner evidence, provided-key, fabricated history', () => {
+  test('a determiner-bearing acceptance fact grounds the bare bigram', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'Customer accepted the renewal on the call' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer accepted renewal' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('"Customer provided key/pin" rejects without grounding', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer provided key', 'Customer provided pin']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('completed-service wording needs a real prior visit; history-of needs history', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const summary of ['Service performed', 'Service provided']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: summary, open_scope: null, customer_context: null },
+        empty,
+      ).reason).toMatch(/fabricated_history/);
+    }
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['History of activity'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toMatch(/history/);
+    const grounded = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { lastVisit: { recap: 'Treated exterior; history of ant activity noted' } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['History of activity'], mentioned_terms: [], last_visit_summary: 'Service performed', open_scope: null, customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r39 — reversed payment, descriptive pets, appointment status, contact requests', () => {
+  test('all four r39 claim shapes reject on unsupported facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const overdue = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } }, flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] },
+    };
+    for (const claim of ['Accepted payment', 'Customer paid the balance']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        overdue,
+      ).reason).toMatch(/payment_state_conflict/);
+    }
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer provided dog information', 'Pet information provided', 'Appointment cancelled', 'Customer asked for a phone call', 'Customer asked for text update']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        empty,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('grounded appointment status and contact request pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { visit: { status: 'confirmed' }, flags: [{ detail: 'customer asked for a call before arrival' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment confirmed. Customer asked for a call.' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r40 — key on file, appointment lifecycle, contact verbs, balance-current', () => {
+  test('all r40 claim shapes reject on unsupported facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Key on file', 'Appointment pending', 'Appointment completed', 'Customer wants a phone call', 'Customer prefers a text update']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const overdue = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] },
+    };
+    for (const claim of ['Balance is current', 'No balance due', 'Account is current']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        overdue,
+      ).reason).toMatch(/payment_state_conflict/);
+    }
+  });
+});
+
+describe('codex #3423 r41 — photo claims, contact polarity, visit-scoped appointment state', () => {
+  test('photo claims, negated preferences, and historical statuses reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer provided photos' },
+      empty,
+    ).reason).toBeTruthy();
+    const negated = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'Customer does not want email contact' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer wants email' },
+      negated,
+    ).reason).toMatch(/contact_request/);
+    const historical = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { visit: { status: 'confirmed' }, flags: [{ detail: 'previous appointment cancelled in June' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment cancelled' },
+      historical,
+    ).reason).toMatch(/appointment_state/);
+  });
+
+  test('grounded photo and current-visit status pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { visit: { status: 'confirmed' }, flags: [{ detail: 'customer shared photo of ant trail' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: ['ant'], last_visit_summary: null, open_scope: null, customer_context: 'Photos provided. Appointment confirmed.' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r42 — production visit status, possession keys, payment-not-due', () => {
+  test('a recent-call appointment-status fact grounds the claim without visit.status', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      // production shape: visit has no status field
+      llmFacts: { visit: { serviceType: 'General Pest Control', scheduledDate: '2026-08-20' }, flags: [{ detail: 'customer called; appointment confirmed for Thursday' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment confirmed' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('possession keys and payment-not-due reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has a key' },
+      empty,
+    ).reason).toBeTruthy();
+    const overdue = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment not due' },
+      overdue,
+    ).reason).toMatch(/payment_state_conflict/);
+  });
+});
+
+describe('codex #3423 r43 — negative contact prefs, scheduled estimates, en-route states', () => {
+  test('invented negative preferences and mismatched states reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer prefers no calls', 'Customer asked not to call']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        empty,
+      ).reason).toMatch(/contact_request/);
+    }
+    const acceptedEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate scheduled', customer_context: null },
+      acceptedEst,
+    ).reason).toMatch(/estimate_state_conflict/);
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'General Pest Control', scheduledDate: '2026-08-20' } } };
+    for (const claim of ['Appointment en route', 'Appointment onsite']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        prodVisit,
+      ).reason).toMatch(/appointment_state/);
+    }
+  });
+
+  test('a grounded negative preference passes with matching polarity', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'customer asked not to call before 9am' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer asked not to call' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r44 — activity evidence, real history, access verb, scoped negation/history', () => {
+  test('r44 rejection and truthful cases', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['Recent pest activity noted'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toMatch(/activity/);
+    // source label 'service_history' is not history evidence
+    const labelOnly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { productGuidance: { source: 'service_history' }, serviceHistory: [] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['History of activity'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      labelOnly,
+    ).reason).toMatch(/history/);
+    // access as a verb over a grounded route passes
+    const route = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'enter backyard through side yard gate is unlocked' }] } };
+    expect(validateBriefJson(
+      { priorities: ['Access backyard through side yard'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      route,
+    ).body).toBeTruthy();
+    // mixed-channel negation: positive call claim grounds despite negated email
+    const mixed = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer does not want email but wants a phone call' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer wants a phone call' },
+      mixed,
+    ).body).toBeTruthy();
+    // historical + current status facts: current grounds
+    const both = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'previous appointment confirmed in May; appointment confirmed for Thursday' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment confirmed' },
+      both,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r45 — tier binding, contact imperatives, outstanding, visit phrasing, sensitive', () => {
+  test('r45 claim shapes reject on unsupported facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const hoa = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { propertyProfile: { hoaName: 'Gold Tree HOA' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Gold member' },
+      hoa,
+    ).reason).toMatch(/gold/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { priorities: ['Call customer before arrival'] },
+      { priorities: ['Do not call customer'] },
+      { priorities: [], customer_context: 'Customer is sensitive to chemicals' },
+    ]) {
+      expect(validateBriefJson(
+        { watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null, ...body },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const overdue = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] } };
+    for (const claim of ['Nothing outstanding', 'No outstanding balance']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        overdue,
+      ).reason).toMatch(/payment_state_conflict/);
+    }
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest', scheduledDate: '2026-08-20' } } };
+    for (const claim of ['Visit cancelled', 'Technician is en route']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        prodVisit,
+      ).reason).toMatch(/appointment_state/);
+    }
+  });
+
+  test('grounded tier and sensitivity claims pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { membership: { tier: 'Gold' }, flags: [{ detail: 'chemical sensitivity on file' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Gold member. Customer is sensitive to chemicals.' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r46 — generalized history, drafted, multi-contact, trailing historical, HOA repeat', () => {
+  test('r46 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Basement vacuumed', open_scope: null, customer_context: null },
+      empty,
+    ).reason).toMatch(/fabricated_history/);
+    const oneChannel = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer asked for a phone call' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer asked for a phone call. Customer asked for text update.' },
+      oneChannel,
+    ).reason).toMatch(/contact_request/);
+    const histCancel = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'appointment was cancelled last week and rebooked' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment cancelled' },
+      histCancel,
+    ).reason).toMatch(/appointment_state/);
+  });
+
+  test('r46 truthful cases pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const draftEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { pendingEstimate: { status: 'draft' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate drafted', customer_context: null },
+      draftEst,
+    ).body).toBeTruthy();
+    const hoa = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { propertyProfile: { hoaName: 'Gold Tree HOA' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Property is in Gold Tree HOA.' },
+      hoa,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r47 — geographic suffix, copular tiers, credential-phrased grounding', () => {
+  test('r47 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const fl = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'Florida summer pressure typical' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control of Florida visited.' },
+      fl,
+    ).reason).toBe('noncanonical_company_name');
+    const hoa = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { propertyProfile: { hoaName: 'Gold Tree HOA' } } };
+    for (const claim of ['Customer is Gold', 'Gold customer']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        hoa,
+      ).reason).toMatch(/gold/);
+    }
+    const keyConcern = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'the key concern is ant activity near patio' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Key on file' },
+      keyConcern,
+    ).reason).toBeTruthy();
+  });
+
+  test('a credential-phrased fact still grounds a credential claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'gate key hidden under the planter' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Gate key hidden under the planter' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r48 — credential type, payment acceptance, contact clause binding', () => {
+  test('r48 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const pinFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has a PIN for the gate' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Door key provided' },
+      pinFact,
+    ).reason).toBeTruthy();
+    const reminder = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } }, flags: [{ detail: 'payment reminder scheduled' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Payment accepted' },
+      reminder,
+    ).reason).toBeTruthy();
+    const crossClause = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'Customer wants email; previous call disconnected' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer wants a phone call' },
+      crossClause,
+    ).reason).toMatch(/contact_request/);
+  });
+
+  test('matching-type credential and real payment facts still ground', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'door key provided by customer; card payment accepted 08-13' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Door key provided. Payment accepted.' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r49 — paid phrasing, object channels, prepositioned temporal, copulas, weak connectors', () => {
+  test('r49 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const overdue = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] } };
+    for (const claim of ['Invoice has been paid', 'No invoice outstanding', 'Outstanding balance resolved']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        overdue,
+      ).reason).toMatch(/payment_state_conflict/);
+    }
+    const estCall = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'Customer requested an estimate during the phone call' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer wants a phone call' },
+      estCall,
+    ).reason).toMatch(/contact_request/);
+    const histConf = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'appointment confirmed for last week' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment confirmed' },
+      histConf,
+    ).reason).toMatch(/appointment_state/);
+  });
+
+  test('r49 truthful cases pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const acceptedEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate was accepted', customer_context: null },
+      acceptedEst,
+    ).body).toBeTruthy();
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'pest activity reviewed at fence' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control - pest activity reviewed.' },
+      empty,
+    ).reason).not.toBe('noncanonical_company_name');
+  });
+});
+
+describe('codex #3423 r50 — geo suffix, polarity, completed summaries, photo boundary', () => {
+  test('r50 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const flFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'serviced by Waves Pest Control Florida branch' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control Florida visited.' },
+      flFact,
+    ).reason).toBe('noncanonical_company_name');
+    const noPets = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has no pets' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has pets' },
+      noPets,
+    ).reason).toMatch(/polarity_conflict/);
+    const hasDog = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'dog on property' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'No dogs on property' },
+      hasDog,
+    ).reason).toMatch(/polarity_conflict/);
+    const photog = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer is a photographer by trade' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Photos provided' },
+      photog,
+    ).reason).toBeTruthy();
+  });
+
+  test('a completed last-visit summary is not an upcoming-visit status claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { visit: { serviceType: 'Pest' }, lastVisit: { recap: 'exterior treated August 1' } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: 'Service completed on August 1.', open_scope: null, customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r51 — access-state scope, paid-up, qualifiers, implicit imperatives, code credentials', () => {
+  test('r51 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const accessibility = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'Website accessibility request was granted' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Access granted' },
+      accessibility,
+    ).reason).toBeTruthy();
+    const overdue = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Account is paid up' },
+      overdue,
+    ).reason).toMatch(/payment_state_conflict/);
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment for today is cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: ['Please call before arrival'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toMatch(/contact_request/);
+    const promo = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'promo code redeemed on signup' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Door code on file' },
+      promo,
+    ).reason).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r52 — per-sentence polarity, perfect tense, generic contact', () => {
+  test('r52 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const noPets = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has no pets' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'No pets. Customer has pets.' },
+      noPets,
+    ).reason).toMatch(/polarity_conflict/);
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment has been cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: ['Do not contact customer before arrival'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toMatch(/contact_request/);
+  });
+});
+
+describe('codex #3423 r53 — infinitive requests, perfect estimates, post-noun negation, missing/missed, tier products, tech evidence', () => {
+  test('r53 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer asked to call before arrival' },
+      empty,
+    ).reason).toMatch(/contact_request/);
+    const acceptedEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate has been cancelled', customer_context: null },
+      acceptedEst,
+    ).reason).toMatch(/estimate_state_conflict/);
+    const petsAbsent = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'pets are not present at this property' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has pets' },
+      petsAbsent,
+    ).reason).toMatch(/polarity_conflict/);
+    const missed = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'missed application last week rescheduled' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Missing unit number' },
+      missed,
+    ).reason).toBeTruthy();
+    const goldMember = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { membership: { tier: 'Gold' } } };
+    expect(validateBriefJson(
+      { priorities: ['Apply Gold Chemical to the perimeter'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      goldMember,
+    ).reason).toBeTruthy();
+  });
+
+  test('technician-form status evidence grounds the claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'technician is en route per dispatch' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Technician is en route' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r54 — copular credentials, perfect access, qualifiers, polarity set, bugs, quantities', () => {
+  test('r54 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Key is on file', 'Customer key is on file', 'Return after two hours', 'Customer reported a bug concern']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const accessibility = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'Website accessibility request was granted' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Access has been granted' },
+      accessibility,
+    ).reason).toBeTruthy();
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'The appointment scheduled for today was cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const noSens = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has no chemical sensitivities' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has chemical sensitivities' },
+      noSens,
+    ).reason).toMatch(/polarity_conflict/);
+    const recurringVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { isRecurring: true } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'This visit is not recurring' },
+      recurringVisit,
+    ).reason).toMatch(/polarity_conflict/);
+  });
+
+  test('a grounded spelled quantity passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'let treated areas dry after two hours' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Dry after two hours' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r55 — generic requests, bare dates, adverbs, access confirmation, field-wide history, service suffixes', () => {
+  test('r55 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer requested contact before arrival', 'Property access confirmed', 'Service was performed today']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'The appointment today is cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const acceptedEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate currently cancelled', customer_context: null },
+      acceptedEst,
+    ).reason).toMatch(/estimate_state_conflict/);
+    const termite = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Termite Control Service' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Waves Pest Control and Termite Control visited.' },
+      termite,
+    ).reason).toBe('noncanonical_company_name');
+  });
+});
+
+describe('codex #3423 r56 — weekday qualifiers, implicit contact, membership scope, activity evidence', () => {
+  test('r56 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment next Monday is cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: ['Please contact before arrival'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toMatch(/contact_request/);
+    const estTier = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { pendingEstimate: { tier: 'Gold' } } } };
+    for (const claim of ['Gold member', 'Customer is Gold']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        estTier,
+      ).reason).toMatch(/gold/);
+    }
+    const history = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { lastVisit: { recap: 'routine exterior service' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['Customer reported pest activity'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      history,
+    ).reason).toMatch(/activity/);
+  });
+});
+
+describe('codex #3423 r57 — polarity everywhere', () => {
+  test('negated inversions reject across guards', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const confirmed = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'appointment confirmed for Thursday' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment is not confirmed' },
+      confirmed,
+    ).reason).toMatch(/appointment_state/);
+    const accessGranted = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'property access was granted by the office' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Property access was not granted' },
+      accessGranted,
+    ).reason).toBeTruthy();
+    const goldMember = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { membership: { tier: 'Gold' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer is not Gold' },
+      goldMember,
+    ).reason).toBeTruthy();
+    const noActivity = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer reported no pest activity' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer reported pest activity' },
+      noActivity,
+    ).reason).toMatch(/polarity_conflict/);
+    const noPhotos = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer said no photos were provided' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Photos provided' },
+      noPhotos,
+    ).reason).toBeTruthy();
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Service was previously performed' },
+      empty,
+    ).reason).toMatch(/fabricated_history/);
+  });
+});
+
+describe('codex #3423 r58 — that-clause requests', () => {
+  test('"asked that you call" rejects without a request fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer asked that you call before arrival' },
+      empty,
+    ).reason).toMatch(/contact_request/);
+  });
+});
+
+describe('codex #3423 r59 — eight precision extensions', () => {
+  test('r59 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const fivePets = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has five pets' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Dry after five hours' },
+      fivePets,
+    ).reason).toBeTruthy();
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment status: cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer asked you to call before arrival', 'Key is at office', 'Key is ready']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const overdue = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] } };
+    for (const claim of ['Payments are up to date', 'Invoice is current']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        overdue,
+      ).reason).toMatch(/payment_state_conflict/);
+    }
+    const acctActivity = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'recent account activity reviewed' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer reported pest activity' },
+      acctActivity,
+    ).reason).toBeTruthy();
+    const turf = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'protect sensitive turf near beds' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer is sensitive to chemicals' },
+      turf,
+    ).reason).toBeTruthy();
+    const noSweep = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { servicePreferences: { exteriorSweep: false } } };
+    for (const claim of ['Sweep exterior', 'Perform exterior sweep']) {
+      expect(validateBriefJson(
+        { priorities: [claim], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+        noSweep,
+      ).reason).toMatch(/preference_conflict/);
+    }
+  });
+});
+
+describe('codex #3423 r60 — compound channels, trailing statuses, clause suffixes, contrast negation, estimate tiers', () => {
+  test('r60 rejection cases', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const emailOnly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer requested email' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer requested email and call' },
+      emailOnly,
+    ).reason).toMatch(/contact_request/);
+    const confirmedOnly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'appointment confirmed for Thursday' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment confirmed but later cancelled' },
+      confirmedOnly,
+    ).reason).toMatch(/appointment_state/);
+  });
+
+  test('r60 truthful cases pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer called and requested service for ants' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: ['ants'], last_visit_summary: null, open_scope: null, customer_context: 'Customer called Waves Pest Control and requested service.' },
+      grounded,
+    ).reason).not.toBe('noncanonical_company_name');
+    const mixedPets = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has no dogs but does have cats' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has cats' },
+      mixedPets,
+    ).body).toBeTruthy();
+    const estGold = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { pendingEstimate: { tier: 'Gold' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate is Gold', customer_context: null },
+      estGold,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r61 — historical fields, future tense, passive requests, photo polarity, field-scoped polarity', () => {
+  test('r61 rejection cases', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const histNote = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, lastVisit: { recap: 'ok' }, serviceHistory: [{ notes: 'Appointment cancelled by customer' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment cancelled' },
+      histNote,
+    ).reason).toMatch(/appointment_state/);
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'The visit will be cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer requested to be called before arrival' },
+      empty,
+    ).reason).toMatch(/contact_request/);
+    const photosYes = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'photos provided by customer' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Photos were not provided' },
+      photosYes,
+    ).reason).toBeTruthy();
+  });
+
+  test('cross-field negation does not poison truthful pet claims', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const hasPets = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has pets' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['No action needed'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has pets' },
+      hasPets,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r62 — six precision extensions', () => {
+  test('r62 rejection cases', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'The appointment is currently cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const estGold = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { pendingEstimate: { tier: 'Gold' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer has Gold tier' },
+      estGold,
+    ).reason).toMatch(/gold/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const body of [
+      { priorities: ['Please phone the customer before arrival'] },
+      { priorities: [], customer_context: 'Key will be at office' },
+    ]) {
+      expect(validateBriefJson(
+        { watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null, ...body },
+        empty,
+      ).reason).toBeTruthy();
+    }
+    const pendingEst = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { pendingEstimate: { status: 'pending' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate is not pending', customer_context: null },
+      pendingEst,
+    ).reason).toMatch(/estimate_state_conflict/);
+    const techAvail = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'technician is available Monday' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer is available Monday' },
+      techAvail,
+    ).reason).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r63 — colon states, paid-current inversions, expected contact, estimate identity, of-prose', () => {
+  test('r63 rejection cases', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Upcoming appointment: cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const overdue = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ type: 'overdue_balance', detail: '$100.00 outstanding' }] } };
+    for (const claim of ['Account is up to date', 'Customer owes nothing']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        overdue,
+      ).reason).toMatch(/payment_state_conflict/);
+    }
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'The customer expects a call before arrival' },
+      empty,
+    ).reason).toMatch(/contact_request/);
+    const twoEstimates = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' }, pendingEstimate: { status: 'pending', tier: 'Silver' } } } };
+    for (const claim of ['Pending estimate accepted', 'Silver estimate accepted']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: claim, customer_context: null },
+        twoEstimates,
+      ).reason).toMatch(/estimate_state_conflict/);
+    }
+  });
+
+  test('canonical name followed by of-prose passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer informed office of the issue' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer informed Waves Pest Control of the issue.' },
+      grounding,
+    ).reason).not.toBe('noncanonical_company_name');
+  });
+});
+
+describe('codex #3423 r64 — seven truthful-case fixes', () => {
+  test('grounded natural phrasings pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const dncFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer does not want a call before arrival' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer does not want a call before arrival' },
+      dncFact,
+    ).body).toBeTruthy();
+    const compound = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer requested email and call' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer requested email and call' },
+      compound,
+    ).body).toBeTruthy();
+    const advStatus = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'appointment is currently cancelled per office' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment is currently cancelled' },
+      advStatus,
+    ).body).toBeTruthy();
+    const negActivity = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'pest activity was never reported' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Pest activity was never reported' },
+      negActivity,
+    ).body).toBeTruthy();
+    const pastPerfect = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate had been accepted', customer_context: null },
+      pastPerfect,
+    ).body).toBeTruthy();
+    const digitHours = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'dry time is 5 hours after treatment application' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Dry after five hours' },
+      digitHours,
+    ).body).toBeTruthy();
+    const pluralFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer is sensitive to chemicals' }] } };
+    expect(validateBriefJson(
+      { priorities: ['Discuss chemical sensitivity'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      pluralFact,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r66 — availability paraphrase, spelled counts, inspection history, access inflections', () => {
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('"<day> works for customer" without availability evidence is rejected; grounded passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const schedOnly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { scheduledDate: '2026-08-14' } } };
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Monday works for customer' }, schedOnly,
+    ).reason).toBeTruthy();
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer said monday works for them' }] } };
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Monday works for the customer' }, grounded,
+    ).body).toBeTruthy();
+  });
+
+  test('spelled counts of visits/appointments must ground like digits', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Customer has five visits' }, EMPTY,
+    ).reason).toBeTruthy();
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Five appointments booked' }, EMPTY,
+    ).reason).toBeTruthy();
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'account shows 5 visits completed to date' }] } };
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Customer has five visits' }, grounded,
+    ).body).toBeTruthy();
+  });
+
+  test('completed inspections/maintenance without visit history are fabricated', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Inspection was performed' }, EMPTY,
+    ).reason).toBeTruthy();
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Prior inspection performed' }, EMPTY,
+    ).reason).toBeTruthy();
+    const withHistory = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { lastVisit: { summary: 'inspection was performed on the exterior' } } };
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Inspection was performed' }, withHistory,
+    ).body).toBeTruthy();
+  });
+
+  test('third-person and future access claims must ground', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Customer provides access' }, EMPTY,
+    ).reason).toBeTruthy();
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Access will be provided' }, EMPTY,
+    ).reason).toBeTruthy();
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Customer provides a key' }, EMPTY,
+    ).reason).toBeTruthy();
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer provides access at the gate; access will be provided by resident; customer provides a key under the mat' }] } };
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Customer provides access. Access will be provided. Customer provides a key.' }, grounded,
+    ).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r67 — perfect-tense adverbs, passive contact, organism boundaries, product truncation, brand suffixes, determiners, comm counts', () => {
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('adverbs inside has/had been do not hide a false cancellation', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const noCancel = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest', scheduledDate: '2026-08-20' } } };
+    for (const s of ['The appointment has now been cancelled', 'The visit has since been cancelled', 'The appointment had recently been cancelled']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, noCancel).reason).toBeTruthy();
+    }
+    const cancelled = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest', status: 'cancelled' } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'The appointment has now been cancelled' }, cancelled).body).toBeTruthy();
+  });
+
+  test('passive/modal contact instructions require a contact-request fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer must be called before arrival', 'Customer needs to be called before arrival', 'A phone call was requested before arrival']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer requested a call before arrival' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer must be called before arrival' }, grounded).body).toBeTruthy();
+  });
+
+  test('roach must ground on a word boundary, not inside approach', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const approachFact = { catalogVocabulary: { names: [], targets: ['roaches'] }, llmFacts: { flags: [{ detail: 'use a cautious approach around the entry' }] } };
+    expect(validateBriefJson(
+      { ...BASE, priorities: ['Inspect roach near garage'], mentioned_terms: ['roach'] }, approachFact,
+    ).reason).toBeTruthy();
+    const roachFact = { catalogVocabulary: { names: [], targets: ['roaches'] }, llmFacts: { flags: [{ detail: 'roach sighting reported near garage' }] } };
+    expect(validateBriefJson(
+      { ...BASE, priorities: ['Inspect roach sighting near garage'], mentioned_terms: ['roach'] }, roachFact,
+    ).body).toBeTruthy();
+  });
+
+  test('a term truncating a catalog product name is rejected', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const bifen = { catalogVocabulary: { names: ['Bifen IT'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen IT'] } } };
+    const verdict = validateBriefJson({ ...BASE, priorities: ['Apply Bifen IT'], mentioned_terms: ['bifen'] }, bifen);
+    expect(verdict.reason).toMatch(/^truncated_product_term:/);
+    expect(validateBriefJson({ ...BASE, priorities: ['Apply Bifen IT'], mentioned_terms: ['bifen it'] }, bifen).body).toBeTruthy();
+  });
+
+  test('any strong-connector continuation of the company name is noncanonical', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson(
+      { ...BASE, customer_context: 'Waves Pest Control & Turf Service will handle it' }, EMPTY,
+    ).reason).toBeTruthy();
+  });
+
+  test('determiners do not hide completed-work claims', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Technician performed an inspection', 'Performed the maintenance']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+  });
+
+  test('spelled counts of communications must ground', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer called five times', 'Five calls today', 'Five messages today']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer called 5 times about ants' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer called five times' }, grounded).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r68 — modifier-spanning counts, upcoming treatment, money inflections', () => {
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('spelled counts with intervening modifiers must ground', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer has five active services', 'Customer called five more times']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const grounded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'account shows five active services on file' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has five active services' }, grounded).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'One of the services is lawn care' }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'lawn care services on the account' }] } }).body).toBeTruthy();
+  });
+
+  test('the current visit grounds upcoming-treatment wording; history phrasing still rejects', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const visitOnly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Quarterly Pest Control' } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'The upcoming treatment is routine' }, visitOnly).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Treatment was performed' }, visitOnly).reason).toBeTruthy();
+  });
+
+  test('pay/paid grounds payment; refunded grounds refund', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const payFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer asked how to pay' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer asked about payment' }, payFact).body).toBeTruthy();
+    const refundFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer was refunded yesterday' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Refund was completed' }, refundFact).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer asked about payment' }, EMPTY).reason).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r69 — needs-based contact, payment lifecycle, membership fields, initials, pet subject, legacy products', () => {
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('needs-based contact nouns require a contact fact, on both sides', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer needs a call before arrival', 'Customer needs contact before arrival']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const needsFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer needs a call before arrival' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer needs a call before arrival' }, needsFact).body).toBeTruthy();
+  });
+
+  test('a failed payment fact cannot ground a completed-payment claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const failedFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment failed on the last attempt' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment completed' }, failedFact).reason).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment failed on the last attempt' }, failedFact).body).toBeTruthy();
+    const okFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment received on the account' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment received' }, okFact).body).toBeTruthy();
+  });
+
+  test('membership claims require evidence in descriptive fields too', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer has a membership', 'Customer is a member', 'Membership is active']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const withMembership = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { membership: { tier: 'Silver' } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has a membership' }, withMembership).body).toBeTruthy();
+  });
+
+  test('customer initials do not ground initial-service claims', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const initialsFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer initials are AB' }] } };
+    for (const s of ['Initial treatment planned', 'This is the initial service']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, initialsFact).reason).toBeTruthy();
+    }
+    const newCust = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { newCustomer: true } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'This is the initial service' }, newCust).body).toBeTruthy();
+  });
+
+  test('a neighbor dog does not become the customer pet', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const neighborDog = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'technician saw a dog next door' }] } };
+    for (const s of ['Customer has a dog', 'Dog is on the property']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, neighborDog).reason).toBeTruthy();
+    }
+    const ownDog = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has a dog in the yard' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has a dog' }, ownDog).body).toBeTruthy();
+  });
+
+  test('an exact legacy product name is not a truncation', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const legacy = { catalogVocabulary: { names: ['Bifen IT'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen'] } } };
+    expect(validateBriefJson({ ...BASE, priorities: ['Apply Bifen'], mentioned_terms: ['bifen'] }, legacy).body).toBeTruthy();
+    const catalogOnly = { catalogVocabulary: { names: ['Bifen IT'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen IT'] } } };
+    expect(validateBriefJson({ ...BASE, priorities: ['Apply Bifen IT'], mentioned_terms: ['bifen'] }, catalogOnly).reason).toMatch(/^truncated_product_term:/);
+  });
+});
+
+describe('codex #3423 r70 — access numbers, full payment lifecycle, pet counts', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('access-number claims need credential evidence, not a matching digit', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const dateOnly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { scheduledDate: '2026-08-20' } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Access number 2026' }, dateOnly).reason).toBeTruthy();
+    const credFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'gate access number 2026 on file' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Access number 2026 on file' }, credFact).body).toBeTruthy();
+  });
+
+  test('every payment lifecycle state binds to the recorded state', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const pending = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment is pending' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment completed' }, pending).reason).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment is pending' }, pending).body).toBeTruthy();
+    const refunded = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment was refunded last week' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment completed' }, refunded).reason).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Payment was refunded' }, refunded).body).toBeTruthy();
+  });
+
+  test('spelled pet counts bind to the grounded count', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const oneDog = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has one dog' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has five dogs' }, oneDog).reason).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has one dog' }, oneDog).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r71 — brand suffix nouns, completed applications, estimate counts, photo inflections, headless truncation, reversed payment states', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('name-shaped suffixes reject even when the facts contain them', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const staleName = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'caller mentioned waves pest control group' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Waves Pest Control Group will visit' }, staleName).reason).toBeTruthy();
+  });
+
+  test('completed application claims need visit history', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const lawnApp = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Lawn Application' } } };
+    for (const s of ['Application was performed', 'Performed the application']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, lawnApp).reason).toBeTruthy();
+    }
+  });
+
+  test('spelled estimate counts bind to the facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const oneEstimate = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { pendingEstimate: { status: 'pending' } } } };
+    for (const s of ['Customer has five estimates', 'Five estimates pending']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, oneEstimate).reason).toBeTruthy();
+    }
+  });
+
+  test('inflected photo claims need a photo fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const s of ['Customer provides photos', 'Customer provides a photo', 'Photos have been provided']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const photoFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer provided photos of the damage' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Photos have been provided' }, photoFact).body).toBeTruthy();
+  });
+
+  test('a branded head without the full catalog name rejects even with no self-report', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const bifen = { catalogVocabulary: { names: ['Bifen IT'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen IT'] } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Bifen was used previously', mentioned_terms: [] }, bifen).reason).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, priorities: ['Apply Bifen IT'], mentioned_terms: ['bifen it'] }, bifen).body).toBeTruthy();
+    const legacy = { catalogVocabulary: { names: ['Bifen IT'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen'] } } };
+    expect(validateBriefJson({ ...BASE, priorities: ['Apply Bifen'], mentioned_terms: ['bifen'] }, legacy).body).toBeTruthy();
+  });
+
+  test('state-before-noun payment forms bind to the recorded state', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const failed = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment failed on the account' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Completed payment' }, failed).reason).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Failed payment on the account' }, failed).body).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r72 — split auxiliaries, payment determiners, photo possession, account state, activity evidence, financial counts, descriptive opt-outs, estimate verb negations', () => {
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('split perfect auxiliaries cannot fabricate completed work', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Treatment has now been performed', 'Application had been performed']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Lawn Application' } } }).reason).toBeTruthy();
+    }
+  });
+
+  test('payment states bind through determiners and adverbs', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const failed = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment failed on the account' }] } };
+    for (const s of ['Completed the payment', 'Payment is now completed']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, failed).reason).toBeTruthy();
+    }
+  });
+
+  test('photo possession is an availability claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has photos' }, EMPTY).reason).toBeTruthy();
+    const photoFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has photos of the damage' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has photos' }, photoFact).body).toBeTruthy();
+  });
+
+  test('account lifecycle claims need account-state evidence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer account closed', 'Customer account active']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const closedFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'account closed at customer request' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer account closed' }, closedFact).body).toBeTruthy();
+  });
+
+  test('pest activity needs observational, non-negated evidence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const warranty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer asked about termite warranty' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Termite activity reported' }, warranty).reason).toBeTruthy();
+    const noAnts = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer reported no ants' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Ant activity reported' }, noAnts).reason).toBeTruthy();
+    const antsSeen = { catalogVocabulary: { names: [], targets: ['ants'] }, llmFacts: { flags: [{ detail: 'ants in the kitchen' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Ant activity in the kitchen' }, antsSeen).body).toBeTruthy();
+  });
+
+  test('spelled invoice and payment counts bind to the facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const oneInvoice = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'invoice pending on the account' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Five invoices pending' }, oneInvoice).reason).toBeTruthy();
+    const onePayment = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment completed last week' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Five payments completed' }, onePayment).reason).toBeTruthy();
+  });
+
+  test('descriptive planned-service claims respect opt-outs', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const optOut = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { servicePreferences: { interiorSpray: false, exteriorSweep: false } } };
+    for (const s of ['Interior service planned', 'Exterior sweep planned']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, optOut).reason).toBeTruthy();
+    }
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer requested no interior spray. No exterior sweep wanted' }, optOut).body).toBeTruthy();
+  });
+
+  test('negated estimate verbs bind to the recorded status', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const accepted = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    expect(validateBriefJson({ ...BASE, open_scope: 'Customer did not accept the estimate' }, accepted).reason).toBeTruthy();
+    const declined = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'declined' } } } };
+    expect(validateBriefJson({ ...BASE, open_scope: 'Customer did not decline the estimate' }, declined).reason).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r73 — passive evidence, variant polarity, brand clause continuation, tier estimate scoping, product-shaped heads', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('passive contact evidence grounds the matching claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const passiveFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'a phone call was requested before arrival' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'A phone call was requested before arrival' }, passiveFact).body).toBeTruthy();
+  });
+
+  test('negation is checked against the grounding variant', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const noSens = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has no chemical sensitivity' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has chemical sensitivities' }, noSens).reason).toBeTruthy();
+    const noAvail = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has no availability monday' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer is available Monday' }, noAvail).reason).toBeTruthy();
+  });
+
+  test('a service clause after the canonical name is not a brand suffix', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const callFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { recentCalls: ['customer called waves pest control and lawn service was discussed'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer called Waves Pest Control and lawn service was discussed' }, callFact).body).toBeTruthy();
+    const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Serviced by Waves Pest Control and Lawn Care.' }, EMPTY).reason).toBeTruthy();
+  });
+
+  test('article-less accepted tier estimates validate against the estimate scope', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const goldAccepted = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted', tier: 'Gold' } } } };
+    expect(validateBriefJson({ ...BASE, open_scope: 'Customer accepted Gold estimate' }, goldAccepted).body).toBeTruthy();
+  });
+
+  test('ordinary uses of English-word catalog heads stay prose', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const suspendCatalog = { catalogVocabulary: { names: ['Suspend SC', 'Suspend Polyzone'], targets: [] }, llmFacts: { recentCalls: ['customer asked to suspend service'] } };
+    expect(validateBriefJson({ ...BASE, priorities: ['Suspend service'] }, suspendCatalog).body).toBeTruthy();
+    const bifen = { catalogVocabulary: { names: ['Bifen IT'], targets: [] }, llmFacts: { productGuidance: { productNames: ['Bifen IT'] } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Bifen was used previously', mentioned_terms: [] }, bifen).reason).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r74 — spray history, clause verbs, unit counts, historical statuses, await evidence, entry state', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+
+  test('completed spray claims need visit history', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['The exterior spray was performed', 'Exterior spraying was completed']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+  });
+
+  test('non-copular service clauses after the canonical name stay prose', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const fact1 = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { recentCalls: ['customer contacted waves pest control and lawn service remains scheduled'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer contacted Waves Pest Control and lawn service remains scheduled' }, fact1).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Waves Pest Control and Termite Control visited.' }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'termite' }] } }).reason).toBeTruthy();
+  });
+
+  test('spelled unit and account counts bind to facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Five units on the property', 'Customer has five accounts']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+  });
+
+  test('explicitly historical appointment statuses pass when grounded', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const hist = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'the appointment was cancelled last week' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'The appointment was cancelled last week' }, hist).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'The appointment was cancelled' }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } }).reason).toBeTruthy();
+  });
+
+  test('await-based grounded contact requests pass', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const detail of ['customer awaits a phone call', 'customer awaits email']) {
+      const fact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail }] } };
+      const out = detail.replace('customer', 'Customer');
+      expect(validateBriefJson({ ...BASE, customer_context: out }, fact).body).toBeTruthy();
+    }
+  });
+
+  test('grounded entry-state wording passes', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const detail of ['entry card provided', 'entry key provided', 'entry number provided']) {
+      const fact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail }] } };
+      expect(validateBriefJson({ ...BASE, customer_context: detail[0].toUpperCase() + detail.slice(1) }, fact).body).toBeTruthy();
+    }
+    expect(validateBriefJson({ ...BASE, customer_context: 'Entry card provided' }, EMPTY).reason).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r75 — property counts, grounded history-of, dated statuses, passive acceptance, with-phrases', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+
+  test('spelled property counts bind to facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has five properties' }, EMPTY).reason).toBeTruthy();
+  });
+
+  test('a grounded history-of phrase passes without visit records', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const histFact = { catalogVocabulary: { names: [], targets: ['ants'] }, llmFacts: { flags: [{ detail: 'customer reports history of ants' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer reports history of ants' }, histFact).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'History of termites' }, EMPTY).reason).toBeTruthy();
+  });
+
+  test('dated appointment-status evidence grounds the matching claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const dated = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'appointment for friday was confirmed' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Appointment for Friday was confirmed' }, dated).body).toBeTruthy();
+  });
+
+  test('passive acceptance evidence normalizes copulas', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const renewal = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'renewal was accepted by the customer' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Renewal was accepted by the customer' }, renewal).body).toBeTruthy();
+  });
+
+  test('ordinary with-phrases sharing a catalog head stay prose', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const advance = { catalogVocabulary: { names: ['Advance 375A'], targets: [] }, llmFacts: { recentCalls: ['customer requested service with advance notice'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer requested service with advance notice' }, advance).body).toBeTruthy();
+    const treated = { catalogVocabulary: { names: ['Advance 375A'], targets: [] }, llmFacts: { recentCalls: ['bait placed'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Treated with Advance last visit', mentioned_terms: [] }, treated).reason).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r76 — modifier treatments, photo modifiers, technician counts, subject-bearing requests, clause verbs, qualified statuses, contrast opt-outs', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+
+  test('modifier-spanning completed treatments reject without history', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson({ ...BASE, customer_context: 'Technician performed the exterior treatment' }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } }).reason).toBeTruthy();
+  });
+
+  test('photo-provision claims with modifiers need a photo fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer provided current photos' }, EMPTY).reason).toBeTruthy();
+  });
+
+  test('spelled technician counts bind to facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson({ ...BASE, customer_context: 'Five technicians scheduled' }, EMPTY).reason).toBeTruthy();
+  });
+
+  test('subject-bearing grounded contact requests round-trip', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const fact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer requested that the technician call' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer requested that the technician call' }, fact).body).toBeTruthy();
+  });
+
+  test('ordinary clause verbs after the canonical name stay prose', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const fact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { recentCalls: ['customer called waves pest control and lawn service begins tuesday'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer called Waves Pest Control and lawn service begins Tuesday' }, fact).body).toBeTruthy();
+  });
+
+  test('qualified reverse-order status evidence grounds the claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const fact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, flags: [{ detail: 'confirmed appointment on file' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Confirmed appointment on file' }, fact).body).toBeTruthy();
+  });
+
+  test('contrast descriptions of opt-outs stay valid', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const optOut = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { servicePreferences: { interiorSpray: false }, flags: [{ detail: 'exterior service planned instead of interior' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Exterior service planned instead of interior' }, optOut).body).toBeTruthy();
+    expect(validateBriefJson({ ...BASE, customer_context: 'Interior service planned' }, optOut).reason).toBeTruthy();
+  });
+});
+
+describe('codex #3423 r77 — active-voice statuses, verb-form history, balance state, cadence, pest polarity, implicit availability, first-visit identity', () => {
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+
+  test('active-voice status claims bind to the visit state', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const cancelledFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, recentCalls: ['the appointment was cancelled'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer confirmed the appointment' }, cancelledFact).reason).toBeTruthy();
+    const confirmedFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' }, recentCalls: ['customer confirmed the appointment'] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer confirmed the appointment' }, confirmedFact).body).toBeTruthy();
+  });
+
+  test('verb-form completed treatments need history', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Interior was sprayed yesterday', 'Technician sprayed the interior yesterday', 'Exterior was treated yesterday']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } }).reason).toBeTruthy();
+    }
+  });
+
+  test('balance-state claims need financial evidence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer owes a balance', 'Customer has no balance']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const owed = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer owes a balance of $86.60' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer owes a balance' }, owed).body).toBeTruthy();
+  });
+
+  test('cadence wording binds to visit facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const quarterly = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Quarterly Pest Control', isRecurring: true } } };
+    for (const s of ['Weekly service is scheduled', 'Service is annual', 'Customer prefers one-time service']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, quarterly).reason).toBeTruthy();
+    }
+    expect(validateBriefJson({ ...BASE, customer_context: 'Quarterly service is scheduled' }, quarterly).body).toBeTruthy();
+  });
+
+  test('negated pest facts cannot ground affirmative presence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const noTermites = { catalogVocabulary: { names: [], targets: ['termites'] }, llmFacts: { flags: [{ detail: 'customer reports no termites' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has termites' }, noTermites).reason).toBeTruthy();
+    const termitesSeen = { catalogVocabulary: { names: [], targets: ['termites'] }, llmFacts: { flags: [{ detail: 'customer reports termites in the garage' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has termites in the garage' }, termitesSeen).body).toBeTruthy();
+  });
+
+  test('implicit presence claims are availability claims', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer will be home Monday' }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { scheduledDate: '2026-08-17' } } }).reason).toBeTruthy();
+    const homeFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer will be home monday' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer will be home Monday' }, homeFact).body).toBeTruthy();
+  });
+
+  test('first-visit synonyms bind to the new-customer fact', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const returning = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { newCustomer: false }, lastVisit: { recap: 'serviced in july' } } };
+    for (const s of ['New customer', 'First visit', 'Customer has no prior visits', 'No service history']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, returning).reason).toBeTruthy();
+    }
+    const fresh = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { newCustomer: true } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'First visit for a new customer' }, fresh).body).toBeTruthy();
   });
 });
