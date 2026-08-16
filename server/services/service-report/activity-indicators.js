@@ -2905,7 +2905,10 @@ const LEVEL_CLAIM_BANDS = {
 // bait-station and mosquito scores). Anything else — "heavy rain",
 // "high ceiling", "light fixture", "heavy levels" — claims nothing.
 const LEVEL_WORD_SRC = '(very\\s+low|light|low|minimal|moderate|high|heavy|severe|extreme)';
-const LEVEL_NOUN_SRC = '(?:activity|infestation|pressure|feeding|consumption)';
+// 'contamination' joined for the sanitation body screen (codex r40 #3420) —
+// "light contamination" beside a Severe finding is a level claim like any
+// other; the binding rules keep unrelated uses ("light fixture") out.
+const LEVEL_NOUN_SRC = '(?:activity|infestation|pressure|feeding|consumption|contamination)';
 const LEVEL_ATTR_MOD_SRC = '(?:(?:cockroach|roach|german|palmetto|termite|rodent|mosquito|flea|tick|ant|pest|bait|overall|general|visible|current|surface|interior|exterior|feeding)\\s+){0,3}';
 const LEVEL_CLAIM_ATTRIBUTIVE_RE = new RegExp(
   `\\b${LEVEL_WORD_SRC}\\b(?!-)\\s+${LEVEL_ATTR_MOD_SRC}${LEVEL_NOUN_SRC}\\b`,
@@ -3256,6 +3259,16 @@ function buildTodaysResult({
     // portion (owner 2026-08-11 rule, same as knockdown/mosquito/flea) — the
     // limitation disclosure, the severe-contamination follow-up line, and
     // the next step are mandated and carry in EVERY body (codex r23 #3420).
+    // The body must agree with the recorded contamination LEVEL: a draft
+    // claiming "light contamination" beside a Severe finding keeps the
+    // deterministic copy (same level screen the flea/mosquito/knockdown
+    // branches run; reconcile override honored — codex r40).
+    const sanitationBand = LEVEL_CLAIM_BANDS[level] || null;
+    const sanitationReportBody = technicianReportBody
+      && (reconcileConfirmed
+        || !activityLevelContradictions(technicianReportBody, sanitationBand).length)
+      ? technicianReportBody
+      : null;
     const mandated = [
       limitations.length
         ? `Some areas had limitations: ${joinPhrases(limitations.map((c) => c.toLowerCase()))}.`
@@ -3265,8 +3278,8 @@ function buildTodaysResult({
         : null,
       nextStep,
     ].filter(Boolean);
-    const descriptive = technicianReportBody
-      ? [technicianReportBody]
+    const descriptive = sanitationReportBody
+      ? [sanitationReportBody]
       : [
         areas.length
           ? `Completed rodent sanitation service in the ${joinPhrases(areas)}.`
@@ -3279,7 +3292,7 @@ function buildTodaysResult({
       headline: `${level.charAt(0).toUpperCase()}${level.slice(1)} rodent contamination was cleaned and sanitized today.`,
       body: [...descriptive, ...mandated].join(' ').replace(/\s+/g, ' ').trim(),
       nextStep,
-      ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
+      ...(sanitationReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 

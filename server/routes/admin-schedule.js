@@ -11657,7 +11657,10 @@ router.post('/generate-report', async (req, res) => {
       && (
         sectionsHaveFacts(typedFindingsPromptSections(structuredFindings.type, typedValuesRaw))
         || validatedChipCount(nextStepChips, structuredFindings.type, typedValuesRaw) > 0
-        || typedActivityScoreNum !== null
+        // A ZERO score alone can't open generation — gauge zero states
+        // refuse the drafted body for fixed copy at completion (codex r40;
+        // mirrors the companion rule from r25).
+        || typedActivityScoreNum >= 1
       );
     // Provisional gate: companion input counts here so the request survives
     // to profile resolution, but only PROFILE-AUTHORIZED customer-facing

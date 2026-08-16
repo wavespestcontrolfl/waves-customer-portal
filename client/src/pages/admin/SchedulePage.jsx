@@ -11713,7 +11713,9 @@ export function CompletionPanel({
     const typedHasFindingInput = (isTypedFindings && (
       nonInternalValuesNonEmpty(typedFindingsSchema, findingsValues)
       || (typedFindingsSchema && validChipCount(typedFindingsSchema, typedNextStepChips, findingsValues) > 0)
-      || typedActivityScore != null
+      // zero-state gauges refuse the drafted body at completion — mirror
+      // the companion rule (codex r40)
+      || (Number.isInteger(typedActivityScore) && typedActivityScore > 0)
     ))
       || companionSchemas.some((schema) => {
         // internal_only shadow companions render and submit but never open

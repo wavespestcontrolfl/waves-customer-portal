@@ -54,12 +54,14 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 const REPORT_ACCESS_CODE_RES = [
   /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}\b[a-z]?\d{2,8}\b/i,
   /\b[a-z]?\d{2,8}\b[^\n.!?]{0,15}\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i,
-  /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b\s*(?:is|:|=|-)?\s*(?:["'][A-Za-z0-9#*]{2,12}["']|[A-Za-z]*\d[A-Za-z0-9#*]*\b)/i,
-  /\b(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase)\b\s*(?:is|:|=|-)?\s*[A-Z0-9#*]{2,12}\b/,
-  /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b\s*(?:is|:|=)\s*["']?[a-z][a-z0-9#*]{1,11}["']?(?=[\s.,!?]|$)/i,
+  // quote classes accept Unicode smart quotes — mobile keyboards curl them
+  // (codex r40)
+  /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b\s*(?:is|:|=|-)?\s*(?:["'‘’“”][A-Za-z0-9#*]{2,12}["'‘’“”]|[A-Za-z]*\d[A-Za-z0-9#*]*\b)/i,
+  /\b(?:[Cc]ode|PIN|[Pp]in|[Cc]ombo|[Cc]ombination|[Pp]asscode|[Pp]assword|[Pp]assphrase)\b\s*(?:is|:|=|-)?\s*["'‘’“”]?[A-Z0-9#*]{2,12}\b/,
+  /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b\s*(?:is|:|=)\s*["'‘’“”]?[a-z][a-z0-9#*]{1,11}["'‘’“”]?(?=[\s.,!?‘’“”]|$)/i,
   // reverse order ("blue is the gate password") — a leading stopword
   // ("this is the code") never counts as the credential itself (codex r38)
-  /\b(?!(?:this|that|it|here|there|what|which|below|above)\b)["']?[a-z0-9#*]{2,12}["']?\s+(?:is|=)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase)\b/i,
+  /\b(?!(?:this|that|it|here|there|what|which|below|above)\b)["'‘’“”]?[a-z0-9#*]{2,12}["'‘’“”]?\s+(?:is|=)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase)\b/i,
 ];
 function containsReportAccessCode(text) {
   const value = String(text || '');
