@@ -83,6 +83,7 @@ function makeStubKnex(rowsByTable = {}) {
             if (b === '<=') return rv != null && rv <= cv;
             if (b === '<') return rv != null && rv < cv;
             if (b === '>=') return rv != null && rv >= cv;
+            if (b === '>') return rv != null && rv > cv;
             return rv === cv;
           });
         } else {
@@ -91,6 +92,8 @@ function makeStubKnex(rowsByTable = {}) {
         return chain;
       },
       whereIn(col, vals) { preds.push((r) => vals.includes(r[col])); return chain; },
+      whereNotIn(col, vals) { preds.push((r) => !vals.includes(r[col])); return chain; },
+      whereNot(col, val) { preds.push((r) => r[col] !== val); return chain; },
       whereNull(col) { preds.push((r) => r[col] == null); return chain; },
       orderBy(col, dir = 'asc') { order = { col, dir }; return chain; },
       limit(n) { lim = n; return chain; },
@@ -219,16 +222,16 @@ describe('per-sender ordering fence', () => {
       ],
       customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverz' }],
     });
+    // Claim-one-per-iteration (round-18): the pass drains the sender's
+    // queue in id order — the newer job is claimed only AFTER the older
+    // one completed and released the fence.
     const first = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
-    expect(first.claimed).toBe(1);
-    expect(mockRunSms).toHaveBeenCalledTimes(1);
+    expect(first.claimed).toBe(2);
+    expect(mockRunSms).toHaveBeenCalledTimes(2);
     expect(mockRunSms.mock.calls[0][0].body).toContain('older correction');
-    expect(knex._data.contact_correction_jobs[0].status).toBe('done');
-    expect(knex._data.contact_correction_jobs[1].status).toBe('queued');
-
-    const second = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
-    expect(second.claimed).toBe(1);
     expect(mockRunSms.mock.calls[1][0].body).toContain('newer correction');
+    expect(knex._data.contact_correction_jobs[0].status).toBe('done');
+    expect(knex._data.contact_correction_jobs[1].status).toBe('done');
   });
 
   it('a still-reserved older message blocks the sender\'s queue (no out-of-order run)', async () => {
@@ -364,5 +367,95 @@ describe('runner integration', () => {
     expect(summary.failed).toBe(1);
     expect(job.status).toBe('failed');
     expect(job.attempts).toBe(2);
+  });
+});
+
+describe('round-18 hardening', () => {
+  it('rebases a queued snapshot over an earlier queue write, so the newer message still wins', async () => {
+    // Both webhooks snapshotted the same original value; job 1 applied
+    // 'Riverson' AFTER job 2's snapshot was taken. Without the rebase,
+    // job 2's CAS would read job 1's write as a concurrent change and
+    // stale out — leaving the OLDER correction as the winner.
+    const snapshot = { last_name: 'Riverz', phone: '+15550001111' };
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({
+          id: 1, status: 'done', customer_id: CUSTOMER_ID,
+          result: { applied: [{ field: 'last_name', oldValue: 'Riverz', newValue: 'Riverson' }], skipped: [] },
+          completed_at: Date.now() - 100,
+        }),
+        jobRow({ id: 2, status: 'queued', customer_id: CUSTOMER_ID, expected_values: { ...snapshot }, created_at: Date.now() - 1000 }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverson' }],
+    });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.succeeded).toBe(1);
+    expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toEqual({ last_name: 'Riverson', phone: '+15550001111' });
+  });
+
+  it('does not rebase over a write that completed BEFORE the snapshot was taken', async () => {
+    // A job that finished before this message's webhook matched is already
+    // reflected in the persisted snapshot — overlaying it again would mask
+    // an admin edit that restored the older value in between.
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({
+          id: 1, status: 'done', customer_id: CUSTOMER_ID,
+          result: { applied: [{ field: 'last_name', oldValue: 'Riverz', newValue: 'Riverson' }], skipped: [] },
+          completed_at: Date.now() - 60_000,
+        }),
+        jobRow({ id: 2, status: 'queued', customer_id: CUSTOMER_ID, expected_values: { last_name: 'Riverz', phone: '+15550001111' }, created_at: Date.now() - 1000 }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverz' }],
+    });
+    await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toEqual({ last_name: 'Riverz', phone: '+15550001111' });
+  });
+
+  it('cancels a stale duplicate-sid reservation instead of replaying it', async () => {
+    // Twilio redelivery reserved before the idempotency claim, then the
+    // route died — the original delivery's job already owns this message.
+    mockFindByPhone.mockResolvedValue({ id: CUSTOMER_ID });
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 1, status: 'done', customer_id: CUSTOMER_ID }),
+        jobRow({ id: 2, created_at: Date.now() - 11 * 60_000 }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.promoted).toBe(0);
+    expect(knex._data.contact_correction_jobs[1].status).toBe('cancelled');
+    expect(knex._data.contact_correction_jobs[1].cancel_reason).toBe('duplicate_sid');
+  });
+
+  it('with both same-sid deliveries dead-reserved, promotes the oldest and cancels the rest', async () => {
+    mockFindByPhone.mockResolvedValue({ id: CUSTOMER_ID });
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 1, created_at: Date.now() - 12 * 60_000 }),
+        jobRow({ id: 2, created_at: Date.now() - 11 * 60_000 }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+      sms_log: [],
+    });
+    const summary = await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(summary.promoted).toBe(1);
+    expect(knex._data.contact_correction_jobs[0].status).toBe('done');
+    expect(knex._data.contact_correction_jobs[1].status).toBe('cancelled');
+    expect(knex._data.contact_correction_jobs[1].cancel_reason).toBe('duplicate_sid');
+  });
+
+  it('a worker whose lock was reclaimed cannot overwrite the new owner\'s state', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [jobRow({ id: 1, status: 'running', customer_id: CUSTOMER_ID, locked_by: 'replacement:2', locked_at: Date.now() })],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null }],
+    });
+    const job = { ...knex._data.contact_correction_jobs[0] };
+    // Stale worker (different wid) finishes its long-running extraction
+    // after the job was reclaimed — its done mark must match zero rows.
+    await queue._internals.runContactCorrectionJob(job, knex, 'stale:1');
+    expect(knex._data.contact_correction_jobs[0].status).toBe('running');
+    expect(knex._data.contact_correction_jobs[0].locked_by).toBe('replacement:2');
   });
 });

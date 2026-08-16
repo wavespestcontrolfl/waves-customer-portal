@@ -33,10 +33,26 @@ async function tableExists(name) {
 function findEvidence(v2Extraction, field) {
   const paths = FIELD_PATHS[field] || [];
   const evidence = Array.isArray(v2Extraction?.evidence) ? v2Extraction.evidence : [];
-  return evidence.find((item) => (
-    item?.quote
-    && paths.some((path) => String(item.field_path || '').startsWith(path))
-  )) || null;
+  // Most-specific path wins, not evidence order (codex #3413 r18): a
+  // generic /property/service_address item listed before a unit-specific
+  // one would otherwise pin the street quote to address_line2, and the
+  // correction lane then discards a genuine unit correction for lacking
+  // intent in its quote (or bells the wrong evidence). Ties keep the
+  // first evidence item, preserving the old behavior within a
+  // specificity level.
+  let best = null;
+  let bestLen = -1;
+  for (const item of evidence) {
+    if (!item?.quote) continue;
+    const fieldPath = String(item.field_path || '');
+    for (const path of paths) {
+      if (fieldPath.startsWith(path) && path.length > bestLen) {
+        best = item;
+        bestLen = path.length;
+      }
+    }
+  }
+  return best;
 }
 
 function confidence(v2Extraction, key, fallback = null) {
@@ -88,6 +104,7 @@ function buildCustomerFieldCandidates({ callId, customerId = null, extraction, v
 }
 
 async function stageCustomerFieldCandidates(args = {}) {
+  const { procToken = null } = args;
   const rows = buildCustomerFieldCandidates(args);
   if (!rows.length || !(await tableExists('customer_field_candidates'))) {
     return { staged: 0, skipped: rows.length };
@@ -122,10 +139,31 @@ async function stageCustomerFieldCandidates(args = {}) {
           continue;
         }
         if (existing.status === 'pending') {
-          await db('customer_field_candidates')
-            .where({ id: existing.id, status: 'pending' })
-            .update({ customer_id: row.customer_id || null, updated_at: db.fn.now() });
-          stagedIds.push(existing.id);
+          // The relink is fenced to the pass that owns the call's
+          // processing token (codex #3413 r18): a timed-out processor
+          // overlapping the worker that reclaimed its claim must not move
+          // the row back to the stale linkage after the owner relinked it
+          // — the call_log row is locked token-conditioned in the same
+          // transaction, so a reclaim (which rewrites processing_token)
+          // serializes against this write. A pass whose token is gone
+          // skips the relink AND the provenance id: it fails closed, same
+          // as its own downstream token check.
+          const relinked = await db.transaction(async (trx) => {
+            if (procToken) {
+              const held = await trx('call_log')
+                .where({ id: row.call_log_id })
+                .where('processing_token', procToken)
+                .forUpdate()
+                .first('id');
+              if (!held) return false;
+            }
+            await trx('customer_field_candidates')
+              .where({ id: existing.id, status: 'pending' })
+              .update({ customer_id: row.customer_id || null, updated_at: trx.fn.now() });
+            return true;
+          });
+          if (relinked) stagedIds.push(existing.id);
+          else logger.warn(`[call-candidates] relink fenced out for call ${row.call_log_id} (processing token lost)`);
           continue;
         }
       }

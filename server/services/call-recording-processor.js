@@ -8362,6 +8362,10 @@ const CallRecordingProcessor = {
       customerId: customerId || call.customer_id || null,
       extraction: extracted,
       v2Extraction: v2ExtractionForAudit,
+      // Token-fences the value-keyed dedupe's relink of pending rows: a
+      // stale pass that lost its claim must not rewrite a candidate's
+      // linkage after the owning pass relinked it (codex #3413 r18).
+      procToken,
     }).catch((err) => {
       logger.warn(`[call-proc] Customer field candidate staging skipped for ${maskSid(callSid)}: ${err.message}`);
       return null;

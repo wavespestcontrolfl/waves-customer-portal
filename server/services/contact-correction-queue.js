@@ -74,6 +74,13 @@ async function reserveContactCorrectionJob({ senderPhone, messageSid = null, bod
       .returning('id');
     return inserted?.[0]?.id ?? inserted?.[0] ?? null;
   } catch (err) {
+    // 23505 on the live-sid partial unique index = a Twilio redelivery of
+    // a message whose original delivery already holds a live job — the
+    // desired outcome, not an error (migration 20260816000005).
+    if (err && err.code === '23505') {
+      logger.info('[contact-correction-queue] duplicate delivery reservation rejected (sid already live)');
+      return null;
+    }
     logger.warn(`[contact-correction-queue] reservation failed: ${err.message}`);
     return null;
   }
@@ -166,6 +173,29 @@ async function promoteStaleReservations(knex) {
   let promoted = 0;
   for (const job of stale) {
     try {
+      // A Twilio redelivery inserts a second reservation before the SID
+      // idempotency claim; if the route died before its finally could
+      // cancel it, that duplicate must never be replayed — the ORIGINAL
+      // delivery's job (queued/running/done/failed under the same sid)
+      // already carries the correction, and a replayed duplicate would run
+      // with a later queue id and a run-start snapshot, able to overwrite
+      // a newer correction with the stale value (codex #3413 r18). A
+      // sibling still 'reserved' does not count: with both deliveries
+      // dead-reserved, the sweep promotes the oldest and this check then
+      // cancels the rest. A partial unique index (migration
+      // 20260816000005) blocks new duplicates at insert; this check covers
+      // the same-window races the index cannot see.
+      if (job.message_sid) {
+        const sibling = await knex('contact_correction_jobs')
+          .where('message_sid', job.message_sid)
+          .whereNot('id', job.id)
+          .whereNotIn('status', ['cancelled', 'reserved'])
+          .first('id');
+        if (sibling) {
+          await cancelContactCorrectionJob(job.id, 'duplicate_sid', { knex });
+          continue;
+        }
+      }
       const contactCorrection = require('./contact-correction');
       if (!job.body || !contactCorrection.detectContactCorrectionIntent(job.body)) {
         await cancelContactCorrectionJob(job.id, 'stale_no_intent', { knex });
@@ -244,9 +274,13 @@ async function claimDueContactCorrectionJobs({ limit = 3, id = workerId(), knex 
   });
 }
 
-async function markJobDone(job, result, knex) {
-  await knex('contact_correction_jobs')
-    .where({ id: job.id })
+// Both terminal marks are OWNER-CONDITIONED (codex #3413 r18): a worker
+// whose lock went stale mid-run (slow LLM call outliving the 10-minute
+// threshold) must not overwrite the state of the peer that legitimately
+// reclaimed the job — its update matches zero rows and is logged instead.
+async function markJobDone(job, result, knex, wid) {
+  const updated = await knex('contact_correction_jobs')
+    .where({ id: job.id, status: 'running', locked_by: wid })
     .update({
       status: 'done',
       result: result ? JSON.stringify(result) : null,
@@ -256,15 +290,17 @@ async function markJobDone(job, result, knex) {
       last_error: null,
       updated_at: knex.fn.now(),
     });
+  if (!updated) logger.warn(`[contact-correction-queue] job ${job.id} lock lost before done mark (reclaimed by a peer)`);
+  return updated > 0;
 }
 
-async function markJobRetry(job, errMessage, knex) {
+async function markJobRetry(job, errMessage, knex, wid) {
   const attempts = Number(job.attempts || 0);
   const maxAttempts = Number(job.max_attempts || DEFAULT_MAX_ATTEMPTS);
   const terminal = attempts >= maxAttempts;
   const delayMinutes = Math.min(30, Math.pow(2, Math.max(0, attempts - 1)));
-  await knex('contact_correction_jobs')
-    .where({ id: job.id })
+  const updated = await knex('contact_correction_jobs')
+    .where({ id: job.id, status: 'running', locked_by: wid })
     .update({
       status: terminal ? 'failed' : 'queued',
       last_error: String(errMessage || 'contact correction failed').slice(0, 500),
@@ -276,17 +312,57 @@ async function markJobRetry(job, errMessage, knex) {
       locked_by: null,
       updated_at: knex.fn.now(),
     });
+  if (!updated) logger.warn(`[contact-correction-queue] job ${job.id} lock lost before retry mark (reclaimed by a peer)`);
+  return updated > 0;
 }
 
-async function runContactCorrectionJob(job, knex) {
+/**
+ * Rebase a job's persisted CAS baseline over earlier QUEUE writes for the
+ * same customer (codex #3413 r18): two rapid messages snapshot the same
+ * original values at their webhooks, so after the older job applies, the
+ * newer job's baseline would read the older job's write as a concurrent
+ * change and stale out — leaving the OLDER correction as the winner.
+ * Overlaying the applied values of earlier completed jobs (only those
+ * finishing AFTER this job's snapshot was taken) advances the baseline
+ * through the queue's own writes while an intervening admin edit — or any
+ * write the queue did not make — still reads as concurrent and fails
+ * closed. applied.newValue is the canonical value the apply wrote, so the
+ * field-aware CAS compare matches exactly.
+ */
+async function rebaseSnapshot(job, snapshot, knex) {
+  if (!snapshot || !job.customer_id) return snapshot;
+  const earlier = await knex('contact_correction_jobs')
+    .where('customer_id', job.customer_id)
+    .where('id', '<', job.id)
+    .where('status', 'done')
+    .where('completed_at', '>', job.created_at)
+    .orderBy('id', 'asc');
+  const rebased = { ...snapshot };
+  for (const e of earlier) {
+    let result = e.result;
+    if (typeof result === 'string') { try { result = JSON.parse(result); } catch { result = null; } }
+    for (const a of (result?.applied || [])) {
+      if (a && a.field && Object.prototype.hasOwnProperty.call(rebased, a.field)) {
+        rebased[a.field] = a.newValue ?? null;
+      }
+    }
+  }
+  return rebased;
+}
+
+async function runContactCorrectionJob(job, knex, wid) {
   const contactCorrection = require('./contact-correction');
   const customer = job.customer_id
     ? await knex('customers').where({ id: job.customer_id }).whereNull('deleted_at').first()
     : null;
   if (!customer) {
-    await markJobDone(job, { applied: [], skipped: [], reason: 'customer_missing' }, knex);
+    await markJobDone(job, { applied: [], skipped: [], reason: 'customer_missing' }, knex, wid);
     return { ok: true, reason: 'customer_missing' };
   }
+  // pg parses jsonb to an object; anything else (older drivers, stubs)
+  // falls back to the runner's run-start read.
+  const rawSnapshot = (job.expected_values && typeof job.expected_values === 'object') ? job.expected_values : null;
+  const snapshot = await rebaseSnapshot(job, rawSnapshot, knex);
   // The runner is fail-soft (never throws; internal errors come back as
   // reason 'error'). Retry only that internal-error shape — every other
   // outcome (gate_off, no_corrections, applied, CAS-skipped, …) is final.
@@ -295,15 +371,13 @@ async function runContactCorrectionJob(job, knex) {
     body: job.body,
     smsLogId: job.sms_log_id || null,
     senderPhone: job.sender_phone || null,
-    // pg parses jsonb to an object; anything else (older drivers, stubs)
-    // falls back to the runner's run-start read.
-    matchedSnapshot: (job.expected_values && typeof job.expected_values === 'object') ? job.expected_values : null,
+    matchedSnapshot: snapshot,
   });
   if (result?.reason === 'error') {
-    await markJobRetry(job, 'runner reported internal error', knex);
+    await markJobRetry(job, 'runner reported internal error', knex, wid);
     return { ok: false, reason: 'error' };
   }
-  await markJobDone(job, result, knex);
+  await markJobDone(job, result, knex, wid);
   return { ok: true, reason: result?.reason || 'done' };
 }
 
@@ -320,22 +394,31 @@ async function processDueContactCorrectionJobs({ limit = 3, knex = db } = {}) {
   } catch (err) {
     logger.warn(`[contact-correction-queue] stale-reservation sweep failed: ${err.message}`);
   }
-  let jobs = [];
-  try {
-    jobs = await claimDueContactCorrectionJobs({ limit, knex });
-  } catch (err) {
-    logger.warn(`[contact-correction-queue] claim failed: ${err.message}`);
-    return summary;
-  }
-  summary.claimed = jobs.length;
-  for (const job of jobs) {
+  // Claim ONE job per iteration, not a batch (codex #3413 r18): batched
+  // claims stamp every job's locked_at up front, and an LLM extraction can
+  // run long enough that a job still WAITING behind earlier work ages past
+  // the stale-lock threshold — a peer then reclaims it and runs the same
+  // paid extraction twice. Claiming immediately before running keeps each
+  // lock's age equal to its own work only.
+  const wid = workerId();
+  while (summary.claimed < limit) {
+    let jobs = [];
     try {
-      const res = await runContactCorrectionJob(job, knex);
+      jobs = await claimDueContactCorrectionJobs({ limit: 1, id: wid, knex });
+    } catch (err) {
+      logger.warn(`[contact-correction-queue] claim failed: ${err.message}`);
+      break;
+    }
+    if (!jobs.length) break;
+    const job = jobs[0];
+    summary.claimed += 1;
+    try {
+      const res = await runContactCorrectionJob(job, knex, wid);
       if (res.ok) summary.succeeded += 1; else summary.failed += 1;
     } catch (err) {
       summary.failed += 1;
       try {
-        await markJobRetry(job, err.message, knex);
+        await markJobRetry(job, err.message, knex, wid);
       } catch (markErr) {
         logger.warn(`[contact-correction-queue] retry mark failed for job ${job.id}: ${markErr.message}`);
       }
@@ -356,5 +439,6 @@ module.exports = {
     promoteStaleReservations,
     recoverStaleLocks,
     runContactCorrectionJob,
+    rebaseSnapshot,
   },
 };

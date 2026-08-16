@@ -5,6 +5,7 @@ jest.mock('../models/db', () => {
   const proxy = (...args) => mockDbStub(...args);
   proxy.fn = { now: () => 'NOW' };
   proxy.schema = { hasTable: async () => true };
+  proxy.transaction = async (fn) => fn(proxy);
   return proxy;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -86,6 +87,47 @@ function merge(target, source) {
   return out;
 }
 
+// Minimal chainable stub over an in-memory candidates table.
+function installDbStub(rows = [], { callLog = [] } = {}) {
+  const tables = {
+    customer_field_candidates: rows.map((r) => ({ ...r })),
+    call_log: callLog.map((r) => ({ ...r })),
+  };
+  let nextId = 100;
+  mockDbStub = (table) => {
+    const data = tables[table];
+    if (!data) throw new Error(`unexpected table ${table}`);
+    const preds = [];
+    const chain = {
+      where(a, b) {
+        if (typeof a === 'object') for (const [k, v] of Object.entries(a)) preds.push((r) => r[k] === v);
+        else preds.push((r) => r[a] === b);
+        return chain;
+      },
+      forUpdate() { return chain; },
+      first(...cols) {
+        const row = data.find((r) => preds.every((p) => p(r)));
+        if (!row) return Promise.resolve(undefined);
+        return Promise.resolve(Object.fromEntries(cols.map((c) => [c, row[c]])));
+      },
+      update(vals) {
+        const matched = data.filter((r) => preds.every((p) => p(r)));
+        for (const r of matched) Object.assign(r, vals);
+        return Promise.resolve(matched.length);
+      },
+      insert(row) {
+        const stored = { id: `cand-${++nextId}`, ...row };
+        data.push(stored);
+        const result = Promise.resolve([{ id: stored.id }]);
+        result.returning = () => Promise.resolve([{ id: stored.id }]);
+        return result;
+      },
+    };
+    return chain;
+  };
+  return tables.customer_field_candidates;
+}
+
 describe('call field candidates', () => {
   test('builds v2 candidates with evidence, confidence, and mapped service values', () => {
     const rows = buildCustomerFieldCandidates({
@@ -152,42 +194,6 @@ describe('staging dedupe linkage (codex #3413 r17)', () => {
   const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
   const OTHER_CUSTOMER_ID = '33333333-3333-4333-8333-333333333333';
 
-  // Minimal chainable stub over an in-memory candidates table.
-  function installDbStub(rows = []) {
-    const data = rows.map((r) => ({ ...r }));
-    let nextId = 100;
-    mockDbStub = (table) => {
-      if (table !== 'customer_field_candidates') throw new Error(`unexpected table ${table}`);
-      const preds = [];
-      const chain = {
-        where(a, b) {
-          if (typeof a === 'object') for (const [k, v] of Object.entries(a)) preds.push((r) => r[k] === v);
-          else preds.push((r) => r[a] === b);
-          return chain;
-        },
-        first(...cols) {
-          const row = data.find((r) => preds.every((p) => p(r)));
-          if (!row) return Promise.resolve(undefined);
-          return Promise.resolve(Object.fromEntries(cols.map((c) => [c, row[c]])));
-        },
-        update(vals) {
-          const matched = data.filter((r) => preds.every((p) => p(r)));
-          for (const r of matched) Object.assign(r, vals);
-          return Promise.resolve(matched.length);
-        },
-        insert(row) {
-          const stored = { id: `cand-${++nextId}`, ...row };
-          data.push(stored);
-          const result = Promise.resolve([{ id: stored.id }]);
-          result.returning = () => Promise.resolve([{ id: stored.id }]);
-          return result;
-        },
-      };
-      return chain;
-    };
-    return data;
-  }
-
   const existingRow = (over = {}) => ({
     id: 'cand-1',
     call_log_id: CALL_ID,
@@ -242,5 +248,78 @@ describe('staging dedupe linkage (codex #3413 r17)', () => {
     expect(data[0].customer_id).toBe(OTHER_CUSTOMER_ID);
     expect(data[0].status).toBe('auto_applied');
     expect(data[1].customer_id).toBe(CUSTOMER_ID);
+  });
+});
+
+describe('round-18 hardening', () => {
+  const CALL_ID = '11111111-1111-4111-8111-111111111111';
+  const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
+  const OTHER_CUSTOMER_ID = '33333333-3333-4333-8333-333333333333';
+
+  test('unit-specific evidence beats an earlier generic address item for address_line2', () => {
+    const rows = buildCustomerFieldCandidates({
+      callId: CALL_ID,
+      customerId: CUSTOMER_ID,
+      extraction: {},
+      v2Extraction: validV2Extraction({
+        property: { service_address: { street_line_1: '8224 Abalone Loop', street_line_2: 'Unit 4B', city: 'Parrish', state: 'FL', postal_code: '34219' } },
+        evidence: [
+          { field_path: '/property/service_address', quote: "I'm at 8224 Abalone Loop in Parrish.", speaker: 'caller' },
+          { field_path: '/property/service_address/unit', quote: 'it is unit 4B, not 4', speaker: 'caller' },
+        ],
+      }),
+    });
+    const line2 = rows.find((r) => r.field_name === 'address_line2');
+    expect(line2.evidence_quote).toBe('it is unit 4B, not 4');
+    // The street candidate still prefers its own component path when one
+    // exists, and otherwise keeps the aggregate quote.
+    const line1 = rows.find((r) => r.field_name === 'address_line1');
+    expect(line1.evidence_quote).toBe("I'm at 8224 Abalone Loop in Parrish.");
+  });
+
+  test('relink is skipped (and the id withheld) when the pass no longer holds the processing token', async () => {
+    const data = installDbStub(
+      [{
+        id: 'cand-1', call_log_id: CALL_ID, customer_id: OTHER_CUSTOMER_ID, field_name: 'last_name',
+        final_recommended_value: 'Rodriguez', source: 'gemini_v2', status: 'pending',
+      }],
+      { callLog: [{ id: CALL_ID, processing_token: 'owner-token' }] },
+    );
+    const res = await stageCustomerFieldCandidates({
+      callId: CALL_ID,
+      customerId: CUSTOMER_ID,
+      extraction: {},
+      procToken: 'stale-token',
+      v2Extraction: validV2Extraction({
+        caller: { name_full: null, first_name: null, email: null, phone_e164: null },
+        property: { service_address: null },
+        service_request: { primary_service_category: null },
+      }),
+    });
+    expect(res.stagedIds).toEqual([]);
+    expect(data[0].customer_id).toBe(OTHER_CUSTOMER_ID); // untouched
+  });
+
+  test('relink proceeds while the pass still holds the processing token', async () => {
+    const data = installDbStub(
+      [{
+        id: 'cand-1', call_log_id: CALL_ID, customer_id: null, field_name: 'last_name',
+        final_recommended_value: 'Rodriguez', source: 'gemini_v2', status: 'pending',
+      }],
+      { callLog: [{ id: CALL_ID, processing_token: 'owner-token' }] },
+    );
+    const res = await stageCustomerFieldCandidates({
+      callId: CALL_ID,
+      customerId: CUSTOMER_ID,
+      extraction: {},
+      procToken: 'owner-token',
+      v2Extraction: validV2Extraction({
+        caller: { name_full: null, first_name: null, email: null, phone_e164: null },
+        property: { service_address: null },
+        service_request: { primary_service_category: null },
+      }),
+    });
+    expect(res.stagedIds).toEqual(['cand-1']);
+    expect(data[0].customer_id).toBe(CUSTOMER_ID);
   });
 });
