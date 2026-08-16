@@ -2651,3 +2651,51 @@ describe('codex #3423 r37 — capitalized inflections, with-connector, acceptanc
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r38 — determiner evidence, provided-key, fabricated history', () => {
+  test('a determiner-bearing acceptance fact grounds the bare bigram', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'Customer accepted the renewal on the call' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Customer accepted renewal' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('"Customer provided key/pin" rejects without grounding', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const claim of ['Customer provided key', 'Customer provided pin']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: claim },
+        grounding,
+      ).reason).toBeTruthy();
+    }
+  });
+
+  test('completed-service wording needs a real prior visit; history-of needs history', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    for (const summary of ['Service performed', 'Service provided']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: summary, open_scope: null, customer_context: null },
+        empty,
+      ).reason).toMatch(/fabricated_history/);
+    }
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['History of activity'], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toMatch(/history/);
+    const grounded = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { lastVisit: { recap: 'Treated exterior; history of ant activity noted' } },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: ['History of activity'], mentioned_terms: [], last_visit_summary: 'Service performed', open_scope: null, customer_context: null },
+      grounded,
+    ).body).toBeTruthy();
+  });
+});

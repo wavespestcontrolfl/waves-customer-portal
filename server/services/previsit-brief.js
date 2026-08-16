@@ -1027,7 +1027,7 @@ const GROUNDED_ONLY_WORDS = new Set([
 
 // 'key' as an access credential ("door key", "key under the mat") must
 // ground; 'key' as emphasis ("key concern") is prose (codex #3423 r29).
-const KEY_CREDENTIAL_RE = /\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\s+(?:keys?|pins?|codes?)\b|\b(?:keys?|pins?)\s+(?:under|hidden|inside|behind|left|beneath|provided)\b|\b(?:pins?|codes?)\s+(?:numbers?|on\s+file)\b/i;
+const KEY_CREDENTIAL_RE = /\b(?:gate|door|house|office|garage|spare|access|lockbox|shed)\s+(?:keys?|pins?|codes?)\b|\b(?:keys?|pins?)\s+(?:under|hidden|inside|behind|left|beneath|provided)\b|\b(?:pins?|codes?)\s+(?:numbers?|on\s+file)\b|\b(?:provided?|leave|left|gave|give)\s+(?:the\s+|a\s+)?(?:keys?|pins?)\b/i;
 
 // Instruction objects carrying these words direct real business actions
 // ("Provide estimate", "Discuss payment", "Perform treatment") — inside
@@ -1373,6 +1373,18 @@ function findUngroundedClaim(body, grounding) {
   if (svcPrefFlags?.exteriorSweep === false) {
     prefConflicts.push({ re: /\b(?:eaves?|cobwebs?)\b/, term: 'eave sweep' });
   }
+  // Completed-service wording in last_visit_summary requires an actual
+  // prior visit — "Service performed" for a customer with no lastVisit
+  // fact is a fabricated service record (r38).
+  if (!grounding.llmFacts?.lastVisit && body.last_visit_summary
+    && /\bservice\s+(?:performed|provided|completed|rendered)\b|\b(?:performed|provided|completed|rendered)\s+service\b/i.test(String(body.last_visit_summary))) {
+    return { kind: 'fabricated_history', term: 'no prior visit on file' };
+  }
+  // "History of <condition>" asserts recorded history — the word must
+  // appear in the fact values (r38).
+  if (/\bhistory\s+of\b/.test(outputText) && !groundedValueText.includes('history')) {
+    return { kind: 'novel_term', term: 'history' };
+  }
   // A positive payment-state phrase under an overdue_balance flag asserts
   // the OPPOSITE of the customer's billing state — flattened token pools
   // cannot see the contradiction, so it is checked as a phrase (r32).
@@ -1393,7 +1405,10 @@ function findUngroundedClaim(body, grounding) {
     if (ACCEPT_OBJECT_OK.has(noun) || noun === 'customer') continue;
     const bigram1 = `accepted ${noun}`;
     const bigram2 = `${noun} accepted`;
-    if (!groundedValueText.includes(bigram1) && !groundedValueText.includes(bigram2)) {
+    // Determiners normalized on the evidence side too — a fact saying
+    // "accepted the renewal" grounds "accepted renewal" (r38 P2).
+    const detNormalizedValues = groundedValueText.replace(/\b(?:the|a|an|his|her|their|our)\s+/g, '');
+    if (!detNormalizedValues.includes(bigram1) && !detNormalizedValues.includes(bigram2)) {
       return { kind: 'acceptance_conflict', term: noun };
     }
   }
