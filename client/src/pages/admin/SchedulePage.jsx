@@ -11280,12 +11280,19 @@ export function CompletionPanel({
     );
     // Type-aware pruning against the CURRENT schema — see
     // pruneRestoredFindingsValues for why key presence alone isn't enough.
+    // Any pruning that changes the generation inputs must ALSO invalidate a
+    // restored installed report below — the baseline reset above would
+    // otherwise adopt the pruned state as original and keep prose that
+    // describes facts no longer submitted (codex r64).
+    let restorePruned = false;
     const restoredFindings =
       savedDraft.findingsValues && typeof savedDraft.findingsValues === "object"
         ? savedDraft.findingsValues
         : {};
     if (typedFindingsSchema?.fields) {
+      const prePruneFindings = JSON.stringify(restoredFindings);
       pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields);
+      if (JSON.stringify(restoredFindings) !== prePruneFindings) restorePruned = true;
       setFindingsValues(restoredFindings);
       setTypedActivityScore(
         Number.isInteger(savedDraft.typedActivityScore)
@@ -11296,6 +11303,10 @@ export function CompletionPanel({
       const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
         ? savedDraft.typedNextStepChips
         : [];
+      if (typedFindingsSchema?.nextStepChips
+        && restoredChips.some((chip) => !typedFindingsSchema.nextStepChips.includes(chip))) {
+        restorePruned = true;
+      }
       setTypedNextStepChips(
         typedFindingsSchema?.nextStepChips
           ? restoredChips.filter((chip) => typedFindingsSchema.nextStepChips.includes(chip))
@@ -11318,6 +11329,7 @@ export function CompletionPanel({
         || (Array.isArray(savedDraft.typedNextStepChips) && savedDraft.typedNextStepChips.length > 0)
         || String(savedDraft.typedRecommendations || "").trim() !== "";
       if (draftHadTypedEntries) {
+        restorePruned = true;
         alert(
           "This service now completes with the standard form. The typed findings saved in this draft (rooms, evidence, treatment, activity, next steps…) can't be restored — re-enter anything still needed in the notes or observations.",
         );
@@ -11345,17 +11357,18 @@ export function CompletionPanel({
               { values: {}, chips: [], score: null, scoreTouched: false },
             ];
           }
-          const values = pruneRestoredFindingsValues(
-            saved.values && typeof saved.values === "object"
-              ? { ...saved.values }
-              : {},
-            schema.fields || [],
-          );
+          const preValues = saved.values && typeof saved.values === "object"
+            ? { ...saved.values }
+            : {};
+          const prePruneCompanion = JSON.stringify(preValues);
+          const values = pruneRestoredFindingsValues(preValues, schema.fields || []);
+          if (JSON.stringify(values) !== prePruneCompanion) restorePruned = true;
           const chips = Array.isArray(saved.chips)
             ? saved.chips.filter((chip) =>
                 (schema.nextStepChips || []).includes(chip),
               )
             : [];
+          if (Array.isArray(saved.chips) && chips.length !== saved.chips.length) restorePruned = true;
           return [
             schema.type,
             {
@@ -11368,6 +11381,32 @@ export function CompletionPanel({
         }),
       ),
     );
+    // Saved companion types the profile no longer declares are dropped
+    // silently by the mapping above — that is pruning too.
+    if (Object.entries(savedCompanions).some(([type, saved]) => (
+      saved && typeof saved === "object"
+      && !companionSchemas.some((schema) => schema.type === type)
+      && (Object.keys(saved.values || {}).length > 0
+        || (Array.isArray(saved.chips) && saved.chips.length > 0)
+        || Number.isInteger(saved.score))
+    ))) {
+      restorePruned = true;
+    }
+    // Pruning changed the generation inputs — the restored installed
+    // report may describe facts that will no longer be submitted, so it
+    // invalidates like any other post-generation input change; an
+    // untouched draft falls back to the saved handwritten notes
+    // (codex r64).
+    if (restorePruned && generatedReportTextRef.current) {
+      const installed = generatedReportTextRef.current;
+      generatedReportTextRef.current = null;
+      setAiReportUsed(false);
+      if (String(savedDraft.notes || "").trim() === installed.trim()) {
+        setNotes(preGenerationNotesRef.current || "");
+        preGenerationNotesRef.current = null;
+        setGeneratedReportCleared(true);
+      }
+    }
     setShowDraftPrompt(false);
   }
 

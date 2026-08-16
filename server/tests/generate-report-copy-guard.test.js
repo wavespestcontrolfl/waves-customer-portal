@@ -327,6 +327,10 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // availability wording, EPA auxiliary, modal continuing linkers (r64)
+    expect(reportCopyRejection('The treated area will be available for use after thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The EPA has approved this treatment for homes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The gate code will continue to be BLUE.')).toBe('access_code');
     // occupancy resumption, EPA reverse forms, continuing linkers (r63)
     expect(reportCopyRejection('Occupancy of the treated area may resume after thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('The treatment is approved by the EPA for residential use.')).toMatch(/^banned:/);
