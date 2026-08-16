@@ -3155,3 +3155,24 @@ describe('codex #3423 r51 — access-state scope, paid-up, qualifiers, implicit 
     ).reason).toBeTruthy();
   });
 });
+
+describe('codex #3423 r52 — per-sentence polarity, perfect tense, generic contact', () => {
+  test('r52 claim shapes reject', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const noPets = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has no pets' }] } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'No pets. Customer has pets.' },
+      noPets,
+    ).reason).toMatch(/polarity_conflict/);
+    const prodVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Pest' } } };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Appointment has been cancelled' },
+      prodVisit,
+    ).reason).toMatch(/appointment_state/);
+    const empty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson(
+      { priorities: ['Do not contact customer before arrival'], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null },
+      empty,
+    ).reason).toMatch(/contact_request/);
+  });
+});

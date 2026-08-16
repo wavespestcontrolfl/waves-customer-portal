@@ -1442,7 +1442,7 @@ function findUngroundedClaim(body, grounding) {
     body.open_scope,
     body.customer_context,
   ].filter(Boolean).join(' ').toLowerCase();
-  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:for|on)\s+\w+\s+)?(?:was\s+|is\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
+  for (const m of currentClaimText.matchAll(/\b(?:appointments?|visits?|service|technician|tech)\s+(?:(?:for|on)\s+\w+\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(cancelled|canceled|confirmed|rescheduled|moved|pending|completed?|skipped|missed|en\s+route|on\s*site|in\s+progress|underway|started)\b|\b(cancelled|canceled|confirmed|rescheduled|pending|completed?)\s+(?:appointments?|visits?)\b/g)) {
     const status = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled').replace(/\s+/g, ' ');
     // Multi-word statuses ('en route', 'on site') match underscore forms too.
     const statusForms = [...new Set([...wordVariants(status.replace(/\s/g, '')), status, status.replace(/\s/g, '_'), status.replace(/\s/g, '')])];
@@ -1463,7 +1463,7 @@ function findUngroundedClaim(body, grounding) {
   // EVERY contact claim is validated, not just the first (r46).
   const contactClaims = [
     ...outputText.matchAll(/\b(?:asked|asks|requested|requests|wants?|wanted|prefers?|preferred)\s+(?:for\s+)?(not\s+to\s+|no\s+)?(?:a\s+|an\s+|the\s+)?(?:phone\s+)?(call(?:s|back)?|texts?|sms|emails?|updates?)\b/g),
-    ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email)\s+(?:the\s+)?customer\b/g)],
+    ...[...outputText.matchAll(/\b(do\s+not\s+|don't\s+)?(call|text|email|contact)\s+(?:the\s+)?customer\b/g)],
     // Imperative channel verbs with implicit customer ("Please call
     // before arrival") in INSTRUCTION fields (r51).
     ...[...instructionalText.matchAll(/(?:^|[.;!?]\s*)(?:please\s+)?(do\s+not\s+|don't\s+)?(call|text|email)\s+(?:before|after|prior|when|upon|on\s+arrival|ahead)\b/g)],
@@ -1707,11 +1707,17 @@ function findUngroundedClaim(body, grounding) {
   for (const pw of ['pet', 'pets', 'dog', 'dogs', 'cat', 'cats', 'available', 'availability']) {
     if (!new RegExp(`\\b${pw}\\b`).test(outputText)) continue;
     const negRe = new RegExp(`\\b(?:no|not|never|without)\\b[^.;!?]{0,20}\\b${pw}\\b`);
-    const outNeg = negRe.test(outputText);
     const factHasWord = wordVariants(pw).some((v) => new RegExp(`\\b${v}`).test(groundedValueText));
     if (!factHasWord) continue; // ungrounded handling stays with the word passes
     const factNeg = negRe.test(groundedValueText);
-    if (outNeg !== factNeg) return { kind: 'polarity_conflict', term: pw };
+    // EVERY sentence mentioning the word must match fact polarity — a
+    // supported negative sentence must not mask a contradictory positive
+    // one (r52).
+    for (const sentence of outputText.split(/[.;!?]/)) {
+      if (!new RegExp(`\\b${pw}\\b`).test(sentence)) continue;
+      const outNeg = negRe.test(sentence);
+      if (outNeg !== factNeg) return { kind: 'polarity_conflict', term: pw };
+    }
   }
   const wordKnown = (word) => {
     // Grounded-only status (on ANY stem variant) outranks prose-set
