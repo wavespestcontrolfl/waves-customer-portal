@@ -1094,6 +1094,8 @@ function wordVariants(word) {
   if (word.endsWith('ing')) out.push(word.slice(0, -3), `${word.slice(0, -3)}e`);
   if (word.endsWith('ed')) out.push(word.slice(0, -2), word.slice(0, -1));
   if (word.endsWith('ly')) out.push(word.slice(0, -2));
+  // initial <-> initially likewise (r33 P2).
+  if (word === 'initial') out.push('initially');
   // available <-> availability are one evidence family (r31 P2) — model
   // paraphrase between them must not defeat a real availability fact.
   if (word === 'available') out.push('availability');
@@ -1368,6 +1370,23 @@ function findUngroundedClaim(body, grounding) {
   if ((grounding.llmFacts?.flags || []).some((f) => f?.type === 'overdue_balance')
     && /\bpayment\s+(?:accepted|received|completed?|made|confirmed)\b|\bpaid\s+in\s+full\b|\b(?:balance|invoice)\s+(?:paid|cleared|settled)\b/i.test(outputText)) {
     return { kind: 'payment_state_conflict', term: 'overdue balance on file' };
+  }
+  // Estimate/quote LIFECYCLE wording must match the actual estimate
+  // object's status — the estimate token asserts existence, never state
+  // (r33: "Estimate cancelled" over an accepted estimate is fabricated).
+  const estimateStatuses = [
+    grounding.llmFacts?.openScope?.sourceEstimate?.status,
+    grounding.llmFacts?.openScope?.pendingEstimate?.status,
+  ].filter(Boolean).map((v) => String(v).toLowerCase().replace(/^canceled$/, 'cancelled'));
+  // A pendingEstimate object IS the pending state, status field or not.
+  if (grounding.llmFacts?.openScope?.pendingEstimate) estimateStatuses.push('pending');
+  if (estimateStatuses.length) {
+    for (const m of outputText.matchAll(/\b(?:estimates?|quotes?)\s+(?:was\s+|is\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected)\s+(?:estimates?|quotes?)\b/g)) {
+      const claimed = String(m[1] || m[2]).replace(/^canceled$/, 'cancelled');
+      if (!estimateStatuses.includes(claimed)) {
+        return { kind: 'estimate_state_conflict', term: claimed };
+      }
+    }
   }
   // Evidence-bearing words are validated FIELD-WIDE in instructions —
   // capture geometry (token caps, connectors) must never decide whether

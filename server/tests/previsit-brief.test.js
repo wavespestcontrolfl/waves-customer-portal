@@ -2498,3 +2498,35 @@ describe('codex #3423 r32 — hyphenated evidence, payment-state contradiction',
     ).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r33 — estimate-status binding, initial family', () => {
+  test('estimate lifecycle wording must match the actual status', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } },
+    };
+    for (const claim of ['Estimate cancelled', 'Estimate pending', 'Quote cancelled']) {
+      expect(validateBriefJson(
+        { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: claim, customer_context: null },
+        grounding,
+      ).reason).toMatch(/estimate_state_conflict/);
+    }
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: 'Estimate accepted', customer_context: null },
+      grounding,
+    ).body).toBeTruthy();
+  });
+
+  test('an initially-worded fact grounds initial wording', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const grounding = {
+      catalogVocabulary: { names: [], targets: [] },
+      llmFacts: { flags: [{ detail: 'Initially requested Monday morning' }] },
+    };
+    expect(validateBriefJson(
+      { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: 'Initial request was Monday morning' },
+      grounding,
+    ).body).toBeTruthy();
+  });
+});
