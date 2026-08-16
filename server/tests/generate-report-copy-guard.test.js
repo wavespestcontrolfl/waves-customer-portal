@@ -327,6 +327,11 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // direct play/sit-on forms + perfect-tense credential copulas (r59)
+    expect(reportCopyRejection('Children can play on the treated lawn after thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('Sit on the treated lawn after 4 PM.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The gate code has been BLUE all season.')).toBe('access_code');
+    expect(reportCopyRejection('BLUE had been the gate code before today.')).toBe('access_code');
     // passive walked-on + progressive reverse credential linkers (r58)
     expect(reportCopyRejection('The treated lawn may be walked on after 4 PM.')).toMatch(/^banned:/);
     expect(reportCopyRejection('BLUE is going to be the gate code.')).toBe('access_code');
