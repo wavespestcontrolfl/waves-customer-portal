@@ -3901,3 +3901,74 @@ describe('codex #3423 r71 — brand suffix nouns, completed applications, estima
     expect(validateBriefJson({ ...BASE, customer_context: 'Failed payment on the account' }, failed).body).toBeTruthy();
   });
 });
+
+describe('codex #3423 r72 — split auxiliaries, payment determiners, photo possession, account state, activity evidence, financial counts, descriptive opt-outs, estimate verb negations', () => {
+  const EMPTY = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+  const BASE = { priorities: [], watch_items: [], mentioned_terms: [], last_visit_summary: null, open_scope: null, customer_context: null };
+
+  test('split perfect auxiliaries cannot fabricate completed work', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Treatment has now been performed', 'Application had been performed']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Lawn Application' } } }).reason).toBeTruthy();
+    }
+  });
+
+  test('payment states bind through determiners and adverbs', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const failed = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment failed on the account' }] } };
+    for (const s of ['Completed the payment', 'Payment is now completed']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, failed).reason).toBeTruthy();
+    }
+  });
+
+  test('photo possession is an availability claim', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has photos' }, EMPTY).reason).toBeTruthy();
+    const photoFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer has photos of the damage' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer has photos' }, photoFact).body).toBeTruthy();
+  });
+
+  test('account lifecycle claims need account-state evidence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    for (const s of ['Customer account closed', 'Customer account active']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, EMPTY).reason).toBeTruthy();
+    }
+    const closedFact = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'account closed at customer request' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer account closed' }, closedFact).body).toBeTruthy();
+  });
+
+  test('pest activity needs observational, non-negated evidence', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const warranty = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer asked about termite warranty' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Termite activity reported' }, warranty).reason).toBeTruthy();
+    const noAnts = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'customer reported no ants' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Ant activity reported' }, noAnts).reason).toBeTruthy();
+    const antsSeen = { catalogVocabulary: { names: [], targets: ['ants'] }, llmFacts: { flags: [{ detail: 'ants in the kitchen' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Ant activity in the kitchen' }, antsSeen).body).toBeTruthy();
+  });
+
+  test('spelled invoice and payment counts bind to the facts', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const oneInvoice = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'invoice pending on the account' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Five invoices pending' }, oneInvoice).reason).toBeTruthy();
+    const onePayment = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { flags: [{ detail: 'payment completed last week' }] } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'Five payments completed' }, onePayment).reason).toBeTruthy();
+  });
+
+  test('descriptive planned-service claims respect opt-outs', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const optOut = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { servicePreferences: { interiorSpray: false, exteriorSweep: false } } };
+    for (const s of ['Interior service planned', 'Exterior sweep planned']) {
+      expect(validateBriefJson({ ...BASE, customer_context: s }, optOut).reason).toBeTruthy();
+    }
+    expect(validateBriefJson({ ...BASE, customer_context: 'Customer requested no interior spray. No exterior sweep wanted' }, optOut).body).toBeTruthy();
+  });
+
+  test('negated estimate verbs bind to the recorded status', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const accepted = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'accepted' } } } };
+    expect(validateBriefJson({ ...BASE, open_scope: 'Customer did not accept the estimate' }, accepted).reason).toBeTruthy();
+    const declined = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { openScope: { sourceEstimate: { status: 'declined' } } } };
+    expect(validateBriefJson({ ...BASE, open_scope: 'Customer did not decline the estimate' }, declined).reason).toBeTruthy();
+  });
+});

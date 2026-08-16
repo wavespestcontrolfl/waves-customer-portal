@@ -1470,7 +1470,7 @@ function findUngroundedClaim(body, grounding) {
   }
   // Completed-work phrasing in ANY field needs a prior visit (r55).
   if (!grounding.llmFacts?.lastVisit
-    && /\b(?:service|work|treatment|visit|inspection|maintenance|application)\s+(?:was\s+|has\s+been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:an?\s+|the\s+)?(?:service|work|treatment|inspection|maintenance|application)\b|\bprior\s+(?:inspection|maintenance|application)\b/.test(outputText)) {
+    && /\b(?:service|work|treatment|visit|inspection|maintenance|application)\s+(?:was\s+|ha[sd]\s+(?:(?:now|since|recently|already|just)\s+)?been\s+)?(?:(?:previously|already|recently|just)\s+)?(?:performed|completed|provided|rendered|done)\b|\b(?:performed|completed|rendered)\s+(?:an?\s+|the\s+)?(?:service|work|treatment|inspection|maintenance|application)\b|\bprior\s+(?:inspection|maintenance|application)\b/.test(outputText)) {
     return { kind: 'fabricated_history', term: 'no prior visit on file' };
   }
   // Spelled-out short quantities before time units are numeric claims —
@@ -1482,7 +1482,7 @@ function findUngroundedClaim(body, grounding) {
   // Bounded modifiers between the quantity and unit ("five active
   // services", "five more times") are still count claims (r68 P2);
   // 'of' is excluded so partitives ("one of the services") stay prose.
-  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:(?!of\b)\w+\s+){0,2}(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?|pets?|dogs?|cats?|estimates?|quotes?)\b/g)) {
+  for (const m of outputText.matchAll(/\b(one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty)\s+(?:(?!of\b)\w+\s+){0,2}(minutes?|hours?|days?|weeks?|months?|visits?|appointments?|services?|treatments?|applications?|inspections?|times?|calls?|messages?|texts?|emails?|voicemails?|pets?|dogs?|cats?|estimates?|quotes?|invoices?|payments?)\b/g)) {
     const phrase = `${m[1]} ${m[2]}`;
     const digitMap = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', fifteen: '15', twenty: '20', thirty: '30' };
     const unit = m[2].replace(/s$/, '');
@@ -1507,7 +1507,7 @@ function findUngroundedClaim(body, grounding) {
   }
   // Photo-availability claims need a photo fact (r41 P2).
   {
-    const photoClaim = /\b(?:provide[sd]?|supplied|supplies|sent|sends|shared|shares)\s+(?:a\s+|the\s+)?photos?\b|\bphotos?\s+(?:(?:were|are|was|is|(?:have|has|had)\s+been|will\s+be)\s+)?(?:not\s+)?(?:provided|supplied|sent|shared|attached|on\s+file)\b|\bno\s+photos?\b/.test(outputText);
+    const photoClaim = /\b(?:provide[sd]?|supplied|supplies|sent|sends|shared|shares)\s+(?:a\s+|the\s+)?photos?\b|\bphotos?\s+(?:(?:were|are|was|is|(?:have|has|had)\s+been|will\s+be)\s+)?(?:not\s+)?(?:provided|supplied|sent|shared|attached|on\s+file)\b|\bno\s+photos?\b|\b(?:customer|client|resident)s?\b[^.;!?]{0,20}\b(?:has|have|had)\s+(?:a\s+|the\s+|some\s+|new\s+)?photos?\b/.test(outputText);
     if (photoClaim) {
       const claimNeg = negNear(outputText, 'photos?');
       const factHas = /\bphotos?\b/.test(groundedValueText);
@@ -1644,10 +1644,20 @@ function findUngroundedClaim(body, grounding) {
   if (/\bpaid\b/.test(groundedValueText)) factPayStates.add('completed');
   if (factPayStates.size > 0) {
     for (const [state, src] of PAY_STATES) {
-      if (new RegExp(`\\bpayment\\s+(?:was\\s+|has\\s+been\\s+|had\\s+been\\s+|is\\s+)?${src}\\b|\\b${src}\\s+payments?\\b`).test(outputText)
+      if (new RegExp(`\\bpayment\\s+(?:(?:was|is|ha[sd]\\s+(?:(?:now|currently|already|recently|just)\\s+)?been)\\s+)?(?:(?:now|currently|already|recently|just)\\s+)?${src}\\b|\\b${src}\\s+(?:the\\s+|an?\\s+)?payments?\\b`).test(outputText)
         && !factPayStates.has(state)) {
         return { kind: 'payment_state_conflict', term: `payment ${state} not on file` };
       }
+    }
+  }
+  // Account lifecycle wording ("account closed"/"account active") is a
+  // customer-state claim — 'account' is common prose and the state words
+  // stem to common verbs, so it is checked as a phrase (r72).
+  const acctClaim = outputText.match(/\baccounts?\b[^.;!?]{0,25}\b(closed|active|inactive|suspended|cancelled|canceled|on\s+hold|frozen|terminated|deactivated|reactivated)\b|\b(closed|active|inactive|suspended|frozen|terminated)\s+accounts?\b/);
+  if (acctClaim) {
+    const acctState = (acctClaim[1] || acctClaim[2]).replace(/^canceled$/, 'cancelled');
+    if (!new RegExp(`\\baccounts?\\b[^.;!?]{0,30}\\b${acctState}|\\b${acctState}\\b[^.;!?]{0,30}\\baccounts?\\b`).test(groundedValueText)) {
+      return { kind: 'novel_term', term: 'account status' };
     }
   }
   // Tier words bind to ACTUAL tier facts — an HOA or product name
@@ -1719,6 +1729,14 @@ function findUngroundedClaim(body, grounding) {
   const pendingStatus = String(grounding.llmFacts?.openScope?.pendingEstimate?.status || (grounding.llmFacts?.openScope?.pendingEstimate ? 'pending' : '')).toLowerCase();
   const pendingTier = String(grounding.llmFacts?.openScope?.pendingEstimate?.tier || '').toLowerCase();
   if (estimateStatuses.length) {
+    // Negated verb-object forms ("did not accept the estimate") assert
+    // lifecycle state too and must not invert the recorded one (r72).
+    for (const m of outputText.matchAll(/\b(?:did\s+not|didn't|has\s+not|hasn't|have\s+not|haven't|never)\s+(accept|decline|approve|reject)(?:ed)?\s+(?:the\s+|an?\s+|this\s+|that\s+)?(?:estimates?|quotes?|proposals?)\b/g)) {
+      const verbState = { accept: 'accepted', decline: 'declined', approve: 'approved', reject: 'rejected' }[m[1]];
+      if (estimateStatuses.includes(verbState)) {
+        return { kind: 'estimate_state_conflict', term: `not ${verbState}` };
+      }
+    }
     for (const m of outputText.matchAll(/\b(?:(?:pending|proposal|bronze|silver|gold|platinum)\s+)?(?:estimates?|quotes?)\s+(?:(?:currently|now|still|recently)\s+)?(?:(?:was|is|has\s+been|had\s+been|got)\s+)?(?:(?:currently|now|still|recently)\s+)?(?:(not)\s+)?(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\b|\b(accepted|declined|cancelled|canceled|pending|sent|expired|rejected|completed|closed|approved|finalized|voided|scheduled|draft(?:ed)?)\s+(?:estimates?|quotes?)\b/g)) {
       const pendingScoped = /\b(?:pending|proposal)\s+estimates?\b/.test(m[0]) || (pendingTier && new RegExp(`\\b${pendingTier}\\s+estimates?\\b`).test(m[0]));
       const negatedLifecycle = Boolean(m[1]);
@@ -1762,6 +1780,18 @@ function findUngroundedClaim(body, grounding) {
       const fieldText = String(field.text).toLowerCase();
       for (const conflict of prefConflicts) {
         if (conflict.re.test(fieldText)) return { kind: 'preference_conflict', term: conflict.term };
+      }
+    }
+    // Descriptive claims of PLANNED/INCLUDED service in an opted-out
+    // scope contradict the same preferences (r72) — negated or opt-out
+    // sentences ("no interior spray requested") stay prose.
+    if (!field.instructional && prefConflicts.length) {
+      for (const sentence of String(field.text).toLowerCase().split(/[.;!?]/)) {
+        if (!/\b(?:planned|scheduled|will\s+be|included?|includes|expect(?:ed)?|to\s+be\s+(?:treated|serviced|performed)|being\s+(?:treated|serviced))\b/.test(sentence)) continue;
+        if (/\b(?:no|not|never|opt(?:ed)?\s*out|declin\w*|exclud\w*|skip\w*|avoid\w*|without)\b/.test(sentence)) continue;
+        for (const conflict of prefConflicts) {
+          if (conflict.re.test(sentence)) return { kind: 'preference_conflict', term: conflict.term };
+        }
       }
     }
     // Instruction fields: scan for EVERY known product name regardless of
@@ -1890,8 +1920,13 @@ function findUngroundedClaim(body, grounding) {
   if (!pestActivityEvidence) {
     for (const m of outputText.matchAll(/(?:\b([a-z][a-z'-]*)\s+)?\bactivity\b/g)) {
       const subject = m[1];
+      // The subject's evidence sentence must be a non-negated observation
+      // — "asked about termite warranty" and "reported no ants" are not
+      // infestations (r72).
       const subjectGrounded = subject && !REFERENCE_STOP_WORDS.has(subject)
-        && wordVariants(subject).some((v) => groundedValueText.includes(v));
+        && groundedValueText.split(/[.;!?]/).some((s) =>
+          wordVariants(subject).some((v) => s.includes(v) && !negNear(s, v))
+          && !/\b(?:warrant\w*|quotes?|estimates?|pricing|prices?|costs?|invoic\w*|billing)\b/.test(s));
       if (!subjectGrounded) return { kind: 'novel_term', term: 'activity' };
     }
   }
