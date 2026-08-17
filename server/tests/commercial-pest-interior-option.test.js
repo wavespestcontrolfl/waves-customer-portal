@@ -234,6 +234,22 @@ describe('interior-service switcher rewrite (estimate-public)', () => {
     expect(parsed.engineRequest.options.commercialInteriorService).toBe('included');
   });
 
+  test('engineRequest WITHOUT an options object gets one created (replay reads req.options only)', () => {
+    // codex #3432 r1 P1: serverRecomputeFromEstimateData replays req.profile
+    // + req.options || {} — a top-level write on the request is invisible, so
+    // a later authoritative reprice would restore the interior charge.
+    const parsed = interiorEstimateData();
+    delete parsed.engineRequest.options;
+    applySelectedCommercialInteriorToEstimateData(parsed, false);
+    expect(parsed.engineRequest.options).toEqual({ commercialInteriorService: 'excluded' });
+    const replayed = generateEstimate(translateV2CallToV1Input(
+      parsed.engineRequest.profile,
+      parsed.engineRequest.selectedServices,
+      parsed.engineRequest.options,
+    ));
+    expect(replayed.lineItems.find((l) => l.service === 'commercial_pest').annual).toBe(954.04);
+  });
+
   test('raw engine payloads (no mapped recurring lists) rewrite the line item + summary', () => {
     const engineResult = generateEstimate(translateV2CallToV1Input(commercialProfile, ['PEST'], {}));
     const parsed = { engineInputs: translateV2CallToV1Input(commercialProfile, ['PEST'], {}), engineResult };

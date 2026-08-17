@@ -707,6 +707,7 @@ function generateEstimate(input) {
         // Interior service selection ('excluded' → exterior-only base price;
         // anything else keeps interior included, the default).
         interiorService: input.commercialInteriorService,
+        floorsArmed: input.commercialFloorsArmed === true,
       });
       if (result.quoteRequired) {
         // No real building footprint to size interior treatment — priceCommercialPest
@@ -780,6 +781,9 @@ function generateEstimate(input) {
         commercialSubtype,
         // Admin apps/year override (null → program default 8).
         lawnVisits: commercialLawnVisits,
+        // Saved-estimate replay only (savedFloorReplayOverrides): re-arms the
+        // disarmed commercial minimum so a pre-disarm quote keeps its price.
+        floorsArmed: input.commercialFloorsArmed === true,
       });
       if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);
@@ -837,6 +841,7 @@ function generateEstimate(input) {
         treeCount: commercialTreeCount > 0 ? commercialTreeCount : services.treeShrub.treeCount,
         // Rep-set plant-density multiplier (very_high → manual); admin-set.
         treeShrubDensity: input.treeShrubDensity,
+        floorsArmed: input.commercialFloorsArmed === true,
       });
       if (!lineItems.some((line) => line.service === result.service)) {
         lineItems.push(result);
@@ -909,6 +914,7 @@ function generateEstimate(input) {
         lotSizeMeasured: input.lotSizeMeasured,
         // Rep-set mosquito-pressure multiplier (severe → manual); admin-set.
         mosquitoPressure: input.mosquitoPressure,
+        floorsArmed: input.commercialFloorsArmed === true,
       });
       // Push the pricer's OWN line — priced or its service-specific manual quote.
       // The manual line keeps service=commercial_mosquito / originalRequestedService=
@@ -951,6 +957,7 @@ function generateEstimate(input) {
         perimeterLF: termiteMeasurements.perimeterLF,
         // Liability scope-split (bond/warranty/install → manual quote); admin-set.
         termiteScope: serviceOptions(termiteBaitService).scope,
+        floorsArmed: input.commercialFloorsArmed === true,
       });
       // Push the pricer's own line — priced or its service-specific manual quote
       // (keeps service=commercial_termite_bait / originalRequestedService=
@@ -1073,6 +1080,7 @@ function generateEstimate(input) {
         buildingSizeMeasured: input.buildingSizeMeasured,
         // Risk-type cadence override (null → program default 4).
         rodentVisits: commercialRodentVisits,
+        floorsArmed: input.commercialFloorsArmed === true,
       });
       // Push the pricer's own line — priced or its service-specific manual quote
       // (keeps service=commercial_rodent_bait / originalRequestedService=

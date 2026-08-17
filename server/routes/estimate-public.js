@@ -9826,6 +9826,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       if (customerId) {
         try {
           const prefs = normalizePrefs(estData?.preferences);
+          // Commercial interior-service scope (owner 2026-08-17): an
+          // exterior-only commercial pest plan must reach the tech surfaces
+          // through the SAME canonical preference the residential toggle
+          // uses — nextstop-alerts and previsit-brief key their EXTERIOR
+          // ONLY warning off interior_spray === false (codex #3432 r1 P1).
+          // Derived from the accepted line's snapshot so both selection
+          // paths (customer PUT toggle and rep estimator preset) land here.
+          const commercialInterior = commercialInteriorOptionFromEstimateData(estData);
+          if (commercialInterior && commercialInterior.selected === false) {
+            prefs.interior_spray = false;
+          }
           if (await trx.schema.hasColumn('customers', 'service_preferences')) {
             await trx('customers').where({ id: customerId }).update({
               service_preferences: JSON.stringify(prefs),
@@ -12070,10 +12081,17 @@ function syncCommercialInteriorIntoReplayableInputs(parsedData = {}, included) {
   const value = included ? 'included' : 'excluded';
   for (const shape of [parsedData?.engineInputs, parsedData?.engineRequest]) {
     if (!shape || typeof shape !== 'object') continue;
-    if (shape.options && typeof shape.options === 'object'
-      && ('commercialInteriorService' in shape.options || Array.isArray(shape.selectedServices))) {
+    // engineRequest ({ profile, selectedServices, options? }) replays through
+    // req.options only (serverRecomputeFromEstimateData /
+    // translateV2CallToV1Input) — a top-level write is invisible there, so
+    // CREATE options when the request omitted it (codex #3432 r1 P1). Flat
+    // engineInputs shapes carry the field at the top level.
+    const isEngineRequest = Array.isArray(shape.selectedServices)
+      || (shape.profile && typeof shape.profile === 'object');
+    if (isEngineRequest) {
+      if (!shape.options || typeof shape.options !== 'object') shape.options = {};
       shape.options.commercialInteriorService = value;
-    } else if (!shape.options) {
+    } else {
       shape.commercialInteriorService = value;
     }
   }
@@ -13064,7 +13082,44 @@ function savedFloorReplayOverrides(estData) {
   const tsKnobs = require('../services/estimate-tree-shrub-knob-replay')
     .treeShrubKnobSignalForReplay(estData);
   if (tsKnobs) overrides.treeShrubPricingKnobs = tsKnobs;
+  if (commercialFloorBoundEvidence(estData)) overrides.commercialFloorsArmed = true;
   return overrides;
+}
+
+// Commercial account-minimum replay evidence (floors disarmed owner
+// 2026-08-17): a pre-disarm estimate whose stored commercial row sits
+// EXACTLY at its era's minimum was clamped there — replaying it live under
+// the disarmed engine would silently reopen the quote at the lower raw
+// buildup and acceptance would lock that drifted amount. Row evidence only
+// (the disarmed engine never lands on these exact values except when the
+// clamp bound; a coincidental exact-equality re-arms a clamp that is a
+// no-op at that price). minApplied is NOT usable as the signal — the
+// disarmed engine stamps it on every sub-reference price.
+const COMMERCIAL_LEGACY_MIN_ANNUAL = {
+  commercial_lawn: 1200,
+  commercial_tree_shrub: 900,
+  commercial_pest: 900,
+  commercial_mosquito: 720,
+  commercial_termite_bait: 900,
+  commercial_rodent_bait: 900,
+};
+
+function commercialFloorBoundEvidence(estData = {}) {
+  const rows = [];
+  const result = estData?.result && typeof estData.result === 'object' ? estData.result : null;
+  for (const rec of [result?.recurring, estData?.recurring]) {
+    if (rec && Array.isArray(rec.services)) rows.push(...rec.services);
+  }
+  for (const container of [estData?.engineResult, result]) {
+    if (container && Array.isArray(container.lineItems)) rows.push(...container.lineItems);
+  }
+  return rows.some((row) => {
+    if (!row || typeof row !== 'object') return false;
+    const legacyMin = COMMERCIAL_LEGACY_MIN_ANNUAL[recurringServiceKey(row) || row.service];
+    if (!legacyMin) return false;
+    const annual = Number(row.annual);
+    return Number.isFinite(annual) && Math.abs(annual - legacyMin) < 0.005;
+  });
 }
 
 

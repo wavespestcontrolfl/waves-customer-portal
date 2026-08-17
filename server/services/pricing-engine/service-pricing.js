@@ -2950,9 +2950,12 @@ function priceCommercialLawn(property = {}, options = {}) {
 
   const computedAnnual = floor.minimumCollectedAnnualPrice;
   // Floors are disarmed (owner 2026-08-17, extends the 2026-07-17 no-floors
-  // ruling to commercial) — minApplied is a report-only signal, never a clamp.
+  // ruling to commercial) — minApplied is a report-only signal, never a clamp
+  // for NEW pricing. options.floorsArmed re-arms the clamp for saved-estimate
+  // replays only (savedFloorReplayOverrides): an outstanding tokenized
+  // estimate quoted at the minimum must keep its quoted price.
   const minApplied = computedAnnual < cfg.minAnnual;
-  const annual = roundMoney(computedAnnual);
+  const annual = roundMoney(options.floorsArmed === true ? Math.max(cfg.minAnnual, computedAnnual) : computedAnnual);
   const monthly = roundMoney(annual / 12);
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - floor.annualCost) / annual) : 0;
@@ -3115,8 +3118,12 @@ function priceCommercialPest(property = {}, options = {}) {
 
   const computedExteriorAnnual = extAnnualCost / (1 - cfg.targetGrossMargin);
   const computedCombinedAnnual = combinedAnnualCost / (1 - cfg.targetGrossMargin);
-  const exteriorOnlyAnnual = roundMoney(computedExteriorAnnual);
-  const combinedAnnual = roundMoney(computedCombinedAnnual);
+  // floorsArmed: saved-estimate replay of a pre-disarm floored quote
+  // (savedFloorReplayOverrides) — clamp both variants so the replayed price
+  // matches what was quoted. Never set for new pricing.
+  const floorsArmed = options.floorsArmed === true;
+  const exteriorOnlyAnnual = roundMoney(floorsArmed ? Math.max(cfg.minAnnual, computedExteriorAnnual) : computedExteriorAnnual);
+  const combinedAnnual = roundMoney(floorsArmed ? Math.max(cfg.minAnnual, computedCombinedAnnual) : computedCombinedAnnual);
 
   // Both variants rounded once, deltas taken between the rounded values so the
   // customer-visible arithmetic is exact: exteriorOnly + add === combined.
@@ -3233,7 +3240,7 @@ function commercialCadenceLabel(visits) {
   return null;
 }
 
-function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, service, name, originalRequestedService, detail, extra = {}, visits: visitsOverride, priceMultiplier = 1 }) {
+function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, service, name, originalRequestedService, detail, extra = {}, visits: visitsOverride, priceMultiplier = 1, floorsArmed = false }) {
   // Risk-type cadence override (commercial pest/rodent visits-per-year vary by
   // business type). Falls back to the program default when not supplied.
   const visits = Number.isFinite(visitsOverride) && visitsOverride > 0 ? visitsOverride : cfg.programVisits;
@@ -3247,9 +3254,11 @@ function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, servi
   const annualDrive = drivePerVisit * visits * mult;
   const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
   const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
-  // Floors disarmed (owner 2026-08-17) — minApplied is report-only, never a clamp.
+  // Floors disarmed (owner 2026-08-17) — minApplied is report-only, never a
+  // clamp for new pricing; floorsArmed re-arms it for saved-estimate replays
+  // only (savedFloorReplayOverrides — quoted prices must not drift).
   const minApplied = computedAnnual < cfg.minAnnual;
-  const annual = roundMoney(computedAnnual);
+  const annual = roundMoney(floorsArmed === true ? Math.max(cfg.minAnnual, computedAnnual) : computedAnnual);
   const monthly = roundMoney(annual / 12);
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
@@ -3383,6 +3392,7 @@ function priceCommercialMosquito(property = {}, options = {}) {
   return buildCommercialPestFamilyLine({
     cfg,
     priceMultiplier: pressure.multiplier,
+    floorsArmed: options.floorsArmed === true,
     materialPerVisit: cfg.materialPerVisitBase + cfg.materialPerKSqFtPerVisit * (treatableSqFt / 1000),
     onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPerKSqFt * (treatableSqFt / 1000),
     service: 'commercial_mosquito',
@@ -3485,6 +3495,7 @@ function priceCommercialTermiteBait(property = {}, options = {}) {
   }
   return buildCommercialPestFamilyLine({
     cfg,
+    floorsArmed: options.floorsArmed === true,
     materialPerVisit: cfg.materialPerVisitBase + cfg.materialPer100LfPerVisit * (perimeter / 100),
     onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPer100Lf * (perimeter / 100),
     service: 'commercial_termite_bait',
@@ -3526,6 +3537,7 @@ function priceCommercialRodentBait(property = {}, options = {}) {
   return buildCommercialPestFamilyLine({
     cfg,
     visits: rodentVisits,
+    floorsArmed: options.floorsArmed === true,
     materialPerVisit: cfg.materialPerVisitBase + cfg.materialPerKSqFtPerVisit * (footprint / 1000),
     onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPerKSqFt * (footprint / 1000),
     service: 'commercial_rodent_bait',
@@ -3660,9 +3672,11 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
 
   const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
   const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
-  // Floors disarmed (owner 2026-08-17) — minApplied is report-only, never a clamp.
+  // Floors disarmed (owner 2026-08-17) — minApplied is report-only, never a
+  // clamp for new pricing; options.floorsArmed re-arms it for saved-estimate
+  // replays only (savedFloorReplayOverrides — quoted prices must not drift).
   const minApplied = computedAnnual < cfg.minAnnual;
-  const annual = roundMoney(computedAnnual);
+  const annual = roundMoney(options.floorsArmed === true ? Math.max(cfg.minAnnual, computedAnnual) : computedAnnual);
   const monthly = roundMoney(annual / 12);
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
