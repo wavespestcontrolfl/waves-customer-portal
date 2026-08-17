@@ -1070,6 +1070,240 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
 // through so the ACH settlement-date restamp below can't drift onto the
 // webhook DELIVERY day when a retry crosses a month/year boundary (mirrors
 // handlePaymentIntentProcessing's initiatedAt).
+/**
+ * Combined full-balance PI (payIncludeBalance) — settle every allocated
+ * invoice through the shared idempotent settle. Guards mirror the
+ * single-invoice path where they still apply at the combined shape:
+ * surcharge-bypass quarantine, per-invoice saved-card fences, tender match
+ * against the ALLOCATION total (the PI's own pricing snapshot), and an
+ * allocation-vs-captured cents check inside the settle itself. Any refusal
+ * records the orphan so captured money is never silently unaccounted.
+ */
+async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated = null) {
+  const PayCombined = require('../services/pay-combined');
+  const piId = paymentIntent.id;
+  const chargedCents = Number(paymentIntent.amount_received || paymentIntent.amount || 0);
+  const chargedTotal = chargedCents > 0 ? centsToDollars(chargedCents) : centsToDollars(paymentIntent.amount);
+  const details = await paymentDetailsFromIntent(paymentIntent);
+
+  let allocation;
+  try {
+    allocation = PayCombined.parseCombinedAllocation(paymentIntent.metadata);
+  } catch (err) {
+    logger.error(`[stripe-webhook] Combined PI ${piId} has a malformed allocation: ${err.message} — quarantining`);
+    await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, `Malformed combined allocation: ${err.message}`);
+    return;
+  }
+
+  // Surcharge-bypass quarantine (same detector as the single path; the
+  // invoice arg is only used for alert labeling — pass the anchor).
+  const anchorId = paymentIntent.metadata?.waves_invoice_id || allocation[0].invoiceId;
+  const anchorInvoice = await db('invoices').where({ id: anchorId }).first().catch(() => null);
+  const surchargeQuarantine = await shouldQuarantineUnfinalizedCardPayment(paymentIntent, details, anchorInvoice);
+  if (surchargeQuarantine && !isTerminalInvoicePaymentIntent(paymentIntent, details.paymentMethod)) {
+    logger.error(`[stripe-webhook] Quarantining succeeded combined PI ${piId}: ${surchargeQuarantine.reason}`);
+    await alertSurchargeBypass(
+      paymentIntent,
+      anchorInvoice,
+      surchargeQuarantine.alertType,
+      surchargeQuarantine.severity,
+      surchargeQuarantine.title,
+      surchargeQuarantine.description,
+      surchargeQuarantine.metadata,
+    );
+    await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, surchargeQuarantine.reason);
+    return;
+  }
+
+  // Saved-card fences, per allocated invoice: an unresolved off-session
+  // claim on ANY of them means that invoice's money state is ambiguous —
+  // quarantine the whole combined settle for the operator (an active claim
+  // asks Stripe to retry, mirroring the single path). The one exception
+  // (codex r2 P1, mirroring the single path's retryingQuarantinedIntent):
+  // a fence raised by the durable quarantine THIS exact PI wrote on an
+  // earlier delivery must not refuse its own retry forever — once the
+  // competing attempt resolves, the retry settles and the post-settle
+  // orphan resolution below clears the quarantine row.
+  const {
+    assertNoInvoiceChargeReconciliationPending,
+    parkInvoiceForSavedCardReconciliation,
+  } = require('../services/stripe');
+  for (const entry of allocation) {
+    try {
+      await assertNoInvoiceChargeReconciliationPending(entry.invoiceId);
+    } catch (fenceErr) {
+      // Composite residual keys (`<pi>:<invoiceId>`) belong to THIS PI too
+      // (codex r28 P1): a provisional residual parked by the processing-
+      // stage settle must not make the successful event quarantine itself —
+      // the allocation-aware settle below reconciles/upgrades that share.
+      const fencePiId = String(fenceErr.stripePaymentIntentId || '');
+      const retryingQuarantinedIntent = fenceErr.code === 'STRIPE_CHARGED_DB_FAILED'
+        && (fencePiId === String(piId) || fencePiId.startsWith(`${piId}:`));
+      if (retryingQuarantinedIntent) {
+        logger.info(`[stripe-webhook] Retrying quarantined combined PI ${piId} on invoice ${entry.invoiceId} after saved-card claim resolved`);
+        continue;
+      }
+      if (fenceErr.code === 'STRIPE_CHARGE_IN_PROGRESS') {
+        await recordOrphanSucceededPaymentIntent(
+          paymentIntent,
+          chargedTotal,
+          `Succeeded combined PI ${piId} raced active saved-card attempt on invoice ${entry.invoiceId}`,
+        );
+        throw new Error(`Saved-card charge attempt on invoice ${entry.invoiceId} is still active; retry combined succeeded webhook`);
+      }
+      const reason = `Succeeded combined PI ${piId} conflicts with unresolved saved-card attempt on invoice ${entry.invoiceId}`;
+      logger.error(`[stripe-webhook] Quarantining ${reason}`);
+      await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, reason);
+      // Park the conflicted invoice like the single path: status-only
+      // collection surfaces must stop offering payment until the operator
+      // resolves the conflict — and the parked quarantine is exactly what
+      // the retry exception above recognizes and settles through.
+      const quarantineError = new Error(reason);
+      quarantineError.code = 'STRIPE_CHARGED_DB_FAILED';
+      quarantineError.stripePaymentIntentId = piId;
+      quarantineError.reconciliationRequired = true;
+      await parkInvoiceForSavedCardReconciliation({
+        invoiceId: entry.invoiceId,
+        error: quarantineError,
+      });
+      return;
+    }
+  }
+
+  // Tender match against the allocation total — the base the PI was priced
+  // from at mint/finalize.
+  try {
+    assertInvoicePaymentIntentTenderMatches(
+      paymentIntent,
+      details.paymentMethod,
+      PayCombined.allocationTotalCents(allocation) / 100,
+    );
+  } catch (err) {
+    logger.error(`[stripe-webhook] Refusing succeeded combined PI ${piId}: ${err.message}`);
+    await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, `Rejected combined payment tender mismatch: ${err.message}`);
+    return;
+  }
+
+  let combinedSettleOutcome = null;
+  try {
+    combinedSettleOutcome = await PayCombined.settleCombinedPaymentIntent(paymentIntent, {
+      paymentMethod: details.paymentMethod,
+      cardBrand: details.cardBrand,
+      cardLastFour: details.cardLastFour,
+      receiptUrl: details.receiptUrl,
+    }, { eventCreated });
+    logger.info(`[stripe-webhook] Combined PI ${piId} settled ${combinedSettleOutcome.settled}/${allocation.length} invoices (${combinedSettleOutcome.paymentStatus})`);
+  } catch (err) {
+    if (err.code === 'COMBINED_ALLOCATION_MISMATCH') {
+      logger.error(`[stripe-webhook] ${err.message} — quarantining`);
+      await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, err.message);
+      return;
+    }
+    if (err.code === 'COMBINED_PI_ALREADY_REFUNDED') {
+      // The refund handler already unwound every share and reopened the
+      // invoices as refunded (codex r17 P1) — the delayed success has
+      // nothing left to do; no orphan (the cash is fully accounted).
+      logger.warn(`[stripe-webhook] ${err.message}`);
+      return;
+    }
+    if (err.code === 'COMBINED_PI_DISPUTED') {
+      // A dispute (possibly pre-settlement — codex r5 P1) already clawed
+      // this money back: settling would mark invoices paid on funds that
+      // are gone. Terminal for this event — record the orphan for the
+      // operator instead of retrying forever. EXCEPT when the fence is a
+      // FINALIZED-LOST marker (codex r32 P2, the closed-before-succeeded
+      // ordering): the chargeback already returned the cash and the lost
+      // closure already ran its cleanup — a fresh quarantine here would be
+      // unresolvable and would fence the anchor forever.
+      const fenceMarkerRows = await db('payments').where({ stripe_payment_intent_id: piId, status: 'disputed' });
+      const finalizedLost = fenceMarkerRows.some((r) => {
+        try {
+          const m = r.metadata ? (typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata) : {};
+          return m.dispute_final === 'lost';
+        } catch { return false; }
+      });
+      if (finalizedLost) {
+        // Release the allocation too (codex r33 P1): the invoices are
+        // still stamped with a now-succeeded PI — pay setup and every
+        // off-page rail would retrieve it and refuse collection forever,
+        // even though the chargeback already returned the cash. Reopen
+        // any 'processing' rows (mirroring the canceled-PI revert) and
+        // unbind the rest, all under the settlement lock.
+        await db.transaction(async (lostTrx) => {
+          await lostTrx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['stripe.pi.payment', String(piId)],
+          );
+          const lostStamped = await lostTrx('invoices').where({ stripe_payment_intent_id: piId, status: 'processing' });
+          for (const stampedRow of lostStamped) {
+            await lostTrx('invoices').where({ id: stampedRow.id, status: 'processing' }).update({
+              status: nextInvoiceStatusAfterFailedPayment(stampedRow),
+              paid_at: null,
+              stripe_payment_intent_id: null,
+              stripe_charge_id: null,
+              ach_processing_notified_at: null,
+              updated_at: lostTrx.fn.now(),
+            });
+          }
+          await require('../services/pay-combined').clearPaymentIntentStamps(lostTrx, piId);
+        });
+        logger.warn(`[stripe-webhook] Combined PI ${piId} succeeded after a FINALIZED-LOST dispute — the chargeback already returned the cash; allocation released, no quarantine recorded`);
+        return;
+      }
+      logger.error(`[stripe-webhook] Refusing to settle disputed combined PI ${piId}: ${err.message}`);
+      await recordOrphanSucceededPaymentIntent(paymentIntent, chargedTotal, err.message);
+      return;
+    }
+    throw err; // infrastructure failure → 500 → Stripe redelivers
+  }
+
+  // A settle that came back through the quarantine-retry exception above
+  // leaves its own fence row in stripe_orphan_charges — resolve it now
+  // that the anchor invoice + a paid ledger row exist (single-path
+  // parity).
+  await resolveOrphanSucceededPaymentIntentIfSettled(piId);
+
+  // Review outreach per settled invoice (codex r4 P2): the shared
+  // enrollment is idempotent and honors the completion's requestReview
+  // intent — the combined early-return must not cost customers their
+  // review invitation.
+  if (combinedSettleOutcome?.paymentStatus === 'paid') {
+    for (const settledId of combinedSettleOutcome.invoiceIds || []) {
+      await scheduleReviewAfterPaidInvoice(piId, { invoiceId: settledId });
+    }
+    // A settled invoice may be gating a payment-held WDO report — nudge
+    // the release sweep like the single-invoice path does (codex r22 P3);
+    // the 60s interval remains the fallback.
+    try {
+      require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 3000 });
+    } catch { /* interval-backed */ }
+  }
+
+  // ACH failure-state reset BEFORE the mirror (codex r3 P1, same ordering
+  // contract as the single path): a combined ACH debit clearing from a
+  // previously blocked account must reset ach_status first, or the
+  // enrollment below refuses the bank method the debit just proved
+  // collectible.
+  await resetAchFailureStateForSucceededIntent(paymentIntent);
+
+  // Same post-settlement save/consent/enroll mirror as the single path
+  // (codex r2 P1): a combined ACH signup's /consent deferred enrollment
+  // to THIS event — skipping it would leave the consented method
+  // unenrolled forever. Throws → Stripe retries (idempotent end to end).
+  await mirrorSavedMethodForSucceededIntent(paymentIntent);
+
+  await maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated);
+
+  // Admin bell + push (codex r5 P2): the same one-shot PI-deduped notifier
+  // the single-invoice path fires — a combined card charge or cleared ACH
+  // debit is real revenue and must ring the same bell. Fire-and-forget for
+  // the same reason as the single path (never gate the webhook 2xx on
+  // notification fan-out).
+  notifyPaymentSuccess(paymentIntent).catch((err) => {
+    logger.warn(`[stripe-webhook] combined payment_succeeded notify failed: ${err.message}`);
+  });
+}
+
 async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent succeeded: ${piId}`);
@@ -1104,6 +1338,19 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   if (paymentIntent.metadata?.purpose === 'appointment_card_no_show_fee') {
     await recordAppointmentCardNoShowFeePayment(paymentIntent);
     return;
+  }
+
+  // Combined full-balance PI (payIncludeBalance): one charge settling
+  // SEVERAL invoices per its metadata allocation. Route before the
+  // single-invoice guards — they resolve an arbitrary stamped row via
+  // findInvoiceForPaymentIntent and would tender-mismatch the combined
+  // amount against one invoice's remainder, quarantining valid money.
+  {
+    const PayCombined = require('../services/pay-combined');
+    if (PayCombined.isCombinedPiMetadata(paymentIntent.metadata)) {
+      await handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated);
+      return;
+    }
   }
 
   const chargedCents = Number(paymentIntent.amount_received || paymentIntent.amount || 0);
@@ -1681,6 +1928,68 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     }
   }
 
+  // ACH-success failure-state reset — extracted to
+  // resetAchFailureStateForSucceededIntent so the combined succeeded
+  // handler runs it too (codex #3427 r3 P1): the reset must precede the
+  // save-card mirror or enrollConsentedMethod refuses a bank method the
+  // clearing debit just proved collectible.
+  await resetAchFailureStateForSucceededIntent(paymentIntent);
+
+  // ── Save payment method on the customer if they opted in ─────
+  // Extracted to mirrorSavedMethodForSucceededIntent so the combined
+  // full-balance succeeded handler runs the SAME post-settlement
+  // save/consent/enroll behavior (codex #3427 r2 P1) — an ACH combined
+  // payment whose /consent deferred enrollment would otherwise clear
+  // with the consented method unenrolled forever.
+  await mirrorSavedMethodForSucceededIntent(paymentIntent);
+
+  const paidInvoice = await db('invoices')
+    .where({ stripe_payment_intent_id: piId })
+    .where({ status: 'paid' })
+    .first();
+  if (paidInvoice) {
+    await ReceiptDeliveryQueue.enqueueReceiptDelivery({
+      invoiceId: paidInvoice.id,
+      stripePaymentIntentId: piId,
+      source: 'stripe_webhook',
+    });
+    ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
+    // Fire-and-forget: a settled invoice may be gating a payment-held WDO
+    // report — nudge the release sweep (60s interval is the fallback).
+    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 3000 });
+  }
+
+  // ── Bell + push for the admin team ──
+  //
+  // Fire-and-forget via Promise.catch (NOT awaited) so the webhook 2xx
+  // is not gated on notification fan-out. triggerNotification does a
+  // DB read for active admins + per-user prefs + sequential
+  // webpush.sendNotification calls per push subscription — awaiting it
+  // inline could push the webhook past Stripe's timeout and trigger
+  // retry storms even though the core payment writes already committed
+  // (codex P1 on PR #534). Emit only when the PI is bound to one of
+  // our invoices — otherwise there's nothing to deep-link into.
+  //
+  // Dedupe: Stripe's at-least-once delivery + multi-event flows (a
+  // single real payment can produce `payment_intent.succeeded` AND
+  // `charge.succeeded` with distinct event.id values) mean the
+  // existing event.id-keyed dedupe in stripe_webhook_events doesn't
+  // catch duplicates at the PAYMENT INTENT level. The
+  // stripe_payment_notification_log table claims (PI, outcome) atomically
+  // via INSERT ... ON CONFLICT DO NOTHING — only the first claimer fires.
+  notifyPaymentSuccess(paymentIntent).catch((err) => {
+    logger.warn(`[stripe-webhook] payment_succeeded notify failed: ${err.message}`);
+  });
+}
+
+/**
+ * ACH-success failure-state reset for a succeeded PaymentIntent —
+ * shared by the single-invoice and combined succeeded handlers. Body
+ * moved verbatim from handlePaymentIntentSucceeded; must run BEFORE
+ * the save-card mirror (see the inline ordering comment).
+ */
+async function resetAchFailureStateForSucceededIntent(paymentIntent) {
+  const piId = paymentIntent.id;
   // If ACH payment succeeded, resolve any pending ACH failures for this
   // customer. ORDER MATTERS: this reset must run BEFORE the save-card
   // mirror below — a required-save customer paying by bank from a
@@ -1716,7 +2025,17 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       }
     } catch { /* non-critical */ }
   }
+}
 
+/**
+ * Save-card mirror + consent-gated autopay enrollment for a succeeded
+ * PaymentIntent — shared by the single-invoice and combined succeeded
+ * handlers. Body moved verbatim from handlePaymentIntentSucceeded;
+ * see the inline comments for the full contract. Throws so the caller
+ * 500s and Stripe retries (idempotent end to end).
+ */
+async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
+  const piId = paymentIntent.id;
   // ── Save payment method on the customer if they opted in ─────
   //
   // When the /pay/:token page sets `setup_future_usage: 'off_session'`
@@ -1900,50 +2219,15 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       throw err;
     }
   }
-
-  const paidInvoice = await db('invoices')
-    .where({ stripe_payment_intent_id: piId })
-    .where({ status: 'paid' })
-    .first();
-  if (paidInvoice) {
-    await ReceiptDeliveryQueue.enqueueReceiptDelivery({
-      invoiceId: paidInvoice.id,
-      stripePaymentIntentId: piId,
-      source: 'stripe_webhook',
-    });
-    ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
-    // Fire-and-forget: a settled invoice may be gating a payment-held WDO
-    // report — nudge the release sweep (60s interval is the fallback).
-    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 3000 });
-  }
-
-  // ── Bell + push for the admin team ──
-  //
-  // Fire-and-forget via Promise.catch (NOT awaited) so the webhook 2xx
-  // is not gated on notification fan-out. triggerNotification does a
-  // DB read for active admins + per-user prefs + sequential
-  // webpush.sendNotification calls per push subscription — awaiting it
-  // inline could push the webhook past Stripe's timeout and trigger
-  // retry storms even though the core payment writes already committed
-  // (codex P1 on PR #534). Emit only when the PI is bound to one of
-  // our invoices — otherwise there's nothing to deep-link into.
-  //
-  // Dedupe: Stripe's at-least-once delivery + multi-event flows (a
-  // single real payment can produce `payment_intent.succeeded` AND
-  // `charge.succeeded` with distinct event.id values) mean the
-  // existing event.id-keyed dedupe in stripe_webhook_events doesn't
-  // catch duplicates at the PAYMENT INTENT level. The
-  // stripe_payment_notification_log table claims (PI, outcome) atomically
-  // via INSERT ... ON CONFLICT DO NOTHING — only the first claimer fires.
-  notifyPaymentSuccess(paymentIntent).catch((err) => {
-    logger.warn(`[stripe-webhook] payment_succeeded notify failed: ${err.message}`);
-  });
 }
 
-async function scheduleReviewAfterPaidInvoice(piId) {
+async function scheduleReviewAfterPaidInvoice(piId, { invoiceId = null } = {}) {
   try {
+    // A combined PI settles several invoices at once — callers pass each
+    // settled invoiceId explicitly; the PI-keyed .first() remains for the
+    // single-invoice path.
     const paidInvoice = await db('invoices')
-      .where({ stripe_payment_intent_id: piId })
+      .where(invoiceId ? { id: invoiceId } : { stripe_payment_intent_id: piId })
       .select('id', 'customer_id', 'service_record_id', 'invoice_number')
       .first();
     if (!paidInvoice?.customer_id || !paidInvoice?.service_record_id) return;
@@ -2157,6 +2441,38 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   // armed, the whereNull guards make it a no-op.
   await armMonthlyAutopayRetryForAsyncFailure(paymentIntent, processingRowBeforeFailure);
 
+  // Stale-failure guard for COMBINED PIs (codex r20 P1): the reusable PI
+  // is retried after an ACH bounce, and a newer processing delivery can
+  // have already moved every row/invoice back to 'processing' before an
+  // OLDER failure delivery lands — the row-status terminal guard below
+  // can't see that ('processing' isn't terminal). Verify against the LIVE
+  // intent, exactly like the processing handler's freshness check; a
+  // still-moving replacement debit makes this failure event a no-op.
+  // Fail CLOSED: an unreadable PI throws so Stripe redelivers.
+  if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)) {
+    const freshFailStripe = getStripe();
+    // Fail CLOSED on a missing Stripe client (codex r35 P1): skipping the
+    // freshness check would apply an UNVERIFIED stale failure — marking
+    // rows failed and reopening invoices while a newer attempt on the
+    // reusable PI may be live. Throw so Stripe retries the event.
+    if (!freshFailStripe) {
+      throw new Error(`Combined payment_failed for PI ${piId} cannot be freshness-checked (Stripe client unavailable); retry`);
+    }
+    {
+      const currentFailIntent = await freshFailStripe.paymentIntents.retrieve(piId);
+      if (['processing', 'succeeded', 'requires_capture'].includes(currentFailIntent.status)
+        // A NEWER attempt awaiting microdeposit verification is also live
+        // (codex r31 P2): the customer switched to ACH after the old
+        // failure — running the stale failure would ledger-fail rows and
+        // notify the customer while their bank verification stands.
+        || (currentFailIntent.status === 'requires_action'
+          && currentFailIntent.next_action?.type === 'verify_with_microdeposits')) {
+        logger.warn(`[stripe-webhook] stale combined payment_failed for PI ${piId} — current status is ${currentFailIntent.status}${currentFailIntent.next_action?.type ? ` (${currentFailIntent.next_action.type})` : ''}; skipping ledger revert`);
+        return;
+      }
+    }
+  }
+
   // Terminal-status guard: Stripe doesn't guarantee event ordering, and
   // pay-page PIs are reused across attempts — a late-delivered
   // payment_failed from attempt 1 must not demote a row that attempt 2's
@@ -2169,9 +2485,62 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
       failure_reason: `${failureMessage}${failureCode ? ` (${failureCode})` : ''}`,
     });
 
+  // A combined full-balance PI (payIncludeBalance) is stamped on EVERY
+  // allocated invoice, so the processing revert walks all rows carrying
+  // this PI — a single-row revert would strand the siblings in
+  // 'processing' forever after a combined ACH bounce. Single-invoice PIs
+  // keep the original single-row lookup exactly.
   const failedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first();
-  if (failedInvoice?.status === 'processing') {
-    const nextStatus = nextInvoiceStatusAfterFailedPayment(failedInvoice);
+  const failedInvoices = failedInvoice ? [failedInvoice] : [];
+  if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)) {
+    const allStamped = await db('invoices').where({ stripe_payment_intent_id: piId });
+    for (const r of (Array.isArray(allStamped) ? allStamped : [])) {
+      if (!failedInvoice || String(r.id) !== String(failedInvoice.id)) failedInvoices.push(r);
+    }
+  }
+  // Kill-switch enforcement on failure (codex r26 P1): with the gate OFF,
+  // a failed combined debit returns the reusable PI to an unconfirmed
+  // state — a browser retaining its client secret could retry the old
+  // combined allocation despite the flip. Revoke the session as part of
+  // the failure handling: cancel fail-closed (a throw retries the event)
+  // and clear every stamp before the invoices reopen below.
+  let gateOffRevokedPi = false;
+  if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)
+    && !require('../config/feature-gates').isEnabled('payIncludeBalance')) {
+    const gateOffStripe = getStripe();
+    // Same fail-closed posture as the freshness check (codex r35 P1):
+    // a null client must not silently skip the kill-switch revoke.
+    if (!gateOffStripe) {
+      throw new Error(`Gate-off revoke of failed combined PI ${piId} cannot run (Stripe client unavailable); retry`);
+    }
+    {
+      try {
+        await gateOffStripe.paymentIntents.cancel(piId);
+        gateOffRevokedPi = true;
+      } catch (cancelErr) {
+        // Re-read instead of trusting the error text (codex r31 P1): a
+        // customer retry can race the PI to succeeded/processing between
+        // the freshness guard and this cancel — treating that as
+        // "revoked" would reopen and unstamp invoices whose cash was
+        // captured, exposing them to double collection until the
+        // succeeded webhook repairs them.
+        const recheck = await gateOffStripe.paymentIntents.retrieve(piId);
+        if (recheck.status === 'canceled') {
+          gateOffRevokedPi = true;
+        } else if (['succeeded', 'processing', 'requires_capture'].includes(recheck.status)) {
+          logger.warn(`[stripe-webhook] gate-off revoke skipped — combined PI ${piId} raced to ${recheck.status}; its own events own the ledger`);
+          return;
+        } else {
+          throw new Error(`Gate-off revoke of failed combined PI ${piId} could not cancel (${cancelErr.message}); retry`);
+        }
+      }
+      if (gateOffRevokedPi) logger.warn(`[stripe-webhook] gate OFF — revoked failed combined PI ${piId}; stamps clear after the reopen below`);
+    }
+  }
+
+  for (const failedRow of failedInvoices) {
+    if (failedRow.status !== 'processing') continue;
+    const nextStatus = nextInvoiceStatusAfterFailedPayment(failedRow);
     // Clearing ach_processing_notified_at means a re-attempted ACH on
     // the same invoice (different bank account, customer retries, etc.)
     // will trigger a fresh "we got it" acknowledgment when its
@@ -2179,12 +2548,36 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
     // dedupe lock from the first attempt would permanently suppress
     // notifications for every subsequent attempt on the same invoice.
     await db('invoices')
-      .where({ id: failedInvoice.id })
+      .where({ id: failedRow.id })
       .update({
         status: nextStatus,
         paid_at: null,
         ach_processing_notified_at: null,
       });
+  }
+
+  // Gate-off stamp cleanup AFTER the reopen (codex r27 P2): the clear
+  // helper excludes 'processing' rows, so clearing before the loop was a
+  // no-op — now the rows are reopened (sent/overdue) and unbind cleanly,
+  // so no invoice stays bound to the revoked PI.
+  if (gateOffRevokedPi) {
+    await require('../services/pay-combined').clearPaymentIntentStamps(db, piId);
+  }
+  // Provisional residuals from the PROCESSING-stage settle resolve when
+  // the combined intent terminates without settling (codex r27 P2): the
+  // parked cash never arrived, so the reconciliation queue must not keep
+  // reporting it (and the sibling fence must not keep blocking the
+  // invoice).
+  if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)) {
+    const resolvedProvisional = await db('stripe_orphan_charges')
+      .where({ resolved: false, source: 'combined_pay_processing' })
+      .where('stripe_payment_intent_id', 'like', `${piId}:%`)
+      .update({
+        resolved: true,
+        resolved_at: new Date(),
+        resolution_notes: 'Automatically resolved: the combined ACH debit failed before settling — the provisional residual cash never arrived',
+      });
+    if (resolvedProvisional > 0) logger.info(`[stripe-webhook] combined PI ${piId} failed — resolved ${resolvedProvisional} provisional residual(s)`);
   }
 
   // A create timeout may have left no PI on the parked invoice. Stripe's
@@ -2254,9 +2647,21 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   const isAutopay = paymentIntent.metadata?.type === 'monthly_autopay';
   if (pmType !== 'us_bank_account' && !isAutopay) {
     const attemptId = paymentIntent.latest_charge || eventId || 'no_charge';
+    // Combined full-balance PI (codex r7 P2): resolve the ANCHOR invoice and
+    // pass the allocation total, so the failure email names the combined
+    // amount the customer attempted — the PI-keyed .first() below the email
+    // helper would otherwise pick an arbitrary stamped share.
+    let failedCombinedAlloc = null;
+    try {
+      failedCombinedAlloc = require('../services/pay-combined').parseCombinedAllocation(paymentIntent.metadata);
+    } catch { failedCombinedAlloc = null; }
     PaymentLifecycleEmail.sendPaymentFailed({
       paymentIntentId: piId,
       attemptId,
+      ...(failedCombinedAlloc ? {
+        invoiceId: paymentIntent.metadata?.waves_invoice_id || failedCombinedAlloc[0].invoiceId,
+        amountDueOverride: require('../services/pay-combined').allocationTotalCents(failedCombinedAlloc) / 100,
+      } : {}),
     }).catch((err) => {
       logger.warn(`[stripe-webhook] payment_failed customer email failed: ${err.message}`);
     });
@@ -2784,6 +3189,308 @@ async function handleChargeRefunded(charge) {
         }
       }
     }
+    // Combined full-balance charge: N per-invoice ledger rows share this
+    // one charge, so the generic cumulative stamp below would smear the
+    // charge-level refund total onto every row (codex r2 P1). A FULL
+    // refund settles cleanly (each row refunded at its own share, each
+    // invoice reopened, applied credit returned); a PARTIAL refund cannot
+    // be attributed to a share from the charge alone — record it for the
+    // operator and touch nothing.
+    {
+      let combinedRows = await trx('payments').where({ stripe_charge_id: chargeId });
+      const rowMeta = (row) => {
+        try { return row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch { return {}; }
+      };
+      if (combinedRows.some((r) => rowMeta(r).combined_payment)) {
+        // Serialize with refund.failed's combined unwind (codex r12 P1):
+        // both combined-row paths take this per-charge lock, rows are
+        // RE-READ under it, and the bounce fences are re-checked — a
+        // refund.failed that committed its fence while this event was in
+        // flight means Stripe KEPT the money, so nothing may be stamped
+        // refunded or reopened.
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['combined.refund.fence', String(chargeId)],
+        );
+        combinedRows = await trx('payments').where({ stripe_charge_id: chargeId });
+        if (refundId) {
+          const rowFenced = combinedRows.some((r) => {
+            const m = rowMeta(r);
+            return Array.isArray(m.failed_refund_ids) && m.failed_refund_ids.includes(refundId);
+          });
+          let tableFenced = false;
+          if (!rowFenced && await db.schema.hasTable('stripe_failed_refunds')) {
+            tableFenced = !!(await trx('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id'));
+          }
+          if (rowFenced || tableFenced) {
+            logger.warn(`[stripe-webhook] combined refund ${refundId} on charge ${chargeId} was already fenced as FAILED — skipping the refund stamp (Stripe kept the money)`);
+            return combinedRows.find((r) => r.customer_id && !(r.status === 'canceled' && rowMeta(r).superseded_reason)) || combinedRows[0] || null;
+          }
+        }
+        if (!isFullRefund) {
+          logger.error(`[stripe-webhook] PARTIAL refund on combined charge ${chargeId} — cannot attribute to a share; parked for operator`);
+          await trx('stripe_orphan_charges')
+            .insert({
+              // Keyed per REFUND (codex r7 P1): two distinct partial refunds
+              // on the same charge must each keep their own reconciliation
+              // case — a constant key would onConflict-ignore the second.
+              stripe_payment_intent_id: `${charge.payment_intent || chargeId}:partial-refund:${refundId || 'unknown'}`,
+              stripe_charge_id: chargeId,
+              customer_id: combinedRows[0]?.customer_id || null,
+              invoice_id: null,
+              amount: refundAmountDollars,
+              source: 'combined_pay_webhook',
+              original_db_error: `Partial refund ${refundId || 'unknown'} of $${refundAmountDollars} on a combined balance charge — attribute and reconcile manually`,
+            })
+            .onConflict('stripe_payment_intent_id')
+            .ignore();
+          try {
+            await NotificationService.notifyAdmin(
+              'refund',
+              `Partial refund on combined payment: $${refundAmountDollars}`,
+              `Charge ${chargeId} settled multiple invoices; a partial refund can't be auto-attributed. Reconcile in /admin/revenue.`,
+              { icon: '⚠️', link: '/admin/revenue' },
+            );
+          } catch { /* non-critical */ }
+          return combinedRows.find((r) => r.customer_id && !(r.status === 'canceled' && rowMeta(r).superseded_reason)) || combinedRows[0] || null;
+        }
+        // CUMULATIVE-full (codex r8 P1): charge.refunded went true through
+        // MULTIPLE partial refunds — the earlier partials are already
+        // parked, and stamping only THIS refund's id across every row
+        // would make any later bounce unwind all-or-nothing (a bounce of
+        // this refund would restore everything as fully paid; a bounce of
+        // an earlier parked one would restore nothing). Park this
+        // contribution alongside the others for allocation-aware operator
+        // reconciliation; only a SINGLE refund covering the whole charge
+        // takes the clean full unwind below.
+        const combinedChargeCents = Number(charge.amount) || 0;
+        if (combinedChargeCents && Math.round(refundAmountDollars * 100) < combinedChargeCents) {
+          logger.error(`[stripe-webhook] Combined charge ${chargeId} reached FULLY refunded via multiple partials — final contribution parked; operator reconciles all constituents`);
+          await trx('stripe_orphan_charges')
+            .insert({
+              stripe_payment_intent_id: `${charge.payment_intent || chargeId}:partial-refund:${refundId || 'unknown'}`,
+              stripe_charge_id: chargeId,
+              customer_id: combinedRows[0]?.customer_id || null,
+              invoice_id: null,
+              amount: refundAmountDollars,
+              source: 'combined_pay_webhook',
+              original_db_error: `Refund ${refundId || 'unknown'} of $${refundAmountDollars} completed a CUMULATIVE full refund of combined charge ${chargeId} — reconcile every constituent refund manually (rows deliberately untouched)`,
+            })
+            .onConflict('stripe_payment_intent_id')
+            .ignore();
+          try {
+            await NotificationService.notifyAdmin(
+              'refund',
+              `Combined charge fully refunded via partials: $${cumulativeRefundAmountDollars}`,
+              `Charge ${chargeId} is now fully refunded through multiple partial refunds. No rows were auto-unwound — reconcile the constituents in /admin/revenue.`,
+              { icon: '⚠️', link: '/admin/revenue' },
+            );
+          } catch { /* non-critical */ }
+          return combinedRows.find((r) => r.customer_id && !(r.status === 'canceled' && rowMeta(r).superseded_reason)) || combinedRows[0] || null;
+        }
+        const { returnAppliedCreditOnRefund } = require('../services/customer-credit');
+        for (const row of combinedRows) {
+          const meta = rowMeta(row);
+          // Superseded pre-settlement markers stay canceled (codex r21 P2)
+          // — flipping the zeroed, customer-less marker back to 'refunded'
+          // would let it surface as the branch's primary row and pollute
+          // same-charge consumers; the real per-invoice rows carry the
+          // refund.
+          if (row.status === 'canceled' && meta.superseded_reason) continue;
+          await trx('payments').where({ id: row.id }).update({
+            status: 'refunded',
+            refund_amount: row.amount,
+            refund_status: 'full',
+            stripe_refund_id: refundId,
+            metadata: JSON.stringify(metadataWithStampedRefund(row.metadata, refundId)),
+          });
+          const invId = meta.invoice_id || null;
+          if (invId) {
+            // Ownership check before reopening (codex r36 P1): after a
+            // dispute-created reopen, a REPLACEMENT payment may have paid
+            // this invoice — refunding the ORIGINAL charge must not flip a
+            // replacement-paid invoice to refunded or return credit the
+            // replacement still consumes. The invoice reopens only when
+            // the refunded PI still owns it; otherwise only the ledger row
+            // was stamped (above) and the parked dispute-won reinstatement
+            // case resolves — the refund just returned that reinstated
+            // cash.
+            const refInvoice = await trx('invoices').where({ id: invId }).first('id', 'status', 'stripe_payment_intent_id');
+            const refInvPi = refInvoice?.stripe_payment_intent_id ? String(refInvoice.stripe_payment_intent_id) : null;
+            const rowPi = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
+            if (refInvoice && refInvPi && rowPi && refInvPi === rowPi) {
+              await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
+              await trx('invoices')
+                .where({ id: invId })
+                .whereIn('status', ['paid', 'processing'])
+                .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() });
+            } else {
+              const resolvedReinstated = await trx('stripe_orphan_charges')
+                .where({ resolved: false, source: 'combined_pay_webhook' })
+                .where('stripe_payment_intent_id', 'like', `%:dispute-won:%:${invId}`)
+                .update({
+                  resolved: true,
+                  resolved_at: new Date(),
+                  resolution_notes: `Automatically resolved: the original combined charge was fully refunded (${refundId || 'refund id unknown'}) — the reinstated share was returned to the customer`,
+                });
+              logger.warn(`[stripe-webhook] combined full refund: invoice ${invId} is owned by ${refInvPi || 'no PI / another rail'} — left untouched${resolvedReinstated ? `; ${resolvedReinstated} parked reinstatement case(s) resolved` : ''}`);
+            }
+          }
+        }
+        // Residual reconciliation cases for this charge resolve WITH the
+        // money (codex r18 P2): unsettleable shares were parked as
+        // `<pi>:<invoiceId>` orphan rows — a full charge refund returns
+        // that cash too, so the case must not keep reporting unmatched
+        // money or keep fencing the invoice through
+        // assertNoInvoiceChargeReconciliationPending. Partial-refund/
+        // partial-dispute parks are their OWN cases and stay open.
+        const residualPiId = charge.payment_intent || combinedRows[0]?.stripe_payment_intent_id || null;
+        const resolvedResiduals = await trx('stripe_orphan_charges')
+          .where({ resolved: false, source: 'combined_pay_webhook' })
+          .where(function residualKeys() {
+            this.where('stripe_charge_id', chargeId);
+            if (residualPiId) this.orWhere('stripe_payment_intent_id', 'like', `${residualPiId}:%`);
+          })
+          .whereNot('stripe_payment_intent_id', 'like', '%:partial-%')
+          .update({
+            resolved: true,
+            resolved_at: new Date(),
+            resolution_notes: `Automatically resolved: the combined charge was fully refunded (${refundId || 'refund id unknown'}) — the unmatched cash was returned to the customer`,
+          });
+        if (resolvedResiduals > 0) {
+          logger.info(`[stripe-webhook] Combined charge ${chargeId} full refund resolved ${resolvedResiduals} residual reconciliation case(s)`);
+        }
+        logger.info(`[stripe-webhook] Combined charge ${chargeId} fully refunded — ${combinedRows.length} rows refunded at their shares, invoices reopened as refunded`);
+        return combinedRows.find((r) => r.customer_id && !(r.status === 'canceled' && rowMeta(r).superseded_reason)) || combinedRows[0] || null;
+      }
+      // PRE-SETTLEMENT combined refund (codex r6 P0): charge.refunded can
+      // arrive before payment_intent.succeeded wrote any allocation rows —
+      // the generic missing-row branch below would refund only the anchor
+      // and the later combined settle would mark every sibling paid on
+      // money Stripe already returned. Detect the combined allocation from
+      // the charge/PI metadata (charge.metadata mirrors the PI's; confirm
+      // against the PI itself when it's absent, failing CLOSED on an
+      // unreadable read). A FULL refund persists a refunded fence marker
+      // the combined settle honors (it records the orphan instead of
+      // settling); a PARTIAL refund parks for the operator exactly like
+      // the post-settlement partial (the eventual settle is real money —
+      // only the partial needs manual attribution).
+      if (!combinedRows.length && charge.payment_intent) {
+        const PayCombined = require('../services/pay-combined');
+        let combinedPiMeta = PayCombined.isCombinedPiMetadata(charge.metadata) ? charge.metadata : null;
+        if (!combinedPiMeta) {
+          const preStripe = getStripe();
+          // Fail CLOSED (codex r37 P0): with no client we cannot rule out
+          // a combined PI — falling through to the single-invoice path
+          // would refund only the anchor and let a reordered succeeded
+          // settle the siblings on fully-returned money.
+          if (!preStripe) {
+            throw new Error(`charge.refunded for ${chargeId}: PI ${charge.payment_intent} cannot be verified as combined or single (Stripe client unavailable); retry`);
+          }
+          const refundedPi = await preStripe.paymentIntents.retrieve(charge.payment_intent);
+          if (PayCombined.isCombinedPiMetadata(refundedPi?.metadata)) combinedPiMeta = refundedPi.metadata;
+        }
+        if (combinedPiMeta) {
+          // Serialize with handleRefundFailed's no-row fence write (codex
+          // r9 P1): both paths take this per-charge advisory lock, and the
+          // fence is RE-CHECKED under it — a bounce that committed its
+          // stripe_failed_refunds row while this event was in flight means
+          // Stripe KEPT the money, so no refunded marker may be written
+          // (it would permanently fence a legitimate later settle).
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['combined.refund.fence', String(chargeId)],
+          );
+          if (refundId && await db.schema.hasTable('stripe_failed_refunds')) {
+            const bounceFenced = await trx('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id');
+            if (bounceFenced) {
+              logger.warn(`[stripe-webhook] pre-settlement combined refund ${refundId} was already fenced as FAILED — skipping the refunded marker (Stripe kept the money)`);
+              return null;
+            }
+          }
+          // Serialize with COMBINED SETTLEMENT too (codex r10 P1): the
+          // succeeded handler settles under stripe.pi.payment, not the
+          // refund-fence lock — without this, both can read "no opposing
+          // row" and commit (every invoice paid + a refunded marker, with
+          // no later event to reopen them). Re-check for allocation rows
+          // in-lock and retry against them when settlement won the race.
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['stripe.pi.payment', String(charge.payment_intent)],
+          );
+          const settledRowInLock = await trx('payments').where({ stripe_charge_id: chargeId }).first('id');
+          if (settledRowInLock) {
+            throw new Error(`payments rows appeared for charge ${chargeId} while fencing its pre-settlement refund — retry the event against the rows`);
+          }
+          // CUMULATIVE-full gating (codex r16 P1, mirroring the
+          // post-settlement branch): charge.refunded reached via multiple
+          // partials must NOT write a fence stamped with only the final
+          // refund id — a bounce of that constituent would lift the whole
+          // fence and resettle despite the earlier refunds standing, and a
+          // bounce of an earlier one couldn't lift it at all. Park the
+          // final contribution with the other parked constituents instead;
+          // only a SINGLE whole-charge refund writes the clean fence.
+          const preChargeCents = Number(charge.amount) || 0;
+          const cumulativeFullPreSettle = isFullRefund
+            && preChargeCents > 0
+            && Math.round(refundAmountDollars * 100) < preChargeCents;
+          if (!isFullRefund || cumulativeFullPreSettle) {
+            logger.error(`[stripe-webhook] ${cumulativeFullPreSettle ? 'CUMULATIVE-full' : 'PARTIAL'} refund on unsettled combined charge ${chargeId} — parked for operator`);
+            await trx('stripe_orphan_charges')
+              .insert({
+                // Same per-refund key as the post-settlement partial park.
+                stripe_payment_intent_id: `${charge.payment_intent}:partial-refund:${refundId || 'unknown'}`,
+                stripe_charge_id: chargeId,
+                customer_id: null,
+                invoice_id: null,
+                amount: refundAmountDollars,
+                source: 'combined_pay_webhook',
+                original_db_error: `${cumulativeFullPreSettle ? 'Final constituent of a CUMULATIVE full refund' : 'Partial refund'} ${refundId || 'unknown'} of $${refundAmountDollars} on a combined balance charge BEFORE settlement — attribute and reconcile manually${cumulativeFullPreSettle ? ' (the charge is now fully refunded across multiple partials; if settlement proceeds, reopen the invoices from the parked cases)' : ''}`,
+              })
+              .onConflict('stripe_payment_intent_id')
+              .ignore();
+            try {
+              await NotificationService.notifyAdmin(
+                'refund',
+                `${cumulativeFullPreSettle ? 'Combined charge fully refunded via partials (pre-settlement)' : 'Partial refund on combined payment'}: $${refundAmountDollars}`,
+                `Charge ${chargeId} backs multiple invoices (not yet settled); ${cumulativeFullPreSettle ? 'it is now FULLY refunded across multiple partial refunds — every constituent is parked' : 'a partial refund can\'t be auto-attributed'}. Reconcile in /admin/revenue.`,
+                { icon: '⚠️', link: '/admin/revenue' },
+              );
+            } catch { /* non-critical */ }
+            return null;
+          }
+          const [refundFence] = await trx('payments').insert({
+            customer_id: null,
+            processor: 'stripe',
+            stripe_payment_intent_id: charge.payment_intent,
+            stripe_charge_id: chargeId,
+            payment_date: etDateString(),
+            amount: (charge.amount || refundAmountCents) / 100,
+            status: 'refunded',
+            refund_amount: cumulativeRefundAmountDollars,
+            refund_status: 'full',
+            stripe_refund_id: refundId,
+            description: 'Combined balance charge fully refunded before settlement (marker)',
+            metadata: JSON.stringify({
+              combined_payment: true,
+              pre_settlement: true,
+              source: 'combined_pay_webhook',
+              combined_anchor_invoice_id: combinedPiMeta.waves_invoice_id || null,
+              ...(refundId ? { stamped_refund_ids: [refundId] } : {}),
+            }),
+          }).returning('*');
+          try {
+            await NotificationService.notifyAdmin(
+              'refund',
+              `Combined payment refunded pre-settlement: $${refundAmountDollars}`,
+              `Charge ${chargeId} (combined PI ${charge.payment_intent}) was fully refunded before settlement — settlement is fenced; no invoice was marked paid.`,
+              { icon: '⚠️', link: '/admin/revenue' },
+            );
+          } catch { /* non-critical */ }
+          return refundFence;
+        }
+      }
+    }
     await trx('payments')
       .where({ stripe_charge_id: chargeId })
       .update({
@@ -2896,16 +3603,31 @@ async function handleChargeRefunded(charge) {
     logger.warn(`[stripe-webhook] refund triggerNotification failed: ${e.message}`);
   }
 
+  // Annual-prepay claw-back after a full refund — CRITICAL lifecycle
+  // write, no .catch (codex r15 P1): a swallowed failure acknowledges the
+  // webhook with active coverage still riding on refunded money, and no
+  // cron reconciles active terms whose invoices are refunded. Propagate so
+  // Stripe redelivers; the refund stamps above are idempotent on replay.
+  {
+    const refundSyncAnchor = await db('payments').where({ stripe_charge_id: chargeId }).first();
+    if (isFullRefund && refundSyncAnchor) {
+      // A combined charge refunds N per-invoice rows — the annual-prepay
+      // sync must see EVERY refunded share, not the arbitrary first row
+      // (codex r4 P1: a prepay invoice elsewhere in the allocation would
+      // keep active coverage on refunded money). Single-invoice charges
+      // have exactly one row, preserving the original behavior.
+      const refundSyncRows = await db('payments')
+        .where({ stripe_charge_id: chargeId, status: 'refunded' });
+      const rowsToSync = refundSyncRows.length ? refundSyncRows : [refundSyncAnchor];
+      for (const refundedRow of rowsToSync) {
+        await require('../services/annual-prepay-renewals').syncTermForRefundedPayment(refundedRow);
+      }
+    }
+  }
+
   // Fire-and-forget health rescore after refund
   try {
     const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
-    if (isFullRefund && payment) {
-      try {
-        await require('../services/annual-prepay-renewals').syncTermForRefundedPayment(payment);
-      } catch (err) {
-        logger.warn(`[stripe-webhook] annual prepay refund sync skipped for charge ${chargeId}: ${err.message}`);
-      }
-    }
     if (payment?.customer_id) {
       const customerHealth = require('../services/customer-health');
       customerHealth.scoreCustomer(payment.customer_id).catch(err => {
@@ -2972,6 +3694,238 @@ async function handleRefundFailed(refund) {
     });
     if (!notif) throw new Error('refund-failure notification insert failed');
   };
+
+  // Combined full-balance charge (payIncludeBalance): the full-refund
+  // handler stamped this refund onto EVERY allocation row, so its bounce
+  // must unwind every row and restore every invoice — the single-row path
+  // below would restore only .first() and leave the siblings 'refunded'
+  // with their credit returned while Stripe kept the whole charge (codex
+  // r3 P1). Partial refunds never stamp combined rows (they park for the
+  // operator), so a stamped refund here is by construction the full one:
+  // the unwind is a clean full reversal per row.
+  {
+    let combinedRefundMeta = {};
+    try {
+      combinedRefundMeta = payment?.metadata
+        ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata)
+        : {};
+    } catch { combinedRefundMeta = {}; }
+    if (payment && combinedRefundMeta.combined_payment) {
+      const rowChargeId = chargeId || payment.stripe_charge_id || null;
+      const rowPiId = piId || payment.stripe_payment_intent_id || null;
+      let resettleFencedPiId = null;
+      const restored = [];
+      await db.transaction(async (trx) => {
+        // Same per-charge lock as charge.refunded's combined branch (codex
+        // r12 P1) — the two unwinds are strictly ordered, so the refunded
+        // stamp and the bounce fence can never interleave.
+        if (rowChargeId) {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['combined.refund.fence', String(rowChargeId)],
+          );
+        }
+        const rows = rowChargeId
+          ? await trx('payments').where({ stripe_charge_id: rowChargeId }).forUpdate()
+          : await trx('payments').where({ stripe_payment_intent_id: rowPiId }).forUpdate();
+        let alreadyRecorded = false;
+        let neutralizedMarker = false;
+        let anyUnwound = false;
+        for (const row of rows) {
+          let meta = {};
+          try {
+            meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {};
+          } catch { meta = {}; }
+          const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
+          const isPreSettlementMarker = meta.pre_settlement === true && !meta.invoice_id;
+          if (refundId && failedIds.includes(refundId)) {
+            // Replay after a crash between the marker neutralization and
+            // the resettle (codex r8 P1): the fence must not suppress the
+            // recovery it exists to retry — re-arm the (idempotent)
+            // succeeded re-run for an already-neutralized marker.
+            if (isPreSettlementMarker) {
+              resettleFencedPiId = row.stripe_payment_intent_id || rowPiId;
+            }
+            alreadyRecorded = true;
+            continue;
+          }
+          const stampedIds = Array.isArray(meta.stamped_refund_ids) ? meta.stamped_refund_ids : [];
+          const wasStamped = !!refundId && (row.stripe_refund_id === refundId || stampedIds.includes(refundId));
+          const nextMeta = {
+            ...meta,
+            failed_refund_ids: refundId ? [...failedIds, refundId] : failedIds,
+            ...(refundId && stampedIds.includes(refundId)
+              ? { stamped_refund_ids: stampedIds.filter((id) => id !== refundId) }
+              : {}),
+          };
+          if (!wasStamped) {
+            await trx('payments').where({ id: row.id }).update({ metadata: JSON.stringify(nextMeta) });
+            continue;
+          }
+          // PRE-SETTLEMENT refund fence marker (codex r7 P0): this row is a
+          // full-amount fence, not a settled share — flipping it to 'paid'
+          // would either strand the invoices unsettled (the fenced
+          // succeeded already recorded its orphan and will not retry) or
+          // double-count the charge once a later succeeded settles the
+          // per-invoice rows. Neutralize it and re-run the full succeeded
+          // lifecycle after commit.
+          if (isPreSettlementMarker) {
+            await trx('payments').where({ id: row.id }).update({
+              refund_amount: 0,
+              refund_status: null,
+              stripe_refund_id: null,
+              status: 'canceled',
+              // Amount zeroed too (codex r8 P1): same-charge consumers (the
+              // dispute handlers' full-vs-partial sums, payout recon) must
+              // not count a superseded full-amount marker beside the real
+              // per-invoice rows; the original amount survives in metadata.
+              amount: 0,
+              metadata: JSON.stringify({ ...nextMeta, superseded_reason: 'pre_settlement_refund_bounced', superseded_marker_amount: Number(row.amount) || 0 }),
+            });
+            neutralizedMarker = true;
+            resettleFencedPiId = row.stripe_payment_intent_id || rowPiId;
+            continue;
+          }
+          anyUnwound = true;
+          // Rows refunded while the ACH debit was still PROCESSING restore
+          // to 'processing', not 'paid' (codex r29 P1): the refund landed
+          // before settlement, so the eventual debit outcome — not this
+          // bounce — is authoritative. Flipping them 'paid' would leave
+          // every invoice paid and coverage active even if the debit later
+          // fails (the failure path preserves paid rows).
+          let wasStillProcessing = nextMeta.payment_state === 'processing' && !nextMeta.settled_event_at;
+          let debitAlreadyTerminal = false;
+          if (wasStillProcessing && row.status === 'refunded') {
+            // The debit may ALREADY be terminal (codex r34 P1): a
+            // payment_failed/canceled delivered before this bounce skipped
+            // the then-'refunded' rows, so no later intent event remains —
+            // restoring 'processing' from stale metadata would strand the
+            // allocation non-collectible forever. The LIVE intent decides;
+            // fail closed on an unreadable read.
+            const bounceStripeCheck = getStripe();
+            // Fail CLOSED (codex r36 P1): restoring 'processing' without
+            // the live read could strand the allocation forever.
+            if (!bounceStripeCheck) {
+              throw new Error(`Refund bounce for combined PI ${row.stripe_payment_intent_id || rowPiId} cannot verify the live debit (Stripe client unavailable); retry`);
+            }
+            if (row.stripe_payment_intent_id || rowPiId) {
+              const liveBouncePi = await bounceStripeCheck.paymentIntents.retrieve(row.stripe_payment_intent_id || rowPiId);
+              if (!['processing', 'succeeded', 'requires_capture'].includes(liveBouncePi.status)) {
+                debitAlreadyTerminal = true;
+                wasStillProcessing = false;
+              }
+            }
+          }
+          await trx('payments').where({ id: row.id }).update({
+            refund_amount: 0,
+            refund_status: null,
+            stripe_refund_id: null,
+            ...(row.status === 'refunded'
+              ? {
+                status: debitAlreadyTerminal ? 'failed' : (wasStillProcessing ? 'processing' : 'paid'),
+                ...(debitAlreadyTerminal ? { failure_reason: 'ACH debit terminated before settling (refund bounced afterwards)' } : {}),
+              }
+              : {}),
+            metadata: JSON.stringify(nextMeta),
+          });
+          const invId = meta.invoice_id || null;
+          if (invId && debitAlreadyTerminal) {
+            // Reopen like the failure path — the money never arrived.
+            const termInvoice = await trx('invoices').where({ id: invId, status: 'refunded' }).first();
+            if (termInvoice) {
+              await trx('invoices').where({ id: invId, status: 'refunded' }).update({
+                status: nextInvoiceStatusAfterFailedPayment(termInvoice),
+                paid_at: null,
+                stripe_payment_intent_id: null,
+                stripe_charge_id: null,
+                ach_processing_notified_at: null,
+                updated_at: new Date(),
+              });
+            }
+          } else if (invId) {
+            const flipped = await trx('invoices')
+              .where({ id: invId, status: 'refunded' })
+              .update(wasStillProcessing
+                ? {
+                  // Back to the in-flight state — the debit's own
+                  // succeeded/failed event decides the final outcome.
+                  status: 'processing',
+                  paid_at: null,
+                  updated_at: new Date(),
+                }
+                : {
+                  status: 'paid',
+                  // The refund cleared paid_at, and AR/overdue queries treat
+                  // paid_at IS NULL as an outstanding balance (codex r11 P1)
+                  // — restore the settlement timestamp with the status, from
+                  // the ledger row's recorded settle time when available.
+                  paid_at: meta.settled_event_at || new Date().toISOString(),
+                  updated_at: new Date(),
+                });
+            if (flipped > 0 && !wasStillProcessing) restored.push(invId);
+          }
+        }
+        if (alreadyRecorded && !restored.length && !neutralizedMarker) return; // replay
+        // A PARKED partial refund's bounce never stamped any row (codex r15
+        // P2): the loop only recorded failed_refund_ids — reporting "the
+        // full refund bounced ... credit may need claw-back" would describe
+        // an unwind and a credit return that never happened. Name the real
+        // event: the parked reconciliation case's refund attempt failed.
+        if (!anyUnwound && !neutralizedMarker) {
+          // The parked case itself resolves with the bounce (codex r20
+          // P2): Stripe kept the money, so there is no movement left to
+          // attribute — leaving the per-refund orphan open would keep the
+          // revenue queue reporting a refund that never cleared.
+          if (refundId) {
+            const resolvedParked = await trx('stripe_orphan_charges')
+              .where({ resolved: false, source: 'combined_pay_webhook' })
+              .where('stripe_payment_intent_id', 'like', `%:partial-refund:${refundId}`)
+              .update({
+                resolved: true,
+                resolved_at: new Date(),
+                resolution_notes: `Automatically resolved: refund ${refundId} FAILED at the bank — Stripe kept the money, no movement to reconcile`,
+              });
+            if (resolvedParked > 0) logger.info(`[stripe-webhook] bounce of parked partial refund ${refundId} resolved its reconciliation case`);
+          }
+          await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: a PARKED partial-refund attempt (${refundId || 'unknown id'}) failed at the bank — no rows were ever stamped and no credit was returned; its reconciliation case was auto-resolved (the money never moved).`);
+          return;
+        }
+        await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: the full refund bounced — ${neutralizedMarker ? 'the pre-settlement refund fence was lifted and settlement re-runs from the PI' : `${rows.length} allocation rows unwound to paid and ${restored.length} invoices restored`}. Account credit that returnAppliedCreditOnRefund restored per invoice may need manual claw-back (it is deliberately not auto-reversed).${restored.length ? ' Any annual-prepay coverage the refund CANCELLED is not auto-revived (revival is dispute-marker-gated) — the paid-sync re-runs post-commit, but if coverage stays cancelled on a restored invoice, reactivate it manually.' : ''}`);
+      });
+      // Post-commit paid sync per restored invoice (codex r19 P1, single-
+      // payment-branch parity): the refund already ran
+      // syncTermForRefundedPayment and cancelled any prepay coverage; no
+      // payment_intent.succeeded will ever fire for a bounce, so this is
+      // the only re-sync. payment_pending terms reactivate through the
+      // sanctioned state machine; refund-cancelled terms stay cancelled by
+      // design (the notification above names the manual remediation).
+      for (const restoredId of restored) {
+        try {
+          await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(restoredId);
+        } catch (syncErr) {
+          logger.error(`[stripe-webhook] annual-prepay resync after combined refund bounce failed for invoice ${restoredId}: ${syncErr.message}`);
+        }
+      }
+      // Bounced pre-settlement refund → the money never left after all. If
+      // the PI actually succeeded (its settle was fenced into an orphan),
+      // run the FULL succeeded lifecycle now — guard chain, allocation
+      // settle, orphan resolution, review/ACH/enroll/pause mirrors (codex
+      // r7 P0+P1). Fail closed: an unreadable PI throws so Stripe
+      // redelivers this bounce event and the (idempotent) path re-runs.
+      if (resettleFencedPiId) {
+        const bounceStripe = getStripe();
+        if (!bounceStripe) throw new Error(`Combined refund bounce on unsettled PI ${resettleFencedPiId} but Stripe is unavailable to resettle; retry`);
+        const fencedPi = await bounceStripe.paymentIntents.retrieve(resettleFencedPiId);
+        if (fencedPi.status === 'succeeded') {
+          await handleCombinedPaymentIntentSucceeded(fencedPi, null);
+          logger.warn(`[stripe-webhook] combined refund bounce lifted the pre-settlement fence — PI ${resettleFencedPiId} re-ran the succeeded lifecycle`);
+        } else {
+          logger.warn(`[stripe-webhook] combined refund bounce lifted the pre-settlement fence — PI ${resettleFencedPiId} is ${fencedPi.status}, awaiting its own settle event`);
+        }
+      }
+      return;
+    }
+  }
 
   if (!payment) {
     // Estimate-deposit refunds have no payments row — record the failed id
@@ -3083,6 +4037,23 @@ async function handleRefundFailed(refund) {
           const rowInLock = await trx('payments').where({ stripe_payment_intent_id: piId }).first('id');
           if (rowInLock) {
             const e = new Error('fee payments row appeared before the fence — retry the event against the row');
+            e.retryRefundFailed = true;
+            throw e;
+          }
+        }
+        // Combined pre-settlement marker race (codex r9 P1): serialize with
+        // charge.refunded's marker insert on the same per-charge lock, and
+        // re-check for rows that landed while waiting — if the refunded
+        // marker (or settlement rows) committed first, retry this event so
+        // the row-based unwind handles it instead of fencing alongside it.
+        if (chargeId) {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['combined.refund.fence', String(chargeId)],
+          );
+          const chargeRowInLock = await trx('payments').where({ stripe_charge_id: chargeId }).first('id');
+          if (chargeRowInLock) {
+            const e = new Error('payments row appeared for the charge before the fence — retry the event against the row');
             e.retryRefundFailed = true;
             throw e;
           }
@@ -3270,7 +4241,11 @@ async function handleRefundFailed(refund) {
     if (linkedInvoice && nextRefundCents < rowPaidCents) {
       const flipped = await trx('invoices')
         .where({ id: linkedInvoice.id, status: 'refunded' })
-        .update({ status: 'paid', updated_at: new Date() });
+        // paid_at restored with the status (codex r11 P1, same reasoning
+        // as the combined unwind): AR and overdue alerts key on
+        // paid_at IS NULL, so a status-only restore keeps the invoice on
+        // every outstanding-balance surface.
+        .update({ status: 'paid', paid_at: nextMeta.settled_event_at || new Date().toISOString(), updated_at: new Date() });
       if (flipped > 0) {
         invoiceRestored = linkedInvoice.invoice_number || linkedInvoice.id;
         restoredInvoiceId = linkedInvoice.id;
@@ -4168,12 +5143,152 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
  * fresh acknowledgment email, while genuine duplicate webhook deliveries
  * of the same event remain deduped at the email_messages level.
  */
+/**
+ * Combined full-balance ACH in flight: mark EVERY allocated invoice (and a
+ * per-invoice ledger row) 'processing' via the shared settle, after the
+ * same freshness + expected-amount guards as the single path — the
+ * expected ACH amount is the ALLOCATION total (ACH is never surcharged).
+ * The customer-facing "we got it" acknowledgment fires once, on the
+ * anchor invoice, with the combined amount.
+ */
+async function handleCombinedPaymentIntentProcessing(paymentIntent, eventCreated = null, eventId = null) {
+  const PayCombined = require('../services/pay-combined');
+  const piId = paymentIntent.id;
+  const isAch = isAchPaymentIntent(paymentIntent, paymentIntent.metadata?.selected_method_category);
+  if (!isAch) {
+    logger.info(`[stripe-webhook] Ignoring non-ACH combined processing event: ${piId}`);
+    return;
+  }
+  const stripe = getStripe();
+  // Fail CLOSED on a missing client (codex r35 P1 class): the freshness
+  // and attempt-identity checks below are load-bearing — an unverified
+  // processing event must not move money state.
+  if (!stripe) {
+    throw new Error(`Combined processing event for PI ${piId} cannot be freshness-checked (Stripe client unavailable); retry`);
+  }
+  {
+    const currentIntent = await stripe.paymentIntents.retrieve(piId);
+    if (currentIntent.status !== 'processing') {
+      logger.info(`[stripe-webhook] Ignoring stale combined processing event for PI ${piId}; current status is ${currentIntent.status}`);
+      return;
+    }
+    // Attempt-identity check (codex r22 P2): a retried reusable PI can be
+    // 'processing' AGAIN when a delayed processing event from the PRIOR
+    // attempt arrives — status alone accepts it, and the handler would run
+    // the OLD event's immutable amount/allocation (acknowledging the old
+    // total, settling the old sibling set). The live intent is the
+    // authority: a mismatched allocation or amount marks this event stale;
+    // the current attempt's own delivery carries the right snapshot.
+    if (String(currentIntent.metadata?.combined_allocation || '') !== String(paymentIntent.metadata?.combined_allocation || '')
+      || Number(currentIntent.amount) !== Number(paymentIntent.amount)) {
+      logger.warn(`[stripe-webhook] Ignoring stale combined processing event for PI ${piId}: event allocation/amount differs from the live intent (retry superseded it)`);
+      return;
+    }
+    // Same-balance retries keep allocation AND amount identical (codex r25
+    // P2) — the ATTEMPT identity is the charge. A delayed prior-attempt
+    // event would restore failed rows to 'processing' under the OLD charge
+    // id, which the current attempt's event can then never repair. Fail
+    // CLOSED when sameness can't be established — the live attempt's own
+    // delivery carries a matching charge.
+    const eventCharge = typeof paymentIntent.latest_charge === 'string'
+      ? paymentIntent.latest_charge : paymentIntent.latest_charge?.id || null;
+    const liveCharge = typeof currentIntent.latest_charge === 'string'
+      ? currentIntent.latest_charge : currentIntent.latest_charge?.id || null;
+    if (!eventCharge || !liveCharge || eventCharge !== liveCharge) {
+      logger.warn(`[stripe-webhook] Ignoring combined processing event for PI ${piId}: event charge ${eventCharge || 'unknown'} does not match the live intent's ${liveCharge || 'unknown'} (prior-attempt delivery or unestablishable identity)`);
+      return;
+    }
+  }
+
+  let allocation;
+  try {
+    allocation = PayCombined.parseCombinedAllocation(paymentIntent.metadata);
+  } catch (err) {
+    logger.error(`[stripe-webhook] Combined processing PI ${piId} has a malformed allocation: ${err.message}`);
+    if (stripe) {
+      try { await stripe.paymentIntents.cancel(piId); } catch (e) { logger.warn(`[stripe-webhook] could not cancel malformed combined PI ${piId}: ${e.message}`); }
+    }
+    throw new Error(`Combined processing PI ${piId} allocation malformed; retry after cancellation`);
+  }
+
+  const expectedCents = PayCombined.allocationTotalCents(allocation);
+  const actualCents = Number(paymentIntent.amount || 0);
+  if (actualCents !== expectedCents) {
+    logger.error(`[stripe-webhook] Combined ACH processing amount mismatch on PI ${piId}. Expected ${expectedCents}c from allocation; got ${actualCents}c.`);
+    if (stripe) {
+      try { await stripe.paymentIntents.cancel(piId); } catch (cancelErr) { logger.warn(`[stripe-webhook] Could not cancel mismatched combined processing PI ${piId}: ${cancelErr.message}`); }
+    }
+    throw new Error(`Combined ACH processing PI ${piId} amount mismatch; retry after cancellation`);
+  }
+
+  try {
+    await PayCombined.settleCombinedPaymentIntent(paymentIntent, {
+      paymentMethod: 'us_bank_account',
+      cardBrand: null,
+      cardLastFour: null,
+      receiptUrl: null,
+    }, { eventCreated });
+  } catch (err) {
+    // Same terminal-fence handling as the succeeded handler (codex r17
+    // P1): a refunded/disputed charge must not retry-loop the processing
+    // event — the refund/dispute paths own the ledger from here.
+    if (err.code === 'COMBINED_PI_ALREADY_REFUNDED' || err.code === 'COMBINED_PI_DISPUTED') {
+      logger.warn(`[stripe-webhook] combined processing event for PI ${piId} skipped: ${err.message}`);
+      return;
+    }
+    throw err;
+  }
+
+  const anchorInvoiceId = paymentIntent.metadata?.waves_invoice_id || allocation[0].invoiceId;
+
+  // Stamp the SIBLING acknowledgment claims (codex r5 P1): every allocated
+  // invoice just moved to 'processing' with this PI, but only the anchor's
+  // claim is consumed by the combined-total notice below — a null sibling
+  // claim would make sweepUnacknowledgedAchProcessingAcks send additional
+  // per-invoice ACH acks after the customer already got the combined one.
+  // If the anchor's notice fails, the sweep rescue runs through the ANCHOR
+  // row (its claim is released/never taken), so stamping siblings first
+  // loses nothing.
+  const combinedSiblingIds = allocation
+    .map((a) => a.invoiceId)
+    .filter((id) => String(id) !== String(anchorInvoiceId));
+  if (combinedSiblingIds.length) {
+    await db('invoices')
+      .whereIn('id', combinedSiblingIds)
+      .where({ stripe_payment_intent_id: piId, status: 'processing' })
+      .whereNull('ach_processing_notified_at')
+      .update({ ach_processing_notified_at: new Date() });
+  }
+
+  setImmediate(() => {
+    dispatchAchProcessingAcknowledgment({
+      invoiceId: anchorInvoiceId,
+      piId,
+      amount: centsToDollars(actualCents),
+      eventCreated,
+      eventId,
+    }).catch((err) => {
+      logger.error(`[stripe-webhook] Combined ACH processing acknowledgment failed for PI ${piId}: ${err.message}`);
+    });
+  });
+}
+
 async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null, eventId = null) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent processing (ACH in flight): ${piId}`);
   if (paymentIntent.metadata?.waves_statement_id) {
     await handleStatementPaymentIntentEvent(paymentIntent, 'processing');
     return;
+  }
+  // Combined full-balance PI: the single-invoice expected-amount check
+  // below prices from ONE invoice's remainder and would cancel a valid
+  // combined ACH debit — route to the allocation-aware path.
+  {
+    const PayCombined = require('../services/pay-combined');
+    if (PayCombined.isCombinedPiMetadata(paymentIntent.metadata)) {
+      await handleCombinedPaymentIntentProcessing(paymentIntent, eventCreated, eventId);
+      return;
+    }
   }
   const invoice = await findInvoiceForPaymentIntent(paymentIntent);
   const isAch = isAchPaymentIntent(paymentIntent, paymentIntent.metadata?.selected_method_category);
@@ -4623,6 +5738,26 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
       logger.info(`[stripe-webhook] ACH ack sweep skipping invoice ${row.invoice_number || row.id}: PI ${pi.id} is ${isBankDebit ? `status=${pi.status}` : `non-ACH (${methodTypes.join(',') || 'unknown'})`} — not an in-flight bank transfer`);
       continue;
     }
+    // Combined full-balance PI (codex r5 P1): the notice is COMBINED-total,
+    // dispatched once through the anchor. A swept SIBLING (missed the
+    // handler's claim stamp — e.g. a pre-stamping deploy) is covered by the
+    // anchor's notice: consume its claim without sending. A swept ANCHOR
+    // re-acknowledges with the ALLOCATION total, not its own row's amount.
+    let combinedAllocationForAck = null;
+    try {
+      combinedAllocationForAck = require('../services/pay-combined').parseCombinedAllocation(pi.metadata);
+    } catch { combinedAllocationForAck = null; }
+    if (combinedAllocationForAck) {
+      const ackAnchorId = pi.metadata?.waves_invoice_id || combinedAllocationForAck[0].invoiceId;
+      if (String(ackAnchorId) !== String(row.id)) {
+        await db('invoices')
+          .where({ id: row.id, stripe_payment_intent_id: row.stripe_payment_intent_id, status: 'processing' })
+          .whereNull('ach_processing_notified_at')
+          .update({ ach_processing_notified_at: new Date() });
+        logger.info(`[stripe-webhook] ACH ack sweep: invoice ${row.invoice_number || row.id} is a combined sibling of PI ${pi.id} — claim stamped, anchor notice covers it`);
+        continue;
+      }
+    }
     const priorEmailAttempt = await db('email_messages')
       .whereRaw('idempotency_key LIKE ?', [`payment.ach_processing:${row.id}:%`])
       .first('id')
@@ -4631,7 +5766,9 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
     // (cash + applied credit) — subtract the credit back out so the
     // email states the actual bank transfer, never an overstated total
     // (sendAchProcessing's own fallback is the gross total).
-    const cashAmount = Math.round((Number(row.total || 0) - Number(row.credit_applied || 0)) * 100) / 100;
+    const cashAmount = combinedAllocationForAck
+      ? require('../services/pay-combined').allocationTotalCents(combinedAllocationForAck) / 100
+      : Math.round((Number(row.total || 0) - Number(row.credit_applied || 0)) * 100) / 100;
     logger.warn(`[stripe-webhook] ACH ack sweep re-running acknowledgment for invoice ${row.invoice_number || row.id} (claim was released or never taken; email ${priorEmailAttempt ? 'already attempted — SMS-only' : 'never attempted — both legs'})`);
     await dispatchAchProcessingAcknowledgment({
       invoiceId: row.id,
@@ -4710,6 +5847,44 @@ async function handlePaymentIntentCanceled(paymentIntent) {
     .where({ stripe_payment_intent_id: piId })
     .whereNotIn('status', ['paid', 'refunded', 'disputed'])
     .update({ status: 'canceled' });
+
+  // Combined PI canceled AFTER entering processing (codex r20 P2, a rare
+  // but supported Stripe transition): the processing handler already moved
+  // every allocated invoice to 'processing' — without an allocation-aware
+  // revert they stay non-collectible forever (excluded from dunning,
+  // blocked from a replacement payment). Mirror the failure path's revert:
+  // reopen each stamped 'processing' invoice, clear the dead PI binding
+  // and the ACH-ack claim so a retry re-acknowledges.
+  if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)) {
+    const canceledStamped = await db('invoices')
+      .where({ stripe_payment_intent_id: piId, status: 'processing' });
+    for (const stampedRow of canceledStamped) {
+      await db('invoices').where({ id: stampedRow.id, status: 'processing' }).update({
+        status: nextInvoiceStatusAfterFailedPayment(stampedRow),
+        paid_at: null,
+        stripe_payment_intent_id: null,
+        stripe_charge_id: null,
+        ach_processing_notified_at: null,
+        updated_at: db.fn.now(),
+      });
+    }
+    if (canceledStamped.length) {
+      logger.warn(`[stripe-webhook] canceled combined PI ${piId} — reopened ${canceledStamped.length} allocated invoice(s) from 'processing'`);
+    }
+    // Any remaining collectible stamps (not yet 'processing') unbind too.
+    await require('../services/pay-combined').clearPaymentIntentStamps(db, piId);
+    // Provisional processing-stage residuals resolve with the cancellation
+    // (codex r27 P2) — the parked cash never arrived.
+    const resolvedProvisional = await db('stripe_orphan_charges')
+      .where({ resolved: false, source: 'combined_pay_processing' })
+      .where('stripe_payment_intent_id', 'like', `${piId}:%`)
+      .update({
+        resolved: true,
+        resolved_at: new Date(),
+        resolution_notes: 'Automatically resolved: the combined intent was canceled before settling — the provisional residual cash never arrived',
+      });
+    if (resolvedProvisional > 0) logger.info(`[stripe-webhook] canceled combined PI ${piId} — resolved ${resolvedProvisional} provisional residual(s)`);
+  }
 }
 
 /**
@@ -4995,10 +6170,283 @@ async function handleDisputeCreated(dispute) {
     }
   }
 
+  // Combined full-balance charge (payIncludeBalance): ONE charge backs a
+  // payments row PER allocated invoice — a chargeback claws back the whole
+  // charge, so EVERY row flips disputed and EVERY invoice it settled
+  // reopens. The generic single-row path below would revert only .first().
+  {
+    const combinedRows = await db('payments').where({ stripe_charge_id: chargeId });
+    const parseMeta = (row) => {
+      try { return row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch { return {}; }
+    };
+    if (combinedRows.length && combinedRows.some((r) => parseMeta(r).combined_payment)) {
+      // PARTIAL dispute (codex r5 P1): Stripe can dispute part of a charge.
+      // A charge-level partial cannot be attributed to a specific share
+      // (same reasoning as the partial-refund branch) — reopening EVERY
+      // invoice would make dunning chase the whole combined balance when
+      // only dispute.amount was withdrawn. Park it for the operator and
+      // touch nothing.
+      // Canceled rows (neutralized pre-settlement markers) are excluded —
+      // their amounts are zeroed, but the filter keeps the sum honest even
+      // against legacy rows (codex r8 P1).
+      let combinedFullCents = combinedRows
+        .filter((r) => r.status !== 'canceled')
+        .reduce((s, r) => s + Math.round(Number(r.amount || 0) * 100), 0);
+      // The row sum UNDERCOUNTS when a share settled as a residual (no
+      // payments row) — a partial dispute >= that reduced sum would then
+      // misclassify as full-charge and wrongly reopen every recorded
+      // invoice (codex r19 P1). The Stripe charge is the authority; fail
+      // CLOSED on an unreadable charge (retry) rather than guess.
+      {
+        const disputeStripe = getStripe();
+        // Fail CLOSED (codex r36 P2): the residual-reduced row sum must
+        // never classify the dispute on its own.
+        if (!disputeStripe) {
+          throw new Error(`Dispute ${dispute.id}: charge ${chargeId} cannot be classified full-vs-partial (Stripe client unavailable); retry`);
+        }
+        {
+          let liveCharge;
+          try {
+            liveCharge = await disputeStripe.charges.retrieve(chargeId);
+          } catch (chargeErr) {
+            throw new Error(`Dispute ${dispute.id}: charge ${chargeId} unreadable for full-vs-partial classification (${chargeErr.message}); retry`);
+          }
+          if (Number(liveCharge?.amount) > 0) combinedFullCents = Number(liveCharge.amount);
+        }
+      }
+      if (Number(dispute.amount) < combinedFullCents) {
+        logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} ($${amount} of $${(combinedFullCents / 100).toFixed(2)}) on combined charge ${chargeId} — cannot attribute to a share; parked for operator`);
+        await db('stripe_orphan_charges')
+          .insert({
+            // Keyed per DISPUTE (same reasoning as the per-refund partial
+            // key): each partial dispute keeps its own reconciliation case.
+            stripe_payment_intent_id: `${dispute.payment_intent || chargeId}:partial-dispute:${dispute.id}`,
+            stripe_charge_id: chargeId,
+            customer_id: combinedRows[0]?.customer_id || null,
+            invoice_id: null,
+            amount: Number(amount),
+            source: 'combined_pay_webhook',
+            original_db_error: `Partial dispute ${dispute.id} of $${amount} on a combined balance charge (${reason}) — attribute and reconcile manually`,
+          })
+          .onConflict('stripe_payment_intent_id')
+          .ignore();
+        try {
+          await NotificationService.notifyAdmin(
+            'dispute',
+            `PARTIAL dispute on combined payment: $${amount}`,
+            `Dispute ${dispute.id} withdrew $${amount} of a $${(combinedFullCents / 100).toFixed(2)} combined charge ${chargeId} (${reason}). Shares can't be auto-attributed — reconcile manually AND respond with evidence in the Stripe dashboard.`,
+            { icon: '⚠️', link: '/admin/revenue' },
+          );
+        } catch (err) { logger.error(`[stripe-webhook] Combined partial-dispute notification failed: ${err.message}`); }
+        return;
+      }
+      // Row stamps run under the shared per-PI serialization lock with a
+      // FRESH in-lock re-read (codex r12 P1): a concurrent closed(won) can
+      // otherwise stamp dispute_final + restore a row while this loop holds
+      // a stale metadata snapshot — overwriting the final stamp and
+      // reopening an invoice the won charge backs. Which invoices to reopen
+      // is decided in-lock too; the reopen transactions themselves run
+      // after commit (they only fire for rows this handler stamped).
+      const disputeLockKey = String(dispute.payment_intent
+        || combinedRows.find((r) => r.stripe_payment_intent_id)?.stripe_payment_intent_id
+        || chargeId);
+      const reopenPlan = [];
+      let disputeAlreadyFinalized = false;
+      await db.transaction(async (lockTrx) => {
+        await lockTrx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['stripe.pi.payment', disputeLockKey],
+        );
+        const freshRows = await lockTrx('payments').where({ stripe_charge_id: chargeId });
+        // GLOBAL late-created suppression (codex r31 P1): if ANY row for
+        // this charge — including a canceled/superseded closure marker —
+        // records this dispute as FINAL, the closure already owns the
+        // outcome. The per-row guard below misses the shape where a
+        // won-before-created marker was neutralized and settlement then
+        // added fresh rows carrying no dispute stamps; disputing those
+        // would reopen invoices Stripe already restored, with no later
+        // closure event to repair them.
+        disputeAlreadyFinalized = freshRows.some((r) => {
+          const m = parseMeta(r);
+          return m.dispute_final && m.dispute_id === dispute.id;
+        });
+        if (disputeAlreadyFinalized) {
+          logger.warn(`[stripe-webhook] dispute ${dispute.id} already finalized on charge ${chargeId} — late created event suppressed globally`);
+          return;
+        }
+        for (const row of freshRows) {
+          const meta = parseMeta(row);
+          // A neutralized pre-settlement marker is superseded — never
+          // resurrect it (codex r8 P1); the live per-invoice rows carry the
+          // dispute state.
+          if (row.status === 'canceled' && meta.superseded_reason) continue;
+          // Same late-replay guard as the single path: a dispute already
+          // CLOSED owns its row — never flip a won charge back to disputed.
+          // The in-lock re-read makes this authoritative against a racing
+          // closure.
+          if (meta.dispute_final && meta.dispute_id === dispute.id) continue;
+          await lockTrx('payments').where({ id: row.id }).update({
+            status: 'disputed',
+            failure_reason: `Dispute: ${reason}`,
+            metadata: JSON.stringify({ ...meta, dispute_id: dispute.id, ...(meta.invoice_id ? { dispute_invoice_id: meta.invoice_id } : {}) }),
+          });
+          const rowInvoice = await findInvoiceForPayment(row);
+          const invoicePi = rowInvoice?.stripe_payment_intent_id ? String(rowInvoice.stripe_payment_intent_id) : null;
+          const disputedPiId = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
+          if (rowInvoice && ['paid', 'processing'].includes(rowInvoice.status)
+            && invoicePi && disputedPiId && invoicePi === disputedPiId) {
+            reopenPlan.push({ invoiceId: rowInvoice.id, rowId: row.id });
+          }
+        }
+      });
+      if (disputeAlreadyFinalized) return; // closure owns the outcome — no reopens, no notification
+      for (const { invoiceId: reopenInvoiceId, rowId: reopenRowId } of reopenPlan) {
+        // Same lifecycle hook as the single-invoice reopen (codex r4 P1):
+        // prepaid coverage must not ride on provisionally clawed-back
+        // money — SUSPEND any live term this invoice paid for; the
+        // closure branches re-activate (won) or cancel (lost) it.
+        // ATOMIC with the reopen and UNCAUGHT (codex r5 P1): a rollback
+        // fails the event and Stripe retries it, and the world only ever
+        // sees suspended-term + reopened-invoice together. The row's
+        // CURRENT dispute state is re-read in this transaction: a closure
+        // that finalized between the lock release and this reopen owns the
+        // outcome — a won restore must not be reopened behind its back.
+        await db.transaction(async (trx) => {
+          const rowNow = await trx('payments').where({ id: reopenRowId }).first('status', 'metadata');
+          let rowNowMeta = {};
+          try { rowNowMeta = rowNow?.metadata ? (typeof rowNow.metadata === 'string' ? JSON.parse(rowNow.metadata) : rowNow.metadata) : {}; } catch { rowNowMeta = {}; }
+          if (!rowNow || rowNow.status !== 'disputed'
+            || (rowNowMeta.dispute_final && rowNowMeta.dispute_id === dispute.id)) {
+            logger.warn(`[stripe-webhook] combined dispute ${dispute.id}: row ${reopenRowId} was finalized while the reopen was queued — closure owns invoice ${reopenInvoiceId}`);
+            return;
+          }
+          await require('../services/annual-prepay-renewals')
+            .suspendActiveTermsForDisputedInvoice(reopenInvoiceId, trx);
+          await trx('invoices').where({ id: reopenInvoiceId }).update({
+            status: 'overdue',
+            paid_at: null,
+            stripe_payment_intent_id: null,
+            stripe_charge_id: null,
+            updated_at: trx.fn.now(),
+          });
+        });
+      }
+      try {
+        await NotificationService.notifyAdmin(
+          'dispute',
+          `Combined payment dispute: $${amount}`,
+          `Dispute ${dispute.id} on a combined balance charge (${reason}) — ${combinedRows.length} invoices reopened. Respond with evidence in the Stripe dashboard.`,
+          { icon: '⚠️', link: '/admin/invoices' },
+        );
+      } catch (err) { logger.error(`[stripe-webhook] Combined dispute notification failed: ${err.message}`); }
+      return;
+    }
+  }
+
   // Revert payment + invoice
   // These are critical ledger writes: no .catch — a failure must
   // propagate so the event is NOT marked processed and Stripe retries.
   const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+
+  // Combined PI disputed BEFORE settlement (codex r5 P1): no payments rows
+  // exist yet, so the combined block above fell through — but the later
+  // combined succeeded/processing settle would mark every allocated invoice
+  // paid on money already clawed back. Persist a durable disputed marker on
+  // the PI; settleCombinedPaymentIntent's disputed-row fence refuses to
+  // settle while it stands (the succeeded handler records the orphan for
+  // the operator), and dispute.closed(won) flips the marker to 'paid',
+  // lifting the fence so a legitimate settle can proceed. Mirrors the
+  // statement and appointment-fee pre-settlement mechanisms.
+  if (!payment && dispute.payment_intent) {
+    const preStripe = getStripe();
+    // Fail CLOSED (codex r36 P1): a null client must not acknowledge a
+    // pre-settlement dispute without fencing — the delayed succeeded
+    // would settle a disputed charge.
+    if (!preStripe) {
+      throw new Error(`Dispute ${dispute.id} pre-settlement check cannot run (Stripe client unavailable); retry`);
+    }
+    {
+      let disputedPi = null;
+      try {
+        disputedPi = await preStripe.paymentIntents.retrieve(dispute.payment_intent);
+      } catch (piErr) {
+        // Fail CLOSED: an unreadable PI could be a combined one — retry.
+        throw new Error(`Dispute ${dispute.id} pre-settlement PI ${dispute.payment_intent} unreadable (${piErr.message}); retry`);
+      }
+      if (require('../services/pay-combined').isCombinedPiMetadata(disputedPi?.metadata)) {
+        // PARTIAL pre-settlement dispute (codex r10 P1): a full-PI fence
+        // would make settlement refuse EVERY share when Stripe withdrew
+        // only dispute.amount — park it for reconciliation exactly like
+        // the row-based partial branch.
+        if (Number(dispute.amount) < Number(disputedPi.amount || 0)) {
+          logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} ($${amount}) on unsettled combined PI ${dispute.payment_intent} — parked for operator, no settlement fence`);
+          await db('stripe_orphan_charges')
+            .insert({
+              stripe_payment_intent_id: `${dispute.payment_intent}:partial-dispute:${dispute.id}`,
+              stripe_charge_id: chargeId,
+              customer_id: null,
+              invoice_id: null,
+              amount: Number(amount),
+              source: 'combined_pay_webhook',
+              original_db_error: `Partial dispute ${dispute.id} of $${amount} on a combined balance charge BEFORE settlement (${reason}) — attribute and reconcile manually`,
+            })
+            .onConflict('stripe_payment_intent_id')
+            .ignore();
+          try {
+            await NotificationService.notifyAdmin(
+              'dispute',
+              `PARTIAL dispute on unsettled combined payment: $${amount}`,
+              `Dispute ${dispute.id} withdrew $${amount} of unsettled combined PI ${dispute.payment_intent} (${reason}). Reconcile manually AND respond with evidence in the Stripe dashboard.`,
+              { icon: '⚠️', link: '/admin/revenue' },
+            );
+          } catch (err) { logger.error(`[stripe-webhook] pre-settlement partial-dispute notification failed: ${err.message}`); }
+          return;
+        }
+        // Marker insert serialized on the SETTLEMENT lock (codex r10 P1):
+        // a concurrent combined settle (or the closed handler's marker)
+        // must be strictly ordered with this fence — re-check for rows
+        // under the lock and retry the event against them if any landed.
+        await db.transaction(async (trx) => {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['stripe.pi.payment', String(dispute.payment_intent)],
+          );
+          const rowInLock = await trx('payments').where({ stripe_charge_id: chargeId }).first('id');
+          if (rowInLock) {
+            throw new Error(`payments rows appeared for charge ${chargeId} while fencing dispute ${dispute.id} — retry the event against the rows`);
+          }
+          await trx('payments').insert({
+            customer_id: null,
+            processor: 'stripe',
+            stripe_payment_intent_id: dispute.payment_intent,
+            stripe_charge_id: chargeId,
+            payment_date: etDateString(),
+            amount: Number(amount),
+            status: 'disputed',
+            failure_reason: `Dispute: ${reason}`,
+            description: 'Combined balance charge disputed before settlement (marker)',
+            metadata: JSON.stringify({
+              combined_payment: true,
+              pre_settlement: true,
+              dispute_id: dispute.id,
+              combined_anchor_invoice_id: disputedPi.metadata?.waves_invoice_id || null,
+              waves_customer_id: disputedPi.metadata?.waves_customer_id || null,
+            }),
+          });
+        });
+        try {
+          await NotificationService.notifyAdmin(
+            'dispute',
+            `Combined payment disputed pre-settlement: $${amount}`,
+            `Dispute ${dispute.id} on combined PI ${dispute.payment_intent} arrived before settlement (${reason}) — settlement is fenced. Respond with evidence in the Stripe dashboard.`,
+            { icon: '⚠️', link: '/admin/invoices' },
+          );
+        } catch (err) { logger.error(`[stripe-webhook] Combined pre-settlement dispute notification failed: ${err.message}`); }
+        return;
+      }
+    }
+  }
+
   let createdPaymentMeta = {};
   if (payment) {
     try {
@@ -5161,9 +6609,583 @@ async function handleDisputeClosed(dispute) {
     }
   }
 
+  // Combined full-balance charge (payIncludeBalance): dispute.created
+  // flipped EVERY allocation row disputed and reopened every invoice — the
+  // closure must apply the final outcome across the same set (codex r3
+  // P1); the single-row path below would restore only .first() and leave
+  // the sibling invoices overdue after Stripe reinstated the whole charge.
+  {
+    const combinedClosedRows = await db('payments').where({ stripe_charge_id: chargeId });
+    const rowMetaOf = (row) => {
+      try { return row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch { return {}; }
+    };
+    if (combinedClosedRows.length && combinedClosedRows.some((r) => rowMetaOf(r).combined_payment)) {
+      // PARTIAL dispute closing (codex r5 P1): the created handler parked it
+      // (no statuses touched) because a charge-level partial can't be
+      // attributed to a share — the closure must not apply the full-charge
+      // transition either. Stamp nothing, notify, leave for the operator.
+      // Same canceled-marker exclusion as the created handler (codex r8 P1).
+      let combinedClosedFullCents = combinedClosedRows
+        .filter((r) => r.status !== 'canceled')
+        .reduce((s, r) => s + Math.round(Number(r.amount || 0) * 100), 0);
+      // Stripe charge = the classification authority (codex r19 P1, same
+      // residual-undercount reasoning as the created handler); fail CLOSED
+      // on an unreadable charge.
+      {
+        const closedDisputeStripe = getStripe();
+        // Fail CLOSED (codex r36 P2), same reasoning as the created path.
+        if (!closedDisputeStripe) {
+          throw new Error(`Dispute ${dispute.id} closure: charge ${chargeId} cannot be classified full-vs-partial (Stripe client unavailable); retry`);
+        }
+        {
+          let liveClosedCharge;
+          try {
+            liveClosedCharge = await closedDisputeStripe.charges.retrieve(chargeId);
+          } catch (chargeErr) {
+            throw new Error(`Dispute ${dispute.id} closure: charge ${chargeId} unreadable for full-vs-partial classification (${chargeErr.message}); retry`);
+          }
+          if (Number(liveClosedCharge?.amount) > 0) combinedClosedFullCents = Number(liveClosedCharge.amount);
+        }
+      }
+      if (Number(dispute.amount) < combinedClosedFullCents) {
+        logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} on combined charge ${chargeId} closed as ${status} — ${status === 'lost' ? 'parked case stands, still needs manual reconcile' : 'funds restored, case auto-resolved'}`);
+        // A restored partial (won/warning_closed) resolves its per-dispute
+        // reconciliation case (codex r21 P2) — Stripe put the money back, so
+        // no unmatched cash remains. The UPSERT also handles the
+        // closed-before-created ordering: a pre-created RESOLVED row makes
+        // the late created's onConflict-ignore insert a no-op instead of a
+        // fresh false-positive case. LOST keeps its case open (money gone,
+        // attribution still owed).
+        if (status === 'won' || status === 'warning_closed') {
+          await db('stripe_orphan_charges')
+            .insert({
+              stripe_payment_intent_id: `${dispute.payment_intent || chargeId}:partial-dispute:${dispute.id}`,
+              stripe_charge_id: chargeId,
+              customer_id: null,
+              invoice_id: null,
+              amount: Number(amount),
+              source: 'combined_pay_webhook',
+              original_db_error: `Partial dispute ${dispute.id} on a combined balance charge closed as ${status}`,
+              resolved: true,
+              resolved_at: new Date(),
+              resolution_notes: `Automatically resolved: partial dispute ${dispute.id} closed as ${status} — Stripe restored the disputed amount`,
+            })
+            .onConflict('stripe_payment_intent_id')
+            .merge(['resolved', 'resolved_at', 'resolution_notes']);
+        }
+        try {
+          await NotificationService.notifyAdmin(
+            'dispute',
+            `PARTIAL combined dispute ${status}: $${amount}`,
+            `Partial dispute ${dispute.id} on combined charge ${chargeId} closed as ${status}. ${status === 'lost' ? 'Shares were never auto-attributed — reconcile manually in /admin/revenue.' : 'The disputed amount was restored; its reconciliation case was auto-resolved.'}`,
+            { icon: status === 'won' ? '✅' : '❌', link: '/admin/revenue' },
+          );
+        } catch { /* non-critical */ }
+        return;
+      }
+      let restoredCount = 0;
+      // Phase 1 — row stamps under the shared per-PI serialization lock
+      // with a FRESH in-lock re-read (codex r12 P1): a concurrent
+      // dispute.created holding a stale snapshot can otherwise overwrite
+      // the final stamp this closure writes and reopen a won invoice.
+      // Invoice restores/reopens, term syncs, and marker resettles run
+      // AFTER the lock releases (phase 2): the resettle re-enters
+      // handleCombinedPaymentIntentSucceeded, whose settle takes this same
+      // advisory lock in its own transaction — running it in-lock would
+      // self-deadlock — and each phase-2 action re-checks its own guards.
+      const closedLockKey = String(dispute.payment_intent
+        || combinedClosedRows.find((r) => r.stripe_payment_intent_id)?.stripe_payment_intent_id
+        || chargeId);
+      const closurePlan = [];
+      await db.transaction(async (lockTrx) => {
+        await lockTrx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['stripe.pi.payment', closedLockKey],
+        );
+        const freshClosedRows = await lockTrx('payments').where({ stripe_charge_id: chargeId });
+        for (const row of freshClosedRows) {
+          const meta = rowMetaOf(row);
+          // Skip already-superseded markers (codex r8 P1) — but a
+          // RESOLVED-marker replay must still re-arm the resettle (a prior
+          // delivery may have crashed between neutralization and the
+          // succeeded lifecycle; the re-run is idempotent).
+          if (row.status === 'canceled' && meta.superseded_reason) {
+            if ((status === 'won' || status === 'warning_closed')
+              && meta.superseded_reason === 'pre_settlement_marker_resolved'
+              && row.stripe_payment_intent_id) {
+              closurePlan.push({ type: 'resettle', piId: String(row.stripe_payment_intent_id) });
+            }
+            continue;
+          }
+          const finalRowMeta = JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status });
+          const invId = meta.invoice_id || meta.dispute_invoice_id || null;
+          if (status === 'won' || status === 'warning_closed') {
+            // PRE-SETTLEMENT marker won (codex r6 P0): the marker fenced the
+            // settle (which recorded an orphan), so flipping it to 'paid'
+            // would strand every allocated invoice unsettled — and if won
+            // arrived BEFORE succeeded, a full-amount 'paid' marker would
+            // double-count once settlement adds the per-invoice rows.
+            // Neutralize the marker (canceled, final outcome recorded) and
+            // queue the succeeded-lifecycle re-run for phase 2.
+            if (meta.pre_settlement === true && !invId) {
+              await lockTrx('payments').where({ id: row.id }).update({
+                status: 'canceled',
+                // Amount zeroed (codex r8 P1): same-charge sums and payout
+                // recon must not count the superseded full-amount marker
+                // beside the real per-invoice rows settlement adds.
+                amount: 0,
+                metadata: JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status, superseded_reason: 'pre_settlement_marker_resolved', superseded_marker_amount: Number(row.amount) || 0 }),
+              });
+              if (row.stripe_payment_intent_id) {
+                closurePlan.push({ type: 'resettle', piId: String(row.stripe_payment_intent_id) });
+              }
+              continue;
+            }
+            await lockTrx('payments').where({ id: row.id }).update({ status: 'paid', metadata: finalRowMeta });
+            if (invId) closurePlan.push({ type: 'won', invId, row });
+          } else if (status === 'lost') {
+            await lockTrx('payments').where({ id: row.id }).update({
+              status: 'disputed',
+              failure_reason: `Dispute lost — $${amount} returned to customer`,
+              metadata: finalRowMeta,
+            });
+            if (invId) closurePlan.push({ type: 'lost', invId, row });
+          } else {
+            await lockTrx('payments').where({ id: row.id }).update({ metadata: finalRowMeta });
+          }
+        }
+      });
+      // Phase 2 — invoice-side outcomes and marker resettles, each behind
+      // its own fresh-read guards.
+      for (const step of closurePlan) {
+        const row = step.row;
+        if (step.type === 'resettle') {
+          const markerStripe = getStripe();
+          if (!markerStripe) throw new Error(`Combined pre-settlement dispute ${dispute.id} won but Stripe is unavailable to resettle PI ${step.piId}; retry`);
+          const markerPi = await markerStripe.paymentIntents.retrieve(step.piId);
+          if (markerPi.status === 'succeeded') {
+            // FULL succeeded lifecycle, not a bare settle (codex r7 P1):
+            // the recovered PI also owes review enrollment, the ACH
+            // failure-state reset, the saved-method consent mirror, the
+            // billing-pause clear, and the success notification — a
+            // consented combined ACH signup must not clear with its bank
+            // method unenrolled. The handler resolves the fenced orphan
+            // itself; throws propagate for Stripe redelivery.
+            await handleCombinedPaymentIntentSucceeded(markerPi, null);
+            logger.warn(`[stripe-webhook] combined pre-settlement dispute ${dispute.id} won — PI ${step.piId} re-ran the full succeeded lifecycle`);
+          } else {
+            logger.warn(`[stripe-webhook] combined pre-settlement dispute ${dispute.id} won before settlement — fence lifted, PI ${step.piId} is ${markerPi.status}`);
+          }
+          continue;
+        }
+        if (step.type === 'won') {
+          const invId = step.invId;
+          {
+            const invoice = await db('invoices').where({ id: invId }).first('id', 'status', 'stripe_payment_intent_id');
+            const invoicePi = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
+            const disputedPiId = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
+            // Same replacement guard as the single path: the reopen cleared
+            // the PI, so a non-null different PI means a replacement payment
+            // owns this invoice — never double-settle it.
+            // A DIFFERENT live PI = a replacement session started after the
+            // created-reopen (codex r27 P1). The payment row above was
+            // already flipped back to 'paid' — leaving both alive would let
+            // the customer pay the same share AGAIN with the reinstated
+            // funds unaccounted. Cancel an UNCONFIRMED replacement and take
+            // the invoice back; money in flight (or a cash/other-rail
+            // payment) instead PARKS the reinstated amount for the
+            // operator. Fail closed on an unreadable replacement.
+            let replacementNeutralized = false;
+            if (invoice && invoicePi && disputedPiId && invoicePi !== disputedPiId) {
+              // The replacement may ALREADY have paid the invoice (codex
+              // r28 P1) — the reconciliation runs regardless of invoice
+              // status: only a still-collectible invoice with an
+              // UNCONFIRMED replacement gets the cancel-and-take-back;
+              // paid/processing (money moved) parks the reinstated share.
+              const replacementAlreadySettled = ['paid', 'processing'].includes(String(invoice.status || '').toLowerCase());
+              if (!replacementAlreadySettled) {
+                const wonStripe = getStripe();
+                if (!wonStripe) throw new Error(`Dispute ${dispute.id} won but replacement PI ${invoicePi} on invoice ${invId} is unverifiable (Stripe unavailable); retry`);
+                let replPi;
+                try {
+                  replPi = await wonStripe.paymentIntents.retrieve(invoicePi);
+                } catch (replErr) {
+                  throw new Error(`Dispute ${dispute.id} won but replacement PI ${invoicePi} on invoice ${invId} is unreadable (${replErr.message}); retry`);
+                }
+                if (replPi.status === 'canceled') {
+                  // A prior delivery canceled the replacement but crashed
+                  // before the stamp cleanup (codex r36 P2) — finish the
+                  // neutralization instead of parking money that never
+                  // moved. Neutralized ONLY when the binding is proven
+                  // ours-or-clear (codex r37 P1): a fresh /setup
+                  // replacement bound in the gap keeps its live secret and
+                  // takes the park path.
+                  await require('../services/pay-combined').clearPaymentIntentStamps(db, replPi.id, { keepInvoiceIds: [String(invId)] });
+                  const unboundCanceled = await db('invoices').where({ id: invId, stripe_payment_intent_id: replPi.id }).update({ stripe_payment_intent_id: null, updated_at: db.fn.now() });
+                  if (unboundCanceled > 0) {
+                    invoice.stripe_payment_intent_id = null;
+                    replacementNeutralized = true;
+                  } else {
+                    const nowBound = await db('invoices').where({ id: invId }).first('stripe_payment_intent_id');
+                    const nowPi = nowBound?.stripe_payment_intent_id ? String(nowBound.stripe_payment_intent_id) : null;
+                    if (!nowPi) {
+                      invoice.stripe_payment_intent_id = null;
+                      replacementNeutralized = true; // already cleared by a prior retry
+                    } else {
+                      logger.warn(`[stripe-webhook] dispute ${dispute.id} won — a fresh replacement (${nowPi}) bound invoice ${invId} while cleaning canceled ${replPi.id}; parking the reinstated amount`);
+                    }
+                  }
+                  if (replacementNeutralized) logger.warn(`[stripe-webhook] dispute ${dispute.id} won — replacement PI ${replPi.id} was already canceled; stamps cleaned, the reinstated charge settles invoice ${invId}`);
+                } else if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(replPi.status)) {
+                  // ONLY the cancel itself may take the park-on-error path
+                  // (codex r37 P2): a post-cancel DB failure must PROPAGATE
+                  // so redelivery finishes through the already-canceled
+                  // branch above — swallowing it would park a phantom
+                  // replacement and strand the invoice behind a dead PI.
+                  let cancelSucceeded = false;
+                  try {
+                    await wonStripe.paymentIntents.cancel(replPi.id);
+                    cancelSucceeded = true;
+                  } catch (cancelErr) {
+                    logger.warn(`[stripe-webhook] dispute ${dispute.id} won — replacement PI ${replPi.id} raced into flight (${cancelErr.message}); parking the reinstated amount`);
+                  }
+                  if (cancelSucceeded) {
+                    await require('../services/pay-combined').clearPaymentIntentStamps(db, replPi.id, { keepInvoiceIds: [String(invId)] });
+                    // CONDITIONAL unbind (codex r36 P1): only clear the
+                    // binding if it is still the replacement we canceled —
+                    // a /setup racing this window can commit a FRESH
+                    // replacement whose client secret the customer holds.
+                    const unbound = await db('invoices').where({ id: invId, stripe_payment_intent_id: replPi.id }).update({ stripe_payment_intent_id: null, updated_at: db.fn.now() });
+                    if (unbound > 0) {
+                      invoice.stripe_payment_intent_id = null;
+                      replacementNeutralized = true;
+                      logger.warn(`[stripe-webhook] dispute ${dispute.id} won — canceled unconfirmed replacement PI ${replPi.id} on invoice ${invId}; the reinstated charge settles it`);
+                    } else {
+                      logger.warn(`[stripe-webhook] dispute ${dispute.id} won — a fresh replacement bound invoice ${invId} while neutralizing ${replPi.id}; parking the reinstated amount`);
+                    }
+                  }
+                }
+              }
+              if (!replacementNeutralized) {
+                // Replacement money is real — park the reinstated share so
+                // the reconciliation queue owns it (never silently absent).
+                await db('stripe_orphan_charges')
+                  .insert({
+                    stripe_payment_intent_id: `${disputedPiId}:dispute-won:${dispute.id}:${invId}`,
+                    stripe_charge_id: row.stripe_charge_id || chargeId,
+                    customer_id: row.customer_id || null,
+                    invoice_id: invId,
+                    amount: Number(row.amount) || 0,
+                    source: 'combined_pay_webhook',
+                    original_db_error: `Dispute ${dispute.id} won reinstated $${Number(row.amount || 0).toFixed(2)} for invoice ${invId}, but a replacement payment owns the invoice — credit or refund the reinstated share manually`,
+                  })
+                  .onConflict('stripe_payment_intent_id')
+                  .ignore();
+                try {
+                  await NotificationService.notifyAdmin(
+                    'dispute',
+                    `Won dispute needs reconciliation: $${Number(row.amount || 0).toFixed(2)}`,
+                    `Dispute ${dispute.id} reinstated funds for invoice ${invId}, but a replacement payment already owns it — credit or refund the reinstated share in /admin/revenue.`,
+                    { icon: '⚠️', link: '/admin/revenue' },
+                  );
+                } catch { /* non-critical */ }
+              }
+            }
+            // TERMINAL states stay terminal (codex r29 P2): an admin who
+            // voided the invoice after the created-reopen made a deliberate
+            // decision — the won closure must not overwrite it with 'paid'
+            // and re-run coverage sync. Park the reinstated share instead.
+            const invStatusNow = String(invoice?.status || '').toLowerCase();
+            const terminalNow = ['void', 'refunded', 'canceled', 'cancelled'].includes(invStatusNow);
+            if (invoice && terminalNow) {
+              await db('stripe_orphan_charges')
+                .insert({
+                  stripe_payment_intent_id: `${disputedPiId || chargeId}:dispute-won:${dispute.id}:${invId}`,
+                  stripe_charge_id: row.stripe_charge_id || chargeId,
+                  customer_id: row.customer_id || null,
+                  invoice_id: invId,
+                  amount: Number(row.amount) || 0,
+                  source: 'combined_pay_webhook',
+                  original_db_error: `Dispute ${dispute.id} won reinstated $${Number(row.amount || 0).toFixed(2)} for invoice ${invId}, but the invoice is ${invStatusNow} (deliberate terminal state) — credit or refund the reinstated share manually`,
+                })
+                .onConflict('stripe_payment_intent_id')
+                .ignore();
+              try {
+                await NotificationService.notifyAdmin(
+                  'dispute',
+                  `Won dispute needs reconciliation: $${Number(row.amount || 0).toFixed(2)}`,
+                  `Dispute ${dispute.id} reinstated funds for invoice ${invId}, but the invoice is ${invStatusNow} — credit or refund the reinstated share in /admin/revenue.`,
+                  { icon: '⚠️', link: '/admin/revenue' },
+                );
+              } catch { /* non-critical */ }
+              continue;
+            }
+            const invoicePiNow = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
+            const restoreNow = invoice && invoice.status !== 'paid'
+              && (!invoicePiNow || (disputedPiId && invoicePiNow === disputedPiId));
+            // Replay shape (codex r8 P1): a prior delivery committed the
+            // restore but crashed in the term sync below — the invoice is
+            // already 'paid' UNDER THIS DISPUTED PI, and skipping would
+            // strand the term suspended forever. Re-run the idempotent
+            // sync for that shape too.
+            const alreadyRestoredByThisPi = invoice && invoice.status === 'paid'
+              && invoicePi && disputedPiId && invoicePi === disputedPiId;
+            let restoredThisPass = false;
+            if (restoreNow) {
+              // CONDITIONAL restore (codex r34 P1): the snapshot above was
+              // read unlocked — a /setup can mint a replacement PI in the
+              // gap, and an unconditional overwrite would stamp the
+              // disputed PI over a binding whose client secret the
+              // customer still holds. The WHERE re-verifies the binding at
+              // write time; zero rows = a replacement raced in → park the
+              // reinstated share instead.
+              const restoredRows = await db('invoices')
+                .where({ id: invoice.id })
+                .whereNot('status', 'paid')
+                .where(function bindingUnchanged() {
+                  this.whereNull('stripe_payment_intent_id');
+                  if (disputedPiId) this.orWhere('stripe_payment_intent_id', disputedPiId);
+                })
+                .update({
+                  status: 'paid',
+                  paid_at: new Date().toISOString(),
+                  stripe_payment_intent_id: row.stripe_payment_intent_id || null,
+                  stripe_charge_id: row.stripe_charge_id || null,
+                });
+              if (restoredRows > 0) {
+                restoredCount += 1;
+                restoredThisPass = true;
+              } else {
+                logger.warn(`[stripe-webhook] dispute ${dispute.id} won — invoice ${invId} binding changed before the restore committed; parking the reinstated share`);
+                await db('stripe_orphan_charges')
+                  .insert({
+                    stripe_payment_intent_id: `${disputedPiId || chargeId}:dispute-won:${dispute.id}:${invId}`,
+                    stripe_charge_id: row.stripe_charge_id || chargeId,
+                    customer_id: row.customer_id || null,
+                    invoice_id: invId,
+                    amount: Number(row.amount) || 0,
+                    source: 'combined_pay_webhook',
+                    original_db_error: `Dispute ${dispute.id} won reinstated $${Number(row.amount || 0).toFixed(2)} for invoice ${invId}, but a replacement payment bound the invoice before the restore — credit or refund the reinstated share manually`,
+                  })
+                  .onConflict('stripe_payment_intent_id')
+                  .ignore();
+                try {
+                  await NotificationService.notifyAdmin(
+                    'dispute',
+                    `Won dispute needs reconciliation: $${Number(row.amount || 0).toFixed(2)}`,
+                    `Dispute ${dispute.id} reinstated funds for invoice ${invId}, but a replacement payment raced the restore — credit or refund the reinstated share in /admin/revenue.`,
+                    { icon: '⚠️', link: '/admin/revenue' },
+                  );
+                } catch { /* non-critical */ }
+              }
+            }
+            if (restoredThisPass || alreadyRestoredByThisPi) {
+              // Recovery sync on the restored money (codex r4 P1): a paid
+              // prepay invoice re-activates its dispute-suspended term.
+              // UNCAUGHT (codex r5 P1): a swallowed failure marks the event
+              // processed with the term stranded in payment_pending even
+              // though the invoice is back to paid — propagate so Stripe
+              // redelivers and the idempotent loop (including the
+              // already-restored replay shape) re-runs the sync.
+              const freshWon = await db('invoices').where({ id: invoice.id }).first();
+              if (freshWon) await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(freshWon);
+            }
+          }
+          continue;
+        }
+        if (step.type === 'lost') {
+          const invId = step.invId;
+          {
+            // Replacement-payment guard (codex r5 P1, exactly the single
+            // path's): if dispute.created reopened this invoice and the
+            // customer already re-paid it (a DIFFERENT live PI now backs
+            // it), the lost closure must not clear that valid payment and
+            // reopen collection a third time — and must not claw back the
+            // coverage the replacement money funds.
+            const lostInvoice = await db('invoices').where({ id: invId }).first('id', 'status', 'stripe_payment_intent_id');
+            const lostInvoicePi = lostInvoice?.stripe_payment_intent_id ? String(lostInvoice.stripe_payment_intent_id) : null;
+            const lostDisputedPi = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
+            const lostStatus = String(lostInvoice?.status || '').toLowerCase();
+            if (lostInvoice && ['paid', 'processing'].includes(lostStatus)
+              && lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi) {
+              await db('invoices')
+                .where({ id: invId })
+                .update({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: db.fn.now() });
+            }
+            // Refund-shaped term sync (codex r4 P1): lost money cancels the
+            // prepaid coverage this invoice funded — but only when the
+            // DISPUTED payment still owns the invoice: PI match above, or
+            // the created-reopen shape (PI cleared, invoice sitting
+            // 'overdue' under this dispute's recorded binding). UNCAUGHT
+            // (codex r5 P1): critical lifecycle write, propagate for
+            // Stripe redelivery.
+            const lostDisputeOwnsInvoice = !!lostInvoice && (
+              (lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi)
+              || (!lostInvoicePi && lostStatus === 'overdue')
+            );
+            if (lostDisputeOwnsInvoice) {
+              await require('../services/annual-prepay-renewals')
+                .syncTermForInvoicePayment({ id: invId, status: 'refunded', paid_at: null });
+            }
+          }
+        }
+      }
+      // A LOST full-charge dispute returns the residual shares' cash too
+      // (codex r24 P2): resolve this charge's parked residual cases (same
+      // matcher as the full-refund cleanup — partial-dispute/refund parks
+      // stay open, and a WON dispute preserves everything).
+      if (status === 'lost') {
+        const lostResiduals = await db('stripe_orphan_charges')
+          .where({ resolved: false, source: 'combined_pay_webhook' })
+          .where(function lostResidualKeys() {
+            this.where('stripe_charge_id', chargeId);
+            this.orWhere('stripe_payment_intent_id', 'like', `${closedLockKey}:%`);
+          })
+          .whereNot('stripe_payment_intent_id', 'like', '%:partial-%')
+          .update({
+            resolved: true,
+            resolved_at: new Date(),
+            resolution_notes: `Automatically resolved: dispute ${dispute.id} was LOST — the unmatched cash was returned to the customer via chargeback`,
+          });
+        if (lostResiduals > 0) {
+          logger.info(`[stripe-webhook] combined dispute ${dispute.id} lost — resolved ${lostResiduals} residual reconciliation case(s) for charge ${chargeId}`);
+        }
+        // Whole-charge quarantines resolve too (codex r29 P2): a combined
+        // succeeded event quarantined before settlement wrote an
+        // invoice_payment_webhook orphan keyed by the PLAIN PI id — the
+        // lost chargeback returned that cash as well, and leaving the row
+        // open keeps assertNoInvoiceChargeReconciliationPending fencing
+        // the anchor from collection.
+        const lostQuarantines = await db('stripe_orphan_charges')
+          .where({ resolved: false, source: 'invoice_payment_webhook', stripe_payment_intent_id: closedLockKey })
+          .update({
+            resolved: true,
+            resolved_at: new Date(),
+            resolution_notes: `Automatically resolved: dispute ${dispute.id} was LOST — the quarantined charge's cash was returned to the customer via chargeback`,
+          });
+        if (lostQuarantines > 0) {
+          logger.info(`[stripe-webhook] combined dispute ${dispute.id} lost — resolved ${lostQuarantines} whole-charge quarantine(s) for PI ${closedLockKey}`);
+        }
+      }
+      try {
+        await NotificationService.notifyAdmin(
+          'dispute',
+          `Combined-payment dispute ${status}: $${amount}`,
+          `Dispute on combined balance charge ${chargeId} closed as ${status} — ${combinedClosedRows.length} rows finalized${status === 'won' || status === 'warning_closed' ? `, ${restoredCount} invoices restored to paid` : ''}.`,
+          { icon: status === 'won' ? '✅' : '❌', link: '/admin/invoices' },
+        );
+      } catch { /* non-critical */ }
+      return;
+    }
+  }
+
   // Critical ledger writes: no .catch — failures must propagate so the
   // event is NOT marked processed and Stripe retries.
   const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+
+  // Combined PI closed BEFORE dispute.created AND settlement (codex r9 P1):
+  // no rows exist, so the combined block above fell through — persist the
+  // final outcome so a late created can't reverse the win (its late-replay
+  // guard reads dispute_final) and settlement behaves correctly: a WON
+  // closure leaves a zeroed superseded marker (no fence — funds stood, the
+  // eventual succeeded settles normally); a LOST closure leaves a disputed
+  // fence marker (the clawed-back charge must never settle).
+  if (!payment && dispute.payment_intent) {
+    const preStripe = getStripe();
+    // Fail CLOSED (codex r36 P1): losing an early LOST outcome to a null
+    // client would let the delayed settle mark clawed-back money paid.
+    if (!preStripe) {
+      throw new Error(`Dispute ${dispute.id} closure pre-settlement check cannot run (Stripe client unavailable); retry`);
+    }
+    {
+      let closedPi = null;
+      try {
+        closedPi = await preStripe.paymentIntents.retrieve(dispute.payment_intent);
+      } catch (piErr) {
+        throw new Error(`Dispute ${dispute.id} closed (${status}) pre-settlement but PI ${dispute.payment_intent} is unreadable (${piErr.message}); retry`);
+      }
+      if (require('../services/pay-combined').isCombinedPiMetadata(closedPi?.metadata)) {
+        // Partial pre-settlement closure: created parked it (or will) — no
+        // full-PI outcome marker either (codex r10 P1, same reasoning as
+        // the created fallback).
+        if (Number(dispute.amount) < Number(closedPi.amount || 0)) {
+          logger.error(`[stripe-webhook] PARTIAL dispute ${dispute.id} on unsettled combined PI ${dispute.payment_intent} closed as ${status} — ${status === 'lost' ? 'parked case stands' : 'funds restored, case auto-resolved'}`);
+          // Same restored-outcome case resolution + late-created suppression
+          // as the post-settlement partial closure (codex r21 P2).
+          if (status === 'won' || status === 'warning_closed') {
+            await db('stripe_orphan_charges')
+              .insert({
+                stripe_payment_intent_id: `${dispute.payment_intent || chargeId}:partial-dispute:${dispute.id}`,
+                stripe_charge_id: chargeId,
+                customer_id: null,
+                invoice_id: null,
+                amount: Number(amount),
+                source: 'combined_pay_webhook',
+                original_db_error: `Partial dispute ${dispute.id} on an unsettled combined balance charge closed as ${status}`,
+                resolved: true,
+                resolved_at: new Date(),
+                resolution_notes: `Automatically resolved: partial dispute ${dispute.id} closed as ${status} — Stripe restored the disputed amount`,
+              })
+              .onConflict('stripe_payment_intent_id')
+              .merge(['resolved', 'resolved_at', 'resolution_notes']);
+          }
+          try {
+            await NotificationService.notifyAdmin(
+              'dispute',
+              `PARTIAL combined dispute ${status} (pre-settlement): $${amount}`,
+              `Partial dispute ${dispute.id} on unsettled combined PI ${dispute.payment_intent} closed as ${status}. ${status === 'lost' ? 'Reconcile manually in /admin/revenue.' : 'The disputed amount was restored; its reconciliation case was auto-resolved.'}`,
+              { icon: status === 'won' ? '✅' : '❌', link: '/admin/revenue' },
+            );
+          } catch { /* non-critical */ }
+          return;
+        }
+        const lostOutcome = status === 'lost';
+        // Serialized on the settlement lock, marker re-checked in-lock
+        // (codex r10 P1): a concurrent created-fence or settlement must be
+        // strictly ordered with this outcome marker.
+        await db.transaction(async (trx) => {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['stripe.pi.payment', String(dispute.payment_intent)],
+          );
+          const rowInLock = await trx('payments').where({ stripe_charge_id: chargeId }).first('id');
+          if (rowInLock) {
+            throw new Error(`payments rows appeared for charge ${chargeId} while recording dispute ${dispute.id} closure — retry the event against the rows`);
+          }
+          await trx('payments').insert({
+            customer_id: null,
+            processor: 'stripe',
+            stripe_payment_intent_id: dispute.payment_intent,
+            stripe_charge_id: chargeId,
+            payment_date: etDateString(),
+            amount: lostOutcome ? Number(amount) : 0,
+            status: lostOutcome ? 'disputed' : 'canceled',
+            ...(lostOutcome ? { failure_reason: `Dispute lost — $${amount} returned to customer` } : {}),
+            description: `Combined balance charge dispute ${status} before settlement (marker)`,
+            metadata: JSON.stringify({
+              combined_payment: true,
+              pre_settlement: true,
+              dispute_id: dispute.id,
+              dispute_final: status,
+              ...(lostOutcome ? {} : { superseded_reason: 'closed_before_created', superseded_marker_amount: Number(amount) || 0 }),
+              combined_anchor_invoice_id: closedPi.metadata?.waves_invoice_id || null,
+            }),
+          });
+        });
+        try {
+          await NotificationService.notifyAdmin(
+            'dispute',
+            `Combined dispute ${status} pre-settlement: $${amount}`,
+            `Dispute ${dispute.id} on combined PI ${dispute.payment_intent} closed as ${status} before settlement — final outcome recorded${lostOutcome ? '; settlement is fenced' : '; the eventual settle proceeds normally'}.`,
+            { icon: status === 'won' ? '✅' : '❌', link: '/admin/invoices' },
+          );
+        } catch { /* non-critical */ }
+        logger.warn(`[stripe-webhook] combined dispute ${dispute.id} closed (${status}) before created/settlement — durable outcome marker written for PI ${dispute.payment_intent}`);
+        return;
+      }
+    }
+  }
+
   if (payment) {
     // Record the final dispute state on the payment row so a late or
     // retried dispute.created for the same dispute is a no-op instead

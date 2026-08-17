@@ -258,7 +258,19 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     // the flip left collected money permanently missing on a transient DB
     // failure. Either both commit or the operator gets a retryable error and
     // nothing changed.
-    const txResult = await db.transaction(async (trx) => {
+    let txResult;
+    try {
+      txResult = await db.transaction(async (trx) => {
+      // Combined-session reservation INSIDE the collection transaction
+      // (codex #3427 r30 P0, serialized r31 P0): per-customer combined
+      // lock + fresh in-lock re-read + release, held through this commit
+      // so /setup cannot stamp a confirmable combined PI in the gap.
+      const reservation = await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'reconciling this payment' });
+      // Book against the FRESH locked row's owner (codex r33 P2): a merge
+      // committing between the route's read and this transaction repoints
+      // the invoice — the ledger row must credit the surviving customer,
+      // not the retired snapshot's.
+      if (reservation.invoice?.customer_id) invoice.customer_id = reservation.invoice.customer_id;
       if (stripeChargeId) {
         // Charge-scoped, transaction-scoped advisory lock. Two admins
         // reconciling the SAME charge against different same-value invoices
@@ -350,6 +362,14 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
 
       return { updated: rows };
     });
+    } catch (releaseErr) {
+      // 409-shaped combined-session refusals from the in-transaction
+      // reservation surface as retryable conflicts.
+      if (releaseErr.statusCode === 409) {
+        return res.status(409).json({ error: releaseErr.message });
+      }
+      throw releaseErr;
+    }
     if (txResult.conflict) {
       return res.status(409).json({ error: txResult.conflict });
     }

@@ -3267,6 +3267,17 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           if (updates.waveguard_tier !== undefined || updates.monthly_rate !== undefined) {
             await lockCustomerComms(trx, req.params.id);
           }
+          // Combined-session lock BEFORE the customer row lock (codex #3427
+          // r16 P1): /setup acquires pay.combined.customer and then reads/
+          // writes customer state on other connections — taking the row
+          // lock first here and waiting on the advisory lock inside the
+          // release helper forms an application-level deadlock PostgreSQL
+          // can't fully see. Advisory-then-rows puts both paths in one
+          // order (comms → combined → rows here); the later release call
+          // re-acquires re-entrantly.
+          if (updates.payer_id) {
+            await require('../services/pay-combined').lockCombinedCustomers(trx, [String(req.params.id)]);
+          }
           // Serialize overlapping address edits on the same customer: the row
           // lock makes a second editor WAIT, and before/after are re-derived
           // from the locked row — a pre-transaction 'before' from the losing
@@ -3312,6 +3323,24 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             // The automated-intake guard keeps its drop-the-email posture
             // — unauthenticated input never gets to claim a live
             // customer's mailbox; an operator can.
+          }
+          // Assigning a DEFAULT payer must first release any unconfirmed
+          // combined pay-page session on this customer's invoices (codex
+          // #3427 r8 P1, same fence as the scheduled-service payer writer):
+          // live payer resolution reads this column, and the browser can
+          // confirm a combined ACH PI with no later server seam. Fail-closed
+          // — an unreleasable session aborts this transaction.
+          if (updates.payer_id !== undefined && updates.payer_id) {
+            const payerRelease = await require('../services/pay-combined')
+              .releaseUnconfirmedCombinedSessionsForCustomer(trx, req.params.id);
+            // In-flight combined money DEFERS the payer edit (codex r30
+            // P1, same contract as the merge fence): the eventual combined
+            // settlement never re-resolves ownership, so committing now
+            // would settle the homeowner's authorized debit against debt
+            // this edit says belongs to third-party AP.
+            if (payerRelease.inFlight > 0) {
+              throw new Error('A combined bank payment for this customer is still in flight — retry the payer change after it settles or fails');
+            }
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
           // Only an ACTUAL rate change invalidates the attribution (codex

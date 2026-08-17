@@ -1230,12 +1230,106 @@ function shiftAnchorNYCalendarDays(anchorDate, days) {
 }
 
 async function stopSequence(invoiceId, { reason, adminId } = {}) {
-  await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).update({
-    updated_at: db.fn.now(),
-    status: 'stopped',
-    stopped_reason: reason || null,
-    stopped_by_admin_id: adminId || null,
-    next_touch_at: null,
+  // "Stop dunning" also means "don't force-collect on the pay page"
+  // (payIncludeBalance): if this invoice rides another invoice's combined
+  // PaymentIntent as a SIBLING, release that session — cancel the PI while
+  // it is still unconfirmed and clear its stamps, so a customer mid-pay
+  // reloads to a fresh total without this invoice instead of charging it
+  // after the stop (codex #3427 r4 P1: the money-seam locks can't see a
+  // stop that lands between the last verification and the browser's
+  // confirm). Money already in flight (processing/succeeded) is never
+  // touched — the stop can't retract a confirmed payment.
+  //
+  // FAIL CLOSED, release BEFORE the stop (codex r5 P1): the browser can
+  // call Stripe confirmPayment directly with no later server verification,
+  // so a swallowed cancel failure would report the stop as done while the
+  // confirmable PI (post /update-amount) can still charge the stopped
+  // invoice. The stop must not acknowledge until the release succeeds —
+  // an unreadable PI throws too (it could be a combined session), and the
+  // admin simply retries the stop.
+  // The whole stop runs in ONE transaction holding the pay.combined.customer
+  // advisory lock (codex r10 P1): without it, a combined /setup between this
+  // PI read and the sequence commit could stamp the siblings AFTER the scan
+  // saw no PI but BEFORE the stop landed — setup's stopped-dunning check
+  // would pass and the customer could confirm a PI that still includes the
+  // newly stopped invoice. Under the shared lock the stop and any setup are
+  // strictly ordered: setup first → the release below cancels its PI; stop
+  // first → setup's in-lock stopped-dunning re-check excludes the invoice.
+  const invoice = await db('invoices').where({ id: invoiceId }).first('id', 'customer_id', 'stripe_payment_intent_id', 'invoice_number');
+  await db.transaction(async (trx) => {
+    const PayCombined = require('./pay-combined');
+    // The pre-transaction customer read can be OBSOLETE (codex r22 P1): a
+    // merge holding both combined locks but not yet committed still shows
+    // the loser's customer_id — locking that would serialize against the
+    // wrong customer while /setup locks the winner. Re-read the owner
+    // AFTER each lock and re-lock under the current owner if it moved
+    // (xact locks accumulate, so old+new both stay held — strictly safer).
+    if (invoice?.customer_id) {
+      let ownerId = String(invoice.customer_id);
+      for (let attempt = 0; ; attempt++) {
+        await PayCombined.lockCombinedCustomers(trx, [ownerId]);
+        const freshOwner = await trx('invoices').where({ id: invoiceId }).first('customer_id');
+        const freshId = freshOwner?.customer_id ? String(freshOwner.customer_id) : null;
+        if (!freshId || freshId === ownerId) break;
+        if (attempt >= 4) throw new Error(`Invoice ownership kept changing while stopping dunning for ${invoiceId} — try again`);
+        ownerId = freshId;
+      }
+    }
+    // Re-read under the lock — a setup that committed while we waited may
+    // have stamped a PI the unlocked read missed.
+    const lockedInvoice = invoice
+      ? await trx('invoices').where({ id: invoiceId }).first('id', 'stripe_payment_intent_id', 'invoice_number')
+      : null;
+    if (lockedInvoice?.stripe_payment_intent_id) {
+      const StripeService = require('./stripe');
+      let pi;
+      try {
+        pi = await StripeService.retrievePaymentIntent(lockedInvoice.stripe_payment_intent_id);
+      } catch (err) {
+        throw new Error(`Could not verify invoice ${lockedInvoice.invoice_number}'s active payment before stopping dunning (${err.message}) — try again`);
+      }
+      // Null = Stripe unconfigured, not "no session" (codex r23 P1): the
+      // attached PI may be a live combined session a browser can still
+      // confirm — the stop must not acknowledge past an unverifiable one.
+      if (!pi) {
+        throw new Error(`Could not verify invoice ${lockedInvoice.invoice_number}'s active payment before stopping dunning (payment service unavailable) — try again`);
+      }
+      const isSiblingOnCombined = pi
+        && PayCombined.isCombinedPiMetadata(pi.metadata)
+        && String(pi.metadata?.waves_invoice_id || '') !== String(invoiceId)
+        && PayCombined.paymentIntentOwnsInvoice(pi.metadata, invoiceId);
+      // NO microdeposit exemption (codex r11 P1): this release only fires
+      // for a SIBLING riding someone else's combined PI — the stop is an
+      // explicit "don't collect this invoice", and a pending bank
+      // verification is still an uncaptured session that would charge the
+      // stopped sibling once verified. Cancel it like the payer-change
+      // fence does; only processing/succeeded money is left alone.
+      const unconfirmed = pi && ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status);
+      if (isSiblingOnCombined && pi.status === 'canceled') {
+        // A prior attempt's cancel succeeded but its transaction rolled
+        // back (codex r26 P2) — finish the stamp cleanup on retry instead
+        // of committing the stop past a dead-PI binding.
+        await PayCombined.clearPaymentIntentStamps(trx, pi.id);
+        logger.info(`[invoice-followups] stop-dunning on ${lockedInvoice.invoice_number}: combined PI ${pi.id} was already canceled — stamps cleaned on retry`);
+      } else if (isSiblingOnCombined && unconfirmed) {
+        try {
+          await StripeService.cancelPaymentIntent(pi.id);
+        } catch (err) {
+          throw new Error(`Could not release the combined payment session holding invoice ${lockedInvoice.invoice_number} (${err.message}) — dunning NOT stopped, try again`);
+        }
+        await PayCombined.clearPaymentIntentStamps(trx, pi.id);
+        logger.info(`[invoice-followups] stop-dunning on ${lockedInvoice.invoice_number} released combined PI ${pi.id} (unconfirmed) and cleared its stamps`);
+      } else if (isSiblingOnCombined) {
+        logger.warn(`[invoice-followups] stop-dunning on ${lockedInvoice.invoice_number}: combined PI ${pi.id} is ${pi.status} — money may be in flight, not touched`);
+      }
+    }
+    await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).update({
+      updated_at: trx.fn.now(),
+      status: 'stopped',
+      stopped_reason: reason || null,
+      stopped_by_admin_id: adminId || null,
+      next_touch_at: null,
+    });
   });
 }
 

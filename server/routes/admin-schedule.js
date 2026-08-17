@@ -4954,6 +4954,9 @@ async function voidConversionInvoicesRestoringCredits({ trx, ids, voidUpdate }) 
           continue;
         }
       }
+      // Unbind combined siblings from the canceled intent — regardless of
+      // who canceled it (codex #3427 r17 P2).
+      await require('../services/pay-combined').clearPaymentIntentStamps(trx, piId, { keepInvoiceIds: [String(id)] });
     }
     const updated = await trx('invoices')
       .where({ id, status: invoice.status })
@@ -5643,6 +5646,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // Keys are read provisionally WITHOUT locking; after the locked read
         // below, a key mismatch (row moved concurrently) aborts the edit
         // rather than proceeding with the wrong day fenced.
+        // Combined-session lock BEFORE any scheduled_services row lock
+        // (codex #3427 r16 P1, same advisory-then-rows discipline as the
+        // tech-day fence below): the payer-activation release helper waits
+        // on pay.combined.customer, and taking row locks first would
+        // invert against /setup's advisory-then-reads order. Customer id
+        // read provisionally WITHOUT locking; the later release re-acquires
+        // re-entrantly.
+        if ((Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
+          || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override)) {
+          const provCust = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
+          if (provCust?.customer_id) {
+            await require('../services/pay-combined').lockCombinedCustomers(trx, [String(provCust.customer_id)]);
+          }
+        }
         let provFence = null;
         if (updates.scheduled_date !== undefined) {
           const prov = await trx('scheduled_services')
@@ -5753,6 +5770,41 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // Old day's sequence number is meaningless on the new date —
           // consumers append NULLs last.
           updates.route_order = null;
+        }
+        // Assigning a payer must first release any UNCONFIRMED combined
+        // pay-page session riding this visit's invoices (codex #3427 r8
+        // P1): the browser confirms a combined ACH PI directly after the
+        // last server seam, and settlement never re-resolves ownership —
+        // without this fence the homeowner could be charged sibling debt
+        // that now belongs to third-party AP. Fail-closed: a session that
+        // can't be verified/released aborts this transaction (payer NOT
+        // changed); in-flight money is never touched. Children included —
+        // the payer propagation below reaches them too.
+        // Trigger on EVERY update that can change effective payer ownership
+        // (codex r9 P1): assigning payer_id directly, OR clearing
+        // self_pay_override — resolveForInvoice then inherits the
+        // customer's default payer even though updates.payer_id is absent.
+        // Over-triggering is safe (the release no-ops on non-combined /
+        // confirmed sessions).
+        const activatesPayer = (Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
+          || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override);
+        if (activatesPayer) {
+          const fencedVisitIds = [req.params.id];
+          try {
+            const childIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).pluck('id');
+            fencedVisitIds.push(...childIds);
+          } catch { /* no children / column absent */ }
+          const visitRelease = await require('../services/pay-combined')
+            .releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds);
+          // In-flight combined money DEFERS the payer edit (codex r30 P1,
+          // same contract as the merge fence) — settlement never
+          // re-resolves ownership.
+          if (visitRelease.inFlight > 0) {
+            throw Object.assign(
+              new Error('A combined bank payment on this visit is still in flight — retry the payer change after it settles or fails'),
+              { isValidation: true },
+            );
+          }
         }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         // Rebooker-parity live-move bookkeeping (same split as the bulk
@@ -7408,6 +7460,15 @@ router.post('/:id/invoice', async (req, res, next) => {
       }
 
       return db.transaction(async (trx) => {
+        // Combined-session reservation (codex #3427 r38 P0): applying a
+        // recorded out-of-band prepayment changes the remainder (or
+        // settles the invoice) while a combined PI priced from the OLD
+        // remainder may still be browser-confirmable — release the session
+        // first, same in-transaction contract as every other collection
+        // rail (advisory lock + fresh read held through this commit;
+        // in-flight money refuses with a 409). The settle-side amount
+        // recheck remains the backstop.
+        await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'applying a recorded prepayment' });
         const lockedInvoice = await trx('invoices')
           .where({ id: invoice.id })
           .forUpdate()

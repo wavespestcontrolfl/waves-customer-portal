@@ -743,7 +743,6 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       }
       return res.status(409).json(terminalChargeFenceResponse(fenceErr));
     }
-
     const tech = await db('technicians').where({ id: handoff.tech_user_id }).first();
     if (!tech || tech.active === false) {
       return res.status(409).json({
@@ -782,7 +781,16 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     // reject — never hand a live client secret back for a settled invoice.
     // (apply-credit does the mirror re-check under the same lock, so whichever
     // transaction commits second detects the other and backs off.)
-    const bound = await db.transaction(async (trx) => {
+    let bound;
+    try {
+      bound = await db.transaction(async (trx) => {
+      // Combined-session reservation INSIDE the bind transaction (codex
+      // #3427 r30 P0, serialized r31 P0): the helper takes the
+      // per-customer combined lock, re-reads the invoice under it, and
+      // releases any combined session — held through the stamp write
+      // below, so /setup cannot stamp a confirmable combined PI in the
+      // gap before Terminal binds its card-present PI.
+      await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'collecting at the terminal' });
       const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
       if (!locked || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(locked.status)) {
         return { ok: false, status: locked ? locked.status : null };
@@ -830,6 +838,14 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       await trx('invoices').where({ id: invoice.id }).update({ stripe_payment_intent_id: pi.id });
       return { ok: true };
     });
+    } catch (releaseErr) {
+      // 409-shaped combined-session refusals from the in-transaction
+      // reservation surface as retryable conflicts.
+      if (releaseErr.statusCode === 409) {
+        return res.status(409).json({ error: releaseErr.message, code: 'combined_session_release_failed' });
+      }
+      throw releaseErr;
+    }
 
     if (!bound.ok) {
       // PI was minted but the invoice changed under the lock (went terminal, or

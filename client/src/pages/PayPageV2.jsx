@@ -414,7 +414,7 @@ function SummaryRow({ label, value, strong, muted }) {
 }
 
 // ── Stripe Payment Element wrapper ─────────────────────────────────
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, thirdPartyBilled = false }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -492,6 +492,13 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        // Combined balance drift (a sibling invoice changed under the
+        // server's locked re-verification): reload to live amounts — same
+        // contract as the /setup staleBalance path.
+        if (data.staleBalance) {
+          window.location.reload();
+          return new Promise(() => {});
+        }
         throw serverReportedError(data.error || 'Could not update payment total');
       }
       // The server minted a fresh PaymentIntent for this tender (the old one
@@ -505,6 +512,9 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId: data.paymentIntentId,
           baseAmount: data.base,
           methodCategory,
+          // Authoritative combined verdict rides the replacement too
+          // (codex r8 P1) — undefined means an old server, leave as-is.
+          ...(Object.prototype.hasOwnProperty.call(data, 'combined') ? { combined: data.combined || null } : {}),
         });
         return { ok: true, replaced: true };
       }
@@ -525,6 +535,14 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       displayedBaseRef.current = data.base;
       setDisplayedSurcharge(data.surcharge);
       setDisplayedTotal(data.total);
+      // Server-authoritative combined verdict (codex r8 P1): when the
+      // update dropped the allocation (kill switch flipped, sibling paid or
+      // stopped elsewhere), `combined: null` clears the parent's breakdown
+      // so the summary and "Pay securely" header stop showing a total
+      // Stripe no longer charges. Absent key = older server, leave as-is.
+      if (Object.prototype.hasOwnProperty.call(data, 'combined')) {
+        onCombinedUpdate?.(data.combined || null);
+      }
       return { ok: true, replaced: false, superseded: false };
     } catch (err) {
       setAmountSyncError(true);
@@ -548,7 +566,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         setSyncingAmount(false);
       }
     }
-  }, [paymentIntentId, token, saveCard, onPaymentIntentReplaced]);
+  }, [paymentIntentId, token, saveCard, onPaymentIntentReplaced, onCombinedUpdate]);
 
   // Re-sync the PI whenever the save-card checkbox toggles — Stripe's
   // mandate wording switches between one-time and recurring on the
@@ -1741,10 +1759,11 @@ export default function PayPageV2() {
       .then(async (r) => {
         const setup = await r.json().catch(() => ({}));
         if (!r.ok) {
-          if (setup.staleInvoice) {
-            // The invoice changed since this page rendered — reload to show
-            // the customer the updated details before they pay. Never-resolving
-            // promise: the navigation supersedes this chain.
+          if (setup.staleInvoice || setup.staleBalance) {
+            // The invoice (or, for a combined balance payment, one of the
+            // other open invoices) changed since this page rendered — reload
+            // to show the customer the updated amounts before they pay.
+            // Never-resolving promise: the navigation supersedes this chain.
             window.location.reload();
             return new Promise(() => {});
           }
@@ -1768,8 +1787,13 @@ export default function PayPageV2() {
         // is re-derived from the GET on any reload, so a transient mint
         // failure can never permanently bypass the required capture).
         if (setup.coveredByCredit || setup.status === 'prepaid') {
+          // Credit fully covered THE ANCHOR — no combined PI exists and no
+          // money moves here, so the GET-time sibling preview must clear
+          // (codex r4 P1): leaving it would show a combined "Total due
+          // today" with no payment form behind it. The siblings keep their
+          // own pay links + dunning exactly as before.
           setData((prev) => (prev
-            ? { ...prev, invoice: { ...prev.invoice, status: 'prepaid', captureNeeded: !!setup.captureNeeded } }
+            ? { ...prev, previousBalance: null, invoice: { ...prev.invoice, status: 'prepaid', captureNeeded: !!setup.captureNeeded } }
             : prev));
           setPaymentState('idle');
           return;
@@ -1779,7 +1803,17 @@ export default function PayPageV2() {
         // setup.baseAmount, so sync the displayed amount due + credit line to it.
         // Otherwise the page would keep showing the pre-credit gross from the
         // earlier read-only GET while Stripe charges the reduced amount.
-        const setupAmountDue = Number(setup.amountDue ?? setup.baseAmount ?? setup.amount);
+        // Combined balance payment: setup.baseAmount is the COMBINED total
+        // (this invoice + the itemized previous balance), not this invoice's
+        // amount due — sync the anchor card from ITS OWN entry in the
+        // combined breakdown instead (codex r2 P1: auto-applied partial
+        // credit reduces the anchor's share, and skipping the sync entirely
+        // would render the pre-credit amount with no credit line while
+        // Stripe charges the reduced total).
+        const combinedAnchorEntry = setup.combined?.invoices?.find((i) => i.isCurrent) || null;
+        const setupAmountDue = setup.combined
+          ? Number(combinedAnchorEntry?.amountDue)
+          : Number(setup.amountDue ?? setup.baseAmount ?? setup.amount);
         if (Number.isFinite(setupAmountDue)) {
           setData((prev) => {
             if (!prev?.invoice) return prev;
@@ -1806,6 +1840,10 @@ export default function PayPageV2() {
           baseAmount: setup.baseAmount ?? setup.amount,
           cardSurchargeRate: setup.cardSurchargeRate ?? 0.029,
           publishableKey: setup.publishableKey || data.stripe.publishableKey,
+          // Server-authoritative combined breakdown (invoice list + total);
+          // the summary renders from THIS once the PI exists, falling back
+          // to the GET's previousBalance before setup completes.
+          combined: setup.combined || null,
         });
         setPaymentState('ready');
       })
@@ -1857,7 +1895,7 @@ export default function PayPageV2() {
   // an incompatible PaymentMethod attached). Swap in the fresh clientSecret —
   // PaymentForm is keyed by paymentIntentId, so it fully re-mounts Stripe
   // Elements against the new intent.
-  const handlePaymentIntentReplaced = useCallback(({ clientSecret, paymentIntentId, baseAmount }) => {
+  const handlePaymentIntentReplaced = useCallback(({ clientSecret, paymentIntentId, baseAmount, combined }) => {
     if (!clientSecret || !paymentIntentId) return;
     setPaymentError(null);
     setStripeSetup((prev) => (prev ? {
@@ -1865,7 +1903,16 @@ export default function PayPageV2() {
       clientSecret,
       paymentIntentId,
       baseAmount: baseAmount ?? prev.baseAmount,
+      // undefined = caller didn't carry a verdict; null = clear breakdown.
+      ...(combined !== undefined ? { combined } : {}),
     } : prev));
+  }, []);
+
+  // /update-amount's authoritative combined verdict (codex r8 P1): null
+  // clears the itemized breakdown so the invoice summary and header total
+  // match what Stripe now charges (e.g. the kill switch flipped mid-session).
+  const handleCombinedUpdate = useCallback((combined) => {
+    setStripeSetup((prev) => (prev ? { ...prev, combined: combined || null } : prev));
   }, []);
 
   const handlePaymentSuccess = async (paymentIntent, methodCategory = null) => {
@@ -2427,6 +2474,50 @@ export default function PayPageV2() {
                 <SummaryRow label="Account credit applied" value={`− ${fmtCurrency(invoice.creditApplied)}`} />
               )}
               <SummaryRow label="Total due" value={fmtCurrency(invoice.amountDue ?? invoice.total)} strong />
+              {(() => {
+                // Combined balance payment (server-gated): itemize the other
+                // open invoices this payment also settles. Once /setup has
+                // minted the PI its breakdown is authoritative; before that,
+                // the GET's previousBalance previews the same selection.
+                const combinedSetup = stripeSetup?.combined;
+                const prev = combinedSetup
+                  ? (() => {
+                    const others = combinedSetup.invoices.filter((i) => !i.isCurrent);
+                    return {
+                      invoices: others,
+                      total: Math.round(others.reduce((s, i) => s + Number(i.amountDue || 0), 0) * 100) / 100,
+                      combinedTotal: combinedSetup.total,
+                    };
+                  })()
+                  // Once /setup has answered, ITS verdict is authoritative
+                  // (codex r3 P0): a setup with no combined allocation
+                  // (required-save capture hold, siblings became
+                  // ineligible) charges the anchor alone — falling back to
+                  // the GET preview would show a total Stripe won't charge.
+                  : (stripeSetup ? null : data.previousBalance);
+                if (!prev || !prev.invoices?.length) return null;
+                return (
+                  <>
+                    <div style={{ ...eyebrow, marginTop: SP.md, marginBottom: SP.xs }}>Also due on your account</div>
+                    {prev.invoices.map((inv) => {
+                      // The date tells repeated services apart and shows
+                      // which balance is older (codex r10 P2) — prefer the
+                      // service date, fall back to the due date.
+                      const rowDate = inv.serviceDate || inv.dueDate;
+                      return (
+                        <SummaryRow
+                          key={inv.invoiceNumber}
+                          label={`Invoice ${inv.invoiceNumber}${inv.serviceType ? ` — ${inv.serviceType}` : ''}${rowDate ? ` (${fmtDate(rowDate)})` : ''}`}
+                          value={fmtCurrency(inv.amountDue)}
+                          muted
+                        />
+                      );
+                    })}
+                    <SummaryRow label="Previous balance" value={fmtCurrency(prev.total)} />
+                    <SummaryRow label="Total due today" value={fmtCurrency(prev.combinedTotal)} strong />
+                  </>
+                );
+              })()}
             </div>
 
             {invoice.notes && (
@@ -2449,7 +2540,12 @@ export default function PayPageV2() {
               <div>
                 <div style={{ ...eyebrow, marginBottom: 6 }}>Pay securely</div>
                 <div style={{ fontSize: FS.h2, fontWeight: FW.heavy, color: DOC.ink, lineHeight: LH.solid }}>
-                  {fmtCurrency(invoice.amountDue ?? invoice.total)}
+                  {fmtCurrency(stripeSetup
+                    // Post-setup the PI is authoritative: combined total when
+                    // the allocation exists, the anchor alone when setup
+                    // declined to combine (codex r3 P0 — never the preview).
+                    ? (stripeSetup.combined?.total ?? invoice.amountDue ?? invoice.total)
+                    : (data.previousBalance?.combinedTotal ?? invoice.amountDue ?? invoice.total))}
                 </div>
                 <div style={{ marginTop: 6, fontSize: FS.body, color: DOC.muted }}>
                   {invoiceStatusLabel}
@@ -2499,6 +2595,7 @@ export default function PayPageV2() {
                 customerName={payer ? payer.name : [customer.firstName, customer.lastName].filter(Boolean).join(' ')}
                 customerEmail={payer ? (payer.email || '') : customer.email}
                 onPaymentIntentReplaced={handlePaymentIntentReplaced}
+                onCombinedUpdate={handleCombinedUpdate}
               />
             ) : paymentState === 'error' ? null : (
               <div style={{ padding: '24px 0', textAlign: 'center', color: DOC.muted, fontSize: FS.body }}>

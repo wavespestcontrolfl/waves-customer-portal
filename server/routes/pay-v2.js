@@ -303,16 +303,52 @@ router.get('/:token', async (req, res, next) => {
     // invoices settled before the held-coverage flow shipped; a still-
     // collectible invoice whose credit WOULD fully cover is the held
     // state (round-7 P1 — coverage now applies only after capture).
-    // NO previous-balance / sibling-invoice data on this surface — EVER
-    // (pre-push P0 ×2 on the balance-visibility lane): this is an
-    // unauthenticated, permanent, per-invoice bearer token that AGENTS.md
-    // notes is commonly forwarded (bookkeepers, spouses). Possession of one
-    // invoice link must not disclose the account's other invoice numbers,
-    // service history, amounts, or balance total, let alone their tokens.
-    // Consolidated-balance visibility lives on the surfaces addressed to the
-    // customer themselves: the invoice email's previous-balance note
-    // (GATE_BALANCE_VISIBILITY, invoice-email.js) and the authenticated
-    // portal Billing tab (GATE_PORTAL_PAY_NOW, billing-v2.js).
+    // Previous-balance itemization (owner ruling 2026-08-16, SUPERSEDING
+    // the earlier "no sibling-invoice data on this surface" P0 from the
+    // balance-visibility lane): with GATE_PAY_INCLUDE_BALANCE on, this
+    // surface itemizes the customer's other open self-pay invoices —
+    // numbers, dates, amounts — and the Pay flow charges the COMBINED
+    // total. The owner accepted the forwarded-link disclosure trade-off
+    // explicitly (itemized list, not amount-only). Two hard lines remain:
+    // sibling TOKENS never ride this payload (one leaked link must not fan
+    // out into bearer credentials for other invoices), and the gate off ⇒
+    // payload byte-identical to today. Selection = pay-combined.js (the
+    // same authority /setup prices from, so what's shown is what's
+    // charged); payer-billed anchors and admin-stopped-dunning invoices
+    // never appear.
+    let previousBalance = null;
+    // Account credit that will FULLY cover the anchor suppresses the
+    // combined preview (codex r18 P1): /setup's auto-apply transitions the
+    // anchor to prepaid and returns covered_by_credit with NO PaymentIntent
+    // — a "Total due today" that included siblings would silently shrink
+    // to nothing at Pay time. The siblings stay on their own dunning rails.
+    let creditWillCoverAnchor = false;
+    try {
+      creditWillCoverAnchor = await invoiceCreditWouldFullyCover(data);
+    } catch { creditWillCoverAnchor = false; }
+    if (isInvoiceCollectibleStatus(data.status) && !data.payer_id && !creditWillCoverAnchor) {
+      const PayCombined = require('../services/pay-combined');
+      const siblings = await PayCombined.combinedEligibleSiblings(data, {
+        reusePaymentIntentId: data.stripe_payment_intent_id || null,
+      });
+      if (siblings?.length) {
+        const prevTotalCents = siblings.reduce((sum, inv) => sum + PayCombined.amountDueCents(inv), 0);
+        previousBalance = {
+          invoices: siblings.map((inv) => ({
+            invoiceNumber: inv.invoice_number,
+            // NO serviceType (codex r14 P1): /pay/:token is an
+            // unauthenticated forwarded bearer surface — the owner-approved
+            // exception covers sibling numbers, dates, and amounts only,
+            // never the customer's service history.
+            serviceDate: inv.service_date,
+            dueDate: inv.due_date,
+            amountDue: PayCombined.amountDueCents(inv) / 100,
+          })),
+          total: prevTotalCents / 100,
+          combinedTotal: (prevTotalCents + PayCombined.amountDueCents(data)) / 100,
+        };
+      }
+    }
 
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
     const getCaptureNeeded = getSaveRequired
@@ -410,6 +446,9 @@ router.get('/:token', async (req, res, next) => {
         available: StripeService.isAvailable(),
         publishableKey: stripeConfig.publishableKey || null,
       },
+      // Absent (not null) when the gate is off or there is nothing owed —
+      // the gate-off payload stays byte-identical to today.
+      ...(previousBalance ? { previousBalance } : {}),
     });
   } catch (err) {
     next(err);
@@ -510,6 +549,10 @@ router.post('/:token/setup', async (req, res, next) => {
       cardOnly: !!cardOnly,
       holdCoverageForCapture,
       expectedVersion: invoiceVersion,
+      // Combined full-balance charge (GATE_PAY_INCLUDE_BALANCE): the mint
+      // decides server-side whether siblings ride this PI; gate off or no
+      // open balance ⇒ identical to today.
+      includeOpenBalance: true,
     });
     const captureNeeded = !!result.covered_by_credit && holdCoverageForCapture;
 
@@ -519,6 +562,9 @@ router.post('/:token/setup', async (req, res, next) => {
       amount: result.amount,
       baseAmount: result.baseAmount,
       cardSurchargeRate: result.cardSurchargeRate,
+      // Combined breakdown when this PI charges the full balance — the pay
+      // page renders its totals from THIS, never client math.
+      ...(result.combined ? { combined: result.combined } : {}),
       publishableKey: stripeConfig.publishableKey,
       // Account credit may have fully covered the invoice at setup (no PI minted) —
       // surface it so the pay page can show "covered" instead of a card form.
@@ -547,7 +593,9 @@ router.post('/:token/setup', async (req, res, next) => {
       // A stale-render refusal from the in-txn version recheck is the same
       // benign reload-and-retry as the unlocked pre-check above — no
       // operator alert, the page just refreshes to the updated invoice.
-      if (!err.inProgress && !err.staleInvoice) {
+      // staleBalance (a sibling changed under the combined verification) is
+      // the same benign self-recovering race (codex r12 P2).
+      if (!err.inProgress && !err.staleInvoice && !err.staleBalance) {
         // Never log the raw pay-link token — it is the bearer credential for
         // this invoice and errors.log is broadly readable. When the invoice id
         // is unavailable, fall back to a masked suffix that still aids
@@ -571,6 +619,10 @@ router.post('/:token/setup', async (req, res, next) => {
         savedCardPending: !!err.savedCardPending,
         reconciliationRequired: !!err.reconciliationRequired,
         staleInvoice: !!err.staleInvoice,
+        // Combined full-balance flow: a sibling invoice changed between the
+        // page render and the mint — same reload-and-retry contract as
+        // staleInvoice, surfaced separately for clarity.
+        staleBalance: !!err.staleBalance,
       });
     }
     logger.error(`[pay-v2] Setup error: ${err.message}`);
@@ -625,9 +677,11 @@ router.post('/:token/update-amount', async (req, res, next) => {
   } catch (err) {
     // 409 = expected race/in-flight state (e.g. trying to switch tender while
     // a payment is already processing). Surface it to the customer without
-    // raising an admin bill-payment-error alert.
+    // raising an admin bill-payment-error alert. staleBalance = a combined
+    // allocation drifted under the locked re-verification — same
+    // reload-and-retry contract as /setup.
     if (err.statusCode === 409) {
-      return res.status(409).json({ error: err.message });
+      return res.status(409).json({ error: err.message, staleBalance: !!err.staleBalance });
     }
     logger.error(
       `[pay-v2] Update-amount error `
@@ -769,14 +823,26 @@ router.post('/:token/confirm', async (req, res, next) => {
 
     // Card payments are paid immediately. ACH bank payments sit in
     // `processing` until Stripe emits payment_intent.succeeded, so the
-    // webhook sends the receipt after funds clear.
+    // webhook sends the receipt after funds clear. A COMBINED settle
+    // already enqueued per-invoice receipts inside
+    // settleCombinedPaymentIntent — skip the anchor enqueue here or the
+    // customer gets the anchor's receipt twice.
+    const recordMeta = (() => {
+      try {
+        return typeof paymentRecord.metadata === 'string'
+          ? JSON.parse(paymentRecord.metadata)
+          : (paymentRecord.metadata || {});
+      } catch { return {}; }
+    })();
     if (paymentRecord.status === 'paid') {
-      await ReceiptDeliveryQueue.enqueueReceiptDelivery({
-        invoiceId: invoice.id,
-        stripePaymentIntentId: paymentIntentId,
-        source: 'pay_confirm',
-      });
-      ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 1000, limit: 5 });
+      if (!recordMeta.combined_payment) {
+        await ReceiptDeliveryQueue.enqueueReceiptDelivery({
+          invoiceId: invoice.id,
+          stripePaymentIntentId: paymentIntentId,
+          source: 'pay_confirm',
+        });
+        ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 1000, limit: 5 });
+      }
       // Fire-and-forget: release any payment-held WDO report gated on this
       // invoice (60s interval is the fallback).
       require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });

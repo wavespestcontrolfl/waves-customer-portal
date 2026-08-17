@@ -321,7 +321,9 @@ async function syncPayouts(limit = 50) {
 /**
  * Batch-resolve local payments/customers for a set of Stripe balance
  * transactions (avoids N+1). Shared by the per-payout and global syncs.
- * Returns { paymentsBySource, customersById }.
+ * Returns { paymentsBySource, customersById }; paymentsBySource maps each
+ * source to an ARRAY of payment rows (a combined full-balance charge backs
+ * several per-invoice rows).
  */
 async function resolveTxnLinkMaps(transactionRows) {
   const chargeSources = transactionRows
@@ -332,11 +334,24 @@ async function resolveTxnLinkMaps(transactionRows) {
   if (chargeSources.length) {
     try {
       const payments = await db('payments')
-        .whereIn('stripe_charge_id', chargeSources)
-        .orWhereIn('stripe_payment_intent_id', chargeSources);
+        .where(function bySource() {
+          this.whereIn('stripe_charge_id', chargeSources)
+            .orWhereIn('stripe_payment_intent_id', chargeSources);
+        })
+        // Neutralized pre-settlement markers (status canceled, amount 0)
+        // must not appear beside the real per-invoice rows (codex r8 P1).
+        .whereNot('status', 'canceled');
+      // ARRAYS per source (codex #3427 r5 P1): a combined full-balance
+      // charge backs one payments row PER allocated invoice — a
+      // last-write-wins Map would attribute the whole balance transaction
+      // to an arbitrary share and drop the rest from reconciliation.
+      const addLink = (key, pay) => {
+        const arr = paymentsBySource.get(key);
+        if (arr) arr.push(pay); else paymentsBySource.set(key, [pay]);
+      };
       for (const pay of payments) {
-        if (pay.stripe_charge_id) paymentsBySource.set(pay.stripe_charge_id, pay);
-        if (pay.stripe_payment_intent_id) paymentsBySource.set(pay.stripe_payment_intent_id, pay);
+        if (pay.stripe_charge_id) addLink(pay.stripe_charge_id, pay);
+        if (pay.stripe_payment_intent_id) addLink(pay.stripe_payment_intent_id, pay);
       }
       const customerIds = [...new Set(payments.map(p => p.customer_id).filter(Boolean))];
       if (customerIds.length) {
@@ -358,7 +373,36 @@ function txnRowFromStripe(txn, { paymentsBySource, customersById }, payoutId = n
   let customerName = null;
   let invoiceId = null;
   let paymentId = null;
-  const payment = (typeof txn.source === 'string') ? paymentsBySource.get(txn.source) : null;
+  let combinedNote = null;
+  const linked = (typeof txn.source === 'string') ? (paymentsBySource.get(txn.source) || []) : [];
+  const metaOf = (pay) => {
+    try {
+      return (typeof pay.metadata === 'string' ? JSON.parse(pay.metadata) : pay.metadata) || {};
+    } catch { return {}; }
+  };
+  let payment = linked[0] || null;
+  // Combined detection by METADATA, not row count (codex r13 P2): a share
+  // that couldn't settle (terminal invoice → residual) leaves only ONE
+  // recorded row for a combined charge — the whole Stripe amount must not
+  // be attributed to that one invoice while the residual share vanishes.
+  const isCombinedLink = linked.length > 1 || linked.some((p) => metaOf(p).combined_payment);
+  if (isCombinedLink) {
+    // Combined full-balance charge: ONE balance transaction carries the
+    // whole amount + fee across N per-invoice payment rows (codex #3427 r5
+    // P1). The ledger row stays one-per-txn (unique stripe_txn_id), so:
+    // anchor the linkage on the ANCHOR payment row (it carries the
+    // surcharge), leave invoice_id null (no single invoice owns the txn),
+    // and expose the recorded allocation in the description so the payout
+    // ledger never silently drops a share.
+    payment = linked.find((p) => {
+      const m = metaOf(p);
+      return m.combined_payment && m.invoice_id
+        && String(m.combined_anchor_invoice_id || '') === String(m.invoice_id);
+    }) || payment;
+    combinedNote = `combined: ${linked
+      .map((p) => `$${Number(p.amount || 0).toFixed(2)} → invoice ${metaOf(p).invoice_id || `payment ${p.id}`}`)
+      .join('; ')}${linked.length === 1 ? ' (allocation may be incomplete — check residual shares in stripe_orphan_charges)' : ''}`;
+  }
   if (payment) {
     paymentId = payment.id;
     customerId = payment.customer_id;
@@ -366,12 +410,10 @@ function txnRowFromStripe(txn, { paymentsBySource, customersById }, payoutId = n
       const customer = customersById.get(customerId);
       if (customer) customerName = `${customer.first_name} ${customer.last_name}`;
     }
-    try {
-      const meta = typeof payment.metadata === 'string'
-        ? JSON.parse(payment.metadata)
-        : payment.metadata;
-      if (meta && meta.invoice_id) invoiceId = meta.invoice_id;
-    } catch { /* metadata parse failure — non-critical */ }
+    if (!isCombinedLink) {
+      const meta = metaOf(payment);
+      if (meta.invoice_id) invoiceId = meta.invoice_id;
+    }
   }
   return {
     payout_id: payoutId,
@@ -384,7 +426,7 @@ function txnRowFromStripe(txn, { paymentsBySource, customersById }, payoutId = n
     amount: txn.amount / 100,
     fee: txn.fee / 100,
     net: txn.net / 100,
-    description: txn.description,
+    description: combinedNote ? `${txn.description || ''} [${combinedNote}]`.trim() : txn.description,
     customer_name: customerName,
     customer_id: customerId,
     invoice_id: invoiceId,
@@ -1286,4 +1328,7 @@ module.exports = {
   getCashFlow,
   reconcilePayout,
   generateExport,
+  // exported for unit tests (combined-charge allocation attribution)
+  _txnRowFromStripe: txnRowFromStripe,
+  _resolveTxnLinkMaps: resolveTxnLinkMaps,
 };

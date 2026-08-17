@@ -791,6 +791,15 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         ['collections_case', custId],
       );
     }
+    // Combined-session locks BEFORE any customer row locks, UNCONDITIONALLY
+    // (codex #3427 r16/r18 P1): the payer-activation release helper later
+    // waits on pay.combined.customer, and a payer-presence peek here is a
+    // stale read — a payer edit committing between the peek and the row
+    // locks would leave the merge releasing sessions while holding rows
+    // /setup's separate-connection payer resolution reads, an inversion
+    // PostgreSQL can't see. Two advisory locks per merge is cheap;
+    // sorted ids for deterministic order.
+    await require('./pay-combined').lockCombinedCustomers(trx, [winnerId, loserId].map(String).sort());
     // A collection call mid-flight defers the merge (codex gh-r10): the
     // dial claim also takes these case locks, so this check is
     // authoritative — a 'dialing' case means a live call is using policy
@@ -1518,6 +1527,32 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       winnerPriorValues.service_contacts_consent_at = winner.service_contacts_consent_at;
       winnerPriorValues.service_contacts_consent_source = winner.service_contacts_consent_source ?? null;
       winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
+    }
+    // Combined-session fence, UNCONDITIONAL (codex #3427 r13/r14 P1,
+    // widened r24 P1): the payer case is the sharpest hazard (every
+    // invoice starts resolving to the effective winner payer), but a
+    // SELF-PAY merge is unsafe too — the loser's prepared combined PI
+    // carries the loser's waves_customer_id, and after the retire the
+    // post-settlement mirror would persist consent/autopay against the
+    // archived record (or churn Stripe profiles). Release BOTH sides'
+    // unconfirmed sessions; a loser-side session with money actually IN
+    // FLIGHT defers the merge entirely (merges are retryable, ACH windows
+    // are days — settling first keeps the settlement identity coherent).
+    // An unreleasable session aborts the merge; the admin retries.
+    {
+      const PayCombined = require('./pay-combined');
+      const winnerRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId);
+      const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, loser.id);
+      if (loserRelease.inFlight > 0) {
+        throw new Error('A combined payment on the merged-away record is still in flight — retry the merge after it settles');
+      }
+      // A payer-CHANGING merge defers on WINNER-side in-flight money too
+      // (codex r33 P1): a blank-payer winner absorbing the loser's payer
+      // would change the billing owner of a debit the homeowner already
+      // authorized — settlement never re-resolves ownership.
+      if (winnerRelease.inFlight > 0 && !winner.payer_id && loser.payer_id) {
+        throw new Error('A combined payment for the surviving record is still in flight and this merge would change its billing owner — retry after it settles');
+      }
     }
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });

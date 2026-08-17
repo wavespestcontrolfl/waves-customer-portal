@@ -420,6 +420,10 @@ async function sendPaymentFailed({
   attemptId,
   invoiceId = null,
   paymentId = null,
+  // Combined full-balance PI (codex #3427 r7 P2): the caller passes the
+  // allocation total so the email names the amount the customer actually
+  // attempted, never one arbitrary share's remainder.
+  amountDueOverride = null,
   idempotencyKey,
 } = {}) {
   let invoice = invoiceId ? await db('invoices').where({ id: invoiceId }).first().catch(() => null) : null;
@@ -452,7 +456,9 @@ async function sendPaymentFailed({
     invoice_number: invoice?.invoice_number || '',
     // No payments row yet on an interactive failure → fall back to amount DUE
     // (total − applied credit), not the gross total, to match /pay and the charge.
-    amount_due: money(payment?.amount || (invoice ? invoiceAmountDue(invoice) : 0)),
+    amount_due: money(amountDueOverride != null
+      ? amountDueOverride
+      : (payment?.amount || (invoice ? invoiceAmountDue(invoice) : 0))),
     failed_payment_date: displayDate(payment?.payment_date || payment?.created_at),
     retry_date: displayDate(payment?.next_retry_at),
     payment_method_label: method?.last4 ? method.label : '',

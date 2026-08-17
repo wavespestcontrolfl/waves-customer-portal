@@ -1511,6 +1511,14 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invoice has no amount to collect (total is $0)' });
     }
 
+    // Combined pay-page session release BEFORE accepting a manual payment
+    // (codex #3427 r29 P0): this invoice may ride a combined PI a browser
+    // can still confirm directly — recording cash/check now and letting
+    // that capture land later double-charges the customer. Unconfirmed →
+    // cancel + unstamp (fail closed); already canceled → finish the stamp
+    // cleanup; anything in flight refuses (the collectible guard above
+    // already blocks 'processing' invoices, this covers seam races).
+
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
 
     // Append operator note to invoice notes (don't clobber existing notes).
@@ -1534,6 +1542,14 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // dashboard gap-fallback only rescues Stripe-PI invoices). Either both
     // commit or the operator gets a retryable error and nothing changed.
     const updatedInvoice = await db.transaction(async (trx) => {
+      // Combined-session reservation INSIDE the collection transaction
+      // (codex #3427 r30 P0, serialized r31 P0): the helper takes the
+      // per-customer combined lock, re-reads the invoice under it, and
+      // releases any combined session — the lock holds through this
+      // commit, so /setup cannot stamp a confirmable combined PI between
+      // the check and the paid flip. Throws are 409-shaped; the route
+      // catch surfaces them.
+      await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'recording a manual payment' });
       const [row] = await trx('invoices')
         .where({ id })
         .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
@@ -1696,6 +1712,12 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       receipt: sendReceipt ? { email: emailResult, sms: smsResult } : null,
     });
   } catch (err) {
+    // The combined-session reservation throws 409-shaped refusals from
+    // inside the collection transaction — surface them as retryable
+    // conflicts, not 500s.
+    if (err.statusCode === 409) {
+      return res.status(409).json({ error: err.message });
+    }
     logger.error(`[admin-invoices] record-payment failed: ${err.message}`);
     next(err);
   }
@@ -1819,6 +1841,9 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
           return res.status(409).json({ error: `Couldn't cancel the open payment session ${openPiId} (${e.message}); resolve it before applying credit` });
         }
       }
+      // Unbind combined siblings from the canceled intent — regardless of
+      // who canceled it (codex #3427 r17 P2).
+      await require('../services/pay-combined').clearPaymentIntentStamps(db, openPiId, { keepInvoiceIds: [String(invoice.id)] });
     }
 
     // ── Atomic credit draw-down + prepaid transition ──
