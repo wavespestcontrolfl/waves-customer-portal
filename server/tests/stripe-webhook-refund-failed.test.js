@@ -535,10 +535,17 @@ describe('handleRefundFailed', () => {
       throw new Error(`Unexpected db table: ${table}`);
     });
     db.schema = { hasTable: jest.fn(async () => true) };
+    // The fence write now serializes with charge.refunded's combined
+    // pre-settlement marker on a per-charge advisory lock (codex #3427 r9).
+    db.raw = jest.fn(async () => ({}));
     db.transaction.mockImplementation(async (cb) => cb(db));
 
     await handleRefundFailed(failedRefund());
     expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db.raw).toHaveBeenCalledWith(
+      expect.stringContaining('pg_advisory_xact_lock'),
+      ['combined.refund.fence', 'ch_1'],
+    );
     expect(fenceInsert).toHaveBeenCalledWith(expect.objectContaining({
       stripe_refund_id: 're_fail',
       stripe_charge_id: 'ch_1',

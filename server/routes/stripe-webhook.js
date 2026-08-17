@@ -3155,6 +3155,23 @@ async function handleChargeRefunded(charge) {
           }
         }
         if (combinedPiMeta) {
+          // Serialize with handleRefundFailed's no-row fence write (codex
+          // r9 P1): both paths take this per-charge advisory lock, and the
+          // fence is RE-CHECKED under it — a bounce that committed its
+          // stripe_failed_refunds row while this event was in flight means
+          // Stripe KEPT the money, so no refunded marker may be written
+          // (it would permanently fence a legitimate later settle).
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['combined.refund.fence', String(chargeId)],
+          );
+          if (refundId && await db.schema.hasTable('stripe_failed_refunds')) {
+            const bounceFenced = await trx('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id');
+            if (bounceFenced) {
+              logger.warn(`[stripe-webhook] pre-settlement combined refund ${refundId} was already fenced as FAILED — skipping the refunded marker (Stripe kept the money)`);
+              return null;
+            }
+          }
           if (!isFullRefund) {
             logger.error(`[stripe-webhook] PARTIAL refund on unsettled combined charge ${chargeId} — parked for operator`);
             await trx('stripe_orphan_charges')
@@ -3641,6 +3658,23 @@ async function handleRefundFailed(refund) {
           const rowInLock = await trx('payments').where({ stripe_payment_intent_id: piId }).first('id');
           if (rowInLock) {
             const e = new Error('fee payments row appeared before the fence — retry the event against the row');
+            e.retryRefundFailed = true;
+            throw e;
+          }
+        }
+        // Combined pre-settlement marker race (codex r9 P1): serialize with
+        // charge.refunded's marker insert on the same per-charge lock, and
+        // re-check for rows that landed while waiting — if the refunded
+        // marker (or settlement rows) committed first, retry this event so
+        // the row-based unwind handles it instead of fencing alongside it.
+        if (chargeId) {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['combined.refund.fence', String(chargeId)],
+          );
+          const chargeRowInLock = await trx('payments').where({ stripe_charge_id: chargeId }).first('id');
+          if (chargeRowInLock) {
+            const e = new Error('payments row appeared for the charge before the fence — retry the event against the row');
             e.retryRefundFailed = true;
             throw e;
           }
@@ -6165,6 +6199,58 @@ async function handleDisputeClosed(dispute) {
   // Critical ledger writes: no .catch — failures must propagate so the
   // event is NOT marked processed and Stripe retries.
   const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+
+  // Combined PI closed BEFORE dispute.created AND settlement (codex r9 P1):
+  // no rows exist, so the combined block above fell through — persist the
+  // final outcome so a late created can't reverse the win (its late-replay
+  // guard reads dispute_final) and settlement behaves correctly: a WON
+  // closure leaves a zeroed superseded marker (no fence — funds stood, the
+  // eventual succeeded settles normally); a LOST closure leaves a disputed
+  // fence marker (the clawed-back charge must never settle).
+  if (!payment && dispute.payment_intent) {
+    const preStripe = getStripe();
+    if (preStripe) {
+      let closedPi = null;
+      try {
+        closedPi = await preStripe.paymentIntents.retrieve(dispute.payment_intent);
+      } catch (piErr) {
+        throw new Error(`Dispute ${dispute.id} closed (${status}) pre-settlement but PI ${dispute.payment_intent} is unreadable (${piErr.message}); retry`);
+      }
+      if (require('../services/pay-combined').isCombinedPiMetadata(closedPi?.metadata)) {
+        const lostOutcome = status === 'lost';
+        await db('payments').insert({
+          customer_id: null,
+          processor: 'stripe',
+          stripe_payment_intent_id: dispute.payment_intent,
+          stripe_charge_id: chargeId,
+          payment_date: etDateString(),
+          amount: lostOutcome ? Number(amount) : 0,
+          status: lostOutcome ? 'disputed' : 'canceled',
+          ...(lostOutcome ? { failure_reason: `Dispute lost — $${amount} returned to customer` } : {}),
+          description: `Combined balance charge dispute ${status} before settlement (marker)`,
+          metadata: JSON.stringify({
+            combined_payment: true,
+            pre_settlement: true,
+            dispute_id: dispute.id,
+            dispute_final: status,
+            ...(lostOutcome ? {} : { superseded_reason: 'closed_before_created', superseded_marker_amount: Number(amount) || 0 }),
+            combined_anchor_invoice_id: closedPi.metadata?.waves_invoice_id || null,
+          }),
+        });
+        try {
+          await NotificationService.notifyAdmin(
+            'dispute',
+            `Combined dispute ${status} pre-settlement: $${amount}`,
+            `Dispute ${dispute.id} on combined PI ${dispute.payment_intent} closed as ${status} before settlement — final outcome recorded${lostOutcome ? '; settlement is fenced' : '; the eventual settle proceeds normally'}.`,
+            { icon: status === 'won' ? '✅' : '❌', link: '/admin/invoices' },
+          );
+        } catch { /* non-critical */ }
+        logger.warn(`[stripe-webhook] combined dispute ${dispute.id} closed (${status}) before created/settlement — durable outcome marker written for PI ${dispute.payment_intent}`);
+        return;
+      }
+    }
+  }
+
   if (payment) {
     // Record the final dispute state on the payment row so a late or
     // retried dispute.created for the same dispute is a no-op instead

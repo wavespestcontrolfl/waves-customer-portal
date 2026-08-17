@@ -5763,7 +5763,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // can't be verified/released aborts this transaction (payer NOT
         // changed); in-flight money is never touched. Children included —
         // the payer propagation below reaches them too.
-        if (Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id) {
+        // Trigger on EVERY update that can change effective payer ownership
+        // (codex r9 P1): assigning payer_id directly, OR clearing
+        // self_pay_override — resolveForInvoice then inherits the
+        // customer's default payer even though updates.payer_id is absent.
+        // Over-triggering is safe (the release no-ops on non-combined /
+        // confirmed sessions).
+        const activatesPayer = (Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
+          || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override);
+        if (activatesPayer) {
           const fencedVisitIds = [req.params.id];
           try {
             const childIds = await trx('scheduled_services').where({ recurring_parent_id: req.params.id }).pluck('id');

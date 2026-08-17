@@ -329,6 +329,16 @@ async function clearPaymentIntentStamps(database, paymentIntentId, { keepInvoice
 async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, scheduledServiceIds) {
   const ids = (scheduledServiceIds || []).filter(Boolean);
   if (!ids.length) return 0;
+  // Serialize with combined /setup (codex r9 P1): the same per-customer
+  // advisory lock createInvoicePaymentIntent holds — otherwise this scan
+  // can complete before setup stamps the invoices, the payer change
+  // commits while Stripe is being called, and setup returns a confirmable
+  // PI containing debt that is now payer-billed. Sorted for determinism.
+  const customerIds = (await database('scheduled_services')
+    .whereIn('id', ids)
+    .distinct('customer_id')
+    .pluck('customer_id')).filter(Boolean).map(String).sort();
+  await lockCombinedCustomers(database, customerIds);
   const rows = await database('invoices')
     .whereIn('scheduled_service_id', ids)
     .whereNotNull('stripe_payment_intent_id')
@@ -341,12 +351,27 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
  * writer creates the identical late-assignment gap). */
 async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId) {
   if (!customerId) return 0;
+  // Same setup-serialization lock as the scheduled-service variant.
+  await lockCombinedCustomers(database, [String(customerId)]);
   const rows = await database('invoices')
     .where({ customer_id: customerId })
     .whereNotNull('stripe_payment_intent_id')
     .whereNotIn('status', ['paid', 'processing', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
     .select('id', 'invoice_number', 'stripe_payment_intent_id');
   return releaseUnconfirmedCombinedSessions(database, rows);
+}
+
+// The pay.combined.customer namespace matches createInvoicePaymentIntent /
+// update-amount / finalize — payer changes and combined session setup are
+// mutually exclusive per customer while either transaction is open. The
+// caller MUST pass a transaction (xact locks release on commit/rollback).
+async function lockCombinedCustomers(database, customerIds) {
+  for (const cid of customerIds) {
+    await database.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['pay.combined.customer', cid],
+    );
+  }
 }
 
 async function releaseUnconfirmedCombinedSessions(database, rows) {
@@ -512,17 +537,20 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
       if (details.receiptUrl) invoiceUpdates.receipt_url = details.receiptUrl;
       await trx('invoices').where({ id: invoice.id }).update(invoiceUpdates);
 
+      const shareCents = entry.cents + (isAnchor ? surchargeCents : 0);
       const existing = rowForInvoice(invoice.id);
       if (existing) {
         // ACH RETRY on the same reusable PI (codex r7 P2): the prior
         // attempt's bounce left this row 'failed' — a new processing event
-        // must pull it back to 'processing' (failure metadata cleared) or
-        // the invoice sits in 'processing' over a 'failed' ledger row for
-        // the multi-day clearing window.
+        // must pull it back to 'processing' (failure metadata cleared, and
+        // the charge linkage refreshed to the NEW attempt's charge) or the
+        // invoice sits in 'processing' over a 'failed' ledger row for the
+        // multi-day clearing window.
         if (existing.status === 'failed' && invoiceStatus === 'processing') {
           await trx('payments').where({ id: existing.id }).update({
             status: 'processing',
             failure_reason: null,
+            stripe_charge_id: invoiceUpdates.stripe_charge_id || existing.stripe_charge_id || null,
             updated_at: new Date(),
             metadata: trx.raw(
               `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"processing"') - 'settled_event_at'`,
@@ -530,16 +558,39 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
           });
         }
         // ACH: the processing handler inserted this row — flip it in place.
+        // A retry can also change TENDER on the reused PI (failed ACH →
+        // successful card — codex r9 P0): refresh every charge-derived
+        // column from the CURRENT PI/details, not just the status, or the
+        // ledger keeps the failed attempt's charge id, omits the captured
+        // card surcharge on the anchor, and a later refund/dispute on the
+        // successful charge can't find the allocation rows.
         if (!['paid', 'refunded', 'disputed'].includes(existing.status) && invoiceStatus === 'paid') {
+          const existingMeta = (typeof existing.metadata === 'string' ? safeJson(existing.metadata) : existing.metadata) || {};
+          const settledAtIso = eventCreated ? new Date(eventCreated * 1000).toISOString() : new Date().toISOString();
           await trx('payments').where({ id: existing.id }).update({
             status: 'paid',
             updated_at: new Date(),
             payment_date: etDateString(eventCreated ? new Date(eventCreated * 1000) : undefined),
             receipt_url: details.receiptUrl || existing.receipt_url || null,
-            metadata: trx.raw(
-              `jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"'), '{settled_event_at}', to_jsonb(?::text))`,
-              [eventCreated ? new Date(eventCreated * 1000).toISOString() : new Date().toISOString()],
-            ),
+            stripe_charge_id: invoiceUpdates.stripe_charge_id || existing.stripe_charge_id || null,
+            amount: shareCents / 100,
+            base_amount_cents: entry.cents,
+            surcharge_amount_cents: isAnchor ? surchargeCents : 0,
+            surcharge_rate_bps: isAnchor ? Number(paymentIntent.metadata?.surcharge_rate_bps || 0) : 0,
+            surcharge_policy_version: isAnchor ? (paymentIntent.metadata?.surcharge_policy_version || null) : null,
+            card_funding: paymentIntent.metadata?.card_funding || null,
+            card_brand: details.cardBrand || null,
+            card_last_four: details.cardLastFour || null,
+            failure_reason: null,
+            metadata: JSON.stringify({
+              ...existingMeta,
+              payment_state: 'paid',
+              settled_event_at: settledAtIso,
+              payment_method: details.paymentMethod || paymentIntent.payment_method_types?.[0] || existingMeta.payment_method || null,
+              base_amount: entry.cents / 100,
+              card_surcharge: isAnchor ? surchargeCents / 100 : 0,
+              charged_amount: shareCents / 100,
+            }),
           });
         }
         if (isAnchor) anchorPaymentRow = existing;
@@ -547,7 +598,6 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
         continue;
       }
 
-      const shareCents = entry.cents + (isAnchor ? surchargeCents : 0);
       const [inserted] = await trx('payments').insert({
         customer_id: invoice.customer_id,
         processor: 'stripe',
