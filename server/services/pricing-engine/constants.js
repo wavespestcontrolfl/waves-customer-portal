@@ -658,7 +658,7 @@ const COMMERCIAL_LAWN = {
   equipmentReservePerVisit: 0,
   adminAnnual: 120,           // COI tracking, net-terms invoicing, account management overhead
   targetGrossMargin: 0.45,    // commercial target margin (tunable)
-  minAnnual: 1200,            // commercial account annual minimum
+  minAnnual: 1200,            // report-only reference (floors disarmed, owner 2026-08-17); feeds minApplied only
   lowConfidenceTurfSf: 60000, // above this the satellite turf estimate is flagged LOW confidence (still prices)
   taxable: false,
   taxCategory: 'lawn_spraying_or_treatment',
@@ -675,7 +675,7 @@ const COMMERCIAL_TREE_SHRUB = {
   laborOverheadMinutesPerVisit: 10,
   adminAnnual: 120,
   targetGrossMargin: 0.45,
-  minAnnual: 900,             // commercial ornamental account annual minimum
+  minAnnual: 900,             // report-only reference (floors disarmed, owner 2026-08-17); feeds minApplied only
   lowConfidenceBedSf: 20000,  // above this the bed-area estimate is flagged LOW confidence
   taxable: false,
   taxCategory: 'lawn_spraying_or_treatment',
@@ -697,7 +697,7 @@ const COMMERCIAL_PEST = {
   routeDriveMinutes: 15,
   adminAnnual: 120,                   // COI tracking, net-terms invoicing, account management
   targetGrossMargin: 0.45,            // commercial target margin (tunable)
-  minAnnual: 900,                     // commercial pest account annual minimum ($75/mo floor — professional commercial posture; owner 2026-06-30)
+  minAnnual: 900,                     // report-only reference (floors disarmed, owner 2026-08-17); feeds minApplied only
   lowConfidenceFootprintSf: 30000,    // above this the footprint estimate is flagged LOW confidence
   taxable: true,
   taxCategory: 'nonresidential_pest_control',
@@ -716,7 +716,7 @@ const COMMERCIAL_MOSQUITO = {
   routeDriveMinutes: 15,
   adminAnnual: 120,
   targetGrossMargin: 0.45,
-  minAnnual: 720,                     // $60/mo floor
+  minAnnual: 720,                     // report-only reference (floors disarmed, owner 2026-08-17); feeds minApplied only
   lowConfidenceTreatableSf: 80000,    // above this the treatable-area estimate is flagged LOW confidence
   taxable: true,
   taxCategory: 'nonresidential_pest_control',
@@ -736,7 +736,7 @@ const COMMERCIAL_TERMITE_BAIT = {
   routeDriveMinutes: 15,
   adminAnnual: 120,
   targetGrossMargin: 0.45,
-  minAnnual: 900,                     // $75/mo monitoring floor (inspection/monitoring; bond/warranty quoted separately — owner 2026-06-30)
+  minAnnual: 900,                     // report-only reference (floors disarmed, owner 2026-08-17); feeds minApplied only
   lowConfidenceFootprintSf: 30000,
   taxable: true,
   taxCategory: 'nonresidential_pest_control',
@@ -754,7 +754,7 @@ const COMMERCIAL_RODENT_BAIT = {
   routeDriveMinutes: 15,
   adminAnnual: 120,
   targetGrossMargin: 0.45,
-  minAnnual: 900,                     // $75/mo standalone floor (a $50/mo commercial rodent line reads cheap; bundled-add-on $600 nuance needs the risk-type PR — owner 2026-06-30)
+  minAnnual: 900,                     // report-only reference (floors disarmed, owner 2026-08-17); feeds minApplied only
   lowConfidenceFootprintSf: 30000,
   taxable: true,
   taxCategory: 'nonresidential_pest_control',

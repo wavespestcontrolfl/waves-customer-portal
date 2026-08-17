@@ -4,8 +4,8 @@
 // under/over-services: an office serviced monthly is over-served, a restaurant
 // serviced quarterly is under-served. A business-type bucket drives how many
 // PEST and RODENT visits/yr a commercial program gets. The commercial cost
-// buildup scales linearly with visit count, so lower-cadence buckets frequently
-// land on the $900/yr commercial floor — that is intended, not a bug.
+// buildup scales linearly with visit count. (Floors are disarmed — owner
+// 2026-08-17 — so low-cadence buckets price at the raw buildup, not a minimum.)
 //
 // Mosquito (9 seasonal) and termite (4 quarterly monitoring) are NOT risk-typed.
 // riskType defaults NULL (admin must classify — a defaulted-required field gets

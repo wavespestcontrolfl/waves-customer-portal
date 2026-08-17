@@ -29,9 +29,11 @@ describe('priceCommercialLawn — cost-buildup auto-pricer', () => {
     expect(r.perApp).toBeCloseTo(r.annual / r.frequency, 1);
   });
 
-  test('applies the commercial account minimum on tiny turf', () => {
+  test('tiny turf prices at the raw buildup — floor disarmed, minApplied report-only', () => {
+    // Floors disarmed (owner 2026-08-17): the $1,200 account minimum no longer
+    // clamps; minApplied still flags that the buildup landed under the reference.
     const r = priceCommercialLawn({ turfSf: 5000 });
-    expect(r.annual).toBe(1200);
+    expect(r.annual).toBeCloseTo(1031.52, 2);
     expect(r.minApplied).toBe(true);
   });
 
@@ -66,12 +68,14 @@ describe('priceCommercialLawn — cost-buildup auto-pricer', () => {
   });
 
   test('respects an explicit measured-zero turf (does not invent a lot estimate)', () => {
-    // Turf measured as absent (all-hardscape lot) is authoritative — price at
-    // the account minimum, NOT lot * 0.45. (Regression for Codex R11 P1.)
+    // Turf measured as absent (all-hardscape lot) is authoritative — price the
+    // raw buildup on zero turf, NOT lot * 0.45. (Regression for Codex R11 P1;
+    // floor disarmed 2026-08-17 so no minimum clamp applies.)
     const r = priceCommercialLawn({ turfSf: 0, lotSqFt: 100000 });
     expect(r.turfSf).toBe(0);
     expect(r.turfBasis).toBe('turfSf');
-    expect(r.annual).toBe(1200);
+    expect(r.annual).toBeCloseTo(558.79, 2);
+    expect(r.minApplied).toBe(true);
   });
 });
 
@@ -131,19 +135,24 @@ describe('priceCommercialTreeShrub — cost-buildup auto-pricer', () => {
     expect(priceCommercialTreeShrub({ bedArea: 5000, features: { trees: 'heavy' } }, { treeCount: 4 }).treeCount).toBe(4);
   });
 
-  test('applies the commercial ornamental account minimum on tiny beds', () => {
+  test('tiny beds price at the raw buildup — floor disarmed, minApplied report-only', () => {
+    // Floors disarmed (owner 2026-08-17): the $900 ornamental minimum no longer
+    // clamps; minApplied still flags that the buildup landed under the reference.
     const r = priceCommercialTreeShrub({ bedArea: 200 }, { treeCount: 0 });
-    expect(r.annual).toBe(900);
+    expect(r.annual).toBeCloseTo(664.18, 2);
     expect(r.minApplied).toBe(true);
   });
 
-  test('respects an explicit measured-zero bed area (does not invent a lot estimate)', () => {
-    // Beds measured as absent are authoritative — price at the minimum, not a
-    // lot-density estimate. (Regression for Codex R11 P1.)
+  test('an explicit measured-zero bed area routes to a manual quote (never a lot estimate)', () => {
+    // Beds measured as absent are authoritative — but with floors disarmed an
+    // all-hardscape lot would price at the ~$220/yr admin-only buildup, which is
+    // not a sellable ornamental program. Manual quote instead (owner 2026-08-17).
+    // (Regression for Codex R11 P1: still never invents a lot estimate.)
     const r = priceCommercialTreeShrub({ bedArea: 0, lotSqFt: 100000 }, { treeCount: 0 });
-    expect(r.bedArea).toBe(0);
-    expect(r.bedAreaSource).toBe('explicit');
-    expect(r.annual).toBe(900);
+    expect(r.quoteRequired).toBe(true);
+    expect(r.commercialPricingMode).toBe('manual_quote');
+    expect(r.manualReviewReasons).toEqual(['commercial_tree_shrub_explicit_zero_bed_manual_quote']);
+    expect(r.annual).toBeNull();
   });
 });
 
@@ -366,10 +375,15 @@ describe('priceCommercialMosquito / TermiteBait / RodentBait — cost-buildup au
     expect(r).toMatchObject({ service: 'commercial_rodent_bait', annual: 1080.61, visitsPerYear: 4, taxable: true });
   });
 
-  test('termite/rodent apply the $900 commercial floor on small buildings', () => {
-    // Below the buildup breakeven, the account minimum ($900/yr = $75/mo) binds.
-    expect(priceCommercialTermiteBait({ footprint: 10000, perimeter: 400 }).annual).toBe(900);
-    expect(priceCommercialRodentBait({ footprint: 10000 }).annual).toBe(900);
+  test('termite/rodent small buildings price at the raw buildup — floor disarmed', () => {
+    // Floors disarmed (owner 2026-08-17): sub-$900 buildups are no longer
+    // clamped to the account minimum; minApplied stays as the report-only flag.
+    const termite = priceCommercialTermiteBait({ footprint: 10000, perimeter: 400 });
+    const rodent = priceCommercialRodentBait({ footprint: 10000 });
+    expect(termite.annual).toBeCloseTo(850.91, 2);
+    expect(termite.minApplied).toBe(true);
+    expect(rodent.annual).toBeCloseTo(781.21, 2);
+    expect(rodent.minApplied).toBe(true);
   });
 
   test('termite/rodent fall back to a MANUAL quote with no real building size', () => {
@@ -610,11 +624,11 @@ describe('generateEstimate — commercial integration', () => {
     expect(ts.bedArea).toBe(6000);
   });
 
-  test('a blank/estimated zero bed area falls back to the lot estimate (not the $900 min)', () => {
+  test('a blank/estimated zero bed area falls back to the lot estimate (never treated as no-beds)', () => {
     // The admin V2 form sends estimatedBedAreaSf: 0 as its blank default, which
     // calculatePropertyProfile resolves to bedArea: 0 / bedAreaSource:
-    // 'estimated'. That inferred zero must NOT price at the ornamental minimum —
-    // it falls through to the lot-density estimate so a real commercial property
+    // 'estimated'. That inferred zero must NOT be honored as "no beds" — it
+    // falls through to the lot-density estimate so a real commercial property
     // with beds isn't underquoted. (Regression for the PR bot's P1.)
     const est = generateEstimate({
       propertyType: 'commercial',
@@ -626,18 +640,20 @@ describe('generateEstimate — commercial integration', () => {
     const ts = est.lineItems.find((l) => l.service === 'commercial_tree_shrub');
     expect(ts.bedArea).toBeGreaterThan(0);
     expect(ts.bedAreaSource).not.toBe('explicit');
-    // A real lot-derived bed prices well above the $900 ornamental minimum.
+    // A real lot-derived bed prices as a full auto-estimate, not a manual quote.
     expect(ts.annual).toBeGreaterThan(900);
     expect(ts.minApplied).toBeFalsy();
   });
 
   test('a deliberate explicit zero bed area is still honored (all-hardscape lot)', () => {
     // Direct/explicit zero (no estimated source) stays authoritative — the
-    // P1-B fix only redirects the inferred/estimated zero. (Guards R11.)
+    // P1-B fix only redirects the inferred/estimated zero. (Guards R11.) With
+    // floors disarmed it now routes to a manual quote rather than pricing the
+    // admin-only buildup (owner 2026-08-17).
     const r = priceCommercialTreeShrub({ bedArea: 0, lotSqFt: 100000 }, { treeCount: 0 });
-    expect(r.bedArea).toBe(0);
-    expect(r.bedAreaSource).toBe('explicit');
-    expect(r.annual).toBe(900);
+    expect(r.commercialPricingMode).toBe('manual_quote');
+    expect(r.manualReviewReasons).toEqual(['commercial_tree_shrub_explicit_zero_bed_manual_quote']);
+    expect(r.annual).toBeNull();
   });
 
   test('residential estimate is unaffected (still uses residential pricers)', () => {

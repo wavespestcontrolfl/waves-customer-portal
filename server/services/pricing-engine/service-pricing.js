@@ -2949,8 +2949,10 @@ function priceCommercialLawn(property = {}, options = {}) {
   });
 
   const computedAnnual = floor.minimumCollectedAnnualPrice;
+  // Floors are disarmed (owner 2026-08-17, extends the 2026-07-17 no-floors
+  // ruling to commercial) — minApplied is a report-only signal, never a clamp.
   const minApplied = computedAnnual < cfg.minAnnual;
-  const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
+  const annual = roundMoney(computedAnnual);
   const monthly = roundMoney(annual / 12);
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - floor.annualCost) / annual) : 0;
@@ -3096,8 +3098,9 @@ function priceCommercialPest(property = {}, options = {}) {
   const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
 
   const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
+  // Floors disarmed (owner 2026-08-17) — minApplied is report-only, never a clamp.
   const minApplied = computedAnnual < cfg.minAnnual;
-  const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
+  const annual = roundMoney(computedAnnual);
   const monthly = roundMoney(annual / 12);
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
@@ -3164,7 +3167,7 @@ function priceCommercialPest(property = {}, options = {}) {
 
 // Build a priced commercial pest-family line from the supplied per-visit
 // material $ and on-site minutes. Identical buildup/margin/shape across the
-// three services (45% target margin, account minimum, FL-taxed).
+// three services (45% target margin, FL-taxed; floors report-only).
 // Cadence word for a commercial visit count — used in customer-facing detail copy
 // so a monthly program isn't described as quarterly after a risk-type override.
 function commercialCadenceLabel(visits) {
@@ -3189,8 +3192,9 @@ function buildCommercialPestFamilyLine({ cfg, materialPerVisit, onSiteMin, servi
   const annualDrive = drivePerVisit * visits * mult;
   const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
   const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
+  // Floors disarmed (owner 2026-08-17) — minApplied is report-only, never a clamp.
   const minApplied = computedAnnual < cfg.minAnnual;
-  const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
+  const annual = roundMoney(computedAnnual);
   const monthly = roundMoney(annual / 12);
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
@@ -3494,9 +3498,10 @@ function resolveCommercialBedArea(property = {}) {
   // measured as absent) — NOT an inferred/estimated zero. The admin V2 form
   // sends estimatedBedAreaSf: 0 as its blank default, which
   // calculatePropertyProfile resolves to bedArea: 0 with bedAreaSource:
-  // 'estimated'; honoring that as "no beds" would underquote a real commercial
-  // property at the $900 minimum, so an estimated/lot_based zero falls through
-  // to the lot-density estimate instead. (A positive value is always honored.)
+  // 'estimated'; honoring that as "no beds" would misprice a real commercial
+  // property, so an estimated/lot_based zero falls through to the lot-density
+  // estimate instead. (A positive value is always honored; an explicit zero
+  // routes to a manual quote in priceCommercialTreeShrub.)
   if (property.bedArea !== null && property.bedArea !== undefined && property.bedArea !== '') {
     const explicit = Number(property.bedArea);
     const src = property.bedAreaSource;
@@ -3528,6 +3533,22 @@ function resolveCommercialBedArea(property = {}) {
 function priceCommercialTreeShrub(property = {}, options = {}) {
   const cfg = COMMERCIAL_TREE_SHRUB;
   const { bedArea, bedBasis, estimated } = resolveCommercialBedArea(property);
+  // An explicit measured-zero bed area (all-hardscape lot) used to price at the
+  // $900 minimum; with floors disarmed it would price at the admin-only buildup
+  // (~$220/yr), which is not a sellable ornamental program — manual quote.
+  // Only the explicit path can surface zero here (the resolver routes
+  // estimated/lot-based zeros to the lot-density estimate).
+  if (bedArea === 0 && !estimated) {
+    return commercialPestFamilyManualLine({
+      service: 'commercial_tree_shrub',
+      name: 'Commercial Tree & Shrub',
+      originalRequestedService: 'tree_shrub',
+      cfg,
+      reason: 'commercial_tree_shrub_explicit_zero_bed_manual_quote',
+      detail: 'No plant beds on file for this property — your Waves account manager will confirm the ornamental program and quote.',
+      commercialSubtype: options.commercialSubtype || property.commercialSubtype,
+    });
+  }
   // Tree count resolution (mirrors residential priceTreeShrub):
   //  1. Only a POSITIVE count is authoritative — callers (e.g. the public quote
   //     adapter) may pass treeCount: 0 to mean "omitted", which must NOT
@@ -3584,8 +3605,9 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
 
   const annualCost = annualMaterial + annualLabor + annualDrive + cfg.adminAnnual;
   const computedAnnual = annualCost / (1 - cfg.targetGrossMargin);
+  // Floors disarmed (owner 2026-08-17) — minApplied is report-only, never a clamp.
   const minApplied = computedAnnual < cfg.minAnnual;
-  const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
+  const annual = roundMoney(computedAnnual);
   const monthly = roundMoney(annual / 12);
   const perApp = roundMoney(annual / visits);
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;

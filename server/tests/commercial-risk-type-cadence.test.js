@@ -46,13 +46,15 @@ describe('resolveCommercialCadence', () => {
 describe('pricers honor the visits override', () => {
   const BUILD = { footprint: 20000, perimeter: 600 };
 
-  test('priceCommercialPest scales visits (fewer → lower annual, floored at $900)', () => {
+  test('priceCommercialPest scales visits (fewer → lower annual; floor disarmed)', () => {
     const def = priceCommercialPest(BUILD); // 12 visits (program default)
     const office = priceCommercialPest(BUILD, { pestVisits: 4 });
     expect(def.visitsPerYear).toBe(12);
     expect(office.visitsPerYear).toBe(4);
     expect(office.annual).toBeLessThan(def.annual); // fewer visits → cheaper
-    expect(office.annual).toBeGreaterThanOrEqual(900); // never below the commercial floor
+    // Floors disarmed (owner 2026-08-17) — the raw buildup prices, no clamp.
+    expect(office.annual).toBeCloseTo(1303.03, 2);
+    expect(office.minApplied).toBe(false);
   });
 
   test('priceCommercialRodentBait scales visits (monthly > quarterly)', () => {
