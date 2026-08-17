@@ -81,7 +81,7 @@ const NAME_OWNERSHIP_DISCLAIMER_RE = /\b(?:not|isn'?t|no longer|never|won'?t be)
 // mandate. Clauses split on sentence boundaries (dot only when followed by
 // whitespace, so emails and street abbreviations survive).
 const CW_SRC = '(?:wrong|incorrect|misspell\\w*|spell\\w*|typo|actually|correct\\w*|fix\\w*|updat\\w*|chang\\w*|remov\\w*|drop\\w*|delet\\w*|no\\s+longer|should\\s+be|\\bnot\\b|\\bnew\\b|\\bold\\b)';
-const ADDR_TOPIC_SRC = '(?:address|street|city|zip|unit|apt|apartment|suite|lot)';
+const ADDR_TOPIC_SRC = '(?:address|street|city|state|zip|unit|apt|apartment|suite|lot)';
 const CW_RE = new RegExp(CW_SRC, 'gi');
 const TOPIC_RES = [
   ['name', /\b(?:name|surname)\b/gi],
@@ -490,8 +490,12 @@ const THIRD_PARTY_CONTACT_RE = /\b(?:his|her|their)\s+(?:\w+\s+)?(?:e-?mail|name
 // text is the authority. Falls back to the quote itself when it cannot be
 // located (grounding rejects unlocatable quotes anyway).
 function sourceClauseFor(text, quote) {
-  const hay = normValue(text).replace(/\s+/g, ' ').toLowerCase();
-  const nq = normValue(quote).replace(/\s+/g, ' ').toLowerCase();
+  // Typographic apostrophes normalize to ASCII (codex #3413 r25): the
+  // ownership predicates match 's-possessives, and "My wife’s email" with
+  // a curly quote must not slip past them.
+  const deQuote = (s) => String(s).replace(/[‘’]/g, "'");
+  const hay = deQuote(normValue(text).replace(/\s+/g, ' ').toLowerCase());
+  const nq = deQuote(normValue(quote).replace(/\s+/g, ' ').toLowerCase());
   const qs = nq ? hay.indexOf(nq) : -1;
   if (qs < 0) return String(quote || '');
   const qe = qs + nq.length;
@@ -580,6 +584,11 @@ async function applyContactCorrections({ customerId, corrections, source, source
     // of street/city/zip is dropped by canonicalization/validation below,
     // the whole group must go with it (re-checked after the validators).
     const hadNewStreet = byField.has('address_line1');
+    // Whether a real unit was STATED (codex #3413 r25): if the parser or
+    // validator later drops it, the move/replacement logic must not read
+    // the absence as "no unit at the new property" and clear the old one —
+    // a group whose stated unit cannot be represented fails closed.
+    const line2WasStated = byField.has('address_line2') && byField.get('address_line2').newValue !== '';
     // Canonicalize. Address fields parse as ONE address through the same
     // normalizeAdminAddressInput the Customer-360 admin edit uses (unit
     // canonicalization "4b" → "Unit 4B", inline-unit vs line2 conflict
@@ -682,6 +691,14 @@ async function applyContactCorrections({ customerId, corrections, source, source
     // state deterministically (USPS prefix allocation) — derive and stage
     // it; a same-state move skips as 'unchanged', an unresolvable ZIP
     // fails the whole group closed.
+    // A stated unit that died in canonicalization/validation poisons the
+    // whole new-address group (codex #3413 r25) — committing the new
+    // street while silently dropping (and for moves, CLEARING) the unit
+    // the customer explicitly supplied corrupts the address.
+    if (line2WasStated && !byField.has('address_line2') && (hadNewStreet || moveContext)
+      && ADDRESS_FIELDS.some((f) => byField.has(f))) {
+      rejectAddressGroup('unit_invalid');
+    }
     if ((hadNewStreet || moveContext) && byField.has('zip')) {
       const { stateForZip } = require('./data-hygiene/normalizers');
       const derived = stateForZip(byField.get('zip').newValue);
@@ -1293,8 +1310,8 @@ async function runCallContactCorrection({ callId, customerId, knex = db, procTok
       // line that grounds the quote (r24): a narrowed evidence quote must
       // not shed the possessive that marks the statement third-party.
       const tpNeedle = normValue(c.evidence_quote).replace(/\s+/g, ' ').toLowerCase();
-      const tpLine = callerLines.find((line) => tpNeedle.length >= 4 && line.includes(tpNeedle))
-        || String(c.evidence_quote || '');
+      const tpLine = (callerLines.find((line) => tpNeedle.length >= 4 && line.includes(tpNeedle))
+        || String(c.evidence_quote || '')).replace(/[‘’]/g, "'");
       const tpField = CALL_AUTO_FIELDS[c.field_name] || c.field_name;
       if (thirdPartyOwnedStatement(tpField, tpLine)) return false;
       if (!quoteGrounded(c.evidence_quote)) return false;

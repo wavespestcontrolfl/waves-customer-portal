@@ -528,10 +528,10 @@ describe('round-20 hardening', () => {
 describe('round-21 hardening', () => {
   it('a write UNCOMMITTED at snapshot capture still rebases — newest message wins (round-24)', async () => {
     // Older job A's apply transaction started before B's snapshot capture
-    // (so A's completed_at PRE-dates B's context_attached_at) but
-    // committed after it — a timestamp cutoff would exclude A even though
-    // B's snapshot never saw A's write. The oldValue chain includes it and
-    // B's correction proceeds over A's value.
+    // (so A's transaction clock PRE-dates the capture) but committed after
+    // it — A was NOT done at capture, so it sits ABOVE B's rebase floor;
+    // the oldValue chain includes it and B's correction proceeds over A's
+    // value.
     const snapAt = Date.now() - 500;
     const knex = makeStubKnex({
       contact_correction_jobs: [
@@ -544,7 +544,7 @@ describe('round-21 hardening', () => {
           id: 2, status: 'queued', customer_id: CUSTOMER_ID,
           expected_values: { last_name: 'Riverz', phone: '+15550001111' }, // …and the snapshot missed the write
           created_at: snapAt - 400,
-          context_attached_at: snapAt,
+          rebase_floor_id: 0, // A was still running at capture — above the floor
         }),
       ],
       customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverson' }],
@@ -568,7 +568,7 @@ describe('round-21 hardening', () => {
           id: 2, status: 'queued', customer_id: CUSTOMER_ID,
           expected_values: { last_name: 'Riverz', phone: '+15550001111' },
           created_at: Date.now() - 1000,
-          context_attached_at: Date.now() - 900,
+          rebase_floor_id: 0,
         }),
       ],
       customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverson' }],
@@ -622,21 +622,20 @@ describe('round-22 hardening', () => {
     expect(JSON.parse(job.result).applied).toHaveLength(1);
   });
 
-  it('enqueue preserves the original context timestamp and baseline', async () => {
-    const attachedAt = Date.now() - 5000;
+  it('enqueue preserves the original context (baseline + rebase floor)', async () => {
     const snapshot = { last_name: 'Riverz' };
     const knex = makeStubKnex({
-      contact_correction_jobs: [jobRow({ id: 1, customer_id: CUSTOMER_ID, expected_values: snapshot, context_attached_at: attachedAt })],
+      contact_correction_jobs: [jobRow({ id: 5, customer_id: CUSTOMER_ID, expected_values: snapshot, rebase_floor_id: 2 })],
     });
-    const ok = await queue.enqueueContactCorrectionJob(1, {
+    const ok = await queue.enqueueContactCorrectionJob(5, {
       customerId: CUSTOMER_ID, smsLogId: 'sms-1', expectedValues: { last_name: 'Riverz' }, knex,
     });
     expect(ok).toBe(true);
     const job = knex._data.contact_correction_jobs[0];
     expect(job.status).toBe('queued');
-    // The rebase cut must stay at the ORIGINAL capture time — advancing it
-    // at fire time would exclude queue writes the baseline predates.
-    expect(job.context_attached_at).toBe(attachedAt);
+    // The rebase floor must stay at the ORIGINAL capture point — advancing
+    // it at fire time would exclude queue writes the baseline predates.
+    expect(job.rebase_floor_id).toBe(2);
     expect(job.expected_values).toEqual(snapshot);
   });
 
@@ -646,7 +645,43 @@ describe('round-22 hardening', () => {
       customerId: CUSTOMER_ID, expectedValues: { last_name: 'Riverz' }, knex,
     });
     const job = knex._data.contact_correction_jobs[0];
-    expect(job.context_attached_at).toBeTruthy();
     expect(typeof job.expected_values).toBe('string');
+  });
+});
+
+describe('round-25 hardening', () => {
+  it('a historical chain below the rebase floor never replays onto a fresh baseline', async () => {
+    // Old job 1 wrote Riverz→Riverson long ago; an admin later restored
+    // Riverz; a NEW message snapshots Riverz with floor = 1 (job 1 was
+    // done at capture). The old chain must not rebase the fresh baseline
+    // back to Riverson.
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({
+          id: 1, status: 'done', customer_id: CUSTOMER_ID,
+          result: { applied: [{ field: 'last_name', oldValue: 'Riverz', newValue: 'Riverson' }], skipped: [] },
+          completed_at: Date.now() - 86_400_000,
+        }),
+        jobRow({
+          id: 2, status: 'queued', customer_id: CUSTOMER_ID,
+          expected_values: { last_name: 'Riverz', phone: '+15550001111' },
+          rebase_floor_id: 1,
+        }),
+      ],
+      customers: [{ id: CUSTOMER_ID, deleted_at: null, last_name: 'Riverz' }],
+    });
+    await queue.processDueContactCorrectionJobs({ limit: 3, knex });
+    expect(mockRunSms.mock.calls[0][0].matchedSnapshot).toEqual({ last_name: 'Riverz', phone: '+15550001111' });
+  });
+
+  it('context attach records the rebase floor from the done jobs at capture', async () => {
+    const knex = makeStubKnex({
+      contact_correction_jobs: [
+        jobRow({ id: 3, status: 'done', customer_id: CUSTOMER_ID }),
+        jobRow({ id: 7, status: 'reserved' }),
+      ],
+    });
+    await queue.attachContactCorrectionContext(7, { customerId: CUSTOMER_ID, expectedValues: { last_name: 'Riverz' }, knex });
+    expect(knex._data.contact_correction_jobs[1].rebase_floor_id).toBe(3);
   });
 });

@@ -8417,12 +8417,18 @@ const CallRecordingProcessor = {
         && String(customerId || call.customer_id) === String(call.customer_id))
         ? contactCasBaselineAtClaim
         : null,
-      // Historical/forced passes never auto-apply names (codex #3413 r22):
-      // the claim-time baseline of a force-reprocess (or a retry reaching
-      // an old call) reflects TODAY's values, so an admin edit made since
-      // the call would pass the CAS and be overwritten by the old
-      // transcript. 24h bounds the normal pipeline's retry ladder.
+      // Historical/forced/RETRY passes never auto-apply names (codex
+      // #3413 r22, tightened r25): the claim-time baseline of any pass
+      // that is not the call's FIRST processing reflects post-call values,
+      // so an admin edit made between a failed first pass and its retry
+      // would be adopted as the baseline and overwritten by the older
+      // transcript. processing_generation === 1 identifies the first
+      // claim (recovery reclaims and force passes increment it); a
+      // missing generation (no-RETURNING environments) fails closed. The
+      // 24h bound additionally covers a first claim arriving late off a
+      // backlog.
       allowNameAutoApply: !opts.force
+        && procGeneration === 1
         && (Date.now() - new Date(call.created_at || processingStartedAt).getTime()) < 24 * 60 * 60 * 1000,
     }).catch((err) => {
       logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);

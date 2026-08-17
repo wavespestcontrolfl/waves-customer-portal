@@ -2577,3 +2577,57 @@ describe('round-24 hardening', () => {
     expect(out.zip).toBe('34231');
   });
 });
+
+describe('round-25 hardening', () => {
+  it('a typographic apostrophe possessive is still third-party (SMS)', async () => {
+    const body = 'My wife’s email is wrong; use spouse@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'spouse@example.com', quote: 'email is wrong; use spouse@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it('a state-only correction carries its own field intent end to end', async () => {
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'state', new_value: 'GA', quote: 'my state is wrong; it should be GA', confidence: 'high' }] },
+    });
+    const res = await runSmsContactCorrection({ customer: { id: CUSTOMER_ID }, body: 'My state is wrong; it should be GA', knex });
+    expect(res.applied.map((a) => a.field)).toEqual(['state']);
+    expect(knex._data.customers[0].state).toBe('GA');
+  });
+
+  it('a stated unit that fails validation rejects the whole new-address group', async () => {
+    // The unit dies in canonicalization; committing the new street while
+    // treating the unit as omitted (and clearing the old one) would
+    // corrupt the address the customer explicitly stated.
+    const knex = makeStubKnex({ customers: [baseCustomer()], agent_decisions: [] });
+    const res = await applyContactCorrections({
+      customerId: CUSTOMER_ID,
+      corrections: [
+        { field: 'address_line1', newValue: '99 Pine Ave', quote: 'we moved to 99 Pine Ave, Sarasota 34231' },
+        { field: 'address_line2', newValue: '——', quote: 'unit ——' },
+        { field: 'city', newValue: 'Sarasota', quote: 'we moved' },
+        { field: 'zip', newValue: '34231', quote: 'we moved' },
+      ],
+      source: 'sms',
+      knex,
+      moveContext: true,
+    });
+    expect(res.applied).toEqual([]);
+    expect(res.skipped.map((s) => s.reason)).toContain('unit_invalid');
+    expect(knex._data.customers[0].address_line1).toBe('12 Oak St');
+    expect(knex._data.customers[0].address_line2).toBe('Unit 4');
+  });
+
+  it('the shared ZIP inverse honors the r25 exceptional prefixes', () => {
+    const { stateForZip } = require('../services/data-hygiene/normalizers');
+    expect(stateForZip('05501')).toBe('MA');
+    expect(stateForZip('05601')).toBe('VT');
+    expect(stateForZip('56901')).toBe('DC');
+    expect(stateForZip('34001')).toBeNull(); // military AA, never FL
+    expect(stateForZip('34231')).toBe('FL');
+  });
+});

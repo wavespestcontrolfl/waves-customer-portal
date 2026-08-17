@@ -397,7 +397,15 @@ router.post('/sms', async (req, res) => {
         }
       }
 
-      await fireContactCorrection(optOutSmsLogId);
+      // NEVER on a wrong-number declaration (codex #3413 r25): "Wrong
+      // number. The email is wrong; change it to …" invalidates the
+      // sender-identity anchor — the matched customer is the number's
+      // FORMER owner, and a correction from the new holder must not touch
+      // their record. The un-fired reservation is released by the
+      // route-level finally.
+      if (optCommand.reason !== 'wrong_number') {
+        await fireContactCorrection(optOutSmsLogId);
+      }
 
       return res.type('text/xml').send(
         `<Response><Message>You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.</Message></Response>`

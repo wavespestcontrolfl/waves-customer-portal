@@ -35,9 +35,12 @@ const ZIP3_RANGES = {
   CT: [[60, 69]],
   // 201 is VA (not DC) — USPS exception carved out (codex #3413 r24) so
   // stateForZip and zipMatchesState agree on the exceptional prefixes.
-  DC: [[200, 200], [202, 205]],
+  // 569 (Parcel Return Service) is DC — USPS exception (codex #3413 r25).
+  DC: [[200, 200], [202, 205], [569, 569]],
   DE: [[197, 199]],
-  FL: [[320, 349]],
+  // 340 is military AA (APO/FPO), not Florida — carved out (codex #3413
+  // r25) so an omitted-state correction never writes FL for it.
+  FL: [[320, 339], [341, 349]],
   GA: [[300, 319], [398, 399]],
   HI: [[967, 968]],
   IA: [[500, 528]],
@@ -47,7 +50,8 @@ const ZIP3_RANGES = {
   KS: [[660, 679]],
   KY: [[400, 427]],
   LA: [[700, 714]],
-  MA: [[10, 27]],
+  // 055 (Andover IRS) is MA — USPS exception (codex #3413 r25).
+  MA: [[10, 27], [55, 55]],
   MD: [[206, 219]],
   ME: [[39, 49]],
   MI: [[480, 499]],
@@ -77,7 +81,7 @@ const ZIP3_RANGES = {
   TX: [[733, 733], [750, 799], [885, 885]],
   UT: [[840, 847]],
   VA: [[201, 201], [220, 246]],
-  VT: [[50, 59]],
+  VT: [[50, 54], [56, 59]],
   WA: [[980, 994]],
   WI: [[530, 549]],
   WV: [[247, 268]],

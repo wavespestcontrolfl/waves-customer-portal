@@ -1,23 +1,29 @@
 /**
- * contact_correction_jobs.context_attached_at (codex #3413 r21): records
- * WHEN the CAS baseline was captured (the route's context stamp / payload
- * enqueue). The snapshot-rebase cuts on this instead of the reservation's
- * created_at — the baseline trails the reservation by the route's
- * media/customer-lookup awaits, and a queue write landing in that gap is
- * already reflected in the snapshot (or superseded by an admin edit the
- * snapshot correctly holds) and must not be overlaid.
+ * contact_correction_jobs.rebase_floor_id (codex #3413 r25; this file
+ * previously added context_attached_at, retired in the same PR when the
+ * timestamp-cutoff rebase was abandoned — filename kept so knex's
+ * migration ledger stays consistent for environments that ran it).
+ *
+ * The floor is the highest DONE job id for the customer at the moment the
+ * route captures the CAS baseline. The snapshot rebase overlays only
+ * queue writes ABOVE the floor: jobs completed before the capture are by
+ * definition either reflected in the snapshot or superseded by a
+ * non-queue edit the snapshot holds — without the floor, a historical
+ * chain (old job wrote A→B, admin later restored A) could rebase a fresh
+ * baseline back to B. Expressed in job-id space, not time, because
+ * completed_at carries the transaction clock, not commit visibility.
  */
 
 exports.up = async function up(knex) {
-  if (await knex.schema.hasColumn('contact_correction_jobs', 'context_attached_at')) return;
+  if (await knex.schema.hasColumn('contact_correction_jobs', 'rebase_floor_id')) return;
   await knex.schema.alterTable('contact_correction_jobs', (t) => {
-    t.timestamp('context_attached_at');
+    t.bigInteger('rebase_floor_id');
   });
 };
 
 exports.down = async function down(knex) {
-  if (!(await knex.schema.hasColumn('contact_correction_jobs', 'context_attached_at'))) return;
+  if (!(await knex.schema.hasColumn('contact_correction_jobs', 'rebase_floor_id'))) return;
   await knex.schema.alterTable('contact_correction_jobs', (t) => {
-    t.dropColumn('context_attached_at');
+    t.dropColumn('rebase_floor_id');
   });
 };

@@ -102,22 +102,28 @@ async function reserveContactCorrectionJob({ senderPhone, messageSid = null, bod
 async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null, expectedValues = null, knex = db } = {}) {
   if (!jobId || !customerId) return false;
   try {
-    // Keep the ORIGINAL baseline timestamp when context was already
-    // attached (codex #3413 r22): the expectedValues passed here come
-    // from the SAME customer row the route captured at webhook matching —
-    // re-stamping context_attached_at at fire time would advance the
-    // rebase cut past queue writes that landed between the match and this
-    // enqueue, excluding exactly the writes the baseline predates.
+    // Keep the ORIGINAL context when it was already attached (codex #3413
+    // r22): the expectedValues passed here come from the SAME customer
+    // row the route captured at webhook matching — re-deriving the rebase
+    // floor at fire time would advance it past queue writes that landed
+    // between the match and this enqueue, excluding exactly the writes
+    // the baseline predates. The attached customer_id is the marker
+    // (attach always sets it).
     const existing = await knex('contact_correction_jobs')
       .where({ id: jobId, status: 'reserved' })
-      .first('context_attached_at', 'expected_values');
+      .first('customer_id', 'expected_values');
     if (!existing) return false;
-    const contextFields = existing.context_attached_at
-      ? {}
-      : {
+    let contextFields = {};
+    if (!existing.customer_id) {
+      const floorRow = await knex('contact_correction_jobs')
+        .where({ customer_id: customerId, status: 'done' })
+        .orderBy('id', 'desc')
+        .first('id');
+      contextFields = {
         expected_values: expectedValues ? JSON.stringify(expectedValues) : null,
-        context_attached_at: knex.fn.now(),
+        rebase_floor_id: floorRow?.id ?? null,
       };
+    }
     const updated = await knex('contact_correction_jobs')
       .where({ id: jobId, status: 'reserved' })
       .update({
@@ -148,12 +154,20 @@ async function enqueueContactCorrectionJob(jobId, { customerId, smsLogId = null,
 async function attachContactCorrectionContext(jobId, { customerId, expectedValues = null, knex = db } = {}) {
   if (!jobId || !customerId) return false;
   try {
+    // Rebase floor (codex #3413 r25): the highest DONE job id for this
+    // customer at capture time. Only queue writes ABOVE the floor may
+    // rebase this job's baseline — an older chain whose value was later
+    // reverted by an admin must not be replayed onto a fresh snapshot.
+    const floorRow = await knex('contact_correction_jobs')
+      .where({ customer_id: customerId, status: 'done' })
+      .orderBy('id', 'desc')
+      .first('id');
     const updated = await knex('contact_correction_jobs')
       .where({ id: jobId, status: 'reserved' })
       .update({
         customer_id: customerId,
         expected_values: expectedValues ? JSON.stringify(expectedValues) : null,
-        context_attached_at: knex.fn.now(),
+        rebase_floor_id: floorRow?.id ?? null,
         updated_at: knex.fn.now(),
       });
     return updated > 0;
@@ -411,15 +425,18 @@ async function rebaseSnapshot(job, snapshot, knex) {
   // TRANSACTION's clock, not when its write became visible — an older job
   // committing just after this job's snapshot capture could carry a
   // completed_at that PRE-dates the capture, and a time cut would exclude
-  // exactly the write the snapshot missed. The oldValue chain below is the
-  // authority: a write is overlaid only when it chains off the value being
-  // rebased, which is inherently position-independent — a write already
-  // reflected in the snapshot (or superseded by an admin edit the snapshot
-  // holds) fails the chain and falls through to the CAS, which stales
-  // conservatively.
+  // exactly the write the snapshot missed. Instead (r25): the scan is
+  // bounded BELOW by the rebase floor — the highest job already DONE when
+  // the baseline was captured. Jobs at or under the floor are either
+  // reflected in the snapshot or superseded by a non-queue edit the
+  // snapshot holds, so a historical chain (old job wrote A→B, admin later
+  // restored A) can never replay onto a fresh baseline. Above the floor
+  // the oldValue chain is the authority; unmatched chains fall through to
+  // the CAS, which stales conservatively.
   const earlier = await knex('contact_correction_jobs')
     .where('customer_id', job.customer_id)
     .where('id', '<', job.id)
+    .where('id', '>', Number(job.rebase_floor_id || 0))
     .where('status', 'done')
     .orderBy('id', 'asc');
   const rebased = { ...snapshot };
