@@ -16,6 +16,23 @@
  */
 
 exports.up = async function up(knex) {
+  // Duplicate live reservations for one SID can already exist on a
+  // database that ran the pre-index queue shape (codex #3413 r60) — the
+  // crash window this index closes is exactly what could have produced
+  // them, and CREATE UNIQUE INDEX would fail on that state instead of
+  // installing the guard. Cancel every live duplicate but the EARLIEST
+  // (lowest id = source order; the original delivery's job owns the
+  // message — same outcome the reserve path's fail-soft 23505 gives).
+  await knex.raw(`
+    UPDATE contact_correction_jobs SET status = 'cancelled'
+    WHERE id IN (
+      SELECT id FROM (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY message_sid ORDER BY id) AS rn
+        FROM contact_correction_jobs
+        WHERE message_sid IS NOT NULL AND status <> 'cancelled'
+      ) dup WHERE dup.rn > 1
+    )
+  `);
   await knex.raw(`
     CREATE UNIQUE INDEX IF NOT EXISTS contact_correction_jobs_live_sid_unique
     ON contact_correction_jobs (message_sid)

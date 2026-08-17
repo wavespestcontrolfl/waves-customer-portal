@@ -4190,3 +4190,22 @@ describe('round-59 hardening', () => {
     spy.mockRestore();
   });
 });
+
+describe('round-60 hardening', () => {
+  it("subject-first 'changed — use X' passes the prefilter", () => {
+    expect(detectContactCorrectionIntent('My address changed — use 99 Pine Ave, Sarasota, FL 34231')).toBe(true);
+    expect(detectContactCorrectionIntent('My email changed, it is new@example.com')).toBe(true);
+    expect(detectContactCorrectionIntent('My address changed now, use 99 Pine Ave')).toBe(true);
+  });
+
+  it('an unrelated changed mention without direction still does not trigger', () => {
+    expect(detectContactCorrectionIntent('The weather changed our plans for tomorrow')).toBe(false);
+  });
+
+  it('Lakewood Ranch is accepted for 34212', () => {
+    const { cityAcceptedForZip } = require('../utils/zip-to-city');
+    expect(cityAcceptedForZip('34212', 'Lakewood Ranch')).toBe(true);
+    expect(cityAcceptedForZip('34212', 'Bradenton')).toBe(true);
+    expect(cityAcceptedForZip('34212', 'Venice')).toBe(false);
+  });
+});

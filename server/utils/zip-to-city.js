@@ -137,6 +137,7 @@ function zipToCity(zip) {
 const ZIP_CITY_ALIASES = {
   '34202': ['lakewood ranch'],
   '34211': ['lakewood ranch'],
+  '34212': ['lakewood ranch'],
   '34243': ['sarasota'], // USPS labels this Sarasota; map says University Park
   '34242': ['siesta key'],
   '33955': ['burnt store'],
