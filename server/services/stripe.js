@@ -3149,8 +3149,14 @@ const StripeService = {
         // each hold their own anchor and then want the other's inside the
         // sorted allocation lock — a deadlock Postgres resolves by killing
         // one customer request. Single-invoice setups (one row lock, no
-        // allocation) skip the serialization entirely.
-        if (opts.includeOpenBalance && invoice.customer_id && !invoice.payer_id) {
+        // allocation) skip the serialization entirely — and so does EVERY
+        // setup while the kill switch is off (codex r10 P2): the route
+        // always passes includeOpenBalance, so without the gate term a
+        // gate-off single-invoice payment would still queue behind payer
+        // edits and other combined-lock holders instead of being
+        // byte-identical to the pre-gate behavior.
+        if (opts.includeOpenBalance && require('../config/feature-gates').isEnabled('payIncludeBalance')
+          && invoice.customer_id && !invoice.payer_id) {
           await trx.raw(
             'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
             ['pay.combined.customer', String(invoice.customer_id)],
@@ -3350,6 +3356,8 @@ const StripeService = {
             invoices: combinedAllocation.map((a) => ({
               invoiceNumber: a.invoiceNumber,
               amountDue: a.cents / 100,
+              serviceDate: a.serviceDate || null,
+              dueDate: a.dueDate || null,
               isCurrent: String(a.invoiceId) === String(invoiceId),
             })),
             total: PayCombined.allocationTotalCents(combinedAllocation) / 100,
@@ -3948,6 +3956,8 @@ const StripeService = {
             invoices: combinedCtx.allocation.map((a) => ({
               invoiceNumber: a.invoiceNumber,
               amountDue: a.cents / 100,
+              serviceDate: a.serviceDate || null,
+              dueDate: a.dueDate || null,
               isCurrent: String(a.invoiceId) === String(invoiceId),
             })),
             total: combinedCtx.totalCents / 100,
@@ -4149,12 +4159,14 @@ const StripeService = {
         if (!replacementAllocation) return null;
         const numberRows = await db('invoices')
           .whereIn('id', replacementAllocation.map((a) => a.invoiceId))
-          .select('id', 'invoice_number');
-        const numberById = new Map(numberRows.map((r) => [String(r.id), r.invoice_number]));
+          .select('id', 'invoice_number', 'service_date', 'due_date');
+        const numberById = new Map(numberRows.map((r) => [String(r.id), r]));
         return {
           invoices: replacementAllocation.map((a) => ({
-            invoiceNumber: numberById.get(String(a.invoiceId)) || null,
+            invoiceNumber: numberById.get(String(a.invoiceId))?.invoice_number || null,
             amountDue: a.cents / 100,
+            serviceDate: numberById.get(String(a.invoiceId))?.service_date || null,
+            dueDate: numberById.get(String(a.invoiceId))?.due_date || null,
             isCurrent: String(a.invoiceId) === String(invoiceId),
           })),
           total: PayCombined.allocationTotalCents(replacementAllocation) / 100,

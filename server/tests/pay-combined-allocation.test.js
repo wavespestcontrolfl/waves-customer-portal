@@ -30,8 +30,8 @@ describe('pay-combined allocation codec', () => {
   test('buildAllocation is anchor-first with cents-exact remainders', () => {
     const alloc = buildAllocation(anchor, [sibling]);
     expect(alloc).toEqual([
-      { invoiceId: anchor.id, invoiceNumber: 'WPC-2026-0378', cents: 10530 },
-      { invoiceId: sibling.id, invoiceNumber: 'WPC-2026-0316', cents: 4455 },
+      { invoiceId: anchor.id, invoiceNumber: 'WPC-2026-0378', cents: 10530, serviceDate: null, dueDate: null },
+      { invoiceId: sibling.id, invoiceNumber: 'WPC-2026-0316', cents: 4455, serviceDate: null, dueDate: null },
     ]);
     expect(allocationTotalCents(alloc)).toBe(14985);
   });

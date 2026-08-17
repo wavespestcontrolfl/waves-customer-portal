@@ -2499,14 +2499,20 @@ export default function PayPageV2() {
                 return (
                   <>
                     <div style={{ ...eyebrow, marginTop: SP.md, marginBottom: SP.xs }}>Also due on your account</div>
-                    {prev.invoices.map((inv) => (
-                      <SummaryRow
-                        key={inv.invoiceNumber}
-                        label={`Invoice ${inv.invoiceNumber}${inv.serviceType ? ` — ${inv.serviceType}` : ''}`}
-                        value={fmtCurrency(inv.amountDue)}
-                        muted
-                      />
-                    ))}
+                    {prev.invoices.map((inv) => {
+                      // The date tells repeated services apart and shows
+                      // which balance is older (codex r10 P2) — prefer the
+                      // service date, fall back to the due date.
+                      const rowDate = inv.serviceDate || inv.dueDate;
+                      return (
+                        <SummaryRow
+                          key={inv.invoiceNumber}
+                          label={`Invoice ${inv.invoiceNumber}${inv.serviceType ? ` — ${inv.serviceType}` : ''}${rowDate ? ` (${fmtDate(rowDate)})` : ''}`}
+                          value={fmtCurrency(inv.amountDue)}
+                          muted
+                        />
+                      );
+                    })}
                     <SummaryRow label="Previous balance" value={fmtCurrency(prev.total)} />
                     <SummaryRow label="Total due today" value={fmtCurrency(prev.combinedTotal)} strong />
                   </>

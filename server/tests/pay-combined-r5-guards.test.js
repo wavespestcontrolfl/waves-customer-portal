@@ -61,6 +61,7 @@ describe('stopSequence combined-PI release (fail closed)', () => {
         q.where = jest.fn(() => q);
         q.first = jest.fn(async () => ({
           id: SIBLING_ID,
+          customer_id: 'cust-1',
           stripe_payment_intent_id: 'pi_combined_1',
           invoice_number: 'WPC-2026-0316',
         }));
@@ -75,6 +76,10 @@ describe('stopSequence combined-PI release (fail closed)', () => {
       throw new Error(`unexpected table ${table}`);
     });
     db.fn = { now: jest.fn(() => 'NOW()') };
+    // stopSequence now runs in one transaction holding the
+    // pay.combined.customer advisory lock (codex #3427 r10).
+    db.raw = jest.fn(async () => ({}));
+    db.transaction = jest.fn(async (cb) => cb(db));
   });
 
   test('cancel failure rejects the stop and leaves the sequence running', async () => {

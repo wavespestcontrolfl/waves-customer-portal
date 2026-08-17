@@ -127,6 +127,11 @@ function buildAllocation(anchorInvoice, siblings) {
     invoiceId: String(inv.id),
     invoiceNumber: inv.invoice_number,
     cents: amountDueCents(inv),
+    // Display-only (never encoded into PI metadata): lets the setup-
+    // authoritative breakdown show WHICH visit each share belongs to
+    // (codex r10 P2).
+    serviceDate: inv.service_date || null,
+    dueDate: inv.due_date || null,
   }));
 }
 
@@ -387,8 +392,14 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
     }
     if (!pi) continue; // Stripe unconfigured (dev)
     if (!isCombinedPiMetadata(pi.metadata)) continue;
-    const unconfirmed = ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status)
-      && pi.next_action?.type !== 'verify_with_microdeposits';
+    // NO microdeposit exemption here (codex r10 P1, unlike stop-dunning):
+    // a pending bank verification is still an UNCAPTURED session, and the
+    // customer completing it later would charge debt that now belongs to
+    // the payer — ownership correctness outranks the verification UX, so
+    // the session is canceled like any other unconfirmed PI. Only money
+    // actually moving (processing/succeeded) is left to the settle-path
+    // ownership guards.
+    const unconfirmed = ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status);
     if (!unconfirmed) {
       logger.warn(`[pay-combined] payer change: combined PI ${piId} is ${pi.status} — money may be in flight, not touched`);
       continue;
@@ -708,6 +719,7 @@ module.exports = {
   paymentIntentOwnsInvoice,
   combinedContextForInvoice,
   clearPaymentIntentStamps,
+  lockCombinedCustomers,
   releaseUnconfirmedCombinedSessionsForScheduledServices,
   releaseUnconfirmedCombinedSessionsForCustomer,
   settleCombinedPaymentIntent,
