@@ -88,7 +88,12 @@ describe('previsitCardInviteEligible', () => {
     // first-time predicate alone read a 16-month member as new (2026-08-15
     // incident): a live recurring series must exclude on its own.
     expect(sweep).toContain('.whereNotExists(function recurringPlan()');
-    expect(sweep).toContain("qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id')");
+    // The canonical recurring marker TRIO (codex #3426 r4 P1 — the same set
+    // project-completion's hasActiveRecurringSchedule and pay-v2 read): a
+    // legacy top-level series row can carry recurring_pattern alone, with
+    // is_recurring false/null and no parent id. Both legs (candidate query +
+    // locked recheck) read all three markers.
+    expect(sweep.match(/qb\.where\('rec\.is_recurring', true\)\.orWhereNotNull\('rec\.recurring_parent_id'\)\.orWhereNotNull\('rec\.recurring_pattern'\)/g)).toHaveLength(2);
     // Fail-closed race recheck inside the advisory lock, same as the
     // invited-history rechecks.
     expect(sweep).toContain('if (reqRow || stampRow || !liveCustomer || recurringRow || isMembershipCustomerRow(liveCustomer))');
@@ -118,6 +123,36 @@ describe('previsitCardInviteEligible', () => {
     // …and the in-lock recheck leg on the same customers probe.
     expect(sweep).toContain('|| isMembershipCustomerRow(liveCustomer)');
     expect(sweep).toContain("first('id', 'waveguard_tier', 'monthly_rate')");
+    // Members are excluded IN the query, before the LIMIT (codex #3426 r4
+    // P2): a JS-only filter after a fixed window lets member rows crowd
+    // eligible one-time customers out of consideration. The SQL twin is
+    // exported by the SAME module as the JS predicate so they cannot fork.
+    expect(sweep).toContain(".whereRaw(notMembershipCustomerSql('c'))");
+  });
+
+  test('the SQL twin mirrors the JS membership predicate — same tier vocabulary, same legacy-rate fallback', () => {
+    const {
+      notMembershipCustomerSql,
+      NON_MEMBERSHIP_TIER_KEYS,
+      isMembershipCustomerRow,
+    } = require('../services/waveguard-existing-services');
+    const sql = notMembershipCustomerSql('c');
+    // Every non-membership tier key the JS predicate consults appears in the
+    // SQL IN-list — a key added to one side without the other fails here.
+    for (const key of NON_MEMBERSHIP_TIER_KEYS) {
+      expect(sql).toContain(`'${key}'`);
+    }
+    // Tier normalization and the tierless legacy monthly_rate fallback both
+    // present, matching isMembershipCustomerRow's branch structure.
+    expect(sql).toContain("regexp_replace(lower(coalesce(c.waveguard_tier, '')), '[^a-z0-9]+', '', 'g')");
+    expect(sql).toContain('COALESCE(c.monthly_rate, 0) <= 0');
+    // Spot-check the JS side agrees on the branch semantics the SQL encodes:
+    // a known tier is a member even at rate 0; a non-membership tier is not
+    // a member even at a positive rate; tierless resolves on the rate.
+    expect(isMembershipCustomerRow({ waveguard_tier: 'Silver', monthly_rate: 0 })).toBe(true);
+    expect(isMembershipCustomerRow({ waveguard_tier: 'none', monthly_rate: '49.00' })).toBe(false);
+    expect(isMembershipCustomerRow({ waveguard_tier: null, monthly_rate: '49.00' })).toBe(true);
+    expect(isMembershipCustomerRow({ waveguard_tier: null, monthly_rate: 0 })).toBe(false);
   });
 
   test('the sweep transaction joins the customer-comms lock namespace — conversions serialize with the send (codex #3426 r2)', () => {

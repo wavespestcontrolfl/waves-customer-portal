@@ -63,7 +63,7 @@ const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS, isAlwaysFreeServiceType } = require('
 // evidence must count every NON-TERMINAL row — an in-progress (en_route/
 // on_site) recurring visit is still an active plan — not just the sweep's
 // own pending/confirmed candidate statuses.
-const { TERMINAL_STATUSES, isMembershipCustomerRow } = require('./waveguard-existing-services');
+const { TERMINAL_STATUSES, isMembershipCustomerRow, notMembershipCustomerSql } = require('./waveguard-existing-services');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const BATCH_CAP = 25;
 
@@ -214,8 +214,21 @@ async function runSweep(dbh = db) {
         .from('scheduled_services as rec')
         .whereRaw('rec.customer_id = s.customer_id')
         .whereNotIn('rec.status', TERMINAL_STATUSES)
-        .where((qb) => qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id'));
+        // The canonical recurring marker TRIO (codex #3426 r4 P1 — same set
+        // project-completion's hasActiveRecurringSchedule and pay-v2 read):
+        // a legacy top-level series row can identify recurrence through
+        // recurring_pattern alone, with is_recurring false/null and no
+        // parent id.
+        .where((qb) => qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id').orWhereNotNull('rec.recurring_pattern'));
     })
+    // Customer-LEVEL plan members are excluded IN the query, before the
+    // LIMIT (codex #3426 r4 P2): a JS-only filter after a fixed window let
+    // member rows crowd eligible one-time customers out of consideration
+    // entirely. The predicate is the SQL twin of isMembershipCustomerRow,
+    // exported by the SAME module so the tier vocabulary and the legacy
+    // monthly_rate fallback can never fork; the JS legs below stay as
+    // defense in depth.
+    .whereRaw(notMembershipCustomerSql('c'))
     // Never-invited is part of the QUERY (codex r1 P2): applying it after a
     // LIMIT let already-invited customers' visits starve eligible first-time
     // customers out of the window entirely.
@@ -338,7 +351,7 @@ async function runSweep(dbh = db) {
           trx('scheduled_services as rec')
             .where('rec.customer_id', visit.customer_id)
             .whereNotIn('rec.status', TERMINAL_STATUSES)
-            .where((qb) => qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id'))
+            .where((qb) => qb.where('rec.is_recurring', true).orWhereNotNull('rec.recurring_parent_id').orWhereNotNull('rec.recurring_pattern'))
             .first('rec.id'),
         ]);
         if (reqRow || stampRow || !liveCustomer || recurringRow || isMembershipCustomerRow(liveCustomer)) { skipped += 1; return; }

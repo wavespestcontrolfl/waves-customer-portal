@@ -353,6 +353,13 @@ describe('backstop trigger — existing-recurring-customer prohibition (owner ru
     expect(res.action).toBe('sent');
   });
 
+  test('the in-funnel recheck reads the canonical recurring marker TRIO (codex #3426 r4 P1)', () => {
+    const src = require('fs').readFileSync(
+      require.resolve('../services/appointment-card-request'), 'utf8',
+    );
+    expect(src).toContain("qb.where('is_recurring', true).orWhereNotNull('recurring_parent_id').orWhereNotNull('recurring_pattern')");
+  });
+
   test('customer-LEVEL plan evidence (tier, no recurring row) → skip, claim released, no SMS (codex #3426 r3 P1)', async () => {
     mockTableHandlers.scheduled_services.first = visitFirstWithRecurring(null);
     mockTableHandlers.customers.first = () => ({ ...CUSTOMER, waveguard_tier: 'Silver' });

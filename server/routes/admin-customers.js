@@ -10,6 +10,7 @@ const { stageLifecycleStamps } = require('../services/customer-stages');
 const { etDateString } = require('../utils/datetime-et');
 const { formatAddress, normalizeLeadAddress, normalizeUnitLine } = require('../utils/address-normalizer');
 const { recordAuditEvent } = require('../services/audit-log');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const PhotoService = require('../services/photos');
 const { acceptanceServiceLists } = require('./estimate-public');
@@ -3234,6 +3235,18 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       let emailSync = null;
       try {
         await db.transaction(async (trx) => {
+          // Membership-affecting edits participate in the customer-comms
+          // serialization (codex #3426 r4 P2): the previsit backstop sweep
+          // holds `customer-comms:<id>` through its membership recheck AND
+          // the SMS dispatch, so a tier/rate write that makes this customer
+          // a plan member either commits before the sweep's in-lock recheck
+          // reads (and excludes them) or waits until after the send. Rung-6
+          // ordering: BEFORE the customers row lock below (customer-comms-
+          // lock.js contract — revertMerge takes comms first, then
+          // FOR-UPDATEs rows; row-lock-first-then-wait-here would deadlock).
+          if (updates.waveguard_tier !== undefined || updates.monthly_rate !== undefined) {
+            await lockCustomerComms(trx, req.params.id);
+          }
           // Serialize overlapping address edits on the same customer: the row
           // lock makes a second editor WAIT, and before/after are re-derived
           // from the locked row — a pre-transaction 'before' from the losing

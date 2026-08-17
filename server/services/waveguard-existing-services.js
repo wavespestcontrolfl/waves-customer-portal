@@ -45,6 +45,20 @@ function isMembershipCustomerRow(customer = {}) {
   return Number(customer.monthly_rate ?? customer.monthlyRate ?? 0) > 0;
 }
 
+// SQL twin of isMembershipCustomerRow, for query-level exclusion of plan
+// members where the predicate must run BEFORE a LIMIT and a JS filter can't
+// reach (previsit-card-request-sweep's candidate query). Lives HERE so the
+// tier vocabulary and the legacy monthly_rate fallback can never fork from
+// the JS predicate above. Returns a raw SQL boolean that is TRUE when the
+// aliased customers row is NOT a member. Non-membership keys are inlined —
+// static lowercase-alphanumeric tokens from NON_MEMBERSHIP_TIER_KEYS,
+// nothing user-supplied to bind.
+function notMembershipCustomerSql(alias = 'c') {
+  const tk = `regexp_replace(lower(coalesce(${alias}.waveguard_tier, '')), '[^a-z0-9]+', '', 'g')`;
+  const keys = [...NON_MEMBERSHIP_TIER_KEYS].map((k) => `'${k}'`).join(', ');
+  return `(CASE WHEN ${tk} <> '' THEN ${tk} IN (${keys}) ELSE COALESCE(${alias}.monthly_rate, 0) <= 0 END)`;
+}
+
 // Live "does this customer hold a WaveGuard plan today?" check. Fail-closed to
 // false (treat as a non-member / new customer) on a missing customer or any
 // lookup error — the safe default is to charge the setup fee and offer annual
@@ -576,4 +590,6 @@ module.exports = {
   ownershipKeysForRow,
   isMembershipCustomerRow,
   isActivePlanCustomer,
+  NON_MEMBERSHIP_TIER_KEYS,
+  notMembershipCustomerSql,
 };

@@ -673,7 +673,9 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         const recurringRow = await db('scheduled_services')
           .where({ customer_id: visit.customer_id })
           .whereNotIn('status', TERMINAL_STATUSES)
-          .where((qb) => qb.where('is_recurring', true).orWhereNotNull('recurring_parent_id'))
+          // Canonical recurring marker TRIO (codex #3426 r4 P1): legacy
+          // top-level series rows can carry recurring_pattern alone.
+          .where((qb) => qb.where('is_recurring', true).orWhereNotNull('recurring_parent_id').orWhereNotNull('recurring_pattern'))
           .first('id');
         if (recurringRow) {
           await releaseClaim();
