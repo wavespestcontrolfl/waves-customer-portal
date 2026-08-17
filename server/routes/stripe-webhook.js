@@ -3380,10 +3380,14 @@ async function handleChargeRefunded(charge) {
     logger.warn(`[stripe-webhook] refund triggerNotification failed: ${e.message}`);
   }
 
-  // Fire-and-forget health rescore after refund
-  try {
-    const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
-    if (isFullRefund && payment) {
+  // Annual-prepay claw-back after a full refund — CRITICAL lifecycle
+  // write, no .catch (codex r15 P1): a swallowed failure acknowledges the
+  // webhook with active coverage still riding on refunded money, and no
+  // cron reconciles active terms whose invoices are refunded. Propagate so
+  // Stripe redelivers; the refund stamps above are idempotent on replay.
+  {
+    const refundSyncAnchor = await db('payments').where({ stripe_charge_id: chargeId }).first();
+    if (isFullRefund && refundSyncAnchor) {
       // A combined charge refunds N per-invoice rows — the annual-prepay
       // sync must see EVERY refunded share, not the arbitrary first row
       // (codex r4 P1: a prepay invoice elsewhere in the allocation would
@@ -3391,15 +3395,16 @@ async function handleChargeRefunded(charge) {
       // have exactly one row, preserving the original behavior.
       const refundSyncRows = await db('payments')
         .where({ stripe_charge_id: chargeId, status: 'refunded' });
-      const rowsToSync = refundSyncRows.length ? refundSyncRows : [payment];
+      const rowsToSync = refundSyncRows.length ? refundSyncRows : [refundSyncAnchor];
       for (const refundedRow of rowsToSync) {
-        try {
-          await require('../services/annual-prepay-renewals').syncTermForRefundedPayment(refundedRow);
-        } catch (err) {
-          logger.warn(`[stripe-webhook] annual prepay refund sync skipped for charge ${chargeId} row ${refundedRow.id}: ${err.message}`);
-        }
+        await require('../services/annual-prepay-renewals').syncTermForRefundedPayment(refundedRow);
       }
     }
+  }
+
+  // Fire-and-forget health rescore after refund
+  try {
+    const payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
     if (payment?.customer_id) {
       const customerHealth = require('../services/customer-health');
       customerHealth.scoreCustomer(payment.customer_id).catch(err => {
@@ -3502,6 +3507,7 @@ async function handleRefundFailed(refund) {
         const restored = [];
         let alreadyRecorded = false;
         let neutralizedMarker = false;
+        let anyUnwound = false;
         for (const row of rows) {
           let meta = {};
           try {
@@ -3557,6 +3563,7 @@ async function handleRefundFailed(refund) {
             resettleFencedPiId = row.stripe_payment_intent_id || rowPiId;
             continue;
           }
+          anyUnwound = true;
           await trx('payments').where({ id: row.id }).update({
             refund_amount: 0,
             refund_status: null,
@@ -3581,6 +3588,15 @@ async function handleRefundFailed(refund) {
           }
         }
         if (alreadyRecorded && !restored.length && !neutralizedMarker) return; // replay
+        // A PARKED partial refund's bounce never stamped any row (codex r15
+        // P2): the loop only recorded failed_refund_ids — reporting "the
+        // full refund bounced ... credit may need claw-back" would describe
+        // an unwind and a credit return that never happened. Name the real
+        // event: the parked reconciliation case's refund attempt failed.
+        if (!anyUnwound && !neutralizedMarker) {
+          await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: a PARKED partial-refund attempt (${refundId || 'unknown id'}) failed at the bank — no rows were ever stamped and no credit was returned; the reconciliation case in /admin/revenue stands, minus this bounced refund.`);
+          return;
+        }
         await insertBounceNotification(trx, `Combined balance charge ${rowChargeId || rowPiId}: the full refund bounced — ${neutralizedMarker ? 'the pre-settlement refund fence was lifted and settlement re-runs from the PI' : `${rows.length} allocation rows unwound to paid and ${restored.length} invoices restored`}. Account credit that returnAppliedCreditOnRefund restored per invoice may need manual claw-back (it is deliberately not auto-reversed).`);
       });
       // Bounced pre-settlement refund → the money never left after all. If
