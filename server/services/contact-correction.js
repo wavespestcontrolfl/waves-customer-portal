@@ -639,7 +639,7 @@ function valueNegatedInQuote(quote, value) {
 // "Starting next month, my email will change to …" must wait for the
 // customer's present-tense confirmation, not switch fan-outs weeks
 // early.
-const FUTURE_CHANGE_RE = /\b(?:starting|beginning|effective|as\s+of)\s+(?:next|this\s+coming|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d)|\bwill\s+(?:change|be\s+changing|switch)\s+to\b|\bnext\s+(?:week|month|year)\b[^.;!?\n]{0,40}\bchang/i;
+const FUTURE_CHANGE_RE = /\b(?:starting|beginning|effective|as\s+of)\s+(?:on\s+|in\s+|from\s+)?(?:next|this\s+coming|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d)|\bwill\s+(?:change|be\s+changing|switch)\s+to\b|\bnext\s+(?:week|month|year)\b[^.;!?\n]{0,40}\bchang/i;
 
 // A NEGATED name statement is not a correction (r46): "my name is not
 // Jane Smith anymore" states the OLD name — staging its components would
@@ -651,7 +651,7 @@ const NEGATED_NAME_RE = /\b(?:name|surname)\s+(?:is\s+not|isn'?t|was|used\s+to\s
 // to the number's new holder, not the linked customer. The bare "I'm not
 // <Name>" form requires a CAPITALIZED name token, so "I'm not sure" and
 // "I am not happy" never trip it.
-const WRONG_PERSON_RE = /\b(?:I'?m\s+not|I\s+am\s+not|[Tt]his\s+is\s+not|[Tt]his\s+isn'?t|[Ii]t\s+is\s+not|[Ii]t\s+isn'?t|[Nn]o\s+longer)\s+(?:[A-Z][a-z]+|[A-Z]{2,})\b|\bwrong\s+person\b|\bnew\s+(?:owner|holder)\s+of\s+this\s+(?:number|phone)\b|\b(?:just\s+)?got\s+this\s+(?:number|phone)\b|\bthis\s+(?:number|phone)\s+used\s+to\s+belong\b|\bno\s+longer\s+(?:his|her|their)\s+(?:number|phone)\b|\b(?:[A-Z][a-z]+|[A-Z]{2,})\s+(?:no\s+longer\s+has|doesn'?t\s+have|does\s+not\s+have|used\s+to\s+have)\s+this\s+(?:number|phone)\b/;
+const WRONG_PERSON_RE = /\b(?:I'?m\s+not|I\s+am\s+not|[Tt]his\s+is\s+not|[Tt]his\s+isn'?t|[Ii]t\s+is\s+not|[Ii]t\s+isn'?t|[Nn]o\s+longer)\s+(?:[A-Z][a-z]+|[A-Z]{2,})\b|\bwrong\s+person\b|\bnew\s+(?:owner|holder)\s+of\s+this\s+(?:number|phone)\b|\b(?:just\s+)?got\s+this\s+(?:number|phone)\b|\bthis\s+(?:number|phone)\s+used\s+to\s+belong\b|\bno\s+longer\s+(?:his|her|their)\s+(?:number|phone)\b|\b(?:[A-Z][a-z]+|[A-Z]{2,})\s+(?:no\s+longer\s+(?:has|uses)|doesn'?t\s+(?:have|use)|does\s+not\s+(?:have|use)|used\s+to\s+have|stopped\s+using)\s+this\s+(?:number|phone)(?:\s+anymore)?\b/;
 
 // Negated direction verbs never count as replacement direction (r42):
 // "do not use my old email …" is a retirement, not a correction.

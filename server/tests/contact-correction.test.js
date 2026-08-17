@@ -3724,3 +3724,23 @@ describe('round-48 hardening', () => {
     expect(await extractSmsContactCorrections({ body })).toEqual([]);
   });
 });
+
+describe('round-49 hardening', () => {
+  it("'John doesn't use this number anymore' invalidates the message", async () => {
+    const body = "John doesn't use this number anymore. My email is wrong; use newholder@example.com";
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'newholder@example.com', quote: 'my email is wrong; use newholder@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+
+  it("'Starting on September 1, my new email is …' holds for present-tense confirmation", async () => {
+    const body = 'Starting on September 1, my new email is future@example.com';
+    mockCallAnthropic.mockResolvedValue({
+      ok: true,
+      json: { corrections: [{ field: 'email', new_value: 'future@example.com', quote: 'starting on september 1, my new email is future@example.com', confidence: 'high' }] },
+    });
+    expect(await extractSmsContactCorrections({ body })).toEqual([]);
+  });
+});
