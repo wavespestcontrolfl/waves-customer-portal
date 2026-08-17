@@ -9893,6 +9893,11 @@ export function CompletionPanel({
   // draft back as "technician-confirmed" serviceNotes would entrench the
   // first model's claims — codex r43).
   const preGenerationNotesRef = useRef(null);
+  // The chip-line ownership state that goes WITH those notes: restoring
+  // marker-bearing notes while the labels stay detached would let
+  // completion submit an action the tech deleted from the restored notes
+  // (codex r77).
+  const preGenerationChipDetachedRef = useRef(false);
   // AI photo analysis (optional, never blocks submit): summary is editable,
   // captions attach to the photo entries. Not draft-persisted — photos
   // themselves aren't, and a summary without its photos would be stale.
@@ -11005,6 +11010,8 @@ export function CompletionPanel({
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
         preGenerationNotes: preGenerationNotesRef.current,
+        // ... and the chip-ownership state those notes carry (codex r77).
+        preGenerationChipDetached: preGenerationChipDetachedRef.current,
         // The station auto-count baseline restores with it — otherwise the
         // registry's post-reload load re-derives the SAME counts against an
         // empty baseline and clears a valid draft (codex r28).
@@ -11290,6 +11297,7 @@ export function CompletionPanel({
     preGenerationNotesRef.current = typeof savedDraft.preGenerationNotes === "string"
       ? savedDraft.preGenerationNotes
       : null;
+    preGenerationChipDetachedRef.current = savedDraft.preGenerationChipDetached === true;
     stationAutoCountsRef.current = savedDraft.stationAutoCounts
       && typeof savedDraft.stationAutoCounts === "object"
       ? { ...savedDraft.stationAutoCounts }
@@ -11427,7 +11435,11 @@ export function CompletionPanel({
       setAiReportUsed(false);
       if (String(savedDraft.notes || "").trim() === installed.trim()) {
         setNotes(preGenerationNotesRef.current || "");
+        // Detachment restores with the notes (codex r77) — same contract
+        // as the invalidation path.
+        setChipLinesDetached(preGenerationChipDetachedRef.current === true);
         preGenerationNotesRef.current = null;
+        preGenerationChipDetachedRef.current = false;
         setGeneratedReportCleared(true);
       }
     }
@@ -11683,6 +11695,7 @@ export function CompletionPanel({
     if (!notesLookGenerated
       && notes.trim() !== String(generatedReportTextRef.current || "").trim()) {
       preGenerationNotesRef.current = notes;
+      preGenerationChipDetachedRef.current = chipLinesDetached;
     }
     generatedReportTextRef.current = String(reportText || "").trim();
     setGeneratedReportCleared(false);
@@ -13423,7 +13436,12 @@ export function CompletionPanel({
       // no-regenerate completion and from the next generation's grounding
       // (codex r44).
       setNotes(preGenerationNotesRef.current || "");
+      // The restored notes' [Protocol]/[Found]/[Next] marker lines own
+      // selection again — the detachment state travels with the notes it
+      // described (codex r77).
+      setChipLinesDetached(preGenerationChipDetachedRef.current === true);
       preGenerationNotesRef.current = null;
+      preGenerationChipDetachedRef.current = false;
       setAiReportUsed(false);
       setGeneratedReportCleared(true);
     }

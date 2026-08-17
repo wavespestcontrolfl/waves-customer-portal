@@ -375,6 +375,10 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The area should dry in thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Re-enter after two hours to be sure.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Everything should be dry in about half an hour.')).toMatch(/^banned:/);
+    // readiness-for-pets/children/foot-traffic timing forms (r77)
+    expect(reportCopyRejection('The treated lawn will be ready for pets after thirty minutes.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The yard is available for children in 2 hours.')).toMatch(/^banned:/);
+    expect(reportCopyRejection('The turf is safe for foot traffic after 30 minutes.')).toMatch(/^banned:/);
     // plain-away timing + unquoted multiword continuing credentials (r76)
     expect(reportCopyRejection('Keep pets away for thirty minutes.')).toMatch(/^banned:/);
     expect(reportCopyRejection('Stay away for 30 minutes after the application.')).toMatch(/^banned:/);
